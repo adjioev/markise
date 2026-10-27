@@ -29,7 +29,7 @@ const SOURCES: [(Icon, &str); 4] = [
 ];
 
 /// Polylines in the 24×24 icon box.
-type Lines = Vec<Vec<Pos2>>;
+pub(crate) type Lines = Vec<Vec<Pos2>>;
 
 fn cache() -> &'static [(Icon, Lines)] {
     static C: OnceLock<Vec<(Icon, Lines)>> = OnceLock::new();
@@ -114,7 +114,7 @@ enum Tok {
     Num(f32),
 }
 
-fn parse_path(d: &str) -> Lines {
+pub(crate) fn parse_path(d: &str) -> Lines {
     let toks = tokens(d);
     let mut lines: Lines = Vec::new();
     let mut cur: Vec<Pos2> = Vec::new();

@@ -450,6 +450,8 @@ pub struct MarkiseApp {
     /// Leaving source mode: scroll the preview to this offset once the model is current.
     pending_scroll: Option<usize>,
     sidebar_visible: bool,
+    /// Formatting toolbar state (spec 04 §3.2; shown per the `showToolbar` setting).
+    toolbar: crate::toolbar::Toolbar,
     tab: Tab,
     tree: Option<FileTree>,
     themes: ThemeManager,
@@ -536,6 +538,7 @@ impl MarkiseApp {
             sbs_apply_ms: Vec::new(),
             pending_scroll: None,
             sidebar_visible: true,
+            toolbar: Default::default(),
             tab: Tab::Outline,
             tree: None,
             themes,
@@ -941,6 +944,37 @@ impl MarkiseApp {
         if let Some(d) = self.doc.as_mut() {
             d.viewer.ed.view.set_highlights(h);
         }
+    }
+
+    /// Whether the formatting toolbar is shown (View → Toolbar, persisted as `showToolbar`;
+    /// spec 04 §3.2). In this version it is shown over the rendered document only (Rendered,
+    /// and the rendered pane of Side by Side); source mode has no toolbar yet.
+    pub fn show_toolbar(&self) -> bool {
+        self.themes.show_toolbar()
+    }
+
+    /// View → Toolbar.
+    pub fn set_show_toolbar(&mut self, on: bool) {
+        self.themes.set_show_toolbar(on);
+        if !on {
+            self.toolbar.close();
+        }
+    }
+
+    /// The toolbar's controls as shown now (tests): `None` while no toolbar is visible.
+    pub fn toolbar_state(&self) -> Option<crate::toolbar::Model> {
+        self.toolbar_visible().then(|| self.toolbar_model(!self.side_by_side))
+    }
+
+    /// Toolbar drop-down open / groups collapsed into More (tests).
+    pub fn toolbar(&self) -> &crate::toolbar::Toolbar {
+        &self.toolbar
+    }
+
+    /// The toolbar is drawn this frame: enabled, a document is open and the rendered document
+    /// is visible (not in source mode).
+    fn toolbar_visible(&self) -> bool {
+        self.show_toolbar() && self.doc.is_some() && !self.source_visible
     }
 
     /// Whether code highlighting is on.
@@ -2245,13 +2279,30 @@ impl MarkiseApp {
     fn central(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         let t = self.theme.clone();
+        // formatting toolbar (spec 04 §3.2): its drop-down keys are taken before the document
+        // surface sees them; the bar itself is drawn on top afterwards
+        let toolbar = self.toolbar_visible().then(|| self.toolbar_model(!self.side_by_side));
+        let mut tool_cmd = None;
+        match &toolbar {
+            Some(m) => tool_cmd = self.toolbar.pre_input(ctx, m),
+            None => self.toolbar.close(),
+        }
+        if let Some(id) = tool_cmd.take() {
+            self.menu_command(ctx, id, crate::menu::Trigger::Click);
+            ctx.request_repaint();
+        }
+        let mut tool_area = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(color(t.page_bg)))
             .show(ui, |ui| {
                 self.banner_ui(ui, &t);
                 if self.side_by_side && self.doc.is_some() {
-                    self.side_by_side_ui(ui, &t);
+                    tool_area = self.side_by_side_ui(ui, &t);
                     return;
+                }
+                tool_area = Some(ui.available_rect_before_wrap());
+                if toolbar.is_some() && self.doc.is_some() && !self.source_visible {
+                    ui.add_space(crate::toolbar::RESERVED_H);
                 }
                 if self.source_visible
                     && let Some(s) = self.doc.as_mut().and_then(|d| d.buffer.as_mut())
@@ -2296,6 +2347,7 @@ impl MarkiseApp {
                         }
                     }
                     None => {
+                        tool_area = None;
                         ui.centered_and_justified(|ui| {
                             ui.label(
                                 // plain-text shortcuts: egui's default fonts lack ⇧
@@ -2311,13 +2363,23 @@ impl MarkiseApp {
                     }
                 }
             });
+        if let (Some(m), Some(area)) = (&toolbar, tool_area) {
+            let look = crate::toolbar::Look::new(&t);
+            tool_cmd = self.toolbar.show(ui, area, m, &look);
+        }
+        if let Some(id) = tool_cmd {
+            // exactly like the menu item (and its shortcut)
+            self.menu_command(ctx, id, crate::menu::Trigger::Click);
+            ctx.request_repaint();
+        }
     }
 
-    /// Side by Side panes (spec 04 §3.3, interim: the rendered pane is read-only).
-    fn side_by_side_ui(&mut self, ui: &mut egui::Ui, t: &Theme) {
+    /// Side by Side panes (spec 04 §3.3, interim: the rendered pane is read-only). Returns the
+    /// rendered pane's rectangle.
+    fn side_by_side_ui(&mut self, ui: &mut egui::Ui, t: &Theme) -> Option<egui::Rect> {
         let ctx = ui.ctx().clone();
         let split = self.side_by_side_split();
-        let Some(doc) = self.doc.as_mut() else { return };
+        let doc = self.doc.as_mut()?;
         if doc.buffer.is_none() {
             // a new or reloaded document: the editor starts at the rendered position
             doc.buffer = Some(SourceState::new(doc.md(), 0));
@@ -2375,6 +2437,7 @@ impl MarkiseApp {
         if let Some(link) = out.link {
             self.open_link(&ctx, &link);
         }
+        out.right
     }
 
     fn banner_ui(&mut self, ui: &mut egui::Ui, t: &Theme) {

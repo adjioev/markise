@@ -309,6 +309,8 @@ pub struct ThemeManager {
     chose_split: bool,
     /// View → Diagrams toggled before the settings file was read.
     chose_diagrams: bool,
+    /// View → Toolbar toggled before the settings file was read.
+    chose_toolbar: bool,
     chose_editing: bool,
     /// Settings changed and not yet handed to the worker (coalesced, debounced).
     dirty: SettingsPatch,
@@ -376,6 +378,7 @@ impl ThemeManager {
             chose_appearance: false,
             chose_split: false,
             chose_diagrams: false,
+            chose_toolbar: false,
             chose_editing: false,
             dirty: SettingsPatch::default(),
             save_at: None,
@@ -620,6 +623,22 @@ impl ThemeManager {
         }
     }
 
+    /// Whether the formatting toolbar is shown (settings key `showToolbar`, spec 04 §3.2;
+    /// spec 05 default off).
+    pub fn show_toolbar(&self) -> bool {
+        self.settings.show_toolbar
+    }
+
+    /// View → Toolbar; persisted like the other settings.
+    pub fn set_show_toolbar(&mut self, on: bool) {
+        self.chose_toolbar = true;
+        if on != self.settings.show_toolbar {
+            self.settings.show_toolbar = on;
+            self.dirty.show_toolbar = Some(on);
+            self.schedule_save();
+        }
+    }
+
     pub fn set_appearance(&mut self, a: Appearance) {
         self.chose_appearance = true;
         if a != self.settings.appearance {
@@ -845,6 +864,9 @@ impl ThemeManager {
                 }
                 if self.chose_diagrams {
                     self.settings.diagrams = chosen.diagrams;
+                }
+                if self.chose_toolbar {
+                    self.settings.show_toolbar = chosen.show_toolbar;
                 }
                 if self.chose_editing {
                     self.settings.editing = chosen.editing;

@@ -322,6 +322,8 @@ pub struct SbsOutput {
     pub synced_source: bool,
     /// Time spent applying the edit (patch + parse + model + view), ms.
     pub apply_ms: Option<f64>,
+    /// The rendered pane's rectangle (the formatting toolbar floats over it).
+    pub right: Option<Rect>,
 }
 
 /// Per-document Side by Side state (the divider position lives in the settings).
@@ -569,6 +571,7 @@ impl SideBySide {
             // interim: the rendered pane is read-only (caret and selection only)
             let vo = viewer.show(&mut rui, f.images, f.theme, f.parley, false);
             out.link = vo.link;
+            out.right = Some(right);
         }
         if user_scrolls_rendered || self.sync_source {
             self.sync_source = false;
