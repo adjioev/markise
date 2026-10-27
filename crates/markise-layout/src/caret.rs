@@ -525,7 +525,24 @@ pub fn item_pos(view: &View, pos: DocPos) -> Option<(usize, ItemPos)> {
     if model.items.is_empty() {
         return None;
     }
-    let i = model.item_at_offset(pos.offset);
+    let mut i = model.item_at_offset(pos.offset);
+    // spaces just typed after a heading's text sit in the source gap after its item (the
+    // heading's span stops at its text): they still belong to the heading line, not to the
+    // next item (issue #16)
+    if i > 0
+        && pos.offset < model.item_start(i)
+        && model
+            .items
+            .get(i - 1)
+            .is_some_and(|it| matches!(it.kind, ItemKind::Paragraph | ItemKind::Heading { .. }))
+        && view
+            .doc()
+            .text()
+            .get(model.item_span(i - 1).end..pos.offset)
+            .is_some_and(|gap| gap.bytes().all(|c| matches!(c, b' ' | b'\t')))
+    {
+        i -= 1;
+    }
     let start = model.item_start(i);
     Some((
         i,

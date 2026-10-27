@@ -1280,6 +1280,9 @@ impl Document {
         let text = self.text();
         let eol = self.line_ending().as_str();
         let nothing = Ok(Plan::default());
+        // a caret in spaces typed after a heading's text (outside its span, which stops at
+        // the text) is at the end of that heading (issue #16)
+        let at = self.heading_end_before_ws(at).unwrap_or(at);
         let Some(leaf) = self.leaf(at) else { return nothing };
         let (Some(first), Some(last)) = (leaf.lines.first().copied(), leaf.lines.last().copied()) else {
             return nothing;
@@ -1489,6 +1492,29 @@ impl Document {
     }
 
     /// The leaf ending before offset `at` (skipping blank lines and container prefixes).
+    /// The end of the heading whose line `at` is on when only spaces and tabs separate them
+    /// and nothing but whitespace follows `at` on that line (a heading's span ends at its
+    /// text or closing sequence, so whitespace typed after it is outside the block).
+    fn heading_end_before_ws(&self, at: usize) -> Option<usize> {
+        let b = self.text().as_bytes();
+        let mut q = at.min(b.len());
+        while q > 0 && matches!(b[q - 1], b' ' | b'\t') {
+            q -= 1;
+        }
+        if q == at
+            || q == 0
+            || !b[at..]
+                .iter()
+                .take_while(|c| !matches!(c, b'\n' | b'\r'))
+                .all(|c| matches!(c, b' ' | b'\t'))
+        {
+            return None;
+        }
+        self.leaf(q - 1)
+            .filter(|l| matches!(l.kind, LeafKind::Heading { .. }) && l.span.end == q)
+            .map(|_| q)
+    }
+
     pub(crate) fn leaf_before(&self, at: usize) -> Option<LeafView> {
         let b = self.text().as_bytes();
         let mut q = at.min(b.len());
@@ -1541,6 +1567,15 @@ impl Document {
             gap + eol.len()
         } else {
             gap
+        };
+        // whitespace left after the block's text stays on its line (a heading's span ends
+        // before it): the new paragraph goes after it (issue #16)
+        let ws = text[gap..].bytes().take_while(|c| matches!(c, b' ' | b'\t')).count();
+        let (gap, end) = if ws > 0 && end == gap && matches!(text.as_bytes().get(gap + ws), None | Some(b'\n' | b'\r'))
+        {
+            (gap + ws, gap + ws)
+        } else {
+            (gap, end)
         };
         let caret = gap + ins.len();
         TypingPlan {

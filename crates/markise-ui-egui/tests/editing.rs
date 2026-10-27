@@ -464,3 +464,226 @@ fn trailing_space_at_soft_wrap_boundaries() {
     }
     assert_eq!(save(&mut h, &p), format!("{want}\n"));
 }
+
+/// The caret rectangle the app reports to the platform (IME cursor area) this frame.
+fn caret_screen(h: &mut Harness<'static, MarkiseApp>) -> egui::Rect {
+    h.step();
+    h.output().platform_output.ime.expect("a caret is shown").cursor_rect
+}
+
+/// Heading variants for issue #16: (source, navigation to the end of the heading text, the
+/// caret offset there, the bytes after typing " x" there, the bytes after Enter and "x").
+#[allow(clippy::type_complexity)]
+const HEADINGS: &[(&str, &[Key], usize, &str, &str)] = &[
+    (
+        "# Title\n\nPara\n",
+        &[Key::End],
+        7,
+        "# Title x\n\nPara\n",
+        "# Title\n\nx\n\nPara\n",
+    ),
+    (
+        "# Title\nPara\n",
+        &[Key::End],
+        7,
+        "# Title x\nPara\n",
+        "# Title\n\nx\nPara\n",
+    ),
+    (
+        "## Title\n\nPara\n",
+        &[Key::End],
+        8,
+        "## Title x\n\nPara\n",
+        "## Title\n\nx\n\nPara\n",
+    ),
+    (
+        "### Title\n\nPara\n",
+        &[Key::End],
+        9,
+        "### Title x\n\nPara\n",
+        "### Title\n\nx\n\nPara\n",
+    ),
+    (
+        "#### Title\n\nPara\n",
+        &[Key::End],
+        10,
+        "#### Title x\n\nPara\n",
+        "#### Title\n\nx\n\nPara\n",
+    ),
+    (
+        "##### Title\n\nPara\n",
+        &[Key::End],
+        11,
+        "##### Title x\n\nPara\n",
+        "##### Title\n\nx\n\nPara\n",
+    ),
+    (
+        "###### Title\n\nPara\n",
+        &[Key::End],
+        12,
+        "###### Title x\n\nPara\n",
+        "###### Title\n\nx\n\nPara\n",
+    ),
+    (
+        "# Title #\n\nPara\n",
+        &[Key::End],
+        7,
+        "# Title x #\n\nPara\n",
+        "# Title #\n\nx\n\nPara\n",
+    ),
+    (
+        "Title\n=====\n\nPara\n",
+        &[Key::End],
+        5,
+        "Title x\n=====\n\nPara\n",
+        "Title\n=====\n\nx\n\nPara\n",
+    ),
+    (
+        "Title\n-----\nPara\n",
+        &[Key::End],
+        5,
+        "Title x\n-----\nPara\n",
+        "Title\n-----\n\nx\nPara\n",
+    ),
+    (
+        "Para\n\n# Title\n",
+        &[Key::ArrowDown, Key::End],
+        13,
+        "Para\n\n# Title x\n",
+        "Para\n\n# Title\n\nx\n",
+    ),
+    ("# Title", &[Key::End], 7, "# Title x", "# Title\n\nx"),
+    (
+        "- # Title\n\nPara\n",
+        &[Key::End],
+        9,
+        "- # Title x\n\nPara\n",
+        "- # Title\n\n  x\n\nPara\n",
+    ),
+    (
+        "> # Title\n\nPara\n",
+        &[Key::End],
+        9,
+        "> # Title x\n\nPara\n",
+        "> # Title\n>\n> x\n\nPara\n",
+    ),
+];
+
+fn open_toolbar(name: &str, src: &str, toolbar: bool) -> (Harness<'static, MarkiseApp>, PathBuf) {
+    let (mut h, p) = open(name, src);
+    h.state_mut().set_show_toolbar(toolbar);
+    h.step();
+    (h, p)
+}
+
+#[test]
+fn space_at_the_end_of_a_heading_issue_16() {
+    // the space used to move the caret to the next block: the heading's span stops at its
+    // text, so the caret in the whitespace after it was mapped to the following item
+    for toolbar in [false, true] {
+        for (src, nav, at, want, _) in HEADINGS {
+            let (mut h, p) = open_toolbar("hd16-space", src, toolbar);
+            for k in *nav {
+                key(&mut h, *k);
+            }
+            assert_eq!(caret(&mut h), *at, "{src:?}");
+            let before = caret_screen(&mut h);
+            type_keys(&mut h, " ");
+            assert_eq!(
+                caret(&mut h),
+                at + 1,
+                "caret stays after the space: {src:?} toolbar={toolbar}"
+            );
+            let after = caret_screen(&mut h);
+            assert_eq!(
+                after.center().y,
+                before.center().y,
+                "same line: {src:?} toolbar={toolbar}"
+            );
+            assert!(after.min.x > before.min.x, "moved right: {src:?} toolbar={toolbar}");
+            type_keys(&mut h, "x");
+            assert_eq!(caret(&mut h), at + 2, "{src:?}");
+            assert_eq!(save(&mut h, &p), *want, "{src:?} toolbar={toolbar}");
+        }
+    }
+}
+
+#[test]
+fn enter_at_the_end_of_a_heading_issue_16() {
+    // M2b-1 / C7: Enter at the end of a heading opens the (virtual) empty paragraph below,
+    // also right after a typed trailing space (it used to do nothing there)
+    for toolbar in [false, true] {
+        for space in [false, true] {
+            for (src, nav, _, _, want) in HEADINGS {
+                let (mut h, p) = open_toolbar("hd16-enter", src, toolbar);
+                for k in *nav {
+                    key(&mut h, *k);
+                }
+                if space {
+                    type_keys(&mut h, " ");
+                }
+                let before = caret_screen(&mut h);
+                key(&mut h, Key::Enter);
+                let sel = h.state_mut().viewer().unwrap().ed.session.selection().primary();
+                assert!(
+                    sel.is_caret() && sel.focus.virt > 0,
+                    "virtual paragraph: {src:?} {sel:?}"
+                );
+                let after = caret_screen(&mut h);
+                assert!(
+                    after.min.y > before.max.y,
+                    "caret on the new line below: {src:?} space={space}"
+                );
+                type_keys(&mut h, "x");
+                // a typed trailing space stays on the heading line
+                let want = if space {
+                    want.replacen("Title", "Title ", 1)
+                } else {
+                    want.to_string()
+                };
+                assert_eq!(save(&mut h, &p), want, "{src:?} toolbar={toolbar} space={space}");
+            }
+        }
+    }
+}
+
+#[test]
+fn space_and_enter_at_other_block_ends_issue_16() {
+    // the same checks at the end of paragraphs, list items, quotes and table cells
+    let space: &[(&str, usize, &str)] = &[
+        ("Hello\n\nPara\n", 5, "Hello x\n\nPara\n"),
+        ("Hello\n", 5, "Hello x\n"),
+        ("- item\n- two\n", 6, "- item x\n- two\n"),
+        ("> quoted\n\nPara\n", 8, "> quoted x\n\nPara\n"),
+        (
+            "| a | b |\n|---|---|\n| x | y |\n",
+            3,
+            "| a x | b |\n|---|---|\n| x | y |\n",
+        ),
+    ];
+    for (src, at, want) in space {
+        let (mut h, p) = open("blk16-space", src);
+        key(&mut h, Key::End);
+        assert_eq!(caret(&mut h), *at, "{src:?}");
+        type_keys(&mut h, " ");
+        assert_eq!(caret(&mut h), at + 1, "{src:?}");
+        type_keys(&mut h, "x");
+        assert_eq!(save(&mut h, &p), *want, "{src:?}");
+    }
+    let enter: &[(&str, &str)] = &[
+        ("Hello\n\nPara\n", "Hello\n\nx\n\nPara\n"),
+        ("Hello\n", "Hello\n\nx\n"),
+        ("- item\n- two\n", "- item\n- x\n- two\n"),
+        ("> quoted\n\nPara\n", "> quoted\n>\n> x\n\nPara\n"),
+    ];
+    for (src, want) in enter {
+        let (mut h, p) = open("blk16-enter", src);
+        key(&mut h, Key::End);
+        let before = caret_screen(&mut h);
+        key(&mut h, Key::Enter);
+        let after = caret_screen(&mut h);
+        assert!(after.min.y > before.max.y, "caret on the new line below: {src:?}");
+        type_keys(&mut h, "x");
+        assert_eq!(save(&mut h, &p), *want, "{src:?}");
+    }
+}
