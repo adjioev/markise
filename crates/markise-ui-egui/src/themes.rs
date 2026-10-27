@@ -311,6 +311,7 @@ pub struct ThemeManager {
     chose_diagrams: bool,
     /// View → Toolbar toggled before the settings file was read.
     chose_toolbar: bool,
+    chose_toolbar_position: bool,
     chose_editing: bool,
     /// Settings changed and not yet handed to the worker (coalesced, debounced).
     dirty: SettingsPatch,
@@ -379,6 +380,7 @@ impl ThemeManager {
             chose_split: false,
             chose_diagrams: false,
             chose_toolbar: false,
+            chose_toolbar_position: false,
             chose_editing: false,
             dirty: SettingsPatch::default(),
             save_at: None,
@@ -624,7 +626,7 @@ impl ThemeManager {
     }
 
     /// Whether the formatting toolbar is shown (settings key `showToolbar`, spec 04 §3.2;
-    /// spec 05 default off).
+    /// spec 05 default on).
     pub fn show_toolbar(&self) -> bool {
         self.settings.show_toolbar
     }
@@ -635,6 +637,21 @@ impl ThemeManager {
         if on != self.settings.show_toolbar {
             self.settings.show_toolbar = on;
             self.dirty.show_toolbar = Some(on);
+            self.schedule_save();
+        }
+    }
+
+    /// Formatting toolbar placement (settings key `toolbarPosition`, default top).
+    pub fn toolbar_position(&self) -> markise_engine::settings::ToolbarPosition {
+        self.settings.toolbar_position
+    }
+
+    /// View → Toolbar Position; persisted like the other settings.
+    pub fn set_toolbar_position(&mut self, p: markise_engine::settings::ToolbarPosition) {
+        self.chose_toolbar_position = true;
+        if p != self.settings.toolbar_position {
+            self.settings.toolbar_position = p;
+            self.dirty.toolbar_position = Some(p);
             self.schedule_save();
         }
     }
@@ -867,6 +884,9 @@ impl ThemeManager {
                 }
                 if self.chose_toolbar {
                     self.settings.show_toolbar = chosen.show_toolbar;
+                }
+                if self.chose_toolbar_position {
+                    self.settings.toolbar_position = chosen.toolbar_position;
                 }
                 if self.chose_editing {
                     self.settings.editing = chosen.editing;

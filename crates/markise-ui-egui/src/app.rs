@@ -953,6 +953,26 @@ impl MarkiseApp {
         self.themes.show_toolbar()
     }
 
+    /// Where the formatting toolbar sits (View → Toolbar Position, persisted as
+    /// `toolbarPosition`; spec 04 §3.2).
+    pub fn toolbar_position(&self) -> markise_engine::settings::ToolbarPosition {
+        self.themes.toolbar_position()
+    }
+
+    /// View → Toolbar Position → Top / Bottom.
+    pub fn set_toolbar_position(&mut self, p: markise_engine::settings::ToolbarPosition) {
+        if p != self.toolbar_position() {
+            // an open drop-down belongs to the old placement
+            self.toolbar.close();
+        }
+        self.themes.set_toolbar_position(p);
+    }
+
+    /// The toolbar sits at the bottom of the editor area.
+    fn toolbar_at_bottom(&self) -> bool {
+        self.toolbar_position() == markise_engine::settings::ToolbarPosition::Bottom
+    }
+
     /// View → Toolbar.
     pub fn set_show_toolbar(&mut self, on: bool) {
         self.themes.set_show_toolbar(on);
@@ -2292,6 +2312,7 @@ impl MarkiseApp {
             ctx.request_repaint();
         }
         let mut tool_area = None;
+        let at_bottom = self.toolbar_at_bottom();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(color(t.page_bg)))
             .show(ui, |ui| {
@@ -2301,9 +2322,20 @@ impl MarkiseApp {
                     return;
                 }
                 tool_area = Some(ui.available_rect_before_wrap());
+                // the document (or source) area: the strip for the formatting toolbar is kept
+                // free above or below it, so the bar never covers text; one child UI in every
+                // placement keeps the surface's widget id (and its focus) stable
+                let mut body_rect = ui.available_rect_before_wrap();
                 if toolbar.is_some() && self.doc.is_some() && !self.source_visible {
-                    ui.add_space(crate::toolbar::RESERVED_H);
+                    let room = (body_rect.height() - crate::toolbar::RESERVED_H).max(0.0);
+                    if at_bottom {
+                        body_rect.max.y = body_rect.min.y + room;
+                    } else {
+                        body_rect.min.y = body_rect.max.y - room;
+                    }
                 }
+                let mut body = ui.new_child(egui::UiBuilder::new().max_rect(body_rect).id_salt("markise-doc-area"));
+                let ui = &mut body;
                 if self.source_visible
                     && let Some(s) = self.doc.as_mut().and_then(|d| d.buffer.as_mut())
                 {
@@ -2365,7 +2397,7 @@ impl MarkiseApp {
             });
         if let (Some(m), Some(area)) = (&toolbar, tool_area) {
             let look = crate::toolbar::Look::new(&t);
-            tool_cmd = self.toolbar.show(ui, area, m, &look);
+            tool_cmd = self.toolbar.show(ui, area, m, &look, at_bottom);
         }
         if let Some(id) = tool_cmd {
             // exactly like the menu item (and its shortcut)
@@ -2380,6 +2412,7 @@ impl MarkiseApp {
         let ctx = ui.ctx().clone();
         let split = self.side_by_side_split();
         let show_toolbar = self.toolbar_visible();
+        let at_bottom = self.toolbar_at_bottom();
         let doc = self.doc.as_mut()?;
         if doc.buffer.is_none() {
             // a new or reloaded document: the editor starts at the rendered position
@@ -2405,7 +2438,16 @@ impl MarkiseApp {
                 theme: t,
                 parley: self.parley.as_mut(),
                 highlighter: self.source_highlight.then_some(&mut self.source_highlighter),
-                top_reserve: if show_toolbar { crate::toolbar::RESERVED_H } else { 0.0 },
+                top_reserve: if show_toolbar && !at_bottom {
+                    crate::toolbar::RESERVED_H
+                } else {
+                    0.0
+                },
+                bottom_reserve: if show_toolbar && at_bottom {
+                    crate::toolbar::RESERVED_H
+                } else {
+                    0.0
+                },
             },
         );
         if out.typed {
