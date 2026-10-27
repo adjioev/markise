@@ -8,6 +8,7 @@
 //! - [`view`]: neutral views: leaves ([`LeafView`]), the flattened block structure
 //!   ([`FlatEvent`]), inline trees with rendered values ([`RichInline`]), tables, headings and
 //!   fragment source maps ([`SourceMap`]);
+//! - [`source`]: source-mode token classes ([`SourceTok`]);
 //! - [`chunked`]: [`chunked::RelChunks`], relative-offset storage (gate G1);
 //! - [`resource`]: resource path resolution;
 //! - [`command`]: pure-data [`CommandDescriptor`]s with [`PlannerId`]s;
@@ -22,6 +23,7 @@ pub mod patch;
 pub mod plan;
 pub mod pos;
 pub mod resource;
+pub mod source;
 pub mod text;
 pub mod view;
 
@@ -37,6 +39,7 @@ pub use plan::{
     plain_typing,
 };
 pub use pos::{Affinity, DocPos, SelRange, Selection, VirtualSlot};
+pub use source::{SourceTok, SourceToken};
 pub use text::{LineEnding, Span};
 pub use view::{
     CalloutKind, ColumnAlign, ContainerKind, FlatContainer, FlatEvent, FlatLeaf, HeadingInfo, InlineKind, InlineNode,

@@ -10,6 +10,7 @@
 pub mod command;
 pub mod history;
 pub mod keymap;
+pub mod source;
 pub mod surface;
 
 use std::borrow::Cow;
@@ -23,6 +24,7 @@ use markise_doc::{
 };
 
 pub use history::{History, HistoryLimits, StateId, Step, Transaction, TxKind, TypingDir};
+pub use source::{SourceCaret, SourcePane};
 pub use surface::{CaretGeometry, EditorView, ViewCaret};
 
 /// Time source for typing-group pauses (C13); injectable for tests.
@@ -187,6 +189,8 @@ pub struct EditorSession {
     clock: Box<dyn Clock>,
     /// Editing preferences passed to planners (auto-pair, smart punctuation…).
     prefs: EditPrefs,
+    /// Full Source mode's own history (ADR 0006 §4.3), while it is open.
+    source: Option<source::SourceSession>,
 }
 
 impl fmt::Debug for EditorSession {
@@ -242,6 +246,7 @@ impl EditorSession {
             effects: Vec::new(),
             clock,
             prefs: EditPrefs::default(),
+            source: None,
         }
     }
 
@@ -1110,6 +1115,9 @@ impl EditorSession {
     /// Undoes the newest transaction: inverse steps in reverse, exact hints, `sel_before`.
     pub fn undo(&mut self) -> bool {
         self.close_typing();
+        if !self.can_undo() {
+            return false;
+        }
         let Some(tx) = self.history.pop_undo() else {
             return false;
         };

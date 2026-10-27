@@ -2655,6 +2655,7 @@ dependencies = [
  "markise-testfmt",
  "markise-text",
  "markise-theme",
+ "memchr",
  "proptest",
  "unicode-segmentation",
 ]
