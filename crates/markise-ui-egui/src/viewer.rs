@@ -83,6 +83,8 @@ pub struct DocViewer {
     last_top: f32,
     /// Text to put on the clipboard after this frame's input handling.
     pending_copy: Option<String>,
+    /// Widget id and screen rectangle of the surface at the last frame.
+    last_surface: Option<(egui::Id, Rect)>,
 }
 
 impl DocViewer {
@@ -115,12 +117,23 @@ impl DocViewer {
             last_left: 0.0,
             last_top: 0.0,
             pending_copy: None,
+            last_surface: None,
         }
     }
 
     /// A viewer of a parsed Markdown document (tests, tools).
     pub fn from_markdown(doc: Arc<markise_md::Document>, model: Arc<DocModel>, theme: &Theme) -> Self {
         Self::new(Arc::new(markise_md::MarkdownFormat::default()), doc, model, theme, None)
+    }
+
+    /// The surface's widget id at the last frame (it holds the keyboard focus while editing).
+    pub fn surface_id(&self) -> Option<egui::Id> {
+        self.last_surface.map(|(id, _)| id)
+    }
+
+    /// The surface's screen rectangle at the last frame (document painting is clipped to it).
+    pub fn surface_rect(&self) -> Option<Rect> {
+        self.last_surface.map(|(_, r)| r)
     }
 
     /// The shared view (layout, scrolling).
@@ -246,6 +259,7 @@ impl DocViewer {
         let id = ui.scope_id().with("markise-viewer");
         let page_rect = Rect::from_min_max(rect.min, pos2(rect.right() - SCROLLBAR_W, rect.bottom()));
         let resp = ui.interact(page_rect, id, Sense::click_and_drag());
+        self.last_surface = Some((id, rect));
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, color(theme.page_bg));
         let ctx = ui.ctx().clone();

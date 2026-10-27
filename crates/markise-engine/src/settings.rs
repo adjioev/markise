@@ -19,6 +19,7 @@
 //! | `colors` | theme family id: `"markise"`, `"palette:<id>"`, `"builtin:<id>"` (`drake`, `lapis`, `phycat`), `"user:<key>"` (user theme family: lowercase file stem without a `-dark`/`-light` suffix) | `"markise"` |
 //! | `appearance` | `"system"`, `"light"`, `"dark"` | `"system"` |
 //! | `diagrams` | `true` / `false`: render `mermaid`/`sequence`/`flow` fences (spec 01 §4.6; View → Diagrams) | `true` |
+//! | `showToolbar` | `true` / `false`: show the formatting toolbar (spec 04 §3.2, spec 05; View → Toolbar) | `false` |
 //! | `consumed_pending` | names of recovery files already merged into this file (written with the merge; see [`update_file`]); omitted when empty | none |
 //! | `overrides` | object with optional `font_family` (string), `font_size`, `line_height`, `content_width` (numbers); omitted when empty | none |
 //! | `editing` | object: `auto_pair_brackets` (default `true`), `auto_pair_markdown` (`false`), `smart_punctuation` (convert on input, `false`), `smart_dashes_em` (`--` → em dash, `false`) (spec 02 §4, §13, §16; Edit menu) | defaults |
@@ -222,6 +223,8 @@ pub struct Settings {
     pub appearance: Appearance,
     /// Render diagram fences (spec 01 §4.6, DG-2/DG-7; owner default on).
     pub diagrams: bool,
+    /// Show the formatting toolbar (key `showToolbar`, spec 04 §3.2; spec 05 default off).
+    pub show_toolbar: bool,
     /// Editing preferences (key `editing`).
     pub editing: EditingSettings,
     pub overrides: FontOverrides,
@@ -264,6 +267,7 @@ impl Default for Settings {
             colors: "markise".into(),
             appearance: Appearance::System,
             diagrams: true,
+            show_toolbar: false,
             editing: EditingSettings::default(),
             overrides: FontOverrides::default(),
             overrides_extra: Map::new(),
@@ -343,6 +347,7 @@ pub struct SettingsPatch {
     pub colors: Option<String>,
     pub appearance: Option<Appearance>,
     pub diagrams: Option<bool>,
+    pub show_toolbar: Option<bool>,
     pub editing: Option<EditingSettings>,
     pub overrides: OverridesPatch,
     pub side_by_side_split: Option<f32>,
@@ -380,6 +385,9 @@ impl SettingsPatch {
         if let Some(v) = self.diagrams {
             s.diagrams = v;
         }
+        if let Some(v) = self.show_toolbar {
+            s.show_toolbar = v;
+        }
         if let Some(v) = self.editing {
             s.editing = v;
         }
@@ -406,6 +414,9 @@ impl SettingsPatch {
         }
         if saved.diagrams.is_some() {
             self.diagrams = None;
+        }
+        if saved.show_toolbar.is_some() {
+            self.show_toolbar = None;
         }
         if saved.editing.is_some() {
             self.editing = None;
@@ -439,6 +450,9 @@ impl SettingsPatch {
         if later.diagrams.is_some() {
             self.diagrams = later.diagrams;
         }
+        if later.show_toolbar.is_some() {
+            self.show_toolbar = later.show_toolbar;
+        }
         if later.editing.is_some() {
             self.editing = later.editing;
         }
@@ -465,6 +479,9 @@ impl SettingsPatch {
         }
         if let Some(v) = self.diagrams {
             m.insert("diagrams".into(), Value::from(v));
+        }
+        if let Some(v) = self.show_toolbar {
+            m.insert("showToolbar".into(), Value::from(v));
         }
         if let Some(v) = self.editing {
             m.insert("editing".into(), v.to_json());
@@ -500,6 +517,7 @@ impl SettingsPatch {
             appearance: m.get("appearance").and_then(Value::as_str).and_then(Appearance::parse),
             side_by_side_split: m.get("side_by_side_split").and_then(valid_split),
             diagrams: m.get("diagrams").and_then(Value::as_bool),
+            show_toolbar: m.get("showToolbar").and_then(Value::as_bool),
             editing: m.get("editing").and_then(EditingSettings::from_json),
             ..Default::default()
         };
@@ -583,6 +601,9 @@ impl Settings {
         if let Some(Value::Bool(b)) = map.remove("diagrams") {
             s.diagrams = b;
         }
+        if let Some(Value::Bool(b)) = map.remove("showToolbar") {
+            s.show_toolbar = b;
+        }
         if let Some(e) = map.remove("editing").as_ref().and_then(EditingSettings::from_json) {
             s.editing = e;
         }
@@ -599,6 +620,7 @@ impl Settings {
         map.insert("theme".into(), Value::from(self.colors.clone()));
         map.insert("appearance".into(), Value::from(self.appearance.as_str()));
         map.insert("diagrams".into(), Value::from(self.diagrams));
+        map.insert("showToolbar".into(), Value::from(self.show_toolbar));
         map.insert("editing".into(), self.editing.to_json());
         if !self.consumed_pending.is_empty() {
             map.insert("consumed_pending".into(), Value::from(self.consumed_pending.clone()));
@@ -852,6 +874,30 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(SettingsPatch::from_json(&p.to_json()).unwrap().editing, p.editing);
+    }
+
+    /// Spec 04 §3.2 / spec 05: `showToolbar` defaults to off, round-trips, and patches carry it.
+    #[test]
+    fn show_toolbar_setting_defaults_off_and_round_trips() {
+        assert!(!Settings::default().show_toolbar);
+        assert!(!Settings::from_json(r#"{"version": 2}"#).unwrap().show_toolbar);
+        let on = Settings::from_json(r#"{"version": 2, "showToolbar": true}"#).unwrap();
+        assert!(on.show_toolbar);
+        assert!(on.to_json().contains("\"showToolbar\": true"));
+        assert!(Settings::from_json(&on.to_json()).unwrap().show_toolbar);
+        assert!(
+            !Settings::from_json(r#"{"version": 2, "showToolbar": 1}"#)
+                .unwrap()
+                .show_toolbar
+        );
+        let p = SettingsPatch {
+            show_toolbar: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(SettingsPatch::from_json(&p.to_json()).unwrap().show_toolbar, Some(true));
+        let mut s = Settings::default();
+        p.apply(&mut s);
+        assert!(s.show_toolbar);
     }
 
     #[test]

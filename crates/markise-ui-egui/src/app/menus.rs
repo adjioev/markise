@@ -111,6 +111,39 @@ impl MarkiseApp {
         Check::Toggle(on)
     }
 
+    /// The formatting toolbar's controls (spec 04 §3.2): the registry commands it shows with
+    /// their labels, effective shortcuts, enabled state and check state — the same queries as
+    /// the Format and Paragraph menus. `active`: the toolbar acts on the visible pane
+    /// (otherwise every control is disabled, e.g. over the read-only rendered pane of Side by
+    /// Side).
+    pub(super) fn toolbar_model(&self, active: bool) -> crate::toolbar::Model {
+        let reg = self.registry();
+        let km = if self.menu_platform == Platform::current() {
+            self.effective_keymap()
+        } else {
+            &defaults(self.menu_platform).1
+        };
+        let controls = crate::toolbar::all_ids()
+            .filter_map(|id| {
+                let spec = reg.get(id)?;
+                let enabled = active && self.command_enabled(id, false);
+                let shortcut = km
+                    .shown_chord_of(id)
+                    .map(|c| crate::menu::shortcut_text(c, self.menu_platform));
+                Some(crate::toolbar::Control {
+                    id: spec.desc.id,
+                    label: spec.desc.label,
+                    shortcut,
+                    enabled,
+                    // state is shown even where the command is a no-op (Paragraph in a
+                    // paragraph) or the pane is read-only
+                    active: self.doc.is_some() && self.command_check(id, true) == Check::Toggle(true),
+                })
+            })
+            .collect();
+        crate::toolbar::Model { controls }
+    }
+
     /// Edit menu tail: auto-pair and smart punctuation preferences (spec 02 §4, §13).
     fn editing_pref_entries(&self) -> Vec<Entry> {
         let e = self.themes.editing();
@@ -326,6 +359,7 @@ impl MarkiseApp {
                     true,
                     Check::None,
                 ),
+                self.app_item("view.toolbar", true, Check::Toggle(self.show_toolbar())),
                 Entry::Separator,
                 self.app_item("view.highlightCode", true, Check::Toggle(self.highlight_code)),
                 self.app_item("view.diagrams", true, Check::Toggle(self.diagrams)),
@@ -498,6 +532,7 @@ impl MarkiseApp {
             },
             "view.rendered" if self.doc.is_some() => self.set_view_mode(ViewMode::Rendered),
             "view.toggleSidebar" => self.sidebar_visible = !self.sidebar_visible,
+            "view.toolbar" => self.set_show_toolbar(!self.show_toolbar()),
             "view.highlightCode" => self.set_highlight_code(!self.highlight_code),
             "view.diagrams" => self.set_diagrams(!self.diagrams),
             "view.fullScreen" => {

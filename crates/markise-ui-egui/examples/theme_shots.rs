@@ -302,6 +302,13 @@ fn shoot_with(doc: &Path, config: &Path, sel: Selection, appearance: Appearance,
     app.select_style(sel.style);
     app.select_colors(sel.colors);
     app.set_theme_choice(appearance);
+    // `MARKISE_SHOT_TOOLBAR=1`: with the formatting toolbar (spec 04 §3.2); `=narrow` also
+    // renders a narrow window, where groups collapse into More
+    let toolbar = std::env::var("MARKISE_SHOT_TOOLBAR").unwrap_or_default();
+    if !toolbar.is_empty() {
+        app.set_show_toolbar(true);
+    }
+    let w_pt = if toolbar == "narrow" { 560.0 } else { w_pt };
     let ctx = egui::Context::default();
     // `MARKISE_SHOT_MODE=sbs|source`: shots of the Side by Side / Source view mode
     let mode = std::env::var("MARKISE_SHOT_MODE").unwrap_or_default();

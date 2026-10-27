@@ -18,6 +18,7 @@ pub mod source;
 pub mod source_highlight;
 pub mod text_paint;
 pub mod themes;
+pub mod toolbar;
 pub mod viewer;
 
 pub use app::{AppOptions, MarkiseApp, MenuHost, ThemeChoice, ViewMode, rss_mb};
