@@ -1,0 +1,11 @@
+# THROWAWAY SPIKE for docs/adr/0005-text-shaping.md — not a workspace member, not wired into the app.
+[package]
+name = "spike-wordcraft-fonts"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+wordcraft-fonts = { git = "https://github.com/storytold/wordcraft", rev = "6a2b520fa49aa0d0595cea36589aaf16ca371cd3" }

@@ -1,0 +1,10 @@
+# THROWAWAY SPIKE for docs/adr/0005-text-shaping.md — not a workspace member, not wired into the app.
+[package]
+name = "spike-parley-text"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.89"
+[workspace]
+[dependencies]
+parley = "0.12"

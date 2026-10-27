@@ -1,0 +1,3 @@
+# Check out every file byte-for-byte on all platforms (no CRLF conversion on Windows): the
+# Markdown corpus contains deliberate CRLF / mixed line endings and round-trip tests compare bytes.
+* -text

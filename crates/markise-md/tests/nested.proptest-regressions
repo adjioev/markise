@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2a569fcf10c8dda326a280520925ede918f8782fa9741481f332b52e704d7fff # shrinks to doc = 3, ops = [(0, 3, 19, true), (0, 3, 0, false), (0, 3, 0, false), (5362, 1, 0, false)]
+cc 868f1aa6ceb7e540274acd57209f4339bce7579dfe18037873e5285aa2230cbd # shrinks to doc = 3, ops = [(477, 4, 0, false), (5845, 4, 16, true), (7601, 0, 2, true)]
+cc 77980bf0c953c6ddc40c16ceeec005a7350bb264f50b33742c1c1627278c14b3 # shrinks to doc = 0, ops = [(4645, 1, 0, false), (52, 1, 0, false)]
+cc c9761f2fb1ada5e3ea2ed830cb30dba02e7e6fa9b7162453e1331cbf00bea10f # shrinks to doc = 4, ops = [(773, 2, 0, false), (773, 5, 0, false), (773, 4, 0, false), (4177, 2, 2, true), (4187, 3, 0, false), (772, 5, 0, false), (3410, 4, 0, false), (4158, 1, 6, true)]
+cc 55c736a88d8714bfdba867c60481b6ac7f439a9e0b772ef59197efd06a186efb # shrinks to doc = 2, ops = [(4906, 0, 2, true), (245, 3, 0, false), (245, 4, 0, false), (244, 0, 11, true), (0, 4, 0, false), (240, 4, 0, true), (0, 0, 0, false)]

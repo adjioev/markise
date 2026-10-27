@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Markise
+GenericName=Markdown Editor
+Comment=Live-preview Markdown editor
+Exec=markise %F
+Icon=io.github.adjioev.markise
+Terminal=false
+Categories=Office;TextEditor;Utility;
+MimeType=text/markdown;text/x-markdown;
+Keywords=Markdown;Editor;Notes;
+StartupNotify=true
+StartupWMClass=io.github.adjioev.markise

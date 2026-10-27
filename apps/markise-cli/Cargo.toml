@@ -1,0 +1,19 @@
+[package]
+name = "markise-cli"
+description = "Markise command line: round-trip check, HTML export, theme import"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "markise-cli"
+path = "src/main.rs"
+
+[dependencies]
+markise-md.workspace = true
+markise-export.workspace = true
+similar.workspace = true
+markise-theme.workspace = true
+serde_json.workspace = true

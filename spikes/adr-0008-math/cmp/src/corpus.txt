@@ -1,0 +1,56 @@
+x^2 + y^2 = z^2
+\frac{a}{b} + \frac{\frac{1}{x}}{1+\frac{1}{y}}
+\sqrt{x} + \sqrt[3]{x^2+1}
+a_{i,j}^{(k)} + x_1^2 + e^{-x^2/2}
+\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}
+\int_0^1 f(x)\,dx + \iint_D g\,dA + \oint_C \mathbf{F}\cdot d\mathbf{r}
+\lim_{x \to 0} \frac{\sin x}{x} = 1
+\prod_{k=1}^n k = n!
+\alpha\beta\gamma\delta\epsilon\varepsilon\zeta\eta\theta\vartheta\lambda\mu\pi\rho\sigma\tau\phi\varphi\chi\psi\omega
+\Gamma\Delta\Theta\Lambda\Xi\Pi\Sigma\Phi\Psi\Omega
+\left( \frac{a}{b} \right)^2 \left[ x \right] \left\{ y \right\} \left| z \right| \left\langle u \right\rangle
+\left. \frac{df}{dx} \right|_{x=0}
+\begin{pmatrix} a & b \\ c & d \end{pmatrix}
+\begin{bmatrix} 1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1 \end{bmatrix}
+\begin{vmatrix} a & b \\ c & d \end{vmatrix} = ad - bc
+\begin{matrix} x & y \\ z & w \end{matrix}
+\begin{aligned} f(x) &= (x+1)^2 \\ &= x^2 + 2x + 1 \end{aligned}
+\begin{cases} 1 & x > 0 \\ 0 & \text{otherwise} \end{cases}
+\begin{array}{c|cc} a & b & c \\ \hline 1 & 2 & 3 \end{array}
+\begin{align} a &= b \\ c &= d \end{align}
+\begin{align*} a &= b + c \\ &= d \end{align*}
+\begin{gather} a = b \\ c = d \end{gather}
+\text{if } x \in \mathbb{R} \text{ then } x^2 \geq 0
+\mathbb{N} \subset \mathbb{Z} \subset \mathbb{Q} \subset \mathbb{R} \subset \mathbb{C}
+\mathcal{L}\{f\} \mathfrak{g} \mathscr{H} \mathrm{d}x \mathit{abc} \mathsf{T} \mathtt{x}
+\mathbf{v} \cdot \boldsymbol{\alpha}
+\hat{x}\ \bar{y}\ \vec{v}\ \tilde{n}\ \dot{x}\ \ddot{x}\ \widehat{abc}\ \overline{AB}\ \underline{x}
+\overbrace{a+b+c}^{3} + \underbrace{x+y}_{2}
+\binom{n}{k} = \frac{n!}{k!(n-k)!}
+\dfrac{1}{2} \tfrac{1}{2} \cfrac{1}{1+\cfrac{1}{x}}
+\operatorname{arg\,max}_x f(x) \quad \max_{i} a_i \quad \log x \ln y \exp z \sin\theta\cos\theta\tan\theta
+a \leq b \geq c \neq d \approx e \equiv f \sim g \simeq h \propto i \pm j \mp k \times l \div m
+\forall x \exists y : x \in A \cup B \cap C \setminus D, \emptyset, \infty, \partial, \nabla
+\rightarrow \leftarrow \Rightarrow \Leftarrow \leftrightarrow \Leftrightarrow \mapsto \to \implies \iff
+\xrightarrow{f} \xleftarrow[g]{h}
+\overset{!}{=} \underset{x}{\lim} \stackrel{def}{=}
+a \bmod b \quad a \equiv b \pmod{n}
+\lfloor x \rfloor \lceil y \rceil \| v \| \langle a, b \rangle
+x_1, x_2, \ldots, x_n \quad x_1 + \cdots + x_n \quad \vdots \quad \ddots
+\color{red}{x} + \textcolor{blue}{y}
+\boxed{E = mc^2}
+E = mc^2 \tag{1}
+\sum_{\substack{0 \le i \le m \\ 0 < j < n}} P(i,j)
+\displaystyle \sum_{i=1}^n i \textstyle \sum_{i=1}^n i
+\begin{smallmatrix} a & b \\ c & d \end{smallmatrix}
+\not\in \not= \nleq
+\frac{\partial^2 u}{\partial t^2} = c^2 \nabla^2 u
+\mathbb{E}[X] = \int_{-\infty}^{\infty} x f(x)\, dx
+e^{i\pi} + 1 = 0
+f'(x) f''(x) f^{\prime}(x)
+\hbar \ell \Re \Im \aleph \wp
+\ce{H2O + CO2 -> H2CO3}
+\begin{equation} a = b \end{equation}
+\frac{1}{2
+\foo{x}
+x^^2

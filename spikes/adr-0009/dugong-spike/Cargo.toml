@@ -1,0 +1,15 @@
+# THROWAWAY SPIKE for docs/adr/0009-diagrams.md — not a workspace member, not wired into the app.
+[package]
+name = "spike-dugong"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+dugong = "=0.9.2"
+rust-sugiyama = "=0.4.0"
+
+[profile.release]
+debug = false

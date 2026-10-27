@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b9b806a89488fcb671cc8f38bbb130ed47053037b3c9cdd1fa8a49af7dbef188 # shrinks to start = "# T\n\n- [ ] a\r\n- b\n\npara\r\n", ops = [Newline, Select(Index(9223372036854775808), Index(4611686018427387904)), Type("-"), Backspace, Delete]
+cc ce9f1dbd6c8778cef643c3e7c547e8af90ea7fc9a52dea79c719e8dc9ddae6ad # shrinks to start = "= H\r\n\r\n* i\nplain\n", ops = [Type("- "), Newline, Newline, Type("[!NOTE]"), Type("a"), Newline, Type("[ ] "), Type("1. "), Newline, Newline, Delete]
+cc 578f92a434dff95b355f47a4454ed3c1eaaeedcdfcef5251d7dbcf413ae6755a # shrinks to start = "alpha\r\nbeta\ngamma\r\n", ops = [Command("block.taskList"), Type("- "), Newline, Type("a"), Pause, Newline, Type("a")]

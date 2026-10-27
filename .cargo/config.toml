@@ -1,0 +1,3 @@
+[alias]
+# Workspace tooling (xtask/): `cargo xtask layers`, `cargo xtask assets`, `cargo xtask ci`.
+xtask = "run --package xtask --"

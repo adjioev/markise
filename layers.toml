@@ -1,0 +1,73 @@
+# Crate layering: the machine-readable copy of the "Architecture" table in AGENTS.md.
+#
+# Enforced by `cargo xtask layers` (CI lint job). The check fails when
+#   - a workspace crate is not listed here,
+#   - a crate depends (normal, build or dev) on a crate of the same or a higher layer, unless the
+#     pair is allowed by an `intra_layer` chain below,
+#   - a crate below `ui_min_layer` depends on a UI toolkit crate (`ui_crates`, by name, from any
+#     source),
+#   - the test tool crate is used as anything but a dev-dependency (apps included),
+#   - anything depends on an app (apps included),
+#   - a crate has a path dependency outside the workspace,
+#   - this file and the AGENTS.md table disagree (a crate missing from one of them, or listed
+#     at a different layer),
+#   - a format-neutral crate depends on a format crate other than as a dev-dependency
+#     ([format_seam] below).
+# Crates listed here that do not exist yet (planned crates) are fine.
+
+# First layer allowed to use UI toolkit crates.
+ui_min_layer = 6
+# External UI toolkit / windowing crates. A trailing `*` makes an entry a prefix.
+ui_crates = ["egui", "eframe", "winit", "egui_kittest", "rfd", "muda"]
+# Packages whose manifest lives under these paths (relative to the workspace root) are ignored:
+# throwaway spikes are separate workspaces and never part of the product.
+exclude_paths = ["spikes/"]
+
+# Layered library crates: crate = layer.
+[layers]
+markise-geom = 0
+markise-md = 1
+markise-doc = 1
+markise-layout = 2
+markise-theme = 2
+markise-blocks = 2
+markise-text = 2
+markise-render = 3
+markise-export = 3
+markise-pdf = 3
+markise-engine = 4
+markise-mcp = 5
+markise-ui-egui = 6
+
+# Crates outside the layer stack:
+#   "app"     — binaries on top of the stack; may depend on any layer (test tool: dev only),
+#               nothing may depend on them (AGENTS.md row "apps").
+#   "testkit" — test/benchmark tooling; may depend on layers below `ui_min_layer` and may be
+#               used by other crates only as a dev-dependency (AGENTS.md row "tests").
+#   "tool"    — build tooling (xtask); exempt, not listed in AGENTS.md.
+[roles]
+markise = "app"
+markise-cli = "app"
+markise-corpus = "testkit"
+markise-testfmt = "testkit"
+xtask = "tool"
+
+# Explicit orderings within one layer: a crate may depend on the crates listed before it in
+# the same chain (never the other way round).
+[intra_layer]
+# The format-neutral seam (ADR 0006 §1.2) sits below every format: markise-md implements its
+# traits and re-exports its Span/LineEnding.
+L1 = ["markise-doc", "markise-md"]
+# The layout engine applies the theme model (block styles, fonts) and, once ADR 0005 lands,
+# shapes text through markise-text; the theme model may use markise-text's font matching.
+# Code highlighting (markise-blocks) classifies tokens into the theme model's token kinds.
+L2 = ["markise-text", "markise-theme", "markise-blocks", "markise-layout"]
+# The PDF/PNG back ends lay out the export model built by markise-export.
+L3 = ["markise-export", "markise-pdf"]
+
+# The format seam (ADR 0006 §1.5): these crates read documents only through `markise-doc`
+# (`FormatDoc` views), so another source format can be added without touching them. Format
+# crates are allowed there as dev-dependencies (tests, benchmarks) only.
+[format_seam]
+formats = ["markise-md"]
+neutral = ["markise-layout"]

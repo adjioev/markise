@@ -1,0 +1,25 @@
+[package]
+name = "markise-doc"
+description = "Markise L1: format-neutral document seam — spans, patches, positions, selections, hints, views, command descriptors and the format traits (ADR 0006 §1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+memchr.workspace = true
+
+# resource::open_regular: non-blocking open (O_NONBLOCK)
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# resource::open_regular: handle type checks (GetFileType, reparse points)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_Security"] }
+
+[dev-dependencies]
+proptest.workspace = true

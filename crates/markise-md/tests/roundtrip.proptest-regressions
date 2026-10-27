@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc da9eca80a0ff1f52a828d921d98ccebb45e6075656456a21bdb8441ce841c308 # shrinks to text = "#【toc】\n》"
+cc e54f7b038dfe6bb5434fabece5d4df51d6a11ab4700806f849d2a4215fcb627d # shrinks to text = "<!--日本> "
+cc 730b8bbc9afc69e1aff6e40721ad1ddc7bbe36e2b0052f635f0b222db97b8107 # shrinks to text = "> [x]: /u \"t\"\n```math```math\n$$# ", a = 29, len = 0, ins = [], opt = 0

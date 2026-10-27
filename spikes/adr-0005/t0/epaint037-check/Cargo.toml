@@ -1,0 +1,7 @@
+[package]
+name = "spike-epaint037-check"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+[dependencies]
+epaint.workspace = true

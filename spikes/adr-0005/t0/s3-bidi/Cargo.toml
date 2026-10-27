@@ -1,0 +1,13 @@
+[package]
+name = "spike-s3-bidi"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+[dependencies]
+markise-text = { workspace = true, default-features = false }
+unicode-bidi.workspace = true
+unicode-segmentation.workspace = true
+
+[features]
+default = ["complex-scripts"]
+complex-scripts = ["markise-text/complex-scripts"]

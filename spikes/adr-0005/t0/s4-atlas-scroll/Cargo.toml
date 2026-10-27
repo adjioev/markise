@@ -1,0 +1,10 @@
+[package]
+name = "spike-s4-atlas-scroll"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+[dependencies]
+markise-text.workspace = true
+markise-corpus.workspace = true
+atlas.workspace = true
+skrifa.workspace = true

@@ -1,0 +1,20 @@
+# THROWAWAY SPIKE for docs/adr/0008-math-rendering.md — not a member of the Markise workspace.
+# `cmp`: coverage and speed of RaTeX vs latex-rust on a formula corpus.
+# `size-*`: release-binary size probes (baseline, + RaTeX parse/layout, + latex-rust).
+[workspace]
+resolver = "3"
+members = ["cmp", "size-base", "size-ratex", "size-latexrust"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+ratex-parser = "=0.1.15"
+ratex-layout = "=0.1.15"
+ratex-types = "=0.1.15"
+latex-rust = { version = "=3.0.1", default-features = false }
+
+[profile.release]
+debug = false

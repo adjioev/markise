@@ -1,0 +1,13 @@
+[package]
+name = "spike-s5-chunk-context"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+[dependencies]
+parley.workspace = true
+unicode-bidi.workspace = true
+unicode-segmentation.workspace = true
+harfrust.workspace = true
+skrifa.workspace = true
+icu_segmenter = "2.3"
+icu_properties = "2.3"

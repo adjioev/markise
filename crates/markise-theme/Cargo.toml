@@ -1,0 +1,23 @@
+[package]
+name = "markise-theme"
+description = "Markise L2: native theme model, built-in themes and CSS theme importer (spec 03 §2)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# resource::open_regular / read_regular (hardened file reads)
+markise-doc.workspace = true
+cssparser.workspace = true
+# staging folders / exclusive temp files for theme install and built-in extraction
+tempfile.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "import"
+harness = false

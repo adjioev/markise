@@ -1,0 +1,18 @@
+target/
+.DS_Store
+*.swp
+.theme-cache/
+/benches/corpus/
+/crates/*/benches/corpus/
+*.generated.md
+
+.spec-cache/
+
+# headless theme screenshots (examples/theme_shots.rs)
+/.screenshots/
+
+# export samples (crates/markise-pdf/examples/export_samples.rs)
+/.export-samples/
+
+# release artifacts (cargo xtask dist)
+/dist/

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 11a95d850ebdb7ea80541f142d5ab36977c956f3e4cc97384738466d5ca0e17a # shrinks to (text, hinted) = ("- \n> q\n| a |\n- \n# T\n- \npara\n- \n", [28, 16]), edits = [(Index(9223372036854775808), 1, "- "), (Index(12682136550675316736), 0, "x")]
+cc 4aabe8607bcfe7df4bc85639ae681a63b474f28deb782090c2c87c97484c73e1 # shrinks to (text, hinted) = ("* a\n* a\n\ntext **b**\n> q\n* a\n- \npara\n| a |\n- \n- \n", [9]), edits = [(Index(6776354965852488349), 2, "")]

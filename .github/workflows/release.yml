@@ -1,0 +1,247 @@
+# Release: on a version tag (v<semver>), build release artifacts for macOS (universal: aarch64 +
+# x86_64 via lipo, Markise.app in a .dmg), Windows x86_64 (.zip) and Linux x86_64 (.tar.gz),
+# compute SHA256SUMS and create a DRAFT GitHub Release with them. Publishing the draft is a
+# manual, owner-approved step. Every artifact is built by `cargo xtask dist <platform>`
+# (xtask/src/dist.rs: `dist` profile = release + thin LTO + strip, then scripts/package.sh), the
+# same command used locally.
+#
+# Dry run: "Run workflow" (workflow_dispatch) on any branch builds the selected commit with the
+# label <version>-dryrun.<sha7> and uploads the artifacts and SHA256SUMS to the workflow run
+# only; no tag, release or draft is touched (the release job, the only one with
+# `contents: write`, is skipped).
+#
+# Release safety: every tag run creates a BRAND-NEW draft (scripts/release-draft.sh) identified
+# by the id returned from its creation and only adds assets to it; it never updates, replaces or
+# deletes assets of any pre-existing release (draft or published), and it fails early if the
+# tag already has a published release (scripts/release-guard.sh). Re-running a tag run therefore
+# leaves an extra draft; delete stale drafts by hand. Owner TODO: enable "immutable releases"
+# (Settings > General > Releases) so GitHub itself forbids changing published assets.
+#
+# Tags: strict SemVer 2.0.0 with a "v" prefix (scripts/check-tag.sh) that must equal the
+# workspace version in Cargo.toml (v0.1.0-beta.1 <-> version = "0.1.0-beta.1"); a tag with a
+# prerelease part (-beta.1) makes a GitHub *pre-release* draft. The release notes come from
+# docs/release/<version>.md (required for tag runs). The tag is resolved once to its commit SHA
+# (refs/tags/<tag> only, never a branch of the same name) and every build job checks out that
+# SHA.
+#
+# TODO (not done yet, needs owner accounts/secrets):
+# - macOS: Developer ID signing + notarization (Apple developer account; secrets for the
+#   certificate .p12, its password, an App Store Connect API key). Today the .app is only
+#   ad-hoc signed: users must right-click > Open (or `xattr -dr com.apple.quarantine`).
+# - Windows: Authenticode signing (SmartScreen will warn until then).
+# - Linux: AppImage / .deb / Flatpak; the tarball is built on ubuntu-22.04 so it runs on
+#   glibc >= 2.35 distributions.
+#
+# Required secrets: none (GITHUB_TOKEN with contents: write creates the draft release).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  prepare:
+    name: resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      label: ${{ steps.resolve.outputs.label }}
+      version: ${{ steps.resolve.outputs.version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      epoch: ${{ steps.resolve.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Resolve tag/commit, check the version, refuse published releases
+        id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)"
+          [ -n "$version" ] || { echo "::error::no version in [workspace.package]"; exit 1; }
+          if [ "$EVENT" = push ]; then
+            TAG="$REF_NAME"
+            ./scripts/check-tag.sh "$TAG"
+            git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+            sha="$(git rev-parse --verify "refs/tags/$TAG^{commit}")"
+            git show "$sha:Cargo.toml" > "$RUNNER_TEMP/Cargo.toml"
+            version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$RUNNER_TEMP/Cargo.toml")"
+            if [ "v$version" != "$TAG" ]; then
+              echo "::error::tag $TAG does not match the workspace version $version (expected v$version)"
+              exit 1
+            fi
+            git cat-file -e "$sha:docs/release/$version.md" \
+              || { echo "::error::docs/release/$version.md (release notes) is missing at $TAG"; exit 1; }
+            ./scripts/release-guard.sh "$TAG"
+            dry_run=false
+            label="$TAG"
+          else
+            TAG=""
+            sha="$(git rev-parse --verify HEAD)"
+            dry_run=true
+            label="$version-dryrun.${sha::7}"
+          fi
+          # SemVer prerelease = a "-" before any "+build" metadata (v1.0.0+build-1 is not one)
+          case "${version%%+*}" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          epoch="$(git log -1 --format=%ct "$sha")"
+          {
+            echo "dry_run=$dry_run"
+            echo "tag=$TAG"
+            echo "label=$label"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "sha=$sha"
+            echo "epoch=$epoch"
+          } >> "$GITHUB_OUTPUT"
+          echo "version $version, label $label, commit $sha, dry run: $dry_run, prerelease: $prerelease"
+
+  build:
+    name: build (${{ matrix.name }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-universal
+            os: macos-latest
+            targets: aarch64-apple-darwin, x86_64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            targets: x86_64-pc-windows-msvc
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            targets: x86_64-unknown-linux-gnu
+    defaults:
+      run:
+        shell: bash
+    env:
+      LABEL: ${{ needs.prepare.outputs.label }}
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libgl1-mesa-dev libegl1-mesa-dev
+      - uses: ./.github/actions/setup-rust
+        with:
+          targets: ${{ matrix.targets }}
+          cache-key: release-${{ matrix.name }}
+      - name: Build and package (cargo xtask dist)
+        env:
+          PLATFORM: ${{ matrix.name }}
+          # versionless asset names for /releases/latest/download/ links (tag runs only)
+          PACKAGE_STABLE_NAME: ${{ needs.prepare.outputs.dry_run == 'true' && '0' || '1' }}
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            # Git Bash, not the WSL launcher that a bare `bash` may resolve to
+            XTASK_BASH="$(cygpath -w "$(command -v bash)")"
+            export XTASK_BASH
+          fi
+          cargo xtask dist "$PLATFORM" --label "$LABEL" --out dist
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.name }}
+          path: dist/*
+          retention-days: 7
+          if-no-files-found: error
+
+  checksums:
+    name: checksums
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      LABEL: ${{ needs.prepare.outputs.label }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        working-directory: dist
+        run: |
+          ls -l
+          sha256sum markise-* > SHA256SUMS
+          cat SHA256SUMS
+          {
+            echo "### Markise $LABEL"
+            echo '```'
+            for f in markise-*; do
+              printf '%-48s %8.1f MB\n' "$f" "$(( $(wc -c < "$f") / 100000 ))e-1"
+            done
+            echo
+            cat SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-SHA256SUMS
+          path: dist/SHA256SUMS
+          retention-days: 7
+          if-no-files-found: error
+
+  release:
+    name: draft GitHub Release
+    if: needs.prepare.outputs.dry_run != 'true'
+    needs: [prepare, build, checksums]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          sparse-checkout: |
+            scripts
+            docs/release
+      # the archives and SHA256SUMS (release-SHA256SUMS artifact)
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      - name: Create a new draft release and upload the assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          ./scripts/release-draft.sh "$TAG" "$SHA" "docs/release/$VERSION.md" dist/markise-* dist/SHA256SUMS

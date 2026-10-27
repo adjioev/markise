@@ -1,0 +1,28 @@
+# Community theme corpus for the CSS importer tests (spec 03 §2, open question C6).
+# TEST INPUT ONLY: these themes are fetched at test time into the gitignored `.theme-cache/`
+# by `scripts/fetch-theme-corpus.sh` and are never committed or used as built-in themes
+# (AGENTS.md clean-room rules). Repositories are listed on theme.typora.io; pinned by commit.
+#
+# id	repository	commit	theme css (path inside the repository)	repository license
+dracula	dracula/typora	61a9edea74b2c25de27b0a720194c7ebdd147b0c	dracula.css	MIT
+onedark	sweatran/typora-onedark-theme	c8e9eb0720d91ff63a23288f95b3358cd38387b2	theme/onedark.css	GPL-3.0
+vue	blinkfox/typora-vue-theme	589efbb34d806fa27e6dc290e969c93c894a6394	vue.css	Apache-2.0
+vue-dark	blinkfox/typora-vue-theme	589efbb34d806fa27e6dc290e969c93c894a6394	vue-dark.css	Apache-2.0
+drake	liangjingkanji/DrakeTyporaTheme	771df28080610cf6b0bd5f6f0c1864efa2d9a41e	drake.css	MIT
+drake-dark	liangjingkanji/DrakeTyporaTheme	771df28080610cf6b0bd5f6f0c1864efa2d9a41e	drake-dark.css	MIT
+purple	hliu202/typora-purple-theme	914bcfb472476a34dddf0336ca7f3c38b67308e1	purple.css	MIT
+orangeheart	evgo2017/typora-theme-orange-heart	4f462e6de7d7087691b2f857d4ef2de5cfe6579c	orangeheart.css	MIT
+maize	BEATREE/typora-maize-theme	89186ead834f90b8df46ee1d12aafe1de431fdd4	maize.css	MIT
+quartz-milky	troennes/quartz-theme-typora	c0e264491cae9fc68a9bcea210c9c9e5cdc18bab	theme/quartz-milky.css	MIT
+lapis	YiNNx/typora-theme-lapis	9124f8659699691edccdc52ba710c79aa801c621	lapis.css	MIT
+lapis-dark	YiNNx/typora-theme-lapis	9124f8659699691edccdc52ba710c79aa801c621	lapis-dark.css	MIT
+notion-light	adrian-fuertes/typora-notion-theme	2611026951d7dacc3e5af21c6c09d076d17793de	themes/enhanced/notion-light-enhanced.css	MIT
+notion-dark	adrian-fuertes/typora-notion-theme	2611026951d7dacc3e5af21c6c09d076d17793de	themes/enhanced/notion-dark-enhanced.css	MIT
+cobalt	elitistsnob/typora-cobalt-theme	1146e705a64bc1e0054e6c503d858917e9e65cb7	cobalt.css	none
+gitlab	elitistsnob/typora-gitlab-theme	ecdd5852af5233484c11b4d502a6391ba7496886	gitlab.css	none
+github-night	kinoute/typora-github-night-theme	2d3414369ff1810c4bb11420f2e1b56ee603d3f0	github-night.css	none
+nord	ChristosBouronikos/typora-nord-theme	b1ef2d1422dda44a91d3db473a4425d5f7019ce2	nord.css	GPL-3.0
+fluent	li3zhen1/Fluent-Typora	5a6a6741359a7630d5006ace2117618e46b5032d	fluent.css	MIT
+mint	Y1chenYao/typora-mint-theme	88d26ae94eee87e5b13cebbf9dfce0691abcd39a	mint.css	none
+everforest-light	yuxbao/everforest-typora	b1fe469a6f96e395e3d44999524630ce5129b603	themes/everforest-light.css	Apache-2.0
+softgreen	pomopopo/typora-theme-softgreen	965d620b986d7b02d6819195091aa8e2525eb6b5	softgreen.css	MIT

@@ -1,0 +1,55 @@
+[package]
+name = "markise-text"
+description = "Markise L2: GUI-free text shaping, CSS font matching and paragraph layout (parley + fontique, ADR 0005)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["complex-scripts"]
+# Dictionary-based word/line segmentation for Thai, Lao, Khmer and Myanmar (ICU4X data; ADR 0005
+# §2.2). Binary-size cost is reported in spikes/adr-0005/README.md (T1).
+complex-scripts = ["parley/complex-scripts"]
+
+[dependencies]
+# resource::open_regular / read_regular (hardened file reads)
+markise-doc.workspace = true
+# No egui/epaint here: this crate is GUI-free (ADR 0005 §4.1).
+parley = { workspace = true }
+skrifa.workspace = true
+unicode-segmentation.workspace = true
+ahash.workspace = true
+unicode-normalization.workspace = true
+# WOFF/WOFF2 → sfnt (pure Rust, MIT; brotli/zlib backends)
+wuff.workspace = true
+# bounded decompressors for WOFF/WOFF2 (the same crates wuff uses)
+flate2.workspace = true
+brotli-decompressor.workspace = true
+
+# System fonts through the platform APIs (CoreText / DirectWrite). On Linux fontconfig is loaded
+# with dlopen at run time, so no -dev package is needed to build (interim policy until ADR 0005
+# §4.6 / T6 replaces it with our own folder index).
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+parley = { workspace = true, features = ["system"] }
+memmap2.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+parley = { workspace = true, features = ["system"] }
+fontique = { workspace = true, features = ["fontconfig-dlopen"] }
+memmap2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+# WOFF/WOFF2 test encoders (null-transform WOFF2)
+brotli.workspace = true
+# epaint baseline for the shaping bench only
+epaint.workspace = true
+tempfile.workspace = true
+markise-corpus.workspace = true
+
+[[bench]]
+name = "shaping"
+harness = false

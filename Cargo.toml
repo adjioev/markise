@@ -1,0 +1,150 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0-beta.1"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+markise-md = { path = "crates/markise-md" }
+markise-doc = { path = "crates/markise-doc" }
+markise-testfmt = { path = "crates/markise-testfmt" }
+markise-export = { path = "crates/markise-export" }
+markise-pdf = { path = "crates/markise-pdf" }
+markise-corpus = { path = "crates/markise-corpus" }
+markise-theme = { path = "crates/markise-theme" }
+markise-layout = { path = "crates/markise-layout" }
+markise-blocks = { path = "crates/markise-blocks" }
+markise-engine = { path = "crates/markise-engine" }
+markise-ui-egui = { path = "crates/markise-ui-egui" }
+memchr = "2.7"
+unicode-width = "0.2"
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
+emojis = "0.9"
+similar = "3.2"
+html-escape = "0.3"
+serde_json = "1"
+# layers.toml (xtask only)
+toml = { version = "1.1", default-features = false, features = ["std", "parse", "serde"] }
+proptest = "1"
+cssparser = "0.38"
+# M1 viewer.
+# `monochrome_emoji_fonts`: egui 0.37 no longer bundles its emoji/symbol fallbacks
+# (NotoEmoji-Regular, emoji-icon-font) by default; they were part of the 0.33 defaults.
+egui = { version = "0.37.0", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts"] }
+epaint = { version = "0.37.0", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts"] }
+# eframe 0.37 switched its default renderer to wgpu and added a system-font provider. Markise
+# keeps the glow renderer and loads system fonts itself (ADR 0004), so the feature set below
+# mirrors the eframe 0.33 defaults; `winit` with its default features restores what eframe's
+# `winit/default` used to enable (Wayland via dlopen, client-side decorations).
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "web_screen_reader", "x11"] }
+winit = "0.30.13"
+# macOS open-documents handler in apps/markise (already in the tree through eframe/arboard)
+objc2 = "0.6.5"
+# Windows: parent-console attach in apps/markise (already in the tree through winit and others)
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
+# Windows: icon resource embedded in markise.exe (apps/markise/build.rs)
+embed-resource = "3"
+egui_kittest = "0.37.0"
+rfd = "0.17"
+# Native menu bar (macOS NSMenu, Windows HMENU; apps/markise only). No GTK: Linux keeps the
+# in-window egui menu bar.
+muda = { version = "0.21.2", default-features = false }
+notify = "8.2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+memory-stats = "1.2"
+ahash = "0.8"
+memmap2 = "0.9"
+# system font index (font-family names → files)
+ttf-parser = "0.25"
+# validation of font bytes with the parser epaint uses (already in the tree via epaint)
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
+# glyph rasteriser for the parley text path (ADR 0005 §3; already in the tree through epaint)
+vello_cpu = { version = "0.2.0", default-features = false, features = ["std", "u8_pipeline", "text", "png"] }
+tempfile = "3"
+# Text shaping and layout (ADR 0005, crates/markise-text).
+markise-text = { path = "crates/markise-text" }
+parley = { version = "0.12.0", default-features = false, features = ["std"] }
+fontique = { version = "0.12.0", default-features = false, features = ["std"] }
+unicode-segmentation = "1.12"
+unicode-normalization = "0.1.24"
+wuff = "0.2.9"
+brotli = "8"
+flate2 = "1"
+brotli-decompressor = "5"
+libc = "0.2"
+# Syntax highlighting (ADR 0006 Q13): pure-Rust fancy-regex backend, no default themes/HTML.
+syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+# dagre-compatible layered graph layout (diagrams, ADR 0009); exact pin: its low-level API is
+# not a separately supported surface upstream
+dugong = "=0.9.2"
+# TeX math layout (ADR 0008): RaTeX, a KaTeX-compatible parser + layout engine (MIT); glyph
+# outlines come from the bundled KaTeX fonts (assets/fonts/katex/, OFL-1.1).
+ratex-parser = "0.1.15"
+ratex-layout = "0.1.15"
+ratex-types = "0.1.15"
+ratex-font = "0.1.15"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+# The regex engines behind syntax highlighting are ~20× slower unoptimised; optimise them in
+# dev/test builds too (debug app and the huge-block tests stay usable).
+[profile.dev.package.fancy-regex]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.regex-syntax]
+opt-level = 3
+[profile.dev.package.syntect]
+opt-level = 3
+
+# Smaller debug info: the test build of the whole workspace (egui, krilla, vello, parley…)
+# otherwise exhausts the Linux CI runner's disk (linker bus error); backtraces keep line numbers.
+[profile.dev]
+debug = "line-tables-only"
+
+# Export (markise-pdf): rasterising, font subsetting and shaping are very slow unoptimised;
+# optimise them in dev/test builds too so the export tests run in seconds.
+[profile.dev.package.vello_cpu]
+opt-level = 3
+[profile.dev.package.vello_common]
+opt-level = 3
+[profile.dev.package.glifo]
+opt-level = 3
+[profile.dev.package.krilla]
+opt-level = 3
+[profile.dev.package.subsetter]
+opt-level = 3
+[profile.dev.package.skrifa]
+opt-level = 3
+[profile.dev.package.read-fonts]
+opt-level = 3
+[profile.dev.package.harfrust]
+opt-level = 3
+[profile.dev.package.parley]
+opt-level = 3
+[profile.dev.package.fontique]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.bench]
+debug = false
+
+[profile.release]
+debug = false
+
+# Release artifacts (`cargo xtask dist`, .github/workflows/release.yml): release + thin LTO,
+# symbols stripped.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+strip = true

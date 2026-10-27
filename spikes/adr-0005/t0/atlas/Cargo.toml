@@ -1,0 +1,9 @@
+[package]
+name = "atlas"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+[dependencies]
+markise-text.workspace = true
+vello_cpu.workspace = true
+skrifa.workspace = true

@@ -1,0 +1,122 @@
+Markise
+Copyright (c) 2026 The Markise contributors
+Licensed under either of Apache License 2.0 (LICENSE-APACHE) or MIT (LICENSE-MIT), at your option.
+
+Third-party components (vendored or forked code, themes, fonts, assets) are listed below with
+their licenses.
+
+Vendored/forked code:
+- WordCraft xtask — xtask/src/layers.rs and xtask/src/assets.rs are adapted from
+  https://github.com/storytold/wordcraft (revision 6a2b520fa49aa0d0595cea36589aaf16ca371cd3),
+  paths xtask/src/layers.rs and xtask/src/assets.rs — MIT OR Apache-2.0,
+  Copyright (c) 2026 ArtCraft Team and the WordCraft contributors. Modified: layer table read
+  from layers.toml and cross-checked against AGENTS.md, Markise crate names, app/spike rules;
+  attribution via SOURCE.md records and NOTICE instead of ATTRIBUTION.md. The license texts are
+  the same as LICENSE-MIT / LICENSE-APACHE.
+
+Syntax definitions (bundled in the binary through the two-face crate, v0.5.2+bat-0.26.1,
+MIT OR Apache-2.0, https://codeberg.org/CosmicHarper/two-face; curated from the bat project,
+https://github.com/sharkdp/bat; used by crates/markise-blocks for code highlighting through
+syntect 5.3, MIT). The "fancy-regex" set is shipped (grammars that need Oniguruma, e.g.
+PowerShell and ARM Assembly, are not included). Full per-file license texts:
+https://codeberg.org/CosmicHarper/two-face/src/tag/v0.5.2+bat-0.26.1/generated/acknowledgements_full.md
+- Sublime HQ Packages (syntaxes/01_Packages: C, C++, C#, CSS, Go, HTML, Java, JavaScript, JSON,
+  Python, Ruby, Rust, shell, SQL, XML, YAML, Markdown, … — the syntect default set) — Sublime HQ
+  permissive license: "Permission to copy, use, modify, sell and distribute this software is
+  granted. This software is provided "as is" without express or implied warranty, and with no
+  claim as to its suitability for any purpose." (files carrying their own license excepted:
+  Rust — MIT).
+- MIT: AWK, Ada, AsciiDoc, CFML, CMake, CoffeeScript, Crontab (+ cron_descriptor), Dart, Docker,
+  DotENV, Elixir, Elm, Email, Fish, GDScript, Groff, JavaScript (Babel), Julia, LLVM, MediaWiki,
+  Nginx, Ninja, Nix, Protobuf, Puppet, PureScript (NOTICE), QML, Robot, SCSS/Sass, Slim, Stylus,
+  SublimeEthereum (Solidity, Vyper), Svelte, Swift, TOML, Terraform, VimL, Vue, Zig, cmd-help,
+  gnuplot, hosts, http-request-response, sublime-odin, typst, varlink, vscode-wgsl.
+- Apache-2.0: Crystal, Idris2, Jsonnet, Kotlin, Lean (+ lean4-unicode-input(-component),
+  vscode-lean4), NSIS, SLS, SmartVHDL, SystemVerilog, TypeScript.
+- BSD-2-Clause: Apache Conf, Org mode. BSD-3-Clause: HTML (Twig).
+- Public-domain style (owner-approved 2026-10-27 for bundled grammars, see AGENTS.md): GLSL
+  (public-domain dedication), PureScript (Unlicense), GraphQL (WTFPL). No GPL/LGPL/AGPL syntax
+  definition is included.
+The full copyright notices and license texts are in THIRD_PARTY/syntax-licenses.md (generated
+from two-face's embedded acknowledgements; shipped in every release archive).
+
+Themes (vendored CSS, built-in themes; each folder holds the upstream LICENSE and a SOURCE.md
+with the pinned commit and any edits; fonts of these themes are NOT vendored):
+- Drake — assets/themes/drake/ — https://github.com/liangjingkanji/DrakeTyporaTheme
+  (commit 771df28080610cf6b0bd5f6f0c1864efa2d9a41e) — MIT, Copyright (c) 2023 劉強東.
+  Files: drake-light.css, drake-dark.css, drake/font.css (unchanged).
+- Phycat — assets/themes/phycat/ — https://github.com/sumruler/typora-theme-phycat
+  (commit b49f1fc6b193e333a3ebb186bbf1ae7f8fc21778) — MIT, Copyright (c) 2024 徐继龙.
+  Files: phycat-sky.css, phycat-abyss.css, phycat/phycat.light.css, phycat/phycat.dark.css;
+  modified: heading icon SVGs credited upstream to the "Savor" theme removed (licence unclear).
+- Lapis — assets/themes/lapis/ — https://github.com/YiNNx/typora-theme-lapis
+  (commit 9124f8659699691edccdc52ba710c79aa801c621) — MIT, Copyright (c) 2024 YiNN.
+  Files: lapis.css, lapis-dark.css (unchanged).
+
+Icons:
+- Lucide — assets/icons/lucide/ (folder, folder-open, file-text, file; unchanged) —
+  https://github.com/lucide-icons/lucide (commit 1802f33f6c270395fcd981067f22719140e2ffbc) —
+  ISC, Copyright (c) 2026 Lucide Icons and Contributors (LICENSE copied alongside).
+
+Palettes (hex values only, used by the original native palette themes in
+crates/markise-theme/src/palettes.rs; details, commits and roles in
+assets/themes/palettes/SOURCES.md; no theme files copied):
+- Tokyo Night — https://github.com/enkia/tokyo-night-vscode-theme — MIT, Copyright (c) 2018-present Enkia;
+  Day variant: https://github.com/folke/tokyonight.nvim — Apache-2.0.
+- Catppuccin — https://github.com/catppuccin/palette — MIT, Copyright (c) 2021 Catppuccin.
+- Nord — https://github.com/nordtheme/nord — MIT, Copyright (c) 2016-present Sven Greb.
+- Gruvbox — https://github.com/morhetz/gruvbox — MIT/X11 (as declared in its README).
+- Rosé Pine — https://github.com/rose-pine/palette — MIT, Copyright (c) mvllow.
+- Dracula — https://github.com/dracula/dracula-theme — MIT, Copyright (c) 2023 Dracula Theme.
+The MIT license text: see LICENSE-MIT (same terms; the copyright notices above apply to the
+respective palettes).
+
+Dependencies with licenses beyond MIT/Apache-2.0 (not vendored; see docs/spec/99-open-questions.md D1):
+- emojis (crates.io) — (MIT OR Apache-2.0) AND Unicode-3.0 — GitHub emoji shortcode table.
+- notify 8 (crates.io) — CC0-1.0 (public-domain dedication) — file watching (markise-engine).
+  CC0 is not in the AGENTS.md crate list; flagged for owner confirmation (open question D3).
+- cssparser 0.38, cssparser-macros 0.7, dtoa-short 0.3 (crates.io) — MPL-2.0 (file-level
+  copyleft; used unmodified as dependencies, sources at github.com/servo/rust-cssparser and
+  github.com/upsuper/dtoa-short) — CSS tokenizer/rule parser for the theme importer
+  (markise-theme, docs/adr/0003-theme-import.md).
+
+- ICU4X (icu_segmenter, icu_properties, icu_normalizer, icu_locale_*, icu_provider,
+  icu_collections and their data crates; zerovec, zerotrie, zerofrom, yoke, litemap, tinystr,
+  writeable, potential_utf) (crates.io, via parley/fontique in crates/markise-text) —
+  Unicode-3.0 (code and data) — line/word/grapheme segmentation and Unicode properties
+  (ADR 0005). Unicode-3.0 code is allowed by AGENTS.md (owner decision 2026-10-27, TS-4).
+- brotli-decompressor 5, alloc-no-stdlib 2 (crates.io, via wuff) — BSD-3-Clause (/MIT) — WOFF2.
+- foldhash 0.2 (crates.io, via fontique/hashbrown) — Zlib.
+
+Website assets: copies and renders of the brand artwork plus screenshots of Markise;
+per-file origins in site/assets/SOURCE.md.
+
+Brand artwork (assets/brand/): the logo lockups contain glyph outlines (not font files) of
+Playfair Display (Copyright 2017 The Playfair Display Project Authors) and Nunito (Copyright 2014
+The Nunito Project Authors), both under the SIL Open Font License 1.1. The logo concept, hero
+illustration and social card were generated by the project owner with an AI image generator and
+are released under the project license.
+
+Fonts bundled for math rendering (OFL-1.1, allowed for font files only — owner decision
+2026-10-27):
+- KaTeX fonts — assets/fonts/katex/ (19 TrueType files, unchanged, from the npm release
+  katex@0.16.22; per-file SHA-256 in assets/fonts/katex/SOURCE.md) — https://github.com/KaTeX/KaTeX
+  — SIL Open Font License 1.1, Copyright (c) 2009-2010 Design Science, Inc., Copyright (c)
+  2014-2018 Khan Academy; Reserved Font Names KaTeX_AMS, KaTeX_Caligraphic, KaTeX_Fraktur,
+  KaTeX_Main, KaTeX_Math, KaTeX_SansSerif, KaTeX_Script, KaTeX_Size1–4, KaTeX_Typewriter. License
+  text: assets/fonts/katex/OFL.txt. Embedded by crates/markise-blocks (math glyph outlines).
+
+Other fonts: none bundled in this repository. The desktop app reads (or, from the OS-protected font folder, memory-maps) installed system fonts at run time when present
+(macOS Arial / Hiragino Sans GB, Windows Segoe UI / Microsoft YaHei, Linux DejaVu Sans /
+Noto Sans CJK) and otherwise uses the fonts bundled inside egui.
+
+Fonts bundled inside egui (crate epaint_default_fonts 0.37.0, compiled into the desktop app as
+egui's fallback fonts); licence texts copied unchanged from the crate into THIRD_PARTY/fonts/
+(see THIRD_PARTY/fonts/README.md; shipped in every release archive):
+- Ubuntu-Light.ttf — Ubuntu Font Licence 1.0 — THIRD_PARTY/fonts/ubuntu-font-licence-1.0.txt
+- Hack-Regular.ttf — MIT, Copyright (c) 2018 Source Foundry Authors, and the Bitstream Vera
+  License — THIRD_PARTY/fonts/hack-MIT-Bitstream.txt
+- NotoEmoji-Regular.ttf — SIL Open Font License 1.1 — THIRD_PARTY/fonts/noto-emoji-OFL.txt
+- emoji-icon-font.ttf — MIT, Copyright (c) 2014 John Slegers — THIRD_PARTY/fonts/emoji-icon-font-MIT.txt
+- egui-icons.ttf (five-glyph subset of emoji-icon-font) — MIT, Copyright (c) 2014 John Slegers —
+  THIRD_PARTY/fonts/emoji-icon-font-MIT.txt, THIRD_PARTY/fonts/egui-icons.txt

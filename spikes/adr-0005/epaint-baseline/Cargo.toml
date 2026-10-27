@@ -1,0 +1,11 @@
+# THROWAWAY SPIKE for docs/adr/0005-text-shaping.md — not a workspace member, not wired into the app.
+[package]
+name = "spike-epaint-baseline"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+epaint = { version = "=0.33.3", default-features = false } # no default_fonts: no bundled OFL data (M1-5)

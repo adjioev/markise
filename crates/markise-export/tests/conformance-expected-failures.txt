@@ -1,0 +1,55 @@
+# CommonMark 0.31.2 / GFM examples that differ by design (spec 01 dialect) or are known gaps.
+# Format: <suite>:<example>  <reason with spec / decision id>
+
+# Spans point into the source, so a partially consumed tab inside code stays a tab instead of
+# being expanded to the remaining columns (ADR 0001; rendering-only difference).
+commonmark:5    partial tab in code kept as tab (ADR 0001)
+commonmark:6    partial tab in code kept as tab (ADR 0001)
+commonmark:7    partial tab in code kept as tab (ADR 0001)
+
+# Backslash escapes only for the R4.1.1 character set (C33).
+commonmark:12   escapable set is R4.1.1 (C33)
+
+# HTML blocks: only CommonMark kinds 1-6 with the R3.14.1 tag list; no kind 7 (C27).
+commonmark:21   lone inline tag is not an HTML block (C27)
+commonmark:31   lone inline tag is not an HTML block (C27)
+commonmark:148  td/tr are not block tags in R3.14.1 (C27)
+commonmark:162  lone inline tag is not an HTML block (C27)
+commonmark:163  lone custom tag is not an HTML block (C27)
+commonmark:164  lone inline tag is not an HTML block (C27)
+commonmark:165  lone inline tag is not an HTML block (C27)
+commonmark:166  lone inline tag is not an HTML block (C27)
+commonmark:167  lone inline tag is not an HTML block (C27)
+commonmark:190  tr/td are not block tags in R3.14.1 (C27)
+commonmark:191  tr/td are not block tags in R3.14.1 (C27)
+
+# A line indented 4+ columns interrupts a paragraph, also lazily (R6.1, C28).
+commonmark:49   indented line interrupts paragraph (R6.1)
+commonmark:70   indented line interrupts paragraph (R6.1)
+commonmark:87   indented line interrupts paragraph (R6.1)
+commonmark:113  indented line interrupts paragraph (R6.1)
+commonmark:193  indented continuation of a link definition interrupts (R6.1)
+commonmark:223  indented line interrupts paragraph (R6.1)
+commonmark:238  indented lazy line interrupts (R6.1, C28)
+commonmark:291  indented lazy line interrupts (R6.1, C28)
+commonmark:312  indented lazy line interrupts (R6.1, C28)
+commonmark:636  indented line after hard break interrupts (R6.1)
+commonmark:637  indented line after hard break interrupts (R6.1)
+
+# `---` on line 1 opens front matter (R3.10.1).
+commonmark:96   front matter at document start (R3.10.1)
+
+# Two blank lines end a list (R3.4.7, C24).
+commonmark:262  two blank lines end the list (C24)
+commonmark:264  two blank lines end the list (C24)
+commonmark:306  two blank lines end the list (C24)
+commonmark:307  two blank lines end the list (C24)
+
+# Bare-URL autolinks are limited to https://, http://, www. and mailto: (spec 01 §4 table).
+gfm:628         ftp:// is not a bare-URL autolink (spec 01 §4)
+gfm:629         plain e-mail addresses are not autolinked (spec 01 §4)
+gfm:630         plain e-mail addresses are not autolinked (spec 01 §4)
+gfm:631         plain e-mail addresses are not autolinked (spec 01 §4)
+
+# Tag filtering is done by the export sanitizer (C40), not by the reference renderer.
+gfm:652         tagfilter handled by export sanitizer (C40)

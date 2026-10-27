@@ -1,0 +1,11 @@
+[package]
+name = "markise-testfmt"
+description = "Markise test kit: a tiny line-based toy format implementing the markise-doc seam (ADR 0006 §1.2); dev-dependency only"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+markise-doc.workspace = true

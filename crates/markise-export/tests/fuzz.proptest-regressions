@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0fadf3ca2233476ffc4278c7bc088b544d07ba1e992ca63c667ca3fa632e87ef # shrinks to parts = []
+cc 592b30af8fa250f09d86a08132c0e08eff502a48a7fc96a7921b4f76e0acccb3 # shrinks to parts = ["</script>", "\n", "```", "[l](javascript:x)"]
+cc 8cae15d6d66337b209af30c5199b4c0a7ff8391023d5f657ed63db69f0e34c3d # shrinks to parts = ["$$\n", "<a href=jAvAsCrIpT:x>", "<div onclick=x>", "$$\n", "<script>"]
+cc 72541368d56651b045444c9adc098762e90fd64b7a980d1c59c1c669ef2a103f # shrinks to parts = ["$$\n", "<b style=\"x:expression(y)\">", "$$\n"]

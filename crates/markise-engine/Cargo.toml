@@ -1,0 +1,38 @@
+[package]
+name = "markise-engine"
+description = "Markise L4: document session services — editing session, undo, commands, background load, save, folder listing, file watching"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+markise-doc.workspace = true
+markise-md.workspace = true
+markise-layout.workspace = true
+notify.workspace = true
+tempfile.workspace = true
+similar.workspace = true
+serde_json.workspace = true
+unicode-segmentation.workspace = true
+epaint.workspace = true
+# export jobs (src/export.rs)
+markise-export.workspace = true
+markise-pdf.workspace = true
+markise-text.workspace = true
+markise-theme.workspace = true
+
+[dev-dependencies]
+markise-corpus.workspace = true
+markise-testfmt.workspace = true
+proptest.workspace = true
+libc.workspace = true
+
+[[bench]]
+name = "editor"
+harness = false
+
+[[bench]]
+name = "typing"
+harness = false

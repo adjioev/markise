@@ -1,0 +1,10 @@
+[package]
+name = "spike-s2-ime-log"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+[dependencies]
+markise-text.workspace = true
+atlas.workspace = true
+egui.workspace = true
+eframe.workspace = true

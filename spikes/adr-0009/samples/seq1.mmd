@@ -1,0 +1,9 @@
+sequenceDiagram
+    participant Alice
+    participant Bob
+    Alice->>Bob: Hello Bob, how are you?
+    Bob-->>Alice: Fine, thanks!
+    Note right of Bob: Bob thinks
+    loop Every minute
+        Alice->>Bob: Ping
+    end

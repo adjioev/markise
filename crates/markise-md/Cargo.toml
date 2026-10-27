@@ -1,0 +1,26 @@
+[package]
+name = "markise-md"
+description = "Markise L1: source-preserving Markdown parser/serializer (spec 01)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+markise-doc.workspace = true
+memchr.workspace = true
+unicode-width.workspace = true
+unicode-properties.workspace = true
+unicode-segmentation.workspace = true
+emojis.workspace = true
+html-escape.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+markise-corpus.workspace = true
+
+[[bench]]
+name = "parse"
+harness = false

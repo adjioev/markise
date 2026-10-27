@@ -1,0 +1,29 @@
+# THROWAWAY SPIKES for docs/adr/0005-text-shaping.md (T0: S1–S5) — not members of the Markise
+# workspace, not wired into the app. Shared lockfile/target for the spike binaries.
+[workspace]
+resolver = "3"
+members = ["atlas", "s1-theme-font", "s2-ime-log", "s3-bidi", "s4-atlas-scroll", "s5-chunk-context", "epaint037-check"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+markise-text = { path = "../../../crates/markise-text" }
+markise-corpus = { path = "../../../crates/markise-corpus" }
+atlas = { path = "atlas" }
+parley = { version = "0.12.0", default-features = false, features = ["std", "system"] }
+unicode-bidi = "0.3.18"
+unicode-segmentation = "1.12"
+harfrust = "0.12.0"
+skrifa = "0.44"
+vello_cpu = { version = "0.2.0", default-features = false, features = ["std", "u8_pipeline", "text", "png"] }
+egui = { version = "0.37.0", default-features = false, features = ["default_fonts"] }
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
+epaint = { version = "0.37.0", default-features = false, features = ["default_fonts"] }
+brotli = "8"
+png = "0.18"
+
+[profile.release]
+debug = false

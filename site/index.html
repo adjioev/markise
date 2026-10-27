@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Markise — the marquise of Markdown editors</title>
+  <meta name="description" content="Markise is a fast, native Markdown editor written in Rust: live preview, files saved byte-for-byte, huge files open instantly, 25+ themes, no telemetry.">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#1a1b26">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="assets/favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <!-- Open Graph / Twitter card. Absolute URL assumes the GitHub Pages address; adjust if the site moves. -->
+  <link rel="canonical" href="https://adjioev.github.io/markise-site/">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://adjioev.github.io/markise-site/">
+  <meta property="og:title" content="Markise — the marquise of Markdown editors">
+  <meta property="og:description" content="A fast, native Markdown editor written in Rust. Live preview, byte-for-byte saves, 25+ themes, no telemetry.">
+  <meta property="og:image" content="https://adjioev.github.io/markise-site/assets/social-preview.jpg">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="The Markise logo: a gold crown over a rounded M, with the words Markise, the marquise of Markdown editors.">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="hero">
+    <picture class="hero-art" aria-hidden="true">
+      <source type="image/webp" srcset="assets/hero.webp 960w, assets/hero-2x.webp 1672w" sizes="100vw">
+      <img src="assets/hero.jpg" srcset="assets/hero.jpg 960w, assets/hero-2x.jpg 1672w" sizes="100vw" alt="" width="1672" height="941" fetchpriority="high">
+    </picture>
+    <nav class="nav wrap" aria-label="Main">
+      <a class="brand" href="#top" aria-label="Markise home">
+        <img src="assets/markise-lockup-dark.svg" alt="Markise" width="185" height="44">
+      </a>
+      <ul>
+        <li><a href="#features">Features</a></li>
+        <li><a href="#themes">Themes</a></li>
+        <li><a href="#download">Coming soon</a></li>
+        <li><a href="#roadmap">Roadmap</a></li>
+      </ul>
+    </nav>
+    <div class="hero-copy wrap" id="top">
+      <p class="eyebrow">Early preview</p>
+      <h1>The marquise of<br>Markdown editors.</h1>
+      <p class="say"><strong>Markise</strong> <span class="ipa">/mar-KEEZ/</span>, pronounced like <em>marquise</em>.</p>
+      <p class="lede">A fast, native Markdown editor written in Rust. Live preview, your files saved
+        byte-for-byte, huge documents that open instantly, and more than 25 themes. No telemetry,
+        ever.</p>
+      <p class="cta">
+        <a class="button primary" href="#download">Coming soon</a>
+        <a class="button ghost" href="#roadmap">See the roadmap</a>
+      </p>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="pitch wrap" aria-labelledby="pitch-title">
+      <h2 id="pitch-title" class="visually-hidden">Why Markise</h2>
+      <ul class="cards">
+        <li>
+          <h3>Native and fast</h3>
+          <p>Pure Rust from parser to pixels. No browser engine inside, starts in a blink and sits
+            at zero CPU while you think.</p>
+        </li>
+        <li>
+          <h3>Your bytes, untouched</h3>
+          <p>Open a file and save it: what you did not edit is written back byte-for-byte —
+            line endings, spacing, odd syntax and all.</p>
+        </li>
+        <li>
+          <h3>Huge files, instantly</h3>
+          <p>Logs, exports, generated docs: a 10&nbsp;MB Markdown file shows its first screen in
+            about a tenth of a second and scrolls smoothly, where many editors simply refuse to
+            open it. Only what is on screen is laid out.</p>
+        </li>
+        <li>
+          <h3>Private by design</h3>
+          <p>No telemetry, no accounts, no network calls. Your notes stay on your disk.</p>
+        </li>
+      </ul>
+    </section>
+
+    <section id="features" class="feature wrap" aria-labelledby="f1">
+      <div class="feature-text">
+        <h2 id="f1">Write in Markdown, read it beautifully</h2>
+        <p>Headings, lists, task lists, tables, quotes, code blocks and footnotes render as you
+          read them, following CommonMark and GitHub Flavored Markdown. Switch to source mode
+          whenever you want the raw text.</p>
+        <ul class="ticks">
+          <li>Outline of every heading — click to jump</li>
+          <li>File tree of the folder you opened</li>
+          <li>Source mode one shortcut away</li>
+        </ul>
+      </div>
+      <figure class="shot">
+        <picture>
+          <source type="image/webp" srcset="assets/shots/markise-light.webp 1080w, assets/shots/markise-light-2x.webp 2160w" sizes="(min-width: 960px) 600px, 100vw">
+          <img src="assets/shots/markise-light.jpg" width="1080" height="820" loading="lazy"
+            alt="Markise in its default light theme: a file tree on the left with a folder of notes, and a document with headings, a quote, bullet and task lists and a table on the right.">
+        </picture>
+      </figure>
+    </section>
+
+    <section class="feature reverse wrap" aria-labelledby="f2">
+      <div class="feature-text">
+        <h2 id="f2">Dark mode, done properly</h2>
+        <p>Every theme comes in light and dark, and Markise follows your system appearance. The
+          outline and file tree are themed too — no bright sidebar at midnight.</p>
+      </div>
+      <figure class="shot">
+        <picture>
+          <source type="image/webp" srcset="assets/shots/tokyo-night.webp 1080w, assets/shots/tokyo-night-2x.webp 2160w" sizes="(min-width: 960px) 600px, 100vw">
+          <img src="assets/shots/tokyo-night.jpg" width="1080" height="820" loading="lazy"
+            alt="Markise with the Tokyo Night theme: a dark outline sidebar listing the document's headings next to the rendered document.">
+        </picture>
+      </figure>
+    </section>
+
+    <section id="themes" class="themes" aria-labelledby="themes-title">
+      <div class="wrap">
+        <h2 id="themes-title">25+ themes, and the ones you already have</h2>
+        <p class="section-lede">Built-in themes plus palette packs — Catppuccin, Dracula, Gruvbox,
+          Nord, Rosé Pine, Tokyo Night and Markise Night. Markise also imports community themes
+          written for Typora, so a CSS theme you like probably works already.</p>
+        <ul class="gallery">
+          <li><figure><picture><source type="image/webp" srcset="assets/shots/palette-catppuccin-latte.webp"><img src="assets/shots/palette-catppuccin-latte.jpg" width="1080" height="820" loading="lazy" alt="Catppuccin Latte theme: soft light background with pastel accents."></picture><figcaption>Catppuccin Latte</figcaption></figure></li>
+          <li><figure><picture><source type="image/webp" srcset="assets/shots/palette-dracula.webp"><img src="assets/shots/palette-dracula.jpg" width="1080" height="820" loading="lazy" alt="Dracula theme: dark purple-grey background with pink and green accents."></picture><figcaption>Dracula</figcaption></figure></li>
+          <li><figure><picture><source type="image/webp" srcset="assets/shots/palette-gruvbox-light.webp"><img src="assets/shots/palette-gruvbox-light.jpg" width="1080" height="820" loading="lazy" alt="Gruvbox Light theme: warm cream background with earthy accents."></picture><figcaption>Gruvbox Light</figcaption></figure></li>
+          <li><figure><picture><source type="image/webp" srcset="assets/shots/palette-nord.webp"><img src="assets/shots/palette-nord.jpg" width="1080" height="820" loading="lazy" alt="Nord theme: cool dark blue-grey background with frost-blue accents."></picture><figcaption>Nord</figcaption></figure></li>
+          <li><figure><picture><source type="image/webp" srcset="assets/shots/palette-rose-pine-moon.webp"><img src="assets/shots/palette-rose-pine-moon.jpg" width="1080" height="820" loading="lazy" alt="Rosé Pine Moon theme: muted dark violet background with rose and gold accents."></picture><figcaption>Rosé Pine Moon</figcaption></figure></li>
+          <li><figure><picture><source type="image/webp" srcset="assets/shots/palette-markise-night.webp"><img src="assets/shots/palette-markise-night.jpg" width="1080" height="820" loading="lazy" alt="Markise Night theme: deep navy background with lavender text and gold accents."></picture><figcaption>Markise Night</figcaption></figure></li>
+          <li><figure><picture><source type="image/webp" srcset="assets/shots/lapis-light.webp"><img src="assets/shots/lapis-light.jpg" width="1080" height="820" loading="lazy" alt="Lapis, an imported community theme: white page with blue headings."></picture><figcaption>Lapis (community theme)</figcaption></figure></li>
+          <li><figure><picture><source type="image/webp" srcset="assets/shots/drake-dark.webp"><img src="assets/shots/drake-dark.jpg" width="1080" height="820" loading="lazy" alt="Drake, an imported community theme, in dark mode."></picture><figcaption>Drake (community theme)</figcaption></figure></li>
+        </ul>
+        <p class="fineprint">Typora is a trademark of its respective owner. Markise is an
+          independent project and is not affiliated with or endorsed by Typora.</p>
+      </div>
+    </section>
+
+    <section id="download" class="download wrap" aria-labelledby="dl-title">
+      <h2 id="dl-title">Coming soon</h2>
+      <p class="notice"><strong>Early preview.</strong> Markise already opens and renders
+        documents — fast, themed and faithful to your files — and live-preview editing is being
+        built now. A first release for macOS, Windows and Linux is coming soon.</p>
+    </section>
+
+    <section id="roadmap" class="roadmap wrap" aria-labelledby="rm-title">
+      <h2 id="rm-title">Roadmap</h2>
+      <ol class="steps">
+        <li class="done"><span class="when">Done</span><h3>Core</h3><p>Lossless Markdown parser and
+          writer, HTML export, command-line tools.</p></li>
+        <li class="done"><span class="when">Done</span><h3>Viewer</h3><p>Fast rendering, outline,
+          file tree, source mode, themes and theme import.</p></li>
+        <li class="now"><span class="when">Next</span><h3>Editor</h3><p>Live-preview editing,
+          undo, autosave and recovery.</p></li>
+        <li><span class="when">Later</span><h3>Beyond</h3><p>Math, diagrams, images, export to PDF
+          and more.</p></li>
+      </ol>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap">
+      <img src="assets/markise-mark-dark.svg" alt="" width="36" height="43" class="foot-mark">
+      <p>Markise — the marquise of Markdown editors. © 2026 The Markise contributors.
+        This site uses no cookies, trackers or third-party requests.</p>
+    </div>
+  </footer>
+</body>
+</html>

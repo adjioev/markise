@@ -1,0 +1,185 @@
+# Continuous integration. Policy (what runs when, how to request the full matrix): docs/ci.md.
+#
+# Default (every PR push, cheap): Linux only -- fmt + clippy + layering/asset checks (`lint`),
+# workspace tests + release-mode incremental property tests (`test`, linux-x86_64), and the
+# `CI result` gate. Full matrix (adds macOS Apple Silicon + Windows test + build, release
+# binaries and 14-day artifacts on every OS): pushes to main, workflow_dispatch
+# (manual; not reported into PR checks), and PR runs while the PR carries the `full-ci` label.
+# macOS minutes are billed at 10x and Windows at 2x the Linux rate on private repositories, which is why they do not run on every PR push.
+#
+# Superseded runs of the same PR/branch are cancelled (never on main). Docs-only changes
+# (Markdown under docs/, README/CLAUDE.md, the site page) do not trigger CI (`paths`).
+#
+# Linux system packages: the egui/eframe stack (winit, glutin, wayland/x11 via dlopen) and rfd
+# (xdg-desktop-portal via zbus, pure Rust) need no -dev packages to build or test; the list in
+# the `test` job is what the desktop app needs to *run* on Linux and keeps the build working
+# if a dependency stops dlopen-ing (libxkbcommon, wayland, X11/xcb, OpenGL/EGL).
+#
+# No secrets are used.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "**"
+      # Narrow docs-only ignores (Markdown prose and the static site page; nothing a build, a
+      # test or an xtask check reads) ...
+      - "!docs/**/*.md"
+      - "!README.md"
+      - "!CLAUDE.md"
+      - "!site/*.html"
+      - "!site/*.css"
+      # ... minus attribution records and test fixtures, should any ever live there
+      # (`cargo xtask assets`). Anything else, e.g. images under docs/, triggers CI.
+      - "**/SOURCE.md"
+      - "**/SOURCES.md"
+      - "**/tests/fixtures/**"
+      - "**/testdata/**"
+  pull_request:
+    # No `labeled`: label events would start runs (unrelated labels: all jobs skipped, which
+    # reads as green). After adding `full-ci`, push a commit (an empty one is fine) or close and
+    # reopen the PR; every later PR run then includes macOS + Windows while the label is set.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths: *paths
+  # Manual full-matrix run on main or any branch. It does not report into PR checks.
+  workflow_dispatch:
+
+# PR runs are keyed by PR number (a new push cancels the superseded run, pending or in
+# progress); every push to main gets its own group (run id), so no main run is ever cancelled
+# or replaced; manual runs are keyed by ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('main-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+  # 'true' for the full matrix (main, workflow_dispatch, PRs labeled `full-ci`).
+  FULL_CI: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+
+jobs:
+  lint:
+    name: fmt + clippy (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt, clippy
+          cache-key: lint
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Crate layering (layers.toml, kept in sync with the AGENTS.md table) and asset
+      # attribution records (SOURCE.md / NOTICE); see xtask/.
+      - name: Crate layering
+        run: cargo run --locked --package xtask -- layers
+      - name: Asset attribution
+        run: cargo run --locked --package xtask -- assets
+
+  test:
+    name: test + build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      # Linux always; macOS and Windows only for the full matrix (FULL_CI above; the workflow
+      # `env` context is not available here, so the condition is repeated). Entries left out
+      # produce no check at all rather than a "skipped" one.
+      matrix:
+        include: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '[{"name":"linux-x86_64","os":"ubuntu-latest"},{"name":"macos-aarch64","os":"macos-latest"},{"name":"windows-x86_64","os":"windows-latest"}]' || '[{"name":"linux-x86_64","os":"ubuntu-latest"}]') }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Line tables only (file/line in backtraces) instead of full debug info: the test
+      # binaries of the whole workspace otherwise fill the Linux runner's disk ("No space left
+      # on device", PR #16).
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libgl1-mesa-dev libegl1-mesa-dev
+      - uses: ./.github/actions/setup-rust
+        with:
+          # rust-cache adds the runner OS/arch, toolchain and Cargo.lock hash to the key; the
+          # cache is saved only from main (see the action).
+          cache-key: test
+      # The CommonMark/GFM conformance and theme-corpus tests fail when CI=true and their
+      # downloaded inputs are missing, so fetch them (cached by manifest/script hash).
+      - name: Cache test inputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .spec-cache
+            .theme-cache
+          key: test-inputs-${{ hashFiles('scripts/fetch-spec-tests.sh', 'scripts/fetch-theme-corpus.sh', 'crates/markise-theme/tests/theme-corpus.tsv') }}
+      - name: Fetch spec examples and theme corpus
+        run: |
+          if [ ! -f .spec-cache/commonmark-0.31.2.json ] || [ ! -f .spec-cache/gfm-spec.txt ]; then
+            ./scripts/fetch-spec-tests.sh
+          fi
+          ./scripts/fetch-theme-corpus.sh
+      - name: Test
+        run: cargo test --workspace --locked
+      # Release binaries, packages and artifacts: full matrix only (the default PR run checks
+      # release-mode codegen through the property tests below).
+      - name: Build release binaries
+        if: env.FULL_CI == 'true'
+        run: cargo build --release --locked -p markise -p markise-cli
+      # Incremental parse/model == fresh, with more cases than the debug-mode defaults
+      # (ADR 0006 §7.2, §14): nested restarts, fast path, layout model.
+      - name: Incremental property tests (release, 3000 cases)
+        if: runner.os == 'Linux'
+        env:
+          PROPTEST_CASES: "3000"
+        run: cargo test --release --locked -p markise-md --test nested --test fastpath --test hints -p markise-layout --test incremental
+      - name: Package
+        if: env.FULL_CI == 'true'
+        env:
+          PLATFORM: ${{ matrix.name }}
+        run: |
+          # archive label carries the commit; the macOS bundle gets the numeric crate version
+          BUNDLE_VERSION="$(cargo pkgid -p markise | sed 's/.*[#@]//')"
+          export BUNDLE_VERSION
+          ./scripts/package.sh "$PLATFORM" "$BUNDLE_VERSION-${GITHUB_SHA::7}" target/release dist
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: env.FULL_CI == 'true'
+        with:
+          name: markise-${{ matrix.name }}
+          path: dist/*
+          retention-days: 14
+          if-no-files-found: error
+
+  # Single merge gate: green only when every job of this run succeeded (any failure or
+  # cancellation, including one matrix entry, fails it). On a PR run without `full-ci` the
+  # matrix is Linux only, so the gate then certifies Linux only.
+  # Branch protection is not available for this private repository on the Free plan, so this is
+  # the check to look at before merging (docs/ci.md).
+  result:
+    name: CI result
+    if: always()
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: All jobs succeeded
+        env:
+          LINT: ${{ needs.lint.result }}
+          TEST: ${{ needs.test.result }}
+          FULL: ${{ env.FULL_CI }}
+        run: |
+          echo "lint=$LINT test=$TEST full-matrix=$FULL"
+          [ "$LINT" = success ] && [ "$TEST" = success ]

@@ -1,0 +1,14 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5f4b1c316eab6c298b1df60cea21dacb981c3c1023d3e1f77613e09ca1fb3900 # shrinks to (n, start) = (3, 8), ops = [BackspaceStart(Index(12297829382473034411)), BackspaceStart(Index(12297829382473034411))]
+cc 0374f2ebafca755a62802bbe4d0e8e87edb73687bcaf86dce9ba20073ef4cc61 # shrinks to (n, start) = (3, 8), ops = [BackspaceStart(Index(0))]
+cc e6dec8362265ed4a1dc9c5247eca7aba368e76eb703ef46bd1cf893883db99d8 # shrinks to (n, start) = (3, 98), ops = [BackspaceStart(Index(6148914691236517206)), EnterEnd(Index(0)), Undo, BackspaceStart(Index(12297829382473034411))]
+cc 1bc9ab7eac0c244d30563064f249fdab48c2ff416ccb8cf91cc67d6374e119b7 # shrinks to (n, start) = (4, 97), ops = [MoveUp(Index(9223372036854775808)), BackspaceStart(Index(4611686018427387904)), MoveUp(Index(13835058055282163712)), BackspaceStart(Index(4611686018427387904)), ShiftTab(Index(4611686018427387904))]
+cc 5c61843670c3f0aeee11e5b3b8d1f71f6ea6daa5780efb272b84c7ee38409ad8 # shrinks to (n, start) = (4, 97), ops = [BackspaceStart(Index(9223372036854775808)), EnterEnd(Index(0)), Undo, Tab(Index(4611686018427387904)), BackspaceStart(Index(4611686018427387904))]
+cc 18b9b9b68e7d3e8fc92a0d81b16064f1c01e7abea2a2c5fa6c5427f929424704 # shrinks to (n, start) = (3, 98), ops = [Tab(Index(6148914691236517206)), EnterEnd(Index(6148914691236517206)), Undo, BackspaceStart(Index(0)), Tab(Index(12297829382473034411))]
+cc cafcf456768376c5d04d30b91f182d28f23696b309e4fc284266af0d845e4155 # shrinks to (n, start) = (3, 98), ops = [BackspaceStart(Index(12297829382473034411)), EnterEnd(Index(12297829382473034411)), BackspaceStart(Index(12297829382473034411)), ShiftTab(Index(12297829382473034411))]
+cc 8b1714de8bb2e7407ebf35834d4771ce542b33157b462d2c8053a658d09037ca # shrinks to (n, start) = (4, 7), ops = [BackspaceStart(Index(9223372036854775808)), BackspaceStart(Index(9223372036854775808)), EnterEnd(Index(9223372036854775808)), Undo, ShiftTab(Index(9223372036854775808))]

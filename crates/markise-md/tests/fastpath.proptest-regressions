@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 42267febd9c2f0901cebbfad868dcb587f25724fb23b71566c18d7395d63d103 # shrinks to doc = 0, ops = [(1501, 2, 0, false), (0, 1, 0, false), (852, 2, 0, false), (3070, 2, 0, false), (317, 2, 0, false), (630, 1, 0, false), (0, 2, 3, true), (313, 2, 0, false), (311, 2, 0, true), (930, 0, 3, true), (933, 2, 0, true), (3290, 2, 0, false), (3269, 0, 13, true)]
+cc f7490ef478348a14d0245ccdbd7bf450fa36a8de041d84cdbee91c25c1bdf166 # shrinks to doc = 0, ops = [(1501, 1, 0, false), (208, 1, 0, false), (322, 1, 2, true), (323, 0, 3, true), (975, 1, 0, false), (970, 2, 3, true), (1484, 1, 0, false), (201, 2, 0, false)]
+cc 1c7a5d562c5085baaeee8cafd754edc852d7a8202924b3caf97e42c01b5157e3 # shrinks to doc = 0, ops = [(648, 1, 0, false), (0, 0, 3, true), (0, 1, 0, false), (136, 1, 0, false), (0, 1, 0, false), (1099, 2, 0, false), (136, 2, 0, false), (0, 1, 0, false), (1399, 2, 0, false), (3588, 0, 4, true), (2339, 1, 0, false)]
+cc 52c91812dfdfebed9f7ade30ffe1ae99c100d0f2044af1fcb86da39d790518ff # shrinks to doc = 4, ops = [(5251, 0, 0, true)]
