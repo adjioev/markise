@@ -2379,6 +2379,7 @@ impl MarkiseApp {
     fn side_by_side_ui(&mut self, ui: &mut egui::Ui, t: &Theme) -> Option<egui::Rect> {
         let ctx = ui.ctx().clone();
         let split = self.side_by_side_split();
+        let show_toolbar = self.toolbar_visible();
         let doc = self.doc.as_mut()?;
         if doc.buffer.is_none() {
             // a new or reloaded document: the editor starts at the rendered position
@@ -2404,6 +2405,7 @@ impl MarkiseApp {
                 theme: t,
                 parley: self.parley.as_mut(),
                 highlighter: self.source_highlight.then_some(&mut self.source_highlighter),
+                top_reserve: if show_toolbar { crate::toolbar::RESERVED_H } else { 0.0 },
             },
         );
         if out.typed {

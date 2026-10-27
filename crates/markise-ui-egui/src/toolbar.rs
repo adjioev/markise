@@ -1,20 +1,22 @@
-//! Formatting toolbar (spec 04 §3.2): a rounded bar floating at the top centre of the editor
-//! area, coloured with the sidebar tokens ([`SideLook`]). Every control names a registry
-//! command; the application builds a [`Model`] (label, effective shortcut, enabled and active
-//! state — the same queries as the Format and Paragraph menus) and runs the command the bar
-//! returns exactly like the menu item, so effect, undo step and shortcut are identical.
+//! The formatting toolbar (spec 04 §3.2).
 //!
-//! - **Focus.** Controls never take keyboard focus: a pointer press on the bar or one of its
-//!   drop-downs hands the focus straight back to the widget that had it (the document), so
-//!   clicking acts on the selection and leaves it where it was.
-//! - **Drop-downs** (block style, list, More) opened by the mouse are keyboard-navigable:
-//!   [`Toolbar::pre_input`] runs before the document surface and takes Up/Down/Home/End,
-//!   Enter and Escape while one is open; closing returns the focus to the document.
-//! - **Narrow windows.** Groups collapse from the right into the More menu.
-//! - **Idle** (NFR-10): the bar never schedules repaints of its own.
+//! A small pill-shaped strip is drawn above the document, horizontally centred, in the colours
+//! the sidebar uses ([`SideLook`]). It owns no editing logic: the application hands it a
+//! [`Model`] describing each registry command it can show (label, shortcut text, whether it
+//! can run, whether the selection already has it) and dispatches whatever id the strip
+//! reports through its menu path, so a toolbar click and the matching menu item behave alike.
 //!
-//! The icons are original line drawings (SVG path syntax, drawn as strokes by
-//! [`crate::icons`]).
+//! - Focus: controls are not focusable. When the pointer goes down on the strip or one of its
+//!   lists, the previously focused widget (normally the document surface) gets the focus back
+//!   in the same frame, so the caret and selection are untouched.
+//! - Lists (block style, list kind, More) can be driven from the keyboard once open:
+//!   [`Toolbar::pre_input`] runs ahead of the document surface and swallows the arrow, Home,
+//!   End, Enter, Escape and Tab keys; closing a list refocuses the document. Long lists are
+//!   limited to the window height and scroll.
+//! - When the window is too narrow, whole groups move into More, rightmost group first.
+//! - The strip only asks for a repaint when its own state changes (NFR-10).
+//!
+//! Icons are drawn here from small hand-written SVG paths, stroked by [`crate::icons`].
 
 use std::sync::OnceLock;
 
@@ -158,6 +160,8 @@ const MARGIN_TOP: f32 = 8.0;
 pub const RESERVED_H: f32 = MARGIN_TOP + BAR_H + 6.0;
 const ROW_H: f32 = 24.0;
 const POPUP_W: f32 = 240.0;
+const POPUP_PAD: f32 = 4.0;
+const SEP_H: f32 = 9.0;
 
 fn group_width(g: Group) -> f32 {
     match g {
@@ -203,12 +207,24 @@ pub struct Toolbar {
     popup_rect: Option<Rect>,
     /// The control that opened the drop-down (it is placed below it).
     anchor: Option<Rect>,
+    /// The keyboard moved the highlight: scroll it into view at the next frame.
+    scroll_to_hi: bool,
 }
 
 impl Toolbar {
     /// Whether a drop-down is open (tests).
     pub fn popup_open(&self) -> bool {
         self.open.is_some()
+    }
+
+    /// The open drop-down's rectangle at the last frame (tests).
+    pub fn popup_rect(&self) -> Option<Rect> {
+        self.popup_rect
+    }
+
+    /// The bar's rectangle at the last frame (tests).
+    pub fn bar_rect(&self) -> Option<Rect> {
+        self.bar_rect
     }
 
     /// Groups collapsed into More at the last frame (tests).
@@ -302,6 +318,7 @@ impl Toolbar {
             })
         });
         let mut chosen = None;
+        let any = !keys.is_empty();
         for k in keys {
             let pos = self.hi.and_then(|h| selectable.iter().position(|&i| i == h));
             match k {
@@ -335,7 +352,11 @@ impl Toolbar {
                 }
             }
         }
-        ctx.request_repaint();
+        // repaint only for a change made here (highlight moved, drop-down closed)
+        if any {
+            self.scroll_to_hi = self.open.is_some();
+            ctx.request_repaint();
+        }
         chosen
     }
 
@@ -352,8 +373,8 @@ impl Toolbar {
         self.bar_rect.is_some_and(|r| r.contains(p)) || self.popup_rect.is_some_and(|r| r.contains(p))
     }
 
-    /// Shows the bar at the top centre of `area` (the editor area). `active`: the bar acts on
-    /// this area (otherwise every control is shown disabled). Returns the chosen command.
+    /// Draws the strip centred near the top edge of `area` (the editor area); controls the
+    /// model marks as unavailable are drawn disabled. Returns the chosen command.
     pub fn show(&mut self, ui: &mut Ui, area: Rect, m: &Model, look: &Look) -> Option<&'static str> {
         let ctx = ui.ctx().clone();
         // a press outside the bar and its drop-down closes the drop-down (the press acts there)
@@ -516,7 +537,7 @@ impl Toolbar {
             self.close();
             self.return_focus = None;
         }
-        // mouse use never moves the text focus: a press on the bar or a drop-down gives it back
+        // pointer presses here leave the document focused: hand the focus straight back
         let on_us = ctx.input(|i| {
             (i.pointer.any_pressed() || i.pointer.any_released() || i.pointer.any_click())
                 && i.pointer
@@ -534,13 +555,16 @@ impl Toolbar {
 
     fn popup_ui(&mut self, ctx: &Context, popup: Popup, rows: &[Option<Row>], look: &Look) -> Option<&'static str> {
         let mut chosen = None;
-        let h: f32 = rows.iter().map(|r| if r.is_some() { ROW_H } else { 9.0 }).sum::<f32>() + 8.0;
+        let content_h: f32 = rows.iter().map(|r| if r.is_some() { ROW_H } else { SEP_H }).sum();
         let screen = ctx.content_rect();
         let anchor = self.anchor.unwrap_or(Rect::from_min_size(Pos2::ZERO, vec2(BTN, BTN)));
         let mut pos = pos2(anchor.left(), anchor.bottom() + 6.0);
         if pos.x + POPUP_W > screen.right() - 4.0 {
             pos.x = (anchor.right() - POPUP_W).max(screen.left() + 4.0);
         }
+        // never taller than the space below the bar: the rows scroll instead
+        let max_h = (screen.bottom() - pos.y - 8.0).max(3.0 * ROW_H + 2.0 * POPUP_PAD);
+        let h = (content_h + 2.0 * POPUP_PAD).min(max_h);
         let rect = Rect::from_min_size(pos, vec2(POPUP_W, h));
         self.popup_rect = Some(rect);
         let label = match popup {
@@ -548,6 +572,7 @@ impl Toolbar {
             Popup::List => "List Menu",
             Popup::More => "More Menu",
         };
+        let scroll_to_hi = std::mem::take(&mut self.scroll_to_hi);
         egui::Area::new(Id::unique("markise-toolbar-popup"))
             .order(Order::Foreground)
             .fixed_pos(pos)
@@ -556,9 +581,8 @@ impl Toolbar {
             .show(ctx, |ui| {
                 let (rect, bg) = ui.allocate_exact_size(rect.size(), Sense::click());
                 bg.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Menu, true, label));
-                let p = ui.painter();
                 let radius = CornerRadius::same(6);
-                p.add(
+                ui.painter().add(
                     egui::epaint::Shadow {
                         offset: [0, 3],
                         blur: 12,
@@ -567,69 +591,82 @@ impl Toolbar {
                     }
                     .as_shape(rect, radius),
                 );
-                p.rect(
+                ui.painter().rect(
                     rect,
                     radius,
                     look.bar_bg,
                     Stroke::new(1.0, look.border),
                     StrokeKind::Inside,
                 );
-                let mut y = rect.top() + 4.0;
-                for (i, r) in rows.iter().enumerate() {
-                    let Some(r) = r else {
-                        let sy = y + 4.5;
-                        ui.painter().line_segment(
-                            [pos2(rect.left() + 8.0, sy), pos2(rect.right() - 8.0, sy)],
-                            Stroke::new(1.0, look.border),
-                        );
-                        y += 9.0;
-                        continue;
-                    };
-                    let rr = Rect::from_min_size(pos2(rect.left() + 4.0, y), vec2(rect.width() - 8.0, ROW_H));
-                    y += ROW_H;
-                    let resp = ui.interact(rr, Id::unique(("markise-toolbar-row", r.id)), Sense::click());
-                    resp.widget_info(|| {
-                        egui::WidgetInfo::selected(egui::Role::MenuItem, r.enabled, r.checked, r.label)
+                let inner = rect.shrink(POPUP_PAD);
+                let mut list = ui.new_child(egui::UiBuilder::new().max_rect(inner).id_salt("markise-toolbar-rows"));
+                list.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                egui::ScrollArea::vertical()
+                    .id_salt("markise-toolbar-scroll")
+                    .max_height(inner.height())
+                    .auto_shrink([false, false])
+                    .show(&mut list, |ui| {
+                        let w = ui.available_width();
+                        for (i, r) in rows.iter().enumerate() {
+                            let Some(r) = r else {
+                                let (sr, _) = ui.allocate_exact_size(vec2(w, SEP_H), Sense::hover());
+                                ui.painter().line_segment(
+                                    [
+                                        pos2(sr.left() + 4.0, sr.center().y),
+                                        pos2(sr.right() - 4.0, sr.center().y),
+                                    ],
+                                    Stroke::new(1.0, look.border),
+                                );
+                                continue;
+                            };
+                            let (rr, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::selected(egui::Role::MenuItem, r.enabled, r.checked, r.label)
+                            });
+                            if resp.hovered() && r.enabled && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                                self.hi = Some(i);
+                            }
+                            let hi = self.hi == Some(i);
+                            if hi && scroll_to_hi {
+                                resp.scroll_to_me(None);
+                            }
+                            let p = ui.painter();
+                            if hi && r.enabled {
+                                p.rect_filled(rr, CornerRadius::same(4), look.hover_bg);
+                            }
+                            let c = if !r.enabled {
+                                look.disabled
+                            } else if hi {
+                                look.hover_text
+                            } else {
+                                look.text
+                            };
+                            if r.checked {
+                                let cr =
+                                    Rect::from_center_size(pos2(rr.left() + 11.0, rr.center().y), vec2(12.0, 12.0));
+                                paint_icon(p, cr, ToolIcon::Check, c);
+                            }
+                            p.text(
+                                pos2(rr.left() + 24.0, rr.center().y),
+                                egui::Align2::LEFT_CENTER,
+                                r.label,
+                                look.font.clone(),
+                                c,
+                            );
+                            if let Some(s) = &r.shortcut {
+                                p.text(
+                                    pos2(rr.right() - 8.0, rr.center().y),
+                                    egui::Align2::RIGHT_CENTER,
+                                    s,
+                                    look.small_font.clone(),
+                                    look.disabled,
+                                );
+                            }
+                            if resp.clicked() && r.enabled {
+                                chosen = Some(r.id);
+                            }
+                        }
                     });
-                    if resp.hovered() && r.enabled && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
-                        self.hi = Some(i);
-                    }
-                    let hi = self.hi == Some(i);
-                    let p = ui.painter();
-                    if hi && r.enabled {
-                        p.rect_filled(rr, CornerRadius::same(4), look.hover_bg);
-                    }
-                    let c = if !r.enabled {
-                        look.disabled
-                    } else if hi {
-                        look.hover_text
-                    } else {
-                        look.text
-                    };
-                    if r.checked {
-                        let cr = Rect::from_center_size(pos2(rr.left() + 11.0, rr.center().y), vec2(12.0, 12.0));
-                        paint_icon(p, cr, ToolIcon::Check, c);
-                    }
-                    p.text(
-                        pos2(rr.left() + 24.0, rr.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        r.label,
-                        look.font.clone(),
-                        c,
-                    );
-                    if let Some(s) = &r.shortcut {
-                        p.text(
-                            pos2(rr.right() - 8.0, rr.center().y),
-                            egui::Align2::RIGHT_CENTER,
-                            s,
-                            look.small_font.clone(),
-                            look.disabled,
-                        );
-                    }
-                    if resp.clicked() && r.enabled {
-                        chosen = Some(r.id);
-                    }
-                }
             });
         chosen
     }
@@ -852,7 +889,7 @@ mod tests {
         }
     }
 
-    /// Spec 04 §3.2: groups collapse from the right into the More menu.
+    /// Spec 04 §3.2: when space runs out, the rightmost groups move into More first.
     #[test]
     fn groups_collapse_from_the_right() {
         let m = model(&all_ids().collect::<Vec<_>>());

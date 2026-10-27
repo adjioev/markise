@@ -354,6 +354,8 @@ pub struct Frame<'a> {
     pub parley: Option<&'a mut ParleyText>,
     /// Colours the source pane (only below [`crate::source_highlight::highlight_limit`]).
     pub highlighter: Option<&'a mut crate::source_highlight::SourceHighlighter>,
+    /// Height kept free above the rendered pane's document (formatting toolbar).
+    pub top_reserve: f32,
 }
 
 impl SideBySide {
@@ -441,7 +443,10 @@ impl SideBySide {
             pos2(left.right(), rect.top()),
             pos2(left.right() + DIVIDER_W, rect.bottom()),
         );
-        let right = Rect::from_min_max(pos2(div.right(), rect.top()), rect.max);
+        let pane = Rect::from_min_max(pos2(div.right(), rect.top()), rect.max);
+        // the strip kept free for the formatting toolbar (the document starts below it)
+        let reserve = f.top_reserve.clamp(0.0, (pane.height() - 40.0).max(0.0));
+        let right = Rect::from_min_max(pos2(pane.left(), pane.top() + reserve), pane.max);
         let key = (f.doc_id, f.text_rev);
 
         // ---- divider
@@ -571,7 +576,7 @@ impl SideBySide {
             // interim: the rendered pane is read-only (caret and selection only)
             let vo = viewer.show(&mut rui, f.images, f.theme, f.parley, false);
             out.link = vo.link;
-            out.right = Some(right);
+            out.right = Some(pane);
         }
         if user_scrolls_rendered || self.sync_source {
             self.sync_source = false;

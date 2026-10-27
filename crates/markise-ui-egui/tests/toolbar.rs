@@ -94,8 +94,10 @@ fn text(h: &Harness<'static, MarkiseApp>) -> String {
     h.state().document_text().unwrap()
 }
 
-fn doc_focused(h: &Harness<'static, MarkiseApp>) -> bool {
-    h.ctx.memory(|m| m.focused()).is_some()
+/// The document surface itself (not just some widget) has the keyboard focus.
+fn doc_focused(h: &mut Harness<'static, MarkiseApp>) -> bool {
+    let surface = h.state_mut().viewer().unwrap().surface_id();
+    surface.is_some() && h.ctx.memory(|m| m.focused()) == surface
 }
 
 fn control(h: &Harness<'static, MarkiseApp>, id: &str) -> markise_ui_egui::toolbar::Control {
@@ -122,7 +124,7 @@ fn save(h: &mut Harness<'static, MarkiseApp>, p: &Path) -> String {
 #[test]
 fn bold_list_and_heading_controls_edit_the_document() {
     let (mut h, p) = open("edit", "Hello world\n\nSecond line\n", 1000.0);
-    assert!(doc_focused(&h), "document has the focus");
+    assert!(doc_focused(&mut h), "document has the focus");
     select(&mut h, 0, 5);
     assert!(!control(&h, "format.strong").active);
     let tip = control(&h, "format.strong").tooltip();
@@ -132,7 +134,7 @@ fn bold_list_and_heading_controls_edit_the_document() {
     click(&mut h, "Strong");
     assert_eq!(text(&h), "**Hello** world\n\nSecond line\n");
     assert!(control(&h, "format.strong").active, "state follows the selection");
-    assert!(doc_focused(&h), "a click never takes the text focus");
+    assert!(doc_focused(&mut h), "a click never takes the text focus");
     // the same command again removes it (toggle), one undo step each
     click(&mut h, "Strong");
     assert_eq!(text(&h), "Hello world\n\nSecond line\n");
@@ -152,7 +154,7 @@ fn bold_list_and_heading_controls_edit_the_document() {
     assert!(!h.state().toolbar().popup_open());
     assert_eq!(text(&h), "## Hello world\n\nSecond line\n");
     assert_eq!(h.state().toolbar_state().unwrap().block_label(), "Heading 2");
-    assert!(doc_focused(&h), "focus back in the document after the drop-down");
+    assert!(doc_focused(&mut h), "focus back in the document after the drop-down");
 
     // List drop-down → bullet list on the second paragraph; typing still reaches the document
     let second = text(&h).find("Second").unwrap();
@@ -188,7 +190,7 @@ fn drop_downs_are_keyboard_navigable() {
     h.step();
     assert!(!h.state().toolbar().popup_open());
     assert_eq!(text(&h), "## Hello world\n");
-    assert!(doc_focused(&h));
+    assert!(doc_focused(&mut h));
     // Escape closes without acting and returns the focus
     click(&mut h, "Block Style");
     h.key_press(Key::ArrowDown);
@@ -197,7 +199,7 @@ fn drop_downs_are_keyboard_navigable() {
     h.step();
     h.step();
     assert!(!h.state().toolbar().popup_open());
-    assert!(doc_focused(&h), "focus returned on Escape");
+    assert!(doc_focused(&mut h), "focus returned on Escape");
     assert_eq!(text(&h), "## Hello world\n");
     assert_eq!(save(&mut h, &p), "## Hello world\n");
 }
@@ -238,7 +240,7 @@ fn narrow_window_collapses_groups_into_more() {
     let (mut h, p) = open("narrow", "Hello world\n", 520.0);
     assert!(
         h.state().toolbar().collapsed_groups() >= 1,
-        "groups collapse from the right"
+        "the last group moved into More"
     );
     assert!(
         h.query_by_label("Quote").is_none(),
@@ -249,7 +251,7 @@ fn narrow_window_collapses_groups_into_more() {
     assert!(h.state().toolbar().popup_open());
     click(&mut h, "Quote");
     assert_eq!(text(&h), "> Hello world\n");
-    assert!(doc_focused(&h));
+    assert!(doc_focused(&mut h));
     assert_eq!(save(&mut h, &p), "> Hello world\n");
 }
 
@@ -319,8 +321,138 @@ fn idle_window_with_toolbar_requests_no_repaint() {
         std::thread::sleep(Duration::from_millis(20));
     }
     let delays: Vec<Duration> = (0..8).map(|_| frame(&mut app)).collect();
+    assert_eq!(*delays.last().unwrap(), Duration::MAX, "NFR-10, closed: {delays:?}");
+    // an open drop-down is idle too
+    let at = app.toolbar().bar_rect().unwrap().left_center() + egui::vec2(30.0, 0.0);
+    let press = |pressed| {
+        let mut input = RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 780.0))),
+            ..Default::default()
+        };
+        input.events = vec![
+            Event::PointerMoved(at),
+            Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            },
+        ];
+        input
+    };
+    for p in [true, false] {
+        let mut out = ctx.run_ui(press(p), |ui| app.ui(ui));
+        out.textures_delta.clear();
+    }
+    assert!(app.toolbar().popup_open(), "block style list opened");
+    let delays: Vec<Duration> = (0..8).map(|_| frame(&mut app)).collect();
+    assert!(app.toolbar().popup_open());
     if *delays.last().unwrap() != Duration::MAX {
         eprintln!("causes: {:?}", ctx.repaint_causes());
     }
-    assert_eq!(*delays.last().unwrap(), Duration::MAX, "NFR-10: {delays:?}");
+    assert_eq!(*delays.last().unwrap(), Duration::MAX, "NFR-10, open: {delays:?}");
+}
+
+/// The first lines are never under the bar: the document surface starts below it in the
+/// rendered view and in Side by Side's rendered pane, also after scrolling (painting is
+/// clipped to the surface).
+#[test]
+fn bar_never_covers_the_document() {
+    let src: String = (1..=80).map(|i| format!("Line {i} of the document.\n\n")).collect();
+    let (mut h, _p) = open("cover", &src, 1000.0);
+    let check = |h: &mut Harness<'static, MarkiseApp>, what: &str| {
+        let bar = h.state().toolbar().bar_rect().unwrap();
+        let surface = h.state_mut().viewer().unwrap().surface_rect().unwrap();
+        assert!(
+            surface.top() >= bar.bottom(),
+            "{what}: surface {surface:?} below bar {bar:?}"
+        );
+        assert!(
+            surface.x_range().intersects(bar.x_range()),
+            "{what}: bar over this surface"
+        );
+        // `None`: the first item scrolled out of the laid-out range
+        let first = h.state_mut().viewer().unwrap().item_screen_rect(0);
+        (first, surface)
+    };
+    let (first, surface) = check(&mut h, "rendered");
+    assert!(first.unwrap().top() >= surface.top(), "first line visible");
+    h.state_mut().set_view_mode(ViewMode::SideBySide);
+    for _ in 0..4 {
+        h.step();
+    }
+    let (first, surface) = check(&mut h, "side by side");
+    assert!(
+        first.unwrap().top() >= surface.top(),
+        "first line visible in the rendered pane"
+    );
+    // scroll the rendered pane: content moves up under the surface edge, never under the bar
+    let over = surface.center();
+    h.hover_at(over);
+    for _ in 0..5 {
+        h.event(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            modifiers: Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.step();
+    }
+    for _ in 0..3 {
+        h.step();
+    }
+    let (first, _) = check(&mut h, "side by side, scrolled");
+    let bar = h.state().toolbar().bar_rect().unwrap();
+    assert!(first.is_none_or(|f| f.top() < bar.bottom()), "the pane did scroll");
+    // and scrolled back to the top the first line is fully visible again
+    h.state_mut().viewer().unwrap().view().scroll_to_y(0.0);
+    for _ in 0..3 {
+        h.step();
+    }
+    let (first, surface) = check(&mut h, "side by side, back at the top");
+    assert!(first.unwrap().top() >= surface.top());
+}
+
+/// A long More list in a short window stays inside the window and scrolls; the entry
+/// chosen with the keyboard is scrolled into view.
+#[test]
+fn long_drop_down_is_bounded_and_scrolls() {
+    let dir = tmpdir("short");
+    let p = dir.join("t.md");
+    std::fs::write(&p, "Hello world\n").unwrap();
+    let app = MarkiseApp::new(AppOptions {
+        open: vec![p],
+        ..Default::default()
+    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(480.0, 300.0))
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), app);
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    h.state_mut().set_show_toolbar(true);
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.state().toolbar().collapsed_groups() >= 2);
+    click(&mut h, "More");
+    let popup = h.state().toolbar().popup_rect().unwrap();
+    assert!(popup.bottom() <= 300.0, "inside the window: {popup:?}");
+    // End highlights the last entry and scrolls it into view
+    h.key_press(Key::End);
+    for _ in 0..3 {
+        h.step();
+    }
+    let last = h.get_by_label("Horizontal Line").rect();
+    assert!(
+        last.top() >= popup.top() - 0.5 && last.bottom() <= popup.bottom() + 0.5,
+        "last entry {last:?} visible in {popup:?}"
+    );
+    h.key_press(Key::Home);
+    for _ in 0..3 {
+        h.step();
+    }
+    // the first entry: Strong, from the collapsed inline group
+    let first = h.get_by_label("Strong").rect();
+    assert!(first.top() >= popup.top() - 0.5, "first entry {first:?} back in view");
 }
