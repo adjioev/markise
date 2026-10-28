@@ -525,7 +525,24 @@ pub fn item_pos(view: &View, pos: DocPos) -> Option<(usize, ItemPos)> {
     if model.items.is_empty() {
         return None;
     }
-    let i = model.item_at_offset(pos.offset);
+    let mut i = model.item_at_offset(pos.offset);
+    // spaces just typed after a heading's text sit in the source gap after its item (the
+    // heading's span stops at its text): they still belong to the heading line, not to the
+    // next item (issue #16)
+    if i > 0
+        && pos.offset < model.item_start(i)
+        && model
+            .items
+            .get(i - 1)
+            .is_some_and(|it| matches!(it.kind, ItemKind::Paragraph | ItemKind::Heading { .. }))
+        && view
+            .doc()
+            .text()
+            .get(model.item_span(i - 1).end..pos.offset)
+            .is_some_and(|gap| gap.bytes().all(|c| matches!(c, b' ' | b'\t')))
+    {
+        i -= 1;
+    }
     let start = model.item_start(i);
     Some((
         i,
@@ -549,6 +566,7 @@ pub fn focus_for(view: &View, pos: DocPos, reveal: bool) -> Option<(usize, ItemF
         virtual_after: p.virt,
         virtual_exit: pos.virt.saturating_sub(1),
         trailing_ws: None,
+        trailing_len: 0,
     };
     if !reveal || p.virt {
         return Some((i, f));
@@ -561,7 +579,7 @@ pub fn focus_for(view: &View, pos: DocPos, reveal: bool) -> Option<(usize, ItemF
             .text()
             .get(start + end..)
             .map_or(0, |after| crate::block::trailing_ws_len(after, kind));
-        (n > 0 && (end as u32) < p.rel && p.rel as usize <= end + n).then_some(end as u32)
+        (n > 0 && (end as u32) < p.rel && p.rel as usize <= end + n).then_some((end as u32, n as u32))
     };
     match it.kind {
         ItemKind::Paragraph | ItemKind::Heading { .. } => {
@@ -576,7 +594,10 @@ pub fn focus_for(view: &View, pos: DocPos, reveal: bool) -> Option<(usize, ItemF
                     } else {
                         crate::block::WsEnd::Line
                     };
-                    f.trailing_ws = rich.nodes.last().and_then(|n| in_trailing(n.source.end as usize, kind));
+                    if let Some((end, n)) = rich.nodes.last().and_then(|n| in_trailing(n.source.end as usize, kind)) {
+                        f.trailing_ws = Some(end);
+                        f.trailing_len = n;
+                    }
                 }
             }
         }
@@ -584,11 +605,13 @@ pub fn focus_for(view: &View, pos: DocPos, reveal: bool) -> Option<(usize, ItemF
             let at = pos.offset;
             if let Some(t) = doc.table(start)
                 && let Some(row) = t.rows.iter().find(|r| r.start <= at && at <= r.end)
-            {
-                f.trailing_ws = doc
+                && let Some((end, n)) = doc
                     .table_row_cells(*row)
                     .iter()
-                    .find_map(|c| in_trailing(c.end.saturating_sub(start), crate::block::WsEnd::Cell));
+                    .find_map(|c| in_trailing(c.end.saturating_sub(start), crate::block::WsEnd::Cell))
+            {
+                f.trailing_ws = Some(end);
+                f.trailing_len = n;
             }
         }
         _ => {}

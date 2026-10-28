@@ -240,12 +240,16 @@ impl Ed {
     }
 
     /// The kind of the item holding the caret.
+    /// The kind of the item holding the caret, as the caret geometry resolves it (spaces typed
+    /// after a heading's text belong to the heading although they follow its source span).
     fn caret_kind(&mut self) -> ItemKind {
-        let off = self.caret().offset;
+        let pos = self.caret();
         let v = self.h.state_mut().viewer().unwrap();
+        let i = markise_layout::caret::item_pos(&v.ed.view, pos).map(|(i, _)| i);
         let m = v.ed.view.model();
-        let i = m.item_at_offset(off);
-        m.items.get(i).map(|it| it.kind.clone()).unwrap_or(ItemKind::Empty)
+        i.and_then(|i| m.items.get(i))
+            .map(|it| it.kind.clone())
+            .unwrap_or(ItemKind::Empty)
     }
 
     fn expect(&mut self, want: &str) -> &mut Self {
@@ -320,7 +324,6 @@ fn a02_atx_heading_followed_by_paragraph_start() {
 
 // Expected: the space stays in the heading and the caret right after it. Overlaps issue #16.
 #[test]
-#[ignore = "bug: #16 space at heading end moves the caret to the next block"]
 fn a02b_atx_heading_followed_by_paragraph_end() {
     let src = "# Title\n\nNext para\n";
     type_at("a02e", src, 7, &format!(" {S}"), &format!("# Title {S}\n\nNext para\n"));
@@ -328,7 +331,6 @@ fn a02b_atx_heading_followed_by_paragraph_end() {
 
 // Expected: the space stays in the heading and the caret right after it. Overlaps issue #16.
 #[test]
-#[ignore = "bug: #16 space at heading end moves the caret to the next block"]
 fn a03_heading_without_blank_line_before_paragraph() {
     type_at(
         "a03",
@@ -341,7 +343,6 @@ fn a03_heading_without_blank_line_before_paragraph() {
 
 // Expected: the space stays in the heading and the caret right after it. Overlaps issue #16.
 #[test]
-#[ignore = "bug: #16 space at heading end moves the caret to the next block"]
 fn a04_heading_levels_1_to_6_end() {
     for lvl in 1..=6 {
         let hashes = "#".repeat(lvl);
@@ -364,7 +365,6 @@ fn a05_heading_last_block_without_newline() {
 
 // Expected: the space stays in the heading and the caret right after it. Overlaps issue #16.
 #[test]
-#[ignore = "bug: #16 space at heading end moves the caret to the next block"]
 fn a06_space_at_heading_end_via_click_keeps_caret_in_heading() {
     // issue #16 scenario reached the way the owner does it: click at the end of the heading
     let mut e = Ed::open("a06", "# Title\n\nNext para\n");
@@ -567,7 +567,6 @@ fn b08_enter_on_virtual_paragraph_does_nothing() {
 
 // Expected (C43): `## ` + Enter turns the heading into an empty paragraph; typing `x` gives `x`. Actual: nothing happens, typing gives `## x`.
 #[test]
-#[ignore = "bug: C43 — PR #18"]
 fn b09_enter_on_empty_heading_becomes_paragraph() {
     // C43
     let mut e = Ed::open("b09", "Intro\n\n## \n");
@@ -1712,7 +1711,6 @@ fn k06_typing_into_empty_doc_then_enter_and_heading() {
 
 // Expected: the space stays in the heading and the caret right after it. Overlaps issue #16. Actual bytes `## Title \n- xa`.
 #[test]
-#[ignore = "bug: #16 space at heading end; next typing lands in the list item"]
 fn k07_space_at_end_of_heading_with_following_list() {
     let mut e = Ed::open("k07", "## Title\n- a\n");
     e.at(8).typ(" x");
@@ -1847,7 +1845,6 @@ fn l09_typing_in_nested_quote_list_item() {
 
 // Expected: the space stays in the heading and the caret right after it. Overlaps issue #16.
 #[test]
-#[ignore = "bug: #16 space then Enter at heading end puts the space in the new paragraph"]
 fn l10_space_then_enter_at_heading_end() {
     // overlaps issue #16: both keys at the end of a heading followed by a paragraph
     let mut e = Ed::open("l10", "# Title\n\nNext\n");

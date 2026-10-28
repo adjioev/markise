@@ -299,6 +299,10 @@ pub struct ItemFocus {
     /// collapsed rendering drops: a space just typed at the end of the text needs a caret stop
     /// after it (issue #31). Set only while the caret is inside that whitespace.
     pub trailing_ws: Option<u32>,
+    /// The length in bytes of that whitespace. Part of the cache key: after an ATX heading the
+    /// whitespace lies outside the item's source span, so the item hash does not change while
+    /// it grows (issue #16).
+    pub trailing_len: u32,
 }
 
 impl ItemFocus {

@@ -208,8 +208,10 @@ impl Document {
             if sel.focus.virt > 0 {
                 return Err(PlanError::NotApplicable("virtual paragraph"));
             }
-            let leaf = self.leaf(a).ok_or(PlanError::NotApplicable("no block"))?;
-            if !Self::text_leaf_kind(&leaf.kind) || !leaf.lines.iter().any(|l| l.start <= a && a <= l.end) {
+            // in whitespace typed after a heading's text: at its end for the checks (#16)
+            let t = self.heading_end_before_ws(a).unwrap_or(a);
+            let leaf = self.leaf(t).ok_or(PlanError::NotApplicable("no block"))?;
+            if !Self::text_leaf_kind(&leaf.kind) || !leaf.lines.iter().any(|l| l.start <= t && t <= l.end) {
                 return Err(PlanError::NotApplicable("not in text"));
             }
             if text[..a].ends_with(open) && text[a..].starts_with(close) {
@@ -328,7 +330,7 @@ impl Document {
         let sel = req.selection.primary();
         let r0 = sel.range();
         if sel.is_caret() {
-            let a = r0.start;
+            let a = self.heading_end_before_ws(r0.start).unwrap_or(r0.start);
             let Some(leaf) = self.leaf(a) else { return false };
             if !Self::text_leaf_kind(&leaf.kind) || leaf.lines.is_empty() {
                 return false;
@@ -356,10 +358,11 @@ impl Document {
         let lead = if image { "![" } else { "[" };
         if sel.is_caret() {
             let a = sel.focus.offset;
-            let leaf = self.leaf(a).ok_or(PlanError::NotApplicable("no block"))?;
+            let t = self.heading_end_before_ws(a).unwrap_or(a);
+            let leaf = self.leaf(t).ok_or(PlanError::NotApplicable("no block"))?;
             if sel.focus.virt > 0
                 || !Self::text_leaf_kind(&leaf.kind)
-                || !leaf.lines.iter().any(|l| l.start <= a && a <= l.end)
+                || !leaf.lines.iter().any(|l| l.start <= t && t <= l.end)
             {
                 return Err(PlanError::NotApplicable("not in text"));
             }

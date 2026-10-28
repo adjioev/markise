@@ -758,17 +758,19 @@ fn enter_in_headings_with_containers_closing_sequences_and_crlf() {
 #[test]
 fn empty_headings_and_merges_with_closing_sequences() {
     let n = "edit.newline";
-    // Enter at an empty heading: no source change (the virtual paragraph; C43 is M2c)
-    for src in ["#\n", "## \n", "- #\n"] {
+    // Enter at an empty top-level heading (C43): it becomes an empty paragraph in place; in a
+    // list item it is left alone (no source change)
+    for (src, want) in [("#\n", "\n"), ("## \n", "\n"), ("- #\n", "- #\n")] {
         let mut t = T::new(src);
         t.ed.edit(|s| s.set_selection(Selection::caret(src.find('#').unwrap() + 1)));
         t.frame();
         t.run(n);
-        assert_eq!(t.text(), src, "Enter in the empty heading {src:?}");
+        assert_eq!(t.text(), want, "Enter in the empty heading {src:?}");
         t.check_model();
     }
-    // Backspace at an empty heading: becomes an (empty) paragraph
-    roundtrip("para\n\n##\n", 8, "edit.deleteBackward", "para\n\n\n");
+    // Backspace at an empty heading: becomes an empty paragraph — the heading goes with its
+    // separator, the caret on the virtual paragraph after the block before (M2c-7)
+    roundtrip("para\n\n##\n", 8, "edit.deleteBackward", "para\n");
     // merges with ATX closing sequences
     roundtrip("## Title ##\n\nmore\n", 13, "edit.deleteBackward", "## Titlemore ##\n");
     roundtrip("## Title ##\n\nmore\n", 8, "edit.deleteForward", "## Titlemore ##\n");
