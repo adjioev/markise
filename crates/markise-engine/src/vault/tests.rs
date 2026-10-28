@@ -748,3 +748,31 @@ fn no_snapshot_without_a_visible_change() {
     assert_eq!(ix.generation(), g1 + 1);
     assert!(ix.file("Sub/C.md").is_some());
 }
+
+/// Round 6: dropping the scanner closes the vault root's directory handle (joined worker),
+/// so the folder can be deleted and created again at once — on Windows an open handle keeps
+/// a deleted folder pending.
+#[test]
+fn dropping_the_scanner_releases_the_root() {
+    let base = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(base.path()).unwrap().join("again");
+    for round in 0..3 {
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("A.md"), "x").unwrap();
+        let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
+        sc.mount(root.clone());
+        let ix = sc.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(ix.root_dir().is_some(), "round {round}");
+        // the user can still rename the vault folder while it is open (Windows: the root
+        // handle shares delete access)
+        let moved = root.with_file_name("again-moved");
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::rename(&moved, &root).unwrap();
+        drop(ix);
+        drop(sc);
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("B.md"), "y").unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}

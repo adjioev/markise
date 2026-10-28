@@ -741,7 +741,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Spec 06 E17: editing `.obsidian/app.json` in place (no rename) is reported.
+    /// Spec 06 E17: editing `.obsidian/app.json` in place (no rename) is reported. The
+    /// config exists before the watch starts; a marker event drains whatever the setup left
+    /// in flight (FSEvents may deliver it late or coalesced) before the edit. That Obsidian's
+    /// other files are not settings events is checked deterministically by
+    /// `vault_config_events_are_classified_robustly`, and at scanner level (an unchanged
+    /// settings file publishes no snapshot) in `vault::tests` — a live negative check would
+    /// depend on platform event coalescing.
     #[test]
     fn obsidian_settings_edited_in_place_are_reported() {
         let root = tmp("obsidian");
@@ -751,15 +757,12 @@ mod tests {
         w.watch_folder(&root);
         w.sync().unwrap();
         assert!(wait_event(&w, &WatchEvent::FolderWatched(root.clone())));
-        // Obsidian's own state files are not settings: not reported. A marker file written
-        // afterwards bounds the wait (events of one watcher arrive in order), no fixed sleep.
-        std::fs::write(root.join(".obsidian/workspace.json"), "{\"x\": 1}").unwrap();
+        // drain setup events: wait for the marker's own event
         std::fs::write(root.join("marker.md"), "").unwrap();
         let t = Instant::now();
         let mut marker = false;
         while !marker && t.elapsed() < Duration::from_secs(30) {
             while let Some(e) = w.try_recv() {
-                assert_ne!(e, WatchEvent::VaultConfigChanged(root.clone()), "workspace.json");
                 marker |= matches!(&e, WatchEvent::DirChanged(d) if norm_path(d) == norm_path(&root));
             }
             std::thread::sleep(Duration::from_millis(10));

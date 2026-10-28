@@ -937,6 +937,34 @@ fn step_hook(_step: &str, _folder: &str) {
     });
 }
 
+/// Opens the vault root directory for the capability held from mount. On Windows the handle
+/// is opened sharing delete access (cap-std's own directory opens do not), so the user can
+/// still rename or move the vault folder while Markise has it open; the handle then keeps
+/// pointing at the moved folder, as the threat model says.
+pub fn open_root(root: &Path) -> std::io::Result<cap_std::fs::Dir> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+        const FILE_SHARE_DELETE: u32 = 0x4;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(root)?;
+        if !f.metadata()?.is_dir() {
+            return Err(std::io::Error::other("not a folder"));
+        }
+        Ok(cap_std::fs::Dir::from_std_file(f))
+    }
+    #[cfg(not(windows))]
+    {
+        cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())
+    }
+}
+
 /// Whether an error from a no-follow open means "this is a symbolic link" (`ELOOP` on Unix,
 /// cap-std's own sandbox errors elsewhere).
 fn dir_is_link(e: &std::io::Error) -> bool {
@@ -1020,8 +1048,22 @@ enum Cmd {
 
 /// Keeps a [`VaultIndex`] of the mounted folder current on a background thread.
 pub struct VaultScanner {
-    tx: Sender<Cmd>,
+    tx: Option<Sender<Cmd>>,
     rx: Receiver<Arc<VaultIndex>>,
+    /// Joined on drop: the worker holds the vault root's directory handle, which must be
+    /// closed when the scanner goes (on Windows an open handle keeps a deleted folder
+    /// pending, so the same path cannot be created again).
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for VaultScanner {
+    fn drop(&mut self) {
+        // closing the command channel ends the worker's loop
+        self.tx = None;
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
+        }
+    }
 }
 
 /// Directory entries the scanner follows at most (cycle and runaway guard).
@@ -1096,9 +1138,7 @@ impl ScanState {
     fn mount(&mut self, root: PathBuf) {
         self.dirty = true;
         // the root path is resolved here, once; later creations use this handle only
-        self.root_dir = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())
-            .ok()
-            .map(Arc::new);
+        self.root_dir = open_root(&root).ok().map(Arc::new);
         self.settings = VaultSettings::read(&root);
         self.root = root;
         self.files.clear();
@@ -1231,7 +1271,7 @@ impl VaultScanner {
     pub fn new(wake: Wake) -> Result<VaultScanner, String> {
         let (tx, cmd_rx) = channel::<Cmd>();
         let (res_tx, rx) = channel();
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("markise-vault".into())
             .spawn(move || {
                 let mut st = ScanState {
@@ -1277,22 +1317,32 @@ impl VaultScanner {
                 }
             })
             .map_err(|e| format!("cannot start vault thread: {e}"))?;
-        Ok(VaultScanner { tx, rx })
+        Ok(VaultScanner {
+            tx: Some(tx),
+            rx,
+            worker: Some(worker),
+        })
+    }
+
+    fn send(&self, c: Cmd) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(c);
+        }
     }
 
     /// Scans `root` from scratch (a folder was mounted).
     pub fn mount(&self, root: PathBuf) {
-        let _ = self.tx.send(Cmd::Mount(root));
+        self.send(Cmd::Mount(root));
     }
 
     /// Something changed in (or at) `path` (watcher event).
     pub fn changed(&self, path: PathBuf) {
-        let _ = self.tx.send(Cmd::Changed(path));
+        self.send(Cmd::Changed(path));
     }
 
     /// Walks the mounted folder again (the folder watch restarted).
     pub fn rescan(&self) {
-        let _ = self.tx.send(Cmd::Rescan);
+        self.send(Cmd::Rescan);
     }
 
     /// The newest snapshot published since the last call, if any.
