@@ -341,13 +341,11 @@ impl EditorSession {
         if self.doc.hints().is_empty() {
             return;
         }
+        // the caret's block by the ownership rule (ADR 0011)
         let caret = self.sel.primary().focus.offset;
-        let here = self.doc.leaf(caret).map(|l| l.span.start);
-        let left = self
-            .doc
-            .hints()
-            .iter()
-            .any(|h| self.doc.leaf(h.line).map(|l| l.span.start) != here);
+        let owner = |at: usize| self.doc.block_owner(at).map(|o| o.leaf.span.start);
+        let here = owner(caret);
+        let left = self.doc.hints().iter().any(|h| owner(h.line) != here);
         if left {
             // the escape patch shifts text after it; the selection is transformed like any
             // live mark. A failure leaves the hint (it is materialised before saving).
@@ -511,8 +509,9 @@ impl EditorSession {
         });
     }
 
+    /// The block a keystroke at `at` is in (typing groups, C13), by the ownership rule.
     fn leaf_info(&self, at: usize) -> Option<(usize, LeafKind)> {
-        self.doc.leaf(at).map(|l| (l.span.start, l.kind))
+        self.doc.block_owner(at).map(|o| (o.leaf.span.start, o.leaf.kind))
     }
 
     // ---- Typing (ADR 0006 §5.1, grouping §4.2) ----
@@ -832,19 +831,17 @@ impl EditorSession {
     /// heading's span stops at its text, so spaces typed after it are outside the block, yet
     /// they are its content for the caret (issue #16).
     fn in_heading_trailing_ws(&self, r: std::ops::Range<usize>) -> bool {
-        let b = self.doc.text().as_bytes();
-        if r.is_empty() || r.end > b.len() || !b[r.clone()].iter().all(|c| matches!(c, b' ' | b'\t')) {
+        if r.is_empty() {
             return false;
         }
-        let mut q = r.start;
-        while q > 0 && matches!(b[q - 1], b' ' | b'\t') {
-            q -= 1;
-        }
-        q > 0
-            && self.doc.leaf(q - 1).is_some_and(|l| {
-                // after the text: past the span (open ATX) or before a closing sequence
-                matches!(l.kind, LeafKind::Heading { .. }) && l.lines.last().is_some_and(|x| x.end == q)
-            })
+        // the heading's trailing whitespace from the ownership query (ADR 0011): after the
+        // text, past the span (open ATX) or before a closing sequence
+        self.doc.block_owner(r.end).is_some_and(|o| {
+            matches!(o.leaf.kind, LeafKind::Heading { .. })
+                && o.trailing_ws.start <= r.start
+                && r.end <= o.trailing_ws.end
+                && o.trailing_ws.start >= o.content.end
+        })
     }
 
     /// Block-level Backspace at `at` (a caret), or `None` for a plain deletion.
@@ -926,14 +923,16 @@ impl EditorSession {
         // at the end of the line after spaces typed after a heading's text: the end of the
         // heading, and a merge keeps those spaces (issue #16)
         let keep = at;
-        let b = self.doc.text().as_bytes();
-        let ws = b[..at].iter().rev().take_while(|c| matches!(c, b' ' | b'\t')).count();
-        let at =
-            if ws > 0 && matches!(b.get(at), None | Some(b'\n' | b'\r')) && self.in_heading_trailing_ws(at - ws..at) {
-                at - ws
-            } else {
-                at
-            };
+        let at = match self.doc.block_owner(at) {
+            Some(o)
+                if o.part == markise_doc::BlockPart::TrailingWs
+                    && at == o.trailing_ws.end
+                    && self.in_heading_trailing_ws(o.trailing_ws.start..at) =>
+            {
+                o.trailing_ws.start
+            }
+            _ => at,
+        };
         let leaf = self.doc.leaf(at)?;
         if leaf.span.end < at {
             return None; // between blocks
@@ -1516,9 +1515,8 @@ enum BlockEdit {
 /// `## `, after container prefixes) and after the last (setext underline line, ATX closing
 /// sequence).
 fn block_syntax(l: &markise_doc::LeafView) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
-    let first = l.lines.first().map_or(l.span.start, |x| x.start);
-    let last = l.lines.last().map_or(l.span.end, |x| x.end);
-    (l.span.start..first.max(l.span.start), last.min(l.span.end)..l.span.end)
+    let (lead, trail) = (l.leading_syntax(), l.trailing_syntax());
+    (lead.start..lead.end, trail.start..trail.end)
 }
 
 /// Merges text leaf `next` into `prev` (spec 02 §5.2 rule 5, C48): `next`'s content is

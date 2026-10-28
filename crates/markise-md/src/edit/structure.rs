@@ -214,7 +214,7 @@ impl Document {
         }
         // the next block from the parsed structure: nothing to join when it holds no text
         // leaf at its start (an empty quote or list item…), never anything past it
-        let next = self.adjacent_leaf_tree(&leaf, true)??;
+        let next = self.adjacent_leaf(&leaf, true)??;
         if next.span.start <= leaf.span.start {
             return None;
         }

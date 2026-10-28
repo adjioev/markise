@@ -202,6 +202,8 @@ fn epaint_job_conversion_is_exact_t2() {
     want.append(" three", 2.0, fmt(&bold, markise_layout::FAMILY_BOLD));
     want.wrap.max_width = 120.0;
     want.halign = Align::Center;
+    // trailing spaces count for centred rows (spaces typed after a centred heading's text)
+    want.keep_trailing_whitespace = true;
     assert_eq!(job, want);
     assert_eq!(
         to_layout_job(&StyledText::single("x", style()), None).wrap.max_width,

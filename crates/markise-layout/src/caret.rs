@@ -15,7 +15,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use epaint::{Pos2, Rect, pos2};
-use markise_doc::{Affinity as DocAffinity, DocPos, InlineSource, PieceKind, SourceMap};
+use markise_doc::{Affinity as DocAffinity, BlockPart, DocPos, InlineSource, PieceKind, SourceMap};
 use markise_text::{Affinity, LocalPos};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -526,20 +526,15 @@ pub fn item_pos(view: &View, pos: DocPos) -> Option<(usize, ItemPos)> {
         return None;
     }
     let mut i = model.item_at_offset(pos.offset);
-    // spaces just typed after a heading's text sit in the source gap after its item (the
-    // heading's span stops at its text): they still belong to the heading line, not to the
-    // next item (issue #16)
+    // an offset in the source gap before item `i` that the ownership query (ADR 0011) gives to
+    // the paragraph or heading before it — the spaces typed after a heading's text, outside its
+    // span — belongs to that block's line, not to the next item (issue #16)
     if i > 0
         && pos.offset < model.item_start(i)
-        && model
-            .items
-            .get(i - 1)
-            .is_some_and(|it| matches!(it.kind, ItemKind::Paragraph | ItemKind::Heading { .. }))
         && view
             .doc()
-            .text()
-            .get(model.item_span(i - 1).end..pos.offset)
-            .is_some_and(|gap| gap.bytes().all(|c| matches!(c, b' ' | b'\t')))
+            .block_owner(pos.offset)
+            .is_some_and(|o| o.is_text_block() && o.leaf.span.start < model.item_start(i))
     {
         i -= 1;
     }
@@ -587,17 +582,16 @@ pub fn focus_for(view: &View, pos: DocPos, reveal: bool) -> Option<(usize, ItemF
             if !lines.is_empty() {
                 let rich = doc.inline(InlineSource::Lines(&lines), start);
                 f.reveal = reveal_set(&rich, p.rel);
-                // a segmented paragraph: only its last segment ends the text
-                if it.segment.as_ref().is_none_or(|s| s.last()) {
-                    let kind = if matches!(it.kind, ItemKind::Heading { .. }) {
-                        crate::block::WsEnd::Heading
-                    } else {
-                        crate::block::WsEnd::Line
-                    };
-                    if let Some((end, n)) = rich.nodes.last().and_then(|n| in_trailing(n.source.end as usize, kind)) {
-                        f.trailing_ws = Some(end);
-                        f.trailing_len = n;
-                    }
+                // the whitespace ending the text, from the ownership query (ADR 0011); a
+                // segmented paragraph: only its last segment ends the text
+                if it.segment.as_ref().is_none_or(|s| s.last())
+                    && !rich.nodes.is_empty()
+                    && let Some(o) = doc.block_owner(pos.offset)
+                    && o.part == BlockPart::TrailingWs
+                    && o.trailing_ws.start >= start
+                {
+                    f.trailing_ws = Some((o.trailing_ws.start - start) as u32);
+                    f.trailing_len = o.trailing_ws.len() as u32;
                 }
             }
         }

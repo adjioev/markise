@@ -276,33 +276,25 @@ impl FormatDoc for Document {
         let changed = r.reparsed.clone();
         summary(r, changed, 0)
     }
-    fn adjacent_leaf(&self, leaf: &LeafView, forward: bool) -> Option<Option<LeafView>> {
-        self.adjacent_leaf_tree(leaf, forward)
-    }
     fn leaf(&self, at: usize) -> Option<LeafView> {
         let path = self.block_path_at(at);
-        let mut containers = Vec::new();
-        let mut leaf = None;
-        for depth in 1..=path.len() {
-            let (b, origin) = self.block_at_path_rel(&path[..depth])?;
-            if b.is_container() {
-                containers.push(container_kind(b));
-            } else {
-                let mut b = b.clone();
-                b.shift(origin as isize);
-                leaf = Some(b);
-                break;
-            }
-        }
-        let b = &leaf?;
-        let first = b.lines.first().map_or(b.span.start, |l| l.start);
-        Some(LeafView {
-            kind: leaf_kind(self.text(), b),
-            span: b.span,
-            lines: b.lines.clone(),
-            containers,
-            hinted: self.hints().contains_line(line_start(self.text(), first)),
-        })
+        let depth = (1..=path.len()).find(|&d| {
+            self.block_at_path_rel(&path[..d])
+                .is_some_and(|(b, _)| !b.is_container())
+        })?;
+        self.leaf_view_at_path(&path[..depth])
+    }
+    fn block_owner(&self, at: usize) -> Option<markise_doc::BlockOwner> {
+        self.owner_from_tree(at)
+    }
+    fn block_owner_biased(&self, at: usize, bias: markise_doc::Affinity) -> Option<markise_doc::BlockOwner> {
+        self.owner_biased_from_tree(at, bias)
+    }
+    fn adjacent_block(&self, at: usize, forward: bool) -> Option<markise_doc::Adjacent> {
+        self.adjacent_from_tree(at, forward)
+    }
+    fn containers_at(&self, at: usize) -> Vec<markise_doc::ContainerAt> {
+        self.containers_from_tree(at)
     }
     fn inlines(&self, leaf: &LeafView) -> RichInline {
         if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) || leaf.lines.is_empty() {
@@ -521,7 +513,7 @@ impl FormatDoc for Document {
     }
 }
 
-fn container_kind(b: &Block) -> ContainerKind {
+pub(crate) fn container_kind(b: &Block) -> ContainerKind {
     match &b.kind {
         BlockKind::BlockQuote { alert: None } => ContainerKind::Quote,
         BlockKind::BlockQuote { alert: Some(k) } => ContainerKind::Callout(callout(*k)),
@@ -1128,7 +1120,7 @@ fn callout(k: AlertKind) -> CalloutKind {
 }
 
 /// [`leaf_kind`] of a block with spans relative to `origin`.
-fn leaf_kind_at(text: &str, b: &Block, origin: usize) -> LeafKind {
+pub(crate) fn leaf_kind_at(text: &str, b: &Block, origin: usize) -> LeafKind {
     match &b.kind {
         BlockKind::FencedCode { info, .. } => LeafKind::CodeBlock {
             info: text[info.start + origin..info.end + origin].into(),
@@ -1221,25 +1213,49 @@ impl Document {
         if let Some((_, content, _)) = scan::atx_heading(b, p, b.len(), self.options().strict)
             && content.is_empty()
         {
-            // C43: an empty heading becomes an empty paragraph (its `##` removed)
-            if let Some(prev) = self.leaf_before(ls)
-                && line_start(text, prev.span.end) < ls
-            {
-                let ps = PatchSet::single_verbatim(prev.span.end..ce, "");
-                return Ok(Plan::single(
-                    PlanStep {
-                        patches: ps,
-                        hints_after: Some(hints),
-                    },
-                    Some(Selection::caret_at(markise_doc::DocPos::with_virt(prev.span.end, 1))),
-                ));
-            }
-            return Ok(Plan::single(
+            // C43: an empty heading becomes an empty paragraph in place (its `##` removed),
+            // in the line's own containers. Markdown cannot store an empty paragraph after
+            // another block, so there it is the virtual one after the block before it (M2b-1)
+            // — when that block is in the same innermost container (compared by identity,
+            // i.e. span, not by kind; ADR 0011), leaving exactly the containers of that block
+            // the line is not in. Otherwise (the first block of its container, nothing before
+            // it) only the marker goes: the line's own prefix stays byte for byte and the caret
+            // after it — the empty item / quote / line Markdown keeps there.
+            let in_place = Ok(Plan::single(
                 PlanStep {
                     patches: PatchSet::single_verbatim(from..ce, ""),
-                    hints_after: Some(hints),
+                    hints_after: Some(hints.clone()),
                 },
                 Some(Selection::caret(from)),
+            ));
+            let line_chain = self.containers_at(from);
+            let Some(before) = self.adjacent_block(at, false) else {
+                return in_place;
+            };
+            let (anchor, chain) = match &before.leaf {
+                Some(prev) if line_start(text, prev.span.end) < ls => {
+                    (prev.span.end, self.containers_at(prev.span.start))
+                }
+                // a block without text (an empty quote, an empty list item): it stays
+                _ => {
+                    let end = before.block.end.min(ls);
+                    (end, self.containers_at(end))
+                }
+            };
+            let shared = chain.iter().zip(&line_chain).take_while(|(a, b)| a == b).count();
+            if shared < line_chain.len() {
+                return in_place;
+            }
+            let exit = chain.len() - shared;
+            return Ok(Plan::single(
+                PlanStep {
+                    patches: PatchSet::single_verbatim(anchor..ce, ""),
+                    hints_after: Some(hints),
+                },
+                Some(Selection::caret_at(markise_doc::DocPos::with_virt(
+                    anchor,
+                    1 + exit as u16,
+                ))),
             ));
         }
         // heading, rule, `[toc]`, definitions, HTML: the block is created by dropping the hint;
@@ -1253,7 +1269,7 @@ impl Document {
         // a link reference definition is not shown: the virtual paragraph goes after the
         // visible block before it (definitions may stand anywhere)
         let def = !footnote && crate::edit::rules::link_def_like(&line[p..]);
-        let gap = match self.leaf_before(ls) {
+        let gap = match self.adjacent_block(at, false).and_then(|a| a.leaf) {
             Some(prev) if def => prev.span.end,
             _ => ce,
         };
@@ -1458,7 +1474,7 @@ impl Document {
         if at_start {
             // an empty paragraph above: the virtual paragraph after the previous block of the
             // same container, if there is one
-            if let Some(prev) = self.leaf_before(leaf.span.start)
+            if let Some(prev) = self.adjacent_leaf(&leaf, false).flatten()
                 && prev.span.start < leaf.span.start
                 && prev.containers == leaf.containers
                 && matches!(
@@ -1543,7 +1559,7 @@ impl Document {
         let (ce, _) = line_end(text, ls);
         // the neighbours from the parsed structure (`Some(None)`: a block without a text leaf
         // at that edge, e.g. an empty quote — nothing is joined across it)
-        let next = self.adjacent_leaf_tree(&leaf, true);
+        let next = self.adjacent_leaf(&leaf, true);
         let following = next.is_some();
         let next = next.flatten();
         let plan = |range: std::ops::Range<usize>, sel: Selection| {
@@ -1559,7 +1575,7 @@ impl Document {
             let into = n.lines.first().map_or(n.span.start, |l| l.start).max(nls) - nls;
             return Some(plan(ls..nls, Selection::caret(ls + into)));
         }
-        match self.adjacent_leaf_tree(&leaf, false) {
+        match self.adjacent_leaf(&leaf, false) {
             Some(None) => return None,
             Some(Some(prev)) if !prev.containers.is_empty() => {
                 // the virtual paragraph would open inside that list / quote
@@ -1567,7 +1583,7 @@ impl Document {
             }
             _ => {}
         }
-        if let Some(Some(prev)) = self.adjacent_leaf_tree(&leaf, false)
+        if let Some(Some(prev)) = self.adjacent_leaf(&leaf, false)
             && line_start(text, prev.span.end) < ls
         {
             return Some(plan(
@@ -1581,92 +1597,13 @@ impl Document {
         None
     }
 
-    /// [`FormatDoc::adjacent_leaf`] from the block tree: the sibling after (before) `leaf`,
-    /// climbing out of containers where `leaf` is their last (first) block, then into the
-    /// sibling's first (last) block while it is a container. A container without blocks (an
-    /// empty quote `>`, an empty list item) stops the walk with `Some(None)`.
-    pub(crate) fn adjacent_leaf_tree(&self, leaf: &LeafView, forward: bool) -> Option<Option<LeafView>> {
-        let mut path = self.block_path_at(leaf.span.start);
-        // the path down to the leaf itself
-        while let Some((b, o)) = self.block_at_path_rel(&path) {
-            if b.span.start + o == leaf.span.start && !b.is_container() {
-                break;
-            }
-            path.pop();
-        }
-        if path.is_empty() {
-            return None;
-        }
-        // the nearest level with a sibling in that direction
-        let mut sib = loop {
-            let last = *path.last()?;
-            let i = if forward {
-                last + 1
-            } else {
-                match last.checked_sub(1) {
-                    Some(i) => i,
-                    None => {
-                        path.pop();
-                        if path.is_empty() {
-                            return None;
-                        }
-                        continue;
-                    }
-                }
-            };
-            let mut cand = path.clone();
-            *cand.last_mut()? = i;
-            if self.block_at_path_rel(&cand).is_some() {
-                break cand;
-            }
-            path.pop();
-            if path.is_empty() {
-                return None;
-            }
-        };
-        // down to the leaf at its edge
-        loop {
-            let (b, o) = self.block_at_path_rel(&sib)?;
-            if !b.is_container() {
-                return Some(self.leaf(b.span.start + o).filter(|l| l.span.start == b.span.start + o));
-            }
-            if b.children.is_empty() {
-                return Some(None);
-            }
-            sib.push(if forward { 0 } else { b.children.len() - 1 });
-        }
-    }
-
+    /// The end of the heading whose span `at` lies after on the same line, in the whitespace
+    /// that ends that line (owned by the heading, ADR 0011: an ATX heading's span stops at its
+    /// text or closing sequence, so whitespace typed after it is outside the block). `None`
+    /// elsewhere — including inside the span.
     pub(crate) fn heading_end_before_ws(&self, at: usize) -> Option<usize> {
-        let b = self.text().as_bytes();
-        let mut q = at.min(b.len());
-        while q > 0 && matches!(b[q - 1], b' ' | b'\t') {
-            q -= 1;
-        }
-        if q == at
-            || q == 0
-            || !b[at..]
-                .iter()
-                .take_while(|c| !matches!(c, b'\n' | b'\r'))
-                .all(|c| matches!(c, b' ' | b'\t'))
-        {
-            return None;
-        }
-        self.leaf(q - 1)
-            .filter(|l| matches!(l.kind, LeafKind::Heading { .. }) && l.span.end == q)
-            .map(|_| q)
-    }
-
-    pub(crate) fn leaf_before(&self, at: usize) -> Option<LeafView> {
-        let b = self.text().as_bytes();
-        let mut q = at.min(b.len());
-        while q > 0 && matches!(b[q - 1], b' ' | b'\t' | b'\n' | b'\r' | b'>') {
-            q -= 1;
-        }
-        if q == 0 {
-            return None;
-        }
-        self.leaf(q - 1).filter(|l| l.span.start < at)
+        let o = self.block_owner(at)?;
+        (matches!(o.leaf.kind, LeafKind::Heading { .. }) && at > o.leaf.span.end).then_some(o.leaf.span.end)
     }
 
     /// The typing step on the virtual empty paragraph (ADR 0006 §2.2): materialises the
@@ -1695,7 +1632,7 @@ impl Document {
                 None => String::new(),
             }
         } else {
-            match self.leaf(gap).or_else(|| self.leaf_before(gap)) {
+            match self.owner_leaf_view(gap, markise_doc::Affinity::Upstream) {
                 Some(l) => self.line_prefix(&l, gap),
                 None => String::new(),
             }
@@ -1852,9 +1789,7 @@ impl EditBehavior for Document {
         if let Some(st) = style_of(id) {
             return self.format_active(st, req);
         }
-        if let Some(r) = self.heading_block_request(id, req) {
-            return self.block_checked(id, &r);
-        }
+        // the active block is the caret's owner (ADR 0011), trailing whitespace included
         self.block_checked(id, req)
     }
 

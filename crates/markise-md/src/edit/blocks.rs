@@ -442,8 +442,14 @@ impl Document {
         if ctx.idx == 0 {
             // first item of a longer list: removed; the caret goes to a virtual paragraph
             // after the block before the list (in the list's container), if there is one
-            let Some(prev) = self.leaf_before(it.ls).map(|l| l.span.end) else {
-                return Ok(Plan::default()); // nothing before the list: Enter waits
+            // (the list's neighbour from the structure: a block without text before it — an
+            // empty quote — or nothing at all, and Enter waits; ADR 0011)
+            let Some(prev) = self
+                .adjacent_block(it.ls, false)
+                .and_then(|a| a.leaf)
+                .map(|l| l.span.end)
+            else {
+                return Ok(Plan::default());
             };
             ed.push(it.ls..next, "");
             if ctx.sequential() {
@@ -453,7 +459,7 @@ impl Document {
             let _ = sep;
             return Ok(Plan::single(
                 PlanStep::patches(ps),
-                Some(Selection::caret_at(DocPos::with_virt(prev, 1))),
+                Some(Selection::caret_at(DocPos::with_virt(prev, 1 + exit(prev)))),
             ));
         }
         let prev = &ctx.items[ctx.idx - 1];
@@ -624,7 +630,9 @@ impl Document {
         if item.content == at {
             return None;
         }
-        let prev = self.leaf_before(leaf.span.start)?;
+        // the previous block of the item from the structure: nothing to join past a block
+        // without text (an empty quote or nested item stays; ADR 0011)
+        let prev = self.adjacent_leaf(&leaf, false)??;
         if !matches!(prev.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) || prev.span.start < item.content {
             return None;
         }
@@ -1057,8 +1065,7 @@ impl Document {
         let text = self.text();
         let eol = self.line_ending().as_str();
         let leaf = self
-            .leaf(at)
-            .or_else(|| self.leaf_before(at))
+            .owner_leaf_view(at, markise_doc::Affinity::Upstream)
             .ok_or(PlanError::NotApplicable("no block"))?;
         let Some(li) = leaf.lines.iter().position(|l| l.start <= at && at <= l.end) else {
             // an empty soft line after a paragraph (C42): the paragraph ends there
@@ -1268,8 +1275,10 @@ impl Document {
     pub(crate) fn block_checked(&self, id: PlannerId, req: &PlanRequest) -> bool {
         let at = req.selection.primary().focus.offset;
         let list = || self.list_ctx(at);
+        // the toolbar's active block: the owner of the caret (ADR 0011)
+        let leaf = || self.block_owner(at).map(|o| o.leaf);
         match id {
-            planners::QUOTE => self.leaf(at).is_some_and(|l| {
+            planners::QUOTE => leaf().is_some_and(|l| {
                 matches!(
                     l.containers.last(),
                     Some(markise_doc::ContainerKind::Quote | markise_doc::ContainerKind::Callout(_))
@@ -1282,9 +1291,9 @@ impl Document {
             planners::TASK_LIST => {
                 list().is_some_and(|c| !c.ordered && c.items.iter().all(|i| i.syntax_end > i.marker.end))
             }
-            planners::PARAGRAPH => self.leaf(at).is_some_and(|l| l.kind == LeafKind::Paragraph),
+            planners::PARAGRAPH => leaf().is_some_and(|l| l.kind == LeafKind::Paragraph),
             _ => planners::heading_level(id)
-                .is_some_and(|n| self.leaf(at).is_some_and(|l| l.kind == LeafKind::Heading { level: n })),
+                .is_some_and(|n| leaf().is_some_and(|l| l.kind == LeafKind::Heading { level: n })),
         }
     }
 }

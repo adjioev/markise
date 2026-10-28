@@ -53,6 +53,11 @@ pub fn to_layout_job(text: &StyledText, width: Option<f32>) -> LayoutJob {
         sections: Vec::with_capacity(text.runs.len()),
         halign: text.halign,
         break_on_newline: text.break_on_newline,
+        // centred / right-aligned rows count their trailing whitespace: the spaces typed at
+        // the end of a centred heading (shown while the caret is in them, BE-1) must move the
+        // caret — epaint otherwise aligns on the text without them and clamps the caret at its
+        // end
+        keep_trailing_whitespace: true,
         ..LayoutJob::default()
     };
     job.wrap = TextWrapping {
@@ -369,5 +374,97 @@ impl TextBlock for EpaintBlock {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text::{FontRole, LocalPos, StyledText, TextStyle};
+    use epaint::Color32;
+    use epaint::emath::Align;
+    use markise_text::Affinity;
+
+    fn heading(s: &str, halign: Align) -> StyledText {
+        let mut t = StyledText::single(
+            s.to_string(),
+            TextStyle::new(32.0, 40.0, FontRole::Heading, Color32::BLACK),
+        );
+        t.halign = halign;
+        t
+    }
+
+    #[test]
+    fn trailing_spaces_of_a_right_aligned_row_move_the_caret() {
+        // right alignment: the row ends at the anchor; each trailing space moves the caret right
+        // of the previous position relative to the text start (the text shifts left by a space)
+        let mut fonts = crate::testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        let mut last: Option<(f32, f32)> = None;
+        for n in 0..4 {
+            let s = format!("Title{}", " ".repeat(n));
+            let b = f.shape(&heading(&s, Align::Max), Some(600.0));
+            let start = b.caret_rect(LocalPos::new(0, Affinity::Downstream)).min.x;
+            let end = b.caret_rect(LocalPos::new(s.len(), Affinity::Upstream)).min.x;
+            assert!(end <= 0.5, "the row ends at the anchor: {end}");
+            if let Some((ps, pe)) = last {
+                assert!(end - start > pe - ps + 1.0, "space {n}: caret moves away from the text");
+                assert!(start < ps, "space {n}: the text moves left");
+            }
+            last = Some((start, end));
+        }
+    }
+
+    #[test]
+    fn selection_over_trailing_spaces_of_a_centred_row() {
+        // selecting the spaces after a centred heading's text highlights them: a rect of about
+        // n space widths right after the text
+        let mut fonts = crate::testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        let one = {
+            let b = f.shape(&heading("Title ", Align::Center), Some(600.0));
+            let r = b.selection_rects(
+                LocalPos::new(5, Affinity::Downstream),
+                LocalPos::new(6, Affinity::Upstream),
+            );
+            assert_eq!(r.len(), 1, "{r:?}");
+            r[0].width()
+        };
+        assert!(one > 2.0, "a space is visible when selected: {one}");
+        let b = f.shape(&heading("Title   ", Align::Center), Some(600.0));
+        let text_end = b.caret_rect(LocalPos::new(5, Affinity::Upstream)).min.x;
+        let r = b.selection_rects(
+            LocalPos::new(5, Affinity::Downstream),
+            LocalPos::new(8, Affinity::Upstream),
+        );
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(
+            (r[0].min.x - text_end).abs() < 0.5,
+            "starts at the text end: {r:?} vs {text_end}"
+        );
+        assert!(
+            (r[0].width() - 3.0 * one).abs() < 1.0,
+            "three spaces wide: {r:?} vs {one}"
+        );
+    }
+
+    #[test]
+    fn trailing_spaces_of_a_centred_row_move_the_caret() {
+        // a centred heading with spaces typed after its text (Classic H1): each space moves the
+        // caret right (epaint used to align without them and clamp the caret at the text end)
+        let mut fonts = crate::testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        let mut last = None;
+        for n in 0..4 {
+            let s = format!("Title{}", " ".repeat(n));
+            let mut t = StyledText::single(s.clone(), TextStyle::new(32.0, 40.0, FontRole::Heading, Color32::BLACK));
+            t.halign = Align::Center;
+            let b = f.shape(&t, Some(600.0));
+            let x = b.caret_rect(LocalPos::new(s.len(), Affinity::Upstream)).min.x;
+            if let Some(prev) = last {
+                assert!(x > prev, "space {n}: {prev} -> {x}");
+            }
+            last = Some(x);
+        }
     }
 }

@@ -974,6 +974,8 @@ enum St {
     C(Key),
     S(Key),
     T(&'static str),
+    /// Cmd/Ctrl + Alt + Shift + key
+    Cas(Key),
 }
 
 /// `src` with `‸` (caret) or `⟦`…`⟧` (anchor…focus): the plain text and the selection.
@@ -1024,6 +1026,10 @@ fn run_marked(name: &str, src: &str, steps: &[St]) -> String {
                 h.step();
             }
             St::T(s) => type_keys(&mut h, s),
+            St::Cas(k) => {
+                h.key_press_modifiers(cmd().plus(Modifiers::ALT).plus(Modifiers::SHIFT), k);
+                h.step();
+            }
         }
     }
     h.step();
@@ -1247,4 +1253,268 @@ fn joins_stop_at_the_neighbouring_block_issue_16() {
         ),
         "---\ntitle: x\n---\n\n‸Title\n"
     );
+}
+
+/// Asserts that each of `n` Spaces typed at the caret moves the drawn caret right by one space
+/// width on the same line, with the caret offset advancing from `at`.
+fn assert_spaces_drawn(h: &mut Harness<'static, MarkiseApp>, at: usize, n: usize, what: &str) {
+    let mut x = caret_screen(h);
+    let mut step: Option<f32> = None;
+    for i in 1..=n {
+        type_keys(h, " ");
+        assert_eq!(caret(h), at + i, "{what}: offset after space {i}");
+        let r = caret_screen(h);
+        assert_eq!(r.center().y, x.center().y, "{what}: same line after space {i}");
+        let dx = r.min.x - x.min.x;
+        assert!(dx > 2.0, "{what}: advanced by a space after space {i}: {dx}");
+        if let Some(s) = step {
+            assert!((dx - s).abs() < 0.5, "{what}: one space width each: {dx} vs {s}");
+        }
+        step = Some(dx);
+        x = r;
+    }
+}
+
+#[test]
+fn spaces_after_a_final_heading_are_drawn() {
+    // owner report: a heading that is the last block — without a final newline, and with one
+    for backend in [
+        markise_ui_egui::TextBackend::Epaint,
+        markise_ui_egui::TextBackend::Parley,
+    ] {
+        for ((src, want), toolbar) in [("# Title", "# Title   x"), ("# Title\n", "# Title   x\n")]
+            .into_iter()
+            .flat_map(|c| [(c, false), (c, true)])
+        {
+            let (mut h, p) = open_with("final-heading-ws", src, backend);
+            h.state_mut().set_show_toolbar(toolbar);
+            h.step();
+            key(&mut h, Key::End);
+            assert_spaces_drawn(&mut h, 7, 3, &format!("{backend:?} {src:?} toolbar={toolbar}"));
+            type_keys(&mut h, "x");
+            assert_eq!(save(&mut h, &p), want, "{backend:?}");
+        }
+    }
+}
+
+/// The owner's settings on top of built-in style `style`: font size override 17.5, dark
+/// appearance, toolbar at the bottom.
+fn owner_look(h: &mut Harness<'static, MarkiseApp>, style: &str) {
+    let st = h.state_mut();
+    st.select_style(markise_theme::catalog::StyleId::Builtin(style.into()));
+    st.set_overrides(markise_theme::Overrides {
+        font_size: Some(17.5),
+        ..Default::default()
+    });
+    st.set_theme_choice(markise_ui_egui::Appearance::Dark);
+    st.set_show_toolbar(true);
+    st.set_toolbar_position(markise_engine::settings::ToolbarPosition::Bottom);
+    for _ in 0..3 {
+        h.step();
+    }
+}
+
+/// Opens an untitled document (File → New) with `style`, and types `src` into it.
+fn untitled_with(backend: markise_ui_egui::TextBackend, style: &str, src: &str) -> Harness<'static, MarkiseApp> {
+    let app = MarkiseApp::new(AppOptions {
+        text_backend: backend,
+        ..Default::default()
+    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), app);
+    h.step();
+    h.key_press_modifiers(cmd(), Key::N);
+    h.step();
+    assert!(h.state().is_untitled());
+    owner_look(&mut h, style);
+    wait_until(&mut h, "new document", |a| a.model().is_some() && !a.is_loading());
+    focus_doc(&mut h);
+    type_keys(&mut h, src);
+    h
+}
+
+#[test]
+fn spaces_after_a_heading_move_the_caret_in_every_style_and_level() {
+    // owner reports: Space at the end of an H1 changed the text but not the screen.
+    // - Classic centres H1: epaint aligned the centred row without its trailing whitespace and
+    //   put the caret at the text end;
+    // - the built-in CSS theme Drake (the owner's theme) centres H1 too.
+    // The caret's pixel x must grow with each Space, and a letter typed after them must appear
+    // after the gap; for every built-in style (the registry, incl. justified text) and every
+    // built-in CSS theme, every heading level, both text backends, a saved file and (styles)
+    // an untitled document, with a font size override, dark appearance and the toolbar at
+    // the bottom.
+    use markise_ui_egui::TextBackend::{Epaint, Parley};
+    let styles: Vec<&str> = markise_theme::style::BUILTIN_STYLES.iter().map(|s| s.id).collect();
+    assert!(styles.len() >= 5, "{styles:?}");
+    let mut fails = Vec::new();
+    for backend in [Epaint, Parley] {
+        for style in &styles {
+            for level in 1..=6 {
+                let hashes = "#".repeat(level);
+                let what = format!("{backend:?} {style} h{level}");
+                // a saved file (heading, an empty line, a paragraph)
+                let src = format!("{hashes} Title\n\nPara\n");
+                let (mut h, p) = open_with("ws-styles", &src, backend);
+                owner_look(&mut h, style);
+                key(&mut h, Key::End);
+                let at = caret(&mut h);
+                assert_eq!(at, level + 6, "{what}");
+                if let Err(e) = spaces_and_letter(&mut h, at, &what) {
+                    fails.push(e);
+                } else {
+                    assert_eq!(save(&mut h, &p), format!("{hashes} Title   x\n\nPara\n"), "{what}");
+                }
+                // an untitled document
+                let mut h = untitled_with(backend, style, &format!("{hashes} Title"));
+                let at = caret(&mut h);
+                if let Err(e) = spaces_and_letter(&mut h, at, &format!("{what} untitled")) {
+                    fails.push(e);
+                } else {
+                    assert!(text(&h).starts_with(&format!("{hashes} Title   x")), "{what} untitled");
+                }
+            }
+        }
+    }
+    // the built-in CSS themes (complete themes: their own heading alignment — Drake centres
+    // H1, the owner's case), dark, opened from a file
+    for backend in [Epaint, Parley] {
+        for theme in markise_theme::builtin::BUILTIN_THEMES.iter().map(|t| t.id) {
+            for level in 1..=6 {
+                let hashes = "#".repeat(level);
+                let what = format!("{backend:?} builtin:{theme} h{level}");
+                let src = format!("{hashes} Title\n\nPara\n");
+                let (mut h, p) = open_with("ws-themes", &src, backend);
+                let before = h.state().theme().name.clone();
+                h.state_mut()
+                    .select_theme(markise_theme::catalog::ThemeId::Builtin(theme.into()));
+                h.state_mut().set_theme_choice(markise_ui_egui::Appearance::Dark);
+                wait_until(&mut h, "theme imported", |a| a.theme().name != before);
+                h.step();
+                key(&mut h, Key::End);
+                let at = caret(&mut h);
+                assert_eq!(at, level + 6, "{what}");
+                if let Err(e) = spaces_and_letter(&mut h, at, &what) {
+                    fails.push(e);
+                } else {
+                    assert_eq!(save(&mut h, &p), format!("{hashes} Title   x\n\nPara\n"), "{what}");
+                }
+            }
+        }
+    }
+    assert!(fails.is_empty(), "{}", fails.join("\n"));
+}
+
+/// Three Spaces move the drawn caret right each time; a letter after them lands after the gap.
+fn spaces_and_letter(h: &mut Harness<'static, MarkiseApp>, at: usize, what: &str) -> Result<(), String> {
+    let x0 = caret_screen(h);
+    let mut x = x0;
+    for i in 1..=3 {
+        type_keys(h, " ");
+        if caret(h) != at + i {
+            return Err(format!("{what}: offset after space {i}: {}", caret(h)));
+        }
+        let r = caret_screen(h);
+        if r.center().y != x.center().y {
+            return Err(format!("{what}: caret left the line after space {i}"));
+        }
+        if r.min.x <= x.min.x + 1.0 {
+            return Err(format!("{what}: caret x after space {i}: {} -> {}", x.min.x, r.min.x));
+        }
+        x = r;
+    }
+    type_keys(h, "x");
+    let after = caret_screen(h);
+    if after.min.x <= x.min.x + 2.0 || x.min.x - x0.min.x <= 3.0 {
+        return Err(format!("{what}: no visible gap before the letter"));
+    }
+    Ok(())
+}
+
+#[test]
+fn cross_block_risks_block_ownership() {
+    // ADR 0011: joins, deletions and virtual-paragraph placement take the neighbouring block
+    // from the parsed structure and stop at a block without text (an empty quote `>`, an empty
+    // list item). Each case failed on main before the ownership query (Codex review of #18).
+    use St::*;
+    let cases: &[(&str, &str, &[St], &str)] = &[
+        // hinted-heading Enter (C43 on `## ` typed as paragraph text)
+        (
+            "hinted-quote",
+            "Before\n\n>\n\n‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "Before\n\n>\n\nx‸\n",
+        ),
+        // … after an empty nested container: stays in its own container
+        (
+            "hinted-nested-quote",
+            "> >\n>\n> ‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "> >\n>\n> x‸\n",
+        ),
+        (
+            "hinted-nested-item",
+            "> - a\n>   -\n>\n> ‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "> - a\n>   -\n>\n> x‸\n",
+        ),
+        (
+            "hinted-quote-in-item",
+            "- a\n\n  >\n\n  ‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "- a\n\n  >\n\n  x‸\n",
+        ),
+        // … when the empty block is outside the line's own container
+        (
+            "hinted-item-after-quote",
+            ">\n\n- ‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            ">\n\n- x‸\n",
+        ),
+        (
+            "hinted-item-after-quote-item",
+            "- >\n- ‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "- >\n- x‸\n",
+        ),
+        (
+            "hinted-after-quote",
+            "> q\n\n‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "> q\n\nx‸\n",
+        ),
+        // list-item paragraph join
+        (
+            "item-join",
+            "- a\n\n  >\n\n  ‸b\n",
+            &[K(Key::Backspace)],
+            "- a\n\n  >\n\n  ‸b\n",
+        ),
+        ("item-join-plain", "- a\n\n  ‸b\n", &[K(Key::Backspace)], "- a‸b\n"),
+        // final-block deletion (Delete Paragraph / Block)
+        ("final-block", "x\n\n>\n\nab‸c\n", &[Cas(Key::P)], "x\n\n>‸\n"),
+        // virtual-caret placement
+        (
+            "virtual-above",
+            "Before\n\n>\n\n## ‸Title\n",
+            &[K(Key::Enter)],
+            "Before\n\n>\n\n## ‸Title\n",
+        ),
+        (
+            "virtual-first-item",
+            "> q\n\n- ‸\n- b\n",
+            &[K(Key::Enter), T("x")],
+            "> q\n\nx‸\n\n- b\n",
+        ),
+    ];
+    let mut fails = Vec::new();
+    for (name, src, steps, want) in cases {
+        let got = run_marked(&format!("own-{name}"), src, steps);
+        if got != *want {
+            fails.push(format!("{name}: {src:?} -> {got:?}, want {want:?}"));
+        }
+    }
+    assert!(fails.is_empty(), "{}", fails.join("\n"));
 }
