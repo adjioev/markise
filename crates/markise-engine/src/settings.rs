@@ -27,6 +27,7 @@
 //! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`) — source editor display (spec 02 §12.1.1; View menu) | defaults |
 //! | `keyBinding` | object: command label (menu title) or id → accelerator (`"Ctrl+Shift+K"`), `""` unbinds (spec 05 §4.7); read only, kept verbatim | none |
 //! | `side_by_side_split` | Side by Side divider position: fraction of the editor width given to the source pane, `0.15`–`0.85` (spec 04 §3.3); omitted until the divider is moved | `0.5` |
+//! | `zoom` | whole-window zoom factor, `0.5`–`3.0` (View → Zoom In / Zoom Out / Actual Size, issue #43); omitted until zoomed | `1.0` |
 //!
 //! **Versions.** A version-1 file (or one without `version`) stores one `theme` id; it migrates
 //! to a complete theme: CSS themes (`builtin:`/`user:`) to `style: "theme:<id>"` +
@@ -310,6 +311,8 @@ pub struct Settings {
     pub consumed_pending: Vec<String>,
     /// Side by Side divider position (fraction of the width given to the source pane).
     pub side_by_side_split: Option<f32>,
+    /// Whole-window zoom factor (View → Zoom), [`ZOOM_RANGE`]; `None`: 100 %.
+    pub zoom: Option<f32>,
     /// The file's schema version (written back as [`VERSION`]; a newer file is not written).
     pub version: u64,
     /// Keys this version does not know, kept verbatim.
@@ -349,6 +352,7 @@ impl Default for Settings {
             overrides_extra: Map::new(),
             consumed_pending: Vec::new(),
             side_by_side_split: None,
+            zoom: None,
             version: VERSION,
             extra: Map::new(),
         }
@@ -429,6 +433,21 @@ pub struct SettingsPatch {
     pub source: Option<SourceSettings>,
     pub overrides: OverridesPatch,
     pub side_by_side_split: Option<f32>,
+    pub zoom: Option<f32>,
+}
+
+/// Valid whole-window zoom factors (issue #43: 50–300 %).
+pub const ZOOM_RANGE: (f32, f32) = (0.5, 3.0);
+
+fn valid_zoom(v: &Value) -> Option<f32> {
+    v.as_f64()
+        .map(|n| n as f32)
+        .filter(|n| n.is_finite() && *n > 0.0)
+        .map(|n| n.clamp(ZOOM_RANGE.0, ZOOM_RANGE.1))
+}
+
+fn round_zoom(v: f32) -> Value {
+    Value::from(((v as f64) * 100.0).round() / 100.0)
 }
 
 /// Valid divider positions (spec 04 §3.3): both panes stay usable.
@@ -479,6 +498,9 @@ impl SettingsPatch {
         if let Some(v) = self.side_by_side_split {
             s.side_by_side_split = Some(v);
         }
+        if let Some(v) = self.zoom {
+            s.zoom = Some(v);
+        }
     }
 
     /// Forgets the fields `saved` sets (they were written later): an older failed change must
@@ -495,6 +517,9 @@ impl SettingsPatch {
         }
         if saved.side_by_side_split.is_some() {
             self.side_by_side_split = None;
+        }
+        if saved.zoom.is_some() {
+            self.zoom = None;
         }
         if saved.diagrams.is_some() {
             self.diagrams = None;
@@ -556,6 +581,9 @@ impl SettingsPatch {
         if later.side_by_side_split.is_some() {
             self.side_by_side_split = later.side_by_side_split;
         }
+        if later.zoom.is_some() {
+            self.zoom = later.zoom;
+        }
     }
 
     /// JSON form (recovery file): absent = unchanged, `null` = cleared override.
@@ -572,6 +600,9 @@ impl SettingsPatch {
         }
         if let Some(v) = self.side_by_side_split {
             m.insert("side_by_side_split".into(), round_split(v));
+        }
+        if let Some(v) = self.zoom {
+            m.insert("zoom".into(), round_zoom(v));
         }
         if let Some(v) = self.diagrams {
             m.insert("diagrams".into(), Value::from(v));
@@ -618,6 +649,7 @@ impl SettingsPatch {
             colors: st("colors"),
             appearance: m.get("appearance").and_then(Value::as_str).and_then(Appearance::parse),
             side_by_side_split: m.get("side_by_side_split").and_then(valid_split),
+            zoom: m.get("zoom").and_then(valid_zoom),
             diagrams: m.get("diagrams").and_then(Value::as_bool),
             show_toolbar: m.get("showToolbar").and_then(Value::as_bool),
             toolbar_position: m
@@ -705,6 +737,7 @@ impl Settings {
             s.appearance = a;
         }
         s.side_by_side_split = map.remove("side_by_side_split").as_ref().and_then(valid_split);
+        s.zoom = map.remove("zoom").as_ref().and_then(valid_zoom);
         if let Some(Value::Bool(b)) = map.remove("diagrams") {
             s.diagrams = b;
         }
@@ -747,6 +780,9 @@ impl Settings {
         }
         if let Some(v) = self.side_by_side_split {
             map.insert("side_by_side_split".into(), round_split(v));
+        }
+        if let Some(v) = self.zoom {
+            map.insert("zoom".into(), round_zoom(v));
         }
         let o = self.overrides.to_json(&self.overrides_extra);
         if o.as_object().is_some_and(|m| !m.is_empty()) {
@@ -1097,6 +1133,35 @@ mod tests {
         let mut s = Settings::default();
         back.apply(&mut s);
         assert!(!s.diagrams);
+    }
+
+    #[test]
+    fn zoom_round_trips_and_is_clamped() {
+        // issue #43: the whole-window zoom is persisted, 50–300 %
+        let s = Settings {
+            zoom: Some(1.2345),
+            ..Settings::default()
+        };
+        let back = Settings::from_json(&s.to_json()).unwrap();
+        assert_eq!(back.zoom, Some(1.23));
+        assert!(!Settings::default().to_json().contains("\"zoom\""));
+        let wild = Settings::from_json(r#"{"version": 2, "zoom": 9}"#).unwrap();
+        assert_eq!(wild.zoom, Some(ZOOM_RANGE.1));
+        let tiny = Settings::from_json(r#"{"version": 2, "zoom": 0.1}"#).unwrap();
+        assert_eq!(tiny.zoom, Some(ZOOM_RANGE.0));
+        let bad = Settings::from_json(r#"{"version": 2, "zoom": "x"}"#).unwrap();
+        assert_eq!(bad.zoom, None);
+        assert!(!bad.extra.contains_key("zoom"));
+        let mut p = SettingsPatch {
+            zoom: Some(1.5),
+            ..Default::default()
+        };
+        assert_eq!(SettingsPatch::from_json(&p.to_json()).unwrap(), p);
+        let mut t = Settings::default();
+        p.apply(&mut t);
+        assert_eq!(t.zoom, Some(1.5));
+        p.forget(&p.clone());
+        assert!(p.is_empty());
     }
 
     #[test]

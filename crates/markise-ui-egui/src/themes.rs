@@ -309,6 +309,8 @@ pub struct ThemeManager {
     chose_appearance: bool,
     /// The Side by Side divider was moved before the settings file arrived.
     chose_split: bool,
+    /// The window was zoomed before the settings file arrived.
+    chose_zoom: bool,
     /// View → Diagrams toggled before the settings file was read.
     chose_diagrams: bool,
     /// View → Toolbar toggled before the settings file was read.
@@ -381,6 +383,7 @@ impl ThemeManager {
             chose_colors: false,
             chose_appearance: false,
             chose_split: false,
+            chose_zoom: false,
             chose_diagrams: false,
             chose_toolbar: false,
             chose_toolbar_position: false,
@@ -684,6 +687,26 @@ impl ThemeManager {
         }
     }
 
+    /// Whole-window zoom factor (View → Zoom; 1.0 until zoomed).
+    pub fn zoom(&self) -> f32 {
+        self.settings.zoom.unwrap_or(1.0)
+    }
+
+    /// Sets the whole-window zoom (clamped to 50–300 %; persisted, written debounced).
+    pub fn set_zoom(&mut self, v: f32) {
+        if !v.is_finite() {
+            return;
+        }
+        let (lo, hi) = markise_engine::settings::ZOOM_RANGE;
+        let v = v.clamp(lo, hi);
+        self.chose_zoom = true;
+        if self.settings.zoom.unwrap_or(1.0) != v {
+            self.settings.zoom = Some(v);
+            self.dirty.zoom = Some(v);
+            self.schedule_save();
+        }
+    }
+
     /// Side by Side divider position (fraction of the width given to the source pane), if set.
     pub fn side_by_side_split(&self) -> Option<f32> {
         self.settings.side_by_side_split
@@ -898,6 +921,9 @@ impl ThemeManager {
                 }
                 if self.chose_split {
                     self.settings.side_by_side_split = chosen.side_by_side_split;
+                }
+                if self.chose_zoom {
+                    self.settings.zoom = chosen.zoom;
                 }
                 if self.chose_diagrams {
                     self.settings.diagrams = chosen.diagrams;

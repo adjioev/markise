@@ -10,7 +10,7 @@ use egui::{Context, Key, Modifiers};
 use markise_engine::editor::command::Registry;
 use markise_engine::editor::keymap::{Keymap, Platform};
 use markise_engine::export::ExportKind;
-use markise_engine::settings::{Appearance, ToolbarPosition};
+use markise_engine::settings::{Appearance, ToolbarPosition, ZOOM_RANGE};
 use markise_export::pandoc::PandocFormat;
 use markise_md::MarkdownFormat;
 use markise_theme::catalog::{Origin, Selection, ThemeFamily, ThemeId};
@@ -397,6 +397,10 @@ impl MarkiseApp {
                 self.app_item("view.diagrams", true, Check::Toggle(self.diagrams)),
                 Entry::Submenu(self.source_menu()),
                 Entry::Separator,
+                self.app_item("view.zoomIn", self.zoom() < ZOOM_RANGE.1, Check::None),
+                self.app_item("view.zoomOut", self.zoom() > ZOOM_RANGE.0, Check::None),
+                self.app_item("view.actualSize", true, Check::None),
+                Entry::Separator,
                 self.app_item("view.fullScreen", true, Check::None),
             ],
         )
@@ -611,6 +615,9 @@ impl MarkiseApp {
                 }
                 self.themes.set_source_prefs(p);
             }
+            "view.zoomIn" => self.zoom_step(1),
+            "view.zoomOut" => self.zoom_step(-1),
+            "view.actualSize" => self.set_zoom(1.0),
             "view.fullScreen" => {
                 let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
@@ -710,9 +717,13 @@ impl MarkiseApp {
                 else {
                     return true;
                 };
-                let Some(chord) = crate::viewer::chord_of(*key, *modifiers, platform) else {
+                let Some(mut chord) = crate::viewer::chord_of(*key, *modifiers, platform) else {
                     return true;
                 };
+                // ⇧= arrives as "+" on most layouts: the zoom chords are written with "="
+                if chord.shift && chord.key == "+" {
+                    chord.key = "=".into();
+                }
                 match cmds.iter().find(|(_, c)| *c == chord) {
                     Some((id, _)) => {
                         fire.push(*id);

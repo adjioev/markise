@@ -68,6 +68,9 @@ pub type ThemeChoice = Appearance;
 /// default theme at startup; a typical import takes 1–5 ms).
 const FIRST_THEME_WAIT: Duration = Duration::from_millis(300);
 
+/// How long the status bar shows a zoom change back to 100 %.
+const ZOOM_NOTE: Duration = Duration::from_secs(2);
+
 /// Startup options.
 #[derive(Clone)]
 pub struct AppOptions {
@@ -456,6 +459,8 @@ pub struct MarkiseApp {
     /// About Markise window.
     about: crate::about::About,
     commit: Option<String>,
+    /// The status bar shows the zoom until then (it changed), and always while not 100 %.
+    zoom_note_until: Option<Instant>,
     /// File operations in progress (the inline rename) and the save-dialog test hook.
     pub(crate) files: files::FileOps,
     /// Shows the yes/no questions ([`AppOptions::confirm`]).
@@ -539,6 +544,7 @@ impl MarkiseApp {
             menu_platform: markise_engine::editor::keymap::Platform::current(),
             about: Default::default(),
             commit: opts.commit,
+            zoom_note_until: None,
             files: Default::default(),
             confirm: opts.confirm,
             question_id: 0,
@@ -645,6 +651,31 @@ impl MarkiseApp {
             (Some(d), Some(c)) => d.viewer.ed.source.is_some() && (self.source_visible || d.source_ui.has_focus(c)),
             _ => false,
         }
+    }
+
+    /// Screen rectangle (last frame) of the document item holding `offset` (tests).
+    pub fn viewer_item_rect(&self, offset: usize) -> Option<egui::Rect> {
+        self.doc.as_ref()?.viewer.item_screen_rect(offset)
+    }
+
+    /// Whole-window zoom factor (View → Zoom In / Zoom Out / Actual Size; issue #43).
+    pub fn zoom(&self) -> f32 {
+        self.themes.zoom()
+    }
+
+    /// Sets the whole-window zoom (clamped to 50–300 %, persisted); the status bar shows it.
+    pub fn set_zoom(&mut self, z: f32) {
+        self.themes.set_zoom(z);
+        self.zoom_note_until = Some(Instant::now() + ZOOM_NOTE);
+        if let Some(c) = &self.ctx {
+            c.request_repaint();
+        }
+    }
+
+    /// Zoom In (`dir` > 0) / Zoom Out by one 10 % step.
+    fn zoom_step(&mut self, dir: i32) {
+        let tenths = (self.zoom() * 10.0).round() as i32 + dir.signum();
+        self.set_zoom(tenths as f32 / 10.0);
     }
 
     /// Side by Side divider position (fraction of the width for the source pane).
@@ -1772,6 +1803,11 @@ impl MarkiseApp {
             t.poll(w);
         }
         self.resolve_theme(ctx);
+        // whole-window zoom (issue #43): egui's zoom factor scales every point
+        let z = self.themes.zoom();
+        if (ctx.zoom_factor() - z).abs() > 1e-4 {
+            ctx.set_zoom_factor(z);
+        }
         // the settings file (read in the background) may switch diagrams
         if self.themes.diagrams() != self.diagrams {
             self.apply_diagrams(self.themes.diagrams());
@@ -2243,6 +2279,15 @@ impl MarkiseApp {
                     ui.label("Saving…");
                 }
                 self.export.status(ui);
+                let z = self.themes.zoom();
+                let noted = self.zoom_note_until.is_some_and(|t| t > Instant::now());
+                if (z - 1.0).abs() > 1e-4 || noted {
+                    ui.weak(format!("Zoom {:.0} %", z * 100.0));
+                    if let Some(t) = self.zoom_note_until.filter(|_| noted) {
+                        ui.ctx()
+                            .request_repaint_after(t.saturating_duration_since(Instant::now()));
+                    }
+                }
                 if let Some(d) = &self.doc {
                     let m = d.viewer.model();
                     ui.weak(format!(

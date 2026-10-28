@@ -314,6 +314,10 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("view.highlightCode", "Highlight Code", &[]),
     app("view.diagrams", "Diagrams", &[]),
     app("view.fullScreen", "Toggle Full Screen", &[both("Ctrl+Cmd+F", "F11")]),
+    // whole-window zoom (issue #43); ⌘= / ⌘- without Shift are the heading level commands
+    app("view.zoomIn", "Zoom In", &[both("Shift+Cmd+=", "Ctrl+Shift+=")]),
+    app("view.zoomOut", "Zoom Out", &[both("Shift+Cmd+-", "Ctrl+Shift+-")]),
+    app("view.actualSize", "Actual Size", &[both("Shift+Cmd+0", "Ctrl+Shift+0")]),
     // source editor display preferences (spec 02 §12.1.1), View → Source Editor
     app("view.sourceLineNumbers", "Line Numbers", &[]),
     app("view.sourceSoftWrap", "Soft Wrap", &[]),
