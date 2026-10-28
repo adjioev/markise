@@ -629,6 +629,25 @@ fn inline_rename_commits_when_its_row_is_scrolled_away_and_the_user_clicks_elsew
     }
     h.run_steps(2);
     assert!(h.query_by_label("n79.md").is_some(), "scrolled to the end");
+    assert!(h.state().rename_state().is_some(), "wheel scrolling keeps editing");
+    // back up: the field has the focus again; down again, and a click elsewhere
+    let wheel = |h: &mut H, dy: f32| {
+        h.hover_at(egui::pos2(120.0, 300.0));
+        for _ in 0..10 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, dy),
+                modifiers: Default::default(),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            });
+            h.step();
+        }
+        h.run_steps(2);
+    };
+    wheel(&mut h, 400.0);
+    field_focused(&mut h);
+    wheel(&mut h, -400.0);
     assert!(h.state().rename_state().is_some(), "still editing");
     // a click in the document
     let doc = egui::pos2(620.0, 200.0);
@@ -671,8 +690,9 @@ fn click(h: &mut H, p: egui::Pos2) {
 }
 
 #[test]
-fn inline_rename_survives_a_click_on_the_tree_scroll_bar() {
-    // Codex review round 2 of PR #38: scrolling the tree is not "clicking elsewhere"
+fn inline_rename_ends_on_a_click_on_the_tree_scroll_bar() {
+    // owner rule (Codex review round 3 of PR #38): scrolling keeps editing, but any press
+    // outside the field ends it — the scroll bar included, as in Finder
     let d = tmpdir("rename-scrollbar");
     for i in 0..80 {
         std::fs::write(d.join(format!("n{i:02}.md")), "x\n").unwrap();
@@ -687,34 +707,13 @@ fn inline_rename_survives_a_click_on_the_tree_scroll_bar() {
     let ctx = h.ctx.clone();
     h.state_mut().tree_action(&ctx, TreeAction::Rename(d.join("n02.md")));
     field_focused(&mut h);
-    type_text(&mut h, "kept");
-    let bar = h.state().file_tree_scrollbar().expect("tree shown");
-    click(&mut h, egui::pos2(bar.center().x - 6.0, bar.center().y));
+    type_text(&mut h, "barred");
+    // the scroll bar sits right of the rows
+    let row = h.get_by_label("n05.md").rect();
+    click(&mut h, egui::pos2(row.right() + 6.0, 400.0));
     h.run_steps(3);
-    assert_eq!(
-        h.state().rename_state().map(|(_, n)| n.to_string()),
-        Some("kept.md".into()),
-        "still editing"
-    );
-    assert!(d.join("n02.md").is_file());
-    // (the click on the track may have scrolled the row away) back to the top: the field
-    // has the focus again and Enter renames
-    h.hover_at(egui::pos2(120.0, 300.0));
-    for _ in 0..10 {
-        h.event(egui::Event::MouseWheel {
-            unit: egui::MouseWheelUnit::Point,
-            delta: egui::vec2(0.0, 400.0),
-            modifiers: Default::default(),
-            phase: egui::TouchPhase::Move,
-            source: egui::MouseWheelSource::Wheel,
-        });
-        h.step();
-    }
-    assert!(h.state().rename_state().is_some(), "scrolling keeps editing");
-    field_focused(&mut h);
-    h.key_press(Key::Enter);
-    h.step();
-    assert!(d.join("kept.md").is_file() && !d.join("n02.md").exists());
+    assert!(h.state().rename_state().is_none(), "editing ended");
+    assert!(d.join("barred.md").is_file() && !d.join("n02.md").exists(), "committed");
     let _ = std::fs::remove_dir_all(&d);
 }
 

@@ -466,8 +466,6 @@ pub struct MarkiseApp {
     /// The widget that had the keyboard focus when the open question appeared (given back
     /// after the answer; nothing has the focus while a question is open).
     focus_before_question: Option<(egui::Id, u8)>,
-    /// The last pointer press: position and frame (the inline rename's blur decision).
-    last_press: Option<(egui::Pos2, u64)>,
 }
 
 impl MarkiseApp {
@@ -545,7 +543,6 @@ impl MarkiseApp {
             confirm: opts.confirm,
             question_id: 0,
             focus_before_question: None,
-            last_press: None,
         }
     }
 
@@ -1749,9 +1746,6 @@ impl MarkiseApp {
         }
         self.frames += 1;
         self.timing.frames += 1;
-        if let Some(p) = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.latest_pos()).flatten()) {
-            self.last_press = Some((p, self.frames));
-        }
         if ctx.input(|i| i.viewport().close_requested()) && !self.request_close() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }

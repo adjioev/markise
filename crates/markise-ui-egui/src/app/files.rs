@@ -257,12 +257,6 @@ impl MarkiseApp {
                     self.set_ask(Ask::Trash(p));
                 }
             }
-            TreeAction::EndRename(EditEnd::CommitOrCancel) if !self.rename_blur_ends_edit(ctx) => {
-                // a press on the tree's scroll bar: keep editing, with the focus back
-                if let Some(r) = self.files.rename.as_mut() {
-                    r.refocus = true;
-                }
-            }
             TreeAction::EndRename(end) => self.end_rename(end),
             TreeAction::Reveal(p) => {
                 if let Err(e) = reveal(&p) {
@@ -307,55 +301,34 @@ impl MarkiseApp {
         self.files.rename.as_ref().and_then(|r| r.error.as_deref())
     }
 
-    /// The file tree's scroll bar strip at the last frame (tests).
-    pub fn file_tree_scrollbar(&self) -> Option<egui::Rect> {
-        self.tree.as_ref().and_then(|t| t.scrollbar_rect())
-    }
-
-    /// Where the pointer was pressed this frame or the frame before.
-    fn recent_press(&self) -> Option<egui::Pos2> {
-        self.last_press
-            .filter(|(_, f)| self.frames.saturating_sub(*f) <= 1)
-            .map(|(p, _)| p)
-    }
-
-    /// The one decision whether losing the inline field's focus without Enter / Esc ends
-    /// editing (like a click elsewhere): not when this frame's press is on the field itself
-    /// or on the tree's scroll bar (scrolling the tree is not "elsewhere").
-    fn rename_blur_ends_edit(&self, ctx: &Context) -> bool {
-        let Some(r) = self.files.rename.as_ref() else {
-            return false;
-        };
-        // egui moves the focus away at the end of the pressing frame: the press may be last
-        // frame's
-        let Some(at) = self.recent_press() else {
-            return true; // no press: Tab, another widget took the focus, the tab switched
-        };
-        let id = crate::sidebar::rename_field_id();
-        let on_field = r.drawn && ctx.read_response(id).is_some_and(|f| f.rect.contains(at));
-        let on_scrollbar = self
-            .tree
-            .as_ref()
-            .and_then(|t| t.scrollbar_rect())
-            .is_some_and(|b| b.contains(at));
-        !on_field && !on_scrollbar
-    }
-
-    /// The inline rename field had the focus and lost it without its row seeing it (the row
-    /// was scrolled out of view, so it is not drawn, or it came back unfocused): a recent
-    /// press that [ends editing](Self::rename_blur_ends_edit) ends it like a click elsewhere;
-    /// otherwise editing goes on and the field gets the focus back when it is drawn.
+    /// The inline rename's "click elsewhere" rule (as in Finder): wheel or trackpad scrolling
+    /// keeps editing; any pointer press outside the field — the tree's scroll bar included,
+    /// and wherever the field is, drawn or scrolled out of view — ends it like a click
+    /// elsewhere (renames if the name is accepted, otherwise keeps the old name and says why
+    /// in the banner). Losing the focus without a press (Tab) ends it in the row itself.
     pub(super) fn rename_blur(&mut self, ctx: &Context) {
         let Some(r) = self.files.rename.as_ref() else { return };
-        let id = crate::sidebar::rename_field_id();
-        if !r.had_focus || ctx.memory(|m| m.has_focus(id)) {
-            return;
+        if !r.had_focus {
+            return; // not started yet (its row was never shown)
         }
-        if self.recent_press().is_some() && self.rename_blur_ends_edit(ctx) {
+        let id = crate::sidebar::rename_field_id();
+        let focused = ctx.memory(|m| m.has_focus(id));
+        // where this frame's presses started (not where the pointer is now)
+        let presses: Vec<egui::Pos2> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::PointerButton { pos, pressed: true, .. } => Some(*pos),
+                    _ => None,
+                })
+                .collect()
+        });
+        let field = r.drawn.then(|| ctx.read_response(id).map(|f| f.rect)).flatten();
+        if presses.iter().any(|p| !field.is_some_and(|f| f.contains(*p))) {
             self.end_rename(EditEnd::CommitOrCancel);
-        } else if let Some(r) = self.files.rename.as_mut() {
-            // the focus went with the row (scrolled out of view, e.g. by a press on the
-            // scroll bar): still editing, the field takes the focus back when it is drawn
+        } else if !focused && let Some(r) = self.files.rename.as_mut() {
+            // the focus went with the row (scrolled out of view): the field takes it back
+            // when it is drawn again
             r.refocus = true;
         }
     }
