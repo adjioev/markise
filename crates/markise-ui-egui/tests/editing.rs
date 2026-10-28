@@ -1459,4 +1459,3 @@ fn cross_block_risks_block_ownership() {
     }
     assert!(fails.is_empty(), "{}", fails.join("\n"));
 }
-
