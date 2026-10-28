@@ -118,7 +118,14 @@ fn s2_1_heading_stays_a_paragraph_until_enter() {
             ("type:x", "## Plan\n\nx‸", "h2"),
         ],
     );
-    script("‸", &[("type:---", "---‸", "para"), ("edit.newline", "---(v)‸", "hr")]);
+    // `---` on the first line opens front matter instead (S-2.4, tested below)
+    script(
+        "a\n\n‸",
+        &[
+            ("type:---", "a\n\n---‸", "para"),
+            ("edit.newline", "a\n\n---(v)‸", "hr"),
+        ],
+    );
     // after a materialised virtual paragraph (Enter at the end of a paragraph)
     script(
         "x‸",
@@ -259,4 +266,102 @@ fn c44_shift_enter_in_headings() {
     script("‸Title\n===", &[("edit.softBreak", "<br/>‸Title\n===", "h1")]);
     script("a‸ - b\n===", &[("edit.softBreak", "a<br/>‸ - b\n===", "h1")]);
     script("a‸ ===\n---", &[("edit.softBreak", "a<br/>‸ ===\n---", "h2")]);
+}
+
+/// Typed one key at a time with auto-pairing: the box / tag closed by the auto-paired `]`
+/// stays literal (the caret on a stop) until the trigger is complete (§2.1, §4.2; #20 h05,
+/// h11, h13).
+#[test]
+fn auto_paired_bracket_does_not_convert_under_the_caret() {
+    let keys = |s: &str| -> Vec<String> { s.chars().map(|c| format!("type:{c}")).collect() };
+    for (src, typed, want, tree) in [
+        ("‸", "- [ ] buy", "- [ ] buy‸", "li[ ]"),
+        ("- ‸\n", "[ ] go", "- [ ] go‸\n", "li[ ]"),
+        ("‸", "- [x] ", "- [x] ‸", "li[x]"),
+    ] {
+        let mut t = T::at(src);
+        for k in keys(typed) {
+            step(&mut t, &k);
+            assert!(t.selection_on_stops(), "after {k}: {}", t.shown());
+            t.check_model();
+        }
+        assert_eq!(t.shown(), want);
+        assert!(t.ed.session.doc().debug_tree().contains(tree));
+    }
+    let mut t = T::at("‸");
+    for k in keys("> [!NOTE") {
+        step(&mut t, &k);
+        assert!(t.selection_on_stops(), "after {k}: {}", t.shown());
+    }
+    assert_eq!(t.shown(), "> [!NOTE‸]");
+    step(&mut t, "type:]");
+    assert_eq!(t.shown(), "> [!NOTE](v)‸");
+    // Enter on the still empty body keeps the caret in the callout
+    step(&mut t, "edit.newline");
+    assert_eq!(t.shown(), "> [!NOTE](v)‸");
+    for k in keys("body") {
+        step(&mut t, &k);
+    }
+    assert_eq!(t.shown(), "> [!NOTE]\n>\n> body‸");
+    assert!(t.ed.session.doc().debug_tree().contains("alert-note"));
+}
+
+/// S-2.4: `---` + Enter on the first line opens front matter; elsewhere it is a rule.
+/// (Drawing the caret inside front matter is M2d, so the plain surface is checked here.)
+#[test]
+fn s2_4_front_matter_at_the_document_start() {
+    let mut t = T::at("‸");
+    t.typ("---");
+    t.key("edit.newline");
+    assert_eq!(t.shown(), "---\n‸\n---");
+    assert!(t.ed.session.doc().debug_tree().contains("fm"));
+    t.typ("k");
+    assert_eq!(t.shown(), "---\nk‸\n---");
+    t.check_model();
+    t.key("edit.undo");
+    t.key("edit.undo");
+    assert_eq!(t.shown(), "---‸");
+    script(
+        "a\n\n‸",
+        &[
+            ("type:---", "a\n\n---‸", "para"),
+            ("edit.newline", "a\n\n---(v)‸", "hr"),
+        ],
+    );
+}
+
+/// Spec 02 §3.3: Cmd+K at a caret inserts `[]()` with the caret on a stop between the
+/// brackets, so typing writes the link text (#20 g04).
+#[test]
+fn link_at_a_caret_puts_the_caret_in_the_empty_text() {
+    let mut t = T::new("see \n");
+    t.set(4);
+    t.run("format.link");
+    assert_eq!(t.text(), "see []()\n");
+    assert_eq!(t.caret().offset, 5);
+    assert!(t.selection_on_stops(), "caret between the brackets is a stop");
+    t.typ("t");
+    assert_eq!(t.text(), "see [t]()\n");
+    t.check_model();
+}
+
+/// A loaded callout with body text: Enter at the body's end opens the virtual paragraph in
+/// the callout, a second Enter leaves the callout (only a tag-only callout keeps the caret).
+#[test]
+fn enter_leaves_a_callout_that_has_a_body() {
+    for src in ["> [!NOTE]\n> body‸\n", "> [!NOTE]\n>\n> body‸\n"] {
+        let mut t = T::at(src);
+        t.key("edit.newline");
+        let c = t.caret();
+        assert_eq!(c.virt, 1, "{src:?}: {}", t.shown());
+        t.key("edit.newline");
+        assert!(t.caret().virt > c.virt, "{src:?}: second Enter leaves: {}", t.shown());
+        t.typ("x");
+        let text = t.text().to_string();
+        assert!(
+            text.ends_with("\n\nx\n") || text.ends_with("\n\nx"),
+            "{src:?}: {text:?}"
+        );
+        assert!(!text.contains("> x"), "{src:?}: {text:?}");
+    }
 }

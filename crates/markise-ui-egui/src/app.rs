@@ -2493,6 +2493,8 @@ fn leave_source_pane(viewer: &mut DocViewer) {
         viewer.ed.session.set_selection(caret);
     }
     viewer.ed.close_source();
+    // the source editor that had the keyboard focus is gone: typing continues in the document
+    viewer.request_refocus();
 }
 
 /// Sets egui's theme preference for the appearance and returns whether the result is dark.
