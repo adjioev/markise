@@ -46,8 +46,7 @@ fn edit(h: &mut Harness<'static, MarkiseApp>, from: &str, to: &str) {
         h.state_mut().toggle_source();
         h.run_steps(1);
     }
-    let b = h.state_mut().source_buffer_mut().unwrap();
-    *b = b.replace(from, to);
+    h.state_mut().edit_source_text(|t| *t = t.replace(from, to));
     h.run_steps(1);
 }
 
@@ -118,8 +117,7 @@ fn edits_made_while_an_open_is_pending_are_not_dropped() {
     h.run_steps(1);
     h.state_mut().open(big.clone()); // clean: starts loading
     // edit before the load completes
-    let buf = h.state_mut().source_buffer_mut().unwrap();
-    buf.push_str("late edit\n");
+    h.state_mut().edit_source_text(|t| t.push_str("late edit\n"));
     wait_until(&mut h, "load finished", |s| !s.is_loading());
     assert!(h.state().is_asking(), "the finished load waits for a decision");
     assert_eq!(h.state().document_path(), Some(a.as_path()));
@@ -236,8 +234,7 @@ fn edits_made_during_a_save_stay_unsaved() {
         assert!(t.elapsed() < Duration::from_secs(10));
         h.step();
     }
-    let b = h.state_mut().source_buffer_mut().unwrap();
-    *b = b.replace("two", "three");
+    h.state_mut().edit_source_text(|t| *t = t.replace("two", "three"));
     wait_until(&mut h, "jobs", |s| !s.is_busy());
     assert!(h.state().is_dirty(), "the newer edit is still unsaved");
     assert_eq!(std::fs::read_to_string(&a).unwrap(), "two\n");

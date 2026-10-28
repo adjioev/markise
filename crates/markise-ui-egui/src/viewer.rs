@@ -206,6 +206,7 @@ impl DocViewer {
         join: bool,
     ) -> Result<(), markise_engine::editor::EditError> {
         self.ed.release();
+        // the source pane's selection follows the replacement's diff (its live marks)
         let r = self
             .ed
             .session
@@ -217,7 +218,18 @@ impl DocViewer {
         if caret.primary().end().offset > len {
             self.ed.session.set_selection(Selection::caret(len));
         }
+        // the source pane shows the new text; its selection is mapped through the diff and
+        // snapped to caret positions
+        if let Some(p) = self.ed.source.as_mut() {
+            p.view.rebuild(self.ed.session.text());
+        }
+        self.ed.source_load_selection();
         r
+    }
+
+    /// Font generation the view was last told about.
+    pub fn font_generation(&self) -> u64 {
+        self.font_gen
     }
 
     pub fn set_font_generation(&mut self, g: u64) {
@@ -473,7 +485,9 @@ impl DocViewer {
         };
         // the available caret stops may have changed under the selection (a diagram or
         // formula became rendered, front matter collapsed): move it to the nearest stop
-        if with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.fix_selection(sh, &*images)) {
+        // (not on a read-only surface without the focus: in Side by Side the session's selection
+        // may be the source pane's, which need not sit on a rendered caret stop)
+        if (focused || editable) && with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.fix_selection(sh, &*images)) {
             self.ed.refresh_focus();
             ctx.request_repaint();
         }
@@ -785,7 +799,11 @@ impl DocViewer {
 }
 
 /// Runs `f` with the text shaper of the active backend.
-fn with_shaper<R>(ctx: &egui::Context, parley: Option<&mut ParleyText>, f: impl FnOnce(&mut dyn TextShaper) -> R) -> R {
+pub(crate) fn with_shaper<R>(
+    ctx: &egui::Context,
+    parley: Option<&mut ParleyText>,
+    f: impl FnOnce(&mut dyn TextShaper) -> R,
+) -> R {
     match parley {
         Some(p) => f(&mut p.shaper),
         None => ctx.fonts_mut(|fonts| f(fonts)),
@@ -930,6 +948,24 @@ fn paint_dashed(painter: &egui::Painter, pts: &[Pos2], stroke: Stroke, d: f32, g
     }
 }
 
+/// Paints one shaped text block (epaint galley or parley block) with its anchor at `pos`.
+pub(crate) fn paint_text_block(
+    painter: &egui::Painter,
+    ui: &Ui,
+    text: &Arc<dyn markise_layout::TextBlock>,
+    pos: Pos2,
+    parley: Option<&mut ParleyText>,
+) {
+    if let Some(galley) = text.galley() {
+        // Re-request the galley: egui's galley cache returns the same Arc while the font atlas
+        // is unchanged, and a freshly rasterised one after an atlas rebuild.
+        let g = painter.layout_job((*galley.job).clone());
+        painter.galley(pos, g, Color32::PLACEHOLDER);
+    } else if let (Some(block), Some(p)) = (text.as_any().downcast_ref::<ParleyBlock>(), parley) {
+        p.atlas.paint(ui.ctx(), painter, block, pos);
+    }
+}
+
 fn paint_layout(
     painter: &egui::Painter,
     ui: &Ui,
@@ -949,16 +985,7 @@ fn paint_layout(
                 if !r.intersects(clip_rect) {
                     continue;
                 }
-                if let Some(galley) = text.galley() {
-                    // Re-request the galley: egui's galley cache returns the same Arc while the
-                    // font atlas is unchanged, and a freshly rasterised one after an atlas rebuild.
-                    let g = painter.layout_job((*galley.job).clone());
-                    painter.galley(*pos + off, g, Color32::PLACEHOLDER);
-                } else if let (Some(block), Some(p)) =
-                    (text.as_any().downcast_ref::<ParleyBlock>(), parley.as_deref_mut())
-                {
-                    p.atlas.paint(ui.ctx(), painter, block, *pos + off);
-                }
+                paint_text_block(painter, ui, text, *pos + off, parley.as_deref_mut());
             }
             Prim::Rect {
                 rect,

@@ -723,8 +723,8 @@ impl Registry {
                 }
             }
             Run::Engine(_) | Run::Caret(_) | Run::Host => match id {
-                "edit.undo" if !s.history().can_undo() => Err(CommandError::Disabled("nothing to undo")),
-                "edit.redo" if !s.history().can_redo() => Err(CommandError::Disabled("nothing to redo")),
+                "edit.undo" if !s.can_undo() => Err(CommandError::Disabled("nothing to undo")),
+                "edit.redo" if !s.can_redo() => Err(CommandError::Disabled("nothing to redo")),
                 _ => Ok(()),
             },
         }

@@ -121,13 +121,10 @@ fn typing_undo_save_in_the_rich_view() {
     // source mode shows the edited text and edits made there come back to the rich view
     h.state_mut().toggle_source();
     h.step();
-    let b = h.state_mut().source_buffer_mut().unwrap();
-    b.push_str("\nAdded in source.\n");
+    h.state_mut().edit_source_text(|t| t.push_str("\nAdded in source.\n"));
     h.step();
     h.state_mut().toggle_source();
-    wait_until(&mut h, "rebuild", |a| {
-        !a.is_busy() && a.viewed_text().is_some_and(|t| t.contains("Added"))
-    });
+    h.step();
     assert!(text(&h).ends_with("Added in source.\n"));
     // the source edit is one undoable transaction in the rich view
     focus_doc(&mut h);

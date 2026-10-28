@@ -24,6 +24,7 @@
 //! | `consumed_pending` | names of recovery files already merged into this file (written with the merge; see [`update_file`]); omitted when empty | none |
 //! | `overrides` | object with optional `font_family` (string), `font_size`, `line_height`, `content_width` (numbers); omitted when empty | none |
 //! | `editing` | object: `auto_pair_brackets` (default `true`), `auto_pair_markdown` (`false`), `smart_punctuation` (convert on input, `false`), `smart_dashes_em` (`--` → em dash, `false`) (spec 02 §4, §13, §16; Edit menu) | defaults |
+//! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`) — source editor display (spec 02 §12.1.1; View menu) | defaults |
 //! | `keyBinding` | object: command label (menu title) or id → accelerator (`"Ctrl+Shift+K"`), `""` unbinds (spec 05 §4.7); read only, kept verbatim | none |
 //! | `side_by_side_split` | Side by Side divider position: fraction of the editor width given to the source pane, `0.15`–`0.85` (spec 04 §3.3); omitted until the divider is moved | `0.5` |
 //!
@@ -239,6 +240,49 @@ impl EditingSettings {
     }
 }
 
+/// Source editor display preferences (spec 02 §12.1.1 display defaults), settings key
+/// `source`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceSettings {
+    pub line_numbers: bool,
+    pub soft_wrap: bool,
+    pub current_line: bool,
+    pub whitespace_marks: bool,
+}
+
+impl Default for SourceSettings {
+    fn default() -> Self {
+        SourceSettings {
+            line_numbers: false,
+            soft_wrap: true,
+            current_line: true,
+            whitespace_marks: false,
+        }
+    }
+}
+
+impl SourceSettings {
+    fn to_json(self) -> Value {
+        let mut m = Map::new();
+        m.insert("line_numbers".into(), Value::from(self.line_numbers));
+        m.insert("soft_wrap".into(), Value::from(self.soft_wrap));
+        m.insert("current_line".into(), Value::from(self.current_line));
+        m.insert("whitespace_marks".into(), Value::from(self.whitespace_marks));
+        Value::Object(m)
+    }
+    fn from_json(v: &Value) -> Option<Self> {
+        let Value::Object(m) = v else { return None };
+        let d = SourceSettings::default();
+        let b = |k: &str, def: bool| m.get(k).and_then(Value::as_bool).unwrap_or(def);
+        Some(SourceSettings {
+            line_numbers: b("line_numbers", d.line_numbers),
+            soft_wrap: b("soft_wrap", d.soft_wrap),
+            current_line: b("current_line", d.current_line),
+            whitespace_marks: b("whitespace_marks", d.whitespace_marks),
+        })
+    }
+}
+
 /// The settings the app persists.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -255,6 +299,8 @@ pub struct Settings {
     pub toolbar_position: ToolbarPosition,
     /// Editing preferences (key `editing`).
     pub editing: EditingSettings,
+    /// Source editor display preferences (key `source`).
+    pub source: SourceSettings,
     pub overrides: FontOverrides,
     /// Members of `overrides` this version does not know, kept verbatim.
     pub overrides_extra: Map<String, Value>,
@@ -298,6 +344,7 @@ impl Default for Settings {
             show_toolbar: true,
             toolbar_position: ToolbarPosition::Top,
             editing: EditingSettings::default(),
+            source: SourceSettings::default(),
             overrides: FontOverrides::default(),
             overrides_extra: Map::new(),
             consumed_pending: Vec::new(),
@@ -379,6 +426,7 @@ pub struct SettingsPatch {
     pub show_toolbar: Option<bool>,
     pub toolbar_position: Option<ToolbarPosition>,
     pub editing: Option<EditingSettings>,
+    pub source: Option<SourceSettings>,
     pub overrides: OverridesPatch,
     pub side_by_side_split: Option<f32>,
 }
@@ -424,6 +472,9 @@ impl SettingsPatch {
         if let Some(v) = self.editing {
             s.editing = v;
         }
+        if let Some(v) = self.source {
+            s.source = v;
+        }
         self.overrides.apply(&mut s.overrides);
         if let Some(v) = self.side_by_side_split {
             s.side_by_side_split = Some(v);
@@ -456,6 +507,9 @@ impl SettingsPatch {
         }
         if saved.editing.is_some() {
             self.editing = None;
+        }
+        if saved.source.is_some() {
+            self.source = None;
         }
         let (o, so) = (&mut self.overrides, &saved.overrides);
         if so.font_family.is_some() {
@@ -495,6 +549,9 @@ impl SettingsPatch {
         if later.editing.is_some() {
             self.editing = later.editing;
         }
+        if later.source.is_some() {
+            self.source = later.source;
+        }
         self.overrides.merge(later.overrides);
         if later.side_by_side_split.is_some() {
             self.side_by_side_split = later.side_by_side_split;
@@ -527,6 +584,9 @@ impl SettingsPatch {
         }
         if let Some(v) = self.editing {
             m.insert("editing".into(), v.to_json());
+        }
+        if let Some(v) = self.source {
+            m.insert("source".into(), v.to_json());
         }
         let mut o = Map::new();
         let op = &self.overrides;
@@ -565,6 +625,7 @@ impl SettingsPatch {
                 .and_then(Value::as_str)
                 .and_then(ToolbarPosition::parse),
             editing: m.get("editing").and_then(EditingSettings::from_json),
+            source: m.get("source").and_then(SourceSettings::from_json),
             ..Default::default()
         };
         if let Some(Value::Object(o)) = m.get("overrides") {
@@ -661,6 +722,9 @@ impl Settings {
         if let Some(e) = map.remove("editing").as_ref().and_then(EditingSettings::from_json) {
             s.editing = e;
         }
+        if let Some(e) = map.remove("source").as_ref().and_then(SourceSettings::from_json) {
+            s.source = e;
+        }
         s.extra = map;
         Some(s)
     }
@@ -677,6 +741,7 @@ impl Settings {
         map.insert("showToolbar".into(), Value::from(self.show_toolbar));
         map.insert("toolbarPosition".into(), Value::from(self.toolbar_position.as_str()));
         map.insert("editing".into(), self.editing.to_json());
+        map.insert("source".into(), self.source.to_json());
         if !self.consumed_pending.is_empty() {
             map.insert("consumed_pending".into(), Value::from(self.consumed_pending.clone()));
         }
@@ -914,6 +979,23 @@ mod tests {
     use super::*;
 
     /// DG-2/DG-7: `diagrams` defaults to on, round-trips, and patches carry it.
+    #[test]
+    fn source_settings_default_and_round_trip() {
+        let d = Settings::default();
+        assert!(!d.source.line_numbers && d.source.soft_wrap && d.source.current_line && !d.source.whitespace_marks);
+        let s = Settings::from_json(r#"{"version": 2, "source": {"line_numbers": true}}"#).unwrap();
+        assert!(s.source.line_numbers && s.source.soft_wrap);
+        assert_eq!(Settings::from_json(&s.to_json()).unwrap().source, s.source);
+        let p = SettingsPatch {
+            source: Some(SourceSettings {
+                whitespace_marks: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(SettingsPatch::from_json(&p.to_json()).unwrap().source, p.source);
+    }
+
     #[test]
     fn editing_settings_default_and_round_trip() {
         let d = Settings::default();

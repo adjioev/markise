@@ -12,6 +12,7 @@ use crate::hints::{HintSet, LiteralHint};
 use crate::patch::PatchSet;
 use crate::plan::{Plan, PlanError, PlanRequest, TypingPlan, plain_typing};
 use crate::pos::{DocPos, VirtualSlot};
+use crate::source::SourceToken;
 use crate::text::{LineEnding, Span};
 use crate::view::{FlatEvent, HeadingInfo, InlineSource, LeafView, RichInline, TableView};
 
@@ -284,6 +285,13 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
             h = (h ^ k ^ self.reference_fingerprint(*k).unwrap_or(0x9e37_79b9)).wrapping_mul(0x0100_0000_01b3);
         }
         h
+    }
+    /// Source-mode tokens (spec 02 §12.1.1) of the text in `range` (absolute): ascending,
+    /// non-overlapping runs clipped to `range` are appended to `out`; bytes without a run are
+    /// plain. Computed from the format's parse; only the blocks overlapping `range` are
+    /// visited, so the cost follows the range, not the document. Default: no tokens.
+    fn source_tokens(&self, range: Range<usize>, out: &mut Vec<SourceToken>) {
+        let _ = (range, out);
     }
     /// Root for absolute resource paths (Markdown: front matter `typora-root-url`).
     fn resource_root(&self) -> Option<String> {

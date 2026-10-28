@@ -11,11 +11,8 @@ pub mod icons;
 pub mod images;
 pub mod menu;
 pub mod side_by_side;
-#[cfg(test)]
-mod side_by_side_tests;
 pub mod sidebar;
 pub mod source;
-pub mod source_highlight;
 pub mod text_paint;
 pub mod themes;
 pub mod toolbar;

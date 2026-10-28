@@ -66,6 +66,17 @@ fn shift_cmd() -> Modifiers {
     Modifiers { shift: true, ..cmd() }
 }
 
+/// The platform's "jump to the document end" chord (spec 02 §5.4): Cmd+Down on macOS,
+/// Ctrl+End elsewhere (Ctrl+Down is not bound there).
+fn doc_end_chord(extend: bool) -> (Modifiers, Key) {
+    let m = if extend { shift_cmd() } else { cmd() };
+    if cfg!(target_os = "macos") {
+        (m, Key::ArrowDown)
+    } else {
+        (m, Key::End)
+    }
+}
+
 /// An open document in the real app.
 struct Ed {
     h: H,
@@ -1085,7 +1096,8 @@ fn e12_page_down_and_up_move_caret_and_keep_it_visible() {
 #[test]
 fn e13_cmd_down_then_type_appends() {
     let mut e = Ed::open("e13", "a\n\nb\n");
-    e.at(0).chord(cmd(), Key::ArrowDown).typ("c");
+    let (m, k) = doc_end_chord(false);
+    e.at(0).chord(m, k).typ("c");
     e.expect_saved("a\n\nbc\n");
 }
 
@@ -1208,7 +1220,8 @@ fn f08_selection_replaced_with_space() {
 #[test]
 fn f09_cmd_shift_down_select_to_end_and_type() {
     let mut e = Ed::open("f09", "a\n\nb\n\nc\n");
-    e.at(3).chord(shift_cmd(), Key::ArrowDown).typ("z");
+    let (m, k) = doc_end_chord(true);
+    e.at(3).chord(m, k).typ("z");
     e.expect_saved("a\n\nz\n");
 }
 
@@ -1849,7 +1862,7 @@ fn l11_caret_after_document_shrinks_in_source_mode() {
     let mut e = Ed::open("l11", "first paragraph\n\nsecond paragraph here\n");
     e.at(38).typ("!");
     e.chord(cmd(), Key::Slash);
-    *e.h.state_mut().source_buffer_mut().unwrap() = "ab\n".into();
+    e.h.state_mut().edit_source_text(|t| *t = "ab\n".into());
     e.h.step();
     e.chord(cmd(), Key::Slash);
     wait_until(&mut e.h, "rich view", |a| {
