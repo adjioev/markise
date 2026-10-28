@@ -81,7 +81,7 @@ fn opening_another_file_asks_and_cancel_keeps_edits() {
     edit(&mut h, "# B", "# Bee");
     h.state_mut().open(a.clone());
     h.run_steps(2);
-    h.get_by_label("Discard").click();
+    h.get_by_label("Don’t Save").click();
     wait_until(&mut h, "discard then open", |s| {
         s.document_path() == Some(a.as_path()) && !s.is_busy()
     });

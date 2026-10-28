@@ -156,7 +156,7 @@ fn new_with_unsaved_edits_asks_first() {
     assert!(!h.state().is_asking() && h.state().document_path() == Some(a.as_path()));
     h.state_mut().new_document();
     h.run_steps(2);
-    h.get_by_label("Discard").click();
+    h.get_by_label("Don’t Save").click();
     h.step();
     assert!(h.state().is_untitled() && !h.state().is_dirty());
     assert_eq!(std::fs::read_to_string(&a).unwrap(), "alpha\n", "discarded, not saved");
@@ -225,10 +225,10 @@ fn sidebar_new_file_new_folder_and_rename() {
     h.state_mut().confirm_rename();
     assert!(h.state().rename_error().is_some_and(|e| e.contains("already exists")));
     assert_eq!(std::fs::read_to_string(d.join("existing.md")).unwrap(), "x\n");
-    // typing and clicking Rename in the dialog renames; the open document follows
+    // a new name and Enter in the row's field renames; the open document follows
     h.state_mut().set_rename_text("renamed.md");
     h.run_steps(2);
-    h.get_by_label("Rename").click();
+    h.key_press(Key::Enter);
     h.step();
     assert!(h.state().rename_state().is_none());
     let renamed = d.join("renamed.md");

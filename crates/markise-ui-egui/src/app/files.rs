@@ -1,14 +1,15 @@
 //! File commands (spec 04 §2 File menu, §4.1 sidebar file items): File → New (an untitled
 //! document in this window), Save As…, and the file tree's New File / New Folder / Rename /
 //! Move to Trash / Reveal / Copy Path. The disk work is in `markise_engine::fsops`; this
-//! module wires it to the document, the watcher and the file tree, and owns the rename and
-//! delete questions.
+//! module wires it to the document, the watcher and the file tree. Rename, New File and New
+//! Folder edit the name inline in the tree row ([`crate::sidebar::InlineEdit`]); Move to Trash
+//! asks through [`crate::confirm`].
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use egui::{Context, RichText};
+use egui::Context;
 use markise_engine::fsops;
 use markise_engine::load::{LoadTimings, Loaded};
 use markise_engine::save::{DiskVersion, Expect};
@@ -17,24 +18,16 @@ use markise_layout::DocModel;
 use markise_md::Document;
 
 use super::{Ask, Banner, MarkiseApp, SaveRequest, Then};
-use crate::sidebar::TreeAction;
+use crate::sidebar::{EditEnd, InlineEdit, Tab, TreeAction};
 
-/// State of the file operations: the open rename / delete question and the test hook that
-/// answers the save dialog.
+/// State of the file operations: the inline rename and the test hook that answers the save
+/// dialog.
 #[derive(Default)]
 pub(crate) struct FileOps {
     /// Answers handed out instead of showing the native save dialog (tests).
     save_answers: VecDeque<Option<PathBuf>>,
-    rename: Option<Rename>,
-    delete: Option<PathBuf>,
-}
-
-struct Rename {
-    path: PathBuf,
-    name: String,
-    error: Option<String>,
-    /// First frame: focus the field and select the name without its extension.
-    fresh: bool,
+    /// The tree row whose name is being edited.
+    pub(crate) rename: Option<InlineEdit>,
 }
 
 /// `p` with the default extension when it has none (spec 05: `md`; returns whether it was
@@ -91,7 +84,7 @@ impl MarkiseApp {
             d.sync();
         }
         if self.is_dirty() {
-            self.ask = Some(Ask::Unsaved(Then::New));
+            self.set_ask(Ask::Unsaved(Then::New));
             return;
         }
         self.new_document_now();
@@ -259,7 +252,12 @@ impl MarkiseApp {
                 }
             },
             TreeAction::Rename(p) => self.start_rename(p),
-            TreeAction::Delete(p) => self.files.delete = Some(p),
+            TreeAction::Delete(p) => {
+                if self.ask.is_none() {
+                    self.set_ask(Ask::Trash(p));
+                }
+            }
+            TreeAction::EndRename(end) => self.end_rename(end),
             TreeAction::Reveal(p) => {
                 if let Err(e) = reveal(&p) {
                     self.banner = Some(Banner::Error(format!("Cannot show {}: {e}", p.display())));
@@ -276,53 +274,110 @@ impl MarkiseApp {
         }
     }
 
-    /// Opens the rename question for `path`.
+    /// Starts editing the name of `path` inline in its tree row (the Files tab is shown).
     pub fn start_rename(&mut self, path: PathBuf) {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        self.files.rename = Some(Rename {
-            path,
-            name,
-            error: None,
-            fresh: true,
-        });
+        self.sidebar_visible = true;
+        self.tab = Tab::Files;
+        if let Some(t) = self.tree.as_mut() {
+            t.expand_to(&path);
+        }
+        self.files.rename = Some(InlineEdit::new(path));
     }
 
-    /// The rename question: the item and the name typed so far (tests).
+    /// The inline rename: the item and the name typed so far (tests).
     pub fn rename_state(&self) -> Option<(&Path, &str)> {
         self.files.rename.as_ref().map(|r| (r.path.as_path(), r.name.as_str()))
     }
 
-    /// Types `name` into the rename question (tests).
+    /// Types `name` into the inline rename field (tests).
     pub fn set_rename_text(&mut self, name: &str) {
         if let Some(r) = self.files.rename.as_mut() {
             r.name = name.to_string();
         }
     }
 
-    /// The error shown in the rename question (tests).
+    /// The error shown under the renamed row (tests).
     pub fn rename_error(&self) -> Option<&str> {
         self.files.rename.as_ref().and_then(|r| r.error.as_deref())
     }
 
-    /// "Rename" in the rename question: performs it, or keeps the question open with the
-    /// reason it was refused (an existing name is never replaced).
+    /// The inline rename's "click elsewhere" rule (as in Finder): wheel or trackpad scrolling
+    /// keeps editing; any pointer press outside the field — the tree's scroll bar included,
+    /// and wherever the field is, drawn or scrolled out of view — ends it like a click
+    /// elsewhere (renames if the name is accepted, otherwise keeps the old name and says why
+    /// in the banner). Losing the focus without a press (Tab) ends it in the row itself.
+    pub(super) fn rename_blur(&mut self, ctx: &Context) {
+        let Some(r) = self.files.rename.as_ref() else { return };
+        if !r.had_focus {
+            return; // not started yet (its row was never shown)
+        }
+        let id = crate::sidebar::rename_field_id();
+        let focused = ctx.memory(|m| m.has_focus(id));
+        // where this frame's presses started (not where the pointer is now)
+        let presses: Vec<egui::Pos2> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::PointerButton { pos, pressed: true, .. } => Some(*pos),
+                    _ => None,
+                })
+                .collect()
+        });
+        let field = r.drawn.then(|| ctx.read_response(id).map(|f| f.rect)).flatten();
+        if presses.iter().any(|p| !field.is_some_and(|f| f.contains(*p))) {
+            self.end_rename(EditEnd::CommitOrCancel);
+        } else if !focused {
+            match ctx.memory(|m| m.focused()) {
+                // another widget took the focus (Tab while the row was scrolled away): a
+                // focus loss, like Tab in the row
+                Some(other) if other != id => self.end_rename(EditEnd::CommitOrCancel),
+                // the focus went with the row (scrolled out of view): the field takes it
+                // back when it is drawn again, unless something else has it by then
+                _ => {
+                    if let Some(r) = self.files.rename.as_mut() {
+                        r.refocus = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Enter in the inline rename: performs it, or keeps editing with the reason it was
+    /// refused (an existing name is never replaced).
     pub fn confirm_rename(&mut self) {
+        self.end_rename(EditEnd::Commit);
+    }
+
+    /// Esc in the inline rename: keeps the old name (tests).
+    pub fn cancel_rename(&mut self) {
+        self.end_rename(EditEnd::Cancel);
+    }
+
+    fn end_rename(&mut self, end: EditEnd) {
         let Some(mut r) = self.files.rename.take() else { return };
-        if self.saving.is_some() {
-            // the running save writes the old path; renaming now could mark text clean
-            // that the new file does not hold
-            r.error = Some("A save is in progress. Try again when it has finished.".into());
-            self.files.rename = Some(r);
+        if end == EditEnd::Cancel {
             return;
         }
-        match fsops::rename(&r.path, &r.name) {
+        let result = if self.saving.is_some() {
+            // the running save writes the old path; renaming now could mark text clean
+            // that the new file does not hold
+            Err("A save is in progress. Try again when it has finished.".to_string())
+        } else {
+            fsops::rename(&r.path, r.name.trim_end_matches(['\r', '\n']))
+        };
+        match result {
             Ok(to) => self.renamed(&r.path, &to),
-            Err(e) => {
+            Err(e) if end == EditEnd::Commit => {
                 r.error = Some(e);
+                r.select = true; // focus the field again
                 self.files.rename = Some(r);
+            }
+            Err(e) => {
+                // clicked elsewhere with a refused name: the old name stays (say why, if a
+                // new one was typed)
+                if r.path.file_name().is_none_or(|n| n.to_string_lossy() != r.name) {
+                    self.banner = Some(Banner::Info(format!("Not renamed: {e}")));
+                }
             }
         }
     }
@@ -354,107 +409,30 @@ impl MarkiseApp {
         }
     }
 
-    /// "Move to Trash" in the delete question (tests).
+    /// "Move to Trash" for the open Move to Trash question (tests; the app answers it
+    /// through [`crate::confirm`]).
     pub fn confirm_delete(&mut self) {
-        let Some(p) = self.files.delete.take() else { return };
-        match fsops::move_to_trash(&p) {
+        if matches!(self.ask, Some(Ask::Trash(_))) {
+            self.answer_question(crate::confirm::Choice::MoveToTrash);
+        }
+    }
+
+    pub(super) fn move_to_trash(&mut self, p: &Path) {
+        match fsops::move_to_trash(p) {
             Ok(()) => {
                 if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
-                    t.renamed(&p, &p, w); // forget its listing; list the parent again
+                    t.renamed(p, p, w); // forget its listing; list the parent again
                 }
             }
             Err(e) => self.banner = Some(Banner::Error(e)),
         }
     }
 
-    /// The delete question is open (tests).
+    /// The Move to Trash question is open for this item (tests).
     pub fn delete_pending(&self) -> Option<&Path> {
-        self.files.delete.as_deref()
-    }
-
-    /// The rename and delete questions (after any Save / Discard question).
-    pub(super) fn file_dialogs(&mut self, ctx: &Context) {
-        if self.ask.is_some() {
-            return;
-        }
-        if let Some(p) = self.files.delete.clone() {
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let mut choice = None;
-            egui::Modal::new(egui::Id::unique("markise-delete")).show(ctx, |ui| {
-                ui.set_max_width(420.0);
-                ui.label(RichText::new(format!("Move “{name}” to the Trash?")).strong());
-                ui.horizontal(|ui| {
-                    if ui.button("Move to Trash").clicked() {
-                        choice = Some(true);
-                    }
-                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        choice = Some(false);
-                    }
-                });
-            });
-            match choice {
-                Some(true) => self.confirm_delete(),
-                Some(false) => self.files.delete = None,
-                None => {}
-            }
-            return;
-        }
-        let Some(r) = self.files.rename.as_mut() else { return };
-        let mut choice = None;
-        let field = egui::Id::unique("markise-rename-field");
-        egui::Modal::new(egui::Id::unique("markise-rename")).show(ctx, |ui| {
-            ui.set_max_width(420.0);
-            let old = r
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            ui.label(RichText::new(format!("Rename “{old}”")).strong());
-            let out = egui::TextEdit::singleline(&mut r.name)
-                .id(field)
-                .desired_width(380.0)
-                .show(ui);
-            if r.fresh {
-                r.fresh = false;
-                out.response.request_focus();
-                // select the name without its extension (folders: all of it)
-                let stem = if r.path.is_dir() {
-                    r.name.chars().count()
-                } else {
-                    r.name
-                        .rfind('.')
-                        .map_or(r.name.chars().count(), |i| r.name[..i].chars().count())
-                };
-                let mut st = out.state;
-                st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-                    egui::text::CCursor::new(0),
-                    egui::text::CCursor::new(stem),
-                )));
-                st.store(ui.ctx(), field);
-            }
-            if out.response.changed() {
-                r.error = None;
-            }
-            if let Some(e) = &r.error {
-                ui.colored_label(egui::Color32::from_rgb(0xc0, 0x39, 0x2b), e);
-            }
-            let enter = out.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            ui.horizontal(|ui| {
-                if ui.button("Rename").clicked() || enter {
-                    choice = Some(true);
-                }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    choice = Some(false);
-                }
-            });
-        });
-        match choice {
-            Some(true) => self.confirm_rename(),
-            Some(false) => self.files.rename = None,
-            None => {}
+        match &self.ask {
+            Some(Ask::Trash(p)) => Some(p),
+            _ => None,
         }
     }
 }

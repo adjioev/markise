@@ -566,6 +566,10 @@ impl DocViewer {
                 let phase = BLINK_HALF - (since % BLINK_HALF);
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(phase.max(0.02)));
             }
+        }
+        // the I-beam only while the pointer is over the surface itself (not over the sidebar,
+        // the toolbar or a window on top of it: `hovered` honours layers; issue #36)
+        if resp.hovered() {
             ctx.set_cursor_icon(CursorIcon::Text);
         }
 
@@ -577,8 +581,6 @@ impl DocViewer {
             let on_toggle = layout.toggle.is_some_and(|t| t.contains(local));
             if link || on_toggle {
                 ctx.set_cursor_icon(CursorIcon::PointingHand);
-            } else if !focused {
-                ctx.set_cursor_icon(CursorIcon::Text);
             }
         }
         if resp.clicked()

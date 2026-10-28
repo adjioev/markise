@@ -222,7 +222,8 @@ fn style_colors_and_overrides_are_independent_and_persisted() {
         h.get_by_label("Complete Themes");
         h.get_by_label("Font & Size… (Custom)").click();
         h.run_steps(2);
-        h.get_by_label("Font & size");
+        // the window and its title line
+        assert!(h.query_all_by_label("Font & size").count() >= 1);
         h.get_by_label("Line height");
         wait_until(&mut h, "settings written", |_| {
             std::fs::read_to_string(&settings).is_ok_and(|s| {

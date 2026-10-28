@@ -43,7 +43,7 @@ use markise_theme::catalog::{StyleId, ThemeId};
 
 use crate::images::TextureStore;
 use crate::side_by_side::{DEFAULT_SPLIT, SideBySide};
-use crate::sidebar::{FileTree, Tab, outline};
+use crate::sidebar::{EditEnd, FileTree, Tab, TreeAction, outline};
 use crate::source::SourceEditor;
 use crate::themes::{ConfigDir, InstallDone, ThemeEvent, ThemeManager};
 use crate::viewer::DocViewer;
@@ -98,6 +98,10 @@ pub struct AppOptions {
     pub text_backend: crate::text_paint::TextBackend,
     /// Short git commit of the build (About window), if known.
     pub commit: Option<String>,
+    /// Shows the yes/no questions (unsaved changes, Move to Trash, …). Default: the in-app
+    /// dialog ([`crate::confirm::InApp`], no OS window); the desktop app passes
+    /// [`crate::confirm::native`]; tests pass [`crate::confirm::Scripted`].
+    pub confirm: Arc<dyn crate::confirm::Confirm>,
 }
 
 impl Default for AppOptions {
@@ -115,6 +119,7 @@ impl Default for AppOptions {
             highlight_code: true,
             text_backend: crate::text_paint::TextBackend::Epaint,
             commit: None,
+            confirm: Arc::new(crate::confirm::InApp),
         }
     }
 }
@@ -325,6 +330,8 @@ enum Ask {
     Link(String),
     /// "Import theme…": a theme of that name exists; replace it?
     ReplaceTheme { src: PathBuf, existing: Vec<PathBuf> },
+    /// Move to Trash from the file tree.
+    Trash(PathBuf),
 }
 
 enum Banner {
@@ -449,8 +456,16 @@ pub struct MarkiseApp {
     /// About Markise window.
     about: crate::about::About,
     commit: Option<String>,
-    /// File operations in progress (rename / delete questions) and the save-dialog test hook.
+    /// File operations in progress (the inline rename) and the save-dialog test hook.
     pub(crate) files: files::FileOps,
+    /// Shows the yes/no questions ([`AppOptions::confirm`]).
+    confirm: Arc<dyn crate::confirm::Confirm>,
+    /// Number of the open question ([`crate::confirm::Question::id`]): changes whenever a
+    /// question is opened or answered, so an answer never applies to another question.
+    question_id: u64,
+    /// The widget that had the keyboard focus when the open question appeared (given back
+    /// after the answer; nothing has the focus while a question is open).
+    focus_before_question: Option<(egui::Id, u8)>,
 }
 
 impl MarkiseApp {
@@ -525,6 +540,9 @@ impl MarkiseApp {
             about: Default::default(),
             commit: opts.commit,
             files: Default::default(),
+            confirm: opts.confirm,
+            question_id: 0,
+            focus_before_question: None,
         }
     }
 
@@ -714,9 +732,10 @@ impl MarkiseApp {
         })
     }
 
-    /// A Save / Discard / Cancel (or link) question is open.
+    /// A yes/no question is open (unsaved changes, link, theme, Move to Trash, export
+    /// overwrite).
     pub fn is_asking(&self) -> bool {
-        self.ask.is_some()
+        self.question().is_some()
     }
 
     pub fn set_theme_choice(&mut self, c: ThemeChoice) {
@@ -798,7 +817,7 @@ impl MarkiseApp {
             return;
         }
         if self.is_dirty() {
-            self.ask = Some(Ask::Unsaved(Then::Open(path)));
+            self.set_ask(Ask::Unsaved(Then::Open(path)));
             return;
         }
         self.open_now(path, LoadReason::Open);
@@ -876,7 +895,7 @@ impl MarkiseApp {
                     LoadReason::Open => {
                         if self.is_dirty() {
                             // edits were made while the open was pending
-                            self.ask = Some(Ask::Unsaved(Then::Install(Box::new(loaded))));
+                            self.set_ask(Ask::Unsaved(Then::Install(Box::new(loaded))));
                         } else {
                             self.install(loaded);
                         }
@@ -1390,7 +1409,7 @@ impl MarkiseApp {
             d.sync();
         }
         if self.is_dirty() {
-            self.ask = Some(Ask::Unsaved(then));
+            self.set_ask(Ask::Unsaved(then));
         } else {
             self.perform(then);
         }
@@ -1423,7 +1442,7 @@ impl MarkiseApp {
         if self.allow_close || !self.is_dirty() {
             return true;
         }
-        self.ask = Some(Ask::Unsaved(Then::Close));
+        self.set_ask(Ask::Unsaved(Then::Close));
         false
     }
 
@@ -1572,6 +1591,7 @@ impl MarkiseApp {
         if self.visuals_fp != Some(fp) {
             self.visuals_fp = Some(fp);
             ctx.set_visuals(visuals_for(&self.theme));
+            crate::dialog::Look::from_theme(&self.theme).store(ctx);
         }
     }
 
@@ -1597,7 +1617,7 @@ impl MarkiseApp {
                 self.theme_report = true;
             }
             ThemeEvent::InstallCollision { src, existing } => {
-                self.ask = Some(Ask::ReplaceTheme { src, existing });
+                self.set_ask(Ask::ReplaceTheme { src, existing });
             }
             ThemeEvent::Error(e) => self.banner = Some(Banner::Error(e)),
         }
@@ -1649,11 +1669,18 @@ impl MarkiseApp {
         }
     }
 
+    /// Follows a link as a click on it in the document does (tests).
+    pub fn follow_link(&mut self, target: &str) {
+        if let Some(c) = self.ctx.clone() {
+            self.open_link(&c, target);
+        }
+    }
+
     fn open_link(&mut self, ctx: &Context, target: &str) {
         let base = self.doc.as_ref().and_then(|d| d.path.parent().map(Path::to_path_buf));
         match classify_link(target, base.as_deref()) {
             LinkAction::Open(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
-            LinkAction::Confirm(u) => self.ask = Some(Ask::Link(u)),
+            LinkAction::Confirm(u) => self.set_ask(Ask::Link(u)),
             LinkAction::Anchor(a) => {
                 if let Some(d) = &mut self.doc {
                     d.viewer.scroll_to_anchor(&a);
@@ -1670,6 +1697,12 @@ impl MarkiseApp {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         if self.ctx.is_none() {
+            // chrome text (status bar, sidebar, toolbar, dialogs) is not selectable: no I-beam
+            // over it (issue #36); text that is worth copying opts back in locally
+            ctx.all_styles_mut(|s| s.interaction.selectable_labels = false);
+            // egui's own ⌘+ / ⌘- / ⌘0 zoom would scale the whole UI on top of our heading
+            // level and paragraph commands bound to ⌘= / ⌘- / ⌘0 (issue #39)
+            ctx.options_mut(|o| o.zoom_with_keyboard = false);
             let c = ctx.clone();
             self.wake = Some(Arc::new(move || c.request_repaint()));
             self.ctx = Some(ctx.clone());
@@ -1754,105 +1787,142 @@ impl MarkiseApp {
         // ---- shortcuts (consumed before widgets see them). The application commands' own
         // chords first (Open Folder ⇧⌘O before ⌘O, Side by Side ⌃⌘/ before ⌘/): they carry more
         // modifiers than the registry host commands below.
-        self.app_shortcuts(ctx);
-        // host commands (Save, Open…, Source Code Mode, Toggle Sidebar) go through the effective
-        // keymap, so `keyBinding` overrides rebind, unbind or take over their chords
-        // (performed through the menu dispatch, exactly like choosing the menu item)
-        for id in self.take_host_shortcuts(ctx) {
-            self.menu_command(ctx, id, crate::menu::Trigger::Shortcut);
+        // while a question is open nothing else runs: no application command (shortcut or
+        // menu: see `menu_action_by`), and no widget has the keyboard focus, so typing does
+        // not reach the document; the focus comes back after the answer
+        if self.is_asking() {
+            if let Some(id) = ctx.memory(|m| m.focused()) {
+                self.focus_before_question.get_or_insert((id, 0));
+                ctx.memory_mut(|m| m.surrender_focus(id));
+            }
+        } else {
+            // give the focus back; the frame after an answer the dialog's layer may still
+            // block interaction (the widget drops the focus again), so retry until it sticks,
+            // something else takes the focus, or a few frames passed
+            if let Some((id, tries)) = self.focus_before_question.take() {
+                match ctx.memory(|m| m.focused()) {
+                    Some(f) if f == id && tries > 0 => {} // it stuck
+                    Some(f) if f != id => {}              // the user focused something else
+                    _ if tries >= 10 => {}
+                    _ => {
+                        ctx.memory_mut(|m| m.request_focus(id));
+                        self.focus_before_question = Some((id, tries + 1));
+                        ctx.request_repaint();
+                    }
+                }
+            }
+            self.app_shortcuts(ctx);
+            // host commands (Save, Open…, Source Code Mode, Toggle Sidebar) go through the
+            // effective keymap, so `keyBinding` overrides rebind, unbind or take over their
+            // chords (performed through the menu dispatch, exactly like choosing the menu item)
+            for id in self.take_host_shortcuts(ctx) {
+                self.menu_command(ctx, id, crate::menu::Trigger::Shortcut);
+            }
         }
 
         self.menus_ui(ui);
         self.status_bar(ui);
+        if let Some(r) = self.files.rename.as_mut() {
+            r.drawn = false;
+        }
         if self.sidebar_visible {
             self.sidebar(ui);
+        } else if self.files.rename.is_some() {
+            self.tree_action(ctx, TreeAction::EndRename(EditEnd::CommitOrCancel));
         }
+        self.rename_blur(ctx);
         self.central(ui);
         self.theme_report_window(ctx);
         self.font_window(ctx);
         self.about.show(ctx, self.commit.as_deref());
         self.dialogs(ctx);
-        self.file_dialogs(ctx);
-        self.export_dialogs(ctx);
         self.update_title(ctx);
         self.sync_native_menu();
         self.after_frame(ctx);
     }
 
-    fn dialogs(&mut self, ctx: &Context) {
-        let Some(p) = &self.ask else { return };
-        let name = self.doc.as_ref().map(DocState::display_name).unwrap_or_default();
-        let mut choice = None;
-        egui::Modal::new(egui::Id::unique("markise-confirm")).show(ctx, |ui| {
-            ui.set_max_width(420.0);
-            match p {
-                Ask::ReplaceTheme { src, existing } => {
-                    let name = src
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    ui.label(RichText::new(format!("A theme named “{name}” is already installed.")).strong());
-                    ui.label("Replace it? These will be replaced:");
-                    for p in existing {
-                        ui.weak(
-                            p.file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
-                        );
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("Replace").clicked() {
-                            choice = Some("replace");
-                        }
-                        if ui.button("Cancel").clicked() {
-                            choice = Some("cancel");
-                        }
-                    });
-                }
-                Ask::Link(url) => {
-                    ui.label(RichText::new("Open this link with another application?").strong());
-                    ui.label(url);
-                    ui.horizontal(|ui| {
-                        if ui.button("Open").clicked() {
-                            choice = Some("open");
-                        }
-                        if ui.button("Cancel").clicked() {
-                            choice = Some("cancel");
-                        }
-                    });
-                }
-                _ => {
-                    ui.label(RichText::new(format!("“{name}” has unsaved changes.")).strong());
-                    ui.label("Save them before continuing?");
-                    ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
-                            choice = Some("save");
-                        }
-                        if ui.button("Discard").clicked() {
-                            choice = Some("discard");
-                        }
-                        if ui.button("Cancel").clicked() {
-                            choice = Some("cancel");
-                        }
-                    });
-                }
+    /// Opens a question (replacing one still open: it gets a new number, so an answer given
+    /// to the old one is not applied to this one).
+    fn set_ask(&mut self, a: Ask) {
+        self.ask = Some(a);
+        self.question_id += 1;
+    }
+
+    /// The export overwrite question was opened.
+    pub(crate) fn opened_export_question(&mut self) {
+        self.question_id += 1;
+    }
+
+    /// The open yes/no question, if any: the pending [`Ask`], else the export overwrite.
+    pub fn question(&self) -> Option<crate::confirm::Question> {
+        use crate::confirm::Question;
+        let file_name = |p: &Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string())
+        };
+        let q = match self.ask.as_ref() {
+            Some(Ask::Unsaved(_)) => {
+                Question::unsaved(&self.doc.as_ref().map(DocState::display_name).unwrap_or_default())
             }
-        });
-        match (choice, self.ask.take()) {
-            (Some("replace"), Some(Ask::ReplaceTheme { src, .. })) => self.themes.install_replacing(src),
-            (Some("open"), Some(Ask::Link(url))) => {
+            Some(Ask::Link(url)) => Question::open_link(url),
+            Some(Ask::ReplaceTheme { src, existing }) => {
+                let files: Vec<String> = existing.iter().map(|p| file_name(p)).collect();
+                Question::replace_theme(&file_name(src), &files)
+            }
+            Some(Ask::Trash(p)) => Question::trash(&file_name(p), p.is_dir()),
+            None => {
+                let req = self.export.pending_overwrite()?;
+                Question::export_overwrite(&req.output)
+            }
+        };
+        Some(q.with_id(self.question_id))
+    }
+
+    /// Shows the open question through [`AppOptions::confirm`] and applies the answer.
+    fn dialogs(&mut self, ctx: &Context) {
+        let Some(q) = self.question() else { return };
+        let confirm = self.confirm.clone();
+        match confirm.ask(ctx, &q) {
+            Some(c) => self.answer(q.id, c),
+            None if !confirm.draws_in_app(&q) => crate::dialog::waiting(ctx, &q),
+            None => {}
+        }
+    }
+
+    /// Applies the answer to the open question (the same one [`Self::question`] describes).
+    pub fn answer_question(&mut self, c: crate::confirm::Choice) {
+        self.answer(self.question_id, c);
+    }
+
+    /// Applies the answer given to question number `id`; ignored if that question is not the
+    /// open one any more.
+    fn answer(&mut self, id: u64, c: crate::confirm::Choice) {
+        use crate::confirm::Choice;
+        if id != self.question_id || self.question().is_none() {
+            return;
+        }
+        self.question_id += 1;
+        match (c, self.ask.take()) {
+            (Choice::Replace, Some(Ask::ReplaceTheme { src, .. })) => self.themes.install_replacing(src),
+            (Choice::Open, Some(Ask::Link(url))) => {
                 if let Some(c) = &self.ctx {
                     c.open_url(egui::OpenUrl::new_tab(url));
                 }
             }
-            (Some("discard"), Some(Ask::Unsaved(then))) => self.perform(then),
-            (Some("save"), Some(Ask::Unsaved(then))) => self.start_save(SaveRequest {
+            (Choice::DontSave, Some(Ask::Unsaved(then))) => self.perform(then),
+            (Choice::Save, Some(Ask::Unsaved(then))) => self.start_save(SaveRequest {
                 expect: None,
                 target: None,
                 then,
             }),
-            (Some("cancel"), _) => {}
-            (_, ask) => self.ask = ask,
+            (Choice::MoveToTrash, Some(Ask::Trash(p))) => self.move_to_trash(&p),
+            (_, Some(_)) => {} // Cancel (or a choice the question does not offer)
+            (c, None) => {
+                if let Some(r) = self.export.answer_overwrite(c == Choice::Overwrite) {
+                    self.start_export(r);
+                }
+            }
         }
     }
 
@@ -1967,17 +2037,17 @@ impl MarkiseApp {
         if !self.font_window {
             return;
         }
-        let mut open = true;
         let mut o = self.themes.overrides().clone();
         let before = o.clone();
         let t = &self.theme;
         // the style's own values (shown while not overridden)
         let style_font = t.fonts.body.iter().find(|f| Some(*f) != o.body_font.as_ref()).cloned();
-        egui::Window::new("Font & size")
-            .open(&mut open)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
+        let open = crate::dialog::window(
+            ctx,
+            "markise-font-window",
+            "Font & size",
+            crate::dialog::Width::Medium,
+            |ui, look| {
                 egui::Grid::new("font-overrides")
                     .num_columns(2)
                     .spacing([12.0, 8.0])
@@ -2043,14 +2113,21 @@ impl MarkiseApp {
                             10.0,
                         );
                     });
-                ui.separator();
-                if ui
-                    .add_enabled(!o.is_empty(), egui::Button::new("Use the style's values"))
-                    .clicked()
-                {
-                    o = Overrides::default();
-                }
-            });
+                crate::dialog::footer(ui, |ui| {
+                    let done = crate::dialog::primary(ui, look, "Done").clicked();
+                    if ui
+                        .add_enabled_ui(!o.is_empty(), |ui| {
+                            crate::dialog::secondary(ui, look, "Use the Style’s Values")
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        o = Overrides::default();
+                    }
+                    done
+                })
+            },
+        );
         if o != before {
             self.themes.set_overrides(o);
         }
@@ -2065,7 +2142,6 @@ impl MarkiseApp {
         if !self.theme_report {
             return;
         }
-        let mut open = true;
         let installed = self.installed.as_ref();
         let current = self.themes.current_import().cloned();
         let fonts = self.themes.last_fonts.clone();
@@ -2073,72 +2149,80 @@ impl MarkiseApp {
         let theme_name = self.theme.name.clone();
         let theme = &self.theme;
         let skipped_content = ctx.fonts_mut(|f| markise_layout::block::undrawable_generated(theme, f));
-        egui::Window::new("Theme report")
-            .open(&mut open)
-            .default_width(460.0)
-            .default_height(420.0)
-            .vscroll(true)
-            .show(ctx, |ui| {
-                if let Some(done) = installed {
-                    ui.label(
-                        RichText::new(format!(
-                            "Imported “{}”",
-                            done.css.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
-                        ))
-                        .strong(),
-                    );
-                    ui.label(format!(
-                        "{} file{} copied to the theme folder{}.",
-                        done.copied,
-                        if done.copied == 1 { "" } else { "s" },
-                        if done.replaced {
-                            " (replaced the previous version)"
-                        } else {
-                            ""
-                        }
-                    ));
-                    for (p, why) in done.skipped.iter().take(8) {
-                        ui.weak(format!(
-                            "not copied: {} — {why}",
-                            p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
-                        ));
-                    }
-                    ui.separator();
-                    report_ui(ui, &done.import);
-                } else if let Some(r) = &current {
-                    ui.label(RichText::new(&theme_name).strong());
-                    report_ui(ui, r);
-                } else if let Some(e) = import_error {
-                    ui.colored_label(egui::Color32::from_rgb(0xc0, 0x39, 0x2b), e);
-                } else {
-                    ui.label(format!("{theme_name}: a native Markise theme (no CSS import)."));
-                }
-                if !skipped_content.is_empty() {
-                    ui.separator();
-                    ui.label(RichText::new("Generated content not drawn").strong());
-                    ui.weak("no glyph in the theme's fonts (or an emoji, which egui cannot draw in color):");
-                    for (at, text) in &skipped_content {
-                        ui.label(format!("{at}: “{text}”"));
-                    }
-                }
-                if let Some(f) = fonts {
-                    ui.separator();
-                    ui.label(RichText::new("Fonts").strong());
-                    for (role, used) in &f.chosen {
-                        ui.label(format!(
-                            "{role}: {}",
-                            if used.is_empty() {
-                                "default".to_string()
-                            } else {
-                                used.join(", ")
+        let open = crate::dialog::window(
+            ctx,
+            "markise-theme-report",
+            "Theme report",
+            crate::dialog::Width::Medium,
+            |ui, look| {
+                egui::ScrollArea::vertical()
+                    .max_height(380.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.style_mut().interaction.selectable_labels = true;
+                        if let Some(done) = installed {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Imported “{}”",
+                                    done.css.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+                                ))
+                                .strong(),
+                            );
+                            ui.label(format!(
+                                "{} file{} copied to the theme folder{}.",
+                                done.copied,
+                                if done.copied == 1 { "" } else { "s" },
+                                if done.replaced {
+                                    " (replaced the previous version)"
+                                } else {
+                                    ""
+                                }
+                            ));
+                            for (p, why) in done.skipped.iter().take(8) {
+                                ui.weak(format!(
+                                    "not copied: {} — {why}",
+                                    p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+                                ));
                             }
-                        ));
-                    }
-                    if !f.missing.is_empty() {
-                        ui.weak(format!("not installed: {}", f.missing.join(", ")));
-                    }
-                }
-            });
+                            ui.separator();
+                            report_ui(ui, &done.import);
+                        } else if let Some(r) = &current {
+                            ui.label(RichText::new(&theme_name).strong());
+                            report_ui(ui, r);
+                        } else if let Some(e) = import_error {
+                            ui.colored_label(egui::Color32::from_rgb(0xc0, 0x39, 0x2b), e);
+                        } else {
+                            ui.label(format!("{theme_name}: a native Markise theme (no CSS import)."));
+                        }
+                        if !skipped_content.is_empty() {
+                            ui.separator();
+                            ui.label(RichText::new("Generated content not drawn").strong());
+                            ui.weak("no glyph in the theme's fonts (or an emoji, which egui cannot draw in color):");
+                            for (at, text) in &skipped_content {
+                                ui.label(format!("{at}: “{text}”"));
+                            }
+                        }
+                        if let Some(f) = fonts {
+                            ui.separator();
+                            ui.label(RichText::new("Fonts").strong());
+                            for (role, used) in &f.chosen {
+                                ui.label(format!(
+                                    "{role}: {}",
+                                    if used.is_empty() {
+                                        "default".to_string()
+                                    } else {
+                                        used.join(", ")
+                                    }
+                                ));
+                            }
+                            if !f.missing.is_empty() {
+                                ui.weak(format!("not installed: {}", f.missing.join(", ")));
+                            }
+                        }
+                    });
+                crate::dialog::footer(ui, |ui| crate::dialog::primary(ui, look, "Close").clicked())
+            },
+        );
         if !open {
             self.theme_report = false;
             self.installed = None;
@@ -2208,20 +2292,28 @@ impl MarkiseApp {
                 match self.tab {
                     Tab::Files => {
                         let current = self.document_path().map(Path::to_path_buf);
-                        let mut action = None;
+                        let mut actions = Vec::new();
                         if let (Some(tree), Some(wake)) = (self.tree.as_mut(), self.wake.as_ref()) {
-                            action = tree.show(ui, current.as_deref(), wake, &look);
+                            actions = tree.show(ui, current.as_deref(), wake, &look, self.files.rename.as_mut());
                         } else {
                             ui.weak("No folder open");
                             if ui.button("Open Folder…").clicked() {
                                 self.open_folder_dialog();
                             }
                         }
-                        if let Some(a) = action {
+                        for a in actions {
                             self.tree_action(ui.ctx(), a);
+                        }
+                        if self.tree.is_none() && self.files.rename.is_some() {
+                            self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
                         }
                     }
                     Tab::Outline => {
+                        // switched away from the Files tab while a name was being edited:
+                        // like a click elsewhere
+                        if self.files.rename.is_some() {
+                            self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
+                        }
                         if let Some(d) = &mut self.doc {
                             let model = d.viewer.model().clone();
                             let cur = model.current_heading(d.viewer.ed.view.anchor().0);

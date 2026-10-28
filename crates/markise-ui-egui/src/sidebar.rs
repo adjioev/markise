@@ -30,6 +30,76 @@ pub enum TreeAction {
     /// Reveal in Finder / Explorer / the file manager.
     Reveal(PathBuf),
     CopyPath(PathBuf),
+    /// The inline name editor finished (see [`InlineEdit`]).
+    EndRename(EditEnd),
+}
+
+/// The inline name editor of a file tree row (Rename, and the new item after New File / New
+/// Folder): the row turns into a text field with the name.
+#[derive(Clone, Debug)]
+pub struct InlineEdit {
+    pub path: PathBuf,
+    pub name: String,
+    /// Why the last attempt was refused (shown under the row while editing goes on).
+    pub error: Option<String>,
+    /// Focus the field and select the name without its extension at the next frame the row
+    /// is shown (the start, and after a refused Enter).
+    pub select: bool,
+    /// The field has had the keyboard focus (editing really started).
+    pub had_focus: bool,
+    /// Give the field the focus back at the next frame it is drawn, keeping the selection
+    /// (its row was scrolled out of view, which took the focus).
+    pub refocus: bool,
+    /// The row was drawn this frame (reset by the app before the sidebar).
+    pub drawn: bool,
+}
+
+impl InlineEdit {
+    pub fn new(path: PathBuf) -> InlineEdit {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        InlineEdit {
+            path,
+            name,
+            error: None,
+            select: true,
+            had_focus: false,
+            refocus: false,
+            drawn: false,
+        }
+    }
+
+    /// Characters of the name that start out selected: the stem of a file (the extension is
+    /// kept), all of a folder's name (or of a name without a stem, like `.env`).
+    pub fn stem_chars(&self) -> usize {
+        let all = self.name.chars().count();
+        if self.path.is_dir() {
+            return all;
+        }
+        match self.name.rfind('.') {
+            Some(i) if i > 0 => self.name[..i].chars().count(),
+            _ => all,
+        }
+    }
+}
+
+/// How the inline name editor finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditEnd {
+    /// Enter: rename; a refused name keeps the editor open with the reason.
+    Commit,
+    /// The field lost the focus another way (a click elsewhere): rename if the name is
+    /// accepted, otherwise give up.
+    CommitOrCancel,
+    /// Esc: keep the old name.
+    Cancel,
+}
+
+/// Id of the inline name field (tests focus and type into it).
+pub fn rename_field_id() -> egui::Id {
+    egui::Id::unique("markise-rename-field")
 }
 
 /// Label of the "reveal in the file manager" item on this platform.
@@ -67,7 +137,7 @@ fn row_menu(ui: &mut Ui, path: &Path, dir: bool, root: bool, out: &mut Option<Tr
     pick(ui, "New Folder", TreeAction::NewFolder(folder));
     ui.separator();
     if !root {
-        pick(ui, "Rename…", TreeAction::Rename(path.to_path_buf()));
+        pick(ui, "Rename", TreeAction::Rename(path.to_path_buf()));
         pick(ui, "Move to Trash", TreeAction::Delete(path.to_path_buf()));
         ui.separator();
     }
@@ -112,6 +182,8 @@ pub struct FileTree {
     lister_error: Option<String>,
     /// Number of listing requests issued (tests).
     pub requests: u64,
+    /// Rows drawn by the last frame (the virtualised range).
+    shown: std::ops::Range<usize>,
 }
 
 impl FileTree {
@@ -125,6 +197,7 @@ impl FileTree {
             lister: None,
             lister_error: None,
             requests: 0,
+            shown: 0..0,
         }
     }
 
@@ -301,6 +374,20 @@ impl FileTree {
         }
     }
 
+    /// Expands every folder between the root and `path` (so its row is shown).
+    pub fn expand_to(&mut self, path: &Path) {
+        if !path.starts_with(&self.root) {
+            return;
+        }
+        for a in path.ancestors().skip(1) {
+            if a == self.root || !a.starts_with(&self.root) {
+                break;
+            }
+            self.expanded.insert(a.to_path_buf());
+        }
+        self.rows_dirty = true;
+    }
+
     /// `from` was renamed to `to`: expanded folders follow, the parent is listed again.
     pub fn renamed(&mut self, from: &Path, to: &Path, wake: &Wake) {
         let moved: Vec<PathBuf> = self.expanded.iter().filter(|p| p.starts_with(from)).cloned().collect();
@@ -324,35 +411,81 @@ impl FileTree {
         self.rows_dirty = true;
     }
 
-    /// Shows the tree; returns what the user clicked or chose in a context menu.
-    pub fn show(&mut self, ui: &mut Ui, current: Option<&Path>, wake: &Wake, look: &SideLook) -> Option<TreeAction> {
+    /// Shows the tree; returns what the user clicked or chose in a context menu, and how the
+    /// inline name editor (`edit`, drawn in its row) finished — that one first.
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        current: Option<&Path>,
+        wake: &Wake,
+        look: &SideLook,
+        mut edit: Option<&mut InlineEdit>,
+    ) -> Vec<TreeAction> {
         let name = self
             .root
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.root.display().to_string());
         let mut action = None;
+        let mut end = None;
         let root = self.root.clone();
-        ui.add(egui::Label::new(RichText::new(name).strong().color(look.active_text)).sense(egui::Sense::click()))
-            .context_menu(|ui| row_menu(ui, &root, true, true, &mut action));
+        ui.add(
+            egui::Label::new(RichText::new(name).strong().color(look.active_text))
+                .selectable(false)
+                .sense(egui::Sense::click()),
+        )
+        .context_menu(|ui| row_menu(ui, &root, true, true, &mut action));
         let n = self.rows(wake).len();
+        // a new editor whose row is not drawn: scroll it into view
+        let scroll_to = edit
+            .as_deref()
+            .filter(|e| e.select)
+            .and_then(|e| self.rows.iter().position(|r| r.note.is_none() && r.path == e.path))
+            .filter(|i| !self.shown.contains(i))
+            .map(|i| (i as f32 - 2.0).max(0.0) * look.row_h);
+        // an item outside the mounted folder (File → Rename of such a document): its editor
+        // sits above the tree
+        if let Some(e) = edit.as_deref_mut().filter(|e| !e.path.starts_with(&self.root)) {
+            let kind = if e.path.is_dir() {
+                RowKind::Dir { open: false }
+            } else {
+                RowKind::File {
+                    markdown: markise_engine::tree::is_markdown(&e.path),
+                }
+            };
+            end = look.edit_row(ui, 0, kind, e);
+        }
         let mut toggle = None;
-        let out = virtual_rows(ui, "markise-tree", look.row_h, n, |ui, range| {
+        let mut shown = 0..0;
+        let out = virtual_rows(ui, "markise-tree", look.row_h, n, scroll_to, |ui, range| {
+            shown = range.clone();
             for r in &self.rows[range] {
                 if let Some(t) = &r.note {
                     look.row(ui, r.depth, RowKind::Note, t, false);
                     continue;
                 }
+                let kind = if r.is_dir {
+                    RowKind::Dir { open: r.expanded }
+                } else {
+                    RowKind::File {
+                        markdown: markise_engine::tree::is_markdown(&r.path),
+                    }
+                };
+                if let Some(e) = edit.as_deref_mut().filter(|e| e.path == r.path) {
+                    if let Some(x) = look.edit_row(ui, r.depth, kind, e) {
+                        end = Some(x);
+                    }
+                    continue;
+                }
                 if r.is_dir {
-                    let resp = look.row(ui, r.depth, RowKind::Dir { open: r.expanded }, &r.name, false);
+                    let resp = look.row(ui, r.depth, kind, &r.name, false);
                     if resp.clicked() {
                         toggle = Some(r.path.clone());
                     }
                     resp.context_menu(|ui| row_menu(ui, &r.path, true, false, &mut action));
                 } else {
                     let selected = current.is_some_and(|c| c == r.path);
-                    let md = markise_engine::tree::is_markdown(&r.path);
-                    let resp = look.row(ui, r.depth, RowKind::File { markdown: md }, &r.name, selected);
+                    let resp = look.row(ui, r.depth, kind, &r.name, selected);
                     if resp.clicked() {
                         action = Some(TreeAction::Open(r.path.clone()));
                     }
@@ -360,6 +493,7 @@ impl FileTree {
                 }
             }
         });
+        self.shown = shown;
         // the empty space below the rows: the mounted folder's menu
         let below = egui::Rect::from_min_max(
             egui::pos2(out.inner_rect.left(), out.inner_rect.top() + out.content_size.y),
@@ -372,7 +506,7 @@ impl FileTree {
         if let Some(d) = toggle {
             self.toggle(&d);
         }
-        action
+        end.map(TreeAction::EndRename).into_iter().chain(action).collect()
     }
 }
 
@@ -480,6 +614,24 @@ impl SideLook {
             (false, _, true) => self.hover_text,
             _ => self.text,
         };
+        let x = self.lead(&p, rect, depth, kind, active);
+        let cy = rect.center().y;
+        let font = self.font.clone();
+        let color = match kind {
+            RowKind::Note => self.icon,
+            // top-level headings stand out by color (the UI font may have no bold face)
+            RowKind::Heading { level: 1 } if !active && !hovered => self.active_text,
+            _ => color,
+        };
+        let galley = ui.painter().layout(label.to_string(), font, color, f32::INFINITY);
+        let gpos = egui::pos2(x, cy - galley.size().y * 0.5);
+        let clip = egui::Rect::from_min_max(egui::pos2(x, rect.top()), egui::pos2(rect.right() - 4.0, rect.bottom()));
+        ui.painter_at(clip).galley(gpos, galley, color);
+        resp.on_hover_text_at_pointer(label)
+    }
+
+    /// Paints what a row shows in front of its label; returns where the label starts.
+    fn lead(&self, p: &egui::Painter, rect: egui::Rect, depth: usize, kind: RowKind, active: bool) -> f32 {
         let cy = rect.center().y;
         let mut x = rect.left() + self.pad_x + depth as f32 * self.indent;
         let icon_s = (self.row_h * 0.62).clamp(12.0, 18.0);
@@ -508,7 +660,7 @@ impl SideLook {
                 } else {
                     crate::icons::Icon::Folder
                 };
-                crate::icons::paint(&p, r, icon, self.icon);
+                crate::icons::paint(p, r, icon, self.icon);
                 x += icon_s + 6.0;
             }
             RowKind::File { markdown } => {
@@ -519,7 +671,7 @@ impl SideLook {
                 } else {
                     crate::icons::Icon::File
                 };
-                crate::icons::paint(&p, r, icon, if active { self.active_text } else { self.icon });
+                crate::icons::paint(p, r, icon, if active { self.active_text } else { self.icon });
                 x += icon_s + 6.0;
             }
             RowKind::Heading { level } => {
@@ -544,18 +696,87 @@ impl SideLook {
                 x += 12.0;
             }
         }
-        let font = self.font.clone();
-        let color = match kind {
-            RowKind::Note => self.icon,
-            // top-level headings stand out by color (the UI font may have no bold face)
-            RowKind::Heading { level: 1 } if !active && !hovered => self.active_text,
-            _ => color,
-        };
-        let galley = ui.painter().layout(label.to_string(), font, color, f32::INFINITY);
-        let gpos = egui::pos2(x, cy - galley.size().y * 0.5);
-        let clip = egui::Rect::from_min_max(egui::pos2(x, rect.top()), egui::pos2(rect.right() - 4.0, rect.bottom()));
-        ui.painter_at(clip).galley(gpos, galley, color);
-        resp.on_hover_text_at_pointer(label)
+        x
+    }
+
+    /// The row of the inline name editor: the row's icon and a text field with the name;
+    /// a refused name is shown under the row. Returns how editing finished, if it did.
+    pub fn edit_row(&self, ui: &mut Ui, depth: usize, kind: RowKind, edit: &mut InlineEdit) -> Option<EditEnd> {
+        let w = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, self.row_h), egui::Sense::hover());
+        let x = self.lead(&ui.painter_at(rect), rect, depth, kind, false);
+        let field = egui::Rect::from_min_max(
+            egui::pos2(x - 4.0, rect.top() + 1.0),
+            egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
+        );
+        let id = rename_field_id();
+        // a child Ui: the field must not move the next row (fixed row pitch)
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(field));
+        let out = egui::TextEdit::singleline(&mut edit.name)
+            .id(id)
+            .font(self.font.clone())
+            .margin(egui::Margin::symmetric(3, 1))
+            .desired_width(field.width() - 6.0)
+            .show(&mut child);
+        if edit.select {
+            edit.select = false;
+            out.response.request_focus();
+            out.response.scroll_to_me(None);
+            let mut st = out.state.clone();
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(edit.stem_chars()),
+            )));
+            st.store(ui.ctx(), id);
+        }
+        if edit.refocus {
+            edit.refocus = false;
+            // never take the focus from another widget
+            if ui.memory(|m| m.focused()).is_none_or(|f| f == id) {
+                out.response.request_focus();
+            }
+        }
+        edit.drawn = true;
+        if out.response.has_focus() {
+            edit.had_focus = true;
+        }
+        if out.response.changed() {
+            edit.error = None;
+        }
+        if let Some(e) = &edit.error {
+            let dark = ui.visuals().dark_mode;
+            let (bg, fg) = if dark {
+                (Color32::from_rgb(0x5c, 0x1f, 0x1c), Color32::from_rgb(0xff, 0xd9, 0xd6))
+            } else {
+                (Color32::from_rgb(0xfd, 0xec, 0xea), Color32::from_rgb(0xb3, 0x26, 0x1e))
+            };
+            egui::Area::new(egui::Id::unique("markise-rename-error"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::pos2(field.left(), rect.bottom() + 1.0))
+                .interactable(false)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new()
+                        .fill(bg)
+                        .stroke(egui::Stroke::new(1.0, fg.gamma_multiply(0.5)))
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .inner_margin(egui::Margin::symmetric(6, 3))
+                        .show(ui, |ui| {
+                            ui.set_max_width(field.width().max(160.0));
+                            ui.add(egui::Label::new(RichText::new(e).color(fg).size(12.0)).wrap());
+                        });
+                });
+        }
+        if out.response.lost_focus() {
+            let (esc, enter) = ui.input(|i| (i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::Enter)));
+            return Some(if esc {
+                EditEnd::Cancel
+            } else if enter {
+                EditEnd::Commit
+            } else {
+                EditEnd::CommitOrCancel
+            });
+        }
+        None
     }
 }
 
@@ -567,12 +788,16 @@ fn virtual_rows(
     id: &str,
     row_h: f32,
     n: usize,
+    scroll_to: Option<f32>,
     add: impl FnOnce(&mut Ui, std::ops::Range<usize>),
 ) -> egui::scroll_area::ScrollAreaOutput<()> {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        egui::ScrollArea::vertical()
-            .id_salt(id)
+        let mut area = egui::ScrollArea::vertical();
+        if let Some(y) = scroll_to {
+            area = area.vertical_scroll_offset(y);
+        }
+        area.id_salt(id)
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show_rows(ui, row_h, n, add)
@@ -587,7 +812,7 @@ pub fn outline(ui: &mut Ui, entries: &[OutlineEntry], current: Option<usize>, lo
     }
     let min_level = entries.iter().map(|e| e.level).min().unwrap_or(1);
     let mut clicked = None;
-    virtual_rows(ui, "markise-outline", look.row_h, entries.len(), |ui, range| {
+    virtual_rows(ui, "markise-outline", look.row_h, entries.len(), None, |ui, range| {
         for i in range {
             let e = &entries[i];
             let level = e.level - min_level + 1;
@@ -619,7 +844,7 @@ mod tests {
         ctx.run_ui(egui::RawInput::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0; // a non-zero default must not leak in
-                let out = virtual_rows(ui, "t", 24.0, 100, |ui, range| {
+                let out = virtual_rows(ui, "t", 24.0, 100, None, |ui, range| {
                     for _ in range {
                         let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 24.0), egui::Sense::hover());
                         painted.push(r.top());
