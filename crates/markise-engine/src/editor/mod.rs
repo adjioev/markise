@@ -467,6 +467,13 @@ impl EditorSession {
         {
             self.close_typing();
         }
+        if !self.sel.is_caret() {
+            let r = self.sel.primary().range();
+            let w = self.widen_from_heading_start(r.clone());
+            if w != r {
+                self.set_selection(Selection::single(DocPos::new(w.start), DocPos::new(w.end)));
+            }
+        }
         let req = self.request(Params::new());
         let tp = self.doc.on_text(&req, typed);
         let leaf_before = self.leaf_info(self.sel.primary().start().offset);
@@ -518,7 +525,7 @@ impl EditorSession {
             return self.apply_key_plan(plan, TypingDir::DeleteBackward);
         }
         let range = if !r.is_empty() {
-            r
+            self.widen_from_heading_start(r)
         } else {
             match self.block_start_backward(r.start) {
                 Some(BlockEdit::Edit { patches, label, caret }) => {
@@ -584,7 +591,7 @@ impl EditorSession {
             return self.apply_key_plan(plan, TypingDir::DeleteForward);
         }
         let range = if !r.is_empty() {
-            r
+            self.widen_from_heading_start(r)
         } else {
             let t = self.doc.text();
             if r.end >= t.len() {
@@ -737,6 +744,23 @@ impl EditorSession {
                     .any(|c| c.start <= r.start && r.end <= c.end)
             }
             _ => false,
+        }
+    }
+
+    /// BE-4: a selection from the start of a heading's text into a later block removes the
+    /// heading's leading syntax too, so what remains of the later block keeps its own type
+    /// (from the middle of the heading the heading stays and the rest is appended).
+    fn widen_from_heading_start(&self, r: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        match self.doc.leaf(r.start) {
+            Some(l)
+                if matches!(l.kind, LeafKind::Heading { .. })
+                    && l.lines.first().is_some_and(|f| f.start == r.start)
+                    && r.end > l.span.end
+                    && self.doc.leaf(r.end).is_some_and(|n| n.span.start > l.span.start) =>
+            {
+                l.span.start..r.end
+            }
+            _ => r,
         }
     }
 

@@ -1185,6 +1185,9 @@ impl Document {
                     return Some(Err(PlanError::NotApplicable("selection")));
                 }
                 let at = sel.focus.offset;
+                if let Some(r) = self.empty_heading_key(at, planners::DELETE_BACKWARD) {
+                    return Some(r);
+                }
                 let text = self.text();
                 // auto-pair (spec 02 §4.3): an opener with its closer right after → both go
                 if req.prefs.auto_pair_brackets
@@ -1211,6 +1214,9 @@ impl Document {
             planners::DELETE_FORWARD => {
                 if !sel.is_caret() || sel.focus.virt > 0 {
                     return Some(Err(PlanError::NotApplicable("selection")));
+                }
+                if let Some(r) = self.empty_heading_key(sel.focus.offset, planners::DELETE_FORWARD) {
+                    return Some(r);
                 }
                 Some(
                     self.list_delete_forward(sel.focus.offset)

@@ -1277,6 +1277,9 @@ impl Document {
         if let Some(r) = self.list_enter(at) {
             return r;
         }
+        if let Some(r) = self.empty_heading_key(at, planners::NEWLINE) {
+            return r;
+        }
         let text = self.text();
         let eol = self.line_ending().as_str();
         let nothing = Ok(Plan::default());
@@ -1495,6 +1498,64 @@ impl Document {
     /// The end of the heading whose line `at` is on when only spaces and tabs separate them
     /// and nothing but whitespace follows `at` on that line (a heading's span ends at its
     /// text or closing sequence, so whitespace typed after it is outside the block).
+    /// Enter / Backspace / Delete (`key`) in an ATX heading without content (`## |`), or `None`
+    /// when `at` is not in one. C43: the heading becomes an empty paragraph in place — its
+    /// line goes with the separator before it and the caret is on the virtual paragraph after
+    /// the previous block (or the document becomes empty). BE-3: Delete with a block after it
+    /// removes the empty heading and puts the caret at the start of that block's text, which
+    /// keeps its type. Top-level headings only; elsewhere, or for an empty heading that opens
+    /// a non-empty document, the keys keep their other rules.
+    pub(crate) fn empty_heading_key(&self, at: usize, key: PlannerId) -> Option<Result<Plan, PlanError>> {
+        let text = self.text();
+        let leaf = self.leaf(self.heading_end_before_ws(at).unwrap_or(at))?;
+        if !matches!(leaf.kind, LeafKind::Heading { .. })
+            || !leaf.containers.is_empty()
+            || !text[leaf.span.start..].starts_with('#')
+            || !leaf.lines.iter().all(|l| text[l.start..l.end].trim().is_empty())
+        {
+            return None;
+        }
+        let ls = line_start(text, leaf.span.start);
+        let (ce, next_ls) = line_end(text, ls);
+        let next = (next_ls < text.len())
+            .then(|| {
+                let b = text.as_bytes();
+                let q = next_ls
+                    + b[next_ls..]
+                        .iter()
+                        .take_while(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
+                        .count();
+                (q < text.len()).then(|| self.leaf(q)).flatten()
+            })
+            .flatten()
+            .filter(|n| n.span.start > leaf.span.start);
+        let plan = |range: std::ops::Range<usize>, sel: Selection| {
+            Ok(Plan::single(
+                PlanStep::patches(PatchSet::single_verbatim(range, "")),
+                Some(sel),
+            ))
+        };
+        if key == planners::DELETE_FORWARD
+            && let Some(n) = next
+        {
+            let nls = line_start(text, n.span.start);
+            let into = n.lines.first().map_or(n.span.start, |l| l.start).max(nls) - nls;
+            return Some(plan(ls..nls, Selection::caret(ls + into)));
+        }
+        if let Some(prev) = self.leaf_before(ls)
+            && line_start(text, prev.span.end) < ls
+        {
+            return Some(plan(
+                prev.span.end..ce,
+                Selection::caret_at(markise_doc::DocPos::with_virt(prev.span.end, 1)),
+            ));
+        }
+        if next.is_none() {
+            return Some(plan(ls..ce, Selection::caret(ls)));
+        }
+        None
+    }
+
     pub(crate) fn heading_end_before_ws(&self, at: usize) -> Option<usize> {
         let b = self.text().as_bytes();
         let mut q = at.min(b.len());
@@ -1627,11 +1688,24 @@ impl Document {
                 ed.build().ok_or(PlanError::NotApplicable("overlap"))?
             }
             (LeafKind::Heading { level: cur }, want) => {
-                let new = match want {
-                    Some(l) if l != *cur => marker(l),
-                    _ => String::new(), // same level or Paragraph → paragraph
-                };
-                PatchSet::single_verbatim(leaf.span.start..first.start.max(leaf.span.start), new)
+                let to = want.filter(|l| l != cur); // same level or Paragraph → paragraph
+                let new = to.map_or(String::new(), marker);
+                let mut ed = crate::edit::Edits::new();
+                ed.push(leaf.span.start..first.start.max(leaf.span.start), new);
+                // a closing sequence (`## T ##`): its hashes follow the level, or it goes
+                // with the heading (spec E18)
+                let last = leaf.lines.last().copied().unwrap_or(first);
+                if leaf.span.end > last.end {
+                    let tail = &text[last.end..leaf.span.end];
+                    match to {
+                        Some(l) => {
+                            let hashes = last.end + tail.find('#').unwrap_or(0);
+                            ed.push(hashes..leaf.span.end, "#".repeat(l as usize));
+                        }
+                        None => ed.delete(last.end..leaf.span.end),
+                    }
+                }
+                ed.build().ok_or(PlanError::NotApplicable("overlap"))?
             }
             _ => return Err(PlanError::NotApplicable("not a paragraph or heading")),
         };

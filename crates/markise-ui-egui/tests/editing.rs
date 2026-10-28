@@ -970,3 +970,160 @@ fn selection_from_trailing_spaces_stays_in_the_block_issue_16() {
         assert_eq!(save(&mut h, &p), want, "{src:?}");
     }
 }
+
+#[derive(Clone, Copy)]
+enum St {
+    K(Key),
+    C(Key),
+    S(Key),
+    T(&'static str),
+}
+
+/// `src` with `|` (caret) or `[`…`]` (anchor…focus): the plain text and the selection.
+fn parse_marked(src: &str) -> (String, usize, usize) {
+    let mut t = String::new();
+    let (mut a, mut f) = (None, None);
+    for ch in src.chars() {
+        match ch {
+            '|' => {
+                a = Some(t.len());
+                f = Some(t.len());
+            }
+            '[' => a = Some(t.len()),
+            ']' => f = Some(t.len()),
+            c => t.push(c),
+        }
+    }
+    (t, a.unwrap(), f.unwrap())
+}
+
+fn run_marked(name: &str, src: &str, steps: &[St]) -> String {
+    let (t, a, f) = parse_marked(src);
+    let (mut h, _p) = open(name, &t);
+    {
+        let ed = &mut h.state_mut().viewer().unwrap().ed;
+        ed.set_selection(markise_doc::Selection::single(
+            markise_doc::DocPos::new(a),
+            markise_doc::DocPos::new(f),
+        ));
+    }
+    h.step();
+    h.step();
+    for s in steps {
+        match *s {
+            St::K(k) => key(&mut h, k),
+            St::C(k) => {
+                h.key_press_modifiers(cmd(), k);
+                h.step();
+            }
+            St::S(k) => {
+                h.key_press_modifiers(
+                    Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                    k,
+                );
+                h.step();
+            }
+            St::T(s) => type_keys(&mut h, s),
+        }
+    }
+    h.step();
+    let sel = h.state_mut().viewer().unwrap().ed.session.selection().primary();
+    let mut out = text(&h);
+    if sel.is_caret() {
+        let mark = if sel.focus.virt > 0 { "|v" } else { "|" };
+        out.insert_str(sel.focus.offset, mark);
+    } else {
+        let (s, e) = (sel.range().start, sel.range().end);
+        out.insert(e, ']');
+        out.insert(s, '[');
+    }
+    out
+}
+
+/// Heading behaviour of the block-edge specification (T-HE cases; Markise decisions C7, C43,
+/// C44, M2b-1 and owner decisions BE-1…BE-4 where they differ). `|` is the caret (`|v`: on the
+/// virtual paragraph), `[`…`]` a selection. Not covered here (follow-ups): Enter at the start
+/// of a heading that opens the document (an empty paragraph above the first block, T-HE.7),
+/// Backspace at a heading's start after a rule or inside a quote / list item (T-HE.20–23),
+/// Cmd+N on a heading of level N (open question F.6: today it toggles to a paragraph) and
+/// Cmd+N on one line of a soft-broken paragraph (T-HE.37).
+#[test]
+fn heading_edges_t_he() {
+    use St::*;
+    let cases: &[(&str, &str, &[St], &str)] = &[
+        ("1", "## Title|\n", &[T("  ")], "## Title  |\n"),
+        ("3", "## Title|\n", &[K(Key::Enter), T("x")], "## Title\n\nx|\n"),
+        ("4", "## Title  |\n", &[K(Key::Enter), T("x")], "## Title  \n\nx|\n"),
+        // BE-2: only whitespace after the caret is "at the end"
+        ("5", "## Title|  \n", &[K(Key::Enter), T("x")], "## Title  \n\nx|\n"),
+        ("6", "## Ti|tle\n", &[K(Key::Enter)], "## Ti\n\n|tle\n"),
+        (
+            "7",
+            "Intro\n\n## |Title\n",
+            &[K(Key::Enter), T("x")],
+            "Intro\n\nx|\n\n## Title\n",
+        ),
+        ("8", "## |\n", &[K(Key::Enter)], "|\n"),
+        ("8b", "Intro\n\n## |\n", &[K(Key::Enter), T("x")], "Intro\n\nx|\n"),
+        ("10", "## Ti|tle\n", &[S(Key::Enter)], "## Ti<br/>|tle\n"),
+        ("11", "Title|\n===\n", &[K(Key::Enter), T("x")], "Title\n===\n\nx|\n"),
+        ("12", "Ti|tle\n===\n", &[K(Key::Enter)], "Ti\n===\n\n|tle\n"),
+        ("13", "# Ti|tle #\n", &[K(Key::Enter)], "# Ti #\n\n|tle\n"),
+        ("15", "## |Title\n", &[K(Key::Backspace)], "|Title\n"),
+        ("16", "## |Title ##\n", &[K(Key::Backspace)], "|Title\n"),
+        ("17", "|Title\n---\n", &[K(Key::Backspace)], "|Title\n"),
+        (
+            "18",
+            "Intro\n\n## |Title\n",
+            &[K(Key::Backspace), K(Key::Backspace)],
+            "Intro|Title\n",
+        ),
+        (
+            "21b",
+            "> ## |Title\n",
+            &[K(Key::Backspace), K(Key::Backspace)],
+            "|Title\n",
+        ),
+        ("24", "## T|\n", &[K(Key::Backspace)], "## |\n"),
+        ("25", "## |\n", &[K(Key::Backspace)], "|\n"),
+        ("25b", "Intro\n\n## |\n", &[K(Key::Backspace), T("x")], "Intro\n\nx|\n"),
+        // BE-3: Delete removes the empty heading; the next block keeps its type
+        ("26", "## |\n\nnext\n", &[K(Key::Delete)], "|next\n"),
+        ("26b", "## |\n\n### B\n", &[K(Key::Delete)], "### |B\n"),
+        ("27", "## |\n", &[K(Key::Delete)], "|\n"),
+        ("28", "## Title|\n\npara\n", &[K(Key::Delete)], "## Title|para\n"),
+        ("29", "## A|\n\n### B\n", &[K(Key::Delete)], "## A|B\n"),
+        ("30", "## A|\n\n- b\n", &[K(Key::Delete)], "## A|b\n"),
+        ("31", "## Ti|tle\n", &[C(Key::Num3)], "### Ti|tle\n"),
+        // E18: a closed ATX heading's closing hashes follow the level, or go with it
+        ("32", "## Ti|tle ##\n", &[C(Key::Num3)], "### Ti|tle ###\n"),
+        ("32b", "## Ti|tle ##\n", &[C(Key::Num0)], "Ti|tle\n"),
+        ("33", "Ti|tle\n===\n", &[C(Key::Num2)], "Ti|tle\n---\n"),
+        ("34", "Ti|tle\n===\n", &[C(Key::Num3)], "### Ti|tle\n"),
+        ("36", "## Ti|tle\n", &[C(Key::Num0)], "Ti|tle\n"),
+        ("38", "# T|\n", &[C(Key::Equals)], "# T|\n"),
+        ("39", "###### T|\n", &[C(Key::Minus)], "T|\n"),
+        ("40", "T|\n", &[C(Key::Equals)], "###### T|\n"),
+        ("41", "## Ti[tle\n\npa]ra\n", &[K(Key::Backspace)], "## Ti|ra\n"),
+        // BE-4: from the heading's text start the remainder keeps the later block's type
+        ("42", "## [Title\n\npa]ra\n", &[K(Key::Backspace)], "|ra\n"),
+        ("42b", "## [Title\n\npa]ra\n", &[T("x")], "x|ra\n"),
+        ("42c", "## [Title\n\npa]ra\n", &[K(Key::Delete)], "|ra\n"),
+        ("43", "## Ti[tle\n\npa]ra\n", &[T("x")], "## Tix|ra\n"),
+        ("44", "te[xt\n\n## Ti]tle\n", &[K(Key::Backspace)], "te|tle\n"),
+        ("46", "|", &[T("## Plan"), K(Key::Enter), T("x")], "## Plan\n\nx|"),
+        ("49", "## Title|\n", &[K(Key::Tab)], "## Title\t|\n"),
+        ("50", "## Title|\n", &[T("xyz"), C(Key::Z)], "## Title|\n"),
+    ];
+    let mut failed = Vec::new();
+    for (id, src, steps, want) in cases {
+        let got = run_marked(&format!("the{id}"), src, steps);
+        if got != *want {
+            failed.push(format!("T-HE.{id}: {src:?} -> {got:?}, want {want:?}"));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
