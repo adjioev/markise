@@ -646,8 +646,41 @@ fn a_swap_before_the_file_is_created_never_writes_outside() {
     let res = create_note(&dir, &root, "A/New.md");
     CREATE_HOOK.with(|h| *h.borrow_mut() = None);
     assert!(walk_files(&outside).is_empty(), "{res:?}");
-    // the handle still points at the original folder: the note is there
+    // the handle still points at the original folder: the note is there, and the move is
+    // reported (the note is no longer at `A/New.md`)
     assert!(root.join("A-aside/New.md").is_file(), "{res:?}");
+    assert!(res.as_ref().is_err_and(|e| e.contains("moved")), "{res:?}");
+}
+
+/// Pilot decision (round 5): a folder renamed out of the vault by another process right
+/// before the file is created is out of scope, but reported; nothing is deleted.
+#[cfg(unix)]
+#[test]
+fn a_folder_moved_out_while_creating_is_reported() {
+    for step in ["create_file", "verify"] {
+        let outer = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(outer.path()).unwrap();
+        let root = base.join("vault");
+        std::fs::create_dir_all(root.join("A")).unwrap();
+        let dir = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap();
+        let (r, b, st) = (root.clone(), base.clone(), step.to_string());
+        CREATE_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move |s: &str, folder: &str| {
+                if s == st && folder == "A" {
+                    std::fs::rename(r.join("A"), b.join("moved-out")).unwrap();
+                }
+            }))
+        });
+        let res = create_note(&dir, &root, "A/New.md");
+        CREATE_HOOK.with(|h| *h.borrow_mut() = None);
+        assert!(res.as_ref().is_err_and(|e| e.contains("moved")), "{step}: {res:?}");
+        assert!(base.join("moved-out/New.md").is_file(), "{step}: not deleted");
+    }
+    // without interference the check passes
+    let outer = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(outer.path()).unwrap();
+    assert!(create(&root, "A/B/New.md").is_ok());
+    assert!(create(&root, "A/B/New.md").is_ok(), "an existing note is found again");
 }
 
 /// Threat model: the guarantee covers the root directory object opened at mount. Replacing

@@ -34,10 +34,21 @@
 //! - names are checked first ([`check_new_note`]): portable on every supported platform, no
 //!   hidden components, no `..`.
 //!
-//! **Out of scope:** replacing the vault root directory itself after it was mounted (whoever
-//! can do that already controls every note in it); creations then still go to the directory
-//! that was opened, or fail. Reading follows links as the file tree does (the scanner lists a
-//! linked folder once, with a cycle guard).
+//! We never resolve link text through symlinks or outside paths, and never create through a
+//! symlinked component.
+//!
+//! **Out of scope:**
+//! - Replacing the vault root directory itself after it was mounted (whoever can do that
+//!   already controls every note in it); creations then still go to the directory that was
+//!   opened, or fail.
+//! - Concurrent renames of directories inside the vault by other processes (equivalent to
+//!   moving the note after creation, which no editor can prevent). As a cheap mitigation,
+//!   after creating the file we walk the same components again from the root handle
+//!   (no-follow) and compare the file's identity; if a folder was moved meanwhile, the user
+//!   is told and the note is not opened (nothing is deleted).
+//!
+//! Reading follows links as the file tree does (the scanner lists a linked folder once, with
+//! a cycle guard).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -820,6 +831,7 @@ pub fn create_note(root_dir: &cap_std::fs::Dir, root_path: &Path, rel: &str) -> 
     let (last, folders) = segs.split_last().ok_or("The name is empty.")?;
     let mut path = root_path.to_path_buf();
     let mut so_far = String::new();
+    let mut disk_folders: Vec<String> = Vec::new();
     let refuse = |seg: &str, e: std::io::Error| -> String {
         match dir_is_link(&e) {
             true => format!("“{seg}” is a symbolic link; notes are not created through links."),
@@ -841,13 +853,14 @@ pub fn create_note(root_dir: &cap_std::fs::Dir, root_path: &Path, rel: &str) -> 
         step_hook("open_dir", &so_far);
         dir = dir.open_dir_nofollow(&seg).map_err(|e| refuse(&seg, e))?;
         path.push(&seg);
+        disk_folders.push(seg);
     }
     let last = disk_name(&dir, last);
     let mut opts = cap_std::fs::OpenOptions::new();
     opts.write(true).create_new(true).follow(FollowSymlinks::No);
     step_hook("create_file", &so_far);
-    match dir.open_with(&last, &opts) {
-        Ok(_) => {}
+    let created = match dir.open_with(&last, &opts) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let m = dir.symlink_metadata(&last).map_err(|e| format!("“{last}”: {e}"))?;
             if m.file_type().is_symlink() {
@@ -858,11 +871,48 @@ pub fn create_note(root_dir: &cap_std::fs::Dir, root_path: &Path, rel: &str) -> 
             if !m.is_file() {
                 return Err(format!("“{last}” exists and is not a file."));
             }
+            let mut ro = cap_std::fs::OpenOptions::new();
+            ro.read(true).follow(FollowSymlinks::No);
+            dir.open_with(&last, &ro).map_err(|e| refuse(&last, e))?
         }
         Err(e) => return Err(refuse(&last, e)),
+    };
+    step_hook("verify", &so_far);
+    // a folder renamed away by another process meanwhile (out of scope, see the threat
+    // model) is at least reported: the note must still be reachable from the root
+    if !reachable(root_dir, &disk_folders, &last, &created) {
+        return Err("A folder was moved while the note was being created; the note was not opened.".into());
     }
     path.push(&last);
     Ok(path)
+}
+
+/// Whether `file` is still `folders/…/name` below `root`, walking without following links
+/// (the same file: device and inode on Unix; the same kind of entry elsewhere).
+fn reachable(root: &cap_std::fs::Dir, folders: &[String], name: &str, file: &cap_std::fs::File) -> bool {
+    use cap_fs_ext::DirExt;
+    let Ok(mut d) = root.try_clone() else { return false };
+    for seg in folders {
+        match d.open_dir_nofollow(seg) {
+            Ok(n) => d = n,
+            Err(_) => return false,
+        }
+    }
+    let (Ok(found), Ok(held)) = (d.symlink_metadata(name), file.metadata()) else {
+        return false;
+    };
+    if found.file_type().is_symlink() || !found.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use cap_fs_ext::OsMetadataExt;
+        found.dev() == held.dev() && found.ino() == held.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        held.is_file()
+    }
 }
 
 /// A [`create_note`] step hook: step name, vault path of the folder concerned.

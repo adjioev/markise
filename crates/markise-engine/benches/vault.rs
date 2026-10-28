@@ -107,9 +107,12 @@ fn main() {
         got.len(),
         t.elapsed().as_secs_f64() * 1e3
     );
+    // a real indexed change (a no-op notification publishes no snapshot)
+    std::fs::write(base.join("Area 3/Folder 33/Added note.md"), "").unwrap();
     let t = Instant::now();
     sc.changed(base.join("Area 3/Folder 33"));
-    let _ = sc.recv_timeout(Duration::from_secs(60)).expect("rescan");
+    let got = sc.recv_timeout(Duration::from_secs(60)).expect("rescan");
+    assert!(got.file("Area 3/Folder 33/Added note.md").is_some());
     println!(
         "one folder changed → new snapshot           {:>10.3} ms",
         t.elapsed().as_secs_f64() * 1e3
