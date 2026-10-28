@@ -250,11 +250,22 @@ impl MarkiseApp {
                 .kind(MenuKind::App),
             );
         }
+        let has_file = self.document_path().is_some();
         let mut file = vec![
+            self.item(MenuAction::Command("file.new"), "New", true, Check::None),
             self.item(MenuAction::Command("file.open"), "Open…", true, Check::None),
             self.app_item("file.openFolder", true, Check::None),
             Entry::Separator,
             self.item(MenuAction::Command("file.save"), "Save", has_doc, Check::None),
+            self.item(MenuAction::Command("file.saveAs"), "Save As…", has_doc, Check::None),
+            Entry::Separator,
+            self.app_item("file.rename", has_file, Check::None),
+            self.item(
+                MenuAction::Command("file.reveal"),
+                crate::sidebar::reveal_label(),
+                has_file,
+                Check::None,
+            ),
             Entry::Separator,
             Entry::Submenu(self.export_menu()),
             Entry::Separator,
@@ -514,6 +525,18 @@ impl MarkiseApp {
             "file.open" => self.open_dialog(),
             "file.openFolder" => self.open_folder_dialog(),
             "file.save" => self.save(),
+            "file.new" => self.new_document(),
+            "file.saveAs" if self.doc.is_some() => self.save_as(),
+            "file.rename" | "file.reveal" => {
+                let Some(p) = self.document_path().map(std::path::Path::to_path_buf) else {
+                    return false;
+                };
+                if id == "file.rename" {
+                    self.start_rename(p);
+                } else {
+                    self.tree_action(ctx, crate::sidebar::TreeAction::Reveal(p));
+                }
+            }
             "file.close" | "app.quit" | "app.exit" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             "app.preferences" => return false,
             "app.about" => self.about.open(),

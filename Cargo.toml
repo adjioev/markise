@@ -55,6 +55,8 @@ rfd = "0.17"
 # in-window egui menu bar.
 muda = { version = "0.21.2", default-features = false }
 notify = "8.2"
+# Sidebar "Move to Trash" (markise-engine fsops; MIT)
+trash = "5.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 memory-stats = "1.2"
 ahash = "0.8"

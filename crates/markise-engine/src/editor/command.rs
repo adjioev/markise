@@ -143,7 +143,7 @@ const fn nav(id: &'static str, label: &'static str, keys: &'static [DefaultKey])
 /// The engine's own commands (spec 02 §5.4, §15; ADR 0006 §3.2 table) with how they run.
 /// Caret and selection commands need the caret geometry of a laid-out view ([`Run::Caret`]);
 /// `file.*` / `view.*` commands are performed by the host (I/O, UI state).
-pub static ENGINE_COMMANDS: [(CommandDescriptor, Run); 41] = [
+pub static ENGINE_COMMANDS: [(CommandDescriptor, Run); 43] = [
     (
         engine(
             "edit.undo",
@@ -422,6 +422,28 @@ pub static ENGINE_COMMANDS: [(CommandDescriptor, Run); 41] = [
             "file.save",
             "Save",
             &[key("Cmd+S", "Ctrl+S")],
+            Scope::Global,
+            Effect::Pure,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
+    (
+        engine(
+            "file.saveAs",
+            "Save As…",
+            &[key("Shift+Cmd+S", "Ctrl+Shift+S")],
+            Scope::Global,
+            Effect::Pure,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
+    (
+        engine(
+            "file.new",
+            "New",
+            &[key("Cmd+N", "Ctrl+N")],
             Scope::Global,
             Effect::Pure,
             ParamSchema::NONE,

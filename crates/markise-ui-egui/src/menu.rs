@@ -283,12 +283,15 @@ const fn mac_only(mac: &'static str) -> DefaultKey {
 /// Commands performed by the application itself (window, files, view and theme state) that
 /// the engine registry does not hold. Same descriptor type as the registry, so labels and
 /// per-platform chords have one source (spec 02 §15).
-pub static APP_COMMANDS: [CommandDescriptor; 25] = [
+pub static APP_COMMANDS: [CommandDescriptor; 27] = [
     app(
         "file.openFolder",
         "Open Folder…",
         &[both("Shift+Cmd+O", "Ctrl+Shift+O")],
     ),
+    // the current document's file (the sidebar offers the same for any file)
+    app("file.rename", "Rename…", &[]),
+    app("file.reveal", "Reveal in File Manager", &[]),
     app("file.close", "Close", &[both("Cmd+W", "Ctrl+W")]),
     app("app.quit", "Quit Markise", &[mac_only("Cmd+Q")]),
     app("app.exit", "Exit", &[]),
