@@ -36,3 +36,7 @@ harness = false
 [[bench]]
 name = "typing"
 harness = false
+
+[[bench]]
+name = "source"
+harness = false

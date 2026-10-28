@@ -226,6 +226,29 @@ impl History {
         self.undo.push_back(tx);
     }
 
+    /// Removes and returns the redo stack (oldest last, as stored).
+    pub fn take_redo(&mut self) -> Vec<Transaction> {
+        let r = std::mem::take(&mut self.redo);
+        for t in &r {
+            self.bytes -= t.bytes();
+        }
+        r
+    }
+
+    /// Puts a redo stack taken with [`History::take_redo`] back (replacing the current one).
+    pub fn restore_redo(&mut self, redo: Vec<Transaction>) {
+        self.clear_redo();
+        self.bytes += redo.iter().map(Transaction::bytes).sum::<usize>();
+        self.redo = redo;
+    }
+
+    /// Drops the redo stack.
+    pub fn clear_redo(&mut self) {
+        for r in self.redo.drain(..) {
+            self.bytes -= r.bytes();
+        }
+    }
+
     fn evict(&mut self) {
         while self.undo.len() > 1 && (self.undo.len() > self.limits.max_steps || self.bytes > self.limits.max_bytes) {
             let tx = self.undo.pop_front().unwrap();
