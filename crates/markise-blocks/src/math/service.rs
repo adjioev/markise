@@ -656,18 +656,32 @@ mod tests {
 
     #[test]
     fn dead_worker_is_replaced_and_its_job_fails() {
-        let wakes = Arc::new(AtomicUsize::new(0));
-        let w = wakes.clone();
+        // Issue #33: the dying worker publishes the failure (under the lock) *before* it starts
+        // the replacement and calls `wake`, so polling `get` until `Failed` and then asserting
+        // that a wake already happened raced. Instead, synchronise on the wake itself: every
+        // finished (or killed) job sends exactly one message, and after it the job's result is
+        // guaranteed to be visible. The timeout only turns a hang into a failure.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
         let svc = MathService::new(Arc::new(move || {
-            w.fetch_add(1, Ordering::Relaxed);
+            let _ = tx.send(());
         }))
         .unwrap();
-        assert!(matches!(wait(&svc, &req(KILL_WORKER)), MathImageLookup::Failed(_)));
-        assert!(wakes.load(Ordering::Relaxed) >= 1, "the UI is woken");
+        let woken = || {
+            rx.recv_timeout(Duration::from_secs(120))
+                .expect("the UI is woken after the job ends")
+        };
+        let kill = req(KILL_WORKER);
+        assert!(matches!(svc.get(&kill), MathImageLookup::Pending));
+        woken();
+        assert!(matches!(svc.get(&kill), MathImageLookup::Failed(_)));
         assert_eq!(svc.stats().respawned, 1);
         // the replacement worker serves later formulas
-        assert!(matches!(wait(&svc, &req("z^2")), MathImageLookup::Ready(_)));
+        let z = req("z^2");
+        assert!(matches!(svc.get(&z), MathImageLookup::Pending));
+        woken();
+        assert!(matches!(svc.get(&z), MathImageLookup::Ready(_)));
         assert!(!svc.busy());
+        assert!(rx.try_recv().is_err(), "one wake per job");
     }
 
     #[test]
