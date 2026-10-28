@@ -308,6 +308,9 @@ pub static APP_COMMANDS: [CommandDescriptor; 27] = [
     // spec 04 §3.3: ⌃⌘/ on macOS, Ctrl+Alt+/ elsewhere (Ctrl+/ is Source Code Mode)
     app("view.sideBySide", "Side by Side", &[both("Ctrl+Cmd+/", "Ctrl+Alt+/")]),
     app("view.toolbar", "Toolbar", &[]),
+    // View → Toolbar Position (spec 04 §3.2); the menu shows them as "Top" / "Bottom"
+    app("view.toolbarTop", "Toolbar at Top", &[]),
+    app("view.toolbarBottom", "Toolbar at Bottom", &[]),
     app("view.highlightCode", "Highlight Code", &[]),
     app("view.diagrams", "Diagrams", &[]),
     app("view.fullScreen", "Toggle Full Screen", &[both("Ctrl+Cmd+F", "F11")]),
