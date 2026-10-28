@@ -16,7 +16,8 @@
 //!   triple-click a line; a drag selects (at the press's unit) and scrolls past the edges.
 //! - **Display** (persisted View preferences, spec 02 §12.1.1 defaults): line-number gutter
 //!   (off), soft wrap (on; otherwise horizontal scrolling), current-line band (on), whitespace
-//!   marks (off: `·` for spaces, `→` for tabs, `↵` after two or more trailing spaces).
+//!   marks (off: `·` for spaces, `→` for tabs); a faint `↵` after two or more trailing spaces
+//!   is always shown (SE-2).
 //! - **Repaint discipline** (NFR-10): the caret blinks only while focused and for
 //!   [`crate::viewer::BLINK_FOR`] seconds after the last input; nothing is scheduled otherwise.
 
@@ -440,9 +441,16 @@ impl SourceEditor {
                 paint_text_block(&tp, ui, &ln.text, pos, parley.as_deref_mut());
             }
         }
-        if prefs.whitespace_marks {
-            self.paint_whitespace(&tp, viewer, &visible, rect.top(), text_left, theme);
-        }
+        // SE-2: spaces and tabs only with "Show Whitespace"; the hard-break mark always (faint)
+        self.paint_whitespace(
+            &tp,
+            viewer,
+            &visible,
+            rect.top(),
+            text_left,
+            theme,
+            prefs.whitespace_marks,
+        );
         if prefs.line_numbers {
             self.paint_gutter(&painter, viewer, &visible, rect, gutter, size, theme);
         }
@@ -574,8 +582,10 @@ impl SourceEditor {
         }
     }
 
-    /// Whitespace marks: `·` for spaces, an arrow for tabs, `↵` after a hard line break (two or
-    /// more trailing spaces before a line break).
+    /// Whitespace marks: `·` for spaces and an arrow for tabs (`spaces`: "Show Whitespace" is
+    /// on), and always a faint `↵` after a hard line break (two or more trailing spaces before
+    /// a line break; SE-2).
+    #[allow(clippy::too_many_arguments)]
     fn paint_whitespace(
         &self,
         painter: &egui::Painter,
@@ -584,8 +594,10 @@ impl SourceEditor {
         top: f32,
         left: f32,
         theme: &Theme,
+        spaces: bool,
     ) {
         let c = color(theme.meta_text).gamma_multiply(0.55);
+        let faint = color(theme.meta_text).gamma_multiply(if spaces { 0.55 } else { 0.35 });
         let text = viewer.ed.session.text();
         for v in visible {
             for ln in &v.layout.lines {
@@ -593,7 +605,7 @@ impl SourceEditor {
                 let rows = &ln.rows;
                 let row_y = |r: usize| rows.get(r).map_or(0.0, |x| x.1 + x.2 * 0.5);
                 let map = ln.text.source_map();
-                let clusters = ln.text.clusters();
+                let clusters = if spaces { ln.text.clusters() } else { Vec::new() };
                 for cl in &clusters {
                     if cl.ch != ' ' {
                         continue;
@@ -639,10 +651,11 @@ impl SourceEditor {
                     ));
                     let y = y0 + end.center().y;
                     let x = left + end.min.x + 3.0;
-                    painter.line_segment([pos2(x + 6.0, y - 4.0), pos2(x + 6.0, y + 2.0)], Stroke::new(1.0, c));
-                    painter.line_segment([pos2(x + 6.0, y + 2.0), pos2(x, y + 2.0)], Stroke::new(1.0, c));
-                    painter.line_segment([pos2(x, y + 2.0), pos2(x + 3.0, y - 1.0)], Stroke::new(1.0, c));
-                    painter.line_segment([pos2(x, y + 2.0), pos2(x + 3.0, y + 5.0)], Stroke::new(1.0, c));
+                    let st = Stroke::new(1.0, faint);
+                    painter.line_segment([pos2(x + 6.0, y - 4.0), pos2(x + 6.0, y + 2.0)], st);
+                    painter.line_segment([pos2(x + 6.0, y + 2.0), pos2(x, y + 2.0)], st);
+                    painter.line_segment([pos2(x, y + 2.0), pos2(x + 3.0, y - 1.0)], st);
+                    painter.line_segment([pos2(x, y + 2.0), pos2(x + 3.0, y + 5.0)], st);
                 }
             }
         }

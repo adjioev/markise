@@ -310,3 +310,47 @@ fn side_by_side_typing_between_markers_is_one_group() {
     assert_eq!(text(&h), "**xyzbold** text\n");
     assert_eq!(h.state_mut().viewer().unwrap().ed.session.history().undo_len(), 1);
 }
+
+/// Review of PR #23 (P1): an external change reloaded while the source caret sits after `a`
+/// in `ab` (now `éb`): the caret is mapped through the diff onto a character boundary and
+/// Backspace works.
+#[test]
+fn reload_keeps_the_source_caret_on_a_char_boundary() {
+    let (mut h, f) = open("reloadutf8", "ab");
+    source_mode(&mut h);
+    key(&mut h, Key::Home);
+    key(&mut h, Key::ArrowRight);
+    assert_eq!(h.state().source_caret(), Some(1));
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::write(&f, "éb").unwrap();
+    wait_until(&mut h, "reload", |a| a.document_text().as_deref() == Some("éb"));
+    let c = h.state().source_caret().unwrap();
+    assert!("éb".is_char_boundary(c), "caret {c}");
+    key(&mut h, Key::Backspace);
+    let t = text(&h);
+    assert!(t == "b" || t == "éb", "{t:?}");
+}
+
+/// Review of PR #23 (P1): in Side by Side, an Undo run from the focused rendered pane maps the
+/// source selection; typing in the source pane afterwards works.
+#[test]
+fn rendered_pane_undo_maps_the_source_caret() {
+    let (mut h, _f) = open("sbsundo", "abc\n");
+    h.state_mut().set_view_mode(ViewMode::SideBySide);
+    h.run_steps(3);
+    doc_end(&mut h);
+    typ(&mut h, "xyz");
+    assert_eq!(text(&h), "abc\nxyz");
+    // focus the rendered pane and undo there (menu command)
+    click(&mut h, pos2(900.0, 120.0), 1);
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().run_command(&ctx, "edit.undo"));
+    h.run_steps(2);
+    assert_eq!(text(&h), "abc\n");
+    assert!(h.state().source_caret().unwrap() <= 4);
+    // back to the source pane: Backspace at the mapped caret
+    let r = h.state().source_rect().unwrap();
+    click(&mut h, pos2(r.left() + 200.0, r.top() + 60.0), 1);
+    key(&mut h, Key::Backspace);
+    assert!(text(&h).len() < 5);
+}

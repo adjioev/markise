@@ -135,6 +135,9 @@ impl EditorView {
                 self.view.apply_change(self.session.doc_arc().clone(), &ch);
                 if let Some(p) = self.source.as_mut() {
                     p.view.apply(self.session.doc().text(), &e);
+                    // a change made elsewhere (the rendered pane, a menu Undo) moves the
+                    // source selection with the text; source edits set it afterwards
+                    p.map_selection(self.session.doc().text(), &e);
                 }
             }
             DocChange::Replaced => {
@@ -142,11 +145,7 @@ impl EditorView {
                 self.view.set_model(self.session.doc_arc().clone(), model);
                 if let Some(p) = self.source.as_mut() {
                     p.view.rebuild(self.session.doc().text());
-                    let len = self.session.text().len();
-                    let s = p.sel.primary();
-                    if s.anchor.offset > len || s.focus.offset > len {
-                        p.sel = Selection::caret(len);
-                    }
+                    p.clamp_selection(self.session.doc().text());
                 }
             }
         }

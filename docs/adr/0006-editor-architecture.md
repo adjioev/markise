@@ -1555,8 +1555,9 @@ numbered M2d-n (proposed for `99-open-questions.md`).
   the read-only rendered pane, honouring the top/bottom reservation.
 - **M2d-8 — display preferences.** Settings key `source` (`line_numbers` false, `soft_wrap`
   true, `current_line` true, `whitespace_marks` false), View → Source Editor. Line numbers are
-  a gutter numbering every line; whitespace marks show `·` for spaces, an arrow for tabs and a
-  return arrow after two or more trailing spaces before a line break, all at paint time; the
+  a gutter numbering every line; whitespace marks show `·` for spaces and an arrow for tabs,
+  and a faint return arrow after two or more trailing spaces before a line break is always
+  shown (SE-2), all at paint time; the
   current-line band covers the caret's physical line (or piece). Without soft wrap the view
   scrolls horizontally (wheel / caret follow; no horizontal scrollbar yet).
 - **M2d-9 — position mapping.** Entering source mode centres the source line of the block at
@@ -1565,6 +1566,15 @@ numbered M2d-n (proposed for `99-open-questions.md`).
   and gives the rendered view the source caret (moved to its nearest caret stop). Outline
   clicks in source mode scroll the source to the heading's line. Side by Side scroll sync maps
   through the source view's line index (`side_by_side::LineMap`).
+- **Selections (review of PR #23).** The source pane's selection follows every document change
+  made elsewhere — mapped through the change summary for rendered-pane edits and menu
+  Undo/Redo, through the diff (session live marks) for a reload — and every selection the pane
+  takes is snapped to a caret position (char boundary, not inside a CRLF). Grapheme steps widen
+  their segmentation context until the boundary is real, so long clusters are never split.
+- **Owner decisions SE-1…SE-10** (private spec): M2d-6 line endings kept (SE-1); the hard-break
+  mark is always shown faintly, spaces/tabs only with Show Whitespace (SE-2); the indent unit
+  becomes the `codeIndentSize` preference in slice 2 (SE-4); smart Home in slice 2, read-only
+  mode and IME preedit in M2e (SE-10).
 - **Removed safety net.** The interim Side by Side caught a panicking incremental update and
   fell back to a background rebuild of the buffer. With the session as the only text there is
   no buffer to rebuild from; source edits now behave like rendered-view edits (no catch).

@@ -341,3 +341,70 @@ fn random_source_keystrokes_keep_both_views_incremental() {
     }
     let _ = DocPos::new(0);
 }
+
+/// Review of PR #23 (P1): a change made outside the source pane (rendered pane, menu Undo)
+/// maps the source selection through it — never beyond the text.
+#[test]
+fn rendered_edits_map_the_source_selection() {
+    let mut s = S::new("abc\n");
+    s.set(4);
+    s.typ("xyz");
+    assert_eq!(s.caret(), 7);
+    // undo from the rendered pane (not through the source pane)
+    let _ = s.ed.edit(|x| x.undo());
+    assert_eq!(s.text(), "abc\n");
+    assert!(
+        s.caret() <= s.text().len(),
+        "caret {} in {} bytes",
+        s.caret(),
+        s.text().len()
+    );
+    s.run("edit.deleteBackward");
+    assert_eq!(s.text(), "abc");
+    // an edit in front of the source caret shifts it
+    s.set(2);
+    let _ = s.ed.edit(|x| {
+        x.set_selection(Selection::caret(0));
+        x.insert_text("Q")
+    });
+    assert_eq!(s.text(), "Qabc");
+    assert_eq!(s.caret(), 3, "the source caret moved with its text");
+}
+
+/// Review of PR #23 (P1): a replaced document (reload) never leaves the source caret inside a
+/// UTF-8 character; every selection the pane takes is snapped to a caret position.
+#[test]
+fn replaced_documents_snap_the_source_selection() {
+    let mut s = S::new("ab");
+    s.set(1);
+    let doc: Arc<dyn markise_doc::FormatDoc> = Arc::new(markise_md::parse("éb"));
+    let _ =
+        s.ed.edit(|x| x.replace_doc(doc, "Reload from Disk", markise_engine::editor::TxKind::Bulk, false));
+    let c = s.caret();
+    assert!(s.text().is_char_boundary(c), "caret {c} on a char boundary");
+    s.run("edit.deleteBackward");
+    s.check();
+    // a selection handed to the pane inside a character or a CRLF is snapped
+    let mut s = S::new("é\r\nx");
+    s.ed.source_set_selection(Selection::range(1, 3));
+    let r = s.ed.source.as_ref().unwrap().sel.primary().range();
+    assert_eq!(r, 0..2);
+    s.run("edit.deleteBackward");
+    assert_eq!(s.text(), "\r\nx");
+}
+
+/// Review of PR #23 (P2): Backspace/Delete never split a grapheme cluster, however long.
+#[test]
+fn deletion_keeps_long_clusters_whole() {
+    let cluster = format!("a{}", "\u{301}".repeat(40));
+    let mut s = S::new(&format!("{cluster}b"));
+    s.set(0);
+    s.run("edit.deleteForward");
+    assert_eq!(s.text(), "b");
+    let mut s = S::new(&format!("x{cluster}"));
+    s.set(s.text().len());
+    s.run("edit.deleteBackward");
+    assert_eq!(s.text(), "x");
+    s.run("caret.left");
+    assert_eq!(s.caret(), 0);
+}

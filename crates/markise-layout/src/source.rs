@@ -1467,25 +1467,84 @@ impl SourceView {
 
 // ---------------------------------------------------------------------- text-based moves
 
-/// The previous grapheme boundary before `at` (a CRLF pair is one grapheme).
+/// The previous grapheme boundary before `at` (a CRLF pair is one grapheme). The segmentation
+/// context grows until the boundary found is a real one (never inside a cluster, however many
+/// combining marks it has); a line break always ends a cluster.
 pub fn prev_grapheme(t: &str, at: usize) -> usize {
+    let at = floor_char(t, at.min(t.len()));
     if at == 0 {
         return 0;
     }
-    let from = t[..at].char_indices().rev().nth(32).map_or(0, |(i, _)| i);
-    t[from..at]
-        .grapheme_indices(true)
-        .next_back()
-        .map_or(from, |(i, _)| from + i)
+    if t[..at].ends_with("\r\n") {
+        return at - 2;
+    }
+    if t[..at].ends_with('\n') {
+        return at - 1;
+    }
+    let line_start = t[..at].rfind('\n').map_or(0, |k| k + 1);
+    let mut k = 32;
+    loop {
+        let from = t[line_start..at]
+            .char_indices()
+            .rev()
+            .nth(k)
+            .map_or(line_start, |(i, _)| line_start + i);
+        let g = t[from..at]
+            .grapheme_indices(true)
+            .next_back()
+            .map_or(from, |(i, _)| from + i);
+        // a boundary at the window start may be an artefact of the window: widen it
+        if g > from || from == line_start {
+            return g;
+        }
+        k *= 4;
+    }
 }
 
-/// The next grapheme boundary after `at`.
+/// The next grapheme boundary after `at` (see [`prev_grapheme`]).
 pub fn next_grapheme(t: &str, at: usize) -> usize {
+    let at = floor_char(t, at.min(t.len()));
     if at >= t.len() {
         return t.len();
     }
-    let to = t[at..].char_indices().nth(32).map_or(t.len(), |(i, _)| at + i);
-    t[at..to].graphemes(true).next().map_or(to, |g| at + g.len())
+    if t[at..].starts_with("\r\n") {
+        return at + 2;
+    }
+    if t[at..].starts_with('\n') {
+        return at + 1;
+    }
+    let line_end = t[at..].find(['\r', '\n']).map_or(t.len(), |k| at + k);
+    if line_end == at {
+        return at + 1; // a lone `\r`
+    }
+    let mut k = 32;
+    loop {
+        let to = t[at..line_end].char_indices().nth(k).map_or(line_end, |(i, _)| at + i);
+        let g = t[at..to].graphemes(true).next().map_or(to, |g| at + g.len());
+        if g < to || to == line_end {
+            return g;
+        }
+        k *= 4;
+    }
+}
+
+/// `at` moved back to a char boundary.
+fn floor_char(t: &str, mut at: usize) -> usize {
+    while at > 0 && !t.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// `at` moved back to a caret position: a char boundary, not between the `\r` and `\n` of a
+/// CRLF terminator, clamped to the text.
+pub fn snap_offset(t: &str, at: usize) -> usize {
+    let at = floor_char(t, at.min(t.len()));
+    if at > 0 && t.as_bytes()[at - 1] == b'\r' && t.as_bytes().get(at) == Some(&b'\n') {
+        at - 1
+    } else {
+        at
+    }
 }
 
 fn is_word(c: char) -> bool {
@@ -1738,6 +1797,13 @@ mod tests {
         assert_eq!(word_at(t, 3), 3..4);
         let e = "e\u{301}x";
         assert_eq!(next_grapheme(e, 0), 3);
+        // a cluster longer than the initial context is never split (review of PR #23)
+        let long = format!("a{}b", "\u{301}".repeat(40));
+        assert_eq!(next_grapheme(&long, 0), long.len() - 1);
+        assert_eq!(prev_grapheme(&long, long.len() - 1), 0);
+        assert_eq!(prev_grapheme(&long, long.len()), long.len() - 1);
+        assert_eq!(snap_offset("a\r\nb", 2), 1, "not inside CRLF");
+        assert_eq!(snap_offset("éb", 1), 0, "a char boundary");
     }
 
     #[test]

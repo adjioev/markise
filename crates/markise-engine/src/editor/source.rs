@@ -290,6 +290,55 @@ fn touched_lines(t: &str, r: &Range<usize>) -> Vec<usize> {
     out
 }
 
+/// `sel` with both ends on caret positions of `text` (char boundaries, not inside a CRLF
+/// terminator, within the text): every selection the source pane takes goes through this.
+pub fn snap_selection(text: &str, sel: &Selection) -> Selection {
+    let p = sel.primary();
+    let snap = |d: DocPos| DocPos {
+        offset: src::snap_offset(text, d.offset),
+        virt: 0,
+        ..d
+    };
+    let (a, f) = (snap(p.anchor), snap(p.focus));
+    if a == p.anchor && f == p.focus && sel.ranges().len() == 1 {
+        return sel.clone();
+    }
+    let mut out = Selection::single(a, f);
+    out.goal_x = sel.goal_x;
+    out
+}
+
+/// A position mapped through one combined change (`EditSummary`: `changed` before the edit,
+/// `new_len` after it): before the change it stays, after it shifts, inside it moves to the
+/// end of the new text.
+fn map_through(pos: DocPos, e: &markise_doc::EditSummary) -> DocPos {
+    let o = pos.offset;
+    let offset = if o < e.changed.start || (o == e.changed.start && e.changed.is_empty() && e.new_len == 0) {
+        o
+    } else if o >= e.changed.end {
+        (o as isize + e.delta).max(0) as usize
+    } else {
+        e.changed.start + e.new_len
+    };
+    DocPos { offset, ..pos }
+}
+
+impl SourcePane {
+    /// Maps the pane's selection through a document change made elsewhere (the rendered pane,
+    /// undo from a menu) and snaps it to caret positions of the new `text`.
+    pub fn map_selection(&mut self, text: &str, e: &markise_doc::EditSummary) {
+        let p = self.sel.primary();
+        let mut s = Selection::single(map_through(p.anchor, e), map_through(p.focus, e));
+        s.goal_x = None;
+        self.sel = snap_selection(text, &s);
+    }
+
+    /// Clamps and snaps the selection to `text` (the document was replaced).
+    pub fn clamp_selection(&mut self, text: &str) {
+        self.sel = snap_selection(text, &self.sel);
+    }
+}
+
 impl EditorView {
     /// Opens the source pane (entering Source or Side by Side): a source view of the current
     /// text with the caret where the session's is (a selection collapses to its focus, spec 02
@@ -377,6 +426,7 @@ impl EditorView {
 
     /// Sets the source selection (click, drag): a caret jump closes the typing group.
     pub fn source_set_selection(&mut self, sel: Selection) {
+        let sel = snap_selection(self.session.text(), &sel);
         let Some(pane) = self.source.as_mut() else { return };
         if pane.sel == sel {
             return;
@@ -387,6 +437,11 @@ impl EditorView {
 
     /// Hands the pane's selection to the session (before a session operation).
     fn source_selection_to_session(&mut self) {
+        // guard: the pane's selection is always on caret positions of the current text
+        let text = self.session.text();
+        if let Some(pane) = self.source.as_mut() {
+            pane.sel = snap_selection(text, &pane.sel);
+        }
         if let Some(pane) = &self.source
             && self.session.selection() != &pane.sel
         {
@@ -397,14 +452,9 @@ impl EditorView {
 
     /// Takes the session's selection after an operation.
     fn source_selection_from_session(&mut self) {
-        let len = self.session.text().len();
+        let text = self.session.text();
         if let Some(pane) = self.source.as_mut() {
-            let mut s = self.session.selection().clone();
-            let p = s.primary();
-            if p.anchor.offset > len || p.focus.offset > len {
-                s = Selection::caret(len);
-            }
-            pane.sel = s;
+            pane.sel = snap_selection(text, self.session.selection());
         }
     }
 
@@ -430,6 +480,7 @@ impl EditorView {
         if own_step {
             self.session.close_typing();
         }
+        self.source_selection_to_session();
         let r = self.source.as_ref().map(|p| p.sel.primary().range()).unwrap_or(0..0);
         let caret = r.start + text.len();
         let res = self.source_edit_with(|s| s.source_keystroke(TypingDir::Insert, r, text, caret));
@@ -448,6 +499,7 @@ impl EditorView {
 
     /// Deletes the source selection as its own step (cut).
     pub fn source_cut(&mut self) -> Result<(), CommandError> {
+        self.source_selection_to_session();
         let Some(r) = self.source.as_ref().map(|p| p.sel.primary().range()) else {
             return Ok(());
         };
@@ -474,6 +526,7 @@ impl EditorView {
         if !source_command_available(id) {
             return Err(CommandError::Disabled("not available in the source editor yet"));
         }
+        self.source_selection_to_session();
         let sel = self.source.as_ref().expect("pane").sel.primary();
         let r = sel.range();
         match id {
