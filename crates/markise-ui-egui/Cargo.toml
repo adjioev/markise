@@ -26,6 +26,7 @@ vello_cpu.workspace = true
 memory-stats.workspace = true
 
 [dev-dependencies]
+libc.workspace = true
 markise-theme.workspace = true
 egui_kittest.workspace = true
 markise-corpus.workspace = true
@@ -37,5 +38,5 @@ name = "viewer"
 harness = false
 
 [[bench]]
-name = "side_by_side"
+name = "source_editor"
 harness = false

@@ -10,6 +10,7 @@
 pub mod command;
 pub mod history;
 pub mod keymap;
+pub mod source;
 pub mod surface;
 
 use std::borrow::Cow;
@@ -23,6 +24,7 @@ use markise_doc::{
 };
 
 pub use history::{History, HistoryLimits, StateId, Step, Transaction, TxKind, TypingDir};
+pub use source::{SourceCaret, SourcePane};
 pub use surface::{CaretGeometry, EditorView, ViewCaret};
 
 /// Time source for typing-group pauses (C13); injectable for tests.
@@ -187,6 +189,8 @@ pub struct EditorSession {
     clock: Box<dyn Clock>,
     /// Editing preferences passed to planners (auto-pair, smart punctuation…).
     prefs: EditPrefs,
+    /// Full Source mode's own history (ADR 0006 §4.3), while it is open.
+    source: Option<source::SourceSession>,
 }
 
 impl fmt::Debug for EditorSession {
@@ -242,6 +246,7 @@ impl EditorSession {
             effects: Vec::new(),
             clock,
             prefs: EditPrefs::default(),
+            source: None,
         }
     }
 
@@ -1153,6 +1158,9 @@ impl EditorSession {
     /// Undoes the newest transaction: inverse steps in reverse, exact hints, `sel_before`.
     pub fn undo(&mut self) -> bool {
         self.close_typing();
+        if !self.can_undo() {
+            return false;
+        }
         let Some(tx) = self.history.pop_undo() else {
             return false;
         };
@@ -1464,20 +1472,9 @@ fn doc_hints_empty(d: &Arc<dyn FormatDoc>) -> bool {
     d.hints().is_empty()
 }
 
-fn prev_grapheme(t: &str, at: usize) -> usize {
-    use unicode_segmentation::UnicodeSegmentation;
-    let from = t[..at].char_indices().rev().nth(32).map_or(0, |(i, _)| i);
-    t[from..at]
-        .grapheme_indices(true)
-        .next_back()
-        .map_or(from, |(i, _)| from + i)
-}
-
-fn next_grapheme(t: &str, at: usize) -> usize {
-    use unicode_segmentation::UnicodeSegmentation;
-    let to = t[at..].char_indices().nth(32).map_or(t.len(), |(i, _)| at + i);
-    t[at..to].graphemes(true).next().map_or(to, |g| at + g.len())
-}
+// one boundary-safe grapheme implementation for both panes (regional-indicator pairs, ZWJ
+// sequences and clusters of any length are never split)
+use markise_layout::source::{next_grapheme, prev_grapheme};
 
 /// Typing coalescing (ADR 0006 §4.1): a keystroke adjacent to the last step's insert (append)
 /// or removal (Backspace prepends, Delete appends) extends that patch in place.

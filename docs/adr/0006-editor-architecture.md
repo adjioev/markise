@@ -751,8 +751,9 @@ part of the same patch set (one reparse; cost bounded by §7.2's list case).
 
 ### 5.5 Source mode, focus and typewriter (spec 02 §12)
 
-- M2d replaces the `TextEdit` source mode (`source.rs`, 2 MB limit, M1-4) by the same editor with
-  `flatten_source`: items are runs of **physical source lines** (segmented like code), covering every
+- (As delivered in M2d slice 1 the source view is a sibling of `View` rather than a
+  `flatten_source` of it — see §16.) M2d replaces the `TextEdit` source mode (`source.rs`, 2 MB
+  limit, M1-4) by the same editor with `flatten_source`: items are runs of **physical source lines** (segmented like code), covering every
   byte except the BOM (C35): blank lines, hidden link/footnote definitions, front matter, the final
   line terminator. Monospace, no reveal, Markdown colouring from the block tree, virtualised by `View`.
   Enter continues lists/quotes, Tab indents list items (`PlanRequest.source = true`).
@@ -1491,6 +1492,123 @@ below and proposed for `99-open-questions.md`):
   rules (S-2.4–S-2.6), the Cmd+K clipboard prefill (needs clipboard reading), C47 image atomic
   deletion, C53, C54, the formatting toolbar (spec 04 §3.2, P1), Select Line by sentence, in-app
   key-binding editor, OS quote preference, source-mode rules (M2d).
+
+## 16. Implementation notes: M2d slice 1 — the source editor core (2026-10-28)
+
+Branch `m2d-source-editor`. Full Source mode and the left pane of Side by Side are a source
+editor on the editing engine; the `TextEdit` source path, its 2 MB edit limit (M1-4), the
+128 KB colouring cap and the source-buffer rebuild/install machinery are gone. Decisions are
+numbered M2d-n (proposed for `99-open-questions.md`).
+
+- **M2d-1 — a sibling of `View`, not `flatten_source`.** §5.5 planned the source view as the
+  rendered `View` over a "source flatten" of the model. `View` is built around rendered items
+  (containers, segments, reveal focus, block-level cache keys), none of which a code view
+  needs, so the source view is its own type, `markise-layout::source::SourceView`, reusing the
+  same pieces: `Fenwick` heights with an anchor scroll position, lazy layout of the viewport
+  plus a margin, the backend-neutral `TextShaper`, item-relative `SourceMap`s and the
+  `Highlights` seam. It is format-neutral (it reads the text and `FormatDoc::source_tokens`).
+- **M2d-2 — items.** An item is a run of physical lines (≤ 64 lines, ≈ 16 KiB); a line longer
+  than 4 KiB is cut into pieces of its own items (a piece starts a new visual row), so a file
+  without line breaks still lays out piece by piece. Per-item byte and newline counts live in
+  two more Fenwick trees: line ↔ offset, gutter numbers and scrolling to the end need no walk
+  over the document. An edit re-chunks only the items it touches (a small last item merges
+  with the next); chunk boundaries are an implementation detail, so "incremental == full
+  rebuild" is defined on what users see — the physical lines, the line ↔ offset mapping and
+  the shaped text and styles of every line (property test `markise-layout/tests/source_view.rs`).
+  Tab stops are measured from the start of the line, or of the piece of an over-long line.
+- **M2d-3 — layout per line, cached by content.** Each unit is shaped on its own; shaped lines
+  are cached by (text, token runs, code runs, wrap width, tab width, theme, fonts), so a
+  keystroke re-shapes only the edited line. Item layouts far from the viewport are dropped
+  (bounded memory); their heights stay exact.
+- **M2d-4 — tokens from the parse.** `FormatDoc::source_tokens(range)` (new, `markise-doc`)
+  reports neutral classes (`SourceTok`: headings 1–6, quote, emphasis, strong, strike, mark,
+  link, URL, code, code block, metadata, marker); Markdown implements it from the CST,
+  visiting only the top-level blocks — and inside large containers, code blocks and tables
+  only the children and lines — overlapping the range. A paragraph over 64 KiB is parsed
+  inline line by line, and a single line over 64 KiB only in a 4 KiB window around the range.
+  Fenced code takes the language colours of the rendered view's background highlighter:
+  the source view asks the rendered model's code items (`CodeQuery`) and maps their content
+  offsets back to source bytes; a pending highlight re-lays out the item when it arrives.
+  Invalidation: items in the edit's re-parsed range lose their tokens; a change of reference
+  definitions (or any document-wide dependency) re-tokenises every item lazily.
+- **M2d-5 — history.** Side by Side edits are ordinary transactions of the live history (typing
+  groups as in the rendered view). Full Source mode opens a *source session* on the
+  `EditorSession`: undo stops at the entry state, the rendered view's redo stack is set aside;
+  on exit the session's transactions are concatenated into "Source Edit" transactions split
+  after every state that was ever saved (§4.3: undo reaches every saved state, which reads
+  clean). A session without edits leaves the history and the set-aside redo stack untouched.
+  Source edits update the rendered model incrementally too (no rebuild on leaving). A reload
+  from disk in source mode restarts the session around the reload transaction.
+- **M2d-6 — verbatim edits (C58).** Typing, paste and IME commits insert the bytes as given;
+  Backspace/Delete remove graphemes (CRLF is one), words, or up to the visual row start. A
+  typed line break repeats the terminator of the line it splits (CRLF on a CRLF line), the last
+  line without one takes the document's line ending; in a uniformly CRLF document this is C58's
+  rule, in a mixed one it differs (C58 kept typed breaks as typed — see the open questions).
+  Tab inserts the indent unit (4 spaces) or, over several lines, indents every touched line;
+  Shift+Tab outdents touched lines (list-aware rules are slice 2).
+- **M2d-7 — commands and focus.** The source pane keeps its own selection and runs caret and
+  selection commands through the shared registry with the source view as `CaretGeometry`;
+  Undo/Redo use the session; format and block commands are disabled while the source pane has
+  the focus (menus, toolbar and shortcuts; slice 2 adds them). In Side by Side the pane with
+  the keyboard focus receives menu commands; the source pane takes the focus when Source or
+  Side by Side opens. The formatting toolbar stays hidden in full Source mode and inactive over
+  the read-only rendered pane, honouring the top/bottom reservation.
+- **M2d-8 — display preferences.** Settings key `source` (`line_numbers` false, `soft_wrap`
+  true, `current_line` true, `whitespace_marks` false), View → Source Editor. Line numbers are
+  a gutter numbering every line; whitespace marks show `·` for spaces and an arrow for tabs,
+  and a faint return arrow after two or more trailing spaces before a line break is always
+  shown (SE-2), all at paint time; the
+  current-line band covers the caret's physical line (or piece). Without soft wrap the view
+  scrolls horizontally (wheel / caret follow; no horizontal scrollbar yet).
+- **M2d-9 — position mapping.** Entering source mode centres the source line of the block at
+  the rendered viewport's middle (plus its share of a tall block's lines) and collapses the
+  selection to its focus; leaving centres the block holding the source viewport's middle line
+  and gives the rendered view the source caret (moved to its nearest caret stop). Outline
+  clicks in source mode scroll the source to the heading's line. Side by Side scroll sync maps
+  through the source view's line index (`side_by_side::LineMap`).
+- **Selections (review of PR #23).** The source pane's selection follows every document change
+  made elsewhere — mapped through the change summary for rendered-pane edits and menu
+  Undo/Redo, through the diff (session live marks) for a reload — and every selection the pane
+  takes is snapped to a caret position (char boundary, not inside a CRLF). Grapheme steps widen
+  their segmentation context until the boundary is real, so long clusters are never split.
+- **Owner decisions SE-1…SE-10** (private spec): M2d-6 line endings kept (SE-1); the hard-break
+  mark is always shown faintly, spaces/tabs only with Show Whitespace (SE-2); the indent unit
+  becomes the `codeIndentSize` preference in slice 2 (SE-4); smart Home in slice 2, read-only
+  mode and IME preedit in M2e (SE-10).
+- **Removed safety net.** The interim Side by Side caught a panicking incremental update and
+  fell back to a background rebuild of the buffer. With the session as the only text there is
+  no buffer to rebuild from; source edits now behave like rendered-view edits (no catch).
+- **Tests.** `markise-md` source tokens (range == clipped document), `markise-layout` source
+  view unit and property tests (incremental == full, 10 MB locality), `markise-engine/tests/
+  source.rs` (verbatim typing, CRLF, caret commands, Tab, disabled format commands, source
+  session collapse with saved boundaries, Side by Side live history, 300 random keystrokes
+  with incremental == full checks of both views), real-app kittests
+  `markise-ui-egui/tests/source_editor.rs` (typing and saved bytes, keyboard/mouse selection,
+  wrap and gutter toggles, undo across mode switches, mapping in/out, 10 MB open/scroll/edit)
+  and the ported Side by Side, lifecycle, safety and smoke suites.
+- **Measured** (release, Apple M-series under heavy parallel load — load average ≈ 115 on 10
+  cores, so thread CPU is the signal):
+
+  | bench | case | p50 | p99 (thread CPU) | budget |
+  |---|---|---|---|---|
+  | `markise-engine --bench source` (headless, wrap on) | type 1 MB | 0.21 ms | 0.68 ms | 12 ms |
+  | | type 10 MB | 0.21 ms | 0.97 ms | 12 ms |
+  | | source view build 10 MB / first viewport | 6.2 ms / 4.6 ms | | |
+  | | scroll to end with wrap, 10 MB | 12 ms (wall) | | 16 ms |
+  | | one 10 MB line, typing | 8.5 ms | 12.7 ms | 12 ms (exceeded) |
+  | `markise-ui-egui --bench source_editor` (whole frame, wrap + gutter) | Source 10 MB | 0.77 ms | 1.80 ms | 16 ms |
+  | | Side by Side 10 MB | 0.92 ms | 2.05 ms | 16 ms |
+  | | open 10 MB → first source frame | 184 ms + 71 ms | | 1 s |
+
+  Known exception: typing in a single 10 MB line costs ≈ 8 ms per keystroke (the rendered
+  model's handling of one huge paragraph), p99 just over the headless budget; ordinary
+  documents stay far below it.
+- **Not in slice 1** (→ slice 2: source-mode smart editing): list/quote continuation, list-aware
+  Tab/Shift+Tab, renumbering, auto-pair and tag closing, marker Backspace, format commands and
+  the toolbar in the source pane, URL-over-selection paste, table navigation and formatting,
+  matching brackets, Move Line, Delete Line, smart Home; (→ slice 3) rich-view tables and
+  special blocks with both Side by Side panes editable; later: IME preedit display, multiple
+  carets, folding, a horizontal scrollbar.
 
 ## Consequences
 

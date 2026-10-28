@@ -480,6 +480,10 @@ impl FormatDoc for Document {
         };
         if id == "write" { "write-1".to_string() } else { id }
     }
+    fn source_tokens(&self, range: std::ops::Range<usize>, out: &mut Vec<markise_doc::SourceToken>) {
+        crate::source_tokens::source_tokens(self, range, out);
+    }
+
     fn reference_candidates(&self, lines: &[crate::Span], out: &mut Vec<u64>) {
         reference_labels(self.text(), lines, out)
     }

@@ -137,16 +137,15 @@ fn edits_on_the_left_update_the_preview_without_a_rebuild() {
     h.state_mut().set_view_mode(ViewMode::SideBySide);
     h.run_steps(2);
     let items = h.state().model().unwrap().items.len();
-    let b = h.state_mut().source_buffer_mut().unwrap();
-    *b = b.replacen("Paragraph 3 with", "Paragraph 3 now with", 1);
+    h.state_mut()
+        .edit_source_text(|t| *t = t.replacen("Paragraph 3 with", "Paragraph 3 now with", 1));
     h.step();
     // applied synchronously in the same frame: no background rebuild
     assert!(!h.state().is_busy(), "no rebuild job");
     assert!(h.state().viewed_text().unwrap().contains("Paragraph 3 now with"));
     assert!(h.state().is_dirty());
     // a structural edit: a new heading adds items
-    let b = h.state_mut().source_buffer_mut().unwrap();
-    b.insert_str(0, "# New\n\n");
+    h.state_mut().edit_source_text(|t| t.insert_str(0, "# New\n\n"));
     h.step();
     assert_eq!(h.state().model().unwrap().items.len(), items + 1);
     assert!(h.state().viewed_text().unwrap().starts_with("# New\n\n"));
@@ -316,10 +315,11 @@ fn text(h: &mut Harness<'static, MarkiseApp>) -> String {
     h.state().document_text().unwrap()
 }
 
-/// Review P2: the editor's undo history belongs to the buffer (same in Source and Side by
-/// Side), and another document starts with a fresh one (99 C58).
+/// Spec 02 §12.1.1 / ADR 0006 §4.3: Side by Side edits are transactions of the single live
+/// history (undone from either pane or after leaving the mode); full Source mode starts a
+/// fresh history; another document starts with a fresh one.
 #[test]
-fn undo_history_follows_the_buffer_across_modes_and_documents() {
+fn undo_history_is_the_live_history_across_panes_and_documents() {
     let (mut h, dir) = open("undo", "# A\n\nalpha\n");
     h.state_mut().set_view_mode(ViewMode::SideBySide);
     h.run_steps(2);
@@ -327,10 +327,35 @@ fn undo_history_follows_the_buffer_across_modes_and_documents() {
     h.event(Event::Text("Q".into()));
     h.run_steps(2);
     assert!(text(&mut h).contains('Q'), "typed: {:?}", text(&mut h));
+    // undo in the source pane, redo through the session: the same history
+    undo(&mut h);
+    assert!(
+        !text(&mut h).contains('Q'),
+        "undone in the source pane: {:?}",
+        text(&mut h)
+    );
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.redo());
+    h.run_steps(1);
+    assert!(text(&mut h).contains('Q'));
+    // full Source mode: a fresh history — the Side by Side edit is not undone there
     h.state_mut().set_view_mode(ViewMode::Source);
     h.run_steps(2);
     undo(&mut h);
-    assert!(!text(&mut h).contains('Q'), "undone in Source mode: {:?}", text(&mut h));
+    assert!(
+        text(&mut h).contains('Q'),
+        "not undone in Source mode: {:?}",
+        text(&mut h)
+    );
+    // back in the rendered view the live history has it
+    h.state_mut().set_view_mode(ViewMode::Rendered);
+    h.run_steps(2);
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    h.run_steps(1);
+    assert!(
+        !text(&mut h).contains('Q'),
+        "undone in the rendered view: {:?}",
+        text(&mut h)
+    );
     // another document: Cmd+Z has nothing to undo
     let other = dir.join("other.md");
     std::fs::write(&other, "# B\n\nbeta\n").unwrap();
@@ -351,56 +376,64 @@ fn returning_to_the_saved_text_is_clean() {
     let (mut h, _d) = open("clean", "# A\n\nalpha\n");
     h.state_mut().set_view_mode(ViewMode::SideBySide);
     h.run_steps(2);
-    h.state_mut().source_buffer_mut().unwrap().push_str("more\n");
+    h.state_mut().edit_source_text(|t| t.push_str("more\n"));
     h.run_steps(2);
     assert!(h.state().is_dirty());
-    let b = h.state_mut().source_buffer_mut().unwrap();
-    b.truncate(b.len() - "more\n".len());
+    h.state_mut().edit_source_text(|t| t.truncate(t.len() - "more\n".len()));
     h.run_steps(2);
     assert!(!h.state().is_dirty(), "back at the saved content");
-    // save, edit, undo to the newly saved text: clean again
-    h.state_mut().source_buffer_mut().unwrap().push_str("x\n");
+    // save, edit, edit back to the newly saved text: clean again
+    h.state_mut().edit_source_text(|t| t.push_str("x\n"));
     h.run_steps(2);
     h.state_mut().save();
     wait_until(&mut h, "save", |a| !a.is_saving() && !a.is_dirty());
-    h.state_mut().source_buffer_mut().unwrap().push_str("y\n");
+    h.state_mut().edit_source_text(|t| t.push_str("y\n"));
     h.run_steps(2);
     assert!(h.state().is_dirty());
-    let b = h.state_mut().source_buffer_mut().unwrap();
-    b.truncate(b.len() - 2);
+    h.state_mut().edit_source_text(|t| t.truncate(t.len() - 2));
     h.run_steps(2);
     assert!(!h.state().is_dirty());
 }
 
-/// M2b merge: edits on the left flow into the editor session verbatim (one joinable
-/// "Source Edit"), the right pane shows them, and the saved state stays an undo boundary.
+/// Typing in the source pane: verbatim keystrokes grouped like typing in the rendered view
+/// (one "Typing" transaction), the right pane shows them, and the saved state stays an undo
+/// boundary.
 #[test]
 fn left_edits_flow_into_the_editor_session() {
     let (mut h, _d) = open("session", "# A\n\nalpha\n");
     h.state_mut().set_view_mode(ViewMode::SideBySide);
     h.run_steps(2);
-    h.state_mut().source_buffer_mut().unwrap().push_str("one\n");
-    h.run_steps(2);
-    h.state_mut().source_buffer_mut().unwrap().push_str("two\n");
-    h.run_steps(2);
+    click(&mut h, pos2(420.0, 50.0));
+    let end = if cfg!(target_os = "macos") {
+        (Modifiers::MAC_CMD | Modifiers::COMMAND, Key::ArrowDown)
+    } else {
+        (Modifiers::CTRL | Modifiers::COMMAND, Key::End)
+    };
+    h.key_press_modifiers(end.0, end.1);
+    h.run_steps(1);
+    for c in ["o", "n", "e"] {
+        h.event(Event::Text(c.into()));
+        h.step();
+    }
+    h.run_steps(1);
     {
         let v = h.state_mut().viewer().unwrap();
-        assert_eq!(v.ed.session.text(), "# A\n\nalpha\none\ntwo\n");
+        assert_eq!(v.ed.session.text(), "# A\n\nalpha\none");
         assert_eq!(v.ed.view.doc().text(), v.ed.session.text(), "the right pane shows it");
         let last = v.ed.session.history().last().unwrap();
-        assert_eq!(last.label, "Source Edit");
-        assert_eq!(last.steps.len(), 2, "joined into one transaction");
+        assert_eq!(last.label, "Typing");
+        assert_eq!(v.ed.session.history().undo_len(), 1, "one typing group");
     }
     h.state_mut().save();
     wait_until(&mut h, "save", |a| !a.is_saving() && !a.is_dirty());
-    h.state_mut().source_buffer_mut().unwrap().push_str("three\n");
+    h.event(Event::Text("!".into()));
     h.run_steps(2);
     assert!(h.state().is_dirty());
     // the saved state is a transaction boundary: the new edit is its own transaction
     let v = h.state_mut().viewer().unwrap();
     let last = v.ed.session.history().last().unwrap();
     assert_eq!(Some(last.state_before), v.ed.session.saved_state());
-    assert_eq!(last.steps.len(), 1);
+    assert_eq!(v.ed.session.history().undo_len(), 2);
 }
 
 /// Codex review round 4 of PR #21: Edit/Paragraph menu commands in Side by Side change the
@@ -410,7 +443,7 @@ fn menu_commands_keep_both_panes_equal() {
     let (mut h, _d) = open("menucmds", "# A\n\nalpha\n");
     h.state_mut().set_view_mode(ViewMode::SideBySide);
     h.run_steps(2);
-    h.state_mut().source_buffer_mut().unwrap().push_str("more\n");
+    h.state_mut().edit_source_text(|t| t.push_str("more\n"));
     h.run_steps(2);
     let both = |h: &mut Harness<'static, MarkiseApp>| {
         let a = h.state().source_buffer().unwrap().to_string();
@@ -423,7 +456,10 @@ fn menu_commands_keep_both_panes_equal() {
     let (left, session) = both(&mut h);
     assert_eq!(session, "# A\n\nalpha\n");
     assert_eq!(left, session, "Undo: both panes");
-    // a heading command at a caret in `alpha`
+    // with the source pane focused, block commands are not available there yet (slice 2)
+    assert!(!h.state_mut().run_command(&ctx, "block.heading2"));
+    // the rendered pane focused: a heading command at a caret in `alpha` acts on the session
+    click(&mut h, pos2(900.0, 120.0));
     h.state_mut()
         .viewer()
         .unwrap()

@@ -80,9 +80,11 @@ fn type_text(h: &mut Harness<'static, MarkiseApp>, from: &str, to: &str) {
         h.state_mut().toggle_source();
         h.step();
     }
-    let b = h.state_mut().source_buffer_mut().unwrap();
-    assert!(b.contains(from), "{from:?} not in buffer");
-    *b = b.replacen(from, to, 1);
+    assert!(
+        h.state().source_buffer().unwrap().contains(from),
+        "{from:?} not in the text"
+    );
+    h.state_mut().edit_source_text(|t| *t = t.replacen(from, to, 1));
     h.step();
 }
 
@@ -149,88 +151,27 @@ fn save_then_open_asks_again_when_typing_during_the_save() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Source edits reach the session at once (M2d: no background rebuild): leaving and entering
+/// source mode again shows the same text, and saving writes it.
 #[test]
-fn reentering_source_mode_during_a_rebuild_keeps_the_text() {
-    // item 3
+fn leaving_and_reentering_source_mode_keeps_the_text() {
     let d = tmpdir("reenter");
     let a = d.join("a.md");
     std::fs::write(&a, "first\n").unwrap();
-    let (g, hook) = gate_hook();
-    let mut h = harness(
-        vec![a.clone()],
-        JobHooks {
-            before_rebuild: Some(Box::new(move |rev| {
-                hook(rev);
-                Ok(())
-            })),
-            ..Default::default()
-        },
-    );
+    let mut h = harness(vec![a.clone()], JobHooks::default());
     wait_until(&mut h, "load", loaded);
     type_text(&mut h, "first", "second");
-    h.state_mut().toggle_source(); // preview: starts the rebuild
-    wait_entered(&mut h, &g); // rebuild is held
-    h.state_mut().toggle_source(); // back to source before it finishes
+    h.state_mut().toggle_source(); // preview: the session already has the text
     h.step();
-    assert_eq!(
-        h.state().document_text().unwrap(),
-        "second\n",
-        "not restored from the old model"
-    );
+    assert_eq!(h.state().viewed_text(), Some("second\n"));
+    h.state_mut().toggle_source(); // back to source
+    h.step();
+    assert_eq!(h.state().document_text().unwrap(), "second\n");
     type_text(&mut h, "second", "third");
-    g.release.send(()).unwrap();
     h.state_mut().save();
     wait_until(&mut h, "save", |s| !s.is_busy() && !s.is_dirty());
     assert_eq!(std::fs::read_to_string(&a).unwrap(), "third\n");
     let _ = std::fs::remove_dir_all(&d);
-}
-
-fn failing_rebuild(panic: bool) {
-    let d = tmpdir(if panic { "panic" } else { "fail" });
-    let a = d.join("a.md");
-    std::fs::write(&a, "old text\n").unwrap();
-    let mut h = harness(
-        vec![a.clone()],
-        JobHooks {
-            before_rebuild: Some(Box::new(move |_| {
-                if panic {
-                    panic!("injected rebuild crash");
-                }
-                Err("injected failure".into())
-            })),
-            ..Default::default()
-        },
-    );
-    wait_until(&mut h, "load", loaded);
-    type_text(&mut h, "old text", "new text");
-    h.state_mut().toggle_source(); // rebuild fails
-    wait_until(&mut h, "failure reported", |s| {
-        s.banner_text()
-            .is_some_and(|b| b.contains("preview could not be updated"))
-    });
-    assert_eq!(h.state().document_text().unwrap(), "new text\n", "submitted text kept");
-    assert!(h.state().is_dirty());
-    // saving writes the authoritative text, not the stale model
-    h.state_mut().save();
-    wait_until(&mut h, "save", |s| !s.is_busy() && !s.is_dirty());
-    assert_eq!(std::fs::read_to_string(&a).unwrap(), "new text\n");
-    // re-entering source mode shows the kept text
-    h.state_mut().toggle_source();
-    h.step();
-    assert_eq!(h.state().document_text().unwrap(), "new text\n");
-    let _ = std::fs::remove_dir_all(&d);
-}
-
-#[test]
-fn failed_rebuild_keeps_the_submitted_text() {
-    // item 4
-    failing_rebuild(false);
-}
-
-#[test]
-fn panicking_rebuild_keeps_the_submitted_text() {
-    // item 4 (worker crash)
-    failing_rebuild(true);
 }
 
 #[test]
@@ -286,79 +227,46 @@ fn overwrite_authorization_survives_further_edits() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Codex review of PR #21 (P1): a save of a source-mode buffer marks the session state of
-/// that text saved whichever worker finishes first, and that state stays reachable by undo.
-fn source_save_keeps_its_boundary(rebuild_first: bool) {
-    let d = tmpdir(if rebuild_first { "srcsave-a" } else { "srcsave-b" });
+/// Codex review of PR #21 (P1), M2d form: a save made in full Source mode — also while edits
+/// continue during the save — marks that session state saved, and after leaving source mode
+/// undo reaches it and reads clean (ADR 0006 §4.3: saved states split the "Source Edit").
+#[test]
+fn source_save_keeps_its_boundary() {
+    let d = tmpdir("srcsave");
     let a = d.join("a.md");
     std::fs::write(&a, "first\n").unwrap();
     let (g, hook) = gate_hook();
-    let hooks = if rebuild_first {
+    let mut h = harness(
+        vec![a.clone()],
         JobHooks {
             before_save: Some(Box::new(hook)),
             ..Default::default()
-        }
-    } else {
-        JobHooks {
-            before_rebuild: Some(Box::new(move |rev| {
-                hook(rev);
-                Ok(())
-            })),
-            ..Default::default()
-        }
-    };
-    let mut h = harness(vec![a.clone()], hooks);
+        },
+    );
     wait_until(&mut h, "load", loaded);
     type_text(&mut h, "first", "second");
-    if rebuild_first {
-        h.state_mut().save(); // held at the hook
-        wait_entered(&mut h, &g);
-        h.state_mut().toggle_source(); // rebuild runs and is installed first
-        wait_until(&mut h, "rebuild", |s| s.viewed_text() == Some("second\n"));
-        assert!(h.state().is_saving());
-        g.release.send(()).unwrap();
-    } else {
-        h.state_mut().toggle_source(); // rebuild held at the hook
-        wait_entered(&mut h, &g);
-        h.state_mut().save(); // the buffer is ahead: saves the buffer text
-        wait_until(&mut h, "save", |s| !s.is_saving());
-        g.release.send(()).unwrap();
-    }
-    wait_until(&mut h, "both workers", |s| {
-        !s.is_busy() && s.viewed_text() == Some("second\n")
-    });
+    h.state_mut().save(); // held at the hook
+    wait_entered(&mut h, &g);
+    type_text(&mut h, "second", "third"); // typed while saving
+    g.release.send(()).unwrap();
+    wait_until(&mut h, "save", |s| !s.is_saving());
     assert_eq!(std::fs::read_to_string(&a).unwrap(), "second\n");
-    assert!(!h.state().is_dirty(), "the session matches the disk");
-    // more source edits, then undo back to the saved state: clean again
-    type_text(&mut h, "second", "third");
-    h.state_mut().toggle_source();
-    if !rebuild_first {
-        wait_entered(&mut h, &g);
-        g.release.send(()).unwrap();
-    }
-    wait_until(&mut h, "rebuild 2", |s| {
-        !s.is_busy() && s.viewed_text() == Some("third\n")
-    });
     assert!(h.state().is_dirty());
+    h.state_mut().toggle_source(); // leave: the source session is collapsed
+    h.step();
     h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
     h.step();
     assert_eq!(h.state().document_text().unwrap(), "second\n");
     assert!(!h.state().is_dirty(), "the saved state is a transaction boundary");
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    h.step();
+    assert_eq!(h.state().document_text().unwrap(), "first\n");
+    assert!(h.state().is_dirty());
     let _ = std::fs::remove_dir_all(&d);
 }
 
-#[test]
-fn source_save_marks_saved_when_the_rebuild_lands_first() {
-    source_save_keeps_its_boundary(true);
-}
-
-#[test]
-fn source_save_marks_saved_when_the_save_lands_first() {
-    source_save_keeps_its_boundary(false);
-}
-
-/// Codex review round 2 of PR #21 (P1): a save inside a source-mode session whose text never
-/// became the preview stays an undo boundary: A → (source) B, save, C, preview, undo → B clean.
+/// Codex review round 2 of PR #21 (P1): a save inside a source-mode session stays an undo
+/// boundary: A → (source) B, save, C, preview, undo → B clean.
 #[test]
 fn source_session_saves_split_the_source_edit() {
     let d = tmpdir("srcsplit");
@@ -371,10 +279,9 @@ fn source_session_saves_split_the_source_edit() {
     wait_until(&mut h, "save B", |s| !s.is_saving());
     assert_eq!(std::fs::read_to_string(&a).unwrap(), "bravo\n");
     type_text(&mut h, "bravo", "charlie");
-    h.state_mut().toggle_source(); // preview: C is rebuilt and installed
-    wait_until(&mut h, "rebuild", |s| {
-        !s.is_busy() && s.viewed_text() == Some("charlie\n")
-    });
+    h.state_mut().toggle_source(); // preview: the source session collapses
+    h.step();
+    assert_eq!(h.state().viewed_text(), Some("charlie\n"));
     assert!(h.state().is_dirty());
     let undo = |h: &mut Harness<'static, MarkiseApp>| {
         h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
@@ -409,7 +316,8 @@ fn two_saves_in_one_source_session() {
     wait_until(&mut h, "save 3", |s| !s.is_saving());
     type_text(&mut h, "three", "four");
     h.state_mut().toggle_source();
-    wait_until(&mut h, "rebuild", |s| !s.is_busy() && s.viewed_text() == Some("four\n"));
+    h.step();
+    assert_eq!(h.state().viewed_text(), Some("four\n"));
     let mut seen = Vec::new();
     for _ in 0..3 {
         h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
@@ -427,8 +335,8 @@ fn two_saves_in_one_source_session() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Codex review round 3 of PR #21: B saved and installed, then C saved in a second source
-/// session before its install — B must stay an undo boundary.
+/// Codex review round 3 of PR #21: B saved in one source session, C saved in a second one —
+/// B must stay an undo boundary.
 #[test]
 fn earlier_saved_source_state_stays_a_boundary() {
     let d = tmpdir("srcsplit3");
@@ -439,17 +347,15 @@ fn earlier_saved_source_state_stays_a_boundary() {
     type_text(&mut h, "alpha", "bravo");
     h.state_mut().save();
     wait_until(&mut h, "save B", |s| !s.is_saving());
-    h.state_mut().toggle_source(); // preview: B installed
-    wait_until(&mut h, "rebuild B", |s| {
-        !s.is_busy() && s.viewed_text() == Some("bravo\n")
-    });
+    h.state_mut().toggle_source(); // preview
+    h.step();
+    assert_eq!(h.state().viewed_text(), Some("bravo\n"));
     type_text(&mut h, "bravo", "charlie"); // back in source mode
     h.state_mut().save();
     wait_until(&mut h, "save C", |s| !s.is_saving());
     h.state_mut().toggle_source();
-    wait_until(&mut h, "rebuild C", |s| {
-        !s.is_busy() && s.viewed_text() == Some("charlie\n")
-    });
+    h.step();
+    assert_eq!(h.state().viewed_text(), Some("charlie\n"));
     assert!(!h.state().is_dirty());
     let mut seen = Vec::new();
     for _ in 0..2 {

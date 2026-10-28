@@ -10,7 +10,7 @@ use egui::{Context, Key, Modifiers};
 use markise_engine::editor::command::Registry;
 use markise_engine::editor::keymap::{Keymap, Platform};
 use markise_engine::export::ExportKind;
-use markise_engine::settings::Appearance;
+use markise_engine::settings::{Appearance, ToolbarPosition};
 use markise_export::pandoc::PandocFormat;
 use markise_md::MarkdownFormat;
 use markise_theme::catalog::{Origin, Selection, ThemeFamily, ThemeId};
@@ -78,8 +78,7 @@ impl MarkiseApp {
         }
     }
 
-    /// Registry commands can run now (not while the source buffer is ahead of the session or
-    /// in source mode, as [`MarkiseApp::run_command`]).
+    /// Registry commands can run now in the focused pane (as [`MarkiseApp::run_command`]).
     fn command_enabled(&self, id: &str, text_field: bool) -> bool {
         let Some(d) = &self.doc else { return false };
         match id {
@@ -89,7 +88,12 @@ impl MarkiseApp {
         if text_field && TEXT_FIELD_KEYS.iter().any(|(k, ..)| *k == id) {
             return true;
         }
-        !d.buffer_ahead() && !self.source_visible && d.viewer.ed.registry.enabled(&d.viewer.ed.session, id).is_ok()
+        // the source editor (full Source mode, or focused in Side by Side) runs only its own
+        // commands; format and block commands come to it in M2d slice 2
+        if self.source_focused() && !markise_engine::editor::source::source_command_available(id) {
+            return false;
+        }
+        d.viewer.ed.registry.enabled(&d.viewer.ed.session, id).is_ok()
     }
 
     /// Format and block-style toggles show whether the selection has them (spec 04 §3.2).
@@ -360,11 +364,43 @@ impl MarkiseApp {
                     Check::None,
                 ),
                 self.app_item("view.toolbar", true, Check::Toggle(self.show_toolbar())),
+                Entry::Submenu(Menu::new("Toolbar Position", {
+                    let bottom = self.toolbar_position() == ToolbarPosition::Bottom;
+                    vec![
+                        self.item(
+                            MenuAction::Command("view.toolbarTop"),
+                            "Top",
+                            true,
+                            Check::Radio(!bottom),
+                        ),
+                        self.item(
+                            MenuAction::Command("view.toolbarBottom"),
+                            "Bottom",
+                            true,
+                            Check::Radio(bottom),
+                        ),
+                    ]
+                })),
                 Entry::Separator,
                 self.app_item("view.highlightCode", true, Check::Toggle(self.highlight_code)),
                 self.app_item("view.diagrams", true, Check::Toggle(self.diagrams)),
+                Entry::Submenu(self.source_menu()),
                 Entry::Separator,
                 self.app_item("view.fullScreen", true, Check::None),
+            ],
+        )
+    }
+
+    /// View → Source Editor: the source editor's display preferences (spec 02 §12.1.1).
+    fn source_menu(&self) -> Menu {
+        let p = self.themes.source_prefs();
+        Menu::new(
+            "Source Editor",
+            vec![
+                self.app_item("view.sourceLineNumbers", true, Check::Toggle(p.line_numbers)),
+                self.app_item("view.sourceSoftWrap", true, Check::Toggle(p.soft_wrap)),
+                self.app_item("view.sourceCurrentLine", true, Check::Toggle(p.current_line)),
+                self.app_item("view.sourceWhitespace", true, Check::Toggle(p.whitespace_marks)),
             ],
         )
     }
@@ -533,8 +569,20 @@ impl MarkiseApp {
             "view.rendered" if self.doc.is_some() => self.set_view_mode(ViewMode::Rendered),
             "view.toggleSidebar" => self.sidebar_visible = !self.sidebar_visible,
             "view.toolbar" => self.set_show_toolbar(!self.show_toolbar()),
+            "view.toolbarTop" => self.set_toolbar_position(ToolbarPosition::Top),
+            "view.toolbarBottom" => self.set_toolbar_position(ToolbarPosition::Bottom),
             "view.highlightCode" => self.set_highlight_code(!self.highlight_code),
             "view.diagrams" => self.set_diagrams(!self.diagrams),
+            "view.sourceLineNumbers" | "view.sourceSoftWrap" | "view.sourceCurrentLine" | "view.sourceWhitespace" => {
+                let mut p = self.themes.source_prefs();
+                match id {
+                    "view.sourceLineNumbers" => p.line_numbers = !p.line_numbers,
+                    "view.sourceSoftWrap" => p.soft_wrap = !p.soft_wrap,
+                    "view.sourceCurrentLine" => p.current_line = !p.current_line,
+                    _ => p.whitespace_marks = !p.whitespace_marks,
+                }
+                self.themes.set_source_prefs(p);
+            }
             "view.fullScreen" => {
                 let full = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!full));
