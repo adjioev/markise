@@ -47,6 +47,9 @@ pub struct InlineEdit {
     pub select: bool,
     /// The field has had the keyboard focus (editing really started).
     pub had_focus: bool,
+    /// Give the field the focus back at the next frame it is drawn, keeping the selection
+    /// (after a press on the tree's scroll bar).
+    pub refocus: bool,
     /// The row was drawn this frame (reset by the app before the sidebar).
     pub drawn: bool,
 }
@@ -63,6 +66,7 @@ impl InlineEdit {
             error: None,
             select: true,
             had_focus: false,
+            refocus: false,
             drawn: false,
         }
     }
@@ -737,6 +741,10 @@ impl SideLook {
                 egui::text::CCursor::new(edit.stem_chars()),
             )));
             st.store(ui.ctx(), id);
+        }
+        if edit.refocus {
+            edit.refocus = false;
+            out.response.request_focus();
         }
         edit.drawn = true;
         if out.response.has_focus() {

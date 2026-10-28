@@ -465,7 +465,9 @@ pub struct MarkiseApp {
     question_id: u64,
     /// The widget that had the keyboard focus when the open question appeared (given back
     /// after the answer; nothing has the focus while a question is open).
-    focus_before_question: Option<egui::Id>,
+    focus_before_question: Option<(egui::Id, u8)>,
+    /// The last pointer press: position and frame (the inline rename's blur decision).
+    last_press: Option<(egui::Pos2, u64)>,
 }
 
 impl MarkiseApp {
@@ -543,6 +545,7 @@ impl MarkiseApp {
             confirm: opts.confirm,
             question_id: 0,
             focus_before_question: None,
+            last_press: None,
         }
     }
 
@@ -1746,6 +1749,9 @@ impl MarkiseApp {
         }
         self.frames += 1;
         self.timing.frames += 1;
+        if let Some(p) = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.latest_pos()).flatten()) {
+            self.last_press = Some((p, self.frames));
+        }
         if ctx.input(|i| i.viewport().close_requested()) && !self.request_close() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
@@ -1792,12 +1798,24 @@ impl MarkiseApp {
         // not reach the document; the focus comes back after the answer
         if self.is_asking() {
             if let Some(id) = ctx.memory(|m| m.focused()) {
-                self.focus_before_question.get_or_insert(id);
+                self.focus_before_question.get_or_insert((id, 0));
                 ctx.memory_mut(|m| m.surrender_focus(id));
             }
         } else {
-            if let Some(id) = self.focus_before_question.take() {
-                ctx.memory_mut(|m| m.request_focus(id));
+            // give the focus back; the frame after an answer the dialog's layer may still
+            // block interaction (the widget drops the focus again), so retry until it sticks,
+            // something else takes the focus, or a few frames passed
+            if let Some((id, tries)) = self.focus_before_question.take() {
+                match ctx.memory(|m| m.focused()) {
+                    Some(f) if f == id && tries > 0 => {} // it stuck
+                    Some(f) if f != id => {}              // the user focused something else
+                    _ if tries >= 10 => {}
+                    _ => {
+                        ctx.memory_mut(|m| m.request_focus(id));
+                        self.focus_before_question = Some((id, tries + 1));
+                        ctx.request_repaint();
+                    }
+                }
             }
             self.app_shortcuts(ctx);
             // host commands (Save, Open…, Source Code Mode, Toggle Sidebar) go through the

@@ -653,3 +653,103 @@ fn inline_rename_commits_when_its_row_is_scrolled_away_and_the_user_clicks_elsew
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+fn click(h: &mut H, p: egui::Pos2) {
+    h.hover_at(p);
+    h.event(egui::Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: Default::default(),
+    });
+    h.event(egui::Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+}
+
+#[test]
+fn inline_rename_survives_a_click_on_the_tree_scroll_bar() {
+    // Codex review round 2 of PR #38: scrolling the tree is not "clicking elsewhere"
+    let d = tmpdir("rename-scrollbar");
+    for i in 0..80 {
+        std::fs::write(d.join(format!("n{i:02}.md")), "x\n").unwrap();
+    }
+    let mut h = harness_with(AppOptions {
+        open: vec![d.clone()],
+        ..Default::default()
+    });
+    h.step();
+    h.state_mut().show_files_tab(true);
+    rows_contain(&mut h, "n79.md");
+    let ctx = h.ctx.clone();
+    h.state_mut().tree_action(&ctx, TreeAction::Rename(d.join("n02.md")));
+    field_focused(&mut h);
+    type_text(&mut h, "kept");
+    let bar = h.state().file_tree_scrollbar().expect("tree shown");
+    click(&mut h, egui::pos2(bar.center().x - 6.0, bar.center().y));
+    h.run_steps(3);
+    assert_eq!(
+        h.state().rename_state().map(|(_, n)| n.to_string()),
+        Some("kept.md".into()),
+        "still editing"
+    );
+    assert!(d.join("n02.md").is_file());
+    // (the click on the track may have scrolled the row away) back to the top: the field
+    // has the focus again and Enter renames
+    h.hover_at(egui::pos2(120.0, 300.0));
+    for _ in 0..10 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 400.0),
+            modifiers: Default::default(),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.step();
+    }
+    assert!(h.state().rename_state().is_some(), "scrolling keeps editing");
+    field_focused(&mut h);
+    h.key_press(Key::Enter);
+    h.step();
+    assert!(d.join("kept.md").is_file() && !d.join("n02.md").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn typing_works_right_after_cancelling_an_in_app_question() {
+    // Codex review round 2 of PR #38: the focus comes back after the modal is gone
+    let d = tmpdir("refocus");
+    let a = d.join("a.md");
+    std::fs::write(&a, "Hello\n").unwrap();
+    let mut h = harness_with(AppOptions {
+        open: vec![a.clone()],
+        ..Default::default()
+    });
+    wait_until(&mut h, "load", idle);
+    click(&mut h, egui::pos2(620.0, 120.0));
+    h.run_steps(2);
+    {
+        let ed = &mut h.state_mut().viewer().unwrap().ed;
+        ed.set_selection(markise_doc::Selection::caret(5));
+    }
+    h.run_steps(2);
+    type_text(&mut h, "!");
+    assert_eq!(h.state().document_text().as_deref(), Some("Hello!\n"));
+    assert!(!h.state_mut().request_close());
+    h.run_steps(2);
+    assert!(h.query_by_label("Don’t Save").is_some(), "the in-app question");
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    assert!(!h.state().is_asking());
+    type_text(&mut h, "?");
+    h.run_steps(2);
+    assert_eq!(
+        h.state().document_text().as_deref(),
+        Some("Hello!?\n"),
+        "typing goes to the document again"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
