@@ -121,7 +121,7 @@ impl BlockOwner {
 
     /// Resolves the parts of `leaf` for offset `at` by the ownership rule (module docs);
     /// `None` when `at` is not owned by `leaf`. `lines` are the leaf's content lines relative
-    /// to `origin` (borrowed from the format's storage: nothing is copied; the cost is a binary
+    /// to `origin` (borrowed from the format's storage, not copied; the cost is a binary
     /// search over them plus the bytes of the offset's line around the leaf's edges).
     pub fn resolve_lines(text: &str, leaf: BlockLeaf, lines: &[Span], origin: usize, at: usize) -> Option<BlockOwner> {
         let b = text.as_bytes();

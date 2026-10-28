@@ -1447,6 +1447,25 @@ fn cross_block_risks_block_ownership() {
             &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
             "Before\n\n>\n\nx‸\n",
         ),
+        // … after an empty nested container: stays in its own container
+        (
+            "hinted-nested-quote",
+            "> >\n>\n> ‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "> >\n>\n> x‸\n",
+        ),
+        (
+            "hinted-nested-item",
+            "> - a\n>   -\n>\n> ‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "> - a\n>   -\n>\n> x‸\n",
+        ),
+        (
+            "hinted-quote-in-item",
+            "- a\n\n  >\n\n  ‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "- a\n\n  >\n\n  x‸\n",
+        ),
         (
             "hinted-after-quote",
             "> q\n\n‸y\n",

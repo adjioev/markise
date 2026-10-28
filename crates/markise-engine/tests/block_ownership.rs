@@ -38,6 +38,21 @@ fn hinted_empty_heading_enter_keeps_an_empty_quote_before_it() {
 }
 
 #[test]
+fn hinted_empty_heading_enter_after_an_empty_nested_container_stays_in_its_own() {
+    // C43 in place inside the enclosing container (Codex review round 2 of #37): the empty
+    // nested block before the line stays, the paragraph stays in the line's own container
+    for (src, want) in [
+        ("> >\n>\n> ‸y", "> >\n>\n> x‸"),
+        // an empty nested list item inside a quote
+        ("> - a\n>   -\n>\n> ‸y", "> - a\n>   -\n>\n> x‸"),
+        // an empty quote inside a list item
+        ("- a\n\n  >\n\n  ‸y", "- a\n\n  >\n\n  x‸"),
+    ] {
+        script(src, &["type:## ", "edit.deleteForward", "edit.newline", "type:x"], want);
+    }
+}
+
+#[test]
 fn hinted_empty_heading_enter_after_a_quote_leaves_the_quote() {
     // the virtual paragraph after the quote's last paragraph used to open inside the quote
     script(

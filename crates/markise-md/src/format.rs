@@ -1253,14 +1253,25 @@ impl Document {
                 ));
             };
             // a block without text before it (an empty quote): it stays; the empty paragraph
-            // is the virtual one right after it, in place of the line
+            // is the virtual one right after it, in place of the line — at this line's level:
+            // it leaves the containers of that block this line is not in (an empty nested
+            // quote), never the ones around this line
             let end = before.block.end.min(ls);
+            let chain: Vec<ContainerKind> = self.containers_at(end).into_iter().map(|c| c.kind).collect();
+            let exit = if chain.len() > here.len() && chain.starts_with(&here) {
+                chain.len() - here.len()
+            } else {
+                0
+            };
             return Ok(Plan::single(
                 PlanStep {
                     patches: PatchSet::single_verbatim(end..ce, ""),
                     hints_after: Some(hints),
                 },
-                Some(Selection::caret_at(markise_doc::DocPos::with_virt(end, 1))),
+                Some(Selection::caret_at(markise_doc::DocPos::with_virt(
+                    end,
+                    1 + exit as u16,
+                ))),
             ));
         }
         // heading, rule, `[toc]`, definitions, HTML: the block is created by dropping the hint;

@@ -98,7 +98,8 @@ None intended except four cross-block fixes (Codex review of #18), each with a r
 
 1. **Hinted-heading Enter** (C43 on `## ` typed as paragraph text): an empty quote before the
    line is no longer deleted — the markers go and the empty paragraph is the virtual one right
-   after the quote, in place of the line (C43); after a quote / list the virtual paragraph
+   after the quote, in place of the line and at the line's own container level (C43; inside an
+   enclosing quote / list item it stays there); after a quote / list the virtual paragraph
    leaves that container instead of opening inside it.
 2. **List-item paragraph join** (Backspace at an item's later paragraph): stops at an empty quote
    or empty nested item between the paragraphs (it deleted them).
@@ -111,8 +112,9 @@ None intended except four cross-block fixes (Codex review of #18), each with a r
 ## Performance
 
 The query is O(log n + depth) per call (no per-keystroke document scan, NFR-4), also when the
-owning block is huge: `block_owner` / `block_owner_biased` / `adjacent_block` never copy a
-block's content lines (one paragraph or code fence can span the whole document) — the Markdown
+owning block is huge: `block_owner` / `block_owner_biased` / `adjacent_block` make no
+per-query copy of block content (only small allocations for the block path, the container
+chain and a code block's info string), in particular never of a block's content lines (one paragraph or code fence can span the whole document) — the Markdown
 implementation binary-searches the lines in place (`BlockOwner::resolve_lines` borrows them,
 relative to the block's origin). Planners that need every line ask `FormatDoc::leaf` for the
 full `LeafView` explicitly (Shift+Enter, the soft-line hint, typing on the virtual paragraph,

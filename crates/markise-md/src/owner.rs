@@ -12,8 +12,8 @@ use crate::text::Span;
 
 impl Document {
     /// The leaf at block path `path` (which must end at a leaf) without its lines, with the
-    /// block (spans relative to the returned origin). O(depth); nothing is copied but the
-    /// container kinds.
+    /// block (spans relative to the returned origin). O(depth); the block's lines are not
+    /// copied (small allocations: the container kinds, a code block's info string).
     fn leaf_head_at_path(&self, path: &[usize]) -> Option<(BlockLeaf, &Block, usize)> {
         let mut containers = Vec::with_capacity(path.len().saturating_sub(1));
         for depth in 1..path.len() {
