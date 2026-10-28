@@ -23,6 +23,7 @@ pub mod options;
 mod parser;
 mod scan;
 pub mod slug;
+mod source_tokens;
 pub mod table;
 pub mod text;
 mod ticks;
