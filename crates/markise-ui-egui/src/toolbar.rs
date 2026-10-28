@@ -155,8 +155,8 @@ const DIVIDER: f32 = 9.0;
 const BLOCK_W: f32 = 112.0;
 const LIST_W: f32 = 40.0;
 const MARGIN_TOP: f32 = 8.0;
-/// Height the rendered view keeps free above the document for the bar (so the bar never
-/// covers the first lines; the document scrolls below it).
+/// Height the rendered view keeps free above (top position) or below (bottom position) the
+/// document for the bar, so the bar never covers text; the document scrolls beside it.
 pub const RESERVED_H: f32 = MARGIN_TOP + BAR_H + 6.0;
 const ROW_H: f32 = 24.0;
 const POPUP_W: f32 = 240.0;
@@ -209,6 +209,8 @@ pub struct Toolbar {
     anchor: Option<Rect>,
     /// The keyboard moved the highlight: scroll it into view at the next frame.
     scroll_to_hi: bool,
+    /// The bar sits at the bottom edge (drop-downs then open upward).
+    bottom: bool,
 }
 
 impl Toolbar {
@@ -373,10 +375,12 @@ impl Toolbar {
         self.bar_rect.is_some_and(|r| r.contains(p)) || self.popup_rect.is_some_and(|r| r.contains(p))
     }
 
-    /// Draws the strip centred near the top edge of `area` (the editor area); controls the
-    /// model marks as unavailable are drawn disabled. Returns the chosen command.
-    pub fn show(&mut self, ui: &mut Ui, area: Rect, m: &Model, look: &Look) -> Option<&'static str> {
+    /// Draws the strip centred near the top edge of `area` (the editor area), or near its
+    /// bottom edge with `bottom`; controls the model marks as unavailable are drawn disabled.
+    /// Returns the chosen command.
+    pub fn show(&mut self, ui: &mut Ui, area: Rect, m: &Model, look: &Look, bottom: bool) -> Option<&'static str> {
         let ctx = ui.ctx().clone();
+        self.bottom = bottom;
         // a press outside the bar and its drop-down closes the drop-down (the press acts there)
         let press = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten());
         if let Some(p) = press
@@ -394,10 +398,12 @@ impl Toolbar {
             .filter(|g| group_present(*g, m) && !shown.contains(g))
             .collect();
         let left = (area.center().x - width / 2.0).max(area.left());
-        let bar = Rect::from_min_size(
-            pos2(left.round(), (area.top() + MARGIN_TOP).round()),
-            vec2(width, BAR_H),
-        );
+        let top = if bottom {
+            area.bottom() - MARGIN_TOP - BAR_H
+        } else {
+            area.top() + MARGIN_TOP
+        };
+        let bar = Rect::from_min_size(pos2(left.round(), top.round()), vec2(width, BAR_H));
         self.bar_rect = Some(bar);
         let mut chosen = None;
         let mut toggle_popup = None;
@@ -562,9 +568,18 @@ impl Toolbar {
         if pos.x + POPUP_W > screen.right() - 4.0 {
             pos.x = (anchor.right() - POPUP_W).max(screen.left() + 4.0);
         }
-        // never taller than the space below the bar: the rows scroll instead
-        let max_h = (screen.bottom() - pos.y - 8.0).max(3.0 * ROW_H + 2.0 * POPUP_PAD);
-        let h = (content_h + 2.0 * POPUP_PAD).min(max_h);
+        let min_h = 3.0 * ROW_H + 2.0 * POPUP_PAD;
+        let h = if self.bottom {
+            // a bar at the bottom opens its drop-downs upward, never above the window's top
+            let max_h = (anchor.top() - 6.0 - screen.top() - 8.0).max(min_h);
+            let h = (content_h + 2.0 * POPUP_PAD).min(max_h);
+            pos.y = (anchor.top() - 6.0 - h).max(screen.top() + 4.0);
+            h
+        } else {
+            // never taller than the space below the bar: the rows scroll instead
+            let max_h = (screen.bottom() - pos.y - 8.0).max(min_h);
+            (content_h + 2.0 * POPUP_PAD).min(max_h)
+        };
         let rect = Rect::from_min_size(pos, vec2(POPUP_W, h));
         self.popup_rect = Some(rect);
         let label = match popup {
