@@ -213,7 +213,16 @@ fn settings_q_v15_q_v18_and_app_json() {
     assert!(ob.obsidian && ob.wikilinks);
     assert_eq!(
         (ob.link_format, ob.new_notes.clone()),
-        (LinkFormat::Shortest, NewNoteLocation::Root)
+        (LinkFormat::Shortest, NewNoteLocation::Current),
+        "owner revision of Q-V18: next to the linking note unless app.json says otherwise"
+    );
+    assert_eq!(
+        VaultSettings::obsidian(Some(r#"{"newFileLocation": "root"}"#)).new_notes,
+        NewNoteLocation::Root
+    );
+    assert_eq!(
+        VaultSettings::obsidian(Some(r#"{"newFileLocation": "current"}"#)).new_notes,
+        NewNoteLocation::Current
     );
     assert_eq!(VaultSettings::obsidian(Some("{}")), ob, "E-fixture: empty app.json");
     let custom = VaultSettings::obsidian(Some(
@@ -360,26 +369,31 @@ fn note_creation_stays_inside_the_vault() {
     std::fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
     std::os::unix::fs::symlink(root.join(".obsidian"), root.join("cfg")).unwrap();
-    assert!(create_note(&root, "out/New.md").is_err());
-    assert!(create_note(&root, "out/deeper/New.md").is_err());
-    assert!(create_note(&root, "cfg/New.md").is_err());
-    assert!(create_note(&root, ".obsidian/New.md").is_err());
+    assert!(create(&root, "out/New.md").is_err());
+    assert!(create(&root, "out/deeper/New.md").is_err());
+    assert!(create(&root, "cfg/New.md").is_err());
+    assert!(create(&root, ".obsidian/New.md").is_err());
     // a symbolic link where the note would go (created by a racing process): refused, the
     // target outside untouched
     std::fs::write(outside.join("target.md"), "outside").unwrap();
     std::os::unix::fs::symlink(outside.join("target.md"), root.join("Link.md")).unwrap();
-    assert!(create_note(&root, "Link.md").is_err());
+    assert!(create(&root, "Link.md").is_err());
     assert_eq!(std::fs::read_to_string(outside.join("target.md")).unwrap(), "outside");
     std::fs::remove_file(outside.join("target.md")).unwrap();
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     assert_eq!(std::fs::read_dir(root.join(".obsidian")).unwrap().count(), 0);
     // normal creation, folders included; an existing file is returned unchanged
-    let p = create_note(&root, "Projects/New/Deep.md").unwrap();
+    let p = create(&root, "Projects/New/Deep.md").unwrap();
     assert_eq!(p, root.join("Projects/New/Deep.md"));
     std::fs::write(&p, "kept").unwrap();
-    assert_eq!(create_note(&root, "Projects/New/Deep.md").unwrap(), p);
+    assert_eq!(create(&root, "Projects/New/Deep.md").unwrap(), p);
     assert_eq!(std::fs::read_to_string(&p).unwrap(), "kept");
-    let rx = spawn_create_note(root.clone(), "Top.md".into(), Arc::new(|| {}));
+    let ix = Arc::new(
+        VaultIndex::from_rels(root.clone(), Vec::<String>::new(), 1).with_root_dir(Some(Arc::new(
+            cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap(),
+        ))),
+    );
+    let rx = spawn_create_note(ix, "Top.md".into(), Arc::new(|| {}));
     assert_eq!(
         rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap(),
         root.join("Top.md")
@@ -394,7 +408,7 @@ fn creation_keeps_the_disk_spelling_of_folders() {
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let nfd = "Re\u{301}sume\u{301}";
     std::fs::create_dir_all(root.join(nfd)).unwrap();
-    let p = create_note(&root, "Résumé/New.md").unwrap();
+    let p = create(&root, "Résumé/New.md").unwrap();
     assert_eq!(p, root.join(nfd).join("New.md"));
     let names: Vec<String> = std::fs::read_dir(&root)
         .unwrap()
@@ -470,55 +484,10 @@ fn generated_links_round_trip() {
     );
 }
 
-/// Review round 3: a racing process swapping a folder of the note's path for a symbolic link
-/// to the outside never gets a file written outside the vault. Iterations: 1000 by default,
-/// `MARKISE_STRESS_N` for longer runs.
-#[cfg(unix)]
-#[test]
-fn creation_races_with_symlink_swaps_never_write_outside() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let n: usize = std::env::var("MARKISE_STRESS_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1000);
-    let outer = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(outer.path()).unwrap();
-    let root = base.join("vault");
-    let outside = base.join("outside");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&outside).unwrap();
-    let stop = Arc::new(AtomicBool::new(false));
-    let swapper = {
-        let (stop, a, real, outside) = (stop.clone(), root.join("A"), root.join("A-real"), outside.clone());
-        std::thread::spawn(move || {
-            std::fs::create_dir_all(&real).unwrap();
-            while !stop.load(Ordering::Relaxed) {
-                // a real folder …
-                let _ = std::fs::rename(&real, &a);
-                // … replaced by a link to the outside
-                let _ = std::fs::rename(&a, &real);
-                let _ = std::os::unix::fs::symlink(&outside, &a);
-                let _ = std::fs::remove_file(&a);
-            }
-        })
-    };
-    let mut created = 0;
-    for i in 0..n {
-        if create_note(&root, &format!("A/note {i}.md")).is_ok() {
-            created += 1;
-        }
-        if create_note(&root, &format!("A/sub/deep {i}.md")).is_ok() {
-            created += 1;
-        }
-    }
-    stop.store(true, Ordering::Relaxed);
-    swapper.join().unwrap();
-    let leaked: Vec<_> = walk_files(&outside);
-    assert!(
-        leaked.is_empty(),
-        "{} files outside after {created} creations: {leaked:?}",
-        leaked.len()
-    );
+/// [`create_note`] through a root handle opened now (tests).
+fn create(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let dir = cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority()).map_err(|e| e.to_string())?;
+    create_note(&dir, root, rel)
 }
 
 #[cfg(unix)]
@@ -533,4 +502,216 @@ fn walk_files(dir: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// Makes `a` a real folder (`true`) or a symbolic link to `outside`; `aside` names the folder
+/// moved out of the way. `true` when the swap happened.
+#[cfg(unix)]
+fn swap(a: &Path, outside: &Path, real: bool, aside: &Path) -> bool {
+    let m = std::fs::symlink_metadata(a);
+    if real {
+        if m.as_ref().is_ok_and(|m| m.file_type().is_symlink()) && std::fs::remove_file(a).is_err() {
+            return false;
+        }
+        std::fs::create_dir(a).is_ok() || a.is_dir()
+    } else {
+        if m.as_ref().is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink()) && std::fs::rename(a, aside).is_err() {
+            return false;
+        }
+        std::os::unix::fs::symlink(outside, a).is_ok()
+    }
+}
+
+/// Threat model: a racing process swapping a folder of the note's path for a symbolic link
+/// to the outside never gets a file written outside the vault. The swapper counts its
+/// successful swaps (the race is real, not idle). Iterations: 1000 by default,
+/// `MARKISE_STRESS_N` for longer runs.
+#[cfg(unix)]
+#[test]
+fn creation_races_with_symlink_swaps_never_write_outside() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let n: usize = std::env::var("MARKISE_STRESS_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    let outer = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(outer.path()).unwrap();
+    let root = base.join("vault");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(root.join("aside")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let dir = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let swaps = Arc::new(AtomicUsize::new(0));
+    let ready = Arc::new(Barrier::new(2));
+    let swapper = {
+        let (stop, swaps, ready) = (stop.clone(), swaps.clone(), ready.clone());
+        let (a, outside, asides) = (root.join("A"), outside.clone(), root.join("aside"));
+        std::thread::spawn(move || {
+            ready.wait();
+            let mut k = 0usize;
+            while !stop.load(Ordering::Relaxed) {
+                for real in [true, false] {
+                    k += 1;
+                    if swap(&a, &outside, real, &asides.join(k.to_string())) {
+                        swaps.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        })
+    };
+    ready.wait();
+    let mut created = 0;
+    for i in 0..n {
+        for rel in [format!("A/note {i}.md"), format!("A/sub/deep {i}.md")] {
+            if create_note(&dir, &root, &rel).is_ok() {
+                created += 1;
+            }
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    let swaps = swaps.load(Ordering::Relaxed);
+    assert!(swaps >= n / 2, "the swapper only swapped {swaps} times in {n} rounds");
+    let leaked = walk_files(&outside);
+    assert!(
+        leaked.is_empty(),
+        "{} files outside after {created} creations and {swaps} swaps: {leaked:?}",
+        leaked.len()
+    );
+}
+
+/// Controlled interleaving: at every step boundary of [`create_note`] the folder just named
+/// is swapped for a symbolic link to the outside; the note is never written outside (it fails
+/// or lands inside).
+#[cfg(unix)]
+#[test]
+fn a_swap_at_every_step_boundary_never_writes_outside() {
+    // (the file step is covered by the next test: there the hook names the parent folder)
+    for step in ["create_dir", "open_dir"] {
+        for target in ["A", "A/B"] {
+            let outer = tempfile::tempdir().unwrap();
+            let base = std::fs::canonicalize(outer.path()).unwrap();
+            let root = base.join("vault");
+            let outside = base.join("outside");
+            std::fs::create_dir_all(root.join("A/B")).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            let dir = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap();
+            let (r, o, s_name, t_name) = (root.clone(), outside.clone(), step.to_string(), target.to_string());
+            let swapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = swapped.clone();
+            CREATE_HOOK.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move |st: &str, folder: &str| {
+                    if st == s_name && folder == t_name && !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        let p = r.join(folder);
+                        std::fs::rename(&p, r.join(format!("{folder}-aside").replace('/', "-"))).unwrap();
+                        std::os::unix::fs::symlink(&o, &p).unwrap();
+                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }))
+            });
+            let res = create_note(&dir, &root, "A/B/C/New.md");
+            CREATE_HOOK.with(|h| *h.borrow_mut() = None);
+            let swapped = swapped.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(swapped, "{step} {target}: the swap ran");
+            assert!(walk_files(&outside).is_empty(), "{step} {target}: {res:?}");
+            if let Ok(p) = &res {
+                assert!(p.starts_with(&root), "{step} {target}: {p:?}");
+            }
+        }
+    }
+}
+
+/// The parent of the file is swapped right before the file is created.
+#[cfg(unix)]
+#[test]
+fn a_swap_before_the_file_is_created_never_writes_outside() {
+    let outer = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(outer.path()).unwrap();
+    let root = base.join("vault");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(root.join("A")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let dir = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap();
+    let (r, o) = (root.clone(), outside.clone());
+    CREATE_HOOK.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move |st: &str, folder: &str| {
+            if st == "create_file" && folder == "A" {
+                std::fs::rename(r.join("A"), r.join("A-aside")).unwrap();
+                std::os::unix::fs::symlink(&o, r.join("A")).unwrap();
+            }
+        }))
+    });
+    let res = create_note(&dir, &root, "A/New.md");
+    CREATE_HOOK.with(|h| *h.borrow_mut() = None);
+    assert!(walk_files(&outside).is_empty(), "{res:?}");
+    // the handle still points at the original folder: the note is there
+    assert!(root.join("A-aside/New.md").is_file(), "{res:?}");
+}
+
+/// Threat model: the guarantee covers the root directory object opened at mount. Replacing
+/// the root path afterwards (rename + symlink to elsewhere) does not redirect creations: they
+/// land in the originally opened folder.
+#[cfg(unix)]
+#[test]
+fn swapping_the_root_after_mount_does_not_redirect_creation() {
+    let outer = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(outer.path()).unwrap();
+    let root = base.join("vault");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(root.join("A.md"), "").unwrap();
+    let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
+    sc.mount(root.clone());
+    let ix = sc.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    assert!(ix.root_dir().is_some());
+    // the root path now names another place
+    std::fs::rename(&root, base.join("vault-moved")).unwrap();
+    std::os::unix::fs::symlink(&outside, &root).unwrap();
+    let rx = spawn_create_note(ix, "Sub/New.md".into(), Arc::new(|| {}));
+    let r = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    assert!(r.is_ok(), "{r:?}");
+    assert!(walk_files(&outside).is_empty(), "nothing at the new target");
+    assert!(
+        base.join("vault-moved/Sub/New.md").is_file(),
+        "the original folder got it"
+    );
+}
+
+/// Review round 4: a snapshot is published only when indexed contents or settings change.
+#[test]
+fn no_snapshot_without_a_visible_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(root.join("Sub")).unwrap();
+    std::fs::write(root.join("A.md"), "one").unwrap();
+    std::fs::write(root.join("Sub/B.md"), "").unwrap();
+    let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
+    let t = std::time::Duration::from_secs(10);
+    let quiet = std::time::Duration::from_millis(400);
+    sc.mount(root.clone());
+    let g1 = sc.recv_timeout(t).unwrap().generation();
+    // a duplicate notification
+    sc.changed(root.clone());
+    sc.changed(root.join("Sub"));
+    assert!(sc.recv_timeout(quiet).is_none(), "duplicate events");
+    // an existing note replaced atomically (same name)
+    std::fs::write(root.join(".A.md.tmp"), "two").unwrap();
+    std::fs::rename(root.join(".A.md.tmp"), root.join("A.md")).unwrap();
+    sc.changed(root.join("A.md"));
+    // hidden files come and go
+    std::fs::write(root.join(".DS_Store"), "x").unwrap();
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    sc.changed(root.clone());
+    sc.changed(root.join(".git"));
+    sc.rescan();
+    assert!(sc.recv_timeout(quiet).is_none(), "atomic replace, hidden files, rescan");
+    // a real change publishes, with the next generation
+    std::fs::write(root.join("Sub/C.md"), "").unwrap();
+    sc.changed(root.join("Sub"));
+    let ix = sc.recv_timeout(t).unwrap();
+    assert_eq!(ix.generation(), g1 + 1);
+    assert!(ix.file("Sub/C.md").is_some());
 }

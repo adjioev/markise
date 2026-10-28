@@ -14,6 +14,30 @@
 //!
 //! Vault paths use `/` separators and NFC; names compare case-insensitively (lower-cased NFC,
 //! an approximation of simple case folding).
+//!
+//! # Threat model for notes created from links
+//!
+//! A link names a note that does not exist; confirming creates it (spec 06 V2.8). Link text
+//! and the folder's contents are untrusted: another program (a sync client, a script, another
+//! user with write access to a folder *inside* the vault) may change the tree at any moment,
+//! including swapping a folder for a symbolic link while a note is being created.
+//!
+//! **Guarantee:** a note is only ever created inside the vault root directory *object* that
+//! the scanner opened when the vault was mounted ([`VaultIndex::root_dir`]), never outside
+//! it and never inside a hidden folder such as `.obsidian/` (Q-V1). Concretely:
+//! - the root path is resolved once, at mount; creations use that directory handle and never
+//!   resolve the root path again;
+//! - every step is relative to the parent's open handle (`cap-std`): each folder is created
+//!   and then entered with a no-follow open, and the file is created exclusively without
+//!   following a link, so a component swapped for a symbolic link at any moment makes the
+//!   creation fail instead of redirecting it;
+//! - names are checked first ([`check_new_note`]): portable on every supported platform, no
+//!   hidden components, no `..`.
+//!
+//! **Out of scope:** replacing the vault root directory itself after it was mounted (whoever
+//! can do that already controls every note in it); creations then still go to the directory
+//! that was opened, or fail. Reading follows links as the file tree does (the scanner lists a
+//! linked folder once, with a cycle guard).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -118,7 +142,7 @@ impl Default for VaultSettings {
 
 impl VaultSettings {
     /// A folder without `.obsidian/`: Markdown links with relative paths (Typora-readable,
-    /// Q-V15), new notes next to the current note (Q-V18).
+    /// Q-V15), new notes next to the linking note (Q-V18).
     pub fn plain() -> Self {
         VaultSettings {
             obsidian: false,
@@ -128,15 +152,17 @@ impl VaultSettings {
         }
     }
 
-    /// An Obsidian vault: Obsidian's defaults (wikilinks, shortest paths, new notes in the
-    /// root), overridden by the keys of `app_json` that are present and understood (key
-    /// names inferred, Q-V3; anything else is ignored).
+    /// An Obsidian vault: wikilinks and shortest paths (Obsidian's defaults); new notes next
+    /// to the linking note (owner revision of Q-V18, 2026-10-28: the same default as plain
+    /// folders). Keys of `app_json` that are present and understood override these (key
+    /// names inferred, Q-V3; anything else is ignored) — `newFileLocation` only when set
+    /// explicitly.
     pub fn obsidian(app_json: Option<&str>) -> Self {
         let mut s = VaultSettings {
             obsidian: true,
             wikilinks: true,
             link_format: LinkFormat::Shortest,
-            new_notes: NewNoteLocation::Root,
+            new_notes: NewNoteLocation::Current,
         };
         let Some(serde_json::Value::Object(m)) = app_json.and_then(|t| serde_json::from_str(t).ok()) else {
             return s;
@@ -189,6 +215,9 @@ impl VaultSettings {
 #[derive(Clone, Debug, Default)]
 pub struct VaultIndex {
     root: PathBuf,
+    /// The vault root directory opened once when the scanner mounted it: the only capability
+    /// notes are created through (see the threat model in the module docs).
+    root_dir: Option<Arc<cap_std::fs::Dir>>,
     generation: u64,
     settings: VaultSettings,
     /// Sorted by vault path (code-point order).
@@ -346,12 +375,24 @@ impl VaultIndex {
         }
         VaultIndex {
             root,
+            root_dir: None,
             generation,
             settings: VaultSettings::plain(),
             files,
             by_name,
             by_rel,
         }
+    }
+
+    /// The same index with the vault root's directory capability.
+    pub fn with_root_dir(mut self, dir: Option<Arc<cap_std::fs::Dir>>) -> Self {
+        self.root_dir = dir;
+        self
+    }
+
+    /// The vault root directory opened at mount time (notes are created through it).
+    pub fn root_dir(&self) -> Option<&Arc<cap_std::fs::Dir>> {
+        self.root_dir.as_ref()
     }
 
     /// The same index with `settings`.
@@ -764,21 +805,21 @@ pub fn check_new_note(rel: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Creates the empty note `rel` under `root` (file I/O: worker threads only) and returns its
-/// path; an existing file is returned as is. Every step is done relative to an open handle of
-/// the parent folder (`cap-std`): folders are created and entered without following symbolic
-/// links, and the file is created exclusively without following one, so a link swapped in by
-/// another process at any moment cannot redirect the write outside the vault or into a
-/// protected folder (Q-V1). Existing folders keep their disk spelling (NFD stays NFD).
-pub fn create_note(root: &Path, rel: &str) -> Result<PathBuf, String> {
+/// Creates the empty note `rel` in the vault whose root directory `root_dir` was opened at
+/// mount time (file I/O: worker threads only) and returns its path below `root_path` (the
+/// path that was mounted; used only to name the result, never resolved). An existing file is
+/// returned as is. Every step works relative to an open directory handle (`cap-std`): folders
+/// are created and entered without following symbolic links, and the file is created
+/// exclusively without following one — see the threat model in the module docs. Existing
+/// folders keep their disk spelling (NFD stays NFD).
+pub fn create_note(root_dir: &cap_std::fs::Dir, root_path: &Path, rel: &str) -> Result<PathBuf, String> {
     use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
     check_new_note(rel)?;
-    let canon_root = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
-    let mut dir = cap_std::fs::Dir::open_ambient_dir(&canon_root, cap_std::ambient_authority())
-        .map_err(|e| format!("{}: {e}", canon_root.display()))?;
+    let mut dir = root_dir.try_clone().map_err(|e| format!("the vault folder: {e}"))?;
     let segs: Vec<&str> = rel.split('/').collect();
     let (last, folders) = segs.split_last().ok_or("The name is empty.")?;
-    let mut path = canon_root;
+    let mut path = root_path.to_path_buf();
+    let mut so_far = String::new();
     let refuse = |seg: &str, e: std::io::Error| -> String {
         match dir_is_link(&e) {
             true => format!("“{seg}” is a symbolic link; notes are not created through links."),
@@ -787,17 +828,24 @@ pub fn create_note(root: &Path, rel: &str) -> Result<PathBuf, String> {
     };
     for seg in folders {
         let seg = disk_name(&dir, seg);
+        if !so_far.is_empty() {
+            so_far.push('/');
+        }
+        so_far.push_str(&seg);
+        step_hook("create_dir", &so_far);
         match dir.create_dir(&seg) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(format!("“{seg}”: {e}")),
         }
+        step_hook("open_dir", &so_far);
         dir = dir.open_dir_nofollow(&seg).map_err(|e| refuse(&seg, e))?;
         path.push(&seg);
     }
     let last = disk_name(&dir, last);
     let mut opts = cap_std::fs::OpenOptions::new();
     opts.write(true).create_new(true).follow(FollowSymlinks::No);
+    step_hook("create_file", &so_far);
     match dir.open_with(&last, &opts) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -815,6 +863,28 @@ pub fn create_note(root: &Path, rel: &str) -> Result<PathBuf, String> {
     }
     path.push(&last);
     Ok(path)
+}
+
+/// A [`create_note`] step hook: step name, vault path of the folder concerned.
+#[cfg(test)]
+pub(crate) type CreateHook = Box<dyn FnMut(&str, &str)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook run at each step boundary of [`create_note`] with the step name and the vault
+    /// path of the folder concerned (controlled-interleaving tests).
+    pub(crate) static CREATE_HOOK: std::cell::RefCell<Option<CreateHook>> =
+        std::cell::RefCell::new(None);
+}
+
+#[inline]
+fn step_hook(_step: &str, _folder: &str) {
+    #[cfg(test)]
+    CREATE_HOOK.with(|h| {
+        if let Some(f) = h.borrow_mut().as_mut() {
+            f(_step, _folder);
+        }
+    });
 }
 
 /// Whether an error from a no-follow open means "this is a symbolic link" (`ELOOP` on Unix,
@@ -850,14 +920,18 @@ fn disk_name(dir: &cap_std::fs::Dir, seg: &str) -> String {
         .unwrap_or_else(|| seg.to_string())
 }
 
-/// [`create_note`] on a short-lived worker thread; the result arrives on the receiver (the
-/// caller is woken).
-pub fn spawn_create_note(root: PathBuf, rel: String, wake: Wake) -> Receiver<Result<PathBuf, String>> {
+/// [`create_note`] through `index`'s root capability on a short-lived worker thread; the
+/// result arrives on the receiver (the caller is woken).
+pub fn spawn_create_note(index: Arc<VaultIndex>, rel: String, wake: Wake) -> Receiver<Result<PathBuf, String>> {
     let (tx, rx) = channel();
     let spawned = std::thread::Builder::new().name("markise-new-note".into()).spawn({
         let tx = tx.clone();
         move || {
-            let _ = tx.send(create_note(&root, &rel));
+            let r = match index.root_dir() {
+                Some(dir) => create_note(dir, index.root(), &rel),
+                None => Err("the vault folder could not be opened".into()),
+            };
+            let _ = tx.send(r);
             wake();
         }
     });
@@ -911,6 +985,8 @@ struct ScanState {
     settings: VaultSettings,
     /// Something a snapshot shows changed since the last one.
     dirty: bool,
+    /// The root directory opened once at mount (see the threat model).
+    root_dir: Option<Arc<cap_std::fs::Dir>>,
 }
 
 impl ScanState {
@@ -969,12 +1045,50 @@ impl ScanState {
 
     fn mount(&mut self, root: PathBuf) {
         self.dirty = true;
+        // the root path is resolved here, once; later creations use this handle only
+        self.root_dir = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())
+            .ok()
+            .map(Arc::new);
         self.settings = VaultSettings::read(&root);
         self.root = root;
         self.files.clear();
         self.dirs.clear();
         let mut seen = HashSet::new();
         self.walk("", 0, &mut seen);
+    }
+
+    /// Walks the mounted root again (the watch restarted), keeping its directory handle;
+    /// publishes only if something differs.
+    fn rescan(&mut self) {
+        let (files, dirs) = (std::mem::take(&mut self.files), std::mem::take(&mut self.dirs));
+        let settings = VaultSettings::read(&self.root);
+        let mut seen = HashSet::new();
+        self.walk("", 0, &mut seen);
+        if self.files != files || self.dirs != dirs || settings != self.settings {
+            self.settings = settings;
+            self.dirty = true;
+        }
+    }
+
+    /// The indexed files and folders below `dir` (`""` = all), for change detection.
+    fn subtree(&self, dir: &str) -> (Vec<String>, Vec<String>) {
+        if dir.is_empty() {
+            return (
+                self.files.iter().cloned().collect(),
+                self.dirs.iter().cloned().collect(),
+            );
+        }
+        let prefix = format!("{dir}/");
+        let under = |set: &BTreeSet<String>| -> Vec<String> {
+            // everything starting with `dir` is contiguous; `dir b.md` may sit between `dir`
+            // and `dir/…`, so filter inside that run
+            set.range(dir.to_string()..)
+                .take_while(|p| p.starts_with(dir))
+                .filter(|p| p.as_str() == dir || p.starts_with(&prefix))
+                .cloned()
+                .collect()
+        };
+        (under(&self.files), under(&self.dirs))
     }
 
     /// `abs` changed (a directory, or something inside one): list its directory again.
@@ -1002,7 +1116,17 @@ impl ScanState {
         if dir.split('/').any(|s| s.starts_with('.')) {
             return;
         }
-        self.dirty = true;
+        // publish only if the indexed contents below `dir` really change (duplicate events,
+        // an existing note replaced atomically, hidden files: no new snapshot)
+        let before = self.subtree(&dir);
+        self.relist(&dir);
+        if self.subtree(&dir) != before {
+            self.dirty = true;
+        }
+    }
+
+    fn relist(&mut self, dir: &str) {
+        let dir = dir.to_string();
         let Some((files, dirs)) = self.list(&dir) else {
             // gone: drop it and everything below
             if dir.is_empty() {
@@ -1047,7 +1171,8 @@ impl ScanState {
         self.generation += 1;
         Arc::new(
             VaultIndex::from_rels(self.root.clone(), self.files.iter().cloned(), self.generation)
-                .with_settings(self.settings.clone()),
+                .with_settings(self.settings.clone())
+                .with_root_dir(self.root_dir.clone()),
         )
     }
 }
@@ -1066,6 +1191,7 @@ impl VaultScanner {
                     generation: 0,
                     settings: VaultSettings::plain(),
                     dirty: false,
+                    root_dir: None,
                 };
                 while let Ok(first) = cmd_rx.recv() {
                     // coalesce a burst into one snapshot
@@ -1085,10 +1211,7 @@ impl VaultScanner {
                                 mounted = true;
                             }
                             Cmd::Changed(p) if mounted => st.changed(&p),
-                            Cmd::Rescan if mounted => {
-                                let r = st.root.clone();
-                                st.mount(r);
-                            }
+                            Cmd::Rescan if mounted => st.rescan(),
                             _ => {}
                         }
                     }

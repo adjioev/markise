@@ -482,7 +482,9 @@ impl MarkiseApp {
     /// Unresolved link (V2.8): asks to create the note — at the target's path from the vault
     /// root when it has a folder part, else in the default location for new notes (Q-V18).
     fn offer_create(&mut self, target: &str, from: Option<&str>) {
-        let Some(root) = self.vault_root() else { return };
+        if self.vault_root().is_none() {
+            return;
+        }
         let t = markise_engine::vault::nfc(target.trim());
         let last = t.rsplit('/').next().unwrap_or(&t);
         if attachment_ext(last) {
@@ -502,8 +504,8 @@ impl MarkiseApp {
             // V2.8 rule 1: a folder part is taken from the vault root
             t.trim_start_matches('/').to_string()
         } else {
-            // rule 2: the default location for new notes (§14, Q-V18): the vault root in an
-            // Obsidian vault (or its `newFileLocation`), the current note's folder elsewhere
+            // rule 2: the default location for new notes (§14, Q-V18 as revised by the owner
+            // 2026-10-28): the linking note's folder, unless app.json sets `newFileLocation`
             use markise_engine::vault::NewNoteLocation;
             let loc = self
                 .vault
@@ -532,13 +534,19 @@ impl MarkiseApp {
             self.banner = Some(Banner::Info(format!("Cannot create “{rel}”: {why}")));
             return;
         }
-        self.set_ask(Ask::CreateNote { root, rel });
+        self.set_ask(Ask::CreateNote { rel });
     }
 
     /// The user confirmed creating the note `rel` in the vault at `root`: created on a worker
     /// (containment checked there, `markise_engine::vault::create_note`), then opened.
-    pub(super) fn create_note(&mut self, root: PathBuf, rel: String) {
-        self.vault.creating = Some(markise_engine::vault::spawn_create_note(root, rel, self.wake_handle()));
+    pub(super) fn create_note(&mut self, rel: String) {
+        // through the vault root's directory handle opened at mount (threat model in
+        // `markise_engine::vault`); the root path is not resolved again
+        let Some(ix) = self.vault.index.clone() else {
+            self.banner = Some(Banner::Info("The folder is still being indexed; try again.".into()));
+            return;
+        };
+        self.vault.creating = Some(markise_engine::vault::spawn_create_note(ix, rel, self.wake_handle()));
     }
 
     /// A note creation finished: open the note, or report why not.

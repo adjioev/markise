@@ -337,9 +337,8 @@ enum Ask {
     ReplaceTheme { src: PathBuf, existing: Vec<PathBuf> },
     /// Move to Trash from the file tree.
     Trash(PathBuf),
-    /// Create the note `rel` (vault path) in the vault at `root` for an unresolved link
-    /// (spec 06 V2.8).
-    CreateNote { root: PathBuf, rel: String },
+    /// Create the note `rel` (vault path) for an unresolved link (spec 06 V2.8).
+    CreateNote { rel: String },
 }
 
 enum Banner {
@@ -1952,12 +1951,7 @@ impl MarkiseApp {
             Some(Ask::Trash(p)) => Question::trash(&file_name(p), p.is_dir()),
             Some(Ask::CreateNote { rel, .. }) => {
                 let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
-                let folder = if dir.is_empty() {
-                    "the folder’s top level".to_string()
-                } else {
-                    format!("“{dir}”")
-                };
-                Question::create_note(name, &folder)
+                Question::create_note(name, dir)
             }
             None => {
                 let req = self.export.pending_overwrite()?;
@@ -2005,7 +1999,7 @@ impl MarkiseApp {
                 then,
             }),
             (Choice::MoveToTrash, Some(Ask::Trash(p))) => self.move_to_trash(&p),
-            (Choice::Create, Some(Ask::CreateNote { root, rel })) => self.create_note(root, rel),
+            (Choice::Create, Some(Ask::CreateNote { rel })) => self.create_note(rel),
             (_, Some(_)) => {} // Cancel (or a choice the question does not offer)
             (c, None) => {
                 if let Some(r) = self.export.answer_overwrite(c == Choice::Overwrite) {

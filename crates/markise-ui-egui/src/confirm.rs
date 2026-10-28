@@ -189,14 +189,20 @@ impl Question {
         }
     }
 
-    /// Cmd/Ctrl+click on a link to a note that does not exist (spec 06 V2.8): create it?
-    /// Creating loses nothing, so Create is the default.
+    /// Cmd/Ctrl+click on a link to a note that does not exist (spec 06 V2.8): create it, and
+    /// where (`folder`: the vault folder it goes to; empty = the top level)? Creating loses
+    /// nothing, so Create is the default.
     pub fn create_note(name: &str, folder: &str) -> Question {
+        let place = if folder.is_empty() {
+            "at the top level of the folder".to_string()
+        } else {
+            format!("in {folder}")
+        };
         Question {
             id: 0,
             kind: Kind::CreateNote,
-            message: format!("Create the note “{name}”?"),
-            detail: format!("No note of that name exists yet. It is created empty in {folder} and opened."),
+            message: format!("Create “{name}” {place}?"),
+            detail: "No note of that name exists yet. It is created empty and opened.".into(),
             buttons: vec![button(Choice::Create, "Create", Role::Primary), cancel()],
             default: Choice::Create,
         }
@@ -571,7 +577,7 @@ mod tests {
             Question::replace_theme("t", &["t.css".into()]),
             Question::export_overwrite(std::path::Path::new("a.html")),
             Question::open_link("vscode://x"),
-            Question::create_note("New idea.md", "the vault folder"),
+            Question::create_note("New idea.md", "Inbox"),
         ];
         for os in [Os::Mac, Os::Windows, Os::Linux] {
             for q in &all {

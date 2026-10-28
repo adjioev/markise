@@ -414,11 +414,43 @@ fn plain_folders_write_markdown_links_and_create_next_to_the_note() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Q-V18: in an Obsidian vault, notes created from a link in a subfolder go to the root.
+/// Q-V18 as revised by the owner (2026-10-28): in an Obsidian vault too, a note created from
+/// a link goes next to the linking note, and the question names the folder; only an explicit
+/// `newFileLocation` in app.json changes that; a link with a path still starts at the root.
 #[test]
-fn obsidian_vaults_create_new_notes_in_the_root() {
+fn obsidian_vaults_create_new_notes_next_to_the_linking_note() {
     let d = vault("obsidian-create");
     make_obsidian(&d);
+    std::fs::create_dir_all(d.join("Sub/Deeper")).unwrap();
+    std::fs::write(d.join("Sub/Deeper/Inner.md"), "To [[02 - just testing a link]].\n").unwrap();
+    let s = Scripted::new();
+    let mut h = harness(&d, Some(&s));
+    ready(&mut h, &d.join("Home.md"));
+    h.state_mut().open(d.join("Sub/Deeper/Inner.md"));
+    ready(&mut h, &d.join("Sub/Deeper/Inner.md"));
+    s.answer(Choice::Create);
+    h.state_mut().follow_link("[[02 - just testing a link]]");
+    h.step();
+    let q = s.last().expect("asked");
+    assert_eq!(q.message, "Create “02 - just testing a link.md” in Sub/Deeper?");
+    ready(&mut h, &d.join("Sub/Deeper/02 - just testing a link.md"));
+    // a link with a path part: from the vault root
+    h.state_mut().open(d.join("Sub/Deeper/Inner.md"));
+    ready(&mut h, &d.join("Sub/Deeper/Inner.md"));
+    s.answer(Choice::Create);
+    h.state_mut().follow_link("[[Inbox/Idea]]");
+    h.step();
+    assert_eq!(s.last().unwrap().message, "Create “Idea.md” in Inbox?");
+    ready(&mut h, &d.join("Inbox/Idea.md"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// An explicit `newFileLocation: "root"` in app.json puts new notes in the vault root.
+#[test]
+fn app_json_new_file_location_root_is_followed() {
+    let d = vault("obsidian-root");
+    make_obsidian(&d);
+    std::fs::write(d.join(".obsidian/app.json"), r#"{"newFileLocation": "root"}"#).unwrap();
     std::fs::write(d.join("Sub/Inner.md"), "To [[Fresh]].\n").unwrap();
     let s = Scripted::new();
     let mut h = harness(&d, Some(&s));
@@ -428,6 +460,10 @@ fn obsidian_vaults_create_new_notes_in_the_root() {
     s.answer(Choice::Create);
     h.state_mut().follow_link("[[Fresh]]");
     h.step();
+    assert_eq!(
+        s.last().unwrap().message,
+        "Create “Fresh.md” at the top level of the folder?"
+    );
     ready(&mut h, &d.join("Fresh.md"));
     let _ = std::fs::remove_dir_all(&d);
 }
