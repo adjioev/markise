@@ -129,20 +129,51 @@ fn same_entry(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Without inode numbers: a case-only name that resolves to an entry at all names the same
-/// entry on a case-insensitive file system (Windows default); on a case-sensitive folder the
-/// lookup of the other spelling fails and the no-replace rename runs instead.
-#[cfg(not(unix))]
+/// Windows: the same volume serial number and file index, read from handles opened on the
+/// entries themselves (reparse points not followed). When the identity cannot be read the
+/// entries are treated as different, so the rename stays no-replace.
+#[cfg(windows)]
 fn same_entry(a: &Path, b: &Path) -> bool {
-    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
-        (Ok(x), Ok(y)) => {
-            x.file_type() == y.file_type()
-                && x.len() == y.len()
-                && x.modified().ok() == y.modified().ok()
-                && x.created().ok() == y.created().ok()
-        }
-        _ => false,
+    matches!((file_identity(a), file_identity(b)), (Some(x), Some(y)) if x == y)
+}
+
+#[cfg(windows)]
+fn file_identity(p: &Path) -> Option<(u32, u32, u32)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
+    };
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: a valid NUL-terminated UTF-16 path; no access rights requested (metadata only)
+    let h = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return None;
     }
+    // SAFETY: `h` is an open handle; the struct is plain data filled by the call
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(h, &mut info) } != 0;
+    // SAFETY: closing the handle opened above exactly once
+    unsafe { CloseHandle(h) };
+    ok.then_some((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+}
+
+/// Other platforms: no reliable identity — never treated as the same entry (a case-only
+/// rename then goes through the no-replace path).
+#[cfg(not(any(unix, windows)))]
+fn same_entry(_: &Path, _: &Path) -> bool {
+    false
 }
 
 /// Renames `from` to `to`, failing with `AlreadyExists` instead of replacing an existing
@@ -320,6 +351,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Whether names in `d` are compared ignoring case.
+    fn case_insensitive(d: &Path) -> bool {
+        let probe = d.join("case-probe");
+        std::fs::write(&probe, "").unwrap();
+        let r = d.join("CASE-PROBE").exists();
+        std::fs::remove_file(&probe).unwrap();
+        r
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_only_rename_never_replaces_a_distinct_entry() {
+        let d = dir("case-distinct");
+        if case_insensitive(&d) {
+            // a.md and A.md cannot both exist here; the same-entry case is covered elsewhere
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+        std::fs::write(d.join("a.md"), "lower").unwrap();
+        std::fs::write(d.join("A.md"), "upper").unwrap();
+        assert!(rename(&d.join("a.md"), "A.md").unwrap_err().contains("already exists"));
+        assert_eq!(std::fs::read_to_string(d.join("A.md")).unwrap(), "upper");
+        assert_eq!(std::fs::read_to_string(d.join("a.md")).unwrap(), "lower");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[cfg(unix)]
     #[test]
     fn renaming_a_symlink_onto_its_target_is_a_collision() {
@@ -331,8 +388,13 @@ mod tests {
         assert!(rename(&link, "real.md").unwrap_err().contains("already exists"));
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        // also onto another spelling of the target's name (case-insensitive file systems)
-        assert!(rename(&link, "REAL.md").is_err());
+        // also onto another spelling of the target's name — a collision only where the file
+        // system ignores case (macOS default); on a case-sensitive one (Linux CI) "REAL.md"
+        // is a free, different name and the rename may proceed
+        if case_insensitive(&d) {
+            assert!(rename(&link, "REAL.md").unwrap_err().contains("already exists"));
+            assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        }
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
         let _ = std::fs::remove_dir_all(&d);
     }

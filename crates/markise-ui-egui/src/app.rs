@@ -412,9 +412,11 @@ enum Banner {
     Info(String),
     /// External change while there are unsaved local edits.
     Conflict(Box<Loaded>),
-    /// Save refused: the file changed on disk (`found` = what is there now).
+    /// Save refused: the file changed on disk (`found` = what is there now). `target`: the
+    /// Save As destination that conflicted ("Overwrite" retries it, not the old file).
     SaveConflict {
         found: Option<DiskVersion>,
+        target: Option<PathBuf>,
     },
 }
 
@@ -1116,7 +1118,7 @@ impl MarkiseApp {
             return;
         }
         if self.is_dirty() {
-            if let Some(Banner::SaveConflict { found }) = &mut self.banner {
+            if let Some(Banner::SaveConflict { found, target: None }) = &mut self.banner {
                 // keep the save-conflict choices; "Overwrite" now targets the newest version
                 *found = Some(loaded.version);
             } else {
@@ -1467,7 +1469,10 @@ impl MarkiseApp {
                 }
                 Err(SaveError::Conflict { found }) => {
                     self.queued_save = None;
-                    self.banner = Some(Banner::SaveConflict { found });
+                    self.banner = Some(Banner::SaveConflict {
+                        found,
+                        target: s.target.clone(),
+                    });
                 }
                 Err(SaveError::Io(e)) => {
                     // spec 04 §10: content stays in the editor, still unsaved; report it
@@ -2591,14 +2596,7 @@ impl MarkiseApp {
                 }
             }
             Some(Act::Overwrite) => {
-                if let Some(Banner::SaveConflict { found }) = self.banner.take() {
-                    let expect = found.map_or(Expect::Missing, Expect::Version);
-                    self.start_save(SaveRequest {
-                        expect: Some(expect),
-                        target: None,
-                        then: Then::Nothing,
-                    });
-                }
+                self.resolve_save_conflict_overwrite();
             }
             Some(Act::ReloadDiscard) => {
                 self.banner = None;
@@ -2626,10 +2624,11 @@ impl MarkiseApp {
 
     /// "Overwrite" in the save-conflict banner (tests).
     pub fn resolve_save_conflict_overwrite(&mut self) {
-        if let Some(Banner::SaveConflict { found }) = self.banner.take() {
+        if let Some(Banner::SaveConflict { found, target }) = self.banner.take() {
+            // the version the user saw in the conflict, at the file that conflicted
             self.start_save(SaveRequest {
                 expect: Some(found.map_or(Expect::Missing, Expect::Version)),
-                target: None,
+                target,
                 then: Then::Nothing,
             });
         }

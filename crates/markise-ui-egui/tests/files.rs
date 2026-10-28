@@ -464,3 +464,36 @@ fn rename_is_refused_while_a_save_is_running() {
     assert_eq!(std::fs::read_to_string(&b).unwrap(), "two\n");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn overwrite_after_a_save_as_conflict_writes_the_save_as_destination() {
+    // review round 2, P2: "Overwrite" retries the Save As target, never the old file
+    let d = tmpdir("as-overwrite");
+    let (a, b) = (d.join("a.md"), d.join("b.md"));
+    std::fs::write(&a, "alpha\n").unwrap();
+    std::fs::write(&b, "old b\n").unwrap();
+    let (g, hooks) = gated_saves();
+    let mut h = harness_with(vec![a.clone()], hooks);
+    wait_until(&mut h, "load", idle);
+    set_text(&mut h, "alpha edited\n");
+    h.state_mut().queue_save_dialog_answer(Some(b.clone()));
+    h.state_mut().save_as();
+    wait_entered(&mut h, &g);
+    std::fs::write(&b, "b changed by another program\n").unwrap();
+    g.release.send(()).unwrap();
+    wait_until(&mut h, "save", |s| !s.is_saving());
+    assert_eq!(h.state().banner_text().as_deref(), Some("save-conflict"));
+    h.state_mut().resolve_save_conflict_overwrite();
+    wait_entered(&mut h, &g);
+    g.release.send(()).unwrap();
+    wait_until(&mut h, "overwrite", |s| !s.is_saving());
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "alpha edited\n");
+    assert_eq!(
+        std::fs::read_to_string(&a).unwrap(),
+        "alpha\n",
+        "the old file is untouched"
+    );
+    assert_eq!(h.state().document_path(), Some(b.as_path()));
+    assert!(!h.state().is_dirty() && h.state().banner_text().is_none());
+    let _ = std::fs::remove_dir_all(&d);
+}
