@@ -51,6 +51,8 @@ type Targets = std::sync::Arc<std::sync::Mutex<TargetSet>>;
 enum Ctl {
     /// The open file and the content identity of the version the caller has.
     File(PathBuf, Option<DiskVersion>),
+    /// No open file on disk any more (a new, untitled document).
+    NoFile,
     Folder(PathBuf),
     Themes(PathBuf),
     /// The caller's document is now this version on disk (its own save, an accepted reload);
@@ -177,6 +179,10 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
                         // waited behind a registration change): compare now
                         new_file = true;
                     }
+                }
+                Ctl::NoFile => {
+                    want.file = None;
+                    known = Baseline::Unknown;
                 }
                 Ctl::Folder(p) => want.folder = Some(canonical(&p)),
                 Ctl::Themes(p) => want.themes = Some(canonical(&p)),
@@ -344,6 +350,12 @@ impl FileWatcher {
     /// [`WatchEvent::ThemeChanged`]. The folder must exist. Returns at once.
     pub fn watch_themes(&mut self, dir: &Path) {
         let _ = self.ctl.send(Ctl::Themes(dir.to_path_buf()));
+    }
+
+    /// Stops watching the open document (the editor now shows a document without a file).
+    /// Returns at once.
+    pub fn clear_file(&mut self) {
+        let _ = self.ctl.send(Ctl::NoFile);
     }
 
     /// The open document `path` is now `version` on disk (after the caller's own save or an

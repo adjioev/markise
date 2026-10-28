@@ -53,11 +53,13 @@ mounting a folder had the same synchronous calls.
      version of the open file the UI reads or writes is acknowledged
      (`FileWatcher::acknowledge`): the loaded one (`watch_file`), every reload result whatever
      is decided (same text, conflict, accepted), every successful save, the version a refused
-     save found, and
+     save found, the file a Save As wrote and a renamed or moved file (the watch follows
+     the new path with that version as its baseline), and
      after a deletion (seen by a catch-up or reported by an ordinary event and acknowledged
      by the UI) "known missing", so a later recreation is reported even with the same
      content. Every acknowledgement is itself followed by a comparison, because it may have
      waited behind a registration change while the file changed again.
+   A new, untitled document has no file: the watch of the previous file is dropped.
 5. Failures are not hidden: a path that cannot be added, or a stream that cannot be started,
    is left out of the active set (so the next request registers it again), reported as
    `WatchEvent::Error` (the UI shows a notice and logs it with `MARKISE_TIMING`), and

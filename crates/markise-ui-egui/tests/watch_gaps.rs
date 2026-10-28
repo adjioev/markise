@@ -245,3 +245,52 @@ fn a_same_content_reload_is_the_new_baseline() {
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Save As (#22) moves the watch to the new file, with what was written as its baseline: a
+/// change to the new file made while that watch is being registered is shown, and the old
+/// file no longer drives the document.
+#[test]
+fn save_as_moves_the_watch_to_the_new_file() {
+    let root = std::env::temp_dir().join(format!("markise-watch-gaps-saveas-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir_all(root.join("c")).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let old = root.join("a").join("doc.md");
+    let new = root.join("c").join("copy.md"); // outside the mounted folder: a new watch
+    std::fs::write(&old, "original\n").unwrap();
+    let (held, entered, hooks) = gate();
+    release(&held);
+    let mut h = harness(vec![old.clone()], hooks);
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_busy());
+    h.state().wait_for_watches().unwrap();
+
+    hold(&held, &entered);
+    h.state_mut().queue_save_dialog_answer(Some(new.clone()));
+    h.state_mut().save_as();
+    let t = Instant::now();
+    while entered.try_recv().is_err() {
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "the new file's watch was never registered"
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read_to_string(&new).unwrap(), "original\n");
+    assert_eq!(h.state().document_path(), Some(new.as_path()));
+    std::fs::write(&new, "changed by another program\n").unwrap();
+    release(&held);
+    wait_until(&mut h, "new file's change shown", |a| {
+        a.viewed_text().is_some_and(|t| t == "changed by another program\n") && !a.is_busy()
+    });
+
+    // the old file is not the document any more
+    std::fs::write(&old, "old file edited\n").unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    h.run_steps(10);
+    h.state().wait_for_watches().unwrap();
+    h.run_steps(10);
+    assert_eq!(h.state().viewed_text(), Some("changed by another program\n"));
+    let _ = std::fs::remove_dir_all(&root);
+}
