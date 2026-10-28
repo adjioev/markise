@@ -169,6 +169,8 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                         let watcher = user_dir.as_ref().and_then(|d| {
                             let mut w = FileWatcher::new(wake.clone()).ok()?;
                             w.watch_themes(d);
+                            // in effect before the UI gets it (this worker may wait)
+                            w.sync();
                             Some(w)
                         });
                         Done::Watcher(watcher)

@@ -395,7 +395,8 @@ struct Timing {
     start: Instant,
     frames: u64,
     first_frame_logged: bool,
-    open_started: Option<(Instant, usize)>,
+    /// Click/command time, size and path of the open being measured.
+    open_started: Option<(Instant, usize, PathBuf)>,
     exit_after_idle: Option<f32>,
     idle_from: Option<(Instant, u64)>,
     idle_input_frames: u64,
@@ -823,9 +824,10 @@ impl MarkiseApp {
                 }
             }
         }
-        if matches!(reason, LoadReason::Open | LoadReason::OpenDiscarding) {
+        if self.timing.enabled && matches!(reason, LoadReason::Open | LoadReason::OpenDiscarding) {
+            // (measurement only: no file access on the UI thread otherwise)
             let size = std::fs::metadata(&path).map(|m| m.len() as usize).unwrap_or(0);
-            self.timing.open_started = Some((Instant::now(), size));
+            self.timing.open_started = Some((Instant::now(), size, path.clone()));
             self.timing
                 .log(&format!("open-start path={} bytes={size}", path.display()));
         }
@@ -1022,7 +1024,7 @@ impl MarkiseApp {
             Banner::Info("The file is not valid UTF-8; it was decoded lossily and saving is disabled.".into())
         });
         if let Some(w) = self.watcher.as_mut() {
-            w.watch_file(&loaded.path);
+            w.watch_file(&loaded.path, loaded.mtime);
         }
         let format: Arc<dyn markise_doc::DocumentFormat> = Arc::new(MarkdownFormat {
             opts: self.parse.clone(),
@@ -1726,7 +1728,7 @@ impl MarkiseApp {
                 }
             }
             if let Some(w) = self.wake.clone() {
-                self.watcher = FileWatcher::new(w.clone()).ok();
+                self.watcher = FileWatcher::with_hooks(w.clone(), self.hooks.clone()).ok();
                 self.themes.start(w);
             }
             // first frame: wait briefly for the settings and the selected theme (no flash of
@@ -2364,10 +2366,15 @@ impl MarkiseApp {
                             self.themes.request_fallback();
                             ctx.request_repaint();
                         }
+                        // the frame that shows the opened document (not the previous one, still
+                        // shown while the load runs)
+                        let opened_shown = self.timing.open_started.as_ref().is_some_and(|o| o.2 == d.path);
                         if let Some(link) = out.link {
                             self.open_link(ctx, &link);
                         }
-                        if let Some((start, bytes)) = self.timing.open_started.take() {
+                        if opened_shown
+                            && let Some((start, bytes, _)) = self.timing.open_started.take()
+                        {
                             self.timing.log(&format!(
                                 "first-document-frame bytes={bytes} open_to_frame={:.1}ms painted={} laid_out={} rss_mb={}",
                                 start.elapsed().as_secs_f64() * 1e3,

@@ -26,6 +26,9 @@ pub struct JobHooks {
     pub before_save: Option<Box<dyn Fn(u64) + Send + Sync>>,
     /// Hooks inside the save protocol.
     pub save: SaveHooks,
+    /// On the file watcher's worker before it applies changed watch targets (tests stall it to
+    /// prove that registering watches never holds up the caller).
+    pub before_watch: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 pub type Hooks = Arc<JobHooks>;
