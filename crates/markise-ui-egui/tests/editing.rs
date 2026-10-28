@@ -792,3 +792,181 @@ fn moving_a_heading_keeps_the_caret_in_its_trailing_spaces_issue_16() {
     type_keys(&mut h, "x");
     assert_eq!(save(&mut h, &p), "Para\n\n# Title x \n");
 }
+
+/// Caret offset, drawn caret rectangle and toolbar block label after the last key.
+fn caret_state(h: &mut Harness<'static, MarkiseApp>) -> (usize, egui::Rect, &'static str) {
+    let c = caret(h);
+    let r = caret_screen(h);
+    let label = h.state().toolbar_state().map_or("-", |m| m.block_label());
+    (c, r, label)
+}
+
+fn open_toolbar_with(
+    name: &str,
+    src: &str,
+    backend: markise_ui_egui::TextBackend,
+) -> (Harness<'static, MarkiseApp>, PathBuf) {
+    let (mut h, p) = open_with(name, src, backend);
+    h.state_mut().set_show_toolbar(true);
+    h.step();
+    (h, p)
+}
+
+#[test]
+fn backspace_at_the_end_of_a_heading_issue_16() {
+    // Backspace removes typed trailing spaces one by one, then letters: the caret is drawn
+    // one step further left each time on the heading line, the toolbar stays on the heading
+    // (spaces after an ATX heading's text lie after its span: Backspace did nothing there)
+    let variants: &[(&str, &[Key], &str)] = &[
+        ("# Title\n\nPara\n", &[Key::End], "Heading 1"),
+        ("# Title\nPara\n", &[Key::End], "Heading 1"),
+        ("# Title\n", &[Key::End], "Heading 1"),
+        ("### Title\n\nPara\n", &[Key::End], "Heading 3"),
+        ("# Title #\n\nPara\n", &[Key::End], "Heading 1"),
+        ("Title\n=====\n\nPara\n", &[Key::End], "Heading 1"),
+        ("Title\n-----\nPara\n", &[Key::End], "Heading 2"),
+        ("Para\n\n# Title\n", &[Key::ArrowDown, Key::End], "Heading 1"),
+        ("- # Title\n\nPara\n", &[Key::End], "Heading 1"),
+        ("> # Title\n\nPara\n", &[Key::End], "Heading 1"),
+    ];
+    for backend in [
+        markise_ui_egui::TextBackend::Epaint,
+        markise_ui_egui::TextBackend::Parley,
+    ] {
+        for (src, nav, label) in variants {
+            for spaces in [0, 1, 3] {
+                let (mut h, p) = open_toolbar_with("hd16-bs", src, backend);
+                for k in *nav {
+                    key(&mut h, *k);
+                }
+                type_keys(&mut h, &" ".repeat(spaces));
+                let (mut c, mut r, l) = caret_state(&mut h);
+                assert_eq!(l, *label, "{backend:?} {src:?}");
+                for n in 0..spaces + 2 {
+                    key(&mut h, Key::Backspace);
+                    let (c2, r2, l2) = caret_state(&mut h);
+                    let what = format!("{backend:?} {src:?} spaces={spaces} backspace {}", n + 1);
+                    assert_eq!(c2 + 1, c, "{what}");
+                    assert_eq!(r2.center().y, r.center().y, "same line: {what}");
+                    assert!(r2.min.x < r.min.x - 1.0, "drawn further left: {what}");
+                    assert_eq!(l2, *label, "{what}");
+                    (c, r) = (c2, r2);
+                }
+                assert_eq!(
+                    save(&mut h, &p),
+                    src.replacen("Title", "Tit", 1),
+                    "{backend:?} {spaces}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn backspace_in_and_at_the_start_of_a_heading_issue_16() {
+    // inside the text: one character, caret drawn left, still the heading
+    let (mut h, p) = open_toolbar("hd16-bs-mid", "Para\n\n# Title\n", true);
+    key(&mut h, Key::ArrowDown);
+    key(&mut h, Key::End);
+    key(&mut h, Key::ArrowLeft);
+    key(&mut h, Key::ArrowLeft);
+    let (c, r, _) = caret_state(&mut h);
+    key(&mut h, Key::Backspace);
+    let (c2, r2, l) = caret_state(&mut h);
+    assert_eq!((c2, l), (c - 1, "Heading 1"));
+    assert!(r2.min.x < r.min.x && r2.center().y == r.center().y);
+    assert_eq!(save(&mut h, &p), "Para\n\n# Tile\n");
+    // at the start of the text: the heading becomes a paragraph, then merges with the
+    // paragraph above (spec 02 §5.2 rules 4 and 5); below a list only the first happens
+    for (src, nav, want1, want2) in [
+        (
+            "Para\n\n# Title\n",
+            &[Key::ArrowDown, Key::Home][..],
+            "Para\n\nTitle\n",
+            "ParaTitle\n",
+        ),
+        (
+            "Para\n# Title\n",
+            &[Key::ArrowDown, Key::Home][..],
+            "Para\nTitle\n",
+            "ParaTitle\n",
+        ),
+        (
+            "- one\n- two\n\n# Title\n",
+            &[Key::ArrowDown, Key::ArrowDown, Key::Home][..],
+            "- one\n- two\n\nTitle\n",
+            "- one\n- two\n\nTitle\n",
+        ),
+    ] {
+        let (mut h, p) = open_toolbar("hd16-bs-start", src, true);
+        for k in nav {
+            key(&mut h, *k);
+        }
+        key(&mut h, Key::Backspace);
+        assert_eq!(text(&h), want1, "{src:?}");
+        assert_eq!(caret_state(&mut h).2, "Paragraph", "{src:?}");
+        key(&mut h, Key::Backspace);
+        assert_eq!(save(&mut h, &p), want2, "{src:?}");
+    }
+}
+
+#[test]
+fn delete_in_the_trailing_spaces_of_a_heading_issue_16() {
+    // between typed spaces: Delete removes the next one (it did nothing)
+    let (mut h, p) = open_toolbar("hd16-del", "# Title\n\nPara\n", true);
+    key(&mut h, Key::End);
+    type_keys(&mut h, "  ");
+    key(&mut h, Key::ArrowLeft);
+    key(&mut h, Key::Delete);
+    assert_eq!(text(&h), "# Title \n\nPara\n");
+    let (c, _, l) = caret_state(&mut h);
+    assert_eq!((c, l), (8, "Heading 1"));
+    // at the end of the line: the next block's text is merged (C48) and the spaces stay
+    key(&mut h, Key::Delete);
+    assert_eq!(text(&h), "# Title Para\n");
+    assert_eq!(caret_state(&mut h).0, 8);
+    assert_eq!(save(&mut h, &p), "# Title Para\n");
+    let (mut h, p) = open_toolbar("hd16-del2", "# Title\n\n# Next\n", true);
+    key(&mut h, Key::End);
+    type_keys(&mut h, " ");
+    key(&mut h, Key::Delete);
+    assert_eq!(save(&mut h, &p), "# Title Next\n");
+}
+
+#[test]
+fn selection_from_trailing_spaces_stays_in_the_block_issue_16() {
+    // Shift+← from inside trailing spaces: the anchor stayed in whitespace that is laid out
+    // only while the focus is in it, so it was "fixed" to the next block and Backspace
+    // deleted across blocks (`# TitPara`, or a table cell's pipe)
+    let shift = Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    for (src, typed, n, want) in [
+        ("# Title\n\nPara\n", "  ", 4, "# Tit\n\nPara\n"),
+        ("# Title #\n\nPara\n", "  ", 4, "# Tit #\n\nPara\n"),
+        ("# Title\n", " ", 2, "# Titl\n"),
+        ("Hello\n\nPara\n", " ", 3, "Hel\n\nPara\n"),
+        (
+            "| ab | c |\n|---|---|\n| x | y |\n",
+            " ",
+            2,
+            "| a | c |\n|---|---|\n| x | y |\n",
+        ),
+    ] {
+        let (mut h, p) = open_toolbar("hd16-sel", src, true);
+        key(&mut h, Key::End);
+        type_keys(&mut h, typed);
+        let at = caret(&mut h);
+        for _ in 0..n {
+            h.key_press_modifiers(shift, Key::ArrowLeft);
+            h.step();
+        }
+        let sel = h.state_mut().viewer().unwrap().ed.session.selection().primary();
+        assert_eq!(sel.anchor.offset, at, "anchor kept: {src:?}");
+        assert_eq!(sel.focus.offset, at - n, "{src:?}");
+        key(&mut h, Key::Backspace);
+        assert_eq!(caret(&mut h), at - n, "{src:?}");
+        assert_eq!(save(&mut h, &p), want, "{src:?}");
+    }
+}

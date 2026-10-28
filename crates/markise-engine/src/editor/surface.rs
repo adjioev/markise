@@ -229,7 +229,15 @@ impl EditorView {
     pub fn fix_selection(&mut self, shaper: &mut dyn TextShaper, images: &dyn Images) -> bool {
         let sel = self.session.selection().primary();
         let mut g = self.geometry(shaper, images);
-        let ok = |g: &mut Geometry<'_>, p: DocPos| g.caret_rect(p).is_some() && g.normalize(p).offset == p.offset;
+        // whitespace after the text of a paragraph, heading or cell is laid out only while the
+        // focus is in it: a selection end there (e.g. the anchor of Shift+← from it) is still a
+        // valid position, not one to move past into the next block (issue #16)
+        let in_trailing_ws = |g: &Geometry<'_>, p: DocPos| {
+            markise_layout::caret::focus_for(g.view, p, true).is_some_and(|(_, f)| f.trailing_ws.is_some())
+        };
+        let ok = |g: &mut Geometry<'_>, p: DocPos| {
+            in_trailing_ws(g, p) || (g.caret_rect(p).is_some() && g.normalize(p).offset == p.offset)
+        };
         if ok(&mut g, sel.focus) && (sel.is_caret() || ok(&mut g, sel.anchor)) {
             return false;
         }

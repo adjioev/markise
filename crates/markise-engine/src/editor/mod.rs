@@ -711,6 +711,9 @@ impl EditorSession {
     /// math, HTML and front matter: inside the content (line joins allowed); tables: inside one
     /// cell's content.
     fn deletion_allowed(&self, r: std::ops::Range<usize>) -> bool {
+        if self.in_heading_trailing_ws(r.clone()) {
+            return true;
+        }
         let Some(leaf) = self.doc.leaf(r.start) else {
             return false;
         };
@@ -735,6 +738,25 @@ impl EditorSession {
             }
             _ => false,
         }
+    }
+
+    /// Whether `r` lies in the spaces and tabs right after a heading's text on its line. An ATX
+    /// heading's span stops at its text, so spaces typed after it are outside the block, yet
+    /// they are its content for the caret (issue #16).
+    fn in_heading_trailing_ws(&self, r: std::ops::Range<usize>) -> bool {
+        let b = self.doc.text().as_bytes();
+        if r.is_empty() || r.end > b.len() || !b[r.clone()].iter().all(|c| matches!(c, b' ' | b'\t')) {
+            return false;
+        }
+        let mut q = r.start;
+        while q > 0 && matches!(b[q - 1], b' ' | b'\t') {
+            q -= 1;
+        }
+        q > 0
+            && self.doc.leaf(q - 1).is_some_and(|l| {
+                // after the text: past the span (open ATX) or before a closing sequence
+                matches!(l.kind, LeafKind::Heading { .. }) && l.lines.last().is_some_and(|x| x.end == q)
+            })
     }
 
     /// Block-level Backspace at `at` (a caret), or `None` for a plain deletion.
@@ -789,11 +811,22 @@ impl EditorSession {
         {
             return Some(BlockEdit::Nothing);
         }
-        merge_blocks(self.doc.text(), &prev, &leaf)
+        merge_blocks(self.doc.text(), &prev, &leaf, 0)
     }
 
     /// Block-level Delete at `at` (a caret), or `None` for a plain deletion.
     fn block_end_forward(&self, at: usize) -> Option<BlockEdit> {
+        // at the end of the line after spaces typed after a heading's text: the end of the
+        // heading, and a merge keeps those spaces (issue #16)
+        let keep = at;
+        let b = self.doc.text().as_bytes();
+        let ws = b[..at].iter().rev().take_while(|c| matches!(c, b' ' | b'\t')).count();
+        let at =
+            if ws > 0 && matches!(b.get(at), None | Some(b'\n' | b'\r')) && self.in_heading_trailing_ws(at - ws..at) {
+                at - ws
+            } else {
+                at
+            };
         let leaf = self.doc.leaf(at)?;
         if leaf.span.end < at {
             return None; // between blocks
@@ -835,7 +868,7 @@ impl EditorSession {
                 {
                     return Some(BlockEdit::Nothing);
                 }
-                return merge_blocks(t, &leaf, &n);
+                return merge_blocks(t, &leaf, &n, keep);
             }
             // skip blank lines / prefixes up to the next leaf
             probe = t[probe..].find('\n').map_or(t.len(), |k| probe + k + 1);
@@ -1383,12 +1416,23 @@ fn snap_selection(text: &str, sel: Selection) -> Selection {
     out
 }
 
-fn merge_blocks(text: &str, prev: &markise_doc::LeafView, next: &markise_doc::LeafView) -> Option<BlockEdit> {
+/// `keep`: a caret after spaces that follow `prev`'s text outside its span (an open ATX
+/// heading): the join goes after them, so they stay (else 0).
+fn merge_blocks(
+    text: &str,
+    prev: &markise_doc::LeafView,
+    next: &markise_doc::LeafView,
+    keep: usize,
+) -> Option<BlockEdit> {
     let (_, prev_trail) = block_syntax(prev);
     let (_, next_trail) = block_syntax(next);
     let first = next.lines.first()?.start;
     let last = next.lines.last()?.end;
-    let join = prev_trail.start;
+    let join = if prev_trail.is_empty() {
+        prev_trail.start.max(keep)
+    } else {
+        prev_trail.start
+    };
     let insert = format!("{}{}", &text[first..last], &text[prev_trail.clone()]);
     let patches = PatchSet::new(vec![Patch::verbatim(join..next_trail.end.max(last), insert)]).ok()?;
     Some(BlockEdit::Edit {
