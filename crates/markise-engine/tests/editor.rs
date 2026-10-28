@@ -861,3 +861,27 @@ fn tab_in_a_table_moves_between_cells() {
     s.tab(true).unwrap();
     assert_eq!(s.text(), src);
 }
+
+/// A selection inside a single block keeps that block's syntax, also when the block is the
+/// whole document (BE-4; Codex review of PR #25).
+#[test]
+fn selection_inside_one_block_keeps_its_syntax() {
+    for (src, a, b, want) in [
+        ("# Old\n", 2, 5, "# New\n"),
+        ("- Old\n", 2, 5, "- New\n"),
+        ("> Old\n", 2, 5, "> New\n"),
+        ("## Old ##\n", 3, 6, "## New ##\n"),
+        ("# H\n\n- Old\n\nz\n", 7, 10, "# H\n\n- New\n\nz\n"),
+    ] {
+        let (mut s, _) = md_session(src);
+        s.set_selection(Selection::range(a, b));
+        s.insert_text("New").unwrap();
+        assert_eq!(s.text(), want, "replace {a}..{b} in {src:?}");
+    }
+    // Select All of a multi-block document still clears everything
+    let src = "- a\n- b\n";
+    let (mut s, _) = md_session(src);
+    s.set_selection(Selection::range(2, 7));
+    s.insert_text("x").unwrap();
+    assert_eq!(s.text(), "x");
+}

@@ -351,7 +351,8 @@ impl EditorSession {
     }
 
     /// A selection from the start of the first block's text to the end of the last block's
-    /// text (Select All: the layout's first and last caret stops) covers the whole document:
+    /// text (Select All: the layout's first and last caret stops) of a document with more than
+    /// one block covers the whole document:
     /// before it is replaced or deleted it is widened to every byte, so the hidden block syntax
     /// at its edges (`# ` of a first heading, the final newline…) goes with it (M2b-3).
     fn widen_whole_document_selection(&mut self) {
@@ -361,11 +362,21 @@ impl EditorSession {
         if p.is_caret() || self.sel.ranges().len() != 1 || (r.start == 0 && r.end == t.len()) {
             return;
         }
-        let Some(first_byte) = t.find(|c: char| !c.is_whitespace()) else {
+        // the selection starts in the document's first leaf (nothing but syntax before it) and
+        // reaches the end of its last leaf
+        let (Some(first_leaf), Some(last_leaf)) = (self.doc.leaf(r.start), leaf_before(self.doc.as_ref(), t.len()))
+        else {
             return;
         };
-        let first = self.doc.leaf(first_byte).and_then(|l| l.lines.first().map(|f| f.start));
-        let last = leaf_before(self.doc.as_ref(), t.len()).and_then(|l| l.lines.last().map(|z| z.end));
+        if leaf_before(self.doc.as_ref(), first_leaf.span.start).is_some() {
+            return;
+        }
+        // a selection inside one block keeps that block's syntax (`# Old` → `# New`, BE-4)
+        if first_leaf.span.start == last_leaf.span.start {
+            return;
+        }
+        let first = first_leaf.lines.first().map(|f| f.start);
+        let last = last_leaf.lines.last().map(|z| z.end);
         let (Some(first), Some(last)) = (first, last) else {
             return;
         };
