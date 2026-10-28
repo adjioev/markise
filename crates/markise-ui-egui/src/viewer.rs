@@ -475,7 +475,9 @@ impl DocViewer {
         };
         // the available caret stops may have changed under the selection (a diagram or
         // formula became rendered, front matter collapsed): move it to the nearest stop
-        if with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.fix_selection(sh, &*images)) {
+        // (not on a read-only surface without the focus: in Side by Side the session's selection
+        // may be the source pane's, which need not sit on a rendered caret stop)
+        if (focused || editable) && with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.fix_selection(sh, &*images)) {
             self.ed.refresh_focus();
             ctx.request_repaint();
         }

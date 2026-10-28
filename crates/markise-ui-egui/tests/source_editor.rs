@@ -294,3 +294,19 @@ fn ten_megabyte_document_opens_scrolls_and_edits() {
     want.push('Z');
     assert_eq!(std::fs::read_to_string(&f).unwrap(), want);
 }
+
+/// Side by Side: the read-only rendered pane does not move the source caret to a rendered caret
+/// stop (a caret between hidden markers), so typing there stays one typing group.
+#[test]
+fn side_by_side_typing_between_markers_is_one_group() {
+    let (mut h, _f) = open("sbsgroup", "**bold** text\n");
+    h.state_mut().set_view_mode(ViewMode::SideBySide);
+    h.run_steps(3);
+    key(&mut h, Key::Home);
+    key(&mut h, Key::ArrowRight);
+    key(&mut h, Key::ArrowRight);
+    assert_eq!(h.state().source_caret(), Some(2));
+    typ(&mut h, "xyz");
+    assert_eq!(text(&h), "**xyzbold** text\n");
+    assert_eq!(h.state_mut().viewer().unwrap().ed.session.history().undo_len(), 1);
+}
