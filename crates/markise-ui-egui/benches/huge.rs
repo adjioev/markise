@@ -306,36 +306,67 @@ fn child(src: &Path) {
         cl.report("FormatDoc clone (copy-on-write fallback)");
     }
 
-    // ---- scrolling: top → bottom → middle
-    let center = Pos2::new(W * 0.6, H * 0.5);
+    // ---- scrolling: top → bottom → middle, through the viewer's own scrollbar
+    let r = app.viewer().unwrap().surface_rect().expect("the viewer was shown");
+    let center = r.center();
+    // a point on the viewer's scrollbar (its right edge) at fraction `f` of its height
+    let bar = |f: f32| Pos2::new(r.right() - 4.0, r.top() + 1.0 + f.clamp(0.0, 1.0) * (r.height() - 2.0));
+    let scrolled = |app: &mut MarkiseApp| {
+        let v = &app.viewer().unwrap().ed.view;
+        v.scroll_y() / (v.total_height() - r.height() as f64).max(1.0)
+    };
     app.viewer().unwrap().ed.view.scroll_to_item(0);
     frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
     let mut s = Series::default();
     for _ in 0..300 {
         s.push(frame(&ctx, &mut app, vec![wheel(-60.0)]));
     }
-    s.report("wheel scroll at top (300 frames)");
-    let bar = |y: f32| Pos2::new(W - 4.0, y);
+    s.report(&format!(
+        "wheel scroll at top (300 frames, ends at {:.4})",
+        scrolled(&mut app)
+    ));
     let mut j = Series::default();
-    j.push(frame(&ctx, &mut app, click_events(bar(H - 2.0))));
+    // drag the scrollbar past its bottom end (clamps to the very end of the document)
+    let (p0, p1) = (bar(0.97), Pos2::new(r.right() - 4.0, r.bottom() + 40.0));
+    let btn = |pos, pressed| Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    frame(&ctx, &mut app, vec![Event::PointerMoved(p0), btn(p0, true)]);
+    j.push(frame(&ctx, &mut app, vec![Event::PointerMoved(p1)]));
+    frame(&ctx, &mut app, vec![btn(p1, false)]);
+    let at = scrolled(&mut app);
+    assert!(at > 0.9999, "scrollbar drag to the bottom must reach the end (at {at})");
     frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
     let mut s = Series::default();
     for _ in 0..300 {
         s.push(frame(&ctx, &mut app, vec![wheel(60.0)]));
     }
-    s.report("wheel scroll at bottom (300 frames)");
-    j.push(frame(&ctx, &mut app, click_events(bar(H * 0.5))));
+    s.report(&format!(
+        "wheel scroll at bottom (300 frames, {at:.4} → {:.4})",
+        scrolled(&mut app)
+    ));
+    j.push(frame(&ctx, &mut app, click_events(bar(0.5))));
+    let at = scrolled(&mut app);
+    assert!((0.45..0.55).contains(&at), "scrollbar click in the middle (at {at})");
     frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
     let mut s = Series::default();
     for _ in 0..300 {
         s.push(frame(&ctx, &mut app, vec![wheel(-60.0)]));
     }
-    s.report("wheel scroll in the middle (300 frames)");
+    s.report(&format!(
+        "wheel scroll in the middle (300 frames, {at:.4} → {:.4})",
+        scrolled(&mut app)
+    ));
     let mut seed = 12345u64;
     for _ in 0..100 {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        let y = 30.0 + ((seed >> 33) as f32 / (1u64 << 31) as f32) * (H - 80.0);
-        j.push(frame(&ctx, &mut app, click_events(bar(y))));
+        let f = (seed >> 33) as f32 / (1u64 << 31) as f32;
+        j.push(frame(&ctx, &mut app, click_events(bar(f))));
+        let at = scrolled(&mut app);
+        assert!((at - f as f64).abs() < 0.01, "scrollbar jump to {f} landed at {at}");
     }
     j.report("scrollbar jumps (bottom, middle, 100 random)");
     println!("  RSS after scrolling: {} MB", rss_mb());
@@ -482,20 +513,23 @@ fn child(src: &Path) {
             f.0,
             rss_mb()
         );
-        let p = Pos2::new(focus_x, H * 0.5);
+        let p = Pos2::new(focus_x, center.y);
         frame(&ctx, &mut app, vec![Event::PointerMoved(p)]);
         let mut s = Series::default();
         for _ in 0..200 {
             s.push(frame(&ctx, &mut app, vec![wheel(-60.0)]));
         }
         s.report(&format!("{label}: wheel scroll (200 frames)"));
-        let t = Instant::now();
-        let jb = frame(&ctx, &mut app, click_events(bar(H * 0.5)));
+        // the source editor's scrollbar: right edge of its rect, half way down
+        let sr = app.source_rect().unwrap_or(r);
+        let before = app.source_scroll_offset();
+        let jb = frame(&ctx, &mut app, click_events(Pos2::new(sr.right() - 4.0, sr.center().y)));
         println!(
-            "  {label}: scrollbar jump to middle {:.1} ms wall / {:.1} ms cpu ({:.1} ms incl. call)",
+            "  {label}: scrollbar jump to middle {:.1} ms wall / {:.1} ms cpu (source offset {:?} → {:?})",
             jb.0,
             jb.1,
-            t.elapsed().as_secs_f64() * 1e3
+            before,
+            app.source_scroll_offset()
         );
         frame(&ctx, &mut app, click_events(p));
         frame(&ctx, &mut app, vec![]);
