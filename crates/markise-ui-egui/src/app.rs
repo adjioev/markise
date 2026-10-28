@@ -2319,27 +2319,8 @@ impl MarkiseApp {
             .frame(egui::Frame::new().fill(color(t.chrome.sidebar_bg)).inner_margin(8.0))
             .show(ui, |ui| {
                 let look = crate::sidebar::SideLook::new(&t);
-                ui.horizontal(|ui| {
-                    for (tab, label) in [(Tab::Files, "Files"), (Tab::Outline, "Outline")] {
-                        let on = self.tab == tab;
-                        let text = RichText::new(label)
-                            .font(if on { look.bold_font.clone() } else { look.font.clone() })
-                            .color(if on { look.active_text } else { look.text });
-                        let r = ui.add(egui::Button::new(text).frame(false));
-                        if on {
-                            let y = r.rect.bottom() + 1.0;
-                            ui.painter().line_segment(
-                                [egui::pos2(r.rect.left(), y), egui::pos2(r.rect.right(), y)],
-                                egui::Stroke::new(2.0, look.outline_active_text),
-                            );
-                        }
-                        if r.clicked() {
-                            self.tab = tab;
-                        }
-                    }
-                });
-                ui.add_space(2.0);
-                ui.separator();
+                crate::sidebar::tabs(ui, &mut self.tab, &look);
+                ui.add_space(6.0);
                 match self.tab {
                     Tab::Files => {
                         let current = self.document_path().map(Path::to_path_buf);
