@@ -161,3 +161,87 @@ fn recreating_a_deleted_file_with_the_same_content_in_a_gap_is_noticed() {
     assert!(h.state().banner_text().is_none(), "{:?}", h.state().banner_text());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Review of #27, round 4: a reload that finds the editor's own text again is still the
+/// watcher's new baseline. Sequence: the catch-up sees B (its baseline becomes B), the disk
+/// returns to A before the UI's reload reads it (A = the editor's text: nothing to do), then
+/// another registration gap changes the disk to B; that must be reported.
+#[test]
+fn a_same_content_reload_is_the_new_baseline() {
+    let root = std::env::temp_dir().join(format!("markise-watch-gaps-same-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir_all(root.join("b")).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let doc = root.join("a").join("doc.md");
+    std::fs::write(&doc, "version A\n").unwrap();
+    let (held, entered, hooks) = gate();
+    release(&held);
+    // the loader can be held before it reads (armed by the test)
+    let load_armed: Held = Arc::new((Mutex::new(false), Condvar::new()));
+    let (load_tx, load_entered) = channel();
+    let (armed2, load_tx) = (load_armed.clone(), Mutex::new(load_tx));
+    let load_hook: markise_engine::load::StageHook = Arc::new(move |stage, _generation| {
+        if stage != markise_engine::load::Stage::Read {
+            return;
+        }
+        let (m, cv) = &*armed2;
+        let mut g = m.lock().unwrap();
+        if *g {
+            let _ = load_tx.lock().unwrap().send(());
+            while *g {
+                g = cv.wait(g).unwrap();
+            }
+        }
+    });
+    let app = MarkiseApp::new(AppOptions {
+        open: vec![doc.clone()],
+        hooks,
+        load_hook: Some(load_hook),
+        ..Default::default()
+    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), app);
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_busy());
+    h.state().wait_for_watches().unwrap();
+
+    // gap 1: the disk becomes B; the catch-up reports it (worker baseline B)
+    *load_armed.0.lock().unwrap() = true;
+    hold(&held, &entered);
+    h.state_mut().open(root.join("b"));
+    entered
+        .recv_timeout(Duration::from_secs(30))
+        .expect("registration change 1");
+    std::fs::write(&doc, "version B\n").unwrap();
+    release(&held);
+    h.state().wait_for_watches().unwrap();
+    // the UI's reload starts and is held before it reads; meanwhile the disk returns to A
+    let t = Instant::now();
+    while load_entered.try_recv().is_err() {
+        assert!(t.elapsed() < Duration::from_secs(30), "reload never started");
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::write(&doc, "version A\n").unwrap();
+    *load_armed.0.lock().unwrap() = false;
+    load_armed.1.notify_all();
+    wait_until(&mut h, "reload done", |a| !a.is_busy());
+    h.run_steps(3);
+    h.state().wait_for_watches().unwrap();
+    assert_eq!(h.state().viewed_text(), Some("version A\n"));
+
+    // gap 2: the disk becomes B again
+    hold(&held, &entered);
+    h.state_mut().open(root.join("a"));
+    entered
+        .recv_timeout(Duration::from_secs(30))
+        .expect("registration change 2");
+    std::fs::write(&doc, "version B\n").unwrap();
+    release(&held);
+    wait_until(&mut h, "B shown", |a| {
+        a.viewed_text().is_some_and(|t| t == "version B\n") && !a.is_busy()
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}

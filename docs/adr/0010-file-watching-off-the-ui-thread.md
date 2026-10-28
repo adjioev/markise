@@ -49,8 +49,11 @@ mounting a folder had the same synchronous calls.
      UI re-reads and decides as for any external change. The worker reads the file for this
      (off the UI thread). This also closes the older gap between the loader's read and the
      watch registration.
-   - the baseline it compares with is the version the UI last acknowledged: the loaded one,
-     then each successful save and each accepted reload (`FileWatcher::acknowledge`), and
+   - the baseline it compares with is the disk version the UI last saw. Invariant: every
+     version of the open file the UI reads or writes is acknowledged
+     (`FileWatcher::acknowledge`): the loaded one (`watch_file`), every reload result whatever
+     is decided (same text, conflict, accepted), every successful save, the version a refused
+     save found, and
      after a deletion (seen by a catch-up or reported by an ordinary event and acknowledged
      by the UI) "known missing", so a later recreation is reported even with the same
      content. Every acknowledgement is itself followed by a comparison, because it may have

@@ -1032,16 +1032,18 @@ impl MarkiseApp {
         if doc.path != loaded.path {
             return;
         }
+        // every version of the open file the UI reads is the watcher's new baseline, whatever
+        // is decided below (the same text, a conflict, a reload later): a later change from it
+        // must be reported, a return to an older version included
+        if let Some(w) = &self.watcher {
+            w.acknowledge(&doc.path, Some(loaded.version));
+        }
         if doc.disk.is_some_and(|d| d.same_content(&loaded.version)) {
             // our own save, a touch without a content change, or the file is back after a
             // deletion with the same content
-            if std::mem::take(&mut doc.deleted) {
-                if let Some(w) = &self.watcher {
-                    w.acknowledge(&doc.path, Some(loaded.version));
-                }
-                if matches!(&self.banner, Some(Banner::Info(m)) if m == DELETED_NOTICE) {
-                    self.banner = None;
-                }
+            if std::mem::take(&mut doc.deleted) && matches!(&self.banner, Some(Banner::Info(m)) if m == DELETED_NOTICE)
+            {
+                self.banner = None;
             }
             return;
         }
@@ -1250,6 +1252,10 @@ impl MarkiseApp {
                     self.finish_then(s.then);
                 }
                 Err(SaveError::Conflict { found }) => {
+                    // what the save found on disk is what the UI has now seen
+                    if let Some(w) = &self.watcher {
+                        w.acknowledge(&doc.path, found);
+                    }
                     self.queued_save = None;
                     self.banner = Some(Banner::SaveConflict { found });
                 }
