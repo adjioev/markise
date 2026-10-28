@@ -47,6 +47,50 @@ pub enum Profile {
     Math,
     /// Mostly CJK prose.
     Cjk,
+    /// Mostly plain prose paragraphs with occasional headings (a long book or notes file).
+    Prose,
+    /// Log-like: many short lines (timestamped records) in long paragraphs, with occasional
+    /// headings and fenced excerpts; about 2.5 M lines per 100 MiB.
+    Log,
+}
+
+/// One short timestamped log record line.
+fn log_line(r: &mut Rng, n: u64, out: &mut String) {
+    let level = *r.pick(&["INFO", "INFO", "INFO", "DEBUG", "WARN", "ERROR"]);
+    out.push_str(&format!(
+        "{:02}:{:02}:{:02}.{:03} {level} {}: {} {}\n",
+        (n / 3_600_000) % 24,
+        (n / 60_000) % 60,
+        (n / 1000) % 60,
+        n % 1000,
+        r.pick(WORDS),
+        r.pick(WORDS),
+        r.below(10_000)
+    ));
+}
+
+/// Log-profile block: a run of log lines, sometimes a heading or a fenced excerpt.
+fn log_block(r: &mut Rng, out: &mut String, n: &mut u64, section: &mut usize) {
+    match r.below(40) {
+        0 => {
+            *section += 1;
+            out.push_str(&format!("## Run {section}\n"));
+        }
+        1 => {
+            out.push_str("```text\n");
+            for _ in 0..5 + r.below(20) {
+                *n += 1 + r.below(50) as u64;
+                log_line(r, *n, out);
+            }
+            out.push_str("```\n");
+        }
+        _ => {
+            for _ in 0..10 + r.below(50) {
+                *n += 1 + r.below(50) as u64;
+                log_line(r, *n, out);
+            }
+        }
+    }
 }
 
 fn word(r: &mut Rng, cjk: bool) -> String {
@@ -245,11 +289,19 @@ pub fn generate_profile(target_bytes: usize, seed: u64, profile: Profile, crlf: 
     }
     let mut section = 0;
     let mut footnotes = 0;
+    let mut log_n = 0u64;
     while out.len() < target_bytes {
+        if profile == Profile::Log {
+            log_block(&mut r, &mut out, &mut log_n, &mut section);
+            out.push('\n');
+            continue;
+        }
         let cjk = cjk_doc || r.chance(10);
         let choice = match profile {
             Profile::Tables if r.chance(60) => 5,
             Profile::Math if r.chance(60) => 6,
+            Profile::Prose if r.chance(95) => 19,
+            Profile::Prose if r.chance(50) => 0,
             _ => r.below(20),
         };
         match choice {

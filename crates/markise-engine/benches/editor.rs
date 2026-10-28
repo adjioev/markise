@@ -15,7 +15,8 @@
 //! Reports p50 / p99 / max per stage (custom harness: criterion reports means, the gates are
 //! p99). G1 budget: memmove + span shift p99 ≤ 1.5 ms.
 //!
-//! Run: `cargo bench -p markise-engine --bench editor`.
+//! Run: `cargo bench -p markise-engine --bench editor` (`MARKISE_BENCH_CORPUS=<file>` replaces
+//! the 10 MB corpus).
 
 use std::hint::black_box;
 use std::sync::Arc;
@@ -31,8 +32,11 @@ use markise_theme::Theme;
 const ROUNDS: usize = 400;
 const WARMUP: usize = 20;
 
+/// The 10 MB corpus, or the file named by `MARKISE_BENCH_CORPUS` (e.g. a 100 MiB scaling
+/// corpus from `markise-corpus --huge`).
 fn corpus() -> String {
-    let path = format!("{}/../../benches/corpus/10mb.md", env!("CARGO_MANIFEST_DIR"));
+    let path = std::env::var("MARKISE_BENCH_CORPUS")
+        .unwrap_or_else(|_| format!("{}/../../benches/corpus/10mb.md", env!("CARGO_MANIFEST_DIR")));
     std::fs::read_to_string(&path).unwrap_or_else(|_| generate_profile(10 << 20, 42, Profile::Mixed, false))
 }
 
