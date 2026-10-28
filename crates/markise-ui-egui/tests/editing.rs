@@ -1255,6 +1255,131 @@ fn joins_stop_at_the_neighbouring_block_issue_16() {
     );
 }
 
+/// Asserts that each of `n` Spaces typed at the caret moves the drawn caret right by one space
+/// width on the same line, with the caret offset advancing from `at`.
+fn assert_spaces_drawn(h: &mut Harness<'static, MarkiseApp>, at: usize, n: usize, what: &str) {
+    let mut x = caret_screen(h);
+    let mut step: Option<f32> = None;
+    for i in 1..=n {
+        type_keys(h, " ");
+        assert_eq!(caret(h), at + i, "{what}: offset after space {i}");
+        let r = caret_screen(h);
+        assert_eq!(r.center().y, x.center().y, "{what}: same line after space {i}");
+        let dx = r.min.x - x.min.x;
+        assert!(dx > 2.0, "{what}: advanced by a space after space {i}: {dx}");
+        if let Some(s) = step {
+            assert!((dx - s).abs() < 0.5, "{what}: one space width each: {dx} vs {s}");
+        }
+        step = Some(dx);
+        x = r;
+    }
+}
+
+#[test]
+fn spaces_after_a_final_heading_are_drawn() {
+    // owner report: a heading that is the last block — without a final newline, and with one
+    for backend in [
+        markise_ui_egui::TextBackend::Epaint,
+        markise_ui_egui::TextBackend::Parley,
+    ] {
+        for ((src, want), toolbar) in [("# Title", "# Title   x"), ("# Title\n", "# Title   x\n")]
+            .into_iter()
+            .flat_map(|c| [(c, false), (c, true)])
+        {
+            let (mut h, p) = open_with("final-heading-ws", src, backend);
+            h.state_mut().set_show_toolbar(toolbar);
+            h.step();
+            key(&mut h, Key::End);
+            assert_spaces_drawn(&mut h, 7, 3, &format!("{backend:?} {src:?} toolbar={toolbar}"));
+            type_keys(&mut h, "x");
+            assert_eq!(save(&mut h, &p), want, "{backend:?}");
+        }
+    }
+}
+
+/// Opens an untitled document (File → New) with `style`, and types `src` into it.
+fn untitled_with(backend: markise_ui_egui::TextBackend, style: &str, src: &str) -> Harness<'static, MarkiseApp> {
+    let app = MarkiseApp::new(AppOptions {
+        text_backend: backend,
+        ..Default::default()
+    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), app);
+    h.step();
+    h.key_press_modifiers(cmd(), Key::N);
+    h.step();
+    assert!(h.state().is_untitled());
+    h.state_mut()
+        .select_style(markise_theme::catalog::StyleId::Builtin(style.into()));
+    wait_until(&mut h, "new document", |a| a.model().is_some() && !a.is_loading());
+    focus_doc(&mut h);
+    type_keys(&mut h, src);
+    h
+}
+
+#[test]
+fn spaces_after_a_heading_move_the_caret_in_every_style_and_level() {
+    // owner report: Space at the end of an H1 changed the text but not the screen. Root cause:
+    // the Classic style centres H1, and epaint aligns a centred row on its text without the
+    // trailing whitespace and puts a caret at the row end there — every Space left the caret
+    // in place. The caret's pixel x must grow with each Space, and a letter typed after them
+    // must appear after the gap; for every heading level, in a saved file and an untitled
+    // document, in the default style and in styles with other fonts and alignments.
+    use markise_ui_egui::TextBackend::{Epaint, Parley};
+    for backend in [Epaint, Parley] {
+        for style in ["markise", "classic", "modern"] {
+            for level in 1..=6 {
+                let hashes = "#".repeat(level);
+                let what = format!("{backend:?} {style} h{level}");
+                // a saved file (heading followed by an empty paragraph's line and a paragraph)
+                let src = format!("{hashes} Title\n\nPara\n");
+                let (mut h, p) = open_with("ws-styles", &src, backend);
+                h.state_mut()
+                    .select_style(markise_theme::catalog::StyleId::Builtin(style.into()));
+                h.step();
+                key(&mut h, Key::End);
+                let at = caret(&mut h);
+                assert_eq!(at, level + 6, "{what}");
+                assert_spaces_and_letter(&mut h, at, &what);
+                assert_eq!(save(&mut h, &p), format!("{hashes} Title   x\n\nPara\n"), "{what}");
+                // an untitled document
+                let mut h = untitled_with(backend, style, &format!("{hashes} Title"));
+                let at = caret(&mut h);
+                assert_spaces_and_letter(&mut h, at, &format!("{what} untitled"));
+                assert!(text(&h).starts_with(&format!("{hashes} Title   x")), "{what} untitled");
+            }
+        }
+    }
+}
+
+/// Three Spaces move the drawn caret right each time; a letter after them lands after the gap.
+fn assert_spaces_and_letter(h: &mut Harness<'static, MarkiseApp>, at: usize, what: &str) {
+    let x0 = caret_screen(h);
+    let mut x = x0;
+    for i in 1..=3 {
+        type_keys(h, " ");
+        assert_eq!(caret(h), at + i, "{what}: offset after space {i}");
+        let r = caret_screen(h);
+        assert_eq!(r.center().y, x.center().y, "{what}: same line after space {i}");
+        assert!(
+            r.min.x > x.min.x + 1.0,
+            "{what}: caret x after space {i}: {} -> {}",
+            x.min.x,
+            r.min.x
+        );
+        x = r;
+    }
+    type_keys(h, "x");
+    let after = caret_screen(h);
+    assert!(
+        after.min.x > x.min.x + 2.0,
+        "{what}: the letter is drawn after the spaces"
+    );
+    assert!(x.min.x - x0.min.x > 3.0, "{what}: a visible gap before the letter");
+}
+
 #[test]
 fn cross_block_risks_block_ownership() {
     // ADR 0011: joins, deletions and virtual-paragraph placement take the neighbouring block

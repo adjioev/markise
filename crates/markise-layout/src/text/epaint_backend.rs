@@ -53,6 +53,11 @@ pub fn to_layout_job(text: &StyledText, width: Option<f32>) -> LayoutJob {
         sections: Vec::with_capacity(text.runs.len()),
         halign: text.halign,
         break_on_newline: text.break_on_newline,
+        // centred / right-aligned rows count their trailing whitespace: the spaces typed at
+        // the end of a centred heading (shown while the caret is in them, BE-1) must move the
+        // caret — epaint otherwise aligns on the text without them and clamps the caret at its
+        // end
+        keep_trailing_whitespace: true,
         ..LayoutJob::default()
     };
     job.wrap = TextWrapping {
@@ -369,5 +374,34 @@ impl TextBlock for EpaintBlock {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text::{FontRole, LocalPos, StyledText, TextStyle};
+    use epaint::Color32;
+    use epaint::emath::Align;
+    use markise_text::Affinity;
+
+    #[test]
+    fn trailing_spaces_of_a_centred_row_move_the_caret() {
+        // a centred heading with spaces typed after its text (Classic H1): each space moves the
+        // caret right (epaint used to align without them and clamp the caret at the text end)
+        let mut fonts = crate::testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        let mut last = None;
+        for n in 0..4 {
+            let s = format!("Title{}", " ".repeat(n));
+            let mut t = StyledText::single(s.clone(), TextStyle::new(32.0, 40.0, FontRole::Heading, Color32::BLACK));
+            t.halign = Align::Center;
+            let b = f.shape(&t, Some(600.0));
+            let x = b.caret_rect(LocalPos::new(s.len(), Affinity::Upstream)).min.x;
+            if let Some(prev) = last {
+                assert!(x > prev, "space {n}: {prev} -> {x}");
+            }
+            last = Some(x);
+        }
     }
 }
