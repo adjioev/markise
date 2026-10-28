@@ -298,3 +298,27 @@ fn auto_paired_bracket_does_not_convert_under_the_caret() {
     assert_eq!(t.shown(), "> [!NOTE]\n>\n> body‸");
     assert!(t.ed.session.doc().debug_tree().contains("alert-note"));
 }
+
+/// S-2.4: `---` + Enter on the first line opens front matter; elsewhere it is a rule.
+/// (Drawing the caret inside front matter is M2d, so the plain surface is checked here.)
+#[test]
+fn s2_4_front_matter_at_the_document_start() {
+    let mut t = T::at("‸");
+    t.typ("---");
+    t.key("edit.newline");
+    assert_eq!(t.shown(), "---\n‸\n---");
+    assert!(t.ed.session.doc().debug_tree().contains("fm"));
+    t.typ("k");
+    assert_eq!(t.shown(), "---\nk‸\n---");
+    t.check_model();
+    t.key("edit.undo");
+    t.key("edit.undo");
+    assert_eq!(t.shown(), "---‸");
+    script(
+        "a\n\n‸",
+        &[
+            ("type:---", "a\n\n---‸", "para"),
+            ("edit.newline", "a\n\n---(v)‸", "hr"),
+        ],
+    );
+}

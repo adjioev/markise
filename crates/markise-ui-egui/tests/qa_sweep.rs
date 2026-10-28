@@ -1426,7 +1426,6 @@ fn h07_math_block_on_enter() {
 
 // Expected (S-2.4): front matter with the caret inside. Actual: a thematic break.
 #[test]
-#[ignore = "bug: `---` + Enter at the document start makes an HR, not front matter"]
 fn h08_front_matter_at_doc_start() {
     // S-2.4
     let mut e = Ed::open("h08", "");

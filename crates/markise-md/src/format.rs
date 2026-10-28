@@ -1197,6 +1197,18 @@ impl Document {
                 Some(Selection::caret(at + eol.len() + blank.len())),
             ));
         }
+        if ls == 0 && from == 0 && scan::fm_open(line, self.options().remap_unicode_punctuation) {
+            // S-2.4: the delimiter typed on the document's first line opens front matter —
+            // its closing delimiter is written, the caret on the empty line between them
+            let insert = format!("{eol}{eol}{line}");
+            return Ok(Plan::single(
+                PlanStep {
+                    patches: PatchSet::single_verbatim(ce..ce, insert),
+                    hints_after: Some(hints),
+                },
+                Some(Selection::caret(ce + eol.len())),
+            ));
+        }
         if let Some((_, content, _)) = scan::atx_heading(b, p, b.len(), self.options().strict)
             && content.is_empty()
         {
