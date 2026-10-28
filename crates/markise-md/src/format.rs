@@ -276,6 +276,9 @@ impl FormatDoc for Document {
         let changed = r.reparsed.clone();
         summary(r, changed, 0)
     }
+    fn adjacent_leaf(&self, leaf: &LeafView, forward: bool) -> Option<Option<LeafView>> {
+        self.adjacent_leaf_tree(leaf, forward)
+    }
     fn leaf(&self, at: usize) -> Option<LeafView> {
         let path = self.block_path_at(at);
         let mut containers = Vec::new();
@@ -1298,9 +1301,15 @@ impl Document {
         if let Some(r) = self.list_enter(at) {
             return r;
         }
+        if let Some(r) = self.empty_heading_key(at, planners::NEWLINE) {
+            return r;
+        }
         let text = self.text();
         let eol = self.line_ending().as_str();
         let nothing = Ok(Plan::default());
+        // a caret in spaces typed after a heading's text (outside its span, which stops at
+        // the text) is at the end of that heading (issue #16)
+        let at = self.heading_end_before_ws(at).unwrap_or(at);
         let Some(leaf) = self.leaf(at) else { return nothing };
         let (Some(first), Some(last)) = (leaf.lines.first().copied(), leaf.lines.last().copied()) else {
             return nothing;
@@ -1510,6 +1519,144 @@ impl Document {
     }
 
     /// The leaf ending before offset `at` (skipping blank lines and container prefixes).
+    /// The end of the heading whose line `at` is on when only spaces and tabs separate them
+    /// and nothing but whitespace follows `at` on that line (a heading's span ends at its
+    /// text or closing sequence, so whitespace typed after it is outside the block).
+    /// Enter / Backspace / Delete (`key`) in an ATX heading without content (`## |`), or `None`
+    /// when `at` is not in one. C43: the heading becomes an empty paragraph in place — its
+    /// line goes with the separator before it and the caret is on the virtual paragraph after
+    /// the previous block (or the document becomes empty). BE-3: Delete with a block after it
+    /// removes the empty heading and puts the caret at the start of that block's text, which
+    /// keeps its type. Top-level headings only; elsewhere, or for an empty heading that opens
+    /// a non-empty document, the keys keep their other rules.
+    pub(crate) fn empty_heading_key(&self, at: usize, key: PlannerId) -> Option<Result<Plan, PlanError>> {
+        let text = self.text();
+        let leaf = self.leaf(self.heading_end_before_ws(at).unwrap_or(at))?;
+        if !matches!(leaf.kind, LeafKind::Heading { .. })
+            || !leaf.containers.is_empty()
+            || !text[leaf.span.start..].starts_with('#')
+            || !leaf.lines.iter().all(|l| text[l.start..l.end].trim().is_empty())
+        {
+            return None;
+        }
+        let ls = line_start(text, leaf.span.start);
+        let (ce, _) = line_end(text, ls);
+        // the neighbours from the parsed structure (`Some(None)`: a block without a text leaf
+        // at that edge, e.g. an empty quote — nothing is joined across it)
+        let next = self.adjacent_leaf_tree(&leaf, true);
+        let following = next.is_some();
+        let next = next.flatten();
+        let plan = |range: std::ops::Range<usize>, sel: Selection| {
+            Ok(Plan::single(
+                PlanStep::patches(PatchSet::single_verbatim(range, "")),
+                Some(sel),
+            ))
+        };
+        if key == planners::DELETE_FORWARD
+            && let Some(n) = next
+        {
+            let nls = line_start(text, n.span.start);
+            let into = n.lines.first().map_or(n.span.start, |l| l.start).max(nls) - nls;
+            return Some(plan(ls..nls, Selection::caret(ls + into)));
+        }
+        match self.adjacent_leaf_tree(&leaf, false) {
+            Some(None) => return None,
+            Some(Some(prev)) if !prev.containers.is_empty() => {
+                // the virtual paragraph would open inside that list / quote
+                return None;
+            }
+            _ => {}
+        }
+        if let Some(Some(prev)) = self.adjacent_leaf_tree(&leaf, false)
+            && line_start(text, prev.span.end) < ls
+        {
+            return Some(plan(
+                prev.span.end..ce,
+                Selection::caret_at(markise_doc::DocPos::with_virt(prev.span.end, 1)),
+            ));
+        }
+        if !following {
+            return Some(plan(ls..ce, Selection::caret(ls)));
+        }
+        None
+    }
+
+    /// [`FormatDoc::adjacent_leaf`] from the block tree: the sibling after (before) `leaf`,
+    /// climbing out of containers where `leaf` is their last (first) block, then into the
+    /// sibling's first (last) block while it is a container. A container without blocks (an
+    /// empty quote `>`, an empty list item) stops the walk with `Some(None)`.
+    pub(crate) fn adjacent_leaf_tree(&self, leaf: &LeafView, forward: bool) -> Option<Option<LeafView>> {
+        let mut path = self.block_path_at(leaf.span.start);
+        // the path down to the leaf itself
+        while let Some((b, o)) = self.block_at_path_rel(&path) {
+            if b.span.start + o == leaf.span.start && !b.is_container() {
+                break;
+            }
+            path.pop();
+        }
+        if path.is_empty() {
+            return None;
+        }
+        // the nearest level with a sibling in that direction
+        let mut sib = loop {
+            let last = *path.last()?;
+            let i = if forward {
+                last + 1
+            } else {
+                match last.checked_sub(1) {
+                    Some(i) => i,
+                    None => {
+                        path.pop();
+                        if path.is_empty() {
+                            return None;
+                        }
+                        continue;
+                    }
+                }
+            };
+            let mut cand = path.clone();
+            *cand.last_mut()? = i;
+            if self.block_at_path_rel(&cand).is_some() {
+                break cand;
+            }
+            path.pop();
+            if path.is_empty() {
+                return None;
+            }
+        };
+        // down to the leaf at its edge
+        loop {
+            let (b, o) = self.block_at_path_rel(&sib)?;
+            if !b.is_container() {
+                return Some(self.leaf(b.span.start + o).filter(|l| l.span.start == b.span.start + o));
+            }
+            if b.children.is_empty() {
+                return Some(None);
+            }
+            sib.push(if forward { 0 } else { b.children.len() - 1 });
+        }
+    }
+
+    pub(crate) fn heading_end_before_ws(&self, at: usize) -> Option<usize> {
+        let b = self.text().as_bytes();
+        let mut q = at.min(b.len());
+        while q > 0 && matches!(b[q - 1], b' ' | b'\t') {
+            q -= 1;
+        }
+        if q == at
+            || q == 0
+            || !b[at..]
+                .iter()
+                .take_while(|c| !matches!(c, b'\n' | b'\r'))
+                .all(|c| matches!(c, b' ' | b'\t'))
+        {
+            return None;
+        }
+        self.leaf(q - 1)
+            .filter(|l| matches!(l.kind, LeafKind::Heading { .. }) && l.span.end == q)
+            .map(|_| q)
+    }
+
     pub(crate) fn leaf_before(&self, at: usize) -> Option<LeafView> {
         let b = self.text().as_bytes();
         let mut q = at.min(b.len());
@@ -1563,6 +1710,15 @@ impl Document {
         } else {
             gap
         };
+        // whitespace left after the block's text stays on its line (a heading's span ends
+        // before it): the new paragraph goes after it (issue #16)
+        let ws = text[gap..].bytes().take_while(|c| matches!(c, b' ' | b'\t')).count();
+        let (gap, end) = if ws > 0 && end == gap && matches!(text.as_bytes().get(gap + ws), None | Some(b'\n' | b'\r'))
+        {
+            (gap + ws, gap + ws)
+        } else {
+            (gap, end)
+        };
         let caret = gap + ins.len();
         TypingPlan {
             step: PlanStep::patches(PatchSet::single_verbatim(gap..end, ins)),
@@ -1613,11 +1769,24 @@ impl Document {
                 ed.build().ok_or(PlanError::NotApplicable("overlap"))?
             }
             (LeafKind::Heading { level: cur }, want) => {
-                let new = match want {
-                    Some(l) if l != *cur => marker(l),
-                    _ => String::new(), // same level or Paragraph → paragraph
-                };
-                PatchSet::single_verbatim(leaf.span.start..first.start.max(leaf.span.start), new)
+                let to = want.filter(|l| l != cur); // same level or Paragraph → paragraph
+                let new = to.map_or(String::new(), marker);
+                let mut ed = crate::edit::Edits::new();
+                ed.push(leaf.span.start..first.start.max(leaf.span.start), new);
+                // a closing sequence (`## T ##`): its hashes follow the level, or it goes
+                // with the heading (spec E18)
+                let last = leaf.lines.last().copied().unwrap_or(first);
+                if leaf.span.end > last.end {
+                    let tail = &text[last.end..leaf.span.end];
+                    match to {
+                        Some(l) => {
+                            let hashes = last.end + tail.find('#').unwrap_or(0);
+                            ed.push(hashes..leaf.span.end, "#".repeat(l as usize));
+                        }
+                        None => ed.delete(last.end..leaf.span.end),
+                    }
+                }
+                ed.build().ok_or(PlanError::NotApplicable("overlap"))?
             }
             _ => return Err(PlanError::NotApplicable("not a paragraph or heading")),
         };
@@ -1641,15 +1810,71 @@ fn style_of(id: PlannerId) -> Option<crate::edit::inline_fmt::Style> {
     })
 }
 
+/// Block commands (block style, lists, quote, indentation, moves): a caret in whitespace
+/// typed after a heading's text acts on that heading (issue #16).
+fn block_command(id: PlannerId) -> bool {
+    planners::heading_level(id).is_some()
+        || matches!(
+            id,
+            planners::PARAGRAPH
+                | planners::HEADING_UP
+                | planners::HEADING_DOWN
+                | planners::QUOTE
+                | planners::BULLET_LIST
+                | planners::ORDERED_LIST
+                | planners::TASK_LIST
+                | planners::TOGGLE_TASK
+                | planners::INDENT
+                | planners::OUTDENT
+                | planners::MOVE_UP
+                | planners::MOVE_DOWN
+                | PlannerId("block.insertRule")
+        )
+}
+
+impl Document {
+    /// `req` with a caret in a heading's trailing whitespace moved to the end of its text, for
+    /// block commands; `None` when nothing changes.
+    fn heading_block_request(&self, id: PlannerId, req: &PlanRequest) -> Option<PlanRequest> {
+        let sel = req.selection.primary();
+        if !block_command(id) || !sel.is_caret() || sel.focus.virt > 0 {
+            return None;
+        }
+        let q = self.heading_end_before_ws(sel.focus.offset)?;
+        let mut r = req.clone();
+        r.selection = Selection::caret(q);
+        Some(r)
+    }
+}
+
 impl EditBehavior for Document {
     fn plan_checked(&self, id: PlannerId, req: &PlanRequest) -> bool {
         if let Some(st) = style_of(id) {
             return self.format_active(st, req);
         }
+        if let Some(r) = self.heading_block_request(id, req) {
+            return self.block_checked(id, &r);
+        }
         self.block_checked(id, req)
     }
 
     fn plan(&self, id: PlannerId, req: &PlanRequest) -> Result<Plan, PlanError> {
+        if let Some(r) = self.heading_block_request(id, req) {
+            // the caret stays where it was (after the whitespace), mapped through the patches
+            let mut plan = self.plan(id, &r)?;
+            if plan.selection_after.as_ref().is_some_and(|s| s == &r.selection) {
+                plan.selection_after = None;
+            } else if matches!(id, planners::MOVE_UP | planners::MOVE_DOWN)
+                && let Some(c) = plan.selection_after.as_ref().map(|s| s.primary().focus)
+                && c.virt == 0
+            {
+                // a move carries the whole line, trailing whitespace included: the caret keeps
+                // its place inside that whitespace
+                let delta = req.selection.primary().focus.offset - r.selection.primary().focus.offset;
+                plan.selection_after = Some(Selection::caret(c.offset + delta));
+            }
+            return Ok(plan);
+        }
         if let Some(st) = style_of(id) {
             return self.plan_format(st, req);
         }

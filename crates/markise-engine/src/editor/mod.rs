@@ -360,6 +360,26 @@ impl EditorSession {
     /// one block covers the whole document:
     /// before it is replaced or deleted it is widened to every byte, so the hidden block syntax
     /// at its edges (`# ` of a first heading, the final newline…) goes with it (M2b-3).
+    /// Widens a selection about to be replaced (typing, Backspace, Delete, Enter) by the
+    /// format-neutral rules: the whole document's content (below), or one starting at a
+    /// heading's text start that reaches a later block (BE-4, [`Self::widen_from_heading_start`]).
+    fn widen_replaced_selection(&mut self) {
+        self.widen_whole_document_selection();
+        if !self.sel.is_caret() && self.sel.ranges().len() == 1 {
+            let p = self.sel.primary();
+            let r = p.range();
+            let w = self.widen_from_heading_start(r.clone());
+            if w != r {
+                let (a, f) = if p.anchor.offset <= p.focus.offset {
+                    (w.start, w.end)
+                } else {
+                    (w.end, w.start)
+                };
+                self.sel = Selection::range(a, f);
+            }
+        }
+    }
+
     fn widen_whole_document_selection(&mut self) {
         let p = self.sel.primary();
         let r = p.range();
@@ -369,11 +389,11 @@ impl EditorSession {
         }
         // the selection starts in the document's first leaf (nothing but syntax before it) and
         // reaches the end of its last leaf
-        let (Some(first_leaf), Some(last_leaf)) = (self.doc.leaf(r.start), leaf_before(self.doc.as_ref(), t.len()))
-        else {
+        let (Some(first_leaf), Some(last_leaf)) = (self.doc.leaf(r.start), self.doc.leaf(r.end)) else {
             return;
         };
-        if leaf_before(self.doc.as_ref(), first_leaf.span.start).is_some() {
+        // no block before the first leaf and none after the last one (from the structure)
+        if self.doc.adjacent_leaf(&first_leaf, false).is_some() || self.doc.adjacent_leaf(&last_leaf, true).is_some() {
             return;
         }
         // a selection inside one block keeps that block's syntax (`# Old` → `# New`, BE-4)
@@ -515,7 +535,7 @@ impl EditorSession {
         {
             self.close_typing();
         }
-        self.widen_whole_document_selection();
+        self.widen_replaced_selection();
         let req = self.request(Params::new());
         let tp = self.doc.on_text(&req, typed);
         let leaf_before = self.leaf_info(self.sel.primary().start().offset);
@@ -554,7 +574,7 @@ impl EditorSession {
     /// the two are merged (rule 5); the start of any other block is a no-op. The remaining
     /// rules (lists, quotes, HR, empty blocks, tables) are M2c/M2d.
     pub fn delete_backward_to(&mut self, prev_stop: Option<usize>) -> Result<(), EditError> {
-        self.widen_whole_document_selection();
+        self.widen_replaced_selection();
         let p = self.sel.primary();
         if p.is_caret() && p.focus.virt > 0 {
             self.set_selection(Selection::caret(p.focus.offset));
@@ -623,7 +643,7 @@ impl EditorSession {
     /// grapheme. At the end of a paragraph or heading followed by a paragraph or heading the
     /// next block's text is merged (C48, M2b subset); at the end of other blocks a no-op.
     pub fn delete_forward_to(&mut self, next_stop: Option<usize>) -> Result<(), EditError> {
-        self.widen_whole_document_selection();
+        self.widen_replaced_selection();
         let p = self.sel.primary();
         if p.is_caret() && p.focus.virt > 0 {
             return Ok(());
@@ -762,6 +782,9 @@ impl EditorSession {
     /// math, HTML and front matter: inside the content (line joins allowed); tables: inside one
     /// cell's content.
     fn deletion_allowed(&self, r: std::ops::Range<usize>) -> bool {
+        if self.in_heading_trailing_ws(r.clone()) {
+            return true;
+        }
         let Some(leaf) = self.doc.leaf(r.start) else {
             return false;
         };
@@ -788,6 +811,42 @@ impl EditorSession {
         }
     }
 
+    /// BE-4: a selection from the start of a heading's text into a later block removes the
+    /// heading's leading syntax too, so what remains of the later block keeps its own type
+    /// (from the middle of the heading the heading stays and the rest is appended).
+    fn widen_from_heading_start(&self, r: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        match self.doc.leaf(r.start) {
+            Some(l)
+                if matches!(l.kind, LeafKind::Heading { .. })
+                    && l.lines.first().is_some_and(|f| f.start == r.start)
+                    && r.end > l.span.end
+                    && self.doc.leaf(r.end).is_some_and(|n| n.span.start > l.span.start) =>
+            {
+                l.span.start..r.end
+            }
+            _ => r,
+        }
+    }
+
+    /// Whether `r` lies in the spaces and tabs right after a heading's text on its line. An ATX
+    /// heading's span stops at its text, so spaces typed after it are outside the block, yet
+    /// they are its content for the caret (issue #16).
+    fn in_heading_trailing_ws(&self, r: std::ops::Range<usize>) -> bool {
+        let b = self.doc.text().as_bytes();
+        if r.is_empty() || r.end > b.len() || !b[r.clone()].iter().all(|c| matches!(c, b' ' | b'\t')) {
+            return false;
+        }
+        let mut q = r.start;
+        while q > 0 && matches!(b[q - 1], b' ' | b'\t') {
+            q -= 1;
+        }
+        q > 0
+            && self.doc.leaf(q - 1).is_some_and(|l| {
+                // after the text: past the span (open ATX) or before a closing sequence
+                matches!(l.kind, LeafKind::Heading { .. }) && l.lines.last().is_some_and(|x| x.end == q)
+            })
+    }
+
     /// Block-level Backspace at `at` (a caret), or `None` for a plain deletion.
     fn block_start_backward(&self, at: usize) -> Option<BlockEdit> {
         let leaf = self.doc.leaf(at)?;
@@ -809,7 +868,12 @@ impl EditorSession {
         if !text_like {
             return Some(BlockEdit::Nothing);
         }
-        let prev = leaf_before(self.doc.as_ref(), leaf.span.start).filter(|p| p.span.start < leaf.span.start);
+        // the previous block from the format's structure (a block without a text leaf at its
+        // end, e.g. an empty quote, stops both rules)
+        let prev = match self.doc.adjacent_leaf(&leaf, false) {
+            Some(Some(p)) if p.span.start < leaf.span.start => Some(p),
+            _ => None,
+        };
         // rule 2: a thematic break right before the block is deleted (with the separator
         // after it); the caret stays at the start of this block's text
         if let Some(hr) = prev
@@ -854,11 +918,22 @@ impl EditorSession {
         {
             return Some(BlockEdit::Nothing);
         }
-        merge_blocks(self.doc.text(), &prev, &leaf)
+        merge_blocks(self.doc.text(), &prev, &leaf, 0)
     }
 
     /// Block-level Delete at `at` (a caret), or `None` for a plain deletion.
     fn block_end_forward(&self, at: usize) -> Option<BlockEdit> {
+        // at the end of the line after spaces typed after a heading's text: the end of the
+        // heading, and a merge keeps those spaces (issue #16)
+        let keep = at;
+        let b = self.doc.text().as_bytes();
+        let ws = b[..at].iter().rev().take_while(|c| matches!(c, b' ' | b'\t')).count();
+        let at =
+            if ws > 0 && matches!(b.get(at), None | Some(b'\n' | b'\r')) && self.in_heading_trailing_ws(at - ws..at) {
+                at - ws
+            } else {
+                at
+            };
         let leaf = self.doc.leaf(at)?;
         if leaf.span.end < at {
             return None; // between blocks
@@ -879,33 +954,19 @@ impl EditorSession {
         if !text_like {
             return Some(BlockEdit::Nothing);
         }
-        // C48: merge the next paragraph/heading's text
+        // C48: merge the next paragraph/heading's text — the next block as the format's
+        // structure gives it, never one past it (an empty quote, a list…: nothing)
         let t = self.doc.text();
-        let mut probe = leaf.span.end + 1;
-        while probe < t.len() {
-            // look past container prefixes (`> `, list indentation) to the line's content
-            let b = t.as_bytes();
-            let mut q = probe;
-            while q < t.len() && matches!(b[q], b'>' | b' ' | b'\t') {
-                q += 1;
-            }
-            if q < t.len()
-                && !matches!(b[q], b'\n' | b'\r')
-                && let Some(n) = self.doc.leaf(q)
-                && n.span.start > leaf.span.start
+        match self.doc.adjacent_leaf(&leaf, true) {
+            Some(Some(n))
+                if matches!(n.kind, LeafKind::Paragraph | LeafKind::Heading { .. })
+                    && n.containers == leaf.containers
+                    && !in_list_item(&leaf) =>
             {
-                if !matches!(n.kind, LeafKind::Paragraph | LeafKind::Heading { .. })
-                    || n.containers != leaf.containers
-                    || in_list_item(&leaf)
-                {
-                    return Some(BlockEdit::Nothing);
-                }
-                return merge_blocks(t, &leaf, &n);
+                merge_blocks(t, &leaf, &n, keep)
             }
-            // skip blank lines / prefixes up to the next leaf
-            probe = t[probe..].find('\n').map_or(t.len(), |k| probe + k + 1);
+            _ => Some(BlockEdit::Nothing),
         }
-        Some(BlockEdit::Nothing)
     }
 
     /// One keystroke step. `leaf_start` is the leaf at the edit position before the keystroke;
@@ -1102,7 +1163,7 @@ impl EditorSession {
         }
         if !self.sel.is_caret() {
             // Enter over a selection: delete it, then Enter at the caret — one transaction
-            self.widen_whole_document_selection();
+            self.widen_replaced_selection();
             let r = self.sel.primary().range();
             return self.transact("New Line", TxKind::Structural, |tx| {
                 tx.step(PlanStep::patches(PatchSet::delete(r.clone())))?;
@@ -1523,12 +1584,23 @@ fn clamp_selection(text: &str, sel: Selection) -> Selection {
     out
 }
 
-fn merge_blocks(text: &str, prev: &markise_doc::LeafView, next: &markise_doc::LeafView) -> Option<BlockEdit> {
+/// `keep`: a caret after spaces that follow `prev`'s text outside its span (an open ATX
+/// heading): the join goes after them, so they stay (else 0).
+fn merge_blocks(
+    text: &str,
+    prev: &markise_doc::LeafView,
+    next: &markise_doc::LeafView,
+    keep: usize,
+) -> Option<BlockEdit> {
     let (_, prev_trail) = block_syntax(prev);
     let (_, next_trail) = block_syntax(next);
     let first = next.lines.first()?.start;
     let last = next.lines.last()?.end;
-    let join = prev_trail.start;
+    let join = if prev_trail.is_empty() {
+        prev_trail.start.max(keep)
+    } else {
+        prev_trail.start
+    };
     let insert = format!("{}{}", &text[first..last], &text[prev_trail.clone()]);
     let patches = PatchSet::new(vec![Patch::verbatim(join..next_trail.end.max(last), insert)]).ok()?;
     Some(BlockEdit::Edit {
@@ -1536,19 +1608,6 @@ fn merge_blocks(text: &str, prev: &markise_doc::LeafView, next: &markise_doc::Le
         label: "Merge Paragraphs",
         caret: join,
     })
-}
-
-/// The leaf ending before `at` (skipping blank lines and quote prefixes).
-fn leaf_before(doc: &dyn FormatDoc, at: usize) -> Option<markise_doc::LeafView> {
-    let b = doc.text().as_bytes();
-    let mut q = at.min(b.len());
-    while q > 0 && matches!(b[q - 1], b' ' | b'\t' | b'\n' | b'\r' | b'>') {
-        q -= 1;
-    }
-    if q == 0 {
-        return None;
-    }
-    doc.leaf(q - 1).filter(|l| l.span.start < at)
 }
 
 /// Merging across list items dissolves an item (spec 02 §5.2 rule 3, S-5.4): M2c. Until then

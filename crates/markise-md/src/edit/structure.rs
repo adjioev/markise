@@ -205,32 +205,16 @@ impl Document {
     /// blocks move up). `None`: the engine's same-container merge and no-op rules apply.
     pub(crate) fn c48_delete_forward(&self, at: usize) -> Option<Result<Plan, PlanError>> {
         let text = self.text();
-        let leaf = self.leaf(at)?;
-        if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) || leaf.lines.last()?.end != at {
+        // after spaces typed at the end of a heading's text: the same rules as at the text end;
+        // the merge joins at the caret, so the spaces stay (issue #16)
+        let end = self.heading_end_before_ws(at).unwrap_or(at);
+        let leaf = self.leaf(end)?;
+        if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) || leaf.lines.last()?.end != end {
             return None;
         }
-        // the next content line, after this block's own syntax (a setext underline)
-        let mut ls = line_end(text, leaf.span.end.max(at)).1;
-        let q = loop {
-            if ls >= text.len() {
-                return None;
-            }
-            let (le, next) = line_end(text, ls);
-            let lead = text[ls..le].len() - text[ls..le].trim_start_matches(['>', ' ', '\t']).len();
-            if ls + lead < le {
-                break ls + lead;
-            }
-            if next == le {
-                return None;
-            }
-            ls = next;
-        };
-        // (a list item's line starts with its marker: its first block starts after it)
-        let next = self.leaf(q).or_else(|| {
-            self.item_at(q)
-                .filter(|it| !it.empty)
-                .and_then(|it| self.leaf(it.content))
-        })?;
+        // the next block from the parsed structure: nothing to join when it holds no text
+        // leaf at its start (an empty quote or list item…), never anything past it
+        let next = self.adjacent_leaf_tree(&leaf, true)??;
         if next.span.start <= leaf.span.start {
             return None;
         }
