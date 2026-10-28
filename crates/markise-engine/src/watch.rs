@@ -27,6 +27,9 @@ pub enum WatchEvent {
     FileRemoved(PathBuf),
     /// Something changed in this directory of the mounted folder.
     DirChanged(PathBuf),
+    /// The mounted folder's `.obsidian/app.json` (or the `.obsidian/` folder itself) changed,
+    /// also in place (spec 06 §14, E17); carries the mounted folder.
+    VaultConfigChanged(PathBuf),
     /// A file in the user theme folder changed (live theme reload, ADR 0004). After the theme
     /// folder's watch (re)started, the folder itself is reported: anything beneath it may have
     /// changed.
@@ -75,6 +78,31 @@ fn same(a: &Path, b: &Path) -> bool {
             .ok()
             .zip(std::fs::canonicalize(b).ok())
             .is_some_and(|(x, y)| x == y)
+}
+
+/// Comparable form of a path: `/` separators, no Windows verbatim prefix (`\\?\`), lower
+/// case on Windows (case-insensitive file names).
+fn norm_path(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/");
+    let s = s.strip_prefix("//?/").unwrap_or(&s).trim_end_matches('/').to_string();
+    if cfg!(windows) { s.to_lowercase() } else { s }
+}
+
+/// Whether an event at `p` concerns the vault settings of `root`: anything on
+/// `.obsidian/app.json`, or the `.obsidian` folder itself appearing, disappearing or being
+/// renamed. A plain modification of the folder (Windows reports one for every write inside
+/// it, e.g. Obsidian's workspace file) is not.
+fn vault_config_event(root: &Path, p: &Path, kind: &EventKind) -> bool {
+    let (r, q) = (norm_path(root), norm_path(p));
+    let Some(rest) = q.strip_prefix(&r).and_then(|x| x.strip_prefix('/')) else {
+        return false;
+    };
+    rest == ".obsidian/app.json"
+        || (rest == ".obsidian"
+            && matches!(
+                kind,
+                EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(notify::event::ModifyKind::Name(_))
+            ))
 }
 
 fn canonical(p: &Path) -> PathBuf {
@@ -296,6 +324,12 @@ impl FileWatcher {
                         WatchEvent::FileRemoved(f.clone())
                     };
                     sent |= tx.send(e).is_ok();
+                }
+                // `.obsidian/app.json` (the only config file spec 06 §14 reads), content edits
+                // included — DirChanged covers names only; Obsidian's constant workspace and
+                // plugin writes are not reported
+                if let Some(root) = folder.as_ref().filter(|root| vault_config_event(root, p, &ev.kind)) {
+                    sent |= tx.send(WatchEvent::VaultConfigChanged(root.clone())).is_ok();
                 }
                 if folder.as_ref().is_some_and(|root| p.starts_with(root))
                     && matches!(
@@ -705,6 +739,97 @@ mod tests {
         assert_eq!(reconcile(&root.join("gone.md"), Baseline::Missing).0, None);
         assert_eq!(reconcile(&root.join("gone.md"), Baseline::Unknown).0, None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Spec 06 E17: editing `.obsidian/app.json` in place (no rename) is reported. The
+    /// config exists before the watch starts; a marker event drains whatever the setup left
+    /// in flight (FSEvents may deliver it late or coalesced) before the edit. That Obsidian's
+    /// other files are not settings events is checked deterministically by
+    /// `vault_config_events_are_classified_robustly`, and at scanner level (an unchanged
+    /// settings file publishes no snapshot) in `vault::tests` — a live negative check would
+    /// depend on platform event coalescing.
+    #[test]
+    fn obsidian_settings_edited_in_place_are_reported() {
+        let root = tmp("obsidian");
+        std::fs::create_dir_all(root.join(".obsidian")).unwrap();
+        std::fs::write(root.join(".obsidian/app.json"), "{}").unwrap();
+        let mut w = FileWatcher::new(Arc::new(|| {})).unwrap();
+        w.watch_folder(&root);
+        w.sync().unwrap();
+        assert!(wait_event(&w, &WatchEvent::FolderWatched(root.clone())));
+        // drain setup events: wait for the marker's own event
+        std::fs::write(root.join("marker.md"), "").unwrap();
+        let t = Instant::now();
+        let mut marker = false;
+        while !marker && t.elapsed() < Duration::from_secs(30) {
+            while let Some(e) = w.try_recv() {
+                marker |= matches!(&e, WatchEvent::DirChanged(d) if norm_path(d) == norm_path(&root));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker, "the marker's event arrived");
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(root.join(".obsidian/app.json"))
+                .unwrap();
+            f.write_all(br#"{"useMarkdownLinks": true}"#).unwrap();
+        }
+        assert!(wait_event(&w, &WatchEvent::VaultConfigChanged(root.clone())));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn vault_config_events_are_classified_robustly() {
+        use notify::event::{CreateKind, DataChange, ModifyKind};
+        let root = Path::new("/v/Notes");
+        let data = EventKind::Modify(ModifyKind::Data(DataChange::Content));
+        let any = EventKind::Modify(ModifyKind::Any);
+        assert!(vault_config_event(
+            root,
+            Path::new("/v/Notes/.obsidian/app.json"),
+            &data
+        ));
+        assert!(vault_config_event(root, Path::new("/v/Notes/.obsidian/app.json"), &any));
+        assert!(vault_config_event(
+            root,
+            Path::new("/v/Notes/.obsidian"),
+            &EventKind::Create(CreateKind::Folder)
+        ));
+        // a write inside the folder that some platforms report on the folder itself
+        assert!(!vault_config_event(root, Path::new("/v/Notes/.obsidian"), &any));
+        assert!(!vault_config_event(
+            root,
+            Path::new("/v/Notes/.obsidian/workspace.json"),
+            &data
+        ));
+        assert!(!vault_config_event(
+            root,
+            Path::new("/v/Other/.obsidian/app.json"),
+            &data
+        ));
+        assert!(!vault_config_event(
+            root,
+            Path::new("/v/Notes/sub/.obsidian/app.json"),
+            &data
+        ));
+        // Windows spellings: verbatim prefix, backslashes, case
+        assert_eq!(
+            norm_path(Path::new("//?/C:/Vault/")),
+            "C:/Vault".to_string().to_lowercase_if_windows()
+        );
+    }
+
+    trait LowerIfWindows {
+        fn to_lowercase_if_windows(self) -> String;
+    }
+
+    impl LowerIfWindows for String {
+        fn to_lowercase_if_windows(self) -> String {
+            if cfg!(windows) { self.to_lowercase() } else { self }
+        }
     }
 
     /// The theme folder gets the same catch-up: once its watch is in effect, the folder is

@@ -64,10 +64,26 @@ fn mac_menu_bar_from_registry_without_document() {
             // the Format menu appears now that the registry has format commands (M2c)
             "Format",
             "View",
+            // Back / Forward between opened notes (spec 06 §2.7)
+            "Go",
             "Themes",
             "Window",
             "Help"
         ]
+    );
+    // ⌘[ is Outdent: Back is ⌥⌘←, Forward ⌥⌘→; disabled with no history
+    let back = bar.item("go.back").unwrap();
+    assert!(
+        back.chord
+            .as_ref()
+            .is_some_and(|c| c.meta && c.alt && !c.ctrl && c.key == "Left")
+    );
+    assert!(!back.enabled);
+    let fwd = bar.item("go.forward").unwrap();
+    assert!(
+        fwd.chord
+            .as_ref()
+            .is_some_and(|c| c.meta && c.alt && !c.ctrl && c.key == "Right")
     );
     assert_eq!(bar.menus[0].kind, MenuKind::App);
     assert_eq!(bar.menus[0].items()[0].label, "About Markise");
@@ -101,7 +117,12 @@ fn other_platform_menus_use_ctrl_chords_and_have_no_app_menu() {
     let bar = app.menu_model();
     assert_eq!(
         titles(&bar),
-        ["File", "Edit", "Paragraph", "Format", "View", "Themes", "Help"]
+        ["File", "Edit", "Paragraph", "Format", "View", "Go", "Themes", "Help"]
+    );
+    let back = bar.item("go.back").unwrap();
+    assert!(
+        back.chord.as_ref().is_some_and(|c| c.alt && !c.ctrl && c.key == "Left"),
+        "Alt+Left"
     );
     assert_eq!(bar.menu("Help").unwrap().items()[0].key, "app.about");
     let sbs = bar.item("view.sideBySide").unwrap();

@@ -382,3 +382,62 @@ fn viewer_resolves_literal_percent_names_first() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Link targets for the wikilink tests: only `Here` exists.
+#[derive(Debug)]
+struct OnlyHere;
+
+impl markise_layout::LinkTargets for OnlyHere {
+    fn generation(&self) -> u64 {
+        7
+    }
+    fn resolves(&self, target: &str) -> bool {
+        target == "Here"
+    }
+}
+
+/// Spec 06 §2.2: a wikilink shows its label in the link color, an unresolved one a muted
+/// variant; both are links (`[[target]]`); the source is revealed when the caret is in it.
+#[test]
+fn wikilinks_show_labels_styled_by_resolution() {
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let src = "go [[Here|there]] and [[Gone#Part]]\n";
+    let mut v = view(src, 700.0);
+    let theme = Theme::light();
+    v.set_links(Arc::new(OnlyHere));
+    let l = v.layout(0, &mut f, &NoImages);
+    let targets: Vec<&str> = l.links.iter().map(|h| h.target.as_str()).collect();
+    assert_eq!(targets, ["[[Here]]", "[[Gone#Part]]"]);
+    let Prim::Text { text, .. } = &l.prims[l.links[0].prim] else {
+        panic!()
+    };
+    let shown = text.text().to_string();
+    assert_eq!(shown, "go there and Gone › Part");
+    let galley = text.galley().unwrap();
+    let color_at = |needle: &str| {
+        let at = shown.find(needle).unwrap();
+        galley
+            .job
+            .sections
+            .iter()
+            .find(|s| s.byte_range.start.0 <= at && at < s.byte_range.end.0)
+            .unwrap()
+            .format
+            .color
+    };
+    let link = markise_layout::block::color(theme.link);
+    assert_eq!(color_at("there"), link);
+    assert_ne!(color_at("Gone"), link, "unresolved links are muted");
+    // the caret inside the first link reveals its source
+    let focus = markise_layout::ItemFocus {
+        reveal: std::iter::once(3..17).collect(),
+        ..Default::default()
+    };
+    v.set_focus(Some((0, focus)));
+    let l = v.layout(0, &mut f, &NoImages);
+    let Prim::Text { text, .. } = &l.prims[l.links[0].prim] else {
+        panic!()
+    };
+    assert_eq!(text.text(), "go [[Here|there]] and Gone › Part");
+}

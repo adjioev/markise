@@ -16,6 +16,7 @@ use crate::cache::{CacheKey, LayoutCache};
 use crate::diagram::{DiagramQuery, DiagramState, Diagrams, NoDiagrams};
 use crate::fenwick::Fenwick;
 use crate::highlight::{CodeQuery, Highlights, NoHighlights, item_range};
+use crate::links::{AllResolved, LinkTargets};
 use crate::model::{DocModel, Item, ItemKind, ModelChange};
 use crate::text::TextShaper;
 
@@ -57,6 +58,8 @@ pub struct View {
     highlights: Arc<dyn Highlights + Send + Sync>,
     /// Source of diagram scenes ([`NoDiagrams`] = diagrams shown as source).
     diagrams: Arc<dyn Diagrams + Send + Sync>,
+    /// Which wikilink targets exist ([`AllResolved`] = all shown resolved).
+    links: Arc<dyn LinkTargets + Send + Sync>,
     /// Reference labels per item hash ([`DocModel::item_references`]), computed when an item's
     /// key is first needed: reference definitions enter only the keys of items that may use
     /// them (ADR 0006 §7.4) without a document-wide scan when the model is built.
@@ -89,6 +92,7 @@ impl View {
             missing_glyphs: false,
             highlights: Arc::new(NoHighlights),
             diagrams: Arc::new(NoDiagrams),
+            links: Arc::new(AllResolved),
             refs: Default::default(),
             focus: None,
         };
@@ -344,6 +348,16 @@ impl View {
         &self.diagrams
     }
 
+    /// Sets which wikilink targets exist (spec 06 §2.2 unresolved style). Items that may hold
+    /// a wikilink get new cache keys through its generation; heights are unaffected.
+    pub fn set_links(&mut self, l: Arc<dyn LinkTargets + Send + Sync>) {
+        self.links = l;
+    }
+
+    pub fn links(&self) -> &Arc<dyn LinkTargets + Send + Sync> {
+        &self.links
+    }
+
     fn diagram_query_of<'a>(
         &'a self,
         i: usize,
@@ -578,6 +592,14 @@ impl View {
         if it.has_math {
             extra ^= self.math_epoch.wrapping_mul(0x2545_f491_4f6c_dd1d);
         }
+        if it.has_wikilink {
+            extra ^= self
+                .links
+                .generation()
+                .wrapping_add(1)
+                .wrapping_mul(0x5851_f42d_4c95_7f2d)
+                .rotate_left(29);
+        }
         // code: highlighter generation and whether this item's range is highlighted yet
         let mut code_ident = 0;
         if let Some(ready) = ready {
@@ -725,6 +747,7 @@ impl View {
                     focus: self.focus.as_ref().filter(|f| f.0 == i).map(|f| &f.1),
                     diagram: dstate.as_ref(),
                     ppp: self.ppp,
+                    links: &*self.links,
                 };
                 let l = Arc::new(layout_item(&*self.doc, &self.model, i, &params, shaper, images));
                 if !self.missing_glyphs {

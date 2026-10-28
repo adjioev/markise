@@ -773,7 +773,13 @@ impl<'a> Parser<'a> {
                 // Table of contents (only where a new paragraph would start).
                 if !tip_para || started {
                     let tc = matches!(self.stack[container].st, St::Table);
-                    if !tc && scan::is_toc_marker(&text[p..c.end], self.opts.remap_unicode_punctuation) {
+                    if !tc
+                        && scan::is_toc_marker(
+                            &text[p..c.end],
+                            self.opts.remap_unicode_punctuation,
+                            self.opts.wikilinks,
+                        )
+                    {
                         self.prepare(&mut container, &mut started);
                         let blk = Block::new(BlockKind::Toc, Span::new(p, scan::trim_end_ws(b, p, c.end)));
                         self.add_leaf(blk, clean);

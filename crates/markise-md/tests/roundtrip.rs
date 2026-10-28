@@ -68,6 +68,7 @@ fn all_option_sets() -> Vec<ParseOptions> {
         auto_links: false,
         block_html: false,
         emoji: false,
+        wikilinks: false,
         ..Default::default()
     };
     vec![ParseOptions::default(), all_on, all_off]

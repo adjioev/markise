@@ -87,6 +87,10 @@ Dependencies with licenses beyond MIT/Apache-2.0 (not vendored; see docs/spec/99
   (ADR 0005). Unicode-3.0 code is allowed by AGENTS.md (owner decision 2026-10-27, TS-4).
 - brotli-decompressor 5, alloc-no-stdlib 2 (crates.io, via wuff) — BSD-3-Clause (/MIT) — WOFF2.
 - foldhash 0.2 (crates.io, via fontique/hashbrown) — Zlib.
+- winx 0.36 (crates.io, via cap-std / cap-primitives, Windows only) — Apache-2.0 WITH
+  LLVM-exception (owner-approved 2026-10-28) — Windows file APIs behind the handle-relative
+  note creation (markise-engine::vault). cap-std, cap-fs-ext, cap-primitives and their other
+  dependencies are used under their MIT option.
 
 Website assets: copies and renders of the brand artwork plus screenshots of Markise;
 per-file origins in site/assets/SOURCE.md.

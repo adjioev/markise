@@ -289,6 +289,13 @@ impl MarkiseApp {
             menus.push(format);
         }
         menus.push(self.view_menu());
+        menus.push(Menu::new(
+            "Go",
+            vec![
+                self.app_item("go.back", self.can_go_back(), Check::None),
+                self.app_item("go.forward", self.can_go_forward(), Check::None),
+            ],
+        ));
         menus.push(self.themes_menu());
         if mac {
             menus.push(
@@ -396,6 +403,7 @@ impl MarkiseApp {
                 Entry::Separator,
                 self.app_item("view.highlightCode", true, Check::Toggle(self.highlight_code)),
                 self.app_item("view.diagrams", true, Check::Toggle(self.diagrams)),
+                self.app_item("view.wikilinks", true, Check::Toggle(self.wikilinks())),
                 Entry::Submenu(self.source_menu()),
                 Entry::Separator,
                 self.app_item("view.zoomIn", self.zoom() < ZOOM_RANGE.1, Check::None),
@@ -607,6 +615,9 @@ impl MarkiseApp {
             "view.toolbarBottom" => self.set_toolbar_position(ToolbarPosition::Bottom),
             "view.highlightCode" => self.set_highlight_code(!self.highlight_code),
             "view.diagrams" => self.set_diagrams(!self.diagrams),
+            "view.wikilinks" => self.set_wikilinks(!self.wikilinks()),
+            "go.back" => self.go_back(),
+            "go.forward" => self.go_forward(),
             "view.sourceLineNumbers" | "view.sourceSoftWrap" | "view.sourceCurrentLine" | "view.sourceWhitespace" => {
                 let mut p = self.themes.source_prefs();
                 match id {

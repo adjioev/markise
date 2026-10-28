@@ -17,12 +17,15 @@ tempfile.workspace = true
 similar.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
+unicode-normalization.workspace = true
 epaint.workspace = true
 # export jobs (src/export.rs)
 markise-export.workspace = true
 markise-pdf.workspace = true
 markise-text.workspace = true
 markise-theme.workspace = true
+cap-std.workspace = true
+cap-fs-ext.workspace = true
 
 # atomic no-replace rename (src/fsops.rs)
 [target.'cfg(unix)'.dependencies]
@@ -47,4 +50,8 @@ harness = false
 
 [[bench]]
 name = "source"
+harness = false
+
+[[bench]]
+name = "vault"
 harness = false

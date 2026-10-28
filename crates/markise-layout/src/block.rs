@@ -280,6 +280,8 @@ pub struct LayoutParams<'a> {
     pub diagram: Option<&'a DiagramState>,
     /// Physical pixels per point (rendered math is sized in pixels).
     pub ppp: f32,
+    /// Which wikilink targets exist (unresolved links are styled apart).
+    pub links: &'a dyn crate::links::LinkTargets,
 }
 
 /// Layout input of the item holding the caret (ADR 0006 §2.4): part of that item's cache key
@@ -584,6 +586,8 @@ struct InlineBuilder<'a> {
     math_width: f32,
     /// Formulas are only measured, never drawn (see [`InlineBuilder::measuring`]).
     measure: bool,
+    /// Which wikilink targets exist (`None`: all shown resolved).
+    link_targets: Option<&'a dyn crate::links::LinkTargets>,
 }
 
 impl<'a> InlineBuilder<'a> {
@@ -606,6 +610,57 @@ impl<'a> InlineBuilder<'a> {
             struts: Vec::new(),
             math_width: f32::INFINITY,
             measure: false,
+            link_targets: None,
+        }
+    }
+
+    /// Styles wikilinks by whether their target exists.
+    fn with_links(mut self, l: &'a dyn crate::links::LinkTargets) -> Self {
+        self.link_targets = Some(l);
+        self
+    }
+
+    /// A wikilink (spec 06 §2.2): collapsed, its label as one caret stop over the whole
+    /// source; revealed (caret inside or touching), the brackets as markers and the text
+    /// between them verbatim. Unresolved targets use a muted link color.
+    fn wikilink(
+        &mut self,
+        r: &RichInline,
+        n: &InlineNode,
+        target: &str,
+        subpath: Option<&str>,
+        st: &Style,
+        revealed: bool,
+    ) {
+        let resolved = self.link_targets.is_none_or(|l| l.resolves(target));
+        let mut c = st.clone();
+        c.color = color(self.theme.link);
+        if !resolved {
+            c.color = c.color.gamma_multiply(0.55);
+        }
+        let start = self.job.text.len();
+        if revealed {
+            self.markers(n, st, true);
+            let raw = self
+                .src
+                .get(n.content.start as usize..n.content.end as usize)
+                .unwrap_or("")
+                .to_string();
+            let mut rs = c.clone();
+            rs.transform = TextTransform::None;
+            self.push_src(&raw, &rs, &n.content, true);
+            self.markers(n, st, false);
+        } else {
+            let label = n.children.first().map(|ch| r.value(ch)).unwrap_or("").to_string();
+            self.push_src(&label, &c, &n.source, false);
+        }
+        let end = self.job.text.len();
+        if end > start {
+            let link = match subpath {
+                Some(sp) => format!("[[{target}#{sp}]]"),
+                None => format!("[[{target}]]"),
+            };
+            self.links.push((start..end, Mark::Link(link)));
         }
     }
 
@@ -867,6 +922,11 @@ impl<'a> InlineBuilder<'a> {
     }
 
     fn node(&mut self, r: &RichInline, n: &InlineNode, st: &Style, top: bool) {
+        if let InlineKind::WikiLink { target, subpath } = &n.kind {
+            let revealed = !self.reveal.is_empty() && self.reveal.contains(&n.source);
+            self.wikilink(r, n, target, subpath.as_deref(), st, revealed);
+            return;
+        }
         let revealed = !self.reveal.is_empty()
             && !n.markers.is_empty()
             && !matches!(
@@ -1083,6 +1143,8 @@ impl<'a> InlineBuilder<'a> {
                 self.push_src(&format!("[{label}]"), &c, &n.source, false);
             }
             InlineKind::Underline => self.nodes(r, &n.children, st, false),
+            // handled in `node` (it needs the reveal state)
+            InlineKind::WikiLink { .. } => {}
         }
     }
 }
@@ -1625,6 +1687,7 @@ pub fn layout_item(
                 st.italic = in_quote && t.quote_italic;
                 let mut b = InlineBuilder::new(t, model, true)
                     .with_math(images, p.ppp, width)
+                    .with_links(p.links)
                     .reveal(&text[origin..], p.focus);
                 if quote_prefix_here
                     && item.segment.as_ref().is_none_or(BlockSegment::first)
@@ -1703,6 +1766,7 @@ pub fn layout_item(
             st.transform = d.transform;
             let mut b = InlineBuilder::new(t, model, false)
                 .with_math(images, p.ppp, width)
+                .with_links(p.links)
                 .reveal(&text[origin..], p.focus);
             let head_font = st.text_style();
             if let Some(pre) = d
@@ -1933,6 +1997,7 @@ pub fn layout_item(
                 images,
                 p.ppp,
                 p.focus,
+                p.links,
             );
         }
         ItemKind::Rule => {
@@ -2724,6 +2789,7 @@ fn layout_table(
     images: &dyn Images,
     ppp: f32,
     focus: Option<&ItemFocus>,
+    links: &dyn crate::links::LinkTargets,
 ) -> f32 {
     let src = doc.text().get(origin..).unwrap_or("");
     let Some(table) = doc.table(origin) else {
@@ -2769,6 +2835,7 @@ fn layout_table(
                 let mw = math_w.get(ci).copied().unwrap_or(width);
                 let mut b = InlineBuilder::new(t, model, false)
                     .with_math(images, ppp, mw)
+                    .with_links(links)
                     .measuring(measure)
                     .reveal(src, focus);
                 b.nodes(&rich, &rich.nodes, &st, true);

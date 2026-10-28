@@ -27,6 +27,7 @@
 //! | `editing` | object: `auto_pair_brackets` (default `true`), `auto_pair_markdown` (`false`), `smart_punctuation` (convert on input, `false`), `smart_dashes_em` (`--` → em dash, `false`) (spec 02 §4, §13, §16; Edit menu) | defaults |
 //! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`) — source editor display (spec 02 §12.1.1; View menu) | defaults |
 //! | `keyBinding` | object: command label (menu title) or id → accelerator (`"Ctrl+Shift+K"`), `""` unbinds (spec 05 §4.7); read only, kept verbatim | none |
+//! | `markdown` | object: `wikilinks` (default `true`) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; View menu) | defaults |
 //! | `side_by_side_split` | Side by Side divider position: fraction of the editor width given to the source pane, `0.15`–`0.85` (spec 04 §3.3); omitted until the divider is moved | `0.5` |
 //! | `zoom` | whole-window zoom factor, `0.5`–`3.0` (View → Zoom In / Zoom Out / Actual Size, issue #43); omitted until zoomed | `1.0` |
 //!
@@ -285,6 +286,34 @@ impl SourceSettings {
     }
 }
 
+/// Markdown dialect extensions the app persists (spec 01 §5), settings key `markdown`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkdownSettings {
+    /// Wikilinks `[[Note]]` (spec 06 V2.1; owner default on).
+    pub wikilinks: bool,
+}
+
+impl Default for MarkdownSettings {
+    fn default() -> Self {
+        MarkdownSettings { wikilinks: true }
+    }
+}
+
+impl MarkdownSettings {
+    fn to_json(self) -> Value {
+        let mut m = Map::new();
+        m.insert("wikilinks".into(), Value::from(self.wikilinks));
+        Value::Object(m)
+    }
+    fn from_json(v: &Value) -> Option<Self> {
+        let Value::Object(m) = v else { return None };
+        let d = MarkdownSettings::default();
+        Some(MarkdownSettings {
+            wikilinks: m.get("wikilinks").and_then(Value::as_bool).unwrap_or(d.wikilinks),
+        })
+    }
+}
+
 /// The settings the app persists.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -305,6 +334,8 @@ pub struct Settings {
     pub editing: EditingSettings,
     /// Source editor display preferences (key `source`).
     pub source: SourceSettings,
+    /// Markdown dialect extensions (key `markdown`).
+    pub markdown: MarkdownSettings,
     pub overrides: FontOverrides,
     /// Members of `overrides` this version does not know, kept verbatim.
     pub overrides_extra: Map<String, Value>,
@@ -352,6 +383,7 @@ impl Default for Settings {
             toolbar_position: ToolbarPosition::Top,
             editing: EditingSettings::default(),
             source: SourceSettings::default(),
+            markdown: MarkdownSettings::default(),
             overrides: FontOverrides::default(),
             overrides_extra: Map::new(),
             consumed_pending: Vec::new(),
@@ -436,6 +468,7 @@ pub struct SettingsPatch {
     pub toolbar_position: Option<ToolbarPosition>,
     pub editing: Option<EditingSettings>,
     pub source: Option<SourceSettings>,
+    pub markdown: Option<MarkdownSettings>,
     pub overrides: OverridesPatch,
     pub side_by_side_split: Option<f32>,
     pub zoom: Option<f32>,
@@ -502,6 +535,9 @@ impl SettingsPatch {
         if let Some(v) = self.source {
             s.source = v;
         }
+        if let Some(v) = self.markdown {
+            s.markdown = v;
+        }
         self.overrides.apply(&mut s.overrides);
         if let Some(v) = self.side_by_side_split {
             s.side_by_side_split = Some(v);
@@ -547,6 +583,9 @@ impl SettingsPatch {
         if saved.source.is_some() {
             self.source = None;
         }
+        if saved.markdown.is_some() {
+            self.markdown = None;
+        }
         let (o, so) = (&mut self.overrides, &saved.overrides);
         if so.font_family.is_some() {
             o.font_family = None;
@@ -590,6 +629,9 @@ impl SettingsPatch {
         }
         if later.source.is_some() {
             self.source = later.source;
+        }
+        if later.markdown.is_some() {
+            self.markdown = later.markdown;
         }
         self.overrides.merge(later.overrides);
         if later.side_by_side_split.is_some() {
@@ -636,6 +678,9 @@ impl SettingsPatch {
         if let Some(v) = self.source {
             m.insert("source".into(), v.to_json());
         }
+        if let Some(v) = self.markdown {
+            m.insert("markdown".into(), v.to_json());
+        }
         let mut o = Map::new();
         let op = &self.overrides;
         if let Some(v) = &op.font_family {
@@ -676,6 +721,7 @@ impl SettingsPatch {
                 .and_then(ToolbarPosition::parse),
             editing: m.get("editing").and_then(EditingSettings::from_json),
             source: m.get("source").and_then(SourceSettings::from_json),
+            markdown: m.get("markdown").and_then(MarkdownSettings::from_json),
             ..Default::default()
         };
         if let Some(Value::Object(o)) = m.get("overrides") {
@@ -782,6 +828,9 @@ impl Settings {
         if let Some(e) = map.remove("source").as_ref().and_then(SourceSettings::from_json) {
             s.source = e;
         }
+        if let Some(e) = map.remove("markdown").as_ref().and_then(MarkdownSettings::from_json) {
+            s.markdown = e;
+        }
         s.extra = map;
         Some(s)
     }
@@ -800,6 +849,7 @@ impl Settings {
         map.insert("toolbarPosition".into(), Value::from(self.toolbar_position.as_str()));
         map.insert("editing".into(), self.editing.to_json());
         map.insert("source".into(), self.source.to_json());
+        map.insert("markdown".into(), self.markdown.to_json());
         if !self.consumed_pending.is_empty() {
             map.insert("consumed_pending".into(), Value::from(self.consumed_pending.clone()));
         }
@@ -1041,6 +1091,23 @@ mod tests {
     use super::*;
 
     /// DG-2/DG-7: `diagrams` defaults to on, round-trips, and patches carry it.
+    #[test]
+    fn markdown_settings_default_on_and_round_trip() {
+        assert!(Settings::default().markdown.wikilinks);
+        assert!(Settings::from_json(r#"{"version": 2}"#).unwrap().markdown.wikilinks);
+        let off = Settings::from_json(r#"{"version": 2, "markdown": {"wikilinks": false}}"#).unwrap();
+        assert!(!off.markdown.wikilinks);
+        assert!(!Settings::from_json(&off.to_json()).unwrap().markdown.wikilinks);
+        let p = SettingsPatch {
+            markdown: Some(MarkdownSettings { wikilinks: false }),
+            ..Default::default()
+        };
+        assert_eq!(SettingsPatch::from_json(&p.to_json()).unwrap().markdown, p.markdown);
+        let mut s = Settings::default();
+        p.apply(&mut s);
+        assert!(!s.markdown.wikilinks);
+    }
+
     #[test]
     fn source_settings_default_and_round_trip() {
         let d = Settings::default();

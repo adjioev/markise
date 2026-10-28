@@ -27,7 +27,7 @@ This project is a clean-room implementation. You are on the **clean** side.
 - If the spec is unclear or missing something, do not guess from memory of the reference
   product: add the question to the specification's open questions (`99-open-questions.md`) or a GitHub issue (section A/B for the spec team,
   C if it is a design decision you may make) and continue with a clearly marked placeholder.
-- Third-party crates: permissive licenses only (MIT, Apache-2.0, BSD, Zlib, ISC, Unicode-3.0 (code and data; owner-approved 2026-10-27 for ICU4X via parley), MPL-2.0 file-level; for bundled syntax-highlighting grammars only, also the Sublime HQ license, public-domain dedications, Unlicense and WTFPL — owner-approved 2026-10-27; SIL Open Font License 1.1 (OFL-1.1) for bundled font files only, never code — owner-approved 2026-10-27).
+- Third-party crates: permissive licenses only (MIT, Apache-2.0, BSD, Zlib, ISC, Unicode-3.0 (code and data; owner-approved 2026-10-27 for ICU4X via parley), MPL-2.0 file-level; for bundled syntax-highlighting grammars only, also the Sublime HQ license, public-domain dedications, Unlicense and WTFPL — owner-approved 2026-10-27; SIL Open Font License 1.1 (OFL-1.1) for bundled font files only, never code — owner-approved 2026-10-27; Apache-2.0 WITH LLVM-exception (owner-approved 2026-10-28; e.g. winx via cap-std)).
   Record every vendored/forked crate in `NOTICE`.
 
 ## Architecture

@@ -232,11 +232,18 @@ fn t23_front_matter_zwsp() {
 
 #[test]
 fn t24_toc_markers() {
+    let no_wiki = ParseOptions {
+        wikilinks: false,
+        ..opts()
+    };
     for m in ["[toc]", "[TOC]", "{:toc}", "[[_TOC_]]"] {
         let t = format!("{m}\n");
-        assert_eq!(tree(&t), "toc\n", "{m}");
+        assert_eq!(tree_with(&t, no_wiki.clone()), "toc\n", "{m}");
         roundtrip(&t);
     }
+    // spec 06 V1.6 f: with wikilinks (default on) `[[_TOC_]]` is a link, `[toc]` stays a TOC
+    assert_eq!(tree("[toc]\n"), "toc\n");
+    assert!(tree("[[_TOC_]]\n").starts_with("para"));
 }
 
 #[test]

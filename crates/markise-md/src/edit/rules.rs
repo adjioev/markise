@@ -36,7 +36,7 @@ pub(crate) fn opener_of(line: &str, opts: &crate::ParseOptions) -> Option<Opener
     if scan::atx_heading(b, p, end, opts.strict).is_some()
         || scan::fence_open(b, p, end).is_some()
         || scan::thematic_break(b, p, end, opts.remap_unicode_punctuation)
-        || scan::is_toc_marker(&line[p..], opts.remap_unicode_punctuation)
+        || scan::is_toc_marker(&line[p..], opts.remap_unicode_punctuation, opts.wikilinks)
         || scan::footnote_def_start(b, p, end).is_some()
         || (opts.block_html && scan::html_block_start(b, p, end).is_some())
         || link_def_like(&line[p..])

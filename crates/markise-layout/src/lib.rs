@@ -19,6 +19,7 @@ pub mod caret;
 pub mod diagram;
 pub mod fenwick;
 pub mod highlight;
+pub mod links;
 pub mod math;
 pub mod model;
 pub mod source;
@@ -29,6 +30,7 @@ pub use block::{BlockLayout, FontSet, ImageState, Images, ItemFocus, LinkHit, Pr
 pub use cache::{CacheKey, LayoutCache};
 pub use diagram::{DiagramQuery, DiagramState, Diagrams, NoDiagrams};
 pub use highlight::{CodeQuery, Highlights, NoHighlights};
+pub use links::{AllResolved, LinkTargets};
 pub use math::{MATH_SCALE, MathBox, MathQuery, MathState};
 pub use model::{CodeRef, Container, DocModel, Gap, Item, ItemKind, Items, Marker, ModelChange, OutlineEntry};
 pub use source::{SourceCtx, SourceLayout, SourceLine, SourceParams, SourceView, SourceVisible};

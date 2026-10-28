@@ -85,6 +85,11 @@ pub struct ExportRequest {
     pub front_matter_overrides: bool,
     /// Timeout for Pandoc and custom commands.
     pub timeout: Duration,
+    /// Parse wikilinks (the `markdown.wikilinks` setting, spec 06 V2.1).
+    pub wikilinks: bool,
+    /// The vault's files: HTML export writes resolved wikilinks as relative links to the
+    /// linked files (spec 06 Q-V11); without it they are plain text.
+    pub vault: Option<std::sync::Arc<crate::vault::VaultIndex>>,
 }
 
 impl ExportRequest {
@@ -100,6 +105,8 @@ impl ExportRequest {
             after_command: None,
             front_matter_overrides: true,
             timeout: Duration::from_secs(120),
+            wikilinks: true,
+            vault: None,
         }
     }
 
@@ -187,7 +194,13 @@ fn stem(p: &Path) -> String {
 pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDone, String> {
     let t0 = Instant::now();
     control.check().map_err(|e| e.to_string())?;
-    let doc = Document::parse(req.text.clone(), ParseOptions::default());
+    let doc = Document::parse(
+        req.text.clone(),
+        ParseOptions {
+            wikilinks: req.wikilinks,
+            ..ParseOptions::default()
+        },
+    );
     let base_dir = req.doc_path.as_deref().and_then(Path::parent).map(Path::to_path_buf);
     let fallback = req.doc_path.as_deref().map(stem).unwrap_or_else(|| stem(&req.output));
     let today = vars::today();
@@ -217,6 +230,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
                 body_extra: req.front_matter_overrides.then(|| get("append-body")).flatten(),
                 images: html_images(&doc, base_dir.as_deref(), &req.output, plain),
                 control: Some(control.clone()),
+                wikilinks: wikilink_hrefs(req),
                 ..Default::default()
             };
             control.set_progress(0.3);
@@ -410,6 +424,29 @@ pub fn tile_paths(output: &Path, n: usize) -> Result<Vec<PathBuf>, String> {
     Ok(std::iter::once(output.to_path_buf()).chain(rest).collect())
 }
 
+/// Wikilink `href`s of an HTML export: the linked file relative to the output folder,
+/// percent-encoded (V2.6.3), with the heading's slug as fragment.
+fn wikilink_hrefs(req: &ExportRequest) -> markise_export::WikiLinkHrefs {
+    let Some(ix) = req.vault.clone() else {
+        return markise_export::WikiLinkHrefs(None);
+    };
+    let from = req.doc_path.as_deref().and_then(|p| ix.rel_of(p));
+    let out_dir = req.output.parent().map(Path::to_path_buf).unwrap_or_default();
+    markise_export::WikiLinkHrefs(Some(std::sync::Arc::new(move |target: &str, sub: Option<&str>| {
+        let f = ix.resolve_wikilink(target, from.as_deref())?;
+        let rel = crate::vault::relative_path(&out_dir, &ix.abs(&f.rel))?;
+        let mut href = crate::vault::percent_encode_path(&rel);
+        if let Some(h) = sub
+            .filter(|s| !s.starts_with('^'))
+            .and_then(|s| s.split('#').map(str::trim).rfind(|x| !x.is_empty()))
+        {
+            href.push('#');
+            href.push_str(&markise_md::slug::slug(h));
+        }
+        Some(href)
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +459,40 @@ mod tests {
             dir.join(name),
             Theme::light(),
         )
+    }
+
+    /// Spec 06 Q-V11: resolved wikilinks become relative links to the linked file, unresolved
+    /// ones plain text; with wikilinks off the brackets stay text.
+    #[test]
+    fn html_wikilinks_link_to_resolved_notes() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().to_path_buf();
+        let ix = crate::vault::VaultIndex::from_rels(
+            root.clone(),
+            ["doc.md".to_string(), "Notes/Other note.md".to_string()],
+            1,
+        );
+        let text = "See [[Other note#Part Two|the other]] and [[Missing]].\n";
+        let mut r = ExportRequest::new(
+            ExportKind::HtmlPlain,
+            text.into(),
+            Some(root.join("doc.md")),
+            root.join("out.html"),
+            Theme::light(),
+        );
+        r.vault = Some(std::sync::Arc::new(ix));
+        let c = JobControl::new();
+        let out = run_export(&r, &c).unwrap();
+        let s = std::fs::read_to_string(&out.outputs[0]).unwrap();
+        assert!(
+            s.contains("<a href=\"Notes/Other%20note.md#part-two\">the other</a>"),
+            "{s}"
+        );
+        assert!(s.contains(" and Missing."), "{s}");
+        r.wikilinks = false;
+        let out = run_export(&r, &c).unwrap();
+        let s = std::fs::read_to_string(&out.outputs[0]).unwrap();
+        assert!(s.contains("[[Missing]]"), "{s}");
     }
 
     #[test]

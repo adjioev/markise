@@ -37,6 +37,10 @@ pub struct ParseOptions {
     pub emoji: bool,
     /// Smart punctuation applied at render time (R4.5.1 "convert on rendering"). Default off.
     pub smart_punctuation_render: bool,
+    /// Wikilinks `[[Note]]`, `[[Note#Heading|alias]]` (spec 06 V2.1). Default on (owner,
+    /// 2026-10-28: vault features on in every folder). Embeds `![[…]]` stay plain text for now.
+    /// With it on, a `[[_TOC_]]` line is a wikilink, not a TOC marker (spec 06 V1.6 f).
+    pub wikilinks: bool,
 }
 
 impl Default for ParseOptions {
@@ -58,6 +62,7 @@ impl Default for ParseOptions {
             block_html: true,
             emoji: true,
             smart_punctuation_render: false,
+            wikilinks: true,
         }
     }
 }

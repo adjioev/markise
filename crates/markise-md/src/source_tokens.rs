@@ -313,6 +313,10 @@ impl Painter<'_> {
             }
             InlineKind::Autolink { .. } | InlineKind::BareUrl { .. } => self.paint(s, e, SourceTok::Url),
             InlineKind::FootnoteRef { .. } => self.paint(s, e, SourceTok::Link),
+            InlineKind::WikiLink { inner, .. } => {
+                self.paint(s, e, SourceTok::Marker);
+                self.paint(at + inner.start, at + inner.end, SourceTok::Link);
+            }
             InlineKind::Html | InlineKind::Math { .. } => self.paint(s, e, SourceTok::Meta),
             InlineKind::Escape => self.paint(s, (s + 1).min(e), SourceTok::Marker),
             _ => {

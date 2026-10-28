@@ -110,6 +110,10 @@ fn conformance_options(ext: Option<&str>) -> ParseOptions {
         emoji: false,
         auto_links: ext == Some("autolink"),
         strict_number_start: true,
+        // the pure CommonMark/GFM dialect: wikilinks (spec 06, a Markise extension that reads
+        // `[[x]]` the Obsidian way) are not part of it; their divergences from CommonMark
+        // (examples 548, 559, 590) are pinned in `markise-md/tests/wikilinks.rs`
+        wikilinks: false,
         ..ParseOptions::default()
     }
 }
