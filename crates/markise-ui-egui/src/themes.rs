@@ -170,7 +170,7 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                             let mut w = FileWatcher::new(wake.clone()).ok()?;
                             w.watch_themes(d);
                             // in effect before the UI gets it (this worker may wait)
-                            w.sync();
+                            let _ = w.sync(); // a failure arrives as a watcher event
                             Some(w)
                         });
                         Done::Watcher(watcher)

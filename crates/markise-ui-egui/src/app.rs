@@ -974,7 +974,7 @@ impl MarkiseApp {
             Banner::Info("The file is not valid UTF-8; it was decoded lossily and saving is disabled.".into())
         });
         if let Some(w) = self.watcher.as_mut() {
-            w.watch_file(&loaded.path, loaded.mtime);
+            w.watch_file(&loaded.path, Some(loaded.version));
         }
         let format: Arc<dyn markise_doc::DocumentFormat> = Arc::new(MarkdownFormat {
             opts: self.parse.clone(),
@@ -1104,6 +1104,20 @@ impl MarkiseApp {
                 }
                 // live reload: re-import the affected theme, re-render (new fingerprint)
                 WatchEvent::ThemeChanged(p) => self.themes.file_changed(&p),
+                // the folder watch (re)started: what changed before it has no events
+                WatchEvent::FolderWatched(_) => {
+                    if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
+                        t.invalidate_all(w);
+                    }
+                }
+                WatchEvent::Error(e) => {
+                    self.timing.log(&format!("watch-error {e}"));
+                    if self.banner.is_none() {
+                        self.banner = Some(Banner::Info(format!(
+                            "Changes made by other programs may not be noticed: {e}"
+                        )));
+                    }
+                }
             }
         }
     }
