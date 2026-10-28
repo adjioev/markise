@@ -896,7 +896,6 @@ fn d01_tab_nests_list_item_and_shift_tab_outdents() {
 
 // Expected (§5.3): next cell, contents selected. Actual: `| a\tZ |`.
 #[test]
-#[ignore = "bug: [M2d] Tab in a table cell inserts a literal tab into the cell"]
 fn d02_tab_in_table_moves_to_next_cell_selecting_it() {
     // §5.3: Tab → next cell, selecting its contents; typing replaces it
     let mut e = Ed::open("d02", "| a | b |\n|---|---|\n| x | y |\n");
@@ -906,7 +905,7 @@ fn d02_tab_in_table_moves_to_next_cell_selecting_it() {
 
 // Expected (S-6.1): a new row, caret in its first cell.
 #[test]
-#[ignore = "bug: [M2d] Tab in the last table cell inserts a tab instead of a new row"]
+#[ignore = "bug: [M2d] Tab in the last table cell does not add a row yet (it no longer inserts a tab)"]
 fn d03_tab_in_last_cell_adds_row() {
     // S-6.1
     let mut e = Ed::open("d03", "| a | b |\n|---|---|\n| x | y |\n");
@@ -921,7 +920,6 @@ fn d03_tab_in_last_cell_adds_row() {
 
 // Expected (§5.3): previous cell, contents selected.
 #[test]
-#[ignore = "bug: [M2d] Shift+Tab in a table cell does not move to the previous cell"]
 fn d04_shift_tab_in_table_moves_back() {
     let mut e = Ed::open("d04", "| a | b |\n|---|---|\n| x | y |\n");
     e.at(7).chord(shift(), Key::Tab).typ("Z");

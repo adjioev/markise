@@ -1004,6 +1004,13 @@ impl EditorSession {
     /// elsewhere Tab inserts a literal tab (not at a line start, where it would open
     /// indented code) and Shift+Tab does nothing.
     pub fn tab(&mut self, shift: bool) -> Result<(), EditError> {
+        if let Some(sel) = self.table_tab_target(shift) {
+            // rule 2: never a literal tab in a cell (it would be saved into the table)
+            if let Some(sel) = sel {
+                self.set_selection(sel);
+            }
+            return Ok(());
+        }
         let id = if shift { planners::SHIFT_TAB } else { planners::TAB };
         match self.doc.plan(id, &self.request(Params::new())) {
             Ok(plan) => {
@@ -1028,6 +1035,41 @@ impl EditorSession {
             }
             Err(_) => Ok(()),
         }
+    }
+
+    /// Tab / Shift+Tab in a table (spec 02 §5.3 rule 2): `None` outside tables; otherwise the
+    /// selection of the next / previous cell's content (`Some(None)`: nowhere to go — adding
+    /// a row at the last cell is part of the table editing of M2d).
+    fn table_tab_target(&self, shift: bool) -> Option<Option<Selection>> {
+        let p = self.sel.primary();
+        if p.focus.virt > 0 {
+            return None;
+        }
+        let at = p.focus.offset;
+        let leaf = self.doc.leaf(at)?;
+        if !matches!(leaf.kind, LeafKind::Table { .. }) {
+            return None;
+        }
+        let t = self.doc.text();
+        let delimiter = |r: &markise_doc::Span| {
+            t[r.start..r.end].bytes().all(|b| b"|:- \t".contains(&b)) && t[r.start..r.end].contains('-')
+        };
+        let cells: Vec<markise_doc::Span> = leaf
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| !(*i == 1 && delimiter(r)))
+            .flat_map(|(_, r)| self.doc.table_row_cells(*r))
+            .collect();
+        let Some(i) = cells.iter().position(|c| c.start <= at && at <= c.end) else {
+            return Some(None);
+        };
+        let j = if shift {
+            i.checked_sub(1)
+        } else {
+            Some(i + 1).filter(|&j| j < cells.len())
+        };
+        Some(j.map(|j| Selection::range(cells[j].start, cells[j].end)))
     }
 
     /// `edit.newline`: the format's Enter planner; where it has no rule (M2a: everything but

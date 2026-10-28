@@ -835,3 +835,29 @@ fn whole_document_selection_replaces_every_byte() {
     s.insert_text("x").unwrap();
     assert_eq!(s.text(), "# Hx\n");
 }
+
+/// Spec 02 §5.3 rule 2: Tab / Shift+Tab in a table move between cells (skipping the
+/// delimiter row) selecting the content; never a literal tab (#20). Adding a row at the last
+/// cell is M2d: until then a no-op.
+#[test]
+fn tab_in_a_table_moves_between_cells() {
+    let src = "| a | b |\n|---|---|\n| x | y |\n";
+    let (mut s, _) = md_session(src);
+    let sel = |s: &EditorSession| {
+        let p = s.selection().primary();
+        (p.anchor.offset, p.focus.offset)
+    };
+    s.set_selection(Selection::caret(3));
+    s.tab(false).unwrap();
+    assert_eq!(sel(&s), (6, 7));
+    s.tab(false).unwrap();
+    assert_eq!(sel(&s), (22, 23));
+    s.tab(true).unwrap();
+    assert_eq!(sel(&s), (6, 7));
+    s.set_selection(Selection::caret(27));
+    s.tab(false).unwrap();
+    assert_eq!(sel(&s), (27, 27));
+    s.set_selection(Selection::caret(2));
+    s.tab(true).unwrap();
+    assert_eq!(s.text(), src);
+}
