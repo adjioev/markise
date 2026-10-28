@@ -815,3 +815,23 @@ fn set_selection_clamps_out_of_range_offsets() {
     s.insert_text("x").unwrap();
     assert_eq!(s.text(), "xмир\n");
 }
+
+/// Select All (first to last caret stop) replaced or deleted takes the hidden block syntax
+/// at the document's edges with it (M2b-3; #20 f03); a partial selection does not.
+#[test]
+fn whole_document_selection_replaces_every_byte() {
+    let src = "# H\n\n- a\n- b\n\n> q\n";
+    let (mut s, _) = md_session(src);
+    s.set_selection(Selection::range(2, src.len() - 1));
+    s.insert_text("new").unwrap();
+    assert_eq!(s.text(), "new");
+    assert!(s.undo());
+    assert_eq!(s.text(), src);
+    s.set_selection(Selection::range(src.len() - 1, 2));
+    s.delete_backward().unwrap();
+    assert_eq!(s.text(), "");
+    let (mut s, _) = md_session(src);
+    s.set_selection(Selection::range(3, src.len() - 1));
+    s.insert_text("x").unwrap();
+    assert_eq!(s.text(), "# Hx\n");
+}

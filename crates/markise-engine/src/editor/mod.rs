@@ -350,6 +350,35 @@ impl EditorSession {
         }
     }
 
+    /// A selection from the start of the first block's text to the end of the last block's
+    /// text (Select All: the layout's first and last caret stops) covers the whole document:
+    /// before it is replaced or deleted it is widened to every byte, so the hidden block syntax
+    /// at its edges (`# ` of a first heading, the final newline…) goes with it (M2b-3).
+    fn widen_whole_document_selection(&mut self) {
+        let p = self.sel.primary();
+        let r = p.range();
+        let t = self.doc.text();
+        if p.is_caret() || self.sel.ranges().len() != 1 || (r.start == 0 && r.end == t.len()) {
+            return;
+        }
+        let Some(first_byte) = t.find(|c: char| !c.is_whitespace()) else {
+            return;
+        };
+        let first = self.doc.leaf(first_byte).and_then(|l| l.lines.first().map(|f| f.start));
+        let last = leaf_before(self.doc.as_ref(), t.len()).and_then(|l| l.lines.last().map(|z| z.end));
+        let (Some(first), Some(last)) = (first, last) else {
+            return;
+        };
+        if r.start <= first && r.end >= last {
+            let (a, f) = if p.anchor.offset <= p.focus.offset {
+                (0, t.len())
+            } else {
+                (t.len(), 0)
+            };
+            self.sel = Selection::range(a, f);
+        }
+    }
+
     /// Closes the open typing group (undo boundary).
     pub fn close_typing(&mut self) {
         self.open = None;
@@ -470,6 +499,7 @@ impl EditorSession {
         {
             self.close_typing();
         }
+        self.widen_whole_document_selection();
         let req = self.request(Params::new());
         let tp = self.doc.on_text(&req, typed);
         let leaf_before = self.leaf_info(self.sel.primary().start().offset);
@@ -508,6 +538,7 @@ impl EditorSession {
     /// the two are merged (rule 5); the start of any other block is a no-op. The remaining
     /// rules (lists, quotes, HR, empty blocks, tables) are M2c/M2d.
     pub fn delete_backward_to(&mut self, prev_stop: Option<usize>) -> Result<(), EditError> {
+        self.widen_whole_document_selection();
         let p = self.sel.primary();
         if p.is_caret() && p.focus.virt > 0 {
             self.set_selection(Selection::caret(p.focus.offset));
@@ -576,6 +607,7 @@ impl EditorSession {
     /// grapheme. At the end of a paragraph or heading followed by a paragraph or heading the
     /// next block's text is merged (C48, M2b subset); at the end of other blocks a no-op.
     pub fn delete_forward_to(&mut self, next_stop: Option<usize>) -> Result<(), EditError> {
+        self.widen_whole_document_selection();
         let p = self.sel.primary();
         if p.is_caret() && p.focus.virt > 0 {
             return Ok(());
@@ -1012,6 +1044,7 @@ impl EditorSession {
         }
         if !self.sel.is_caret() {
             // Enter over a selection: delete it, then Enter at the caret — one transaction
+            self.widen_whole_document_selection();
             let r = self.sel.primary().range();
             return self.transact("New Line", TxKind::Structural, |tx| {
                 tx.step(PlanStep::patches(PatchSet::delete(r.clone())))?;

@@ -267,9 +267,9 @@ fn vertical_line_and_document_moves() {
     t.run("select.all");
     let p = t.ed.session.selection().primary();
     assert_eq!((p.anchor.offset, p.focus.offset), (2, t.text().len()));
-    // typing over the selection replaces it
+    // typing over Select All replaces the whole document, hidden `# ` included (#20 f03)
     t.typ("Z");
-    assert_eq!(t.text(), "# Z");
+    assert_eq!(t.text(), "Z");
 }
 
 #[test]

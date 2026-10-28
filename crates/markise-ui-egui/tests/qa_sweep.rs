@@ -1166,7 +1166,6 @@ fn f02_selection_across_paragraphs_replaced() {
 
 // Expected (M2b-3: deliberate selections are deleted as selected): `new`. Actual: `# new\n` (the first block's heading marker and the final newline survive).
 #[test]
-#[ignore = "bug: typing over Select All keeps the first heading's `# `"]
 fn f03_select_all_then_type() {
     let mut e = Ed::open("f03", "# H\n\n- a\n- b\n\n> q\n");
     e.chord(cmd(), Key::A).typ("new");

@@ -118,7 +118,14 @@ fn s2_1_heading_stays_a_paragraph_until_enter() {
             ("type:x", "## Plan\n\nx‸", "h2"),
         ],
     );
-    script("‸", &[("type:---", "---‸", "para"), ("edit.newline", "---(v)‸", "hr")]);
+    // `---` on the first line opens front matter instead (S-2.4, tested below)
+    script(
+        "a\n\n‸",
+        &[
+            ("type:---", "a\n\n---‸", "para"),
+            ("edit.newline", "a\n\n---(v)‸", "hr"),
+        ],
+    );
     // after a materialised virtual paragraph (Enter at the end of a paragraph)
     script(
         "x‸",
