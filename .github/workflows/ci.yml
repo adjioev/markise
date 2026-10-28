@@ -194,7 +194,9 @@ jobs:
   # toolchain change on main saves a new ~1 GB entry per job/OS while the old one lingers until
   # GitHub evicts it after 7 days unused; 2-4 generations per OS overflowed the 10 GB repository
   # limit. After the jobs above have saved, keep only the newest entry per job/OS (the key minus
-  # its two trailing hashes) on main. Not part of `CI result`; a failure here never fails the run.
+  # its two trailing hashes) of this workflow's own caches (lint, test) on main; other workflows'
+  # caches (e.g. release.yml's v0-rust-release-*) are left alone. Reads every page of the cache
+  # list. Not part of `CI result`; a failure here never fails the run.
   cache-cleanup:
     name: prune superseded Cargo caches
     needs: [lint, test]
@@ -205,15 +207,17 @@ jobs:
     permissions:
       actions: write
     steps:
-      - name: Keep the newest rust-cache entry per job/OS
+      - name: Keep the newest lint/test rust-cache entry per job/OS
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh cache list --ref refs/heads/main --key v0-rust- --limit 100 \
-            --json id,key,createdAt \
-            --jq 'map(. + {group: (.key | sub("-[0-9a-f]+-[0-9a-f]+$"; ""))})
-                  | group_by(.group) | map(sort_by(.createdAt) | reverse | .[1:]) | flatten
+          set -o pipefail
+          gh api --paginate "repos/$GH_REPO/actions/caches?ref=refs/heads/main&per_page=100" \
+            --jq '.actions_caches[] | {id, key, created_at}' |
+          jq -rs 'map(select(.key | test("^v0-rust-(lint|test)-")))
+                  | map(. + {group: (.key | sub("-[0-9a-f]+-[0-9a-f]+$"; ""))})
+                  | group_by(.group) | map(sort_by(.created_at) | reverse | .[1:]) | flatten
                   | .[] | "\(.id) \(.key)"' |
           while read -r id key; do
             echo "deleting superseded cache $key"

@@ -67,8 +67,9 @@ to a PR and does not report into PR checks; look at it under Actions.
   repository cache does not fill up with per-PR entries. Because the key carries the
   toolchain/env and `Cargo.lock`/`Cargo.toml` hashes, each dependency or toolchain change on
   `main` saves a new entry; the `prune superseded Cargo caches` job (pushes to `main` only, not
-  part of `CI result`) then deletes every older `v0-rust-*` entry on `main`, keeping the newest
-  one per job/OS.
+  part of `CI result`) then reads every page of the cache list and deletes the older
+  `v0-rust-lint-*`/`v0-rust-test-*` entries on `main`, keeping the newest one per job/OS (other
+  workflows' caches, e.g. `release.yml`'s, are left alone).
 - **Artifacts**: only pushes to `main` upload the CI binaries (3-day retention); release
   workflow artifacts are kept 7 days.
 - Test binaries use line-tables-only debug info (keeps the Linux runner's disk from filling up).
