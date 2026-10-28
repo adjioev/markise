@@ -781,7 +781,8 @@ impl Settings {
         if let Some(v) = self.side_by_side_split {
             map.insert("side_by_side_split".into(), round_split(v));
         }
-        if let Some(v) = self.zoom {
+        // 100 % is the default: not written (Actual Size leaves no `zoom` behind)
+        if let Some(v) = self.zoom.filter(|v| (v - 1.0).abs() > 1e-4) {
             map.insert("zoom".into(), round_zoom(v));
         }
         let o = self.overrides.to_json(&self.overrides_extra);
@@ -1145,6 +1146,24 @@ mod tests {
         let back = Settings::from_json(&s.to_json()).unwrap();
         assert_eq!(back.zoom, Some(1.23));
         assert!(!Settings::default().to_json().contains("\"zoom\""));
+        // Actual Size: 100 % is not written
+        let reset = Settings {
+            zoom: Some(1.0),
+            ..Settings::default()
+        };
+        assert!(!reset.to_json().contains("\"zoom\""));
+        // …while a patch keeps the reset, so it applies over an older zoom
+        let back = SettingsPatch {
+            zoom: Some(1.0),
+            ..Default::default()
+        };
+        assert_eq!(SettingsPatch::from_json(&back.to_json()).unwrap(), back);
+        let mut zoomed = Settings {
+            zoom: Some(2.0),
+            ..Settings::default()
+        };
+        back.apply(&mut zoomed);
+        assert!(!zoomed.to_json().contains("\"zoom\""));
         let wild = Settings::from_json(r#"{"version": 2, "zoom": 9}"#).unwrap();
         assert_eq!(wild.zoom, Some(ZOOM_RANGE.1));
         let tiny = Settings::from_json(r#"{"version": 2, "zoom": 0.1}"#).unwrap();

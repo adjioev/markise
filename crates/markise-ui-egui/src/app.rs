@@ -1758,6 +1758,17 @@ impl MarkiseApp {
                 self.theme_event(ctx, e);
             }
         }
+        // whole-window zoom (issue #43): egui's zoom factor scales every point. It takes effect
+        // at the next pass, so it is applied before anything is laid out: on the first frame
+        // (the settings were just read) that pass only installs the fonts; a later change
+        // discards the pass already laid out at the old scale
+        let z = self.themes.zoom();
+        if (ctx.zoom_factor() - z).abs() > 1e-4 {
+            ctx.set_zoom_factor(z);
+            if self.frames > 0 {
+                ctx.request_discard("zoom changed");
+            }
+        }
         // (the user theme folder is created, canonicalized and watched by the theme worker)
         if !crate::fonts::installed(ctx) {
             // faces were loaded by the theme worker (no font file access on the UI thread);
@@ -1803,11 +1814,6 @@ impl MarkiseApp {
             t.poll(w);
         }
         self.resolve_theme(ctx);
-        // whole-window zoom (issue #43): egui's zoom factor scales every point
-        let z = self.themes.zoom();
-        if (ctx.zoom_factor() - z).abs() > 1e-4 {
-            ctx.set_zoom_factor(z);
-        }
         // the settings file (read in the background) may switch diagrams
         if self.themes.diagrams() != self.diagrams {
             self.apply_diagrams(self.themes.diagrams());

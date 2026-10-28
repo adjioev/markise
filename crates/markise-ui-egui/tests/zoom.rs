@@ -198,6 +198,20 @@ fn the_zoom_persists_across_a_restart() {
     wait_until(&mut h, "zoom restored", |a| close(a.zoom(), 1.5));
     h.run_steps(2);
     zoom_is(&h, 1.5);
+    // Actual Size leaves no `zoom` key behind
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("view.actualSize")));
+    h.run_steps(2);
+    h.state_mut().on_exit();
+    let t = Instant::now();
+    while std::fs::read_to_string(&file).is_ok_and(|s| s.contains("\"zoom\"")) {
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "settings written without the zoom"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(std::fs::read_to_string(&file).unwrap().contains("\"version\""));
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -287,5 +301,45 @@ fn caret_and_hit_testing_are_right_at_150_percent() {
     h.event(egui::Event::Text("old ".into()));
     h.run_steps(2);
     assert!(h.state().document_text().unwrap().contains("The old lamp"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn the_first_rendered_frame_has_the_saved_zoom() {
+    // Codex review of PR #47: no frame at 100 % before the restored zoom applies
+    let d = tmpdir("first-frame");
+    let cfg = d.join("config");
+    std::fs::create_dir_all(cfg.join("markise")).unwrap();
+    std::fs::write(
+        cfg.join("markise").join("settings.json"),
+        r#"{"version": 2, "zoom": 1.5}"#,
+    )
+    .unwrap();
+    let f = d.join("t.md");
+    std::fs::write(&f, "# Title\n\nText\n").unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(u64, f32)>::new()));
+    let rec = seen.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .allow_missing_glyphs()
+        .build_ui_state(
+            move |ui, app: &mut MarkiseApp| {
+                app.ui(ui);
+                rec.lock().unwrap().push((app.frames, ui.ctx().pixels_per_point()));
+            },
+            MarkiseApp::new(AppOptions {
+                open: vec![f],
+                config: ConfigDir::Dir(cfg.clone()),
+                ..Default::default()
+            }),
+        );
+    wait_until(&mut h, "load", loaded);
+    let seen = seen.lock().unwrap();
+    // every pass that laid out the UI (frames > 0) ran at the saved scale
+    let content: Vec<_> = seen.iter().filter(|(f, _)| *f > 0).collect();
+    assert!(!content.is_empty());
+    for (f, ppp) in content {
+        assert!(close(*ppp, 1.5), "pass {f} ran at pixels_per_point {ppp}");
+    }
     let _ = std::fs::remove_dir_all(&d);
 }
