@@ -1517,16 +1517,16 @@ impl Document {
         }
         let ls = line_start(text, leaf.span.start);
         let (ce, next_ls) = line_end(text, ls);
-        let next = (next_ls < text.len())
-            .then(|| {
-                let b = text.as_bytes();
-                let q = next_ls
-                    + b[next_ls..]
-                        .iter()
-                        .take_while(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
-                        .count();
-                (q < text.len()).then(|| self.leaf(q)).flatten()
-            })
+        // the next content (any block: also one whose first byte is in no leaf, a list)
+        let b = text.as_bytes();
+        let q = next_ls
+            + b[next_ls..]
+                .iter()
+                .take_while(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
+                .count();
+        let following = q < text.len();
+        let next = following
+            .then(|| self.leaf(q))
             .flatten()
             .filter(|n| n.span.start > leaf.span.start);
         let plan = |range: std::ops::Range<usize>, sel: Selection| {
@@ -1545,12 +1545,16 @@ impl Document {
         if let Some(prev) = self.leaf_before(ls)
             && line_start(text, prev.span.end) < ls
         {
+            if !prev.containers.is_empty() {
+                // the virtual paragraph would open inside that list / quote
+                return None;
+            }
             return Some(plan(
                 prev.span.end..ce,
                 Selection::caret_at(markise_doc::DocPos::with_virt(prev.span.end, 1)),
             ));
         }
-        if next.is_none() {
+        if !following {
             return Some(plan(ls..ce, Selection::caret(ls)));
         }
         None

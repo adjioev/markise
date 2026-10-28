@@ -881,11 +881,12 @@ impl EditorSession {
             while q < t.len() && matches!(b[q], b'>' | b' ' | b'\t') {
                 q += 1;
             }
-            if q < t.len()
-                && !matches!(b[q], b'\n' | b'\r')
-                && let Some(n) = self.doc.leaf(q)
-                && n.span.start > leaf.span.start
-            {
+            if q < t.len() && !matches!(b[q], b'\n' | b'\r') {
+                // the first content line decides: a block that is not a text leaf found here
+                // (a list marker, a fence…) ends the search — never merge past it
+                let Some(n) = self.doc.leaf(q).filter(|n| n.span.start > leaf.span.start) else {
+                    return Some(BlockEdit::Nothing);
+                };
                 if !matches!(n.kind, LeafKind::Paragraph | LeafKind::Heading { .. })
                     || n.containers != leaf.containers
                     || in_list_item(&leaf)

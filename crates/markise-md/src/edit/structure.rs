@@ -205,8 +205,11 @@ impl Document {
     /// blocks move up). `None`: the engine's same-container merge and no-op rules apply.
     pub(crate) fn c48_delete_forward(&self, at: usize) -> Option<Result<Plan, PlanError>> {
         let text = self.text();
-        let leaf = self.leaf(at)?;
-        if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) || leaf.lines.last()?.end != at {
+        // after spaces typed at the end of a heading's text: the same rules as at the text end;
+        // the merge joins at the caret, so the spaces stay (issue #16)
+        let end = self.heading_end_before_ws(at).unwrap_or(at);
+        let leaf = self.leaf(end)?;
+        if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) || leaf.lines.last()?.end != end {
             return None;
         }
         // the next content line, after this block's own syntax (a setext underline)
