@@ -174,7 +174,9 @@ fn run(label: &str, text: String) -> Duration {
 }
 
 fn main() {
-    let path10 = format!("{}/../../benches/corpus/10mb.md", env!("CARGO_MANIFEST_DIR"));
+    // `MARKISE_BENCH_CORPUS=<file>` replaces the 10 MB corpus (e.g. a 100 MiB scaling corpus)
+    let path10 = std::env::var("MARKISE_BENCH_CORPUS")
+        .unwrap_or_else(|_| format!("{}/../../benches/corpus/10mb.md", env!("CARGO_MANIFEST_DIR")));
     let ten =
         std::fs::read_to_string(&path10).unwrap_or_else(|_| generate_profile(10 << 20, 42, Profile::Mixed, false));
     let one = generate_profile(1 << 20, 42, Profile::Mixed, false);
