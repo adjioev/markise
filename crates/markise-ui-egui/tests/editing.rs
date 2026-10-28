@@ -1172,3 +1172,82 @@ fn delete_after_heading_spaces_never_skips_a_block_issue_16() {
         assert_eq!(run_marked("hd16-next-bs", src, &[K(Key::Backspace)]), want, "{src:?}");
     }
 }
+
+#[test]
+fn joins_stop_at_the_neighbouring_block_issue_16() {
+    // Codex review round 4: line scans skipped a standalone empty quote `>` (and could skip
+    // other blocks without a text leaf), so Delete / Backspace / the empty-heading rule joined
+    // or deleted across it. Neighbours now come from the parsed block structure: a block with
+    // no text leaf at its edge stops the join, nothing past the neighbour is touched.
+    use St::*;
+    for mid in [">\n", "-\n", "- \n", "<!-- c -->\n"] {
+        // Delete at a heading end (with and without trailing spaces), Backspace at the start
+        // of the paragraph after the block: no change
+        for src in [
+            format!("# Title‸\n\n{mid}\nAfter\n"),
+            format!("# Title  ‸\n\n{mid}\nAfter\n"),
+            format!("# Title\n\n{mid}\n‸After\n"),
+        ] {
+            let k = if src.contains("‸After") {
+                Key::Backspace
+            } else {
+                Key::Delete
+            };
+            assert_eq!(run_marked("nb-join", &src, &[K(k)]), src, "{k:?} {src:?}");
+        }
+        // an empty heading next to the block: Backspace / Delete leave both alone, Enter only
+        // opens the virtual paragraph after the heading
+        let html = mid.starts_with('<');
+        for (src, enter, back, del) in [
+            (
+                format!("Before\n\n{mid}\n## ‸\n"),
+                if html {
+                    format!("Before\n\n{}‸v\n", mid.trim_end())
+                } else {
+                    format!("Before\n\n{mid}\n##‸v \n")
+                },
+                if html {
+                    format!("Before\n\n{}‸v\n", mid.trim_end())
+                } else {
+                    format!("Before\n\n{mid}\n## ‸\n")
+                },
+                if html {
+                    format!("Before\n\n{}‸v\n", mid.trim_end())
+                } else {
+                    format!("Before\n\n{mid}\n## ‸\n")
+                },
+            ),
+            (
+                format!("## ‸\n\n{mid}\nAfter\n"),
+                format!("##‸v \n\n{mid}\nAfter\n"),
+                format!("## ‸\n\n{mid}\nAfter\n"),
+                if html {
+                    format!("‸{mid}\nAfter\n")
+                } else {
+                    format!("## ‸\n\n{mid}\nAfter\n")
+                },
+            ),
+        ] {
+            assert_eq!(run_marked("nb-e", &src, &[K(Key::Enter)]), enter, "Enter {src:?}");
+            assert_eq!(
+                run_marked("nb-b", &src, &[K(Key::Backspace)]),
+                back,
+                "Backspace {src:?}"
+            );
+            assert_eq!(run_marked("nb-d", &src, &[K(Key::Delete)]), del, "Delete {src:?}");
+        }
+    }
+    // front matter before an empty heading (C43 keeps it), and before a heading's start
+    let fm = "---\ntitle: x\n---\n\n## ‸\n";
+    for k in [Key::Enter, Key::Backspace, Key::Delete] {
+        assert_eq!(run_marked("nb-fm", fm, &[K(k)]), "---\ntitle: x\n---‸v\n", "{k:?}");
+    }
+    assert_eq!(
+        run_marked(
+            "nb-fm2",
+            "---\ntitle: x\n---\n\n# ‸Title\n",
+            &[K(Key::Backspace), K(Key::Backspace)]
+        ),
+        "---\ntitle: x\n---\n\n‸Title\n"
+    );
+}

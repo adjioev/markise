@@ -225,6 +225,49 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
     fn set_hints(&mut self, hints: &HintSet) -> EditSummary;
     /// The leaf block containing (or nearest before) byte offset `at`.
     fn leaf(&self, at: usize) -> Option<LeafView>;
+    /// The block next to `leaf` in document order (after it with `forward`, else before it),
+    /// for edits that join neighbouring blocks: `None` when there is no such block,
+    /// `Some(None)` when there is one but no text-holding leaf begins (`forward`) or ends
+    /// (backward) at its edge — an empty container, a block the format does not model as a
+    /// leaf — and `Some(Some(leaf))` otherwise. A join must never reach past this neighbour.
+    /// Formats with a block tree answer from it; the default scans lines conservatively: the
+    /// first non-blank line must start (end) inside a leaf.
+    fn adjacent_leaf(&self, leaf: &LeafView, forward: bool) -> Option<Option<LeafView>> {
+        let text = self.text();
+        let b = text.as_bytes();
+        if forward {
+            let mut p = leaf.span.end;
+            while p < b.len() && !matches!(b[p], b'\n' | b'\r') {
+                p += 1;
+            }
+            // the next byte that is not whitespace or a line break
+            while p < b.len() && b[p].is_ascii_whitespace() {
+                p += 1;
+            }
+            if p >= b.len() {
+                return None;
+            }
+            Some(
+                self.leaf(p)
+                    .filter(|n| n.span.start > leaf.span.start && n.span.start <= p),
+            )
+        } else {
+            let mut p = leaf.span.start;
+            while p > 0 && !matches!(b[p - 1], b'\n' | b'\r') {
+                p -= 1;
+            }
+            while p > 0 && b[p - 1].is_ascii_whitespace() {
+                p -= 1;
+            }
+            if p == 0 {
+                return None;
+            }
+            Some(
+                self.leaf(p - 1)
+                    .filter(|n| n.span.end < leaf.span.start && n.span.end >= p),
+            )
+        }
+    }
     /// The neutral inline tree of `leaf`, offsets relative to its first content byte.
     fn inlines(&self, leaf: &LeafView) -> RichInline {
         match leaf.lines.first() {

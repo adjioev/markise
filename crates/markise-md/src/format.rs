@@ -276,6 +276,9 @@ impl FormatDoc for Document {
         let changed = r.reparsed.clone();
         summary(r, changed, 0)
     }
+    fn adjacent_leaf(&self, leaf: &LeafView, forward: bool) -> Option<Option<LeafView>> {
+        self.adjacent_leaf_tree(leaf, forward)
+    }
     fn leaf(&self, at: usize) -> Option<LeafView> {
         let path = self.block_path_at(at);
         let mut containers = Vec::new();
@@ -1516,19 +1519,12 @@ impl Document {
             return None;
         }
         let ls = line_start(text, leaf.span.start);
-        let (ce, next_ls) = line_end(text, ls);
-        // the next content (any block: also one whose first byte is in no leaf, a list)
-        let b = text.as_bytes();
-        let q = next_ls
-            + b[next_ls..]
-                .iter()
-                .take_while(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
-                .count();
-        let following = q < text.len();
-        let next = following
-            .then(|| self.leaf(q))
-            .flatten()
-            .filter(|n| n.span.start > leaf.span.start);
+        let (ce, _) = line_end(text, ls);
+        // the neighbours from the parsed structure (`Some(None)`: a block without a text leaf
+        // at that edge, e.g. an empty quote — nothing is joined across it)
+        let next = self.adjacent_leaf_tree(&leaf, true);
+        let following = next.is_some();
+        let next = next.flatten();
         let plan = |range: std::ops::Range<usize>, sel: Selection| {
             Ok(Plan::single(
                 PlanStep::patches(PatchSet::single_verbatim(range, "")),
@@ -1542,13 +1538,17 @@ impl Document {
             let into = n.lines.first().map_or(n.span.start, |l| l.start).max(nls) - nls;
             return Some(plan(ls..nls, Selection::caret(ls + into)));
         }
-        if let Some(prev) = self.leaf_before(ls)
-            && line_start(text, prev.span.end) < ls
-        {
-            if !prev.containers.is_empty() {
+        match self.adjacent_leaf_tree(&leaf, false) {
+            Some(None) => return None,
+            Some(Some(prev)) if !prev.containers.is_empty() => {
                 // the virtual paragraph would open inside that list / quote
                 return None;
             }
+            _ => {}
+        }
+        if let Some(Some(prev)) = self.adjacent_leaf_tree(&leaf, false)
+            && line_start(text, prev.span.end) < ls
+        {
             return Some(plan(
                 prev.span.end..ce,
                 Selection::caret_at(markise_doc::DocPos::with_virt(prev.span.end, 1)),
@@ -1558,6 +1558,62 @@ impl Document {
             return Some(plan(ls..ce, Selection::caret(ls)));
         }
         None
+    }
+
+    /// [`FormatDoc::adjacent_leaf`] from the block tree: the sibling after (before) `leaf`,
+    /// climbing out of containers where `leaf` is their last (first) block, then into the
+    /// sibling's first (last) block while it is a container. A container without blocks (an
+    /// empty quote `>`, an empty list item) stops the walk with `Some(None)`.
+    pub(crate) fn adjacent_leaf_tree(&self, leaf: &LeafView, forward: bool) -> Option<Option<LeafView>> {
+        let mut path = self.block_path_at(leaf.span.start);
+        // the path down to the leaf itself
+        while let Some((b, o)) = self.block_at_path_rel(&path) {
+            if b.span.start + o == leaf.span.start && !b.is_container() {
+                break;
+            }
+            path.pop();
+        }
+        if path.is_empty() {
+            return None;
+        }
+        // the nearest level with a sibling in that direction
+        let mut sib = loop {
+            let last = *path.last()?;
+            let i = if forward {
+                last + 1
+            } else {
+                match last.checked_sub(1) {
+                    Some(i) => i,
+                    None => {
+                        path.pop();
+                        if path.is_empty() {
+                            return None;
+                        }
+                        continue;
+                    }
+                }
+            };
+            let mut cand = path.clone();
+            *cand.last_mut()? = i;
+            if self.block_at_path_rel(&cand).is_some() {
+                break cand;
+            }
+            path.pop();
+            if path.is_empty() {
+                return None;
+            }
+        };
+        // down to the leaf at its edge
+        loop {
+            let (b, o) = self.block_at_path_rel(&sib)?;
+            if !b.is_container() {
+                return Some(self.leaf(b.span.start + o).filter(|l| l.span.start == b.span.start + o));
+            }
+            if b.children.is_empty() {
+                return Some(None);
+            }
+            sib.push(if forward { 0 } else { b.children.len() - 1 });
+        }
     }
 
     pub(crate) fn heading_end_before_ws(&self, at: usize) -> Option<usize> {

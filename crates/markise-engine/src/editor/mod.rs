@@ -825,7 +825,7 @@ impl EditorSession {
             }
         }
         // rule 5: merge with the previous paragraph/heading
-        let Some(prev) = leaf_before(self.doc.as_ref(), leaf.span.start) else {
+        let Some(Some(prev)) = self.doc.adjacent_leaf(&leaf, false) else {
             return Some(BlockEdit::Nothing);
         };
         if prev.span.start >= leaf.span.start
@@ -871,34 +871,19 @@ impl EditorSession {
         if !text_like {
             return Some(BlockEdit::Nothing);
         }
-        // C48: merge the next paragraph/heading's text
+        // C48: merge the next paragraph/heading's text — the next block as the format's
+        // structure gives it, never one past it (an empty quote, a list…: nothing)
         let t = self.doc.text();
-        let mut probe = leaf.span.end + 1;
-        while probe < t.len() {
-            // look past container prefixes (`> `, list indentation) to the line's content
-            let b = t.as_bytes();
-            let mut q = probe;
-            while q < t.len() && matches!(b[q], b'>' | b' ' | b'\t') {
-                q += 1;
+        match self.doc.adjacent_leaf(&leaf, true) {
+            Some(Some(n))
+                if matches!(n.kind, LeafKind::Paragraph | LeafKind::Heading { .. })
+                    && n.containers == leaf.containers
+                    && !in_list_item(&leaf) =>
+            {
+                merge_blocks(t, &leaf, &n, keep)
             }
-            if q < t.len() && !matches!(b[q], b'\n' | b'\r') {
-                // the first content line decides: a block that is not a text leaf found here
-                // (a list marker, a fence…) ends the search — never merge past it
-                let Some(n) = self.doc.leaf(q).filter(|n| n.span.start > leaf.span.start) else {
-                    return Some(BlockEdit::Nothing);
-                };
-                if !matches!(n.kind, LeafKind::Paragraph | LeafKind::Heading { .. })
-                    || n.containers != leaf.containers
-                    || in_list_item(&leaf)
-                {
-                    return Some(BlockEdit::Nothing);
-                }
-                return merge_blocks(t, &leaf, &n, keep);
-            }
-            // skip blank lines / prefixes up to the next leaf
-            probe = t[probe..].find('\n').map_or(t.len(), |k| probe + k + 1);
+            _ => Some(BlockEdit::Nothing),
         }
-        Some(BlockEdit::Nothing)
     }
 
     /// One keystroke step. `leaf_start` is the leaf at the edit position before the keystroke;
@@ -1465,19 +1450,6 @@ fn merge_blocks(
         label: "Merge Paragraphs",
         caret: join,
     })
-}
-
-/// The leaf ending before `at` (skipping blank lines and quote prefixes).
-fn leaf_before(doc: &dyn FormatDoc, at: usize) -> Option<markise_doc::LeafView> {
-    let b = doc.text().as_bytes();
-    let mut q = at.min(b.len());
-    while q > 0 && matches!(b[q - 1], b' ' | b'\t' | b'\n' | b'\r' | b'>') {
-        q -= 1;
-    }
-    if q == 0 {
-        return None;
-    }
-    doc.leaf(q - 1).filter(|l| l.span.start < at)
 }
 
 /// Merging across list items dissolves an item (spec 02 §5.2 rule 3, S-5.4): M2c. Until then
