@@ -1035,6 +1035,17 @@ impl MarkiseApp {
         self.toolbar_position() == markise_engine::settings::ToolbarPosition::Bottom
     }
 
+    /// Whether the sidebar shows its Recent section (View → Show Recent Files, persisted as
+    /// `sidebar.showRecent`; issue #57).
+    pub fn show_recent(&self) -> bool {
+        self.themes.show_recent()
+    }
+
+    /// View → Show Recent Files, and Hide Recent in the section's context menu.
+    pub fn set_show_recent(&mut self, on: bool) {
+        self.themes.set_show_recent(on);
+    }
+
     /// View → Toolbar.
     pub fn set_show_toolbar(&mut self, on: bool) {
         self.themes.set_show_toolbar(on);
@@ -2339,12 +2350,14 @@ impl MarkiseApp {
                     Tab::Files => {
                         let current = self.document_path().map(Path::to_path_buf);
                         let mut actions = Vec::new();
-                        actions.extend(crate::sidebar::recent_section(
-                            ui,
-                            &mut self.side,
-                            current.as_deref(),
-                            &look,
-                        ));
+                        if self.themes.show_recent() {
+                            let (open, hide) =
+                                crate::sidebar::recent_section(ui, &mut self.side, current.as_deref(), &look);
+                            actions.extend(open);
+                            if hide {
+                                self.themes.set_show_recent(false);
+                            }
+                        }
                         if let (Some(tree), Some(wake)) = (self.tree.as_mut(), self.wake.as_ref()) {
                             actions.extend(tree.show(ui, current.as_deref(), wake, &look, self.files.rename.as_mut()));
                         } else {

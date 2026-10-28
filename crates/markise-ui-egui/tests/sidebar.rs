@@ -9,8 +9,9 @@ use egui::Key;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use markise_theme::Overrides;
+use markise_ui_egui::menu::{Check, MenuAction};
 use markise_ui_egui::sidebar::TreeAction;
-use markise_ui_egui::{AppOptions, Appearance, MarkiseApp};
+use markise_ui_egui::{AppOptions, Appearance, ConfigDir, MarkiseApp};
 
 type H = Harness<'static, MarkiseApp>;
 
@@ -22,8 +23,13 @@ fn tmpdir(name: &str) -> PathBuf {
 }
 
 fn harness(open: Vec<PathBuf>) -> H {
+    harness_cfg(open, ConfigDir::default())
+}
+
+fn harness_cfg(open: Vec<PathBuf>, config: ConfigDir) -> H {
     let app = MarkiseApp::new(AppOptions {
         open,
+        config,
         ..Default::default()
     });
     Harness::builder()
@@ -227,5 +233,57 @@ fn folder_section_collapses_and_the_activity_bar_switches_views() {
     h.get_by_label("Files").click();
     h.run_steps(2);
     assert!(h.query_by_label("a.md").is_some());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Issue #57 follow-up: the Recent section can be hidden (Hide Recent in its context menu,
+/// View → Show Recent Files); hidden means not drawn, and the choice is persisted as
+/// `sidebar.showRecent`.
+#[test]
+fn recent_section_can_be_hidden_and_the_choice_is_persisted() {
+    let d = tmpdir("hide-recent");
+    let notes = d.join("notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    let f = notes.join("log.md");
+    std::fs::write(&f, "# Log\n").unwrap();
+    let cfg = d.join("config");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let settings = cfg.join("markise").join("settings.json");
+    let loaded =
+        |s: &MarkiseApp| s.model().is_some() && !s.is_busy() && s.file_tree_rows().contains(&"log.md".to_string());
+    {
+        let mut h = harness_cfg(vec![f.clone()], ConfigDir::Dir(cfg.clone()));
+        h.step();
+        h.state_mut().show_files_tab(true);
+        wait_until(&mut h, "load", loaded);
+        assert!(h.state().show_recent(), "on by default");
+        let folder_y = h.get_by_label("notes").rect().top();
+        h.get_by_label("Recent").click_secondary();
+        h.run_steps(2);
+        h.get_by_label("Hide Recent").click();
+        h.run_steps(3);
+        assert!(!h.state().show_recent());
+        assert!(h.query_by_label("Recent").is_none(), "not drawn at all");
+        assert!(h.get_by_label("notes").rect().top() < folder_y, "the tree moves up");
+        assert_eq!(
+            h.state().menu_model().item("view.showRecent").unwrap().check,
+            Check::Toggle(false)
+        );
+        wait_until(&mut h, "settings written", |_| {
+            std::fs::read_to_string(&settings).is_ok_and(|s| s.contains("\"sidebar.showRecent\": false"))
+        });
+    }
+    // the next start keeps it hidden; View → Show Recent Files brings it back
+    let mut h = harness_cfg(vec![f], ConfigDir::Dir(cfg));
+    h.step();
+    h.state_mut().show_files_tab(true);
+    wait_until(&mut h, "load", loaded);
+    wait_until(&mut h, "settings applied", |a| !a.show_recent());
+    assert!(h.query_by_label("Recent").is_none());
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("view.showRecent")));
+    h.run_steps(3);
+    assert!(h.state().show_recent());
+    assert!(h.query_by_label("Recent").is_some());
     let _ = std::fs::remove_dir_all(&d);
 }

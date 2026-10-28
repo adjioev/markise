@@ -374,6 +374,7 @@ impl MarkiseApp {
                     true,
                     Check::None,
                 ),
+                self.app_item("view.showRecent", true, Check::Toggle(self.show_recent())),
                 self.app_item("view.toolbar", true, Check::Toggle(self.show_toolbar())),
                 Entry::Submenu(Menu::new("Toolbar Position", {
                     let bottom = self.toolbar_position() == ToolbarPosition::Bottom;
@@ -601,6 +602,7 @@ impl MarkiseApp {
             "view.rendered" if self.doc.is_some() => self.set_view_mode(ViewMode::Rendered),
             "view.toggleSidebar" => self.sidebar_visible = !self.sidebar_visible,
             "view.toolbar" => self.set_show_toolbar(!self.show_toolbar()),
+            "view.showRecent" => self.set_show_recent(!self.show_recent()),
             "view.toolbarTop" => self.set_toolbar_position(ToolbarPosition::Top),
             "view.toolbarBottom" => self.set_toolbar_position(ToolbarPosition::Bottom),
             "view.highlightCode" => self.set_highlight_code(!self.highlight_code),

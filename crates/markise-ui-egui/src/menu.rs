@@ -307,6 +307,7 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("view.rendered", "Rendered", &[]),
     // spec 04 §3.3: ⌃⌘/ on macOS, Ctrl+Alt+/ elsewhere (Ctrl+/ is Source Code Mode)
     app("view.sideBySide", "Side by Side", &[both("Ctrl+Cmd+/", "Ctrl+Alt+/")]),
+    app("view.showRecent", "Show Recent Files", &[]),
     app("view.toolbar", "Toolbar", &[]),
     // View → Toolbar Position (spec 04 §3.2); the menu shows them as "Top" / "Bottom"
     app("view.toolbarTop", "Toolbar at Top", &[]),

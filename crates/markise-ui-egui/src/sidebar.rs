@@ -878,14 +878,14 @@ impl SideLook {
         let b = (self.row_h - 4.0).round();
         let gap = 2.0;
         let mut right = rect.right();
-        let mut done = Section::default();
+        let mut collapse_all = false;
         if let Some(root) = root {
             let mut button = |ui: &mut Ui, label: &str, glyph: Glyph| {
                 let r = egui::Rect::from_center_size(egui::pos2(right - b * 0.5, rect.center().y), egui::vec2(b, b));
                 right -= b + gap;
                 self.icon_button(ui, r, label, glyph)
             };
-            done.collapse_all = button(ui, "Collapse All", Glyph::CollapseAll);
+            collapse_all = button(ui, "Collapse All", Glyph::CollapseAll);
             if button(ui, "New Folder", Glyph::NewFolder) {
                 *out = Some(TreeAction::NewFolder(root.to_path_buf()));
             }
@@ -934,11 +934,15 @@ impl SideLook {
         let pos = egui::pos2(x, head.center().y - galley.size().y * 0.5);
         ui.painter_at(head).galley(pos, galley, color);
         let resp = if cut { resp.on_hover_text(title) } else { resp };
-        done.toggled = resp.clicked();
+        let toggled = resp.clicked();
         if let Some(root) = root {
             resp.context_menu(|ui| row_menu(ui, root, true, true, out));
         }
-        done
+        Section {
+            toggled,
+            collapse_all,
+            response: resp,
+        }
     }
 
     /// A square icon button with a hover background and a tooltip; returns whether it was
@@ -1007,11 +1011,11 @@ fn paint_glyph(p: &egui::Painter, r: egui::Rect, glyph: Glyph, color: Color32) {
     }
 }
 
-/// What a click on a section header did.
-#[derive(Clone, Copy, Debug, Default)]
+/// What a click on a section header did, and the header's response (context menus).
 struct Section {
     toggled: bool,
     collapse_all: bool,
+    response: egui::Response,
 }
 
 /// Sidebar state the application keeps besides the tree: the files opened in this session
@@ -1051,18 +1055,29 @@ impl SideState {
 }
 
 /// The Recent section above the tree (nothing while no file was opened): a collapsible
-/// header and one row per file, the current one marked. Returns the file clicked.
-pub fn recent_section(ui: &mut Ui, st: &mut SideState, current: Option<&Path>, look: &SideLook) -> Option<TreeAction> {
+/// header (its context menu: Hide Recent) and one row per file, the current one marked.
+/// Returns the file clicked and whether Hide Recent was chosen.
+pub fn recent_section(
+    ui: &mut Ui,
+    st: &mut SideState,
+    current: Option<&Path>,
+    look: &SideLook,
+) -> (Option<TreeAction>, bool) {
     if st.recent.is_empty() {
-        return None;
+        return (None, false);
     }
     let mut none = None;
-    if look
-        .section(ui, "Recent", !st.recent_collapsed, None, &mut none)
-        .toggled
-    {
+    let head = look.section(ui, "Recent", !st.recent_collapsed, None, &mut none);
+    if head.toggled {
         st.recent_collapsed = !st.recent_collapsed;
     }
+    let mut hide = false;
+    head.response.context_menu(|ui| {
+        if ui.button("Hide Recent").clicked() {
+            hide = true;
+            ui.close();
+        }
+    });
     let mut out = None;
     if !st.recent_collapsed {
         ui.scope(|ui| {
@@ -1086,7 +1101,7 @@ pub fn recent_section(ui: &mut Ui, st: &mut SideState, current: Option<&Path>, l
         });
     }
     ui.add_space(4.0);
-    out
+    (out, hide)
 }
 
 /// Width of the activity bar at the sidebar's left edge.
@@ -1214,10 +1229,11 @@ fn paint_bar_glyph(p: &egui::Painter, r: egui::Rect, glyph: BarGlyph, color: Col
             line(vec![pt(12.6, 12.6), pt(17.0, 17.0)]);
         }
         BarGlyph::Outline => {
-            // a heading mark: "H"
-            line(vec![pt(5.0, 3.5), pt(5.0, 16.5)]);
-            line(vec![pt(14.0, 3.5), pt(14.0, 16.5)]);
-            line(vec![pt(5.0, 10.0), pt(14.0, 10.0)]);
+            // a heading tree: short lines with stepped indentation, a dot at each start
+            for (x, y, end) in [(2.0, 3.5, 18.0), (6.0, 10.0, 18.0), (10.0, 16.5, 18.0)] {
+                p.circle_filled(pt(x, y), 1.3, color);
+                line(vec![pt(x + 3.0, y), pt(end, y)]);
+            }
         }
     }
 }
