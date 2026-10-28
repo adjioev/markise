@@ -277,6 +277,19 @@ fn scanner_reads_obsidian_settings() {
     sc.changed(root.join(".obsidian"));
     let s = sc.recv_timeout(t).unwrap().settings().clone();
     assert!(s.obsidian && !s.wikilinks);
+    // unchanged settings (Obsidian rewriting app.json or its other files): no new snapshot
+    std::fs::write(root.join(".obsidian/app.json"), r#"{"useMarkdownLinks":true}"#).unwrap();
+    std::fs::write(root.join(".obsidian/workspace.json"), "{}").unwrap();
+    sc.changed(root.join(".obsidian"));
+    sc.changed(root.join(".obsidian/workspace.json"));
+    assert!(
+        sc.recv_timeout(std::time::Duration::from_millis(500)).is_none(),
+        "no snapshot"
+    );
+    // a real change does publish
+    std::fs::write(root.join(".obsidian/app.json"), r#"{"useMarkdownLinks":false}"#).unwrap();
+    sc.changed(root.join(".obsidian"));
+    assert!(sc.recv_timeout(t).unwrap().settings().wikilinks);
     assert!(!root.join(".markise").exists());
 }
 
@@ -455,4 +468,69 @@ fn generated_links_round_trip() {
         ix.link_for(topic, Some("A/Here.md"), true),
         "[Topic\\]](../Topic%5D.md)"
     );
+}
+
+/// Review round 3: a racing process swapping a folder of the note's path for a symbolic link
+/// to the outside never gets a file written outside the vault. Iterations: 1000 by default,
+/// `MARKISE_STRESS_N` for longer runs.
+#[cfg(unix)]
+#[test]
+fn creation_races_with_symlink_swaps_never_write_outside() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let n: usize = std::env::var("MARKISE_STRESS_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    let outer = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(outer.path()).unwrap();
+    let root = base.join("vault");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, a, real, outside) = (stop.clone(), root.join("A"), root.join("A-real"), outside.clone());
+        std::thread::spawn(move || {
+            std::fs::create_dir_all(&real).unwrap();
+            while !stop.load(Ordering::Relaxed) {
+                // a real folder …
+                let _ = std::fs::rename(&real, &a);
+                // … replaced by a link to the outside
+                let _ = std::fs::rename(&a, &real);
+                let _ = std::os::unix::fs::symlink(&outside, &a);
+                let _ = std::fs::remove_file(&a);
+            }
+        })
+    };
+    let mut created = 0;
+    for i in 0..n {
+        if create_note(&root, &format!("A/note {i}.md")).is_ok() {
+            created += 1;
+        }
+        if create_note(&root, &format!("A/sub/deep {i}.md")).is_ok() {
+            created += 1;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    let leaked: Vec<_> = walk_files(&outside);
+    assert!(
+        leaked.is_empty(),
+        "{} files outside after {created} creations: {leaked:?}",
+        leaked.len()
+    );
+}
+
+#[cfg(unix)]
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk_files(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
 }

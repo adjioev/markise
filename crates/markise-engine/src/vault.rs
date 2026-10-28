@@ -765,72 +765,88 @@ pub fn check_new_note(rel: &str) -> Result<(), String> {
 }
 
 /// Creates the empty note `rel` under `root` (file I/O: worker threads only) and returns its
-/// path; an existing file is returned as is. Missing folders are created one at a time; no
-/// existing component may be a symbolic link and every existing folder must resolve inside the
-/// vault, so a link cannot write outside it or into a protected folder (Q-V1).
+/// path; an existing file is returned as is. Every step is done relative to an open handle of
+/// the parent folder (`cap-std`): folders are created and entered without following symbolic
+/// links, and the file is created exclusively without following one, so a link swapped in by
+/// another process at any moment cannot redirect the write outside the vault or into a
+/// protected folder (Q-V1). Existing folders keep their disk spelling (NFD stays NFD).
 pub fn create_note(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
     check_new_note(rel)?;
     let canon_root = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
-    // an existing component: a real folder / file (never a symbolic link) inside the vault;
-    // checked after every step, also when another process created it meanwhile (a race)
-    let check = |p: &Path, seg: &str, dir: bool| -> Result<PathBuf, String> {
-        let m = std::fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
-        if m.file_type().is_symlink() {
-            return Err(format!(
-                "“{seg}” is a symbolic link; notes are not created through links."
-            ));
-        }
-        if dir && !m.is_dir() {
-            return Err(format!("“{seg}” is not a folder."));
-        }
-        if !dir && !m.is_file() {
-            return Err(format!("“{seg}” exists and is not a file."));
-        }
-        let c = std::fs::canonicalize(p).map_err(|e| e.to_string())?;
-        if !c.starts_with(&canon_root) {
-            return Err("The path leaves the folder.".into());
-        }
-        Ok(c)
-    };
+    let mut dir = cap_std::fs::Dir::open_ambient_dir(&canon_root, cap_std::ambient_authority())
+        .map_err(|e| format!("{}: {e}", canon_root.display()))?;
     let segs: Vec<&str> = rel.split('/').collect();
     let (last, folders) = segs.split_last().ok_or("The name is empty.")?;
-    let mut cur = canon_root.clone();
+    let mut path = canon_root;
+    let refuse = |seg: &str, e: std::io::Error| -> String {
+        match dir_is_link(&e) {
+            true => format!("“{seg}” is a symbolic link; notes are not created through links."),
+            false => format!("“{seg}”: {e}"),
+        }
+    };
     for seg in folders {
-        let seg = &disk_name(&cur, seg);
-        let next = cur.join(seg);
-        match std::fs::create_dir(&next) {
+        let seg = disk_name(&dir, seg);
+        match dir.create_dir(&seg) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(format!("{}: {e}", next.display())),
+            Err(e) => return Err(format!("“{seg}”: {e}")),
         }
-        cur = check(&next, seg, true)?;
+        dir = dir.open_dir_nofollow(&seg).map_err(|e| refuse(&seg, e))?;
+        path.push(&seg);
     }
-    let last = &disk_name(&cur, last);
-    let file = cur.join(last);
-    // `create_new` (O_CREAT | O_EXCL) never follows a symbolic link at the final component
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&file) {
+    let last = disk_name(&dir, last);
+    let mut opts = cap_std::fs::OpenOptions::new();
+    opts.write(true).create_new(true).follow(FollowSymlinks::No);
+    match dir.open_with(&last, &opts) {
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(format!("{}: {e}", file.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let m = dir.symlink_metadata(&last).map_err(|e| format!("“{last}”: {e}"))?;
+            if m.file_type().is_symlink() {
+                return Err(format!(
+                    "“{last}” is a symbolic link; notes are not created through links."
+                ));
+            }
+            if !m.is_file() {
+                return Err(format!("“{last}” exists and is not a file."));
+            }
+        }
+        Err(e) => return Err(refuse(&last, e)),
     }
-    check(&file, last, false)?;
-    Ok(file)
+    path.push(&last);
+    Ok(path)
+}
+
+/// Whether an error from a no-follow open means "this is a symbolic link" (`ELOOP` on Unix,
+/// cap-std's own sandbox errors elsewhere).
+fn dir_is_link(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(libc::ELOOP) || e.raw_os_error() == Some(libc::ENOTDIR) {
+        return true;
+    }
+    e.kind() == std::io::ErrorKind::PermissionDenied || e.to_string().contains("symlink")
 }
 
 /// The spelling of `seg` in `dir` on disk: an existing entry whose name has the same NFC form
 /// (an NFD folder stays NFD), else `seg` itself.
-fn disk_name(dir: &Path, seg: &str) -> String {
-    if std::fs::symlink_metadata(dir.join(seg)).is_ok() {
-        return seg.to_string();
-    }
+fn disk_name(dir: &cap_std::fs::Dir, seg: &str) -> String {
+    // listed, not probed: a normalisation-insensitive file system answers a probe for the
+    // NFC spelling of an NFD entry, but only the listing has the disk spelling
     let want = nfc(seg);
-    std::fs::read_dir(dir)
-        .ok()
-        .and_then(|rd| {
+    let names: Vec<String> = dir
+        .entries()
+        .map(|rd| {
             rd.flatten()
                 .map(|e| e.file_name().to_string_lossy().into_owned())
-                .find(|n| nfc(n) == want)
+                .collect()
         })
+        .unwrap_or_default();
+    if names.iter().any(|n| n == seg) {
+        return seg.to_string();
+    }
+    names
+        .into_iter()
+        .find(|n| nfc(n) == want)
         .unwrap_or_else(|| seg.to_string())
 }
 
@@ -893,6 +909,8 @@ struct ScanState {
     dirs: BTreeSet<String>,
     generation: u64,
     settings: VaultSettings,
+    /// Something a snapshot shows changed since the last one.
+    dirty: bool,
 }
 
 impl ScanState {
@@ -950,6 +968,7 @@ impl ScanState {
     }
 
     fn mount(&mut self, root: PathBuf) {
+        self.dirty = true;
         self.settings = VaultSettings::read(&root);
         self.root = root;
         self.files.clear();
@@ -971,13 +990,19 @@ impl ScanState {
         if !dir.is_empty() && self.files.contains(&dir) {
             dir = folder_of(&dir).to_string();
         }
-        // Obsidian's settings changed (or the config folder appeared / went away)
+        // Obsidian's settings may have changed (or the config folder appeared / went away);
+        // a snapshot is published only when they did
         if dir.is_empty() || dir == ".obsidian" || dir.starts_with(".obsidian/") {
-            self.settings = VaultSettings::read(&self.root);
+            let s = VaultSettings::read(&self.root);
+            if s != self.settings {
+                self.settings = s;
+                self.dirty = true;
+            }
         }
         if dir.split('/').any(|s| s.starts_with('.')) {
             return;
         }
+        self.dirty = true;
         let Some((files, dirs)) = self.list(&dir) else {
             // gone: drop it and everything below
             if dir.is_empty() {
@@ -1040,6 +1065,7 @@ impl VaultScanner {
                     dirs: BTreeSet::new(),
                     generation: 0,
                     settings: VaultSettings::plain(),
+                    dirty: false,
                 };
                 while let Ok(first) = cmd_rx.recv() {
                     // coalesce a burst into one snapshot
@@ -1066,7 +1092,9 @@ impl VaultScanner {
                             _ => {}
                         }
                     }
-                    if !mounted {
+                    // nothing visible changed (e.g. Obsidian rewrote app.json unchanged): no new
+                    // snapshot, so layouts and autocomplete keep their state
+                    if !mounted || !std::mem::take(&mut st.dirty) {
                         continue;
                     }
                     if res_tx.send(st.snapshot()).is_err() {

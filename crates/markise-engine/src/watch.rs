@@ -27,8 +27,8 @@ pub enum WatchEvent {
     FileRemoved(PathBuf),
     /// Something changed in this directory of the mounted folder.
     DirChanged(PathBuf),
-    /// A file of the mounted folder's Obsidian configuration (`.obsidian/`, e.g. `app.json`)
-    /// changed, also in place (spec 06 §14, E17); carries the mounted folder.
+    /// The mounted folder's `.obsidian/app.json` (or the `.obsidian/` folder itself) changed,
+    /// also in place (spec 06 §14, E17); carries the mounted folder.
     VaultConfigChanged(PathBuf),
     /// A file in the user theme folder changed (live theme reload, ADR 0004). After the theme
     /// folder's watch (re)started, the folder itself is reported: anything beneath it may have
@@ -300,8 +300,13 @@ impl FileWatcher {
                     };
                     sent |= tx.send(e).is_ok();
                 }
-                // content edits included (DirChanged covers names only)
-                if let Some(root) = folder.as_ref().filter(|root| p.starts_with(root.join(".obsidian"))) {
+                // `.obsidian/app.json` (the only config file spec 06 §14 reads), content edits
+                // included — DirChanged covers names only; Obsidian's constant workspace and
+                // plugin writes are not reported
+                if let Some(root) = folder
+                    .as_ref()
+                    .filter(|root| *p == root.join(".obsidian").join("app.json") || *p == root.join(".obsidian"))
+                {
                     sent |= tx.send(WatchEvent::VaultConfigChanged(root.clone())).is_ok();
                 }
                 if folder.as_ref().is_some_and(|root| p.starts_with(root))
@@ -724,6 +729,15 @@ mod tests {
         w.watch_folder(&root);
         w.sync().unwrap();
         assert!(wait_event(&w, &WatchEvent::FolderWatched(root.clone())));
+        // Obsidian's own state files are not settings: not reported
+        std::fs::write(root.join(".obsidian/workspace.json"), "{\"x\": 1}").unwrap();
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(1500) {
+            while let Some(e) = w.try_recv() {
+                assert_ne!(e, WatchEvent::VaultConfigChanged(root.clone()), "workspace.json");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         {
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new()

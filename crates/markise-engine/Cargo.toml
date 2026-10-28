@@ -24,6 +24,8 @@ markise-export.workspace = true
 markise-pdf.workspace = true
 markise-text.workspace = true
 markise-theme.workspace = true
+cap-std.workspace = true
+cap-fs-ext.workspace = true
 
 # atomic no-replace rename (src/fsops.rs)
 [target.'cfg(unix)'.dependencies]
