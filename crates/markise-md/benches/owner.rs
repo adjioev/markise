@@ -1,7 +1,9 @@
 //! Block-ownership query (ADR 0011) on 1 MB / 10 MB documents: `block_owner`,
 //! `block_owner_biased` and `adjacent_block` at offsets spread over the whole document. The
 //! query is a binary search over the top-level blocks and each level's children, so its cost
-//! must not grow with the document (NFR-4: never scan the whole document per keystroke).
+//! must not grow with the document (NFR-4: never scan the whole document per keystroke) — nor
+//! with the size of the owning block: a 10 MB paragraph and a 100k-line code fence are single
+//! leaves, and a query only binary-searches their lines (no copy).
 
 use std::hint::black_box;
 use std::time::Duration;
@@ -25,8 +27,31 @@ fn offsets(len: usize) -> Vec<usize> {
 fn bench_owner(c: &mut Criterion) {
     let mut g = c.benchmark_group("owner");
     g.sample_size(30).measurement_time(Duration::from_secs(4));
-    for (name, size) in [("1mb", 1usize << 20), ("10mb", 10 << 20)] {
-        let text = generate_profile(size, 42, Profile::Mixed, false);
+    // one huge block: a 10 MB paragraph of soft-broken lines, a 100k-line code fence
+    let para: String = {
+        let mut s = String::with_capacity(10 << 20);
+        let mut i = 0usize;
+        while s.len() < 10 << 20 {
+            s.push_str(&format!("line {i} of one long paragraph with soft breaks\n"));
+            i += 1;
+        }
+        s
+    };
+    let fence: String = {
+        let mut s = String::from("```rust\n");
+        for i in 0..100_000 {
+            s.push_str(&format!("let x{i} = {i};\n"));
+        }
+        s.push_str("```\n");
+        s
+    };
+    let docs = [
+        ("1mb", generate_profile(1 << 20, 42, Profile::Mixed, false)),
+        ("10mb", generate_profile(10 << 20, 42, Profile::Mixed, false)),
+        ("10mb-paragraph", para),
+        ("100k-line-fence", fence),
+    ];
+    for (name, text) in docs {
         let doc = Document::parse(text.as_str(), ParseOptions::default());
         let offs: Vec<usize> = offsets(text.len())
             .into_iter()

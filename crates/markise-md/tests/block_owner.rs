@@ -273,7 +273,19 @@ fn consistent_with_leaf_on_a_mixed_document() {
     for at in 0..=src.len() {
         if let Some(l) = d.leaf(at) {
             let o = d.block_owner(at).expect("owned");
-            assert_eq!(o.leaf, l, "at {at}");
+            assert_eq!(o.leaf, markise_doc::BlockLeaf::from(&l), "at {at}");
+            let line = l
+                .lines
+                .iter()
+                .rev()
+                .find(|x| x.start <= at)
+                .or(l.lines.first())
+                .copied();
+            assert_eq!(
+                Some(o.line),
+                line.or(Some(markise_doc::Span::new(l.span.start, l.span.start))),
+                "line at {at}"
+            );
         }
         if let Some(o) = d.block_owner(at) {
             let (lo, hi) = (o.leaf.span.start.min(at), o.leaf.span.end.max(at));

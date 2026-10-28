@@ -287,6 +287,9 @@ impl FormatDoc for Document {
     fn block_owner(&self, at: usize) -> Option<markise_doc::BlockOwner> {
         self.owner_from_tree(at)
     }
+    fn block_owner_biased(&self, at: usize, bias: markise_doc::Affinity) -> Option<markise_doc::BlockOwner> {
+        self.owner_biased_from_tree(at, bias)
+    }
     fn adjacent_block(&self, at: usize, forward: bool) -> Option<markise_doc::Adjacent> {
         self.adjacent_from_tree(at, forward)
     }
@@ -1239,7 +1242,7 @@ impl Document {
                     ))),
                 ));
             }
-            if before.is_none() {
+            let Some(before) = before else {
                 // nothing before it: the line is emptied in place
                 return Ok(Plan::single(
                     PlanStep {
@@ -1248,10 +1251,17 @@ impl Document {
                     },
                     Some(Selection::caret(from)),
                 ));
-            }
-            // a block without text before it (an empty quote): nothing to anchor the empty
-            // paragraph to — the line becomes the empty heading it shows, like a typed one
-            // (below), and the caret goes to the virtual paragraph after it
+            };
+            // a block without text before it (an empty quote): it stays; the empty paragraph
+            // is the virtual one right after it, in place of the line
+            let end = before.block.end.min(ls);
+            return Ok(Plan::single(
+                PlanStep {
+                    patches: PatchSet::single_verbatim(end..ce, ""),
+                    hints_after: Some(hints),
+                },
+                Some(Selection::caret_at(markise_doc::DocPos::with_virt(end, 1))),
+            ));
         }
         // heading, rule, `[toc]`, definitions, HTML: the block is created by dropping the hint;
         // the caret goes to the (virtual) paragraph after it — leaving a footnote definition
@@ -1627,8 +1637,8 @@ impl Document {
                 None => String::new(),
             }
         } else {
-            match self.block_owner_biased(gap, markise_doc::Affinity::Upstream) {
-                Some(o) => self.line_prefix(&o.leaf, gap),
+            match self.owner_leaf_view(gap, markise_doc::Affinity::Upstream) {
+                Some(l) => self.line_prefix(&l, gap),
                 None => String::new(),
             }
         };

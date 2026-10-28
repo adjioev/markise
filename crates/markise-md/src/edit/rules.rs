@@ -417,10 +417,7 @@ impl Document {
     /// stays paragraph text as typed (escaped when the caret leaves).
     fn soft_line_hint(&self, tp: &mut TypingPlan, r: std::ops::Range<usize>, typed: &str) {
         let text = self.text();
-        let Some(leaf) = self
-            .block_owner_biased(r.start, markise_doc::Affinity::Upstream)
-            .map(|o| o.leaf)
-        else {
+        let Some(leaf) = self.owner_leaf_view(r.start, markise_doc::Affinity::Upstream) else {
             return;
         };
         if leaf.kind != LeafKind::Paragraph {

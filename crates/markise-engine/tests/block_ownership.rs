@@ -27,7 +27,13 @@ fn hinted_empty_heading_enter_keeps_an_empty_quote_before_it() {
     script(
         "Before\n\n>\n\n‸y",
         &["type:## ", "edit.deleteForward", "edit.newline", "type:x"],
-        "Before\n\n>\n\n## \n\nx‸",
+        "Before\n\n>\n\nx‸",
+    );
+    // C43 in place: the markers go, the empty paragraph is the virtual one after the quote
+    script(
+        "Before\n\n>\n\n‸y",
+        &["type:## ", "edit.deleteForward", "edit.newline"],
+        "Before\n\n>(v)‸",
     );
 }
 

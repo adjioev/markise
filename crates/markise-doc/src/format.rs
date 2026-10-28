@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::command::{CommandDescriptor, PlannerId};
 use crate::hints::{HintSet, LiteralHint};
-use crate::owner::{Adjacent, BlockOwner, BlockPart, ContainerAt};
+use crate::owner::{Adjacent, BlockLeaf, BlockOwner, BlockPart, ContainerAt};
 use crate::patch::PatchSet;
 use crate::plan::{Plan, PlanError, PlanRequest, TypingPlan, plain_typing};
 use crate::pos::{Affinity, DocPos, VirtualSlot};
@@ -234,7 +234,8 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
     /// leaf — and `Some(Some(leaf))` otherwise. A join must never reach past this neighbour.
     /// [`FormatDoc::adjacent_block`] from the leaf's first byte.
     fn adjacent_leaf(&self, leaf: &LeafView, forward: bool) -> Option<Option<LeafView>> {
-        self.adjacent_block(leaf.span.start, forward).map(|a| a.leaf)
+        self.adjacent_block(leaf.span.start, forward)
+            .map(|a| a.leaf.and_then(|l| self.leaf(l.span.start)))
     }
 
     // ---- block ownership (ADR 0011, `crate::owner`) ------------------------------------
@@ -253,12 +254,13 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
         if let Some(o) = self.block_owner(at) {
             return Some(o);
         }
-        let leaf = self.adjacent_block(at, bias == Affinity::Downstream)?.leaf?;
+        let near = self.adjacent_block(at, bias == Affinity::Downstream)?.leaf?;
         let edge = match bias {
-            Affinity::Upstream => leaf.span.end,
-            Affinity::Downstream => leaf.span.start,
+            Affinity::Upstream => near.span.end,
+            Affinity::Downstream => near.span.start,
         };
-        let mut o = BlockOwner::resolve(self.text(), leaf, edge)?;
+        let leaf = self.leaf(edge)?;
+        let mut o = BlockOwner::resolve(self.text(), &leaf, edge)?;
         o.at = at;
         o.part = BlockPart::Gap;
         Some(o)
@@ -286,7 +288,7 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
             let leaf = self.leaf(p).filter(|n| n.span.start > at && n.span.start <= p);
             Some(Adjacent {
                 block: leaf.as_ref().map_or(Span::new(p, p), |l| l.span),
-                leaf,
+                leaf: leaf.as_ref().map(BlockLeaf::from),
             })
         } else {
             let mut p = here.as_ref().map_or(at, |l| l.span.start.min(at));
@@ -302,7 +304,7 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
             let leaf = self.leaf(p - 1).filter(|n| n.span.end < at && n.span.end >= p);
             Some(Adjacent {
                 block: leaf.as_ref().map_or(Span::new(p, p), |l| l.span),
-                leaf,
+                leaf: leaf.as_ref().map(BlockLeaf::from),
             })
         }
     }

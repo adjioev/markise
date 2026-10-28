@@ -2,7 +2,7 @@
 //! `markise_doc::owner`): answered from the block tree — a binary search over the top-level
 //! blocks, then over each level's children — never by scanning lines across blocks.
 
-use markise_doc::{Adjacent, BlockOwner, ContainerAt, LeafView};
+use markise_doc::{Adjacent, BlockLeaf, BlockOwner, ContainerAt, FormatDoc, LeafView};
 
 use crate::Document;
 use crate::block::Block;
@@ -11,9 +11,11 @@ use crate::line_start;
 use crate::text::Span;
 
 impl Document {
-    /// The leaf at block path `path` (which must end at a leaf), as a neutral view.
-    pub(crate) fn leaf_view_at_path(&self, path: &[usize]) -> Option<LeafView> {
-        let mut containers = Vec::new();
+    /// The leaf at block path `path` (which must end at a leaf) without its lines, with the
+    /// block (spans relative to the returned origin). O(depth); nothing is copied but the
+    /// container kinds.
+    fn leaf_head_at_path(&self, path: &[usize]) -> Option<(BlockLeaf, &Block, usize)> {
+        let mut containers = Vec::with_capacity(path.len().saturating_sub(1));
         for depth in 1..path.len() {
             let (b, _) = self.block_at_path_rel(&path[..depth])?;
             if !b.is_container() {
@@ -25,17 +27,41 @@ impl Document {
         if b.is_container() {
             return None;
         }
-        let shift = |s: Span| Span::new(s.start + origin, s.end + origin);
-        let span = shift(b.span);
-        let lines: Vec<Span> = b.lines.iter().map(|l| shift(*l)).collect();
-        let first = lines.first().map_or(span.start, |l| l.start);
+        let span = Span::new(b.span.start + origin, b.span.end + origin);
+        let first = b.lines.first().map_or(span.start, |l| l.start + origin);
+        Some((
+            BlockLeaf {
+                kind: leaf_kind_at(self.text(), b, origin),
+                span,
+                containers,
+                hinted: self.hints().contains_line(line_start(self.text(), first)),
+            },
+            b,
+            origin,
+        ))
+    }
+
+    /// The leaf at block path `path` (which must end at a leaf), as a full neutral view (its
+    /// lines copied: O(lines)).
+    pub(crate) fn leaf_view_at_path(&self, path: &[usize]) -> Option<LeafView> {
+        let (head, b, origin) = self.leaf_head_at_path(path)?;
         Some(LeafView {
-            kind: leaf_kind_at(self.text(), b, origin),
-            span,
-            lines,
-            containers,
-            hinted: self.hints().contains_line(line_start(self.text(), first)),
+            kind: head.kind,
+            span: head.span,
+            lines: b
+                .lines
+                .iter()
+                .map(|l| Span::new(l.start + origin, l.end + origin))
+                .collect(),
+            containers: head.containers,
+            hinted: head.hinted,
         })
+    }
+
+    /// The ownership answer for the leaf at `path` (no line copies).
+    fn owner_at_path(&self, path: &[usize], at: usize) -> Option<BlockOwner> {
+        let (head, b, origin) = self.leaf_head_at_path(path)?;
+        BlockOwner::resolve_lines(self.text(), head, &b.lines, origin, at)
     }
 
     /// The path to the innermost leaf holding `at` (end inclusive), if `at` is inside one.
@@ -58,6 +84,15 @@ impl Document {
 
     /// `markise_doc::FormatDoc::adjacent_block` from the tree.
     pub(crate) fn adjacent_from_tree(&self, at: usize, forward: bool) -> Option<Adjacent> {
+        let (block, leaf) = self.adjacent_path(at, forward)?;
+        Some(Adjacent {
+            block,
+            leaf: leaf.and_then(|p| self.leaf_head_at_path(&p)).map(|(h, _, _)| h),
+        })
+    }
+
+    /// The neighbour of `at` as (its span, the path to the leaf at its near edge).
+    fn adjacent_path(&self, at: usize, forward: bool) -> Option<(Span, Option<Vec<usize>>)> {
         let mut path = self.block_path_at(at);
         let in_leaf = self.block_at_path_rel(&path).is_some_and(|(b, _)| !b.is_container());
         // between the children of the innermost container holding `at` (or the top level)
@@ -109,13 +144,10 @@ impl Document {
         loop {
             let (b, _) = self.block_at_path_rel(&sib)?;
             if !b.is_container() {
-                return Some(Adjacent {
-                    block,
-                    leaf: self.leaf_view_at_path(&sib),
-                });
+                return Some((block, Some(sib)));
             }
             if b.children.is_empty() {
-                return Some(Adjacent { block, leaf: None });
+                return Some((block, None));
             }
             sib.push(if forward { 0 } else { b.children.len() - 1 });
         }
@@ -124,19 +156,42 @@ impl Document {
     /// `markise_doc::FormatDoc::block_owner` from the tree: the leaf holding `at`, else the
     /// leaf before it (whitespace ending its line) or after it (its container prefix).
     pub(crate) fn owner_from_tree(&self, at: usize) -> Option<BlockOwner> {
-        let text = self.text();
-        if at > text.len() {
+        if at > self.text().len() {
             return None;
         }
         if let Some(path) = self.leaf_path_at(at) {
-            return BlockOwner::resolve(text, self.leaf_view_at_path(&path)?, at);
+            return self.owner_at_path(&path, at);
         }
         let near = |forward: bool| {
-            self.adjacent_from_tree(at, forward)
-                .and_then(|a| a.leaf)
-                .and_then(|l| BlockOwner::resolve(text, l, at))
+            self.adjacent_path(at, forward)
+                .and_then(|(_, p)| p)
+                .and_then(|p| self.owner_at_path(&p, at))
         };
         near(false).or_else(|| near(true))
+    }
+
+    /// `markise_doc::FormatDoc::block_owner_biased` from the tree (no line copies).
+    pub(crate) fn owner_biased_from_tree(&self, at: usize, bias: markise_doc::Affinity) -> Option<BlockOwner> {
+        if let Some(o) = self.owner_from_tree(at) {
+            return Some(o);
+        }
+        let path = self.adjacent_path(at, bias == markise_doc::Affinity::Downstream)?.1?;
+        let (head, b, origin) = self.leaf_head_at_path(&path)?;
+        let edge = match bias {
+            markise_doc::Affinity::Upstream => head.span.end,
+            markise_doc::Affinity::Downstream => head.span.start,
+        };
+        let mut o = BlockOwner::resolve_lines(self.text(), head, &b.lines, origin, edge)?;
+        o.at = at;
+        o.part = markise_doc::BlockPart::Gap;
+        Some(o)
+    }
+
+    /// The full view (lines included, O(lines)) of the leaf owning `at`, or of the leaf on the
+    /// `bias` side of a gap: for planners that work on the leaf's lines.
+    pub(crate) fn owner_leaf_view(&self, at: usize, bias: markise_doc::Affinity) -> Option<LeafView> {
+        let o = self.owner_biased_from_tree(at, bias)?;
+        self.leaf(o.leaf.span.start)
     }
 
     /// `markise_doc::FormatDoc::containers_at` from the tree.

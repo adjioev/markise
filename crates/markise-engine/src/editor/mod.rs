@@ -840,7 +840,7 @@ impl EditorSession {
             matches!(o.leaf.kind, LeafKind::Heading { .. })
                 && o.trailing_ws.start <= r.start
                 && r.end <= o.trailing_ws.end
-                && o.trailing_ws.start >= o.leaf.lines.last().map_or(usize::MAX, |x| x.end)
+                && o.trailing_ws.start >= o.content.end
         })
     }
 

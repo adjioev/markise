@@ -1065,8 +1065,7 @@ impl Document {
         let text = self.text();
         let eol = self.line_ending().as_str();
         let leaf = self
-            .block_owner_biased(at, markise_doc::Affinity::Upstream)
-            .map(|o| o.leaf)
+            .owner_leaf_view(at, markise_doc::Affinity::Upstream)
             .ok_or(PlanError::NotApplicable("no block"))?;
         let Some(li) = leaf.lines.iter().position(|l| l.start <= at && at <= l.end) else {
             // an empty soft line after a paragraph (C42): the paragraph ends there

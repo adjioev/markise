@@ -45,16 +45,17 @@ syntax, below the seam).
 
 1. **One query, in the seam.** `markise-doc::owner` defines the rule and the types;
    `FormatDoc` gains
-   - `block_owner(at) -> Option<BlockOwner>` — the owning leaf and the part of it `at` is in
+   - `block_owner(at) -> Option<BlockOwner>` — the owning leaf (a `BlockLeaf`: kind, span,
+     container chain, hint flag — **without its lines**, see Performance) and the part of it `at` is in
      (`Prefix`, `Marker`, `Text`, `LineBreak`, `TrailingWs`, `Closing`) with the ranges
-     `prefix` (container prefix on the first line), `marker` (the leaf's own leading syntax),
+     `line` (the content line holding `at`), `prefix` (container prefix on the first line), `marker` (the leaf's own leading syntax),
      `content` (first content byte … end of the last content line), `trailing_ws` (the spaces and
      tabs ending a paragraph's / heading's text, wherever they are) and `closing`;
    - `block_owner_biased(at, Affinity)` — the same, with offsets between blocks resolved to the
      leaf before / after them (part `Gap`), never across a block without text;
    - `adjacent_block(at, forward) -> Option<Adjacent>` — the sibling block in document order
      (`block`: its span at the level where it was found, possibly a whole container; `leaf`: the
-     text leaf at its near edge, `None` for an empty quote, an empty item…);
+     text leaf at its near edge as a `BlockLeaf`, `None` for an empty quote, an empty item…);
    - `containers_at(at)` — the container chain (kind + span), also between blocks;
    - `adjacent_leaf` is now a provided method on top of `adjacent_block`.
    `LeafView` gains `content()`, `leading_syntax()`, `trailing_syntax()`.
@@ -96,8 +97,8 @@ None intended except four cross-block fixes (Codex review of #18), each with a r
 (`markise-engine/tests/block_ownership.rs`, kittest `cross_block_risks_block_ownership`):
 
 1. **Hinted-heading Enter** (C43 on `## ` typed as paragraph text): an empty quote before the
-   line is no longer deleted (the line becomes the empty heading it shows, caret on the virtual
-   paragraph after it, as for a typed empty heading); after a quote / list the virtual paragraph
+   line is no longer deleted — the markers go and the empty paragraph is the virtual one right
+   after the quote, in place of the line (C43); after a quote / list the virtual paragraph
    leaves that container instead of opening inside it.
 2. **List-item paragraph join** (Backspace at an item's later paragraph): stops at an empty quote
    or empty nested item between the paragraphs (it deleted them).
@@ -109,8 +110,15 @@ None intended except four cross-block fixes (Codex review of #18), each with a r
 
 ## Performance
 
-The query is O(log n + depth) per call (no per-keystroke document scan, NFR-4); microbenchmark
-`markise-md/benches/owner.rs` (1024 queries over 1 MB / 10 MB documents; numbers in the PR).
+The query is O(log n + depth) per call (no per-keystroke document scan, NFR-4), also when the
+owning block is huge: `block_owner` / `block_owner_biased` / `adjacent_block` never copy a
+block's content lines (one paragraph or code fence can span the whole document) — the Markdown
+implementation binary-searches the lines in place (`BlockOwner::resolve_lines` borrows them,
+relative to the block's origin). Planners that need every line ask `FormatDoc::leaf` for the
+full `LeafView` explicitly (Shift+Enter, the soft-line hint, typing on the virtual paragraph,
+joins). Microbenchmark `markise-md/benches/owner.rs`: 1024 queries over 1 MB / 10 MB mixed
+documents, a 10 MB single paragraph with soft line breaks and a 100k-line code fence (numbers in
+the PR).
 
 ## Open questions
 

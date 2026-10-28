@@ -1340,11 +1340,12 @@ fn spaces_after_a_heading_move_the_caret_in_every_style_and_level() {
     // owner reports: Space at the end of an H1 changed the text but not the screen.
     // - Classic centres H1: epaint aligned the centred row without its trailing whitespace and
     //   put the caret at the text end;
-    // - Technical (the owner's style) draws a generated "# " prefix and a rule under H1.
+    // - the built-in CSS theme Drake (the owner's theme) centres H1 too.
     // The caret's pixel x must grow with each Space, and a letter typed after them must appear
-    // after the gap; for every built-in style (the registry, incl. justified text), every
-    // heading level, both text backends, a saved file and an untitled document, with the
-    // owner's settings (font size 17.5, dark, toolbar at the bottom).
+    // after the gap; for every built-in style (the registry, incl. justified text) and every
+    // built-in CSS theme, every heading level, both text backends, a saved file and (styles)
+    // an untitled document, with a font size override, dark appearance and the toolbar at
+    // the bottom.
     use markise_ui_egui::TextBackend::{Epaint, Parley};
     let styles: Vec<&str> = markise_theme::style::BUILTIN_STYLES.iter().map(|s| s.id).collect();
     assert!(styles.len() >= 5, "{styles:?}");
@@ -1373,6 +1374,32 @@ fn spaces_after_a_heading_move_the_caret_in_every_style_and_level() {
                     fails.push(e);
                 } else {
                     assert!(text(&h).starts_with(&format!("{hashes} Title   x")), "{what} untitled");
+                }
+            }
+        }
+    }
+    // the built-in CSS themes (complete themes: their own heading alignment — Drake centres
+    // H1, the owner's case), dark, opened from a file
+    for backend in [Epaint, Parley] {
+        for theme in markise_theme::builtin::BUILTIN_THEMES.iter().map(|t| t.id) {
+            for level in 1..=6 {
+                let hashes = "#".repeat(level);
+                let what = format!("{backend:?} builtin:{theme} h{level}");
+                let src = format!("{hashes} Title\n\nPara\n");
+                let (mut h, p) = open_with("ws-themes", &src, backend);
+                let before = h.state().theme().name.clone();
+                h.state_mut()
+                    .select_theme(markise_theme::catalog::ThemeId::Builtin(theme.into()));
+                h.state_mut().set_theme_choice(markise_ui_egui::Appearance::Dark);
+                wait_until(&mut h, "theme imported", |a| a.theme().name != before);
+                h.step();
+                key(&mut h, Key::End);
+                let at = caret(&mut h);
+                assert_eq!(at, level + 6, "{what}");
+                if let Err(e) = spaces_and_letter(&mut h, at, &what) {
+                    fails.push(e);
+                } else {
+                    assert_eq!(save(&mut h, &p), format!("{hashes} Title   x\n\nPara\n"), "{what}");
                 }
             }
         }
@@ -1418,7 +1445,7 @@ fn cross_block_risks_block_ownership() {
             "hinted-quote",
             "Before\n\n>\n\n‸y\n",
             &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
-            "Before\n\n>\n\n## \n\nx‸\n",
+            "Before\n\n>\n\nx‸\n",
         ),
         (
             "hinted-after-quote",

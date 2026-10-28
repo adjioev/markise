@@ -35,7 +35,7 @@ pub use command::{
 };
 pub use format::{DepChange, DocumentFormat, EditBehavior, EditSummary, FormatDoc, FormatOptions, label_key};
 pub use hints::{HintOrigin, HintSet, LiteralHint};
-pub use owner::{Adjacent, BlockOwner, BlockPart, ContainerAt};
+pub use owner::{Adjacent, BlockLeaf, BlockOwner, BlockPart, ContainerAt};
 pub use patch::{Patch, PatchError, PatchSet};
 pub use plan::{
     EditPrefs, Plan, PlanError, PlanRequest, PlanStep, RulePlan, SmartDashes, SmartPunctuation, TypingPlan,
