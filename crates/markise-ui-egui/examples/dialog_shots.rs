@@ -72,8 +72,13 @@ fn scenes() -> Vec<(&'static str, Setup)> {
             app.menu_action(ctx, &MenuAction::Command("theme.report"));
         }),
         // the sidebar itself (issue #57): a nested folder, a plain-text file, a long name
-        ("sidebar", |app, _, dir| {
+        ("sidebar", |app, ctx, dir| {
             app.toggle_folder(&dir.join("drafts"));
+            // a second file: the Recent section lists both
+            app.tree_action(ctx, TreeAction::Open(dir.join("tides.md")));
+        }),
+        ("sidebar-outline", |app, _, _| {
+            app.show_files_tab(false);
         }),
         // the same with a large document font size: the sidebar keeps its UI size
         ("sidebar-large-font", |app, _, dir| {
@@ -82,6 +87,7 @@ fn scenes() -> Vec<(&'static str, Setup)> {
                 font_size: Some(17.5),
                 ..Default::default()
             });
+            app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
         }),
     ]
 }
@@ -118,7 +124,7 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
     let ctx = Context::default();
     let mut texs: HashMap<TextureId, Tex> = HashMap::new();
     // the sidebar scenes point at a row (hover highlight)
-    let hover = name.starts_with("sidebar").then_some(egui::pos2(90.0, 158.0));
+    let hover = name.starts_with("sidebar").then_some(egui::pos2(150.0, 230.0));
     let input = || {
         let mut raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),

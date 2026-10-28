@@ -184,6 +184,8 @@ pub struct FileTree {
     pub requests: u64,
     /// Rows drawn by the last frame (the virtualised range).
     shown: std::ops::Range<usize>,
+    /// The folder's section is collapsed (its header only; presentation, not tree state).
+    pub collapsed: bool,
 }
 
 impl FileTree {
@@ -198,6 +200,7 @@ impl FileTree {
             lister_error: None,
             requests: 0,
             shown: 0..0,
+            collapsed: false,
         }
     }
 
@@ -435,8 +438,19 @@ impl FileTree {
         let mut action = None;
         let mut end = None;
         let root = self.root.clone();
-        if look.header(ui, &name, &root, &mut action) {
+        let head = look.section(ui, &name, !self.collapsed, Some(&root), &mut action);
+        if head.collapse_all {
             self.collapse_all();
+        }
+        if head.toggled {
+            self.collapsed = !self.collapsed;
+        }
+        // the inline name editor needs its row: an edit opens the section
+        if edit.is_some() || action.is_some() {
+            self.collapsed = false;
+        }
+        if self.collapsed {
+            return end.map(TreeAction::EndRename).into_iter().chain(action).collect();
         }
         let n = self.rows(wake).len();
         // a new editor whose row is not drawn: scroll it into view
@@ -602,9 +616,8 @@ pub struct SideLook {
     pub guide: Color32,
     /// Section title text.
     pub muted: Color32,
-    /// Segmented control: the track and the chosen segment.
-    pub seg_track: Color32,
-    pub seg_on: Color32,
+    /// Activity bar background.
+    pub bar_bg: Color32,
     pub row_h: f32,
     pub pad_x: f32,
     pub indent: f32,
@@ -660,12 +673,7 @@ impl SideLook {
             folder_flap: blend(folder, bg, 0.3),
             guide: blend(text, bg, 0.84),
             muted: blend(text, bg, 0.2),
-            seg_track: blend(bg, text, if t.dark { 0.07 } else { 0.06 }),
-            seg_on: if t.dark {
-                blend(bg, text, 0.17)
-            } else {
-                blend(bg, Color32::WHITE, 0.8)
-            },
+            bar_bg: blend(bg, text, if t.dark { 0.05 } else { 0.04 }),
             row_h,
             pad_x: s.padding_x.filter(|v| v.is_finite()).unwrap_or(6.0).clamp(2.0, 16.0),
             indent: s.indent.filter(|v| v.is_finite()).unwrap_or(14.0).clamp(10.0, 22.0),
@@ -853,47 +861,84 @@ impl SideLook {
         }
     }
 
-    /// The Files tab's header: the folder name as a small section title (its context menu is
-    /// the folder's), and icon buttons New File, New Folder and Collapse All. New File / New
-    /// Folder are reported in `out`; returns whether Collapse All was clicked.
-    fn header(&self, ui: &mut Ui, name: &str, root: &Path, out: &mut Option<TreeAction>) -> bool {
+    /// A collapsible section header: a disclosure triangle and a small title (a click
+    /// toggles the section). With `root` (the mounted folder's section) the title has the
+    /// folder's context menu and the header has icon buttons New File, New Folder and
+    /// Collapse All; New File / New Folder are reported in `out`.
+    fn section(
+        &self,
+        ui: &mut Ui,
+        title: &str,
+        open: bool,
+        root: Option<&Path>,
+        out: &mut Option<TreeAction>,
+    ) -> Section {
         let w = ui.available_width();
         let (rect, _) = ui.allocate_exact_size(egui::vec2(w, self.row_h), egui::Sense::hover());
         let b = (self.row_h - 4.0).round();
         let gap = 2.0;
         let mut right = rect.right();
-        let mut button = |ui: &mut Ui, label: &str, glyph: Glyph| {
-            let r = egui::Rect::from_center_size(egui::pos2(right - b * 0.5, rect.center().y), egui::vec2(b, b));
-            right -= b + gap;
-            self.icon_button(ui, r, label, glyph)
+        let mut done = Section::default();
+        if let Some(root) = root {
+            let mut button = |ui: &mut Ui, label: &str, glyph: Glyph| {
+                let r = egui::Rect::from_center_size(egui::pos2(right - b * 0.5, rect.center().y), egui::vec2(b, b));
+                right -= b + gap;
+                self.icon_button(ui, r, label, glyph)
+            };
+            done.collapse_all = button(ui, "Collapse All", Glyph::CollapseAll);
+            if button(ui, "New Folder", Glyph::NewFolder) {
+                *out = Some(TreeAction::NewFolder(root.to_path_buf()));
+            }
+            if button(ui, "New File", Glyph::NewFile) {
+                *out = Some(TreeAction::NewFile(root.to_path_buf()));
+            }
+        }
+        let head = egui::Rect::from_min_max(rect.min, egui::pos2(right - 4.0, rect.bottom()));
+        let resp = ui.interact(
+            head,
+            ui.scope_id().with(("markise-section", title)),
+            egui::Sense::click(),
+        );
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), open, title));
+        let color = if resp.hovered() { self.hover_text } else { self.muted };
+        // filled disclosure triangle
+        let c = egui::pos2(head.left() + self.pad_x + CHEVRON_W * 0.4, head.center().y);
+        let pts = if open {
+            vec![
+                c + egui::vec2(-3.5, -2.0),
+                c + egui::vec2(3.5, -2.0),
+                c + egui::vec2(0.0, 2.5),
+            ]
+        } else {
+            vec![
+                c + egui::vec2(-2.0, -3.5),
+                c + egui::vec2(2.5, 0.0),
+                c + egui::vec2(-2.0, 3.5),
+            ]
         };
-        let collapse = button(ui, "Collapse All", Glyph::CollapseAll);
-        if button(ui, "New Folder", Glyph::NewFolder) {
-            *out = Some(TreeAction::NewFolder(root.to_path_buf()));
-        }
-        if button(ui, "New File", Glyph::NewFile) {
-            *out = Some(TreeAction::NewFile(root.to_path_buf()));
-        }
-        let title = egui::Rect::from_min_max(rect.min, egui::pos2(right - 4.0, rect.bottom()));
-        let resp = ui.interact(title, ui.scope_id().with("markise-tree-title"), egui::Sense::click());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), name));
+        ui.painter()
+            .add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+        let x = head.left() + self.pad_x + CHEVRON_W;
         let mut job = egui::text::LayoutJob::single_section(
-            name.to_string(),
-            egui::TextFormat::simple(self.small_font.clone(), self.muted),
+            title.to_string(),
+            egui::TextFormat::simple(self.small_font.clone(), color),
         );
         job.wrap = egui::text::TextWrapping {
-            max_width: (title.width() - self.pad_x).max(1.0),
+            max_width: (head.right() - x).max(1.0),
             max_rows: 1,
             break_anywhere: true,
             overflow_character: Some('…'),
         };
         let galley = ui.painter().layout_job(job);
         let cut = galley.elided;
-        let pos = egui::pos2(title.left() + self.pad_x, title.center().y - galley.size().y * 0.5);
-        ui.painter_at(title).galley(pos, galley, self.muted);
-        let resp = if cut { resp.on_hover_text(name) } else { resp };
-        resp.context_menu(|ui| row_menu(ui, root, true, true, out));
-        collapse
+        let pos = egui::pos2(x, head.center().y - galley.size().y * 0.5);
+        ui.painter_at(head).galley(pos, galley, color);
+        let resp = if cut { resp.on_hover_text(title) } else { resp };
+        done.toggled = resp.clicked();
+        if let Some(root) = root {
+            resp.context_menu(|ui| row_menu(ui, root, true, true, out));
+        }
+        done
     }
 
     /// A square icon button with a hover background and a tooltip; returns whether it was
@@ -962,54 +1007,217 @@ fn paint_glyph(p: &egui::Painter, r: egui::Rect, glyph: Glyph, color: Color32) {
     }
 }
 
-/// The Files / Outline switch: a segmented control (two equal segments on a track).
-pub fn tabs(ui: &mut Ui, tab: &mut Tab, look: &SideLook) {
-    let w = ui.available_width();
-    let h = (look.row_h + 2.0).round();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
-    let r = look.radius + 2.0;
-    ui.painter().rect_filled(rect, r, look.seg_track);
-    let seg_w = rect.width() / 2.0;
-    for (i, (t, label)) in [(Tab::Files, "Files"), (Tab::Outline, "Outline")]
-        .into_iter()
-        .enumerate()
+/// What a click on a section header did.
+#[derive(Clone, Copy, Debug, Default)]
+struct Section {
+    toggled: bool,
+    collapse_all: bool,
+}
+
+/// Sidebar state the application keeps besides the tree: the files opened in this session
+/// (the Recent section; Markise has one document per window) and whether Recent is collapsed.
+#[derive(Clone, Debug, Default)]
+pub struct SideState {
+    recent: Vec<PathBuf>,
+    last: Option<PathBuf>,
+    pub recent_collapsed: bool,
+}
+
+impl SideState {
+    /// Entries of the Recent section.
+    pub const RECENT_MAX: usize = 5;
+
+    /// The document shown now (called every frame; cheap unless it changed): it moves to the
+    /// top of Recent. A previous entry whose file is gone (renamed, saved under another
+    /// name and removed) is dropped.
+    pub fn note_current(&mut self, current: Option<&Path>) {
+        if current == self.last.as_deref() {
+            return;
+        }
+        let prev = std::mem::replace(&mut self.last, current.map(Path::to_path_buf));
+        let Some(c) = current else { return };
+        if let Some(p) = prev.filter(|p| !p.exists()) {
+            self.recent.retain(|r| *r != p);
+        }
+        self.recent.retain(|r| r != c);
+        self.recent.insert(0, c.to_path_buf());
+        self.recent.truncate(Self::RECENT_MAX);
+    }
+
+    /// The session's recent files, the most recent first.
+    pub fn recent(&self) -> &[PathBuf] {
+        &self.recent
+    }
+}
+
+/// The Recent section above the tree (nothing while no file was opened): a collapsible
+/// header and one row per file, the current one marked. Returns the file clicked.
+pub fn recent_section(ui: &mut Ui, st: &mut SideState, current: Option<&Path>, look: &SideLook) -> Option<TreeAction> {
+    if st.recent.is_empty() {
+        return None;
+    }
+    let mut none = None;
+    if look
+        .section(ui, "Recent", !st.recent_collapsed, None, &mut none)
+        .toggled
     {
-        let seg = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + i as f32 * seg_w, rect.top()),
-            egui::vec2(seg_w, h),
-        )
-        .shrink(2.0);
-        let on = *tab == t;
-        let resp = ui.interact(
-            seg,
-            ui.scope_id().with(("markise-sidebar-tab", label)),
-            egui::Sense::click(),
+        st.recent_collapsed = !st.recent_collapsed;
+    }
+    let mut out = None;
+    if !st.recent_collapsed {
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for p in &st.recent {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let kind = RowKind::File {
+                    markdown: is_markdown_note(p),
+                };
+                // named by the full path: the tree has a row with the same file name
+                let full = p.display().to_string();
+                let active = current == Some(p.as_path());
+                let resp = look.row_named(ui, 0, kind, display_name(&name, false), &full, active);
+                if resp.clicked() && !active {
+                    out = Some(TreeAction::Open(p.clone()));
+                }
+            }
+        });
+    }
+    ui.add_space(4.0);
+    out
+}
+
+/// Width of the activity bar at the sidebar's left edge.
+pub const ACTIVITY_BAR_W: f32 = 40.0;
+
+/// An activity bar item glyph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BarGlyph {
+    Files,
+    Search,
+    Outline,
+}
+
+/// One activity bar item: the tab it shows, or `None` for a placeholder (disabled) — more
+/// views (backlinks, tags) are added here.
+struct Activity {
+    label: &'static str,
+    tooltip: &'static str,
+    glyph: BarGlyph,
+    tab: Option<Tab>,
+}
+
+const ACTIVITIES: [Activity; 3] = [
+    Activity {
+        label: "Files",
+        tooltip: "Files",
+        glyph: BarGlyph::Files,
+        tab: Some(Tab::Files),
+    },
+    // placeholder until Find (#48)
+    Activity {
+        label: "Search",
+        tooltip: "Search (coming soon)",
+        glyph: BarGlyph::Search,
+        tab: None,
+    },
+    Activity {
+        label: "Outline",
+        tooltip: "Outline",
+        glyph: BarGlyph::Outline,
+        tab: Some(Tab::Outline),
+    },
+];
+
+/// The activity bar in `rect` (a narrow strip at the sidebar's left edge): one icon button
+/// per view, the active one in the theme's accent with a bar at the edge.
+pub fn activity_bar(ui: &mut Ui, rect: egui::Rect, tab: &mut Tab, look: &SideLook) {
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 0.0, look.bar_bg);
+    let x = rect.right() - 0.5;
+    p.line_segment(
+        [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+        egui::Stroke::new(1.0, look.guide),
+    );
+    let size = rect.width() - 6.0;
+    for (i, a) in ACTIVITIES.iter().enumerate() {
+        let r = egui::Rect::from_center_size(
+            egui::pos2(rect.center().x, rect.top() + 6.0 + size * 0.5 + i as f32 * (size + 2.0)),
+            egui::vec2(size, size),
         );
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), on, label));
-        let p = ui.painter();
+        let enabled = a.tab.is_some();
+        let on = a.tab == Some(*tab);
+        let sense = if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        };
+        let resp = ui.interact(r, ui.scope_id().with(("markise-activity", a.label)), sense);
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, on, a.label));
         let color = if on {
-            p.rect_filled(seg, look.radius, look.seg_on);
-            p.rect_stroke(
-                seg,
-                look.radius,
-                egui::Stroke::new(1.0, look.seg_track.lerp_to_gamma(look.text, 0.12)),
-                egui::StrokeKind::Inside,
-            );
-            look.active_text
+            look.accent
+        } else if !enabled {
+            look.icon.gamma_multiply(0.45)
         } else if resp.hovered() {
+            p.rect_filled(r.shrink(2.0), look.radius, look.hover_bg);
             look.hover_text
         } else {
-            look.text.lerp_to_gamma(look.seg_track, 0.15)
+            look.icon
         };
-        p.text(
-            seg.center(),
-            egui::Align2::CENTER_CENTER,
-            label,
-            look.font.clone(),
-            color,
-        );
-        if resp.clicked() {
+        if on {
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), r.top() + 7.0),
+                egui::pos2(rect.left() + 2.5, r.bottom() - 7.0),
+            );
+            p.rect_filled(bar, 1.25, look.accent);
+        }
+        paint_bar_glyph(&p, r, a.glyph, color);
+        let resp = resp.on_hover_text(a.tooltip);
+        if let (true, Some(t)) = (resp.clicked(), a.tab) {
             *tab = t;
+        }
+    }
+}
+
+/// Draws an activity bar glyph centred in `r` (a 20-point box).
+fn paint_bar_glyph(p: &egui::Painter, r: egui::Rect, glyph: BarGlyph, color: Color32) {
+    let o = r.center() - egui::vec2(10.0, 10.0);
+    let pt = |x: f32, y: f32| o + egui::vec2(x, y);
+    let stroke = egui::Stroke::new(1.5, color);
+    let line = |pts: Vec<egui::Pos2>| p.add(egui::Shape::line(pts, stroke));
+    match glyph {
+        BarGlyph::Files => {
+            // two stacked pages, the front one with a folded corner
+            line(vec![
+                pt(6.0, 4.5),
+                pt(6.0, 2.0),
+                pt(13.5, 2.0),
+                pt(17.0, 5.5),
+                pt(17.0, 15.0),
+                pt(15.0, 15.0),
+            ]);
+            line(vec![
+                pt(10.0, 5.0),
+                pt(3.0, 5.0),
+                pt(3.0, 18.0),
+                pt(13.5, 18.0),
+                pt(13.5, 8.5),
+                pt(10.0, 5.0),
+                pt(10.0, 8.5),
+                pt(13.5, 8.5),
+            ]);
+        }
+        BarGlyph::Search => {
+            p.circle_stroke(pt(8.5, 8.5), 5.5, stroke);
+            line(vec![pt(12.6, 12.6), pt(17.0, 17.0)]);
+        }
+        BarGlyph::Outline => {
+            // a heading mark: "H"
+            line(vec![pt(5.0, 3.5), pt(5.0, 16.5)]);
+            line(vec![pt(14.0, 3.5), pt(14.0, 16.5)]);
+            line(vec![pt(5.0, 10.0), pt(14.0, 10.0)]);
         }
     }
 }

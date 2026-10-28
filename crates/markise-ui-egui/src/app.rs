@@ -411,6 +411,8 @@ pub struct MarkiseApp {
     /// Formatting toolbar state (spec 04 §3.2; shown per the `showToolbar` setting).
     toolbar: crate::toolbar::Toolbar,
     tab: Tab,
+    /// Recent files of the session and the sidebar's collapsed sections.
+    side: crate::sidebar::SideState,
     tree: Option<FileTree>,
     themes: ThemeManager,
     /// The theme report window is open.
@@ -505,6 +507,7 @@ impl MarkiseApp {
             sidebar_visible: true,
             toolbar: Default::default(),
             tab: Tab::Outline,
+            side: Default::default(),
             tree: None,
             themes,
             theme_report: false,
@@ -1867,6 +1870,8 @@ impl MarkiseApp {
         if let Some(r) = self.files.rename.as_mut() {
             r.drawn = false;
         }
+        let current = self.document_path().map(Path::to_path_buf);
+        self.side.note_current(current.as_deref());
         if self.sidebar_visible {
             self.sidebar(ui);
         } else if self.files.rename.is_some() {
@@ -2315,18 +2320,33 @@ impl MarkiseApp {
         let t = self.theme.clone();
         egui::Panel::left("markise-sidebar")
             .resizable(true)
-            .default_size(240.0)
-            .frame(egui::Frame::new().fill(color(t.chrome.sidebar_bg)).inner_margin(8.0))
+            .default_size(272.0)
+            .frame(egui::Frame::new().fill(color(t.chrome.sidebar_bg)))
             .show(ui, |ui| {
                 let look = crate::sidebar::SideLook::new(&t);
-                crate::sidebar::tabs(ui, &mut self.tab, &look);
-                ui.add_space(6.0);
+                // the activity bar at the left edge, the chosen view beside it
+                let full = ui.available_rect_before_wrap();
+                let bar =
+                    egui::Rect::from_min_size(full.min, egui::vec2(crate::sidebar::ACTIVITY_BAR_W, full.height()));
+                crate::sidebar::activity_bar(ui, bar, &mut self.tab, &look);
+                let content = egui::Rect::from_min_max(
+                    egui::pos2(bar.right() + 8.0, full.top() + 8.0),
+                    egui::pos2((full.right() - 8.0).max(bar.right() + 8.0), full.bottom() - 8.0),
+                );
+                ui.advance_cursor_after_rect(full);
+                let ui = &mut ui.new_child(egui::UiBuilder::new().id_salt("markise-sidebar-view").max_rect(content));
                 match self.tab {
                     Tab::Files => {
                         let current = self.document_path().map(Path::to_path_buf);
                         let mut actions = Vec::new();
+                        actions.extend(crate::sidebar::recent_section(
+                            ui,
+                            &mut self.side,
+                            current.as_deref(),
+                            &look,
+                        ));
                         if let (Some(tree), Some(wake)) = (self.tree.as_mut(), self.wake.as_ref()) {
-                            actions = tree.show(ui, current.as_deref(), wake, &look, self.files.rename.as_mut());
+                            actions.extend(tree.show(ui, current.as_deref(), wake, &look, self.files.rename.as_mut()));
                         } else {
                             ui.weak("No folder open");
                             if ui.button("Open Folder…").clicked() {

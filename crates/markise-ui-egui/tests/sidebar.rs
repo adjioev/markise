@@ -173,3 +173,59 @@ fn hover_and_selection_paint_in_light_and_dark() {
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+#[test]
+fn recent_section_lists_the_session_files_and_marks_the_current_one() {
+    let (mut h, d) = tree("recent", &["one.md", "two.md"]);
+    let ctx = h.ctx.clone();
+    for f in ["one.md", "two.md"] {
+        h.state_mut().tree_action(&ctx, TreeAction::Open(d.join(f)));
+        let p = d.join(f);
+        wait_until(&mut h, f, move |s| {
+            s.document_path() == Some(p.as_path()) && !s.is_busy()
+        });
+    }
+    h.run_steps(2);
+    // Recent rows are named by the full path (the tree has rows with the same file name)
+    let one = d.join("one.md").display().to_string();
+    let two = d.join("two.md").display().to_string();
+    let r1 = h.get_by_label(&one).rect();
+    let r2 = h.get_by_label(&two).rect();
+    assert!(r2.top() < r1.top(), "the most recent first");
+    assert!(r1.bottom() < h.get_by_label("one.md").rect().top(), "above the tree");
+    // a click opens the file
+    h.get_by_label(&one).click();
+    let p = d.join("one.md");
+    wait_until(&mut h, "reopened", move |s| {
+        s.document_path() == Some(p.as_path()) && !s.is_busy()
+    });
+    // collapsing the section hides its rows
+    h.get_by_label("Recent").click();
+    h.run_steps(2);
+    assert!(h.query_by_label(&one).is_none(), "collapsed");
+    assert!(h.query_by_label("one.md").is_some(), "the tree stays");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn folder_section_collapses_and_the_activity_bar_switches_views() {
+    let (mut h, d) = tree("sections", &["a.md"]);
+    let folder = d.file_name().unwrap().to_string_lossy().into_owned();
+    h.get_by_label(&folder).click();
+    h.run_steps(2);
+    assert!(h.query_by_label("a.md").is_none(), "the folder section is collapsed");
+    h.get_by_label(&folder).click();
+    h.run_steps(2);
+    assert!(h.query_by_label("a.md").is_some());
+    // the activity bar: Outline and back to Files; Search is a disabled placeholder
+    h.get_by_label("Outline").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("a.md").is_none(), "the outline is shown");
+    h.get_by_label("Search").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("a.md").is_none(), "Search does nothing yet");
+    h.get_by_label("Files").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("a.md").is_some());
+    let _ = std::fs::remove_dir_all(&d);
+}
