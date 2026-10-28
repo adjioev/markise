@@ -187,7 +187,7 @@ fn discard_then_failed_open_keeps_the_edited_document_dirty() {
     h.state_mut().open(b.clone());
     h.run_steps(2);
     std::fs::remove_file(&b).unwrap(); // the open will fail
-    h.get_by_label("Discard").click();
+    h.get_by_label("Don’t Save").click();
     wait_until(&mut h, "open attempt fails", |s| {
         !s.is_busy() && s.banner_text().is_some_and(|b| b.starts_with("error"))
     });

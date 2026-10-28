@@ -121,71 +121,83 @@ impl About {
         }
         let dark = ctx.global_style().visuals.dark_mode;
         let logo = self.logo(ctx, dark);
-        let mut open = true;
+        use crate::dialog::{Width, footer, modal, primary, secondary, title};
         let mut show_licences = false;
-        egui::Window::new("About Markise")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.set_width(340.0);
-                ui.vertical_centered(|ui| {
-                    ui.add_space(8.0);
-                    if let Some(t) = &logo {
-                        ui.add(egui::Image::new(t).fit_to_exact_size(egui::vec2(96.0, 96.0)));
-                    }
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(NAME).size(24.0).strong());
-                    ui.label(RichText::new(TAGLINE).italics());
-                    ui.add_space(4.0);
-                    ui.label(DESCRIPTION);
-                    ui.add_space(6.0);
-                    ui.weak(version_text(commit));
-                    ui.add_space(6.0);
-                    ui.label(COPYRIGHT);
-                    ui.label(format!("Licensed under {LICENSE}"));
-                    if ui.button("Licences & Third-Party Notices…").clicked() {
-                        show_licences = true;
-                    }
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        // centre the two links
-                        let w = 150.0;
-                        ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
-                        ui.hyperlink_to("Website", WEBSITE);
-                        ui.label("·");
-                        ui.hyperlink_to("GitHub", REPOSITORY);
-                    });
-                    ui.add_space(8.0);
+        let (closed, dismissed) = modal(ctx, "markise-about", Width::Narrow, |ui, look| {
+            let mut close = None;
+            ui.vertical_centered(|ui| {
+                if let Some(t) = &logo {
+                    ui.add(egui::Image::new(t).fit_to_exact_size(egui::vec2(88.0, 88.0)));
+                }
+                ui.add_space(6.0);
+                ui.label(RichText::new(NAME).size(24.0).strong().color(look.text));
+                ui.label(RichText::new(TAGLINE).italics().color(look.weak));
+                ui.add_space(6.0);
+                ui.label(DESCRIPTION);
+                ui.add_space(6.0);
+                ui.label(RichText::new(version_text(commit)).color(look.weak));
+                ui.add_space(6.0);
+                ui.label(COPYRIGHT);
+                ui.label(format!("Licensed under {LICENSE}"));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    // centre the two links
+                    let w = 150.0;
+                    ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+                    ui.hyperlink_to("Website", WEBSITE);
+                    ui.label("·");
+                    ui.hyperlink_to("GitHub", REPOSITORY);
                 });
             });
+            footer(ui, |ui| {
+                if primary(ui, look, "OK").clicked() {
+                    close = Some(());
+                }
+                if secondary(ui, look, "Licences & Third-Party Notices…").clicked() {
+                    show_licences = true;
+                }
+            });
+            if !self.licences && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                close = Some(());
+            }
+            close
+        });
         if show_licences {
             self.licences = true;
         }
-        if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.licences {
+        if (closed.is_some() || dismissed) && !self.licences {
             self.open = false;
         }
         if self.licences {
-            let mut lic_open = true;
-            egui::Window::new("Licences & Third-Party Notices")
-                .collapsible(false)
-                .open(&mut lic_open)
-                .default_size([620.0, 480.0])
-                .show(ctx, |ui| {
-                    egui::ComboBox::new("markise-about-doc", "Document")
-                        .selected_text(DOCUMENTS[self.doc].title)
-                        .show_ui(ui, |ui| {
-                            for (i, d) in DOCUMENTS.iter().enumerate() {
-                                ui.selectable_value(&mut self.doc, i, d.title);
-                            }
-                        });
-                    ui.separator();
-                    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            let (closed, dismissed) = modal(ctx, "markise-licences", Width::Wide, |ui, look| {
+                title(ui, look, "Licences & Third-Party Notices");
+                egui::ComboBox::new("markise-about-doc", "Document")
+                    .selected_text(DOCUMENTS[self.doc].title)
+                    .show_ui(ui, |ui| {
+                        for (i, d) in DOCUMENTS.iter().enumerate() {
+                            ui.selectable_value(&mut self.doc, i, d.title);
+                        }
+                    });
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical()
+                    .max_height(380.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.style_mut().interaction.selectable_labels = true;
                         ui.label(RichText::new(DOCUMENTS[self.doc].text).monospace().size(11.0));
                     });
+                let mut close = None;
+                footer(ui, |ui| {
+                    if primary(ui, look, "Close").clicked() {
+                        close = Some(());
+                    }
                 });
-            if !lic_open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    close = Some(());
+                }
+                close
+            });
+            if closed.is_some() || dismissed {
                 self.licences = false;
             }
         }

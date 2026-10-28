@@ -290,7 +290,7 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
         &[both("Shift+Cmd+O", "Ctrl+Shift+O")],
     ),
     // the current document's file (the sidebar offers the same for any file)
-    app("file.rename", "Rename…", &[]),
+    app("file.rename", "Rename", &[]),
     app("file.reveal", "Reveal in File Manager", &[]),
     app("file.close", "Close", &[both("Cmd+W", "Ctrl+W")]),
     app("app.quit", "Quit Markise", &[mac_only("Cmd+Q")]),

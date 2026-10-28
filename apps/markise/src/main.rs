@@ -81,6 +81,8 @@ fn main() -> eframe::Result {
         commit: option_env!("MARKISE_COMMIT").map(String::from),
         // settings file and user themes in the platform config folder (ADR 0004)
         config: markise_theme::discover::config_dir().map_or(ConfigDir::None, ConfigDir::Dir),
+        // yes/no questions as the platform's alerts (issue #35)
+        confirm: markise_ui_egui::confirm::native(),
         ..Default::default()
     };
     let mut viewport = eframe::egui::ViewportBuilder::default()

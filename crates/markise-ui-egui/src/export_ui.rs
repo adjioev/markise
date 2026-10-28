@@ -54,7 +54,12 @@ impl ExportUi {
         self.pending_overwrite.is_some()
     }
 
-    fn answer_overwrite(&mut self, overwrite: bool) -> Option<ExportRequest> {
+    /// The export waiting for its overwrite confirmation.
+    pub(crate) fn pending_overwrite(&self) -> Option<&ExportRequest> {
+        self.pending_overwrite.as_ref()
+    }
+
+    pub(crate) fn answer_overwrite(&mut self, overwrite: bool) -> Option<ExportRequest> {
         let req = self.pending_overwrite.take()?;
         if !overwrite {
             return None;
@@ -215,39 +220,10 @@ impl MarkiseApp {
         }
     }
 
-    /// Answers the overwrite confirmation (tests; the window's buttons in the app).
+    /// Answers the overwrite confirmation directly (tests; the app asks through
+    /// [`crate::confirm`]).
     pub fn answer_overwrite_for_test(&mut self, overwrite: bool) {
         if let Some(r) = self.export.answer_overwrite(overwrite) {
-            self.start_export(r);
-        }
-    }
-
-    /// The overwrite confirmation window, if one is pending.
-    pub(crate) fn export_dialogs(&mut self, ctx: &egui::Context) {
-        let Some(req) = &self.export.pending_overwrite else {
-            return;
-        };
-        let target = req.output.display().to_string();
-        let mut answer = None;
-        egui::Window::new("Export and Overwrite")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(format!("Overwrite {target} without asking for a file name?"));
-                ui.weak("You will not be asked again for this document.");
-                ui.horizontal(|ui| {
-                    if ui.button("Overwrite").clicked() {
-                        answer = Some(true);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        answer = Some(false);
-                    }
-                });
-            });
-        if let Some(a) = answer
-            && let Some(r) = self.export.answer_overwrite(a)
-        {
             self.start_export(r);
         }
     }

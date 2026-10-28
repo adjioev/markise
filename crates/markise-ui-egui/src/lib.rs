@@ -3,7 +3,9 @@
 
 pub mod about;
 pub mod app;
+pub mod confirm;
 pub mod diagram;
+pub mod dialog;
 pub mod export_ui;
 pub mod fonts;
 pub mod highlight;
