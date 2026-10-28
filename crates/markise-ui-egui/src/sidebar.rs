@@ -1020,10 +1020,11 @@ struct Section {
 
 /// Sidebar state the application keeps besides the tree: the files opened in this session
 /// (the Recent section; Markise has one document per window) and whether Recent is collapsed.
+/// Updated by the application's file events only (open, rename, Move to Trash, a failed
+/// open) — never per frame and without file system access.
 #[derive(Clone, Debug, Default)]
 pub struct SideState {
     recent: Vec<PathBuf>,
-    last: Option<PathBuf>,
     pub recent_collapsed: bool,
 }
 
@@ -1031,21 +1032,32 @@ impl SideState {
     /// Entries of the Recent section.
     pub const RECENT_MAX: usize = 5;
 
-    /// The document shown now (called every frame; cheap unless it changed): it moves to the
-    /// top of Recent. A previous entry whose file is gone (renamed, saved under another
-    /// name and removed) is dropped.
-    pub fn note_current(&mut self, current: Option<&Path>) {
-        if current == self.last.as_deref() {
-            return;
-        }
-        let prev = std::mem::replace(&mut self.last, current.map(Path::to_path_buf));
-        let Some(c) = current else { return };
-        if let Some(p) = prev.filter(|p| !p.exists()) {
-            self.recent.retain(|r| *r != p);
-        }
-        self.recent.retain(|r| r != c);
-        self.recent.insert(0, c.to_path_buf());
+    /// `path` was opened (or the document now lives there): it moves to the top.
+    pub fn opened(&mut self, path: &Path) {
+        self.recent.retain(|r| r != path);
+        self.recent.insert(0, path.to_path_buf());
         self.recent.truncate(Self::RECENT_MAX);
+    }
+
+    /// `from` (a file or a folder) was renamed or moved to `to`: entries follow.
+    pub fn renamed(&mut self, from: &Path, to: &Path) {
+        for r in &mut self.recent {
+            if let Some(n) = markise_engine::fsops::rebase(r, from, to) {
+                *r = n;
+            }
+        }
+        let mut seen = HashSet::new();
+        self.recent.retain(|r| seen.insert(r.clone()));
+    }
+
+    /// `path` (a file or a folder) was moved to the Trash: its entries leave.
+    pub fn removed(&mut self, path: &Path) {
+        self.recent.retain(|r| !r.starts_with(path));
+    }
+
+    /// `path` could not be opened (gone, unreadable): its entry leaves.
+    pub fn forget(&mut self, path: &Path) {
+        self.recent.retain(|r| r != path);
     }
 
     /// The session's recent files, the most recent first.
@@ -1376,6 +1388,32 @@ pub fn outline(ui: &mut Ui, entries: &[OutlineEntry], current: Option<usize>, lo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_follows_file_events() {
+        let p = |s: &str| PathBuf::from(format!("/v/{s}"));
+        let mut st = SideState::default();
+        for f in ["a.md", "b.md", "a.md", "d/c.md"] {
+            st.opened(&p(f));
+        }
+        assert_eq!(
+            st.recent(),
+            &[p("d/c.md"), p("a.md"), p("b.md")],
+            "newest first, no duplicates"
+        );
+        st.renamed(&p("d"), &p("e"));
+        assert_eq!(st.recent()[0], p("e/c.md"), "a folder rename moves its entries");
+        st.renamed(&p("b.md"), &p("a.md"));
+        assert_eq!(st.recent(), &[p("e/c.md"), p("a.md")], "no duplicate after a rename");
+        st.removed(&p("e"));
+        assert_eq!(st.recent(), &[p("a.md")]);
+        st.forget(&p("a.md"));
+        assert!(st.recent().is_empty());
+        for i in 0..9 {
+            st.opened(&p(&format!("n{i}.md")));
+        }
+        assert_eq!(st.recent().len(), SideState::RECENT_MAX);
+    }
 
     #[test]
     fn markdown_extensions_are_hidden_from_labels() {

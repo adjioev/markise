@@ -287,3 +287,76 @@ fn recent_section_can_be_hidden_and_the_choice_is_persisted() {
     assert!(h.query_by_label("Recent").is_some());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Codex review of #59: a missing file clicked in Recent gets the normal "cannot open"
+/// handling and leaves Recent; a file renamed in the tree keeps its entry under the new name.
+#[test]
+fn recent_entries_follow_renames_and_drop_missing_files() {
+    let (mut h, d) = tree("recent-events", &["one.md", "two.md", "three.md"]);
+    let ctx = h.ctx.clone();
+    for f in ["one.md", "two.md", "three.md"] {
+        h.state_mut().tree_action(&ctx, TreeAction::Open(d.join(f)));
+        let p = d.join(f);
+        wait_until(&mut h, f, move |s| {
+            s.document_path() == Some(p.as_path()) && !s.is_busy()
+        });
+    }
+    assert_eq!(
+        h.state().recent_files(),
+        &[d.join("three.md"), d.join("two.md"), d.join("one.md")]
+    );
+    // a rename in the tree (not the open document)
+    h.state_mut().start_rename(d.join("two.md"));
+    h.state_mut().set_rename_text("deux.md");
+    h.state_mut().confirm_rename();
+    assert_eq!(h.state().recent_files()[1], d.join("deux.md"));
+    // removed behind the app's back, then clicked in Recent
+    std::fs::remove_file(d.join("one.md")).unwrap();
+    let one = d.join("one.md").display().to_string();
+    h.run_steps(2);
+    h.get_by_label(&one).click();
+    wait_until(&mut h, "the failed open", |s| s.banner_text().is_some() && !s.is_busy());
+    assert!(
+        !h.state().recent_files().contains(&d.join("one.md")),
+        "the entry is dropped"
+    );
+    assert!(h.query_by_label(&one).is_none());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Codex review of #59: File → Rename from the keyboard while the folder section is collapsed
+/// opens the section, focuses the name field and renames.
+#[test]
+fn keyboard_rename_works_with_the_folder_section_collapsed() {
+    let (mut h, d) = tree("rename-collapsed", &["a.md", "b.md"]);
+    let ctx = h.ctx.clone();
+    h.state_mut().tree_action(&ctx, TreeAction::Open(d.join("a.md")));
+    let p = d.join("a.md");
+    wait_until(&mut h, "open", move |s| {
+        s.document_path() == Some(p.as_path()) && !s.is_busy()
+    });
+    let folder = d.file_name().unwrap().to_string_lossy().into_owned();
+    h.get_by_label(&folder).click();
+    h.run_steps(2);
+    assert!(h.query_by_label("b.md").is_none(), "collapsed");
+    assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("file.rename")));
+    let id = markise_ui_egui::sidebar::rename_field_id();
+    let t = Instant::now();
+    while !h.ctx.memory(|m| m.has_focus(id)) {
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "the rename field never got the focus"
+        );
+        h.step();
+    }
+    h.step();
+    assert!(h.query_by_label("b.md").is_some(), "the section opened for the editor");
+    h.event(egui::Event::Text("alpha".into()));
+    h.step();
+    h.key_press(Key::Enter);
+    wait_until(&mut h, "renamed", |s| {
+        s.file_tree_rows().contains(&"alpha.md".to_string())
+    });
+    assert!(d.join("alpha.md").is_file());
+    let _ = std::fs::remove_dir_all(&d);
+}

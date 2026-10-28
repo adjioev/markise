@@ -815,6 +815,11 @@ impl MarkiseApp {
         self.tree.as_ref().map(|t| t.row_names()).unwrap_or_default()
     }
 
+    /// The sidebar's Recent files, the most recent first (tests).
+    pub fn recent_files(&self) -> &[PathBuf] {
+        self.side.recent()
+    }
+
     /// Shows the Files (`true`) or Outline tab of the sidebar.
     pub fn show_files_tab(&mut self, files: bool) {
         self.tab = if files { Tab::Files } else { Tab::Outline };
@@ -912,7 +917,13 @@ impl MarkiseApp {
         let Some(r) = got else { return };
         let l = self.load.take().expect("load");
         match r {
-            Err(e) => self.banner = Some(Banner::Error(e)),
+            Err(e) => {
+                // a file that cannot be opened (gone, unreadable) leaves Recent
+                if matches!(l.reason, LoadReason::Open | LoadReason::OpenDiscarding) {
+                    self.side.forget(&l.path);
+                }
+                self.banner = Some(Banner::Error(e));
+            }
             Ok(loaded) => {
                 let t = loaded.timings;
                 self.timing.log(&format!(
@@ -1087,6 +1098,9 @@ impl MarkiseApp {
     /// Replaces the document; `untitled`: a new document without a file (`loaded.path` is
     /// its placeholder, not watched).
     fn install_doc(&mut self, loaded: Loaded, untitled: bool) {
+        if !untitled {
+            self.side.opened(&loaded.path);
+        }
         let same = !untitled
             && self
                 .doc
@@ -1881,8 +1895,6 @@ impl MarkiseApp {
         if let Some(r) = self.files.rename.as_mut() {
             r.drawn = false;
         }
-        let current = self.document_path().map(Path::to_path_buf);
-        self.side.note_current(current.as_deref());
         if self.sidebar_visible {
             self.sidebar(ui);
         } else if self.files.rename.is_some() {
