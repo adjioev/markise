@@ -1753,7 +1753,6 @@ fn k12_space_at_end_of_footnote_before_paragraph() {
 
 // Expected: End puts the caret after the paragraph's last source character, typing gives `a x`. Actual: `ax ` (caret before the invisible space).
 #[test]
-#[ignore = "bug: End before a trailing space that came from the file"]
 fn l01_end_after_trailing_space_from_file_then_type() {
     // a paragraph whose source already ends with a space (not typed in this session)
     let mut e = Ed::open("l01", "a \n\nnext\n");

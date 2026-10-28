@@ -821,3 +821,21 @@ fn backspace_deletes_a_rule_and_merges_into_a_preceding_container() {
     roundtrip("- a\n  - b\n\nc\n", 11, b, "- a\n  - bc\n");
     roundtrip("> q\n\nb\n", 5, b, "> qb\n");
 }
+
+/// End on a paragraph's last line goes past whitespace the file already had after the text,
+/// so typing appends after it (#20 l01); not on a line ending in a hard break.
+#[test]
+fn line_end_includes_trailing_whitespace_from_the_file() {
+    for (src, at, want) in [
+        ("a \n\nnext\n", 0, 2),
+        ("a\t \n", 0, 3),
+        ("a  \nb\n", 0, 1),
+        ("a b\n", 0, 3),
+    ] {
+        let mut t = T::new(src);
+        t.ed.edit(|s| s.set_selection(Selection::caret(at)));
+        t.frame();
+        t.run("caret.lineEnd");
+        assert_eq!(t.caret().offset, want, "End in {src:?}");
+    }
+}
