@@ -431,7 +431,7 @@ fn wikilinks_show_labels_styled_by_resolution() {
     assert_ne!(color_at("Gone"), link, "unresolved links are muted");
     // the caret inside the first link reveals its source
     let focus = markise_layout::ItemFocus {
-        reveal: vec![3..17],
+        reveal: std::iter::once(3..17).collect(),
         ..Default::default()
     };
     v.set_focus(Some((0, focus)));

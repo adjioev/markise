@@ -54,22 +54,36 @@ fn main() {
     let root = PathBuf::from("/vault");
     let t = Instant::now();
     let ix = VaultIndex::from_rels(root.clone(), rels.clone(), 1);
-    println!("index build ({} files)                       {:>10.3} ms", ix.len(), t.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "index build ({} files)                       {:>10.3} ms",
+        ix.len(),
+        t.elapsed().as_secs_f64() * 1e3
+    );
 
     let from = Some("Area 3/Folder 33/Note 33-50 about topic 0.md");
-    time("resolve [[unique name]]", 10_000, || ix.resolve_wikilink("Note 57-42 about topic 0", from));
-    time("resolve [[ambiguous name]] (100 candidates)", 10_000, || ix.resolve_wikilink("Daily 3", from));
+    time("resolve [[unique name]]", 10_000, || {
+        ix.resolve_wikilink("Note 57-42 about topic 0", from)
+    });
+    time("resolve [[ambiguous name]] (100 candidates)", 10_000, || {
+        ix.resolve_wikilink("Daily 3", from)
+    });
     time("resolve [[folder/path]]", 10_000, || {
         ix.resolve_wikilink("Area 7/Folder 57/Note 57-42 about topic 0", from)
     });
-    time("resolve [[suffix/path]]", 10_000, || ix.resolve_wikilink("Folder 57/Daily 4", from));
-    time("resolve [[unresolved]]", 10_000, || ix.resolve_wikilink("No such note", from));
+    time("resolve [[suffix/path]]", 10_000, || {
+        ix.resolve_wikilink("Folder 57/Daily 4", from)
+    });
+    time("resolve [[unresolved]]", 10_000, || {
+        ix.resolve_wikilink("No such note", from)
+    });
     time("resolve [md](../Folder%2012/Daily%201.md)", 10_000, || {
         ix.resolve_markdown("../Folder%2012/Daily%201.md", from)
     });
     let mut worst = Duration::ZERO;
     for q in ["n", "no", "not", "note 5", "note 57-4", "dly", "topic 1"] {
-        worst = worst.max(time(&format!("suggest {q:?} (50 rows)"), 20, || ix.suggest(q, 50).len()));
+        worst = worst.max(time(&format!("suggest {q:?} (50 rows)"), 20, || {
+            ix.suggest(q, 50).len()
+        }));
     }
     println!(
         "autocomplete worst query: {:.2} ms (budget 30 ms, V3.5)",
