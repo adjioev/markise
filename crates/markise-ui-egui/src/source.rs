@@ -272,7 +272,8 @@ impl SourceEditor {
 
         // ---- keyboard
         let mut follow = false;
-        if focused {
+        let has_events = ui.input(|i| !i.events.is_empty());
+        if focused && has_events {
             let events = ui.input(|i| i.events.clone());
             let keymap = viewer.keymap().clone();
             let platform = viewer.platform();
@@ -288,12 +289,30 @@ impl SourceEditor {
 
         // ---- pointer
         let modifiers = ui.input(|i| i.modifiers);
-        let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.hovered();
+        // every primary press of this frame (a fast double click may arrive in one frame)
+        let presses: Vec<Pos2> = if resp.hovered() || resp.is_pointer_button_down_on() {
+            ui.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|e| match e {
+                        Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            ..
+                        } if rect.contains(*pos) && pos.x < bar.left() => Some(*pos),
+                        _ => None,
+                    })
+                    .collect()
+            })
+        } else {
+            Vec::new()
+        };
         let to_content = |p: Pos2, v: &DocViewer| -> Pos2 {
             let sy = v.ed.source.as_ref().map_or(0.0, |s| s.view.scroll_y()) as f32;
             pos2(p.x - text_left, p.y - rect.top() + sy)
         };
-        if pressed && let Some(pt) = ui.input(|i| i.pointer.interact_pos()) {
+        for pt in presses {
             let count = match self.last_press {
                 Some((t, q, n)) if now - t < 0.45 && q.distance(pt) < 5.0 => (n % 3) + 1,
                 _ => 1,

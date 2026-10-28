@@ -83,7 +83,7 @@ fn check_equal(v: &mut SourceView, doc: &markise_md::Document) -> Result<(), Tes
                 x.0 == y.0,
                 d.map(|d| &x.1[d]),
                 d.map(|d| &y.1[d]),
-                &x.0.chars().take(80).collect::<String>()
+                x.0.chars().take(80).collect::<String>()
             )));
         }
     }

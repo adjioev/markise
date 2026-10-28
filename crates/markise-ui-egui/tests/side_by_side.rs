@@ -456,7 +456,10 @@ fn menu_commands_keep_both_panes_equal() {
     let (left, session) = both(&mut h);
     assert_eq!(session, "# A\n\nalpha\n");
     assert_eq!(left, session, "Undo: both panes");
-    // a heading command at a caret in `alpha`
+    // with the source pane focused, block commands are not available there yet (slice 2)
+    assert!(!h.state_mut().run_command(&ctx, "block.heading2"));
+    // the rendered pane focused: a heading command at a caret in `alpha` acts on the session
+    click(&mut h, pos2(900.0, 120.0));
     h.state_mut()
         .viewer()
         .unwrap()
