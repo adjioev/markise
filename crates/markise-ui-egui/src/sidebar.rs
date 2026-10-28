@@ -14,6 +14,67 @@ pub enum Tab {
     Outline,
 }
 
+/// What the user asked for in the file tree: a click, or a context-menu item (spec 04 §4.1
+/// sidebar file items). Performed by the application (`app/files.rs`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TreeAction {
+    /// A file row was clicked.
+    Open(PathBuf),
+    /// New File in this folder.
+    NewFile(PathBuf),
+    /// New Folder in this folder.
+    NewFolder(PathBuf),
+    Rename(PathBuf),
+    /// Move to Trash.
+    Delete(PathBuf),
+    /// Reveal in Finder / Explorer / the file manager.
+    Reveal(PathBuf),
+    CopyPath(PathBuf),
+}
+
+/// Label of the "reveal in the file manager" item on this platform.
+pub fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else if cfg!(windows) {
+        "Show in Explorer"
+    } else {
+        "Show in File Manager"
+    }
+}
+
+/// The context menu of a file tree row (`dir`: the row is a folder) or of the folder itself
+/// (`root`: no Rename / Delete).
+fn row_menu(ui: &mut Ui, path: &Path, dir: bool, root: bool, out: &mut Option<TreeAction>) {
+    let folder = if dir {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+    let mut pick = |ui: &mut Ui, label: &str, a: TreeAction| {
+        if ui.button(label).clicked() {
+            *out = Some(a);
+            ui.close();
+        }
+    };
+    if !dir {
+        pick(ui, "Open", TreeAction::Open(path.to_path_buf()));
+        ui.separator();
+    }
+    pick(ui, "New File", TreeAction::NewFile(folder.clone()));
+    pick(ui, "New Folder", TreeAction::NewFolder(folder));
+    ui.separator();
+    if !root {
+        pick(ui, "Rename…", TreeAction::Rename(path.to_path_buf()));
+        pick(ui, "Move to Trash", TreeAction::Delete(path.to_path_buf()));
+        ui.separator();
+    }
+    pick(ui, reveal_label(), TreeAction::Reveal(path.to_path_buf()));
+    pick(ui, "Copy Path", TreeAction::CopyPath(path.to_path_buf()));
+}
+
 /// Listing state of one directory.
 #[derive(Default)]
 struct DirState {
@@ -215,6 +276,33 @@ impl FileTree {
             .collect()
     }
 
+    /// Shows the contents of `dir` (and lists it again: a file operation changed it).
+    pub fn reveal_dir(&mut self, dir: &Path, wake: &Wake) {
+        if dir != self.root {
+            self.expanded.insert(dir.to_path_buf());
+        }
+        self.rows_dirty = true;
+        if self.dirs.contains_key(dir) {
+            self.invalidate(dir, wake);
+        }
+    }
+
+    /// `from` was renamed to `to`: expanded folders follow, the parent is listed again.
+    pub fn renamed(&mut self, from: &Path, to: &Path, wake: &Wake) {
+        let moved: Vec<PathBuf> = self.expanded.iter().filter(|p| p.starts_with(from)).cloned().collect();
+        for p in moved {
+            self.expanded.remove(&p);
+            if let Some(n) = markise_engine::fsops::rebase(&p, from, to) {
+                self.expanded.insert(n);
+            }
+        }
+        self.dirs.retain(|k, _| !k.starts_with(from));
+        self.rows_dirty = true;
+        if let Some(parent) = to.parent() {
+            self.invalidate(parent, wake);
+        }
+    }
+
     pub fn toggle(&mut self, dir: &Path) {
         if !self.expanded.remove(dir) {
             self.expanded.insert(dir.to_path_buf());
@@ -222,46 +310,55 @@ impl FileTree {
         self.rows_dirty = true;
     }
 
-    /// Shows the tree; returns a file the user clicked.
-    pub fn show(&mut self, ui: &mut Ui, current: Option<&Path>, wake: &Wake, look: &SideLook) -> Option<PathBuf> {
+    /// Shows the tree; returns what the user clicked or chose in a context menu.
+    pub fn show(&mut self, ui: &mut Ui, current: Option<&Path>, wake: &Wake, look: &SideLook) -> Option<TreeAction> {
         let name = self
             .root
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.root.display().to_string());
-        ui.label(RichText::new(name).strong().color(look.active_text));
+        let mut action = None;
+        let root = self.root.clone();
+        ui.add(egui::Label::new(RichText::new(name).strong().color(look.active_text)).sense(egui::Sense::click()))
+            .context_menu(|ui| row_menu(ui, &root, true, true, &mut action));
         let n = self.rows(wake).len();
-        let mut clicked = None;
         let mut toggle = None;
-        virtual_rows(ui, "markise-tree", look.row_h, n, |ui, range| {
+        let out = virtual_rows(ui, "markise-tree", look.row_h, n, |ui, range| {
             for r in &self.rows[range] {
                 if let Some(t) = &r.note {
                     look.row(ui, r.depth, RowKind::Note, t, false);
                     continue;
                 }
                 if r.is_dir {
-                    if look
-                        .row(ui, r.depth, RowKind::Dir { open: r.expanded }, &r.name, false)
-                        .clicked()
-                    {
+                    let resp = look.row(ui, r.depth, RowKind::Dir { open: r.expanded }, &r.name, false);
+                    if resp.clicked() {
                         toggle = Some(r.path.clone());
                     }
+                    resp.context_menu(|ui| row_menu(ui, &r.path, true, false, &mut action));
                 } else {
                     let selected = current.is_some_and(|c| c == r.path);
                     let md = markise_engine::tree::is_markdown(&r.path);
-                    if look
-                        .row(ui, r.depth, RowKind::File { markdown: md }, &r.name, selected)
-                        .clicked()
-                    {
-                        clicked = Some(r.path.clone());
+                    let resp = look.row(ui, r.depth, RowKind::File { markdown: md }, &r.name, selected);
+                    if resp.clicked() {
+                        action = Some(TreeAction::Open(r.path.clone()));
                     }
+                    resp.context_menu(|ui| row_menu(ui, &r.path, false, false, &mut action));
                 }
             }
         });
+        // the empty space below the rows: the mounted folder's menu
+        let below = egui::Rect::from_min_max(
+            egui::pos2(out.inner_rect.left(), out.inner_rect.top() + out.content_size.y),
+            out.inner_rect.max,
+        );
+        if below.height() > 0.0 {
+            ui.interact(below, ui.scope_id().with("markise-tree-empty"), egui::Sense::click())
+                .context_menu(|ui| row_menu(ui, &root, true, true, &mut action));
+        }
         if let Some(d) = toggle {
             self.toggle(&d);
         }
-        clicked
+        action
     }
 }
 

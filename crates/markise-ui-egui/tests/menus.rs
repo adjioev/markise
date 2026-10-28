@@ -326,7 +326,14 @@ fn view_mode_click_sets_and_shortcut_toggles() {
 }
 
 /// Registry host commands handled by the app's fixed shortcuts (app.rs `SC_*`).
-const HOST_KEYS: [&str; 4] = ["file.open", "file.save", "view.sourceMode", "view.toggleSidebar"];
+const HOST_KEYS: [&str; 6] = [
+    "file.new",
+    "file.open",
+    "file.save",
+    "file.saveAs",
+    "view.sourceMode",
+    "view.toggleSidebar",
+];
 
 /// Every shortcut a menu shows on Windows/Linux (where menus only display them) and on macOS
 /// without the native menu has a key handler (Codex review of PR #34).

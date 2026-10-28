@@ -12,6 +12,7 @@ markise-doc.workspace = true
 markise-md.workspace = true
 markise-layout.workspace = true
 notify.workspace = true
+trash.workspace = true
 tempfile.workspace = true
 similar.workspace = true
 serde_json.workspace = true
@@ -22,6 +23,13 @@ markise-export.workspace = true
 markise-pdf.workspace = true
 markise-text.workspace = true
 markise-theme.workspace = true
+
+# atomic no-replace rename (src/fsops.rs)
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 markise-corpus.workspace = true

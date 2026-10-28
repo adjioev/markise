@@ -48,6 +48,7 @@ use crate::source::SourceEditor;
 use crate::themes::{ConfigDir, InstallDone, ThemeEvent, ThemeManager};
 use crate::viewer::DocViewer;
 
+mod files;
 mod menus;
 pub use menus::MenuHost;
 
@@ -168,7 +169,11 @@ struct DocState {
     id: u64,
     /// The `keyBinding` settings value last applied to this document's keymap.
     key_bindings_applied: Option<Vec<(String, String)>>,
+    /// The file; for an untitled document a placeholder in the folder Save As proposes
+    /// (relative links and images resolve against it) — see [`DocState::file`].
     path: PathBuf,
+    /// A new document that has never been saved (File → New): no file on disk yet.
+    untitled: bool,
     viewer: DocViewer,
     lossy: bool,
     deleted: bool,
@@ -196,6 +201,22 @@ fn text_fp(text: &str) -> TextFp {
 }
 
 impl DocState {
+    /// The document's file on disk (`None` for an untitled document).
+    fn file(&self) -> Option<&Path> {
+        (!self.untitled).then_some(self.path.as_path())
+    }
+
+    /// Name shown in the title bar and questions.
+    fn display_name(&self) -> String {
+        if self.untitled {
+            return "Untitled".into();
+        }
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     /// Kept for call sites that fold edits into the document state: the session is the only
     /// state now, so there is nothing to fold.
     fn sync(&mut self) {}
@@ -270,11 +291,15 @@ enum Then {
     Close,
     Open(PathBuf),
     Install(Box<Loaded>),
+    /// File → New: replace the document with an untitled one.
+    New,
 }
 
 struct SaveRequest {
     /// Overwrite authorization: the disk version the user saw (None = the recorded version).
     expect: Option<Expect>,
+    /// Save As: write to this file and make it the document's file.
+    target: Option<PathBuf>,
     then: Then,
 }
 
@@ -286,6 +311,10 @@ struct Saving {
     then: Then,
     /// The session state the save writes (marked saved on success).
     snap: Option<SaveSnapshot>,
+    /// Save As: the document's new file once the save succeeded.
+    target: Option<PathBuf>,
+    /// The file written.
+    path: PathBuf,
 }
 
 /// A question waiting for the user.
@@ -303,9 +332,11 @@ enum Banner {
     Info(String),
     /// External change while there are unsaved local edits.
     Conflict(Box<Loaded>),
-    /// Save refused: the file changed on disk (`found` = what is there now).
+    /// Save refused: the file changed on disk (`found` = what is there now). `target`: the
+    /// Save As destination that conflicted ("Overwrite" retries it, not the old file).
     SaveConflict {
         found: Option<DiskVersion>,
+        target: Option<PathBuf>,
     },
 }
 
@@ -414,6 +445,8 @@ pub struct MarkiseApp {
     /// About Markise window.
     about: crate::about::About,
     commit: Option<String>,
+    /// File operations in progress (rename / delete questions) and the save-dialog test hook.
+    pub(crate) files: files::FileOps,
 }
 
 impl MarkiseApp {
@@ -487,6 +520,7 @@ impl MarkiseApp {
             menu_platform: markise_engine::editor::keymap::Platform::current(),
             about: Default::default(),
             commit: opts.commit,
+            files: Default::default(),
         }
     }
 
@@ -497,8 +531,14 @@ impl MarkiseApp {
         self.wake.clone().unwrap_or_else(|| Arc::new(|| {}))
     }
 
+    /// The open document's file (`None` without a document or for an untitled one).
     pub fn document_path(&self) -> Option<&Path> {
-        self.doc.as_ref().map(|d| d.path.as_path())
+        self.doc.as_ref().and_then(|d| d.file())
+    }
+
+    /// An untitled (never saved) document is open.
+    pub fn is_untitled(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| d.untitled)
     }
 
     pub fn model(&self) -> Option<&Arc<DocModel>> {
@@ -739,7 +779,7 @@ impl MarkiseApp {
             self.sidebar_visible = true;
             return;
         }
-        if self.doc.as_ref().is_some_and(|d| d.path == path) {
+        if self.doc.as_ref().is_some_and(|d| d.file() == Some(path.as_path())) {
             return;
         }
         if self.is_dirty() {
@@ -961,7 +1001,17 @@ impl MarkiseApp {
     }
 
     fn install(&mut self, loaded: Loaded) {
-        let same = self.doc.as_ref().is_some_and(|d| d.path == loaded.path);
+        self.install_doc(loaded, false);
+    }
+
+    /// Replaces the document; `untitled`: a new document without a file (`loaded.path` is
+    /// its placeholder, not watched).
+    fn install_doc(&mut self, loaded: Loaded, untitled: bool) {
+        let same = !untitled
+            && self
+                .doc
+                .as_ref()
+                .is_some_and(|d| d.file() == Some(loaded.path.as_path()));
         if !same {
             self.images.clear();
         }
@@ -971,7 +1021,7 @@ impl MarkiseApp {
         self.banner = loaded.lossy.then(|| {
             Banner::Info("The file is not valid UTF-8; it was decoded lossily and saving is disabled.".into())
         });
-        if let Some(w) = self.watcher.as_mut() {
+        if !untitled && let Some(w) = self.watcher.as_mut() {
             w.watch_file(&loaded.path);
         }
         let format: Arc<dyn markise_doc::DocumentFormat> = Arc::new(MarkdownFormat {
@@ -987,10 +1037,11 @@ impl MarkiseApp {
             key_bindings_applied: None,
             id,
             path: loaded.path,
+            untitled,
             viewer,
             lossy: loaded.lossy,
             deleted: false,
-            disk: Some(loaded.version),
+            disk: (!untitled).then_some(loaded.version),
             source_ui: SourceEditor::new(),
             saved_rev: 0,
             saved_fp,
@@ -1006,14 +1057,14 @@ impl MarkiseApp {
             self.reload_pending = true;
             return;
         }
-        if let Some(path) = self.doc.as_ref().map(|d| d.path.clone()) {
+        if let Some(path) = self.doc.as_ref().and_then(|d| d.file()).map(Path::to_path_buf) {
             self.start_load(path, LoadReason::Reload);
         }
     }
 
     fn external_change(&mut self, loaded: Loaded) {
         let Some(doc) = self.doc.as_mut() else { return };
-        if doc.path != loaded.path {
+        if doc.file() != Some(loaded.path.as_path()) {
             return;
         }
         if doc.disk.is_some_and(|d| d.same_content(&loaded.version)) {
@@ -1025,7 +1076,7 @@ impl MarkiseApp {
             return;
         }
         if self.is_dirty() {
-            if let Some(Banner::SaveConflict { found }) = &mut self.banner {
+            if let Some(Banner::SaveConflict { found, target: None }) = &mut self.banner {
                 // keep the save-conflict choices; "Overwrite" now targets the newest version
                 *found = Some(loaded.version);
             } else {
@@ -1039,7 +1090,7 @@ impl MarkiseApp {
     /// Replaces the document's text with `loaded` (explicit decision, or a clean document).
     fn accept_reload(&mut self, loaded: Loaded) {
         let Some(doc) = self.doc.as_mut() else { return };
-        if doc.path != loaded.path {
+        if doc.file() != Some(loaded.path.as_path()) {
             return;
         }
         // one undoable "Reload from Disk" transaction (ADR 0006 §4.3); disk is now current.
@@ -1080,13 +1131,18 @@ impl MarkiseApp {
         for e in events {
             match e {
                 WatchEvent::FileChanged(p) => {
-                    if self.doc.as_ref().is_some_and(|d| same_file(&d.path, &p)) {
+                    if self
+                        .doc
+                        .as_ref()
+                        .and_then(|d| d.file())
+                        .is_some_and(|f| same_file(f, &p))
+                    {
                         self.request_reload();
                     }
                 }
                 WatchEvent::FileRemoved(p) => {
                     if let Some(doc) = &mut self.doc
-                        && same_file(&doc.path, &p)
+                        && doc.file().is_some_and(|f| same_file(f, &p))
                     {
                         // C18: keep the content, mark it; saving recreates the file.
                         doc.deleted = true;
@@ -1117,9 +1173,22 @@ impl MarkiseApp {
             };
             self.queued_save = Some(SaveRequest {
                 expect: req.expect,
+                target: req.target,
                 then,
             });
             return;
+        }
+        let mut req = req;
+        if self.doc.as_ref().is_some_and(|d| d.untitled) && req.target.is_none() {
+            // an untitled document is saved through Save As (spec 04 §2); Cancel in the
+            // dialog cancels the save and its continuation
+            match self.pick_save_target() {
+                Some((p, expect)) => {
+                    req.target = Some(p);
+                    req.expect = Some(expect);
+                }
+                None => return,
+            }
         }
         let (Some(doc), Some(wake)) = (self.doc.as_mut(), self.wake.clone()) else {
             return;
@@ -1129,7 +1198,7 @@ impl MarkiseApp {
             self.banner = Some(Banner::Error("Saving is disabled for a lossily decoded file.".into()));
             return;
         }
-        if !doc.dirty() && !doc.deleted && req.expect.is_none() {
+        if !doc.dirty() && !doc.deleted && req.expect.is_none() && req.target.is_none() {
             // the file already holds exactly this text
             self.finish_then(req.then);
             return;
@@ -1144,13 +1213,16 @@ impl MarkiseApp {
             SaveText::Exact(t) => text_fp(t),
             SaveText::Buffer { text, .. } => text_fp(text),
         };
-        let rx = spawn_save(text, doc.path.clone(), expect, rev, self.hooks.clone(), wake);
+        let path = req.target.clone().unwrap_or_else(|| doc.path.clone());
+        let rx = spawn_save(text, path.clone(), expect, rev, self.hooks.clone(), wake);
         self.saving = Some(Saving {
             doc_id: doc.id,
             fp,
             rx,
             then: req.then,
             snap,
+            target: req.target,
+            path,
         });
     }
 
@@ -1158,6 +1230,7 @@ impl MarkiseApp {
     pub fn save(&mut self) {
         self.start_save(SaveRequest {
             expect: None,
+            target: None,
             then: Then::Nothing,
         });
     }
@@ -1175,10 +1248,30 @@ impl MarkiseApp {
         };
         let s = self.saving.take().expect("saving");
         let current = self.doc.as_ref().is_some_and(|d| d.id == s.doc_id);
+        // the document's file changed while saving (renamed): the old path was written, the
+        // document's file may not hold this text — keep it unsaved
+        if current && saved.result.is_ok() && s.target.is_none() && self.doc.as_ref().is_some_and(|d| d.path != s.path)
+        {
+            self.queued_save = None;
+            self.banner = Some(Banner::Error(format!(
+                "The file was renamed while saving; the save went to {}. Save again.",
+                s.path.display()
+            )));
+            if std::mem::take(&mut self.reload_pending) {
+                self.request_reload();
+            }
+            return;
+        }
         if current {
             let doc = self.doc.as_mut().expect("doc");
             match saved.result {
                 Ok(out) => {
+                    if let Some(target) = s.target.clone() {
+                        // Save As: the document now lives in the new file
+                        doc.path = target;
+                        doc.untitled = false;
+                        doc.lossy = false;
+                    }
                     doc.disk = Some(out.version);
                     doc.deleted = false;
                     if saved.rev >= doc.saved_rev {
@@ -1199,11 +1292,17 @@ impl MarkiseApp {
                             b.display()
                         ))
                     });
+                    if let Some(target) = s.target {
+                        self.document_moved(&target);
+                    }
                     self.finish_then(s.then);
                 }
                 Err(SaveError::Conflict { found }) => {
                     self.queued_save = None;
-                    self.banner = Some(Banner::SaveConflict { found });
+                    self.banner = Some(Banner::SaveConflict {
+                        found,
+                        target: s.target.clone(),
+                    });
                 }
                 Err(SaveError::Io(e)) => {
                     // spec 04 §10: content stays in the editor, still unsaved; report it
@@ -1244,6 +1343,7 @@ impl MarkiseApp {
             Then::Nothing => {}
             Then::Open(path) => self.open_now(path, LoadReason::OpenDiscarding),
             Then::Install(loaded) => self.install(*loaded),
+            Then::New => self.new_document_now(),
             Then::Close => {
                 self.allow_close = true;
                 if let Some(c) = &self.ctx {
@@ -1477,11 +1577,7 @@ impl MarkiseApp {
     fn update_title(&mut self, ctx: &Context) {
         let title = match &self.doc {
             Some(d) => {
-                let name = d
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let name = d.display_name();
                 format!("{name}{} — Markise", if self.is_dirty() { " •" } else { "" })
             }
             None => "Markise".to_string(),
@@ -1615,6 +1711,7 @@ impl MarkiseApp {
         self.font_window(ctx);
         self.about.show(ctx, self.commit.as_deref());
         self.dialogs(ctx);
+        self.file_dialogs(ctx);
         self.export_dialogs(ctx);
         self.update_title(ctx);
         self.sync_native_menu();
@@ -1623,12 +1720,7 @@ impl MarkiseApp {
 
     fn dialogs(&mut self, ctx: &Context) {
         let Some(p) = &self.ask else { return };
-        let name = self
-            .doc
-            .as_ref()
-            .and_then(|d| d.path.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = self.doc.as_ref().map(DocState::display_name).unwrap_or_default();
         let mut choice = None;
         egui::Modal::new(egui::Id::unique("markise-confirm")).show(ctx, |ui| {
             ui.set_max_width(420.0);
@@ -1693,7 +1785,11 @@ impl MarkiseApp {
                 }
             }
             (Some("discard"), Some(Ask::Unsaved(then))) => self.perform(then),
-            (Some("save"), Some(Ask::Unsaved(then))) => self.start_save(SaveRequest { expect: None, then }),
+            (Some("save"), Some(Ask::Unsaved(then))) => self.start_save(SaveRequest {
+                expect: None,
+                target: None,
+                then,
+            }),
             (Some("cancel"), _) => {}
             (_, ask) => self.ask = ask,
         }
@@ -2050,18 +2146,18 @@ impl MarkiseApp {
                 ui.separator();
                 match self.tab {
                     Tab::Files => {
-                        let current = self.doc.as_ref().map(|d| d.path.clone());
-                        let mut clicked = None;
+                        let current = self.document_path().map(Path::to_path_buf);
+                        let mut action = None;
                         if let (Some(tree), Some(wake)) = (self.tree.as_mut(), self.wake.as_ref()) {
-                            clicked = tree.show(ui, current.as_deref(), wake, &look);
+                            action = tree.show(ui, current.as_deref(), wake, &look);
                         } else {
                             ui.weak("No folder open");
                             if ui.button("Open Folder…").clicked() {
                                 self.open_folder_dialog();
                             }
                         }
-                        if let Some(p) = clicked {
-                            self.open(p);
+                        if let Some(a) = action {
+                            self.tree_action(ui.ctx(), a);
                         }
                     }
                     Tab::Outline => {
@@ -2191,9 +2287,9 @@ impl MarkiseApp {
                             ui.label(
                                 // plain-text shortcuts: egui's default fonts lack ⇧
                                 RichText::new(if self.menu_platform == markise_engine::editor::keymap::Platform::Mac {
-                                    "Open a Markdown file (Cmd+O) or a folder (Shift+Cmd+O)"
+                                    "New document (Cmd+N), open a Markdown file (Cmd+O) or a folder (Shift+Cmd+O)"
                                 } else {
-                                    "Open a Markdown file (Ctrl+O) or a folder (Ctrl+Shift+O)"
+                                    "New document (Ctrl+N), open a Markdown file (Ctrl+O) or a folder (Ctrl+Shift+O)"
                                 })
                                     .color(color(t.meta_text))
                                     .size(16.0),
@@ -2325,17 +2421,11 @@ impl MarkiseApp {
                 }
             }
             Some(Act::Overwrite) => {
-                if let Some(Banner::SaveConflict { found }) = self.banner.take() {
-                    let expect = found.map_or(Expect::Missing, Expect::Version);
-                    self.start_save(SaveRequest {
-                        expect: Some(expect),
-                        then: Then::Nothing,
-                    });
-                }
+                self.resolve_save_conflict_overwrite();
             }
             Some(Act::ReloadDiscard) => {
                 self.banner = None;
-                if let Some(p) = self.doc.as_ref().map(|d| d.path.clone()) {
+                if let Some(p) = self.doc.as_ref().and_then(|d| d.file()).map(Path::to_path_buf) {
                     self.start_load(p, LoadReason::AcceptReload);
                 }
             }
@@ -2359,9 +2449,11 @@ impl MarkiseApp {
 
     /// "Overwrite" in the save-conflict banner (tests).
     pub fn resolve_save_conflict_overwrite(&mut self) {
-        if let Some(Banner::SaveConflict { found }) = self.banner.take() {
+        if let Some(Banner::SaveConflict { found, target }) = self.banner.take() {
+            // the version the user saw in the conflict, at the file that conflicted
             self.start_save(SaveRequest {
                 expect: Some(found.map_or(Expect::Missing, Expect::Version)),
+                target,
                 then: Then::Nothing,
             });
         }
