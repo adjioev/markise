@@ -1466,6 +1466,19 @@ fn cross_block_risks_block_ownership() {
             &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
             "- a\n\n  >\n\n  x‸\n",
         ),
+        // … when the empty block is outside the line's own container
+        (
+            "hinted-item-after-quote",
+            ">\n\n- ‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            ">\n\n- x‸\n",
+        ),
+        (
+            "hinted-item-after-quote-item",
+            "- >\n- ‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "- >\n- x‸\n",
+        ),
         (
             "hinted-after-quote",
             "> q\n\n‸y\n",

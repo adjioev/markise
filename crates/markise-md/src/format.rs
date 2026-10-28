@@ -1213,63 +1213,47 @@ impl Document {
         if let Some((_, content, _)) = scan::atx_heading(b, p, b.len(), self.options().strict)
             && content.is_empty()
         {
-            // C43: an empty heading becomes an empty paragraph (its `##` removed): the
-            // virtual paragraph after the block before it — the neighbour from the structure,
-            // never one past a block without text (an empty quote stays; ADR 0011)
-            let here = self.block_owner(at).map(|o| o.leaf.containers).unwrap_or_default();
-            let before = self.adjacent_block(at, false);
-            if let Some(prev) = before
-                .as_ref()
-                .and_then(|a| a.leaf.clone())
-                .filter(|p| line_start(text, p.span.end) < ls)
-            {
-                // a previous block deeper in containers (the end of a quote or list before
-                // this line): the paragraph leaves them, it stays at this line's level
-                let exit = if prev.containers.len() > here.len() && prev.containers.starts_with(&here) {
-                    prev.containers.len() - here.len()
-                } else {
-                    0
-                };
-                let ps = PatchSet::single_verbatim(prev.span.end..ce, "");
-                return Ok(Plan::single(
-                    PlanStep {
-                        patches: ps,
-                        hints_after: Some(hints),
-                    },
-                    Some(Selection::caret_at(markise_doc::DocPos::with_virt(
-                        prev.span.end,
-                        1 + exit as u16,
-                    ))),
-                ));
+            // C43: an empty heading becomes an empty paragraph in place (its `##` removed),
+            // in the line's own containers. Markdown cannot store an empty paragraph after
+            // another block, so there it is the virtual one after the block before it (M2b-1)
+            // — when that block is in the same innermost container (compared by identity,
+            // i.e. span, not by kind; ADR 0011), leaving exactly the containers of that block
+            // the line is not in. Otherwise (the first block of its container, nothing before
+            // it) only the marker goes: the line's own prefix stays byte for byte and the caret
+            // after it — the empty item / quote / line Markdown keeps there.
+            let in_place = Ok(Plan::single(
+                PlanStep {
+                    patches: PatchSet::single_verbatim(from..ce, ""),
+                    hints_after: Some(hints.clone()),
+                },
+                Some(Selection::caret(from)),
+            ));
+            let line_chain = self.containers_at(from);
+            let Some(before) = self.adjacent_block(at, false) else {
+                return in_place;
+            };
+            let (anchor, chain) = match &before.leaf {
+                Some(prev) if line_start(text, prev.span.end) < ls => {
+                    (prev.span.end, self.containers_at(prev.span.start))
+                }
+                // a block without text (an empty quote, an empty list item): it stays
+                _ => {
+                    let end = before.block.end.min(ls);
+                    (end, self.containers_at(end))
+                }
+            };
+            let shared = chain.iter().zip(&line_chain).take_while(|(a, b)| a == b).count();
+            if shared < line_chain.len() {
+                return in_place;
             }
-            let Some(before) = before else {
-                // nothing before it: the line is emptied in place
-                return Ok(Plan::single(
-                    PlanStep {
-                        patches: PatchSet::single_verbatim(from..ce, ""),
-                        hints_after: Some(hints),
-                    },
-                    Some(Selection::caret(from)),
-                ));
-            };
-            // a block without text before it (an empty quote): it stays; the empty paragraph
-            // is the virtual one right after it, in place of the line — at this line's level:
-            // it leaves the containers of that block this line is not in (an empty nested
-            // quote), never the ones around this line
-            let end = before.block.end.min(ls);
-            let chain: Vec<ContainerKind> = self.containers_at(end).into_iter().map(|c| c.kind).collect();
-            let exit = if chain.len() > here.len() && chain.starts_with(&here) {
-                chain.len() - here.len()
-            } else {
-                0
-            };
+            let exit = chain.len() - shared;
             return Ok(Plan::single(
                 PlanStep {
-                    patches: PatchSet::single_verbatim(end..ce, ""),
+                    patches: PatchSet::single_verbatim(anchor..ce, ""),
                     hints_after: Some(hints),
                 },
                 Some(Selection::caret_at(markise_doc::DocPos::with_virt(
-                    end,
+                    anchor,
                     1 + exit as u16,
                 ))),
             ));

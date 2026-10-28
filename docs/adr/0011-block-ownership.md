@@ -96,11 +96,13 @@ methods; S12 uses `block_owner`; S13 uses `BlockOwner::trailing_ws`; S14 / S15 u
 None intended except four cross-block fixes (Codex review of #18), each with a regression test
 (`markise-engine/tests/block_ownership.rs`, kittest `cross_block_risks_block_ownership`):
 
-1. **Hinted-heading Enter** (C43 on `## ` typed as paragraph text): an empty quote before the
-   line is no longer deleted — the markers go and the empty paragraph is the virtual one right
-   after the quote, in place of the line and at the line's own container level (C43; inside an
-   enclosing quote / list item it stays there); after a quote / list the virtual paragraph
-   leaves that container instead of opening inside it.
+1. **Hinted-heading Enter** (C43 on `## ` typed as paragraph text, emptied): the empty
+   paragraph stays in the line's own containers. After a block of the same innermost container
+   (compared by identity — span — not by kind) it is the virtual paragraph after that block,
+   leaving exactly the containers of that block the line is not in; otherwise only the `##`
+   goes and the line's container prefix stays byte for byte (an empty item / quote line). Empty
+   quotes or items before the line are never deleted, and the paragraph never escapes into or
+   out of a neighbouring container. A generated test covers container stacks up to depth 3.
 2. **List-item paragraph join** (Backspace at an item's later paragraph): stops at an empty quote
    or empty nested item between the paragraphs (it deleted them).
 3. **Final-block deletion** (Delete Paragraph / Block on the last block): the separator is taken
@@ -123,6 +125,11 @@ documents, a 10 MB single paragraph with soft line breaks and a 100k-line code f
 the PR).
 
 ## Open questions
+
+- An emptied `## ` line that is the first line of three nested bullet items with the same
+  marker (`- - - ## `) would become `- - - `, a thematic break, if converted in place. Not
+  handled specially (the generated test alternates markers); should the marker change, or the
+  conversion fall back to the virtual paragraph?
 
 - A caret on the virtual paragraph (`virt > 0`) is owned by the leaf before it, so the toolbar
   shows that leaf's type (e.g. "Heading 1" right after Enter at a heading end) — main's
