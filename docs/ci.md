@@ -18,7 +18,9 @@ The Linux jobs are: `cargo fmt --check`, `cargo clippy --workspace --all-targets
 `cargo xtask layers` and `cargo xtask assets` (job `fmt + clippy (Linux)`), and the workspace
 tests plus the release-mode incremental property tests with 3000 cases (job
 `test + build (linux-x86_64)`). The full matrix also runs the tests on macOS (Apple Silicon) and
-Windows and builds, packages and uploads release binaries on all three OSes (14-day artifacts).
+Windows and builds and packages release binaries on all three OSes. The packaged binaries are
+uploaded as artifacts (`markise-<os>`, kept 3 days) **only from pushes to `main`**; `full-ci` PR
+runs and manual runs build and package but upload nothing.
 
 The docs-only filter is deliberately narrow: only prose and the static site page are ignored.
 Everything else triggers CI, including `AGENTS.md` (its crate table is checked by
@@ -62,5 +64,11 @@ to a PR and does not report into PR checks; look at it under Actions.
   never cancelled or replaced.
 - **Cargo cache** (`Swatinem/rust-cache`, in `.github/actions/setup-rust`): keyed per job, runner
   OS/arch, toolchain and `Cargo.lock`; saved only from `main` and restored by PRs, so the
-  repository cache does not fill up with per-PR entries.
+  repository cache does not fill up with per-PR entries. Because the key carries the
+  toolchain/env and `Cargo.lock`/`Cargo.toml` hashes, each dependency or toolchain change on
+  `main` saves a new entry; the `prune superseded Cargo caches` job (pushes to `main` only, not
+  part of `CI result`) then deletes every older `v0-rust-*` entry on `main`, keeping the newest
+  one per job/OS.
+- **Artifacts**: only pushes to `main` upload the CI binaries (3-day retention); release
+  workflow artifacts are kept 7 days.
 - Test binaries use line-tables-only debug info (keeps the Linux runner's disk from filling up).

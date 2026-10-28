@@ -2,9 +2,10 @@
 #
 # Default (every PR push, cheap): Linux only -- fmt + clippy + layering/asset checks (`lint`),
 # workspace tests + release-mode incremental property tests (`test`, linux-x86_64), and the
-# `CI result` gate. Full matrix (adds macOS Apple Silicon + Windows test + build, release
-# binaries and 14-day artifacts on every OS): pushes to main, workflow_dispatch
-# (manual; not reported into PR checks), and PR runs while the PR carries the `full-ci` label.
+# `CI result` gate. Full matrix (adds macOS Apple Silicon + Windows test + build and release
+# binaries on every OS): pushes to main, workflow_dispatch (manual; not reported into PR
+# checks), and PR runs while the PR carries the `full-ci` label. The binaries are uploaded as
+# artifacts (3 days) only from pushes to main, to keep Actions storage small.
 # macOS minutes are billed at 10x and Windows at 2x the Linux rate on private repositories, which is why they do not run on every PR push.
 #
 # Superseded runs of the same PR/branch are cancelled (never on main). Docs-only changes
@@ -155,12 +156,16 @@ jobs:
           export BUNDLE_VERSION
           ./scripts/package.sh "$PLATFORM" "$BUNDLE_VERSION-${GITHUB_SHA::7}" target/release dist
           ls -l dist
+      # Artifacts only from pushes to main (full-ci PR and manual runs still build and package,
+      # which is what they check, but upload nothing): per-run binaries of every PR push filled
+      # the repository's Actions storage. Nothing downstream consumes them; releases are built by
+      # release.yml.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: env.FULL_CI == 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: markise-${{ matrix.name }}
           path: dist/*
-          retention-days: 14
+          retention-days: 3
           if-no-files-found: error
 
   # Single merge gate: green only when every job of this run succeeded (any failure or
@@ -183,3 +188,34 @@ jobs:
         run: |
           echo "lint=$LINT test=$TEST full-matrix=$FULL"
           [ "$LINT" = success ] && [ "$TEST" = success ]
+
+  # Cargo caches are saved only from main (.github/actions/setup-rust), but rust-cache puts the
+  # toolchain/env hash and the Cargo.lock/Cargo.toml hash into the key, so every dependency or
+  # toolchain change on main saves a new ~1 GB entry per job/OS while the old one lingers until
+  # GitHub evicts it after 7 days unused; 2-4 generations per OS overflowed the 10 GB repository
+  # limit. After the jobs above have saved, keep only the newest entry per job/OS (the key minus
+  # its two trailing hashes) on main. Not part of `CI result`; a failure here never fails the run.
+  cache-cleanup:
+    name: prune superseded Cargo caches
+    needs: [lint, test]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - name: Keep the newest rust-cache entry per job/OS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh cache list --ref refs/heads/main --key v0-rust- --limit 100 \
+            --json id,key,createdAt \
+            --jq 'map(. + {group: (.key | sub("-[0-9a-f]+-[0-9a-f]+$"; ""))})
+                  | group_by(.group) | map(sort_by(.createdAt) | reverse | .[1:]) | flatten
+                  | .[] | "\(.id) \(.key)"' |
+          while read -r id key; do
+            echo "deleting superseded cache $key"
+            gh cache delete "$id"
+          done
