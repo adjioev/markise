@@ -40,3 +40,7 @@ harness = false
 [[bench]]
 name = "source_editor"
 harness = false
+
+[[bench]]
+name = "huge"
+harness = false
