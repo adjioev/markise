@@ -9,8 +9,8 @@ involved did not change in between).
 comfortably for heavily structured documents. A 100 MiB file parses on the loader thread in
 0.4–0.9 s while the UI keeps drawing. All numbers here are **headless CPU work**: layout, paint and
 tessellation of the real app UI on the UI thread, without GPU upload, present, compositor or input
-latency. By that measure scrolling stays within a 60 fps frame (p99 ≤ 24 ms CPU only next to a
-giant `[TOC]`), and typing in the middle of the file stays within 16 ms. Whether real
+latency. By that measure scrolling generally fits the 16.7 ms CPU allowance of a 60 fps frame, except next to
+a giant `[TOC]`, where p99 reaches 23–24 ms CPU and exceeds it, and typing in the middle of the file stays within 16 ms. Whether real
 keystroke-to-pixel latency meets NFR-4 needs the desktop `MARKISE_TIMING=1` measurement, which was
 not taken. Five specific, fixable hazards make some operations slow (0.1–1 s) and memory large
 (0.2–3.3 GB). None of them needs rope storage; see §4.
