@@ -319,7 +319,10 @@ impl EditorSession {
 
     /// Sets the selection. Any change not produced by typing is a caret jump and closes the
     /// open typing group (C13, spec 02 §11).
+    /// Offsets past the end of the text or inside a UTF-8 sequence (API / MCP callers) are
+    /// clamped to the nearest valid position before it.
     pub fn set_selection(&mut self, sel: Selection) {
+        let sel = clamp_selection(self.doc.text(), sel);
         if sel != self.sel {
             self.close_typing();
             self.sel = sel;
@@ -1379,6 +1382,35 @@ fn snap_selection(text: &str, sel: Selection) -> Selection {
     }
     let p = sel.primary();
     let mut out = Selection::single(snap(p.anchor), snap(p.focus));
+    out.goal_x = sel.goal_x;
+    out
+}
+
+/// `sel` with every offset clamped into `text` and moved back to a char boundary (a request's
+/// selection is untrusted input, unlike a planner's).
+fn clamp_selection(text: &str, sel: Selection) -> Selection {
+    let bad = |p: &DocPos| p.offset > text.len() || !text.is_char_boundary(p.offset);
+    if !sel.ranges().iter().any(|r| bad(&r.anchor) || bad(&r.focus)) {
+        return sel;
+    }
+    let fix = |p: DocPos| -> DocPos {
+        let mut o = p.offset.min(text.len());
+        while !text.is_char_boundary(o) {
+            o -= 1;
+        }
+        DocPos { offset: o, ..p }
+    };
+    let primary = sel.primary();
+    let ranges: Vec<markise_doc::SelRange> = sel
+        .ranges()
+        .iter()
+        .map(|r| markise_doc::SelRange {
+            anchor: fix(r.anchor),
+            focus: fix(r.focus),
+        })
+        .collect();
+    let idx = sel.ranges().iter().position(|r| *r == primary).unwrap_or(0);
+    let mut out = Selection::from_ranges(ranges, idx);
     out.goal_x = sel.goal_x;
     out
 }

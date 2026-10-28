@@ -795,3 +795,23 @@ mod saved_boundaries {
         assert_eq!(s.text(), "A\n");
     }
 }
+
+/// `set_selection` from an API caller clamps offsets past the end or inside a UTF-8
+/// sequence (#20); the editing keys after it must not panic.
+#[test]
+fn set_selection_clamps_out_of_range_offsets() {
+    let (mut s, _) = md_session("- a\n- b\n");
+    s.set_selection(Selection::range(3, 999));
+    let p = s.selection().primary();
+    assert_eq!((p.anchor.offset, p.focus.offset), (3, 8));
+    s.set_selection(Selection::caret(999));
+    assert_eq!(s.selection().primary().focus.offset, 8);
+    s.newline().unwrap();
+    s.delete_backward().unwrap();
+    s.insert_text("x").unwrap();
+    let (mut s, _) = md_session("мир\n");
+    s.set_selection(Selection::caret(1));
+    assert_eq!(s.selection().primary().focus.offset, 0);
+    s.insert_text("x").unwrap();
+    assert_eq!(s.text(), "xмир\n");
+}
