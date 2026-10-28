@@ -687,3 +687,80 @@ fn space_and_enter_at_other_block_ends_issue_16() {
         assert_eq!(save(&mut h, &p), *want, "{src:?}");
     }
 }
+
+#[test]
+fn spaces_after_a_heading_are_drawn_issue_16() {
+    // the caret is drawn one space further after each Space (the whitespace after an ATX
+    // heading lies outside its item's source: its layout must still be refreshed)
+    for backend in [
+        markise_ui_egui::TextBackend::Epaint,
+        markise_ui_egui::TextBackend::Parley,
+    ] {
+        for (src, want) in [
+            ("# Title\n\nPara\n", "# Title   x\n\nPara\n"),
+            ("# Title\nPara\n", "# Title   x\nPara\n"),
+            ("# Title\n", "# Title   x\n"),
+        ] {
+            let (mut h, p) = open_with("hd16-drawn", src, backend);
+            key(&mut h, Key::End);
+            let mut x = caret_screen(&mut h);
+            let mut step: Option<f32> = None;
+            for n in 1..=3 {
+                type_keys(&mut h, " ");
+                assert_eq!(caret(&mut h), 7 + n, "{backend:?} {src:?}");
+                let r = caret_screen(&mut h);
+                assert_eq!(r.center().y, x.center().y, "same line: {backend:?} {src:?} space {n}");
+                let dx = r.min.x - x.min.x;
+                assert!(dx > 2.0, "advanced by a space: {backend:?} {src:?} space {n}: {dx}");
+                if let Some(s) = step {
+                    assert!(
+                        (dx - s).abs() < 0.5,
+                        "one space width each: {backend:?} {src:?} {dx} vs {s}"
+                    );
+                }
+                step = Some(dx);
+                x = r;
+            }
+            type_keys(&mut h, "x");
+            assert_eq!(save(&mut h, &p), want, "{backend:?}");
+        }
+    }
+}
+
+#[test]
+fn toolbar_after_a_space_at_a_heading_end_issue_16() {
+    // block style and inline commands still act on the heading after a trailing space
+    let (mut h, p) = open_toolbar("hd16-toolbar", "# Title\n\nPara\n", true);
+    key(&mut h, Key::End);
+    type_keys(&mut h, " ");
+    let m = h.state().toolbar_state().unwrap();
+    assert_eq!(m.block_label(), "Heading 1");
+    for id in [
+        "block.paragraph",
+        "block.heading2",
+        "format.strong",
+        "format.emph",
+        "format.link",
+        "block.quote",
+    ] {
+        assert!(m.get(id).unwrap().enabled, "{id} enabled after the space");
+    }
+    // Bold inserts its markers at the caret (after the space), in the heading
+    h.key_press_modifiers(cmd(), Key::B);
+    h.step();
+    type_keys(&mut h, "b");
+    assert_eq!(text(&h), "# Title **b**\n\nPara\n");
+    assert_eq!(h.state().toolbar_state().unwrap().block_label(), "Heading 1");
+    assert_eq!(save(&mut h, &p), "# Title **b**\n\nPara\n");
+    // a block command keeps the caret after the whitespace
+    let (mut h, p) = open_toolbar("hd16-toolbar2", "# Title\n\nPara\n", true);
+    key(&mut h, Key::End);
+    type_keys(&mut h, " ");
+    h.key_press_modifiers(cmd(), Key::Num2);
+    h.step();
+    assert_eq!(text(&h), "## Title \n\nPara\n");
+    assert_eq!(h.state().toolbar_state().unwrap().block_label(), "Heading 2");
+    assert_eq!(caret(&mut h), 9);
+    type_keys(&mut h, "x");
+    assert_eq!(save(&mut h, &p), "## Title x\n\nPara\n");
+}

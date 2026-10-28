@@ -1495,7 +1495,7 @@ impl Document {
     /// The end of the heading whose line `at` is on when only spaces and tabs separate them
     /// and nothing but whitespace follows `at` on that line (a heading's span ends at its
     /// text or closing sequence, so whitespace typed after it is outside the block).
-    fn heading_end_before_ws(&self, at: usize) -> Option<usize> {
+    pub(crate) fn heading_end_before_ws(&self, at: usize) -> Option<usize> {
         let b = self.text().as_bytes();
         let mut q = at.min(b.len());
         while q > 0 && matches!(b[q - 1], b' ' | b'\t') {
@@ -1655,15 +1655,63 @@ fn style_of(id: PlannerId) -> Option<crate::edit::inline_fmt::Style> {
     })
 }
 
+/// Block commands (block style, lists, quote, indentation, moves): a caret in whitespace
+/// typed after a heading's text acts on that heading (issue #16).
+fn block_command(id: PlannerId) -> bool {
+    planners::heading_level(id).is_some()
+        || matches!(
+            id,
+            planners::PARAGRAPH
+                | planners::HEADING_UP
+                | planners::HEADING_DOWN
+                | planners::QUOTE
+                | planners::BULLET_LIST
+                | planners::ORDERED_LIST
+                | planners::TASK_LIST
+                | planners::TOGGLE_TASK
+                | planners::INDENT
+                | planners::OUTDENT
+                | planners::MOVE_UP
+                | planners::MOVE_DOWN
+                | PlannerId("block.insertRule")
+        )
+}
+
+impl Document {
+    /// `req` with a caret in a heading's trailing whitespace moved to the end of its text, for
+    /// block commands; `None` when nothing changes.
+    fn heading_block_request(&self, id: PlannerId, req: &PlanRequest) -> Option<PlanRequest> {
+        let sel = req.selection.primary();
+        if !block_command(id) || !sel.is_caret() || sel.focus.virt > 0 {
+            return None;
+        }
+        let q = self.heading_end_before_ws(sel.focus.offset)?;
+        let mut r = req.clone();
+        r.selection = Selection::caret(q);
+        Some(r)
+    }
+}
+
 impl EditBehavior for Document {
     fn plan_checked(&self, id: PlannerId, req: &PlanRequest) -> bool {
         if let Some(st) = style_of(id) {
             return self.format_active(st, req);
         }
+        if let Some(r) = self.heading_block_request(id, req) {
+            return self.block_checked(id, &r);
+        }
         self.block_checked(id, req)
     }
 
     fn plan(&self, id: PlannerId, req: &PlanRequest) -> Result<Plan, PlanError> {
+        if let Some(r) = self.heading_block_request(id, req) {
+            // the caret stays where it was (after the whitespace), mapped through the patches
+            let mut plan = self.plan(id, &r)?;
+            if plan.selection_after.as_ref().is_some_and(|s| s == &r.selection) {
+                plan.selection_after = None;
+            }
+            return Ok(plan);
+        }
         if let Some(st) = style_of(id) {
             return self.plan_format(st, req);
         }
