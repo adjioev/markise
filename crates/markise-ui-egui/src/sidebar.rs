@@ -186,6 +186,8 @@ pub struct FileTree {
     shown: std::ops::Range<usize>,
     /// A file to scroll into view once its row is listed ([`FileTree::reveal`]).
     pending_reveal: Option<PathBuf>,
+    /// The folder's section is collapsed (its header only; presentation, not tree state).
+    pub collapsed: bool,
 }
 
 impl FileTree {
@@ -201,6 +203,7 @@ impl FileTree {
             requests: 0,
             shown: 0..0,
             pending_reveal: None,
+            collapsed: false,
         }
     }
 
@@ -398,6 +401,8 @@ impl FileTree {
             return;
         }
         self.expand_to(path);
+        // a collapsed section opens: the note's row must be visible
+        self.collapsed = false;
         self.pending_reveal = Some(path.to_path_buf());
     }
 
@@ -427,6 +432,12 @@ impl FileTree {
         }
     }
 
+    /// Collapses every folder (the header's Collapse All).
+    pub fn collapse_all(&mut self) {
+        self.expanded.clear();
+        self.rows_dirty = true;
+    }
+
     pub fn toggle(&mut self, dir: &Path) {
         if !self.expanded.remove(dir) {
             self.expanded.insert(dir.to_path_buf());
@@ -452,12 +463,20 @@ impl FileTree {
         let mut action = None;
         let mut end = None;
         let root = self.root.clone();
-        ui.add(
-            egui::Label::new(RichText::new(name).strong().color(look.active_text))
-                .selectable(false)
-                .sense(egui::Sense::click()),
-        )
-        .context_menu(|ui| row_menu(ui, &root, true, true, &mut action));
+        let head = look.section(ui, &name, !self.collapsed, Some(&root), &mut action);
+        if head.collapse_all {
+            self.collapse_all();
+        }
+        if head.toggled {
+            self.collapsed = !self.collapsed;
+        }
+        // the inline name editor needs its row: an edit opens the section
+        if edit.is_some() || action.is_some() {
+            self.collapsed = false;
+        }
+        if self.collapsed {
+            return end.map(TreeAction::EndRename).into_iter().chain(action).collect();
+        }
         let n = self.rows(wake).len();
         // a new editor whose row is not drawn: scroll it into view
         let mut scroll_to = edit
@@ -484,7 +503,7 @@ impl FileTree {
                 RowKind::Dir { open: false }
             } else {
                 RowKind::File {
-                    markdown: markise_engine::tree::is_markdown(&e.path),
+                    markdown: is_markdown_note(&e.path),
                 }
             };
             end = look.edit_row(ui, 0, kind, e);
@@ -502,9 +521,10 @@ impl FileTree {
                     RowKind::Dir { open: r.expanded }
                 } else {
                     RowKind::File {
-                        markdown: markise_engine::tree::is_markdown(&r.path),
+                        markdown: is_markdown_note(&r.path),
                     }
                 };
+                let shown = display_name(&r.name, r.is_dir);
                 if let Some(e) = edit.as_deref_mut().filter(|e| e.path == r.path) {
                     if let Some(x) = look.edit_row(ui, r.depth, kind, e) {
                         end = Some(x);
@@ -512,14 +532,14 @@ impl FileTree {
                     continue;
                 }
                 if r.is_dir {
-                    let resp = look.row(ui, r.depth, kind, &r.name, false);
+                    let resp = look.row_named(ui, r.depth, kind, shown, &r.name, false);
                     if resp.clicked() {
                         toggle = Some(r.path.clone());
                     }
                     resp.context_menu(|ui| row_menu(ui, &r.path, true, false, &mut action));
                 } else {
                     let selected = current.is_some_and(|c| c == r.path);
-                    let resp = look.row(ui, r.depth, kind, &r.name, selected);
+                    let resp = look.row_named(ui, r.depth, kind, shown, &r.name, selected);
                     if resp.clicked() {
                         action = Some(TreeAction::Open(r.path.clone()));
                     }
@@ -544,12 +564,38 @@ impl FileTree {
     }
 }
 
+/// File extensions the tree does not show (issue #57): the Markdown ones; others (`.txt`,
+/// `.mdx`, …) stay visible. The tooltip and the inline rename use the full name.
+const HIDDEN_EXTENSIONS: [&str; 2] = ["md", "markdown"];
+
+/// The label a tree row shows for an entry: the name without a `.md` / `.markdown`
+/// extension (any case) for files, the whole name for folders and other files.
+pub fn display_name(name: &str, is_dir: bool) -> &str {
+    if is_dir {
+        return name;
+    }
+    match name.rfind('.') {
+        Some(i) if i > 0 && HIDDEN_EXTENSIONS.iter().any(|e| name[i + 1..].eq_ignore_ascii_case(e)) => &name[..i],
+        _ => name,
+    }
+}
+
+/// A Markdown note (no icon in the tree), as opposed to a plain-text file.
+fn is_markdown_note(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        markise_engine::tree::MARKDOWN_EXTENSIONS
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(e))
+    })
+}
+
 /// What a sidebar row shows in front of its label.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowKind {
     Dir {
         open: bool,
     },
+    /// A file; `markdown` files show no icon.
     File {
         markdown: bool,
     },
@@ -561,11 +607,32 @@ pub enum RowKind {
     Note,
 }
 
+/// The sidebar's own UI text size in points (issue #57): it follows the window zoom (egui's
+/// zoom factor) but never the document font size or the "Font & size…" overrides.
+pub const UI_FONT_SIZE: f32 = 13.0;
+/// Accepted range of a theme's sidebar font size (imported themes may derive it from the
+/// document's size).
+const UI_FONT_RANGE: (f32, f32) = (11.0, 14.0);
+/// Accepted range of a theme's row height: compact rows.
+const ROW_RANGE: (f32, f32) = (22.0, 28.0);
+/// Width of the disclosure-chevron slot in front of every tree row.
+const CHEVRON_W: f32 = 14.0;
+
+/// A small action glyph of the sidebar header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Glyph {
+    NewFile,
+    NewFolder,
+    CollapseAll,
+}
+
 /// Resolved sidebar style: the theme's sidebar slots with UI defaults from the chrome colors.
 #[derive(Clone, Debug)]
 pub struct SideLook {
     pub font: egui::FontId,
     pub bold_font: egui::FontId,
+    /// Section title (the folder name in the header).
+    pub small_font: egui::FontId,
     pub text: Color32,
     pub active_text: Color32,
     pub active_bg: Color32,
@@ -574,6 +641,19 @@ pub struct SideLook {
     pub outline_active_text: Color32,
     pub outline_active_bg: Color32,
     pub icon: Color32,
+    /// The theme's accent (chrome `--primary-color`).
+    pub accent: Color32,
+    /// Background of the open file's row: the accent, faint.
+    pub selected_bg: Color32,
+    /// Folder glyph fill and the front flap of an open folder.
+    pub folder: Color32,
+    pub folder_flap: Color32,
+    /// Vertical indent guides.
+    pub guide: Color32,
+    /// Section title text.
+    pub muted: Color32,
+    /// Activity bar background.
+    pub bar_bg: Color32,
     pub row_h: f32,
     pub pad_x: f32,
     pub indent: f32,
@@ -588,34 +668,72 @@ impl SideLook {
     pub fn new(t: &markise_theme::Theme) -> SideLook {
         let s = &t.sidebar;
         let ch = &t.chrome;
-        let size = s.font_size.unwrap_or(13.5);
+        let size = s
+            .font_size
+            .filter(|v| v.is_finite())
+            .unwrap_or(UI_FONT_SIZE)
+            .clamp(UI_FONT_RANGE.0, UI_FONT_RANGE.1);
         let (fam, bold_fam) = (markise_layout::FAMILY_SIDEBAR, markise_layout::FAMILY_SIDEBAR_BOLD);
         let bold = s.bold.unwrap_or(false);
         let font = egui::FontId::new(size, egui::FontFamily::Name((if bold { bold_fam } else { fam }).into()));
         let bold_font = egui::FontId::new(size, egui::FontFamily::Name(bold_fam.into()));
+        let small_font = egui::FontId::new((size - 1.5).max(10.0), egui::FontFamily::Name(bold_fam.into()));
+        let bg = c32(ch.sidebar_bg);
         let text = s.text.map_or(c32(ch.control_text), c32);
         let active_bg = s.active_bg.map_or(c32(ch.active_bg), c32);
+        let accent = c32(ch.accent);
         let blend = |a: Color32, b: Color32, f: f32| a.lerp_to_gamma(b, f);
+        let icon = s.icon.map_or(blend(text, bg, 0.35), c32);
+        let folder = blend(icon, accent, 0.45);
+        let row_h = s
+            .row_height
+            .filter(|v| v.is_finite())
+            .unwrap_or(24.0)
+            .clamp(ROW_RANGE.0, ROW_RANGE.1)
+            .max((size + 9.0).ceil());
         SideLook {
             font,
             bold_font,
+            small_font,
             text,
             active_text: s.active_text.map_or(c32(t.text), c32),
             active_bg,
             hover_text: s.hover_text.map_or(text, c32),
-            hover_bg: s.hover_bg.map_or(blend(c32(ch.sidebar_bg), active_bg, 0.5), c32),
-            outline_active_text: s.outline_active_text.map_or(c32(ch.accent), c32),
+            hover_bg: s.hover_bg.map_or(blend(bg, active_bg, 0.5), c32),
+            outline_active_text: s.outline_active_text.map_or(accent, c32),
             outline_active_bg: s.outline_active_bg.map_or(Color32::TRANSPARENT, c32),
-            icon: s.icon.map_or(blend(text, c32(ch.sidebar_bg), 0.35), c32),
-            row_h: s.row_height.unwrap_or(24.0).max(size + 6.0),
-            pad_x: s.padding_x.unwrap_or(6.0),
-            indent: s.indent.unwrap_or(14.0),
+            icon,
+            accent,
+            selected_bg: blend(bg, accent, if t.dark { 0.2 } else { 0.13 }),
+            folder,
+            folder_flap: blend(folder, bg, 0.3),
+            guide: blend(text, bg, 0.84),
+            muted: blend(text, bg, 0.2),
+            bar_bg: blend(bg, text, if t.dark { 0.05 } else { 0.04 }),
+            row_h,
+            pad_x: s.padding_x.filter(|v| v.is_finite()).unwrap_or(6.0).clamp(2.0, 16.0),
+            indent: s.indent.filter(|v| v.is_finite()).unwrap_or(14.0).clamp(10.0, 22.0),
             radius: s.radius.unwrap_or(4.0),
         }
     }
 
-    /// One full-width row: background (active / hover), chevron, icon or level marker, label.
+    /// One full-width row whose label is its name (outline headings, placeholders).
     pub fn row(&self, ui: &mut Ui, depth: usize, kind: RowKind, label: &str, active: bool) -> egui::Response {
+        self.row_named(ui, depth, kind, label, label, active)
+    }
+
+    /// One full-width row: background (selected / hover), indent guides, chevron, icon or
+    /// level marker, and `shown` truncated with an ellipsis. `full` is the accessible name
+    /// and the tooltip (when it differs from what is shown, or the label is cut).
+    pub fn row_named(
+        &self,
+        ui: &mut Ui,
+        depth: usize,
+        kind: RowKind,
+        shown: &str,
+        full: &str,
+        active: bool,
+    ) -> egui::Response {
         let w = ui.available_width();
         let sense = if kind == RowKind::Note {
             egui::Sense::hover()
@@ -623,24 +741,31 @@ impl SideLook {
             egui::Sense::click()
         };
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, self.row_h), sense);
-        // accessibility (and UI tests): the row is a labelled button
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), active, label));
+        // accessibility (and UI tests): the row is a button named with the full name
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), active, full));
         let p = ui.painter_at(rect);
         let outline = matches!(kind, RowKind::Heading { .. });
         let hovered = resp.hovered() && kind != RowKind::Note;
-        let bg = if active {
-            if outline {
-                self.outline_active_bg
-            } else {
-                self.active_bg
-            }
-        } else if hovered {
-            self.hover_bg
-        } else {
-            Color32::TRANSPARENT
+        let bg_rect = rect.shrink2(egui::vec2(1.0, 1.0));
+        let bg = match (active, outline, hovered) {
+            (true, true, _) => self.outline_active_bg,
+            (true, false, _) => self.selected_bg,
+            (false, _, true) => self.hover_bg,
+            _ => Color32::TRANSPARENT,
         };
         if bg.a() > 0 {
-            p.rect_filled(rect.shrink2(egui::vec2(1.0, 1.0)), self.radius, bg);
+            p.rect_filled(bg_rect, self.radius, bg);
+        }
+        if !outline {
+            self.guides(&p, rect, depth);
+        }
+        if active && !outline {
+            // the open file: a short accent bar at the row's left edge
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(bg_rect.left(), bg_rect.top() + 5.0),
+                egui::pos2(bg_rect.left() + 2.5, bg_rect.bottom() - 5.0),
+            );
+            p.rect_filled(bar, 1.25, self.accent);
         }
         let color = match (active, outline, hovered) {
             (true, true, _) => self.outline_active_text,
@@ -649,64 +774,88 @@ impl SideLook {
             _ => self.text,
         };
         let x = self.lead(&p, rect, depth, kind, active);
-        let cy = rect.center().y;
-        let font = self.font.clone();
         let color = match kind {
             RowKind::Note => self.icon,
             // top-level headings stand out by color (the UI font may have no bold face)
             RowKind::Heading { level: 1 } if !active && !hovered => self.active_text,
             _ => color,
         };
-        let galley = ui.painter().layout(label.to_string(), font, color, f32::INFINITY);
-        let gpos = egui::pos2(x, cy - galley.size().y * 0.5);
-        let clip = egui::Rect::from_min_max(egui::pos2(x, rect.top()), egui::pos2(rect.right() - 4.0, rect.bottom()));
-        ui.painter_at(clip).galley(gpos, galley, color);
-        resp.on_hover_text_at_pointer(label)
+        let max_w = (rect.right() - 6.0 - x).max(1.0);
+        let mut job = egui::text::LayoutJob::single_section(
+            shown.to_string(),
+            egui::TextFormat::simple(self.font.clone(), color),
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: max_w,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let galley = ui.painter().layout_job(job);
+        let cut = galley.elided;
+        let gpos = egui::pos2(x, rect.center().y - galley.size().y * 0.5);
+        p.galley(gpos, galley, color);
+        if cut || shown != full {
+            resp.on_hover_text(full)
+        } else {
+            resp
+        }
+    }
+
+    /// Vertical guides through the indentation of a row `depth` levels deep, one per
+    /// ancestor folder, under that folder's chevron (the rows join into continuous lines).
+    fn guides(&self, p: &egui::Painter, rect: egui::Rect, depth: usize) {
+        for k in 0..depth {
+            let x = (rect.left() + self.pad_x + k as f32 * self.indent + CHEVRON_W * 0.4).round() + 0.5;
+            p.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                egui::Stroke::new(1.0, self.guide),
+            );
+        }
+    }
+
+    /// Side of the icon slot of tree rows.
+    fn icon_size(&self) -> f32 {
+        (self.font.size + 1.0).round().clamp(12.0, 16.0)
     }
 
     /// Paints what a row shows in front of its label; returns where the label starts.
     fn lead(&self, p: &egui::Painter, rect: egui::Rect, depth: usize, kind: RowKind, active: bool) -> f32 {
         let cy = rect.center().y;
         let mut x = rect.left() + self.pad_x + depth as f32 * self.indent;
-        let icon_s = (self.row_h * 0.62).clamp(12.0, 18.0);
+        let icon_s = self.icon_size();
+        let slot = |x: f32| egui::Rect::from_center_size(egui::pos2(x + icon_s * 0.5, cy), egui::vec2(icon_s, icon_s));
         match kind {
             RowKind::Dir { open } => {
-                // disclosure chevron
-                let c = egui::pos2(x + 4.0, cy);
+                // light disclosure chevron
+                let c = egui::pos2(x + CHEVRON_W * 0.4, cy);
                 let pts = if open {
                     vec![
-                        c + egui::vec2(-3.5, -1.8),
-                        c + egui::vec2(0.0, 2.2),
-                        c + egui::vec2(3.5, -1.8),
+                        c + egui::vec2(-3.0, -1.5),
+                        c + egui::vec2(0.0, 1.5),
+                        c + egui::vec2(3.0, -1.5),
                     ]
                 } else {
                     vec![
-                        c + egui::vec2(-1.8, -3.5),
-                        c + egui::vec2(2.2, 0.0),
-                        c + egui::vec2(-1.8, 3.5),
+                        c + egui::vec2(-1.5, -3.0),
+                        c + egui::vec2(1.5, 0.0),
+                        c + egui::vec2(-1.5, 3.0),
                     ]
                 };
-                p.add(egui::Shape::line(pts, egui::Stroke::new(1.4, self.icon)));
-                x += 12.0;
-                let r = egui::Rect::from_center_size(egui::pos2(x + icon_s * 0.5, cy), egui::vec2(icon_s, icon_s));
-                let icon = if open {
-                    crate::icons::Icon::FolderOpen
-                } else {
-                    crate::icons::Icon::Folder
-                };
-                crate::icons::paint(p, r, icon, self.icon);
-                x += icon_s + 6.0;
+                p.add(egui::Shape::line(pts, egui::Stroke::new(1.1, self.icon)));
+                x += CHEVRON_W;
+                self.folder_glyph(p, slot(x), open);
+                x += icon_s + 5.0;
             }
             RowKind::File { markdown } => {
-                x += 12.0;
-                let r = egui::Rect::from_center_size(egui::pos2(x + icon_s * 0.5, cy), egui::vec2(icon_s, icon_s));
-                let icon = if markdown {
-                    crate::icons::Icon::FileText
-                } else {
-                    crate::icons::Icon::File
-                };
-                crate::icons::paint(p, r, icon, if active { self.active_text } else { self.icon });
-                x += icon_s + 6.0;
+                x += CHEVRON_W;
+                // Markdown notes have no icon; other files a small, light one
+                if !markdown {
+                    let r = slot(x).shrink(1.0);
+                    let c = if active { self.active_text } else { self.icon };
+                    crate::icons::paint(p, r, crate::icons::Icon::File, c.gamma_multiply(0.85));
+                }
+                x += icon_s + 5.0;
             }
             RowKind::Heading { level } => {
                 // subtle level marker: a short tick, longer for deeper levels
@@ -727,17 +876,423 @@ impl SideLook {
                 }
             }
             RowKind::Note => {
-                x += 12.0;
+                x += CHEVRON_W + icon_s + 5.0;
             }
         }
         x
     }
 
+    /// A small filled folder in the theme's folder tint; an open folder shows a lighter flap.
+    fn folder_glyph(&self, p: &egui::Painter, r: egui::Rect, open: bool) {
+        let w = r.width();
+        let h = (w * 0.8).round();
+        let top = (r.center().y - h * 0.5).round();
+        let tab = egui::Rect::from_min_size(egui::pos2(r.left(), top), egui::vec2(w * 0.45, h * 0.4));
+        let body = egui::Rect::from_min_max(egui::pos2(r.left(), top + h * 0.2), egui::pos2(r.right(), top + h));
+        p.rect_filled(tab, 1.5, self.folder);
+        p.rect_filled(body, 2.0, self.folder);
+        if open {
+            let flap = egui::Rect::from_min_max(egui::pos2(body.left(), body.top() + h * 0.3), body.max);
+            p.rect_filled(flap, 2.0, self.folder_flap);
+        }
+    }
+
+    /// A collapsible section header: a disclosure triangle and a small title (a click
+    /// toggles the section). With `root` (the mounted folder's section) the title has the
+    /// folder's context menu and the header has icon buttons New File, New Folder and
+    /// Collapse All; New File / New Folder are reported in `out`.
+    fn section(
+        &self,
+        ui: &mut Ui,
+        title: &str,
+        open: bool,
+        root: Option<&Path>,
+        out: &mut Option<TreeAction>,
+    ) -> Section {
+        let w = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(w, self.row_h), egui::Sense::hover());
+        let b = (self.row_h - 4.0).round();
+        let gap = 2.0;
+        let mut right = rect.right();
+        let mut collapse_all = false;
+        if let Some(root) = root {
+            let mut button = |ui: &mut Ui, label: &str, glyph: Glyph| {
+                let r = egui::Rect::from_center_size(egui::pos2(right - b * 0.5, rect.center().y), egui::vec2(b, b));
+                right -= b + gap;
+                self.icon_button(ui, r, label, glyph)
+            };
+            collapse_all = button(ui, "Collapse All", Glyph::CollapseAll);
+            if button(ui, "New Folder", Glyph::NewFolder) {
+                *out = Some(TreeAction::NewFolder(root.to_path_buf()));
+            }
+            if button(ui, "New File", Glyph::NewFile) {
+                *out = Some(TreeAction::NewFile(root.to_path_buf()));
+            }
+        }
+        let head = egui::Rect::from_min_max(rect.min, egui::pos2(right - 4.0, rect.bottom()));
+        let resp = ui.interact(
+            head,
+            ui.scope_id().with(("markise-section", title)),
+            egui::Sense::click(),
+        );
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), open, title));
+        let color = if resp.hovered() { self.hover_text } else { self.muted };
+        // filled disclosure triangle
+        let c = egui::pos2(head.left() + self.pad_x + CHEVRON_W * 0.4, head.center().y);
+        let pts = if open {
+            vec![
+                c + egui::vec2(-3.5, -2.0),
+                c + egui::vec2(3.5, -2.0),
+                c + egui::vec2(0.0, 2.5),
+            ]
+        } else {
+            vec![
+                c + egui::vec2(-2.0, -3.5),
+                c + egui::vec2(2.5, 0.0),
+                c + egui::vec2(-2.0, 3.5),
+            ]
+        };
+        ui.painter()
+            .add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+        let x = head.left() + self.pad_x + CHEVRON_W;
+        let mut job = egui::text::LayoutJob::single_section(
+            title.to_string(),
+            egui::TextFormat::simple(self.small_font.clone(), color),
+        );
+        job.wrap = egui::text::TextWrapping {
+            max_width: (head.right() - x).max(1.0),
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let galley = ui.painter().layout_job(job);
+        let cut = galley.elided;
+        let pos = egui::pos2(x, head.center().y - galley.size().y * 0.5);
+        ui.painter_at(head).galley(pos, galley, color);
+        let resp = if cut { resp.on_hover_text(title) } else { resp };
+        let toggled = resp.clicked();
+        if let Some(root) = root {
+            resp.context_menu(|ui| row_menu(ui, root, true, true, out));
+        }
+        Section {
+            toggled,
+            collapse_all,
+            response: resp,
+        }
+    }
+
+    /// A square icon button with a hover background and a tooltip; returns whether it was
+    /// clicked.
+    fn icon_button(&self, ui: &mut Ui, r: egui::Rect, label: &str, glyph: Glyph) -> bool {
+        let resp = ui.interact(
+            r,
+            ui.scope_id().with(("markise-sidebar-button", label)),
+            egui::Sense::click(),
+        );
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
+        let p = ui.painter();
+        let color = if resp.hovered() {
+            p.rect_filled(r, self.radius, self.hover_bg);
+            self.hover_text
+        } else {
+            self.icon
+        };
+        paint_glyph(p, r, glyph, color);
+        resp.on_hover_text(label).clicked()
+    }
+}
+
+/// Draws a header glyph centred in `r` (a 14-point box, thin strokes).
+fn paint_glyph(p: &egui::Painter, r: egui::Rect, glyph: Glyph, color: Color32) {
+    let o = r.center() - egui::vec2(7.0, 7.0);
+    let pt = |x: f32, y: f32| o + egui::vec2(x, y);
+    let stroke = egui::Stroke::new(1.2, color);
+    let line = |pts: Vec<egui::Pos2>| p.add(egui::Shape::line(pts, stroke));
+    let plus = |cx: f32, cy: f32| {
+        line(vec![pt(cx - 2.5, cy), pt(cx + 2.5, cy)]);
+        line(vec![pt(cx, cy - 2.5), pt(cx, cy + 2.5)]);
+    };
+    match glyph {
+        Glyph::NewFile => {
+            // a page with a folded corner and a plus
+            line(vec![
+                pt(8.0, 1.0),
+                pt(3.0, 1.0),
+                pt(3.0, 13.0),
+                pt(11.5, 13.0),
+                pt(11.5, 4.5),
+                pt(8.0, 1.0),
+                pt(8.0, 4.5),
+                pt(11.5, 4.5),
+            ]);
+            plus(7.25, 9.0);
+        }
+        Glyph::NewFolder => {
+            line(vec![
+                pt(1.0, 3.0),
+                pt(5.0, 3.0),
+                pt(6.5, 4.5),
+                pt(13.0, 4.5),
+                pt(13.0, 12.0),
+                pt(1.0, 12.0),
+                pt(1.0, 3.0),
+            ]);
+            plus(7.0, 8.25);
+        }
+        Glyph::CollapseAll => {
+            // two chevrons pointing at each other
+            line(vec![pt(3.5, 2.0), pt(7.0, 5.0), pt(10.5, 2.0)]);
+            line(vec![pt(3.5, 12.0), pt(7.0, 9.0), pt(10.5, 12.0)]);
+        }
+    }
+}
+
+/// What a click on a section header did, and the header's response (context menus).
+struct Section {
+    toggled: bool,
+    collapse_all: bool,
+    response: egui::Response,
+}
+
+/// Sidebar state the application keeps besides the tree: the files opened in this session
+/// (the Recent section; Markise has one document per window) and whether Recent is collapsed.
+/// Updated by the application's file events only (open, rename, Move to Trash, a failed
+/// open) — never per frame and without file system access.
+#[derive(Clone, Debug, Default)]
+pub struct SideState {
+    recent: Vec<PathBuf>,
+    pub recent_collapsed: bool,
+}
+
+impl SideState {
+    /// Entries of the Recent section.
+    pub const RECENT_MAX: usize = 5;
+
+    /// `path` was opened (or the document now lives there): it moves to the top.
+    pub fn opened(&mut self, path: &Path) {
+        self.recent.retain(|r| r != path);
+        self.recent.insert(0, path.to_path_buf());
+        self.recent.truncate(Self::RECENT_MAX);
+    }
+
+    /// `from` (a file or a folder) was renamed or moved to `to`: entries follow.
+    pub fn renamed(&mut self, from: &Path, to: &Path) {
+        for r in &mut self.recent {
+            if let Some(n) = markise_engine::fsops::rebase(r, from, to) {
+                *r = n;
+            }
+        }
+        let mut seen = HashSet::new();
+        self.recent.retain(|r| seen.insert(r.clone()));
+    }
+
+    /// `path` (a file or a folder) was moved to the Trash: its entries leave.
+    pub fn removed(&mut self, path: &Path) {
+        self.recent.retain(|r| !r.starts_with(path));
+    }
+
+    /// `path` could not be opened (gone, unreadable): its entry leaves.
+    pub fn forget(&mut self, path: &Path) {
+        self.recent.retain(|r| r != path);
+    }
+
+    /// The session's recent files, the most recent first.
+    pub fn recent(&self) -> &[PathBuf] {
+        &self.recent
+    }
+}
+
+/// The Recent section above the tree (nothing while no file was opened): a collapsible
+/// header (its context menu: Hide Recent) and one row per file, the current one marked.
+/// Returns the file clicked and whether Hide Recent was chosen.
+pub fn recent_section(
+    ui: &mut Ui,
+    st: &mut SideState,
+    current: Option<&Path>,
+    look: &SideLook,
+) -> (Option<TreeAction>, bool) {
+    if st.recent.is_empty() {
+        return (None, false);
+    }
+    let mut none = None;
+    let head = look.section(ui, "Recent", !st.recent_collapsed, None, &mut none);
+    if head.toggled {
+        st.recent_collapsed = !st.recent_collapsed;
+    }
+    let mut hide = false;
+    head.response.context_menu(|ui| {
+        if ui.button("Hide Recent").clicked() {
+            hide = true;
+            ui.close();
+        }
+    });
+    let mut out = None;
+    if !st.recent_collapsed {
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for p in &st.recent {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let kind = RowKind::File {
+                    markdown: is_markdown_note(p),
+                };
+                // named by the full path: the tree has a row with the same file name
+                let full = p.display().to_string();
+                let active = current == Some(p.as_path());
+                let resp = look.row_named(ui, 0, kind, display_name(&name, false), &full, active);
+                if resp.clicked() && !active {
+                    out = Some(TreeAction::Open(p.clone()));
+                }
+            }
+        });
+    }
+    ui.add_space(4.0);
+    (out, hide)
+}
+
+/// Width of the activity bar at the sidebar's left edge.
+pub const ACTIVITY_BAR_W: f32 = 40.0;
+
+/// An activity bar item glyph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BarGlyph {
+    Files,
+    Search,
+    Outline,
+}
+
+/// One activity bar item: the tab it shows, or `None` for a placeholder (disabled) — more
+/// views (backlinks, tags) are added here.
+struct Activity {
+    label: &'static str,
+    tooltip: &'static str,
+    glyph: BarGlyph,
+    tab: Option<Tab>,
+}
+
+const ACTIVITIES: [Activity; 3] = [
+    Activity {
+        label: "Files",
+        tooltip: "Files",
+        glyph: BarGlyph::Files,
+        tab: Some(Tab::Files),
+    },
+    // placeholder until Find (#48)
+    Activity {
+        label: "Search",
+        tooltip: "Search (coming soon)",
+        glyph: BarGlyph::Search,
+        tab: None,
+    },
+    Activity {
+        label: "Outline",
+        tooltip: "Outline",
+        glyph: BarGlyph::Outline,
+        tab: Some(Tab::Outline),
+    },
+];
+
+/// The activity bar in `rect` (a narrow strip at the sidebar's left edge): one icon button
+/// per view, the active one in the theme's accent with a bar at the edge.
+pub fn activity_bar(ui: &mut Ui, rect: egui::Rect, tab: &mut Tab, look: &SideLook) {
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 0.0, look.bar_bg);
+    let x = rect.right() - 0.5;
+    p.line_segment(
+        [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+        egui::Stroke::new(1.0, look.guide),
+    );
+    let size = rect.width() - 6.0;
+    for (i, a) in ACTIVITIES.iter().enumerate() {
+        let r = egui::Rect::from_center_size(
+            egui::pos2(rect.center().x, rect.top() + 6.0 + size * 0.5 + i as f32 * (size + 2.0)),
+            egui::vec2(size, size),
+        );
+        let enabled = a.tab.is_some();
+        let on = a.tab == Some(*tab);
+        let sense = if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        };
+        let resp = ui.interact(r, ui.scope_id().with(("markise-activity", a.label)), sense);
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, on, a.label));
+        let color = if on {
+            look.accent
+        } else if !enabled {
+            look.icon.gamma_multiply(0.45)
+        } else if resp.hovered() {
+            p.rect_filled(r.shrink(2.0), look.radius, look.hover_bg);
+            look.hover_text
+        } else {
+            look.icon
+        };
+        if on {
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), r.top() + 7.0),
+                egui::pos2(rect.left() + 2.5, r.bottom() - 7.0),
+            );
+            p.rect_filled(bar, 1.25, look.accent);
+        }
+        paint_bar_glyph(&p, r, a.glyph, color);
+        let resp = resp.on_hover_text(a.tooltip);
+        if let (true, Some(t)) = (resp.clicked(), a.tab) {
+            *tab = t;
+        }
+    }
+}
+
+/// Draws an activity bar glyph centred in `r` (a 20-point box).
+fn paint_bar_glyph(p: &egui::Painter, r: egui::Rect, glyph: BarGlyph, color: Color32) {
+    let o = r.center() - egui::vec2(10.0, 10.0);
+    let pt = |x: f32, y: f32| o + egui::vec2(x, y);
+    let stroke = egui::Stroke::new(1.5, color);
+    let line = |pts: Vec<egui::Pos2>| p.add(egui::Shape::line(pts, stroke));
+    match glyph {
+        BarGlyph::Files => {
+            // two stacked pages, the front one with a folded corner
+            line(vec![
+                pt(6.0, 4.5),
+                pt(6.0, 2.0),
+                pt(13.5, 2.0),
+                pt(17.0, 5.5),
+                pt(17.0, 15.0),
+                pt(15.0, 15.0),
+            ]);
+            line(vec![
+                pt(10.0, 5.0),
+                pt(3.0, 5.0),
+                pt(3.0, 18.0),
+                pt(13.5, 18.0),
+                pt(13.5, 8.5),
+                pt(10.0, 5.0),
+                pt(10.0, 8.5),
+                pt(13.5, 8.5),
+            ]);
+        }
+        BarGlyph::Search => {
+            p.circle_stroke(pt(8.5, 8.5), 5.5, stroke);
+            line(vec![pt(12.6, 12.6), pt(17.0, 17.0)]);
+        }
+        BarGlyph::Outline => {
+            // a heading tree: short lines with stepped indentation, a dot at each start
+            for (x, y, end) in [(2.0, 3.5, 18.0), (6.0, 10.0, 18.0), (10.0, 16.5, 18.0)] {
+                p.circle_filled(pt(x, y), 1.3, color);
+                line(vec![pt(x + 3.0, y), pt(end, y)]);
+            }
+        }
+    }
+}
+
+impl SideLook {
     /// The row of the inline name editor: the row's icon and a text field with the name;
     /// a refused name is shown under the row. Returns how editing finished, if it did.
     pub fn edit_row(&self, ui: &mut Ui, depth: usize, kind: RowKind, edit: &mut InlineEdit) -> Option<EditEnd> {
         let w = ui.available_width();
         let (rect, _) = ui.allocate_exact_size(egui::vec2(w, self.row_h), egui::Sense::hover());
+        self.guides(&ui.painter_at(rect), rect, depth);
         let x = self.lead(&ui.painter_at(rect), rect, depth, kind, false);
         let field = egui::Rect::from_min_max(
             egui::pos2(x - 4.0, rect.top() + 1.0),
@@ -841,7 +1396,7 @@ fn virtual_rows(
 
 pub fn outline(ui: &mut Ui, entries: &[OutlineEntry], current: Option<usize>, look: &SideLook) -> Option<usize> {
     if entries.is_empty() {
-        ui.colored_label(look.icon, "No headings");
+        ui.label(RichText::new("No headings").font(look.font.clone()).color(look.icon));
         return None;
     }
     let min_level = entries.iter().map(|e| e.level).min().unwrap_or(1);
@@ -869,6 +1424,63 @@ pub fn outline(ui: &mut Ui, entries: &[OutlineEntry], current: Option<usize>, lo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_follows_file_events() {
+        let p = |s: &str| PathBuf::from(format!("/v/{s}"));
+        let mut st = SideState::default();
+        for f in ["a.md", "b.md", "a.md", "d/c.md"] {
+            st.opened(&p(f));
+        }
+        assert_eq!(
+            st.recent(),
+            &[p("d/c.md"), p("a.md"), p("b.md")],
+            "newest first, no duplicates"
+        );
+        st.renamed(&p("d"), &p("e"));
+        assert_eq!(st.recent()[0], p("e/c.md"), "a folder rename moves its entries");
+        st.renamed(&p("b.md"), &p("a.md"));
+        assert_eq!(st.recent(), &[p("e/c.md"), p("a.md")], "no duplicate after a rename");
+        st.removed(&p("e"));
+        assert_eq!(st.recent(), &[p("a.md")]);
+        st.forget(&p("a.md"));
+        assert!(st.recent().is_empty());
+        for i in 0..9 {
+            st.opened(&p(&format!("n{i}.md")));
+        }
+        assert_eq!(st.recent().len(), SideState::RECENT_MAX);
+    }
+
+    #[test]
+    fn markdown_extensions_are_hidden_from_labels() {
+        assert_eq!(display_name("note.md", false), "note");
+        assert_eq!(display_name("Note.MarkDown", false), "Note");
+        assert_eq!(display_name("v1.2.md", false), "v1.2");
+        assert_eq!(display_name("list.txt", false), "list.txt");
+        assert_eq!(display_name("page.mdx", false), "page.mdx");
+        assert_eq!(display_name(".md", false), ".md");
+        assert_eq!(
+            display_name("archive.md", true),
+            "archive.md",
+            "folders keep their name"
+        );
+    }
+
+    #[test]
+    fn sidebar_metrics_are_compact_whatever_the_theme_says() {
+        // a theme (e.g. imported) deriving the sidebar size from a large document font
+        let mut t = markise_theme::Theme::light();
+        t.font_size = 17.5;
+        t.sidebar.font_size = Some(17.5);
+        t.sidebar.row_height = Some(48.0);
+        let l = SideLook::new(&t);
+        assert!(l.font.size <= 14.0, "{}", l.font.size);
+        assert!((22.0..=28.0).contains(&l.row_h), "{}", l.row_h);
+        // the defaults
+        let l = SideLook::new(&markise_theme::Theme::dark());
+        assert_eq!(l.font.size, UI_FONT_SIZE);
+        assert!((22.0..=26.0).contains(&l.row_h), "{}", l.row_h);
+    }
 
     #[test]
     fn virtual_rows_use_the_painted_row_pitch() {

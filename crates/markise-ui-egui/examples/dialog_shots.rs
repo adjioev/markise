@@ -71,6 +71,24 @@ fn scenes() -> Vec<(&'static str, Setup)> {
         ("theme-report", |app, ctx, _| {
             app.menu_action(ctx, &MenuAction::Command("theme.report"));
         }),
+        // the sidebar itself (issue #57): a nested folder, a plain-text file, a long name
+        ("sidebar", |app, ctx, dir| {
+            app.toggle_folder(&dir.join("drafts"));
+            // a second file: the Recent section lists both
+            app.tree_action(ctx, TreeAction::Open(dir.join("tides.md")));
+        }),
+        ("sidebar-outline", |app, _, _| {
+            app.show_files_tab(false);
+        }),
+        // the same with a large document font size: the sidebar keeps its UI size
+        ("sidebar-large-font", |app, _, dir| {
+            app.toggle_folder(&dir.join("drafts"));
+            app.set_overrides(markise_theme::Overrides {
+                font_size: Some(17.5),
+                ..Default::default()
+            });
+            app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
+        }),
     ]
 }
 
@@ -84,6 +102,14 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
     std::fs::write(dir.join("log.md"), DOC).unwrap();
     std::fs::write(dir.join("2026-05-30.md"), "# 30 May\n").unwrap();
     std::fs::write(dir.join("tides.md"), "# Tides\n").unwrap();
+    std::fs::write(dir.join("crew list.txt"), "Ann, Bo\n").unwrap();
+    std::fs::write(
+        dir.join("a rather long note title that does not fit the sidebar.md"),
+        "# Long\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("drafts").join("storm warning.md"), "# Storm\n").unwrap();
+    std::fs::create_dir_all(dir.join("drafts").join("old")).unwrap();
     let config = work.join("config");
     std::fs::create_dir_all(&config).unwrap();
     let mut app = MarkiseApp::new(AppOptions {
@@ -97,9 +123,12 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
     app.show_files_tab(true);
     let ctx = Context::default();
     let mut texs: HashMap<TextureId, Tex> = HashMap::new();
+    // the sidebar scenes point at a row (hover highlight)
+    let hover = name.starts_with("sidebar").then_some(egui::pos2(150.0, 230.0));
     let input = || {
         let mut raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),
+            events: hover.map(egui::Event::PointerMoved).into_iter().collect(),
             ..Default::default()
         };
         raw.viewports

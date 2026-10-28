@@ -20,6 +20,7 @@
 //! | `appearance` | `"system"`, `"light"`, `"dark"` | `"system"` |
 //! | `diagrams` | `true` / `false`: render `mermaid`/`sequence`/`flow` fences (spec 01 §4.6; View → Diagrams) | `true` |
 //! | `showToolbar` | `true` / `false`: show the formatting toolbar (spec 04 §3.2, spec 05; View → Toolbar) | `true` |
+//! | `sidebar.showRecent` | `true` / `false`: show the sidebar's Recent section (View → Show Recent Files, issue #57) | `true` |
 //! | `toolbarPosition` | `"top"` / `"bottom"`: where the formatting toolbar sits (View → Toolbar Position) | `"top"` |
 //! | `consumed_pending` | names of recovery files already merged into this file (written with the merge; see [`update_file`]); omitted when empty | none |
 //! | `overrides` | object with optional `font_family` (string), `font_size`, `line_height`, `content_width` (numbers); omitted when empty | none |
@@ -325,6 +326,8 @@ pub struct Settings {
     pub diagrams: bool,
     /// Show the formatting toolbar (key `showToolbar`, spec 04 §3.2; spec 05 default on).
     pub show_toolbar: bool,
+    /// Show the sidebar's Recent section (key `sidebar.showRecent`, issue #57; default on).
+    pub show_recent: bool,
     /// Formatting toolbar placement (key `toolbarPosition`, default top).
     pub toolbar_position: ToolbarPosition,
     /// Editing preferences (key `editing`).
@@ -376,6 +379,7 @@ impl Default for Settings {
             appearance: Appearance::System,
             diagrams: true,
             show_toolbar: true,
+            show_recent: true,
             toolbar_position: ToolbarPosition::Top,
             editing: EditingSettings::default(),
             source: SourceSettings::default(),
@@ -460,6 +464,7 @@ pub struct SettingsPatch {
     pub appearance: Option<Appearance>,
     pub diagrams: Option<bool>,
     pub show_toolbar: Option<bool>,
+    pub show_recent: Option<bool>,
     pub toolbar_position: Option<ToolbarPosition>,
     pub editing: Option<EditingSettings>,
     pub source: Option<SourceSettings>,
@@ -518,6 +523,9 @@ impl SettingsPatch {
         if let Some(v) = self.show_toolbar {
             s.show_toolbar = v;
         }
+        if let Some(v) = self.show_recent {
+            s.show_recent = v;
+        }
         if let Some(v) = self.toolbar_position {
             s.toolbar_position = v;
         }
@@ -563,6 +571,9 @@ impl SettingsPatch {
         if saved.show_toolbar.is_some() {
             self.show_toolbar = None;
         }
+        if saved.show_recent.is_some() {
+            self.show_recent = None;
+        }
         if saved.toolbar_position.is_some() {
             self.toolbar_position = None;
         }
@@ -606,6 +617,9 @@ impl SettingsPatch {
         }
         if later.show_toolbar.is_some() {
             self.show_toolbar = later.show_toolbar;
+        }
+        if later.show_recent.is_some() {
+            self.show_recent = later.show_recent;
         }
         if later.toolbar_position.is_some() {
             self.toolbar_position = later.toolbar_position;
@@ -652,6 +666,9 @@ impl SettingsPatch {
         if let Some(v) = self.show_toolbar {
             m.insert("showToolbar".into(), Value::from(v));
         }
+        if let Some(v) = self.show_recent {
+            m.insert(SHOW_RECENT_KEY.into(), Value::from(v));
+        }
         if let Some(v) = self.toolbar_position {
             m.insert("toolbarPosition".into(), Value::from(v.as_str()));
         }
@@ -697,6 +714,7 @@ impl SettingsPatch {
             zoom: m.get("zoom").and_then(valid_zoom),
             diagrams: m.get("diagrams").and_then(Value::as_bool),
             show_toolbar: m.get("showToolbar").and_then(Value::as_bool),
+            show_recent: m.get(SHOW_RECENT_KEY).and_then(Value::as_bool),
             toolbar_position: m
                 .get("toolbarPosition")
                 .and_then(Value::as_str)
@@ -733,6 +751,9 @@ pub fn migrate_theme(theme: &str) -> (String, String) {
 }
 
 pub const FILE_NAME: &str = "settings.json";
+
+/// Settings key of [`Settings::show_recent`] (a flat key with a dot, like editor settings).
+pub const SHOW_RECENT_KEY: &str = "sidebar.showRecent";
 const MAX_BYTES: u64 = 1 << 20;
 
 impl Settings {
@@ -790,6 +811,9 @@ impl Settings {
         if let Some(Value::Bool(b)) = map.remove("showToolbar") {
             s.show_toolbar = b;
         }
+        if let Some(Value::Bool(b)) = map.remove(SHOW_RECENT_KEY) {
+            s.show_recent = b;
+        }
         if let Some(p) = map
             .remove("toolbarPosition")
             .as_ref()
@@ -821,6 +845,7 @@ impl Settings {
         map.insert("appearance".into(), Value::from(self.appearance.as_str()));
         map.insert("diagrams".into(), Value::from(self.diagrams));
         map.insert("showToolbar".into(), Value::from(self.show_toolbar));
+        map.insert(SHOW_RECENT_KEY.into(), Value::from(self.show_recent));
         map.insert("toolbarPosition".into(), Value::from(self.toolbar_position.as_str()));
         map.insert("editing".into(), self.editing.to_json());
         map.insert("source".into(), self.source.to_json());
@@ -1119,6 +1144,25 @@ mod tests {
 
     /// Spec 04 §3.2 / spec 05 (owner, 2026-10-28): `showToolbar` defaults to on for fresh
     /// settings, a saved choice is kept, it round-trips, and patches carry it.
+    /// Issue #57: `sidebar.showRecent` defaults to on and round-trips (file and patch).
+    #[test]
+    fn show_recent_setting_defaults_on_and_round_trips() {
+        assert!(Settings::default().show_recent);
+        assert!(Settings::from_json(r#"{"version": 2}"#).unwrap().show_recent);
+        let off = Settings::from_json(r#"{"version": 2, "sidebar.showRecent": false}"#).unwrap();
+        assert!(!off.show_recent);
+        assert!(off.to_json().contains("\"sidebar.showRecent\": false"));
+        assert!(!Settings::from_json(&off.to_json()).unwrap().show_recent);
+        let p = SettingsPatch {
+            show_recent: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(SettingsPatch::from_json(&p.to_json()).unwrap().show_recent, Some(false));
+        let mut s = Settings::default();
+        p.apply(&mut s);
+        assert!(!s.show_recent);
+    }
+
     #[test]
     fn show_toolbar_setting_defaults_on_and_round_trips() {
         assert!(Settings::default().show_toolbar);
