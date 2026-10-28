@@ -10,7 +10,7 @@ use egui::{Context, Key, Modifiers};
 use markise_engine::editor::command::Registry;
 use markise_engine::editor::keymap::{Keymap, Platform};
 use markise_engine::export::ExportKind;
-use markise_engine::settings::Appearance;
+use markise_engine::settings::{Appearance, ToolbarPosition};
 use markise_export::pandoc::PandocFormat;
 use markise_md::MarkdownFormat;
 use markise_theme::catalog::{Origin, Selection, ThemeFamily, ThemeId};
@@ -364,6 +364,23 @@ impl MarkiseApp {
                     Check::None,
                 ),
                 self.app_item("view.toolbar", true, Check::Toggle(self.show_toolbar())),
+                Entry::Submenu(Menu::new("Toolbar Position", {
+                    let bottom = self.toolbar_position() == ToolbarPosition::Bottom;
+                    vec![
+                        self.item(
+                            MenuAction::Command("view.toolbarTop"),
+                            "Top",
+                            true,
+                            Check::Radio(!bottom),
+                        ),
+                        self.item(
+                            MenuAction::Command("view.toolbarBottom"),
+                            "Bottom",
+                            true,
+                            Check::Radio(bottom),
+                        ),
+                    ]
+                })),
                 Entry::Separator,
                 self.app_item("view.highlightCode", true, Check::Toggle(self.highlight_code)),
                 self.app_item("view.diagrams", true, Check::Toggle(self.diagrams)),
@@ -552,6 +569,8 @@ impl MarkiseApp {
             "view.rendered" if self.doc.is_some() => self.set_view_mode(ViewMode::Rendered),
             "view.toggleSidebar" => self.sidebar_visible = !self.sidebar_visible,
             "view.toolbar" => self.set_show_toolbar(!self.show_toolbar()),
+            "view.toolbarTop" => self.set_toolbar_position(ToolbarPosition::Top),
+            "view.toolbarBottom" => self.set_toolbar_position(ToolbarPosition::Bottom),
             "view.highlightCode" => self.set_highlight_code(!self.highlight_code),
             "view.diagrams" => self.set_diagrams(!self.diagrams),
             "view.sourceLineNumbers" | "view.sourceSoftWrap" | "view.sourceCurrentLine" | "view.sourceWhitespace" => {

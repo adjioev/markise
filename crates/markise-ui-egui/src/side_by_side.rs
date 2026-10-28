@@ -226,6 +226,8 @@ pub struct Frame<'a> {
     pub editable: bool,
     /// Height kept free above the rendered pane's document (formatting toolbar).
     pub top_reserve: f32,
+    /// Height kept free below the rendered pane's document (formatting toolbar at the bottom).
+    pub bottom_reserve: f32,
 }
 
 impl SideBySide {
@@ -314,8 +316,13 @@ impl SideBySide {
         );
         let pane = Rect::from_min_max(pos2(div.right(), rect.top()), rect.max);
         // the strip kept free for the formatting toolbar (the document starts below it)
-        let reserve = f.top_reserve.clamp(0.0, (pane.height() - 40.0).max(0.0));
-        let right = Rect::from_min_max(pos2(pane.left(), pane.top() + reserve), pane.max);
+        let room = (pane.height() - 40.0).max(0.0);
+        let reserve = f.top_reserve.clamp(0.0, room);
+        let below = f.bottom_reserve.clamp(0.0, room - reserve);
+        let right = Rect::from_min_max(
+            pos2(pane.left(), pane.top() + reserve),
+            pos2(pane.right(), pane.bottom() - below),
+        );
 
         // ---- divider
         let id = ui.scope_id().with("markise-sbs-divider");
