@@ -1257,7 +1257,6 @@ fn g03_cmd_i_on_selection() {
 
 // Expected (§3.3): `[]()` with the caret between the brackets. Actual: typing gives `see t[]()`.
 #[test]
-#[ignore = "bug: Cmd+K without selection leaves the caret before `[]()`"]
 fn g04_cmd_k_without_selection_inserts_link() {
     // §3.3
     let mut e = Ed::open("g04", "see\n");

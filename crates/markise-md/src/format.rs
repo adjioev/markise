@@ -678,6 +678,11 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
         InlineKind::Code { content } | InlineKind::Math { content, .. } => *content,
         _ => match (n.children.first(), n.children.last()) {
             (Some(a), Some(z)) => Span::new(a.span.start, z.span.end),
+            // a link with empty text (`[]()`, spec 02 §3.3 at a caret): empty content after
+            // `[`, so its markers can be revealed and the caret can stand between them
+            _ if matches!(n.kind, InlineKind::Link { .. }) && n.span.slice(s).starts_with('[') => {
+                Span::new(n.span.start + 1, n.span.start + 1)
+            }
             _ => n.span,
         },
     };

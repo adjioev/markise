@@ -322,3 +322,18 @@ fn s2_4_front_matter_at_the_document_start() {
         ],
     );
 }
+
+/// Spec 02 §3.3: Cmd+K at a caret inserts `[]()` with the caret on a stop between the
+/// brackets, so typing writes the link text (#20 g04).
+#[test]
+fn link_at_a_caret_puts_the_caret_in_the_empty_text() {
+    let mut t = T::new("see \n");
+    t.set(4);
+    t.run("format.link");
+    assert_eq!(t.text(), "see []()\n");
+    assert_eq!(t.caret().offset, 5);
+    assert!(t.selection_on_stops(), "caret between the brackets is a stop");
+    t.typ("t");
+    assert_eq!(t.text(), "see [t]()\n");
+    t.check_model();
+}
