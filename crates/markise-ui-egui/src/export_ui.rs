@@ -194,6 +194,7 @@ impl MarkiseApp {
                     self.export.overwrite_ok_for.as_ref() == Some(&(req.doc_path.clone(), req.output.clone()));
                 if !confirmed {
                     self.export.pending_overwrite = Some(req);
+                    self.opened_export_question();
                     return;
                 }
                 req

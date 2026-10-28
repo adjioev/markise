@@ -5,7 +5,10 @@
 //! implementation every frame until that returns the user's [`Choice`]. This is the seam:
 //!
 //! - [`Native`]: the platform's alert ([`rfd::MessageDialog`]: NSAlert on macOS, a message box
-//!   on Windows, zenity on Linux). The desktop app uses it (see [`native`]).
+//!   on Windows, zenity on Linux). The desktop app uses it (see [`native`]). Where the
+//!   platform's alert cannot make the question's default button its default (Cancel on
+//!   Windows and Linux), that question uses the in-app dialog instead ([`plan`]): Return never
+//!   confirms a destructive action.
 //! - [`InApp`]: the same question as an egui modal in the shared dialog style
 //!   ([`crate::dialog`]); the default of [`crate::AppOptions`] (no OS window in tests and
 //!   headless runs) and the Linux fallback when zenity is not installed.
@@ -63,6 +66,10 @@ pub enum Kind {
 /// A question with its buttons.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Question {
+    /// Which question this is: the app numbers every question it opens, so an answer can
+    /// only ever apply to the question (and continuation) it was given for — two questions
+    /// with the same text are still different questions.
+    pub id: u64,
     pub kind: Kind,
     /// The question itself (the alert's bold message).
     pub message: String,
@@ -97,6 +104,7 @@ impl Question {
     /// file, File → New, reload). Save is the default: it loses nothing.
     pub fn unsaved(name: &str) -> Question {
         Question {
+            id: 0,
             kind: Kind::UnsavedChanges,
             message: format!("Do you want to save the changes made to “{name}”?"),
             detail: "Your changes will be lost if you don’t save them.".into(),
@@ -113,6 +121,7 @@ impl Question {
     pub fn trash(name: &str, folder: bool) -> Question {
         let trash = trash_name();
         Question {
+            id: 0,
             kind: Kind::MoveToTrash,
             message: format!("Move “{name}” to the {trash}?"),
             detail: if folder {
@@ -131,6 +140,7 @@ impl Question {
     /// A link with a scheme other than http, https or mailto.
     pub fn open_link(url: &str) -> Question {
         Question {
+            id: 0,
             kind: Kind::OpenLink,
             message: "Open this link with another application?".into(),
             detail: url.to_string(),
@@ -150,6 +160,7 @@ impl Question {
             detail.push_str(&format!("\n… and {} more", existing.len() - 8));
         }
         Question {
+            id: 0,
             kind: Kind::ReplaceTheme,
             message: format!("A theme named “{name}” is already installed. Replace it?"),
             detail,
@@ -164,6 +175,7 @@ impl Question {
             .file_name()
             .map_or_else(|| target.display().to_string(), |n| n.to_string_lossy().into_owned());
         Question {
+            id: 0,
             kind: Kind::ExportOverwrite,
             message: format!("Overwrite “{name}” without asking for a file name?"),
             detail: format!(
@@ -173,6 +185,12 @@ impl Question {
             buttons: vec![button(Choice::Overwrite, "Overwrite", Role::Destructive), cancel()],
             default: Choice::Cancel,
         }
+    }
+
+    /// The same question numbered `id`.
+    pub fn with_id(mut self, id: u64) -> Question {
+        self.id = id;
+        self
     }
 
     /// The button for `choice`, if the question has one.
@@ -186,9 +204,9 @@ impl Question {
 pub trait Confirm: Send + Sync {
     fn ask(&self, ctx: &Context, q: &Question) -> Option<Choice>;
 
-    /// The implementation draws the question in the egui window itself ([`InApp`]); otherwise
-    /// the app blocks its window with a backdrop while waiting for an answer.
-    fn draws_in_app(&self) -> bool {
+    /// The implementation draws `q` in the egui window itself ([`InApp`]); otherwise the app
+    /// blocks its window with a backdrop while waiting for an answer.
+    fn draws_in_app(&self, _q: &Question) -> bool {
         false
     }
 }
@@ -202,7 +220,7 @@ impl Confirm for InApp {
         crate::dialog::confirm_modal(ctx, q)
     }
 
-    fn draws_in_app(&self) -> bool {
+    fn draws_in_app(&self, _q: &Question) -> bool {
         true
     }
 }
@@ -262,7 +280,8 @@ impl Confirm for Scripted {
     }
 }
 
-/// The platform's alert ([`rfd::MessageDialog`]).
+/// The platform's alert ([`rfd::MessageDialog`]), or the in-app dialog for a question whose
+/// default button the platform's alert cannot make its default (see [`plan`]).
 #[derive(Default)]
 pub struct Native {
     /// Linux: the alert running on a helper thread and the question it shows.
@@ -271,13 +290,26 @@ pub struct Native {
 }
 
 impl Confirm for Native {
+    fn ask(&self, ctx: &Context, q: &Question) -> Option<Choice> {
+        match plan(q, Os::current()) {
+            Plan::InApp => InApp.ask(ctx, q),
+            Plan::Alert(buttons) => self.alert(ctx, q, buttons),
+        }
+    }
+
+    fn draws_in_app(&self, q: &Question) -> bool {
+        plan(q, Os::current()) == Plan::InApp
+    }
+}
+
+impl Native {
     #[cfg(any(target_os = "macos", windows))]
-    fn ask(&self, _: &Context, q: &Question) -> Option<Choice> {
-        Some(rfd_choice(q, rfd_dialog(q).show()))
+    fn alert(&self, _: &Context, q: &Question, buttons: AlertButtons) -> Option<Choice> {
+        Some(rfd_choice(q, rfd_dialog(q, buttons).show()))
     }
 
     #[cfg(not(any(target_os = "macos", windows)))]
-    fn ask(&self, ctx: &Context, q: &Question) -> Option<Choice> {
+    fn alert(&self, ctx: &Context, q: &Question, buttons: AlertButtons) -> Option<Choice> {
         use std::sync::mpsc::TryRecvError;
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((shown, rx)) = running.as_ref()
@@ -295,11 +327,12 @@ impl Confirm for Native {
                 }
             };
         }
-        // a new question (an earlier alert's answer, if any, is dropped with its channel)
+        // a new question (an earlier alert's answer, if any, is dropped with its channel: it
+        // can never answer this one)
         let (tx, rx) = std::sync::mpsc::channel();
         let (q2, ctx) = (q.clone(), ctx.clone());
         let spawned = std::thread::Builder::new().name("markise-alert".into()).spawn(move || {
-            let c = rfd_choice(&q2, rfd_dialog(&q2).show());
+            let c = rfd_choice(&q2, rfd_dialog(&q2, buttons).show());
             let _ = tx.send(c);
             ctx.request_repaint();
         });
@@ -311,47 +344,124 @@ impl Confirm for Native {
     }
 }
 
-/// The alert for `q` and its button set. macOS: the default button is the first one (Return)
-/// and a button titled "Cancel" answers Esc; three buttons read Save · Cancel · Don't Save
-/// from the right. Windows: the stock message box (Yes/No/Cancel or OK/Cancel; custom
-/// labels need common controls 6), so the message is phrased as a yes/no question. Linux
-/// (zenity): custom labels, Esc cancels.
-fn rfd_dialog(q: &Question) -> rfd::MessageDialog {
-    use rfd::{MessageButtons, MessageLevel};
+/// The platforms the native alerts differ on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Os {
+    Mac,
+    Windows,
+    /// Linux and the other Unix desktops (rfd: zenity).
+    Linux,
+}
+
+impl Os {
+    pub fn current() -> Os {
+        if cfg!(target_os = "macos") {
+            Os::Mac
+        } else if cfg!(windows) {
+            Os::Windows
+        } else {
+            Os::Linux
+        }
+    }
+}
+
+/// The alert's buttons, in the order the backend adds them (a mirror of
+/// [`rfd::MessageButtons`] that can be compared in tests).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AlertButtons {
+    OkCancel,
+    YesNoCancel,
+    OkCancelCustom(String, String),
+    YesNoCancelCustom(String, String, String),
+}
+
+impl AlertButtons {
+    fn to_rfd(&self) -> rfd::MessageButtons {
+        use rfd::MessageButtons as M;
+        match self.clone() {
+            AlertButtons::OkCancel => M::OkCancel,
+            AlertButtons::YesNoCancel => M::YesNoCancel,
+            AlertButtons::OkCancelCustom(a, b) => M::OkCancelCustom(a, b),
+            AlertButtons::YesNoCancelCustom(a, b, c) => M::YesNoCancelCustom(a, b, c),
+        }
+    }
+}
+
+/// How the native backend shows a question.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Plan {
+    /// A platform alert with these buttons; its default button (Return) is the question's.
+    Alert(AlertButtons),
+    /// The platform's alert would make another button the default: the in-app dialog.
+    InApp,
+}
+
+/// Chooses how to show `q` natively so that Return picks [`Question::default`] and Esc picks
+/// Cancel.
+///
+/// - macOS (NSAlert): the first button is the default and a button titled "Cancel" answers
+///   Esc, so any default can be honoured: destructive questions list Cancel first; unsaved
+///   changes read Save · Cancel · Don't Save from the right.
+/// - Windows (stock message box; custom labels and default buttons need common controls 6,
+///   issue #40) and Linux (rfd's zenity call has no `--default-cancel`): the first button is
+///   always the default, so only questions whose default is their first action are native
+///   (unsaved changes → Save); Cancel-default questions (Move to Trash, Replace, Overwrite,
+///   Open Link) use the in-app dialog.
+pub fn plan(q: &Question, os: Os) -> Plan {
     let actions: Vec<&Button> = q.buttons.iter().filter(|b| b.choice != Choice::Cancel).collect();
-    let cancel_label = q
+    let Some(first) = actions.first() else {
+        return Plan::InApp;
+    };
+    let cancel = q
         .button(Choice::Cancel)
         .map_or("Cancel".to_string(), |b| b.label.clone());
-    let destructive = q.buttons.iter().any(|b| b.role == Role::Destructive);
-    let buttons = if cfg!(windows) {
-        if actions.len() >= 2 {
-            MessageButtons::YesNoCancel
-        } else {
-            MessageButtons::OkCancel
+    let first_is_default = q.default == first.choice;
+    match os {
+        Os::Mac if actions.len() >= 2 && first_is_default => Plan::Alert(AlertButtons::YesNoCancelCustom(
+            first.label.clone(),
+            cancel,
+            actions[1].label.clone(),
+        )),
+        Os::Mac if actions.len() == 1 && q.default == Choice::Cancel => {
+            Plan::Alert(AlertButtons::OkCancelCustom(cancel, first.label.clone()))
         }
-    } else if actions.len() >= 2 {
-        let (a, b) = (actions[0].label.clone(), actions[1].label.clone());
-        if cfg!(target_os = "macos") {
-            MessageButtons::YesNoCancelCustom(a, cancel_label, b)
-        } else {
-            MessageButtons::YesNoCancelCustom(a, b, cancel_label)
+        Os::Mac if actions.len() == 1 && first_is_default => {
+            Plan::Alert(AlertButtons::OkCancelCustom(first.label.clone(), cancel))
         }
-    } else {
-        let a = actions.first().map_or("OK".to_string(), |b| b.label.clone());
-        if cfg!(target_os = "macos") && q.default == Choice::Cancel {
-            // Cancel first: the default button (Return), still answered by Esc
-            MessageButtons::OkCancelCustom(cancel_label, a)
+        Os::Windows if first_is_default => Plan::Alert(if actions.len() >= 2 {
+            AlertButtons::YesNoCancel
         } else {
-            MessageButtons::OkCancelCustom(a, cancel_label)
-        }
+            AlertButtons::OkCancel
+        }),
+        Os::Linux if first_is_default => Plan::Alert(if actions.len() >= 2 {
+            AlertButtons::YesNoCancelCustom(first.label.clone(), actions[1].label.clone(), cancel)
+        } else {
+            AlertButtons::OkCancelCustom(first.label.clone(), cancel)
+        }),
+        _ => Plan::InApp,
+    }
+}
+
+/// The choice an alert's default button (Return) picks: its first button.
+pub fn alert_default(q: &Question, buttons: &AlertButtons) -> Choice {
+    let first = match buttons {
+        AlertButtons::OkCancel => return rfd_choice(q, rfd::MessageDialogResult::Ok),
+        AlertButtons::YesNoCancel => return rfd_choice(q, rfd::MessageDialogResult::Yes),
+        AlertButtons::OkCancelCustom(a, _) | AlertButtons::YesNoCancelCustom(a, _, _) => a.clone(),
     };
+    rfd_choice(q, rfd::MessageDialogResult::Custom(first))
+}
+
+fn rfd_dialog(q: &Question, buttons: AlertButtons) -> rfd::MessageDialog {
+    use rfd::MessageLevel;
+    let destructive = q.buttons.iter().any(|b| b.role == Role::Destructive);
     let d = rfd::MessageDialog::new()
         .set_level(if destructive {
             MessageLevel::Warning
         } else {
             MessageLevel::Info
         })
-        .set_buttons(buttons);
+        .set_buttons(buttons.to_rfd());
     if cfg!(target_os = "macos") {
         d.set_title(&q.message).set_description(&q.detail)
     } else {
@@ -436,6 +546,62 @@ mod tests {
             rfd_choice(&q, rfd::MessageDialogResult::Custom("x".into())),
             Choice::Cancel
         );
+    }
+
+    #[test]
+    fn native_plans_honour_the_default_button() {
+        let all = [
+            Question::unsaved("a.md"),
+            Question::trash("a.md", false),
+            Question::replace_theme("t", &["t.css".into()]),
+            Question::export_overwrite(std::path::Path::new("a.html")),
+            Question::open_link("vscode://x"),
+        ];
+        for os in [Os::Mac, Os::Windows, Os::Linux] {
+            for q in &all {
+                match plan(q, os) {
+                    // whatever is shown natively, Return picks the question's default
+                    Plan::Alert(b) => assert_eq!(alert_default(q, &b), q.default, "{os:?} {:?}", q.kind),
+                    Plan::InApp => {
+                        assert_ne!(os, Os::Mac, "macOS can honour every default");
+                        assert_eq!(q.default, Choice::Cancel, "{os:?} {:?}", q.kind);
+                    }
+                }
+            }
+        }
+        // the concrete button sets
+        let trash = Question::trash("a.md", false);
+        let label = trash.button(Choice::MoveToTrash).unwrap().label.clone();
+        assert_eq!(
+            plan(&trash, Os::Mac),
+            Plan::Alert(AlertButtons::OkCancelCustom("Cancel".into(), label))
+        );
+        assert_eq!(plan(&trash, Os::Windows), Plan::InApp);
+        assert_eq!(plan(&trash, Os::Linux), Plan::InApp);
+        let unsaved = Question::unsaved("a.md");
+        assert_eq!(
+            plan(&unsaved, Os::Mac),
+            Plan::Alert(AlertButtons::YesNoCancelCustom(
+                "Save".into(),
+                "Cancel".into(),
+                "Don’t Save".into()
+            ))
+        );
+        assert_eq!(plan(&unsaved, Os::Windows), Plan::Alert(AlertButtons::YesNoCancel));
+        assert_eq!(
+            plan(&unsaved, Os::Linux),
+            Plan::Alert(AlertButtons::YesNoCancelCustom(
+                "Save".into(),
+                "Don’t Save".into(),
+                "Cancel".into()
+            ))
+        );
+        // Esc: every alert has a Cancel answer
+        for os in [Os::Mac, Os::Windows, Os::Linux] {
+            if let Plan::Alert(_) = plan(&unsaved, os) {
+                assert_eq!(rfd_choice(&unsaved, rfd::MessageDialogResult::Cancel), Choice::Cancel);
+            }
+        }
     }
 
     #[test]

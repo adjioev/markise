@@ -45,6 +45,10 @@ pub struct InlineEdit {
     /// Focus the field and select the name without its extension at the next frame the row
     /// is shown (the start, and after a refused Enter).
     pub select: bool,
+    /// The field has had the keyboard focus (editing really started).
+    pub had_focus: bool,
+    /// The row was drawn this frame (reset by the app before the sidebar).
+    pub drawn: bool,
 }
 
 impl InlineEdit {
@@ -58,6 +62,8 @@ impl InlineEdit {
             name,
             error: None,
             select: true,
+            had_focus: false,
+            drawn: false,
         }
     }
 
@@ -174,6 +180,8 @@ pub struct FileTree {
     pub requests: u64,
     /// Rows drawn by the last frame (the virtualised range).
     shown: std::ops::Range<usize>,
+    /// Where the rows were drawn last frame (the scroll area's viewport).
+    viewport: Option<egui::Rect>,
 }
 
 impl FileTree {
@@ -188,6 +196,7 @@ impl FileTree {
             lister_error: None,
             requests: 0,
             shown: 0..0,
+            viewport: None,
         }
     }
 
@@ -364,6 +373,15 @@ impl FileTree {
         }
     }
 
+    /// The strip of the tree's vertical scroll bar (last frame).
+    pub fn scrollbar_rect(&self) -> Option<egui::Rect> {
+        let r = self.viewport?;
+        Some(egui::Rect::from_min_max(
+            egui::pos2(r.right() - 16.0, r.top()),
+            egui::pos2(r.right() + 16.0, r.bottom()),
+        ))
+    }
+
     /// Expands every folder between the root and `path` (so its row is shown).
     pub fn expand_to(&mut self, path: &Path) {
         if !path.starts_with(&self.root) {
@@ -484,6 +502,7 @@ impl FileTree {
             }
         });
         self.shown = shown;
+        self.viewport = Some(out.inner_rect);
         // the empty space below the rows: the mounted folder's menu
         let below = egui::Rect::from_min_max(
             egui::pos2(out.inner_rect.left(), out.inner_rect.top() + out.content_size.y),
@@ -718,6 +737,10 @@ impl SideLook {
                 egui::text::CCursor::new(edit.stem_chars()),
             )));
             st.store(ui.ctx(), id);
+        }
+        edit.drawn = true;
+        if out.response.has_focus() {
+            edit.had_focus = true;
         }
         if out.response.changed() {
             edit.error = None;

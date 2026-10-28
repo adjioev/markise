@@ -505,3 +505,151 @@ fn ibeam_only_over_editable_text() {
     assert_eq!(cursor_at(&mut h, field), CursorIcon::Text, "rename field");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ------------------------------------------------------------------ questions block the app
+
+fn cmd() -> egui::Modifiers {
+    if cfg!(target_os = "macos") {
+        egui::Modifiers {
+            mac_cmd: true,
+            command: true,
+            ..Default::default()
+        }
+    } else {
+        egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        }
+    }
+}
+
+#[test]
+fn an_open_question_blocks_commands_and_typing() {
+    // Codex review P2 of PR #38: ⌘N while the unsaved-close alert waits must not replace
+    // the Close continuation the answer applies to
+    let d = tmpdir("blocked");
+    let a = d.join("a.md");
+    std::fs::write(&a, "a\n").unwrap();
+    let s = Scripted::new();
+    let mut h = scripted(vec![a.clone()], &s);
+    wait_until(&mut h, "load", idle);
+    edit(&mut h, "edited\n");
+    let text = h.state().document_text();
+    assert!(!h.state_mut().request_close());
+    h.step();
+    let q = s.last().expect("asked");
+    // shortcuts (File → New, Save), the menu and typing do nothing while it is open
+    h.key_press_modifiers(cmd(), Key::N);
+    h.step();
+    h.key_press_modifiers(cmd(), Key::S);
+    h.step();
+    let ctx = h.ctx.clone();
+    assert!(
+        !h.state_mut()
+            .menu_action(&ctx, &markise_ui_egui::menu::MenuAction::Command("file.new"))
+    );
+    h.event(egui::Event::Text("zzz".into()));
+    h.step();
+    assert_eq!(h.state().document_text(), text, "nothing typed into the document");
+    assert!(!h.state().is_untitled() && h.state().is_dirty() && !h.state().is_saving());
+    assert_eq!(s.asked(), vec![q.clone()], "still the same question");
+    // the answer applies to Close
+    s.answer(Choice::DontSave);
+    h.step();
+    assert!(h.state_mut().request_close(), "Don't Save → the window may close");
+    assert_eq!(h.state().document_path(), Some(a.as_path()));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn a_replaced_question_gets_a_new_number() {
+    // two questions with the same text are different questions: an answer is bound to the
+    // number it was asked with
+    let d = tmpdir("question-ids");
+    let a = d.join("a.md");
+    std::fs::write(&a, "a\n").unwrap();
+    let s = Scripted::new();
+    let mut h = scripted(vec![a], &s);
+    wait_until(&mut h, "load", idle);
+    edit(&mut h, "edited\n");
+    assert!(!h.state_mut().request_close());
+    h.step();
+    let first = h.state().question().expect("open");
+    // something replaces the continuation (here directly, as a background event could)
+    h.state_mut().new_document();
+    h.step();
+    let second = h.state().question().expect("open");
+    assert_eq!(first.message, second.message);
+    assert_ne!(first.id, second.id);
+    assert_eq!(
+        s.asked().len(),
+        2,
+        "asked again: an alert for the first can't answer it"
+    );
+    s.answer(Choice::Cancel);
+    h.step();
+    assert!(!h.state().is_asking());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+// ------------------------------------------------------------------ rename row scrolled away
+
+#[test]
+fn inline_rename_commits_when_its_row_is_scrolled_away_and_the_user_clicks_elsewhere() {
+    // Codex review P2 of PR #38: blur handling must not depend on the row being drawn
+    let d = tmpdir("rename-scrolled");
+    for i in 0..80 {
+        std::fs::write(d.join(format!("n{i:02}.md")), "x\n").unwrap();
+    }
+    let mut h = harness_with(AppOptions {
+        open: vec![d.clone(), d.join("n40.md")],
+        ..Default::default()
+    });
+    h.step();
+    h.state_mut().show_files_tab(true);
+    rows_contain(&mut h, "n79.md");
+    wait_until(&mut h, "load", idle);
+    let ctx = h.ctx.clone();
+    h.state_mut().tree_action(&ctx, TreeAction::Rename(d.join("n00.md")));
+    field_focused(&mut h);
+    type_text(&mut h, "renamed");
+    // scroll the tree far down: the edited row is not drawn any more
+    let over_tree = egui::pos2(120.0, 300.0);
+    h.hover_at(over_tree);
+    for _ in 0..10 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -400.0),
+            modifiers: Default::default(),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.step();
+    }
+    h.run_steps(2);
+    assert!(h.query_by_label("n79.md").is_some(), "scrolled to the end");
+    assert!(h.state().rename_state().is_some(), "still editing");
+    // a click in the document
+    let doc = egui::pos2(620.0, 200.0);
+    h.hover_at(doc);
+    h.event(egui::Event::PointerButton {
+        pos: doc,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: Default::default(),
+    });
+    h.event(egui::Event::PointerButton {
+        pos: doc,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+    h.run_steps(2);
+    assert!(h.state().rename_state().is_none(), "editing ended");
+    assert!(
+        d.join("renamed.md").is_file() && !d.join("n00.md").exists(),
+        "committed"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}

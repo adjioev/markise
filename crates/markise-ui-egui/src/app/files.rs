@@ -84,7 +84,7 @@ impl MarkiseApp {
             d.sync();
         }
         if self.is_dirty() {
-            self.ask = Some(Ask::Unsaved(Then::New));
+            self.set_ask(Ask::Unsaved(Then::New));
             return;
         }
         self.new_document_now();
@@ -254,7 +254,7 @@ impl MarkiseApp {
             TreeAction::Rename(p) => self.start_rename(p),
             TreeAction::Delete(p) => {
                 if self.ask.is_none() {
-                    self.ask = Some(Ask::Trash(p));
+                    self.set_ask(Ask::Trash(p));
                 }
             }
             TreeAction::EndRename(end) => self.end_rename(end),
@@ -299,6 +299,29 @@ impl MarkiseApp {
     /// The error shown under the renamed row (tests).
     pub fn rename_error(&self) -> Option<&str> {
         self.files.rename.as_ref().and_then(|r| r.error.as_deref())
+    }
+
+    /// The inline rename field had the focus and lost it without its row seeing it (the row
+    /// was scrolled out of view, so it is not drawn, or it came back unfocused): a press
+    /// anywhere but on the field or the tree's scroll bar ends editing like a click elsewhere.
+    pub(super) fn rename_blur(&mut self, ctx: &Context) {
+        let Some(r) = self.files.rename.as_ref() else { return };
+        let id = crate::sidebar::rename_field_id();
+        if !r.had_focus || ctx.memory(|m| m.has_focus(id)) {
+            return;
+        }
+        let Some(at) = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten()) else {
+            return;
+        };
+        let on_field = r.drawn && ctx.read_response(id).is_some_and(|f| f.rect.contains(at));
+        let on_scrollbar = self
+            .tree
+            .as_ref()
+            .and_then(|t| t.scrollbar_rect())
+            .is_some_and(|b| b.contains(at));
+        if !on_field && !on_scrollbar {
+            self.end_rename(EditEnd::CommitOrCancel);
+        }
     }
 
     /// Enter in the inline rename: performs it, or keeps editing with the reason it was

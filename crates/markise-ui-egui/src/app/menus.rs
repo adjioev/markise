@@ -517,6 +517,11 @@ impl MarkiseApp {
     /// [`MarkiseApp::menu_action`] for an item chosen by `trigger` (a native menu reports
     /// whether its key equivalent or a click chose the item).
     pub fn menu_action_by(&mut self, ctx: &Context, action: &MenuAction, trigger: Trigger) -> bool {
+        if self.is_asking() {
+            // a yes/no question is open (a native alert on another thread, or the in-app
+            // dialog): no command may replace or bypass the action waiting for the answer
+            return false;
+        }
         match action {
             MenuAction::Command(id) => self.menu_command(ctx, id, trigger),
             MenuAction::Style(id) => {

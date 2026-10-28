@@ -460,6 +460,12 @@ pub struct MarkiseApp {
     pub(crate) files: files::FileOps,
     /// Shows the yes/no questions ([`AppOptions::confirm`]).
     confirm: Arc<dyn crate::confirm::Confirm>,
+    /// Number of the open question ([`crate::confirm::Question::id`]): changes whenever a
+    /// question is opened or answered, so an answer never applies to another question.
+    question_id: u64,
+    /// The widget that had the keyboard focus when the open question appeared (given back
+    /// after the answer; nothing has the focus while a question is open).
+    focus_before_question: Option<egui::Id>,
 }
 
 impl MarkiseApp {
@@ -535,6 +541,8 @@ impl MarkiseApp {
             commit: opts.commit,
             files: Default::default(),
             confirm: opts.confirm,
+            question_id: 0,
+            focus_before_question: None,
         }
     }
 
@@ -809,7 +817,7 @@ impl MarkiseApp {
             return;
         }
         if self.is_dirty() {
-            self.ask = Some(Ask::Unsaved(Then::Open(path)));
+            self.set_ask(Ask::Unsaved(Then::Open(path)));
             return;
         }
         self.open_now(path, LoadReason::Open);
@@ -887,7 +895,7 @@ impl MarkiseApp {
                     LoadReason::Open => {
                         if self.is_dirty() {
                             // edits were made while the open was pending
-                            self.ask = Some(Ask::Unsaved(Then::Install(Box::new(loaded))));
+                            self.set_ask(Ask::Unsaved(Then::Install(Box::new(loaded))));
                         } else {
                             self.install(loaded);
                         }
@@ -1401,7 +1409,7 @@ impl MarkiseApp {
             d.sync();
         }
         if self.is_dirty() {
-            self.ask = Some(Ask::Unsaved(then));
+            self.set_ask(Ask::Unsaved(then));
         } else {
             self.perform(then);
         }
@@ -1434,7 +1442,7 @@ impl MarkiseApp {
         if self.allow_close || !self.is_dirty() {
             return true;
         }
-        self.ask = Some(Ask::Unsaved(Then::Close));
+        self.set_ask(Ask::Unsaved(Then::Close));
         false
     }
 
@@ -1609,7 +1617,7 @@ impl MarkiseApp {
                 self.theme_report = true;
             }
             ThemeEvent::InstallCollision { src, existing } => {
-                self.ask = Some(Ask::ReplaceTheme { src, existing });
+                self.set_ask(Ask::ReplaceTheme { src, existing });
             }
             ThemeEvent::Error(e) => self.banner = Some(Banner::Error(e)),
         }
@@ -1672,7 +1680,7 @@ impl MarkiseApp {
         let base = self.doc.as_ref().and_then(|d| d.path.parent().map(Path::to_path_buf));
         match classify_link(target, base.as_deref()) {
             LinkAction::Open(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
-            LinkAction::Confirm(u) => self.ask = Some(Ask::Link(u)),
+            LinkAction::Confirm(u) => self.set_ask(Ask::Link(u)),
             LinkAction::Anchor(a) => {
                 if let Some(d) = &mut self.doc {
                     d.viewer.scroll_to_anchor(&a);
@@ -1779,21 +1787,38 @@ impl MarkiseApp {
         // ---- shortcuts (consumed before widgets see them). The application commands' own
         // chords first (Open Folder ⇧⌘O before ⌘O, Side by Side ⌃⌘/ before ⌘/): they carry more
         // modifiers than the registry host commands below.
-        self.app_shortcuts(ctx);
-        // host commands (Save, Open…, Source Code Mode, Toggle Sidebar) go through the effective
-        // keymap, so `keyBinding` overrides rebind, unbind or take over their chords
-        // (performed through the menu dispatch, exactly like choosing the menu item)
-        for id in self.take_host_shortcuts(ctx) {
-            self.menu_command(ctx, id, crate::menu::Trigger::Shortcut);
+        // while a question is open nothing else runs: no application command (shortcut or
+        // menu: see `menu_action_by`), and no widget has the keyboard focus, so typing does
+        // not reach the document; the focus comes back after the answer
+        if self.is_asking() {
+            if let Some(id) = ctx.memory(|m| m.focused()) {
+                self.focus_before_question.get_or_insert(id);
+                ctx.memory_mut(|m| m.surrender_focus(id));
+            }
+        } else {
+            if let Some(id) = self.focus_before_question.take() {
+                ctx.memory_mut(|m| m.request_focus(id));
+            }
+            self.app_shortcuts(ctx);
+            // host commands (Save, Open…, Source Code Mode, Toggle Sidebar) go through the
+            // effective keymap, so `keyBinding` overrides rebind, unbind or take over their
+            // chords (performed through the menu dispatch, exactly like choosing the menu item)
+            for id in self.take_host_shortcuts(ctx) {
+                self.menu_command(ctx, id, crate::menu::Trigger::Shortcut);
+            }
         }
 
         self.menus_ui(ui);
         self.status_bar(ui);
+        if let Some(r) = self.files.rename.as_mut() {
+            r.drawn = false;
+        }
         if self.sidebar_visible {
             self.sidebar(ui);
         } else if self.files.rename.is_some() {
             self.tree_action(ctx, TreeAction::EndRename(EditEnd::CommitOrCancel));
         }
+        self.rename_blur(ctx);
         self.central(ui);
         self.theme_report_window(ctx);
         self.font_window(ctx);
@@ -1804,6 +1829,18 @@ impl MarkiseApp {
         self.after_frame(ctx);
     }
 
+    /// Opens a question (replacing one still open: it gets a new number, so an answer given
+    /// to the old one is not applied to this one).
+    fn set_ask(&mut self, a: Ask) {
+        self.ask = Some(a);
+        self.question_id += 1;
+    }
+
+    /// The export overwrite question was opened.
+    pub(crate) fn opened_export_question(&mut self) {
+        self.question_id += 1;
+    }
+
     /// The open yes/no question, if any: the pending [`Ask`], else the export overwrite.
     pub fn question(&self) -> Option<crate::confirm::Question> {
         use crate::confirm::Question;
@@ -1812,7 +1849,7 @@ impl MarkiseApp {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| p.display().to_string())
         };
-        Some(match self.ask.as_ref() {
+        let q = match self.ask.as_ref() {
             Some(Ask::Unsaved(_)) => {
                 Question::unsaved(&self.doc.as_ref().map(DocState::display_name).unwrap_or_default())
             }
@@ -1826,7 +1863,8 @@ impl MarkiseApp {
                 let req = self.export.pending_overwrite()?;
                 Question::export_overwrite(&req.output)
             }
-        })
+        };
+        Some(q.with_id(self.question_id))
     }
 
     /// Shows the open question through [`AppOptions::confirm`] and applies the answer.
@@ -1834,15 +1872,25 @@ impl MarkiseApp {
         let Some(q) = self.question() else { return };
         let confirm = self.confirm.clone();
         match confirm.ask(ctx, &q) {
-            Some(c) => self.answer_question(c),
-            None if !confirm.draws_in_app() => crate::dialog::waiting(ctx, &q),
+            Some(c) => self.answer(q.id, c),
+            None if !confirm.draws_in_app(&q) => crate::dialog::waiting(ctx, &q),
             None => {}
         }
     }
 
     /// Applies the answer to the open question (the same one [`Self::question`] describes).
     pub fn answer_question(&mut self, c: crate::confirm::Choice) {
+        self.answer(self.question_id, c);
+    }
+
+    /// Applies the answer given to question number `id`; ignored if that question is not the
+    /// open one any more.
+    fn answer(&mut self, id: u64, c: crate::confirm::Choice) {
         use crate::confirm::Choice;
+        if id != self.question_id || self.question().is_none() {
+            return;
+        }
+        self.question_id += 1;
         match (c, self.ask.take()) {
             (Choice::Replace, Some(Ask::ReplaceTheme { src, .. })) => self.themes.install_replacing(src),
             (Choice::Open, Some(Ask::Link(url))) => {
