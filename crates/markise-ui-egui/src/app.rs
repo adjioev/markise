@@ -1821,7 +1821,7 @@ impl MarkiseApp {
             Some(Ask::Trash(p)) => Question::trash(&file_name(p), p.is_dir()),
             None => {
                 let req = self.export.pending_overwrite()?;
-                Question::export_overwrite(&req.output.display().to_string())
+                Question::export_overwrite(&req.output)
             }
         })
     }
@@ -1835,7 +1835,6 @@ impl MarkiseApp {
             None if !confirm.draws_in_app() => crate::dialog::waiting(ctx, &q),
             None => {}
         }
-        ctx.request_repaint();
     }
 
     /// Applies the answer to the open question (the same one [`Self::question`] describes).

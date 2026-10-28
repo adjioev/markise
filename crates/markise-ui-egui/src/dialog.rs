@@ -183,7 +183,9 @@ pub fn secondary(ui: &mut Ui, look: &Look, text: &str) -> egui::Response {
 /// (the primary action first).
 pub fn footer<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     ui.add_space(16.0);
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    // a row of fixed height: a right-to-left layout would otherwise take all the height left
+    let size = egui::vec2(ui.available_width(), 30.0);
+    ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         add(ui)
     })
@@ -210,6 +212,21 @@ pub fn keys(ctx: &Context, layer: egui::LayerId) -> (bool, bool) {
     })
 }
 
+/// The ✕ in a tool window's top right corner (painted: not every UI font has the glyph).
+fn close_button(ui: &mut Ui, look: &Look, at: egui::Pos2) -> egui::Response {
+    let rect = egui::Rect::from_min_size(at, egui::vec2(16.0, 16.0));
+    let r = ui
+        .interact(rect, ui.scope_id().with("markise-dialog-close"), egui::Sense::click())
+        .on_hover_text("Close");
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Close"));
+    let c = if r.hovered() { look.text } else { look.weak };
+    let k = rect.shrink(4.0);
+    let s = Stroke::new(1.5, c);
+    ui.painter().line_segment([k.left_top(), k.right_bottom()], s);
+    ui.painter().line_segment([k.right_top(), k.left_bottom()], s);
+    r
+}
+
 /// A tool window (Font & size, Theme report) in the shared style, centred when it opens.
 /// Returns false when it should close (✕, its close button, Esc, or `body` returning true).
 pub fn window(
@@ -231,17 +248,11 @@ pub fn window(
         .default_pos(ctx.content_rect().center())
         .show(ctx, |ui| {
             ui.set_width(width.points());
-            ui.horizontal(|ui| {
-                title(ui, &look, title_text);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    let close = ui
-                        .add(egui::Button::new(RichText::new("✕").color(look.weak)).frame(false))
-                        .on_hover_text("Close");
-                    if close.clicked() {
-                        keep = false;
-                    }
-                });
-            });
+            let top = ui.cursor().min;
+            title(ui, &look, title_text);
+            if close_button(ui, &look, egui::pos2(top.x + width.points() - 16.0, top.y + 2.0)).clicked() {
+                keep = false;
+            }
             if body(ui, &look) {
                 keep = false;
             }

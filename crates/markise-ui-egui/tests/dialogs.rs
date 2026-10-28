@@ -395,6 +395,13 @@ fn inline_rename_click_elsewhere_commits_a_valid_name_and_drops_a_refused_one() 
     h.run_steps(2);
     assert!(h.state().rename_state().is_none());
     assert!(d.join("a.md").is_file());
+    assert!(
+        h.state().banner_text().is_some_and(|b| b.contains("Not renamed")),
+        "{:?}",
+        h.state().banner_text()
+    );
+    h.state_mut().show_files_tab(true);
+    h.step();
     // a valid name: renamed
     h.state_mut().tree_action(&ctx, TreeAction::Rename(d.join("a.md")));
     field_focused(&mut h);

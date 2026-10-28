@@ -40,6 +40,11 @@ fn scenes() -> Vec<(&'static str, Setup)> {
         ("rename", |app, ctx, dir| {
             app.tree_action(ctx, TreeAction::Rename(dir.join("2026-05-30.md")));
         }),
+        ("rename-error", |app, ctx, dir| {
+            app.tree_action(ctx, TreeAction::Rename(dir.join("2026-05-30.md")));
+            app.set_rename_text("tides.md");
+            app.confirm_rename();
+        }),
         ("new-file", |app, ctx, dir| {
             app.tree_action(ctx, TreeAction::NewFile(dir.to_path_buf()));
         }),
@@ -114,10 +119,10 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
             && app.theme_manager().last_fonts.is_some()
             && app.frames > 3
             && app.file_tree_rows().len() >= 3;
-        if ready && !done {
-            if app.view_mode() != markise_ui_egui::ViewMode::Source {
-                app.set_view_mode(markise_ui_egui::ViewMode::Source);
-            }
+        if ready && !done && app.view_mode() != markise_ui_egui::ViewMode::Source {
+            // the source editor takes the focus when it opens: switch first, set up later
+            app.set_view_mode(markise_ui_egui::ViewMode::Source);
+        } else if ready && !done {
             setup(&mut app, &ctx, &dir);
             done = true;
         } else if done {

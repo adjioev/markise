@@ -317,21 +317,27 @@ impl MarkiseApp {
         if end == EditEnd::Cancel {
             return;
         }
-        let refused = if self.saving.is_some() {
+        let result = if self.saving.is_some() {
             // the running save writes the old path; renaming now could mark text clean
             // that the new file does not hold
             Err("A save is in progress. Try again when it has finished.".to_string())
         } else {
             fsops::rename(&r.path, r.name.trim_end_matches(['\r', '\n']))
         };
-        match refused {
+        match result {
             Ok(to) => self.renamed(&r.path, &to),
             Err(e) if end == EditEnd::Commit => {
                 r.error = Some(e);
                 r.select = true; // focus the field again
                 self.files.rename = Some(r);
             }
-            Err(_) => {} // clicked elsewhere with a refused name: keep the old one
+            Err(e) => {
+                // clicked elsewhere with a refused name: the old name stays (say why, if a
+                // new one was typed)
+                if r.path.file_name().is_none_or(|n| n.to_string_lossy() != r.name) {
+                    self.banner = Some(Banner::Info(format!("Not renamed: {e}")));
+                }
+            }
         }
     }
 

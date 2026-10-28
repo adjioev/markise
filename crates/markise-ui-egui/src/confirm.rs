@@ -159,11 +159,17 @@ impl Question {
     }
 
     /// "Export and Overwrite with Previous" the first time for a document and destination.
-    pub fn export_overwrite(target: &str) -> Question {
+    pub fn export_overwrite(target: &std::path::Path) -> Question {
+        let name = target
+            .file_name()
+            .map_or_else(|| target.display().to_string(), |n| n.to_string_lossy().into_owned());
         Question {
             kind: Kind::ExportOverwrite,
-            message: format!("Overwrite “{target}” without asking for a file name?"),
-            detail: "You will not be asked again for this document and file.".into(),
+            message: format!("Overwrite “{name}” without asking for a file name?"),
+            detail: format!(
+                "{}\n\nYou will not be asked again for this document and file.",
+                target.display()
+            ),
             buttons: vec![button(Choice::Overwrite, "Overwrite", Role::Destructive), cancel()],
             default: Choice::Cancel,
         }
@@ -394,7 +400,7 @@ mod tests {
         for q in [
             Question::trash("a.md", false),
             Question::replace_theme("t", &["t.css".into()]),
-            Question::export_overwrite("a.html"),
+            Question::export_overwrite(std::path::Path::new("a.html")),
             Question::open_link("vscode://x"),
         ] {
             assert_eq!(q.default, Choice::Cancel, "{:?}", q.kind);
