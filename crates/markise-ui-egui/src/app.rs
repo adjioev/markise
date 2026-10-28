@@ -309,6 +309,9 @@ enum Banner {
     },
 }
 
+/// Notice shown while the open file is missing on disk (C18).
+const DELETED_NOTICE: &str = "The file was deleted or moved on disk. Save to write it again.";
+
 /// Measurement log state (env-gated).
 struct Timing {
     enabled: bool,
@@ -648,6 +651,17 @@ impl MarkiseApp {
     /// Unsaved edits exist.
     pub fn is_dirty(&self) -> bool {
         self.doc.as_ref().is_some_and(|d| d.dirty())
+    }
+
+    /// Blocks until the file watcher has applied every earlier request (tests only: never on
+    /// a real UI thread). `Err` names watches that are not in effect.
+    pub fn wait_for_watches(&self) -> Result<(), String> {
+        self.watcher.as_ref().map_or(Ok(()), |w| w.sync())
+    }
+
+    /// The open document's file was deleted on disk and not recreated (tests).
+    pub fn document_deleted(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| d.deleted)
     }
 
     /// Text of the banner, if any (tests).
@@ -1019,8 +1033,17 @@ impl MarkiseApp {
             return;
         }
         if doc.disk.is_some_and(|d| d.same_content(&loaded.version)) {
-            doc.deleted = false;
-            return; // our own save, or a touch without a content change
+            // our own save, a touch without a content change, or the file is back after a
+            // deletion with the same content
+            if std::mem::take(&mut doc.deleted) {
+                if let Some(w) = &self.watcher {
+                    w.acknowledge(&doc.path, Some(loaded.version));
+                }
+                if matches!(&self.banner, Some(Banner::Info(m)) if m == DELETED_NOTICE) {
+                    self.banner = None;
+                }
+            }
+            return;
         }
         if self.saving.is_some() {
             self.reload_pending = true; // decide after our save finished
@@ -1095,9 +1118,12 @@ impl MarkiseApp {
                     {
                         // C18: keep the content, mark it; saving recreates the file.
                         doc.deleted = true;
-                        self.banner = Some(Banner::Info(
-                            "The file was deleted or moved on disk. Save to write it again.".into(),
-                        ));
+                        self.banner = Some(Banner::Info(DELETED_NOTICE.into()));
+                        // later catch-ups know it is gone: a recreation is then reported
+                        // even with the same content
+                        if let Some(w) = &self.watcher {
+                            w.acknowledge(&doc.path, None);
+                        }
                     }
                 }
                 WatchEvent::DirChanged(d) => {

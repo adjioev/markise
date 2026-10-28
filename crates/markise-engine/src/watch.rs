@@ -161,6 +161,7 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
     while let Ok(first) = ctl.recv() {
         // coalesce a burst (fast clicks through the file tree) into one update
         let mut acks = Vec::new();
+        // a new file or a new baseline: compare the open file with it
         let mut new_file = false;
         for c in std::iter::once(first).chain(ctl.try_iter()) {
             match c {
@@ -172,6 +173,9 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
                 Ctl::Acknowledge(p, version) => {
                     if want.file.as_ref() == Some(&canonical(&p)) {
                         known = Baseline::of(version);
+                        // the disk may have changed again since (e.g. while this request
+                        // waited behind a registration change): compare now
+                        new_file = true;
                     }
                 }
                 Ctl::Folder(p) => want.folder = Some(canonical(&p)),
@@ -649,11 +653,11 @@ mod tests {
     }
 
     /// Runs `change` while the worker is inside a registration change (folder switch).
-    fn in_gap(w: &mut FileWatcher, gate: &Gate, folder: &Path, change: impl FnOnce()) {
+    fn in_gap(w: &mut FileWatcher, gate: &Gate, folder: &Path, change: impl FnOnce(&FileWatcher)) {
         gate.hold();
         w.watch_folder(folder);
         gate.wait_entered();
-        change();
+        change(w);
         gate.release();
         w.sync().unwrap();
     }
@@ -666,7 +670,7 @@ mod tests {
         std::fs::write(&doc, "version B").unwrap(); // our save
         w.acknowledge(&doc, crate::save::disk_version(&doc).unwrap());
         settle(&w);
-        in_gap(&mut w, &gate, &root.join("b"), || {
+        in_gap(&mut w, &gate, &root.join("b"), |_| {
             std::fs::write(&doc, "version A").unwrap()
         });
         assert!(wait_event(&w, &WatchEvent::FileChanged(doc.clone())));
@@ -678,10 +682,10 @@ mod tests {
     #[test]
     fn a_deletion_does_not_end_catch_ups() {
         let (root, doc, gate, mut w) = doc_in_folder("deleted", "here");
-        in_gap(&mut w, &gate, &root.join("b"), || std::fs::remove_file(&doc).unwrap());
+        in_gap(&mut w, &gate, &root.join("b"), |_| std::fs::remove_file(&doc).unwrap());
         assert!(wait_event(&w, &WatchEvent::FileRemoved(doc.clone())));
         settle(&w);
-        in_gap(&mut w, &gate, &root.join("a"), || {
+        in_gap(&mut w, &gate, &root.join("a"), |_| {
             std::fs::write(&doc, "recreated").unwrap()
         });
         assert!(wait_event(&w, &WatchEvent::FileChanged(doc.clone())));
@@ -706,5 +710,20 @@ mod tests {
         w.sync().unwrap();
         assert!(wait_event(&w, &WatchEvent::ThemeChanged(dir.clone())));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review of #27, round 3: an acknowledgement queued while a registration change is in
+    /// progress is compared with the disk once applied (save B is acknowledged during the gap,
+    /// then the file is restored to A externally).
+    #[test]
+    fn an_acknowledgement_queued_in_a_gap_is_checked_against_the_disk() {
+        let (root, doc, gate, mut w) = doc_in_folder("ack-gap", "version A");
+        in_gap(&mut w, &gate, &root.join("b"), |w| {
+            std::fs::write(&doc, "version B").unwrap(); // our save …
+            w.acknowledge(&doc, crate::save::disk_version(&doc).unwrap()); // … acknowledged
+            std::fs::write(&doc, "version A").unwrap(); // external restore
+        });
+        assert!(wait_event(&w, &WatchEvent::FileChanged(doc.clone())));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

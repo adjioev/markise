@@ -126,3 +126,38 @@ fn an_external_restore_after_our_save_is_noticed_across_a_folder_switch() {
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Review of #27, round 3: a deletion seen through an ordinary watcher event is known to the
+/// catch-up, so recreating the file with the same content inside a registration gap clears
+/// the "deleted" state.
+#[test]
+fn recreating_a_deleted_file_with_the_same_content_in_a_gap_is_noticed() {
+    let root = std::env::temp_dir().join(format!("markise-watch-gaps-del-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir_all(root.join("b")).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let doc = root.join("a").join("doc.md");
+    std::fs::write(&doc, "same text\n").unwrap();
+    let (held, entered, hooks) = gate();
+    release(&held);
+    let mut h = harness(vec![doc.clone()], hooks);
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_busy());
+    // the deletion must arrive as an ordinary watcher event, not through a catch-up
+    h.state().wait_for_watches().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    h.run_steps(3);
+    std::fs::remove_file(&doc).unwrap();
+    wait_until(&mut h, "deleted", |a| a.document_deleted());
+
+    hold(&held, &entered);
+    h.state_mut().open(root.join("b")); // the document's watch changes
+    entered
+        .recv_timeout(Duration::from_secs(30))
+        .expect("registration change");
+    std::fs::write(&doc, "same text\n").unwrap();
+    release(&held);
+    wait_until(&mut h, "recreated", |a| !a.document_deleted() && !a.is_busy());
+    assert!(h.state().banner_text().is_none(), "{:?}", h.state().banner_text());
+    let _ = std::fs::remove_dir_all(&root);
+}

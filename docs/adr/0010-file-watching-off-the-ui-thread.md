@@ -51,7 +51,10 @@ mounting a folder had the same synchronous calls.
      watch registration.
    - the baseline it compares with is the version the UI last acknowledged: the loaded one,
      then each successful save and each accepted reload (`FileWatcher::acknowledge`), and
-     after a detected deletion "known missing", so a later recreation is still reported.
+     after a deletion (seen by a catch-up or reported by an ordinary event and acknowledged
+     by the UI) "known missing", so a later recreation is reported even with the same
+     content. Every acknowledgement is itself followed by a comparison, because it may have
+     waited behind a registration change while the file changed again.
 5. Failures are not hidden: a path that cannot be added, or a stream that cannot be started,
    is left out of the active set (so the next request registers it again), reported as
    `WatchEvent::Error` (the UI shows a notice and logs it with `MARKISE_TIMING`), and
