@@ -874,7 +874,7 @@ fn backspace_in_and_at_the_start_of_a_heading_issue_16() {
     assert!(r2.min.x < r.min.x && r2.center().y == r.center().y);
     assert_eq!(save(&mut h, &p), "Para\n\n# Tile\n");
     // at the start of the text: the heading becomes a paragraph, then merges with the
-    // paragraph above (spec 02 §5.2 rules 4 and 5); below a list only the first happens
+    // paragraph above (spec 02 §5.2 rules 4 and 5); below a list, with the list's last paragraph
     for (src, nav, want1, want2) in [
         (
             "Para\n\n# Title\n",
@@ -892,7 +892,7 @@ fn backspace_in_and_at_the_start_of_a_heading_issue_16() {
             "- one\n- two\n\n# Title\n",
             &[Key::ArrowDown, Key::ArrowDown, Key::Home][..],
             "- one\n- two\n\nTitle\n",
-            "- one\n- two\n\nTitle\n",
+            "- one\n- twoTitle\n",
         ),
     ] {
         let (mut h, p) = open_toolbar("hd16-bs-start", src, true);

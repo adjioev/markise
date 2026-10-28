@@ -109,6 +109,35 @@ fn immediate_rule(
     None
 }
 
+/// `true` when `line` (a block start line after typing; `typed_end` bytes of it are before the
+/// caret) already reads as a task box or a callout tag although the caret is still before its
+/// closing `]` (the auto-paired closer). Parsed as is, the line would convert under the caret
+/// and hide the bytes it is in.
+fn pending_rule(
+    line: &str,
+    typed_end: usize,
+    item_first: Option<bool>,
+    quote_first: bool,
+    opts: &crate::ParseOptions,
+) -> bool {
+    let t = line.trim_start_matches(' ');
+    let lead = line.len() - t.len();
+    if lead > 3 {
+        return false;
+    }
+    let b = t.as_bytes();
+    if item_first == Some(false) && scan::task_box(b, 0, b.len()).is_some() {
+        return typed_end < lead + 3;
+    }
+    if quote_first && opts.alerts {
+        let tag = t.trim_end_matches([' ', '\t']);
+        if immediate_rule(tag, None, true, opts) == Some("Callout") {
+            return typed_end < lead + tag.len();
+        }
+    }
+    false
+}
+
 fn closer_of(c: char) -> Option<char> {
     Some(match c {
         '(' => ')',
@@ -316,7 +345,12 @@ impl Document {
         let line_after = format!("{before}{rest}");
         let col = (cs - ls) as u32;
         let hinted = self.hints().get(ls).copied().filter(|h| h.origin.is_literal());
-        let opener = opener_of(&line_after, self.options());
+        let opener = opener_of(&line_after, self.options()).or_else(|| {
+            // a task box / callout tag already closed by its auto-paired `]` while the caret is
+            // still inside it: the line stays literal until the trigger is typed (§2.1, §4.2)
+            pending_rule(&line_after, before.len(), item_first, quote_first, self.options())
+                .then_some(Opener::Immediate)
+        });
         let mut hints = self.hints().clone();
         match (opener, hinted) {
             (Some(o), None) => {

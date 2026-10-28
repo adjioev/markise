@@ -803,3 +803,64 @@ fn enter_with_the_caret_inside_heading_syntax() {
         assert!(t.caret().virt > 0, "{src:?}: {:?}", t.caret());
     }
 }
+
+/// Spec 02 §5.2 rule 2 (a thematic break before the block is deleted) and rule 5 into the
+/// last paragraph of a container ending right before the block (#20 c04, l07).
+#[test]
+fn backspace_deletes_a_rule_and_merges_into_a_preceding_container() {
+    let b = "edit.deleteBackward";
+    roundtrip("a\n\n---\n\nb\n", 8, b, "a\n\nb\n");
+    roundtrip("---\n\n## T\n", 8, b, "## T\n");
+    roundtrip("> a\n>\n> ***\n>\n> b\n", 16, b, "> a\n>\n> b\n");
+    roundtrip("- a\n\nb\n", 5, b, "- ab\n");
+    roundtrip("- a\n  - b\n\nc\n", 11, b, "- a\n  - bc\n");
+    roundtrip("> q\n\nb\n", 5, b, "> qb\n");
+}
+
+/// End on a paragraph's last line goes past whitespace the file already had after the text,
+/// so typing appends after it (#20 l01); not on a line ending in a hard break.
+#[test]
+fn line_end_includes_trailing_whitespace_from_the_file() {
+    for (src, at, want) in [
+        ("a \n\nnext\n", 0, 2),
+        ("a\t \n", 0, 3),
+        ("a  \nb\n", 0, 1),
+        ("a b\n", 0, 3),
+    ] {
+        let mut t = T::new(src);
+        t.ed.edit(|s| s.set_selection(Selection::caret(at)));
+        t.frame();
+        t.run("caret.lineEnd");
+        assert_eq!(t.caret().offset, want, "End in {src:?}");
+    }
+}
+
+/// C53: Down on the last visual row / Right at the very end of the last block moves to the
+/// virtual paragraph after it (no source change), also from a table or a code block; Up
+/// returns (#20 e05–e08, e15).
+#[test]
+fn c53_arrows_past_the_last_block_reach_the_virtual_paragraph() {
+    for (src, at, key) in [
+        ("a\n", 1, "caret.down"),
+        ("a\n", 0, "caret.down"),
+        ("a\n", 1, "caret.right"),
+        ("a\n\nb\n", 3, "caret.down"),
+        ("| a | b |\n|---|---|\n| x | y |\n", 22, "caret.down"),
+        ("```\ncode\n```\n", 6, "caret.down"),
+    ] {
+        let mut t = T::new(src);
+        t.ed.edit(|s| s.set_selection(Selection::caret(at)));
+        t.frame();
+        t.run(key);
+        assert_eq!(t.caret().virt, 1, "{key} in {src:?} at {at}: {:?}", t.caret());
+        assert_eq!(t.text(), src);
+        t.run(key);
+        assert_eq!(t.caret().virt, 1, "a second {key} stays");
+    }
+    let mut t = T::new("a\n");
+    t.ed.edit(|s| s.set_selection(Selection::caret(1)));
+    t.frame();
+    t.run("caret.down");
+    t.run("caret.up");
+    assert_eq!((t.caret().offset, t.caret().virt), (1, 0));
+}

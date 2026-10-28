@@ -558,7 +558,8 @@ fn motion(s: &mut EditorSession, g: &mut dyn CaretGeometry, m: Motion, extend: b
         }
         Motion::Char(fwd) => g.horizontal(p.focus, fwd, false),
         Motion::Word(fwd) => g.horizontal(p.focus, fwd, true),
-        Motion::Line(end) => g.row_edge(p.focus, end),
+        Motion::Line(false) => g.row_edge(p.focus, false),
+        Motion::Line(true) => past_trailing_ws(s, g.row_edge(p.focus, true)),
         Motion::Vertical(down) => {
             let (d, x) = g.vertical(p.focus, sel.goal_x, down);
             goal = Some(x);
@@ -579,6 +580,29 @@ fn motion(s: &mut EditorSession, g: &mut dyn CaretGeometry, m: Motion, extend: b
     next.goal_x = goal;
     s.set_selection(next);
     Ok(())
+}
+
+/// The end of a paragraph's last line includes the whitespace after its text that the file
+/// already had (the layout's row edge stops at the text; the caret in that whitespace shows
+/// it), so End followed by typing appends after it (#20 l01).
+fn past_trailing_ws(s: &EditorSession, d: markise_doc::DocPos) -> markise_doc::DocPos {
+    if d.virt > 0 {
+        return d;
+    }
+    let t = s.text();
+    let ws = t[d.offset..].bytes().take_while(|b| matches!(b, b' ' | b'\t')).count();
+    let after = d.offset + ws;
+    if ws == 0 || !(after == t.len() || matches!(t.as_bytes()[after], b'\n' | b'\r')) {
+        return d;
+    }
+    match s.doc().leaf(d.offset) {
+        Some(l)
+            if l.kind == markise_doc::LeafKind::Paragraph && l.lines.last().is_some_and(|z| z.start <= d.offset) =>
+        {
+            markise_doc::DocPos { offset: after, ..d }
+        }
+        _ => d,
+    }
 }
 
 macro_rules! motions {

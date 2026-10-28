@@ -727,7 +727,8 @@ impl Geometry<'_> {
             if forward {
                 j += 1;
                 if j >= n {
-                    return pos;
+                    // C53: past the very end of the last block, its virtual paragraph
+                    return self.past_last_block().unwrap_or(pos);
                 }
             } else {
                 if j == 0 {
@@ -739,6 +740,25 @@ impl Geometry<'_> {
                 return d;
             }
         }
+    }
+
+    /// C53: the virtual empty paragraph after the document's last block (no source change),
+    /// unless that block is itself an empty paragraph.
+    fn past_last_block(&self) -> Option<DocPos> {
+        let model = self.view.model();
+        let last = model.items.len().checked_sub(1)?;
+        let it = model.items.get(last)?;
+        let span = model.item_span(last);
+        if matches!(it.kind, ItemKind::Empty) || (matches!(it.kind, ItemKind::Paragraph) && span.is_empty()) {
+            return None;
+        }
+        Some(self.doc_pos(
+            last,
+            ItemPos {
+                virt: true,
+                ..ItemPos::new(0, Affinity::Downstream)
+            },
+        ))
     }
 
     fn edge_of(&mut self, j: usize, last: bool) -> Option<DocPos> {
@@ -785,8 +805,10 @@ impl Geometry<'_> {
             if down {
                 j += 1;
                 if j >= n {
-                    // the end of the document: the last stop
-                    return (self.edge_of(i, true).unwrap_or(pos), x);
+                    // C53: from the last visual row of the document, the virtual paragraph
+                    // after the last block (else the last stop)
+                    let d = self.past_last_block().or_else(|| self.edge_of(i, true));
+                    return (d.unwrap_or(pos), x);
                 }
             } else {
                 if j == 0 {
