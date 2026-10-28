@@ -764,3 +764,31 @@ fn toolbar_after_a_space_at_a_heading_end_issue_16() {
     type_keys(&mut h, "x");
     assert_eq!(save(&mut h, &p), "## Title x\n\nPara\n");
 }
+
+#[test]
+fn moving_a_heading_keeps_the_caret_in_its_trailing_spaces_issue_16() {
+    // Move Row (Alt+↓ / Alt+↑) with the caret inside spaces typed after the heading text
+    let alt = Modifiers {
+        alt: true,
+        ..Default::default()
+    };
+    let (mut h, p) = open("hd16-move", "# Title\n\nPara\n");
+    key(&mut h, Key::End);
+    type_keys(&mut h, "  ");
+    h.key_press_modifiers(alt, Key::ArrowDown);
+    h.step();
+    assert_eq!(text(&h), "Para\n\n# Title  \n");
+    assert_eq!(caret(&mut h), 15, "after both spaces");
+    h.key_press_modifiers(alt, Key::ArrowUp);
+    h.step();
+    assert_eq!(text(&h), "# Title  \n\nPara\n");
+    assert_eq!(caret(&mut h), 9);
+    // one space in: the caret stays between the two spaces
+    key(&mut h, Key::ArrowLeft);
+    assert_eq!(caret(&mut h), 8);
+    h.key_press_modifiers(alt, Key::ArrowDown);
+    h.step();
+    assert_eq!(caret(&mut h), 14);
+    type_keys(&mut h, "x");
+    assert_eq!(save(&mut h, &p), "Para\n\n# Title x \n");
+}

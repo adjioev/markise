@@ -1709,6 +1709,14 @@ impl EditBehavior for Document {
             let mut plan = self.plan(id, &r)?;
             if plan.selection_after.as_ref().is_some_and(|s| s == &r.selection) {
                 plan.selection_after = None;
+            } else if matches!(id, planners::MOVE_UP | planners::MOVE_DOWN)
+                && let Some(c) = plan.selection_after.as_ref().map(|s| s.primary().focus)
+                && c.virt == 0
+            {
+                // a move carries the whole line, trailing whitespace included: the caret keeps
+                // its place inside that whitespace
+                let delta = req.selection.primary().focus.offset - r.selection.primary().focus.offset;
+                plan.selection_after = Some(Selection::caret(c.offset + delta));
             }
             return Ok(plan);
         }
