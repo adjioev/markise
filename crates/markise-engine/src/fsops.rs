@@ -84,8 +84,9 @@ pub fn invalid_name(name: &str) -> Option<&'static str> {
 }
 
 /// Renames `path` to `new_name` in the same folder and returns the new path. Refuses an
-/// invalid name and never replaces an existing entry (a change of letter case only is
-/// allowed: on a case-insensitive file system that is the same entry).
+/// invalid name and never replaces an existing entry: the rename itself is atomic
+/// no-replace where the OS offers it ([`rename_noreplace`]). A change of letter case only
+/// of the same entry (case-insensitive file systems) is allowed.
 pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     if let Some(why) = invalid_name(new_name) {
         return Err(why.into());
@@ -95,38 +96,156 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     if target == path {
         return Ok(target);
     }
-    if std::fs::symlink_metadata(&target).is_ok() && !same_entry(path, &target) {
-        return Err(format!("“{new_name}” already exists in this folder."));
+    let exists = || format!("“{new_name}” already exists in this folder.");
+    if case_only_change(path, &target) && same_entry(path, &target) {
+        // the target name finds this very entry: a no-replace rename would refuse it
+        std::fs::rename(path, &target).map_err(|e| format!("Cannot rename: {e}"))?;
+        return Ok(target);
     }
-    std::fs::rename(path, &target).map_err(|e| format!("Cannot rename: {e}"))?;
-    Ok(target)
+    match rename_noreplace(path, &target) {
+        Ok(()) => Ok(target),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(exists()),
+        Err(e) => Err(format!("Cannot rename: {e}")),
+    }
 }
 
-/// `a` and `b` name the same file system entry (e.g. differ in letter case on a
-/// case-insensitive file system).
+/// The two paths differ only in the letter case of their last component.
+fn case_only_change(a: &Path, b: &Path) -> bool {
+    a.parent() == b.parent()
+        && match (a.file_name(), b.file_name()) {
+            (Some(x), Some(y)) => x != y && x.to_string_lossy().to_lowercase() == y.to_string_lossy().to_lowercase(),
+            _ => false,
+        }
+}
+
+/// `a` and `b` are the same directory entry, compared without following symbolic links
+/// (a link and the file it points to are different entries).
+#[cfg(unix)]
 fn same_entry(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+        (Ok(x), Ok(y)) => (x.dev(), x.ino()) == (y.dev(), y.ino()),
+        _ => false,
+    }
+}
+
+/// Without inode numbers: a case-only name that resolves to an entry at all names the same
+/// entry on a case-insensitive file system (Windows default); on a case-sensitive folder the
+/// lookup of the other spelling fails and the no-replace rename runs instead.
+#[cfg(not(unix))]
+fn same_entry(a: &Path, b: &Path) -> bool {
+    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
         (Ok(x), Ok(y)) => {
-            // canonicalize keeps the spelling it was given for the last component on some
-            // systems: compare the parents and the names case-insensitively
-            x.parent() == y.parent()
-                && x.file_name().map(|n| n.to_string_lossy().to_lowercase())
-                    == y.file_name().map(|n| n.to_string_lossy().to_lowercase())
-                && file_id(a) == file_id(b)
+            x.file_type() == y.file_type()
+                && x.len() == y.len()
+                && x.modified().ok() == y.modified().ok()
+                && x.created().ok() == y.created().ok()
         }
         _ => false,
     }
 }
 
-#[cfg(unix)]
-fn file_id(p: &Path) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()))
+/// Renames `from` to `to`, failing with `AlreadyExists` instead of replacing an existing
+/// entry — atomically (macOS `renamex_np(RENAME_EXCL)`, Linux `renameat2(RENAME_NOREPLACE)`,
+/// Windows `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`). Where the call is not
+/// supported (old kernels, some file systems), files fall back to hard link + unlink (also
+/// no-replace); folders to a checked rename (the only remaining race window).
+pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    match native_noreplace(from, to) {
+        Some(Err(e)) if unsupported(&e) => fallback_noreplace(from, to),
+        Some(r) => r,
+        None => fallback_noreplace(from, to),
+    }
 }
 
-#[cfg(not(unix))]
-fn file_id(p: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(p).ok()
+#[cfg(unix)]
+fn cstr(p: &Path) -> io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+}
+
+#[cfg(target_os = "macos")]
+fn native_noreplace(from: &Path, to: &Path) -> Option<io::Result<()>> {
+    let r = (|| {
+        let (f, t) = (cstr(from)?, cstr(to)?);
+        // SAFETY: two valid NUL-terminated paths; the call does not keep the pointers
+        if unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    })();
+    Some(r)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn native_noreplace(from: &Path, to: &Path) -> Option<io::Result<()>> {
+    let r = (|| {
+        let (f, t) = (cstr(from)?, cstr(to)?);
+        // SAFETY: two valid NUL-terminated paths relative to the working directory
+        let rc = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                f.as_ptr(),
+                libc::AT_FDCWD,
+                t.as_ptr(),
+                libc::RENAME_NOREPLACE as _,
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    })();
+    Some(r)
+}
+
+#[cfg(windows)]
+fn native_noreplace(from: &Path, to: &Path) -> Option<io::Result<()>> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide = |p: &Path| p.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+    let (f, t) = (wide(from), wide(to));
+    // SAFETY: two valid NUL-terminated UTF-16 paths; no MOVEFILE_REPLACE_EXISTING flag, so an
+    // existing target makes the call fail
+    let ok = unsafe { windows_sys::Win32::Storage::FileSystem::MoveFileExW(f.as_ptr(), t.as_ptr(), 0) };
+    Some(if ok != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
+fn native_noreplace(_: &Path, _: &Path) -> Option<io::Result<()>> {
+    None
+}
+
+/// The no-replace call is not available here (the error is not about the paths).
+fn unsupported(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSUP))
+    }
+    #[cfg(not(unix))]
+    {
+        e.kind() == io::ErrorKind::Unsupported
+    }
+}
+
+fn fallback_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    let meta = std::fs::symlink_metadata(from)?;
+    if meta.is_file() {
+        // a hard link is never created over an existing entry
+        std::fs::hard_link(from, to)?;
+        return std::fs::remove_file(from).inspect_err(|_| {
+            let _ = std::fs::remove_file(to);
+        });
+    }
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+    }
+    std::fs::rename(from, to)
 }
 
 /// Moves `path` (file or folder) to the Trash / Recycle Bin.
@@ -198,6 +317,53 @@ mod tests {
         // letter case only: allowed on every file system
         let upper = rename(&c, "C.md").unwrap();
         assert_eq!(std::fs::read_to_string(&upper).unwrap(), "A");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renaming_a_symlink_onto_its_target_is_a_collision() {
+        let d = dir("symlink");
+        let target = d.join("real.md");
+        std::fs::write(&target, "precious").unwrap();
+        let link = d.join("link.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(rename(&link, "real.md").unwrap_err().contains("already exists"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        // also onto another spelling of the target's name (case-insensitive file systems)
+        assert!(rename(&link, "REAL.md").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn noreplace_rename_and_its_fallback_never_replace() {
+        let d = dir("noreplace");
+        let (a, b) = (d.join("a.md"), d.join("b.md"));
+        std::fs::write(&a, "A").unwrap();
+        std::fs::write(&b, "B").unwrap();
+        assert_eq!(
+            rename_noreplace(&a, &b).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            fallback_noreplace(&a, &b).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "B");
+        // folders onto folders too
+        std::fs::create_dir(d.join("x")).unwrap();
+        std::fs::create_dir(d.join("y")).unwrap();
+        std::fs::write(d.join("y").join("keep.md"), "k").unwrap();
+        assert!(rename_noreplace(&d.join("x"), &d.join("y")).is_err());
+        assert!(fallback_noreplace(&d.join("x"), &d.join("y")).is_err());
+        assert!(d.join("y").join("keep.md").is_file());
+        // and they do rename to a free name
+        fallback_noreplace(&a, &d.join("c.md")).unwrap();
+        assert!(!a.exists() && std::fs::read_to_string(d.join("c.md")).unwrap() == "A");
+        rename_noreplace(&d.join("c.md"), &a).unwrap();
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "A");
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -91,14 +91,11 @@ pub enum Expect {
     Missing,
     /// Either the given version or no file (deleted after loading).
     VersionOrMissing(DiskVersion),
-    /// Whatever is there (Save As to a target the user chose to replace in the save dialog).
-    Any,
 }
 
 impl Expect {
     fn accepts(&self, found: &Option<DiskVersion>) -> bool {
         match (self, found) {
-            (Expect::Any, _) => true,
             (Expect::Version(v) | Expect::VersionOrMissing(v), Some(f)) => v.same_content(f),
             (Expect::Missing | Expect::VersionOrMissing(_), None) => true,
             _ => false,

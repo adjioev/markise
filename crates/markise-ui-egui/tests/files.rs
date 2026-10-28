@@ -3,12 +3,15 @@
 //! File / New Folder / Rename. The native save dialog is answered through a test hook.
 
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::{Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use markise_engine::editor::keymap::Platform;
+use markise_engine::jobs::JobHooks;
 use markise_ui_egui::sidebar::TreeAction;
 use markise_ui_egui::{AppOptions, MarkiseApp, ViewMode};
 
@@ -20,8 +23,13 @@ fn tmpdir(name: &str) -> PathBuf {
 }
 
 fn harness(open: Vec<PathBuf>) -> Harness<'static, MarkiseApp> {
+    harness_with(open, JobHooks::default())
+}
+
+fn harness_with(open: Vec<PathBuf>, hooks: JobHooks) -> Harness<'static, MarkiseApp> {
     let app = MarkiseApp::new(AppOptions {
         open,
+        hooks: Arc::new(hooks),
         ..Default::default()
     });
     Harness::builder()
@@ -338,5 +346,121 @@ fn delete_asks_and_cancel_keeps_the_file() {
     h.get_by_label("Cancel").click();
     h.step();
     assert!(h.state().delete_pending().is_none() && f.is_file());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A gate the save worker blocks on: `entered` reports arrival, `release` lets it continue.
+struct Gate {
+    entered: Receiver<u64>,
+    release: Sender<()>,
+}
+
+fn gated_saves() -> (Gate, JobHooks) {
+    let (etx, entered) = channel();
+    let (release, rrx) = channel::<()>();
+    let (etx, rrx) = (Mutex::new(etx), Mutex::new(rrx));
+    let hooks = JobHooks {
+        before_save: Some(Box::new(move |rev: u64| {
+            let _ = etx.lock().unwrap().send(rev);
+            let _ = rrx.lock().unwrap().recv();
+        })),
+        ..Default::default()
+    };
+    (Gate { entered, release }, hooks)
+}
+
+fn wait_entered(h: &mut Harness<'static, MarkiseApp>, g: &Gate) {
+    let t = Instant::now();
+    while g.entered.try_recv().is_err() {
+        assert!(t.elapsed() < Duration::from_secs(10), "the save never started");
+        h.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn save_as_never_replaces_a_file_the_dialog_did_not_confirm() {
+    // review P1-1: `notes` was confirmed (free), `notes.md` exists → refused
+    let d = tmpdir("unconfirmed");
+    let existing = d.join("notes.md");
+    std::fs::write(&existing, "keep me\n").unwrap();
+    let mut h = harness(Vec::new());
+    h.step();
+    h.state_mut().new_document();
+    h.step();
+    set_text(&mut h, "draft\n");
+    h.state_mut().queue_save_dialog_answer(Some(d.join("notes")));
+    h.state_mut().save_as();
+    h.step();
+    assert!(!h.state().is_saving());
+    assert!(h.state().banner_text().is_some_and(|b| b.contains("already exists")));
+    assert_eq!(std::fs::read_to_string(&existing).unwrap(), "keep me\n");
+    assert!(h.state().is_untitled() && h.state().is_dirty());
+    // choosing the file itself replaces it (the dialog confirmed that name)
+    h.state_mut().queue_save_dialog_answer(Some(existing.clone()));
+    h.state_mut().save_as();
+    wait_until(&mut h, "save", |a| !a.is_saving());
+    assert_eq!(std::fs::read_to_string(&existing).unwrap(), "draft\n");
+    assert!(!h.state().is_dirty());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn save_as_over_a_file_changed_after_confirmation_is_a_conflict() {
+    // review P1-2: the confirmed file's version is captured; a later change is not lost
+    let d = tmpdir("as-conflict");
+    let target = d.join("target.md");
+    std::fs::write(&target, "old\n").unwrap();
+    let (g, hooks) = gated_saves();
+    let mut h = harness_with(Vec::new(), hooks);
+    h.step();
+    h.state_mut().new_document();
+    h.step();
+    set_text(&mut h, "mine\n");
+    h.state_mut().queue_save_dialog_answer(Some(target.clone()));
+    h.state_mut().save_as();
+    wait_entered(&mut h, &g);
+    std::fs::write(&target, "theirs, written after the dialog\n").unwrap();
+    g.release.send(()).unwrap();
+    wait_until(&mut h, "save", |a| !a.is_saving());
+    assert_eq!(h.state().banner_text().as_deref(), Some("save-conflict"));
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "theirs, written after the dialog\n"
+    );
+    assert!(h.state().is_untitled() && h.state().is_dirty(), "still unsaved");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn rename_is_refused_while_a_save_is_running() {
+    // review P1-5
+    let d = tmpdir("rename-saving");
+    let a = d.join("a.md");
+    std::fs::write(&a, "one\n").unwrap();
+    let (g, hooks) = gated_saves();
+    let mut h = harness_with(vec![a.clone()], hooks);
+    wait_until(&mut h, "load", idle);
+    set_text(&mut h, "two\n");
+    h.state_mut().save();
+    wait_entered(&mut h, &g);
+    h.state_mut().start_rename(a.clone());
+    h.state_mut().set_rename_text("b.md");
+    h.state_mut().confirm_rename();
+    assert!(
+        h.state()
+            .rename_error()
+            .is_some_and(|e| e.contains("save is in progress"))
+    );
+    assert!(a.exists() && !d.join("b.md").exists());
+    g.release.send(()).unwrap();
+    wait_until(&mut h, "save", |s| !s.is_saving());
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "two\n");
+    // after the save the rename goes through and the document follows, still clean
+    h.state_mut().confirm_rename();
+    let b = d.join("b.md");
+    assert_eq!(h.state().document_path(), Some(b.as_path()));
+    assert!(!h.state().is_dirty());
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), "two\n");
     let _ = std::fs::remove_dir_all(&d);
 }

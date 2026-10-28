@@ -393,6 +393,8 @@ struct Saving {
     snap: Option<SaveSnapshot>,
     /// Save As: the document's new file once the save succeeded.
     target: Option<PathBuf>,
+    /// The file written.
+    path: PathBuf,
 }
 
 /// A question waiting for the user.
@@ -1340,10 +1342,10 @@ impl MarkiseApp {
         if self.doc.as_ref().is_some_and(|d| d.untitled) && req.target.is_none() {
             // an untitled document is saved through Save As (spec 04 §2); Cancel in the
             // dialog cancels the save and its continuation
-            match self.pick_save_path() {
-                Some(p) => {
+            match self.pick_save_target() {
+                Some((p, expect)) => {
                     req.target = Some(p);
-                    req.expect = Some(Expect::Any);
+                    req.expect = Some(expect);
                 }
                 None => return,
             }
@@ -1377,7 +1379,7 @@ impl MarkiseApp {
             SaveText::Buffer { text, .. } => text_fp(text),
         };
         let path = req.target.clone().unwrap_or_else(|| doc.path.clone());
-        let rx = spawn_save(text, path, expect, rev, self.hooks.clone(), wake);
+        let rx = spawn_save(text, path.clone(), expect, rev, self.hooks.clone(), wake);
         self.saving = Some(Saving {
             doc_id: doc.id,
             fp,
@@ -1385,6 +1387,7 @@ impl MarkiseApp {
             then: req.then,
             snap,
             target: req.target,
+            path,
         });
     }
 
@@ -1410,6 +1413,20 @@ impl MarkiseApp {
         };
         let s = self.saving.take().expect("saving");
         let current = self.doc.as_ref().is_some_and(|d| d.id == s.doc_id);
+        // the document's file changed while saving (renamed): the old path was written, the
+        // document's file may not hold this text — keep it unsaved
+        if current && saved.result.is_ok() && s.target.is_none() && self.doc.as_ref().is_some_and(|d| d.path != s.path)
+        {
+            self.queued_save = None;
+            self.banner = Some(Banner::Error(format!(
+                "The file was renamed while saving; the save went to {}. Save again.",
+                s.path.display()
+            )));
+            if std::mem::take(&mut self.reload_pending) {
+                self.request_reload();
+            }
+            return;
+        }
         if current {
             let doc = self.doc.as_mut().expect("doc");
             match saved.result {

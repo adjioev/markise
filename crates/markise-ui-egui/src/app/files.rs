@@ -37,16 +37,18 @@ struct Rename {
     fresh: bool,
 }
 
-/// `p` with the default extension when it has none (spec 05: `md`), its folder canonical
-/// (the file tree and the watcher use canonical paths).
-fn normalize_target(mut p: PathBuf) -> PathBuf {
-    if p.extension().is_none() {
+/// `p` with the default extension when it has none (spec 05: `md`; returns whether it was
+/// added), its folder canonical (the file tree and the watcher use canonical paths).
+fn normalize_target(mut p: PathBuf) -> (PathBuf, bool) {
+    let added = p.extension().is_none();
+    if added {
         p.set_extension(fsops::DEFAULT_EXTENSION);
     }
-    match (p.parent().and_then(|d| std::fs::canonicalize(d).ok()), p.file_name()) {
+    let p = match (p.parent().and_then(|d| std::fs::canonicalize(d).ok()), p.file_name()) {
         (Some(d), Some(n)) => d.join(n),
         _ => p,
-    }
+    };
+    (p, added)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -135,18 +137,41 @@ impl MarkiseApp {
     // ------------------------------------------------------------------ Save As
 
     /// File → Save As… (spec 04 §2): asks for a file and saves the document there; the
-    /// document then lives in that file. The native dialog has already confirmed replacing
-    /// an existing file.
+    /// document then lives in that file.
     pub fn save_as(&mut self) {
         if self.doc.is_none() {
             return;
         }
-        if let Some(p) = self.pick_save_path() {
+        if let Some((p, expect)) = self.pick_save_target() {
             self.start_save(SaveRequest {
-                expect: Some(Expect::Any),
+                expect: Some(expect),
                 target: Some(p),
                 then: Then::Nothing,
             });
+        }
+    }
+
+    /// Asks for the Save As file and returns it with what the save expects to find there:
+    /// the version of the file the dialog confirmed replacing (captured now, so a change
+    /// made afterwards is still a conflict and the replaced content keeps its recovery
+    /// backup), or no file. `None`: cancelled, or refused with a banner.
+    pub(super) fn pick_save_target(&mut self) -> Option<(PathBuf, Expect)> {
+        let (p, added) = normalize_target(self.pick_save_path()?);
+        if added && std::fs::symlink_metadata(&p).is_ok() {
+            // the dialog confirmed the name without the extension, not this file
+            self.banner = Some(Banner::Error(format!(
+                "Not saved: “{}” already exists. Choose it in Save As to replace it.",
+                p.display()
+            )));
+            return None;
+        }
+        match markise_engine::save::disk_version(&p) {
+            Ok(Some(v)) => Some((p, Expect::Version(v))),
+            Ok(None) => Some((p, Expect::Missing)),
+            Err(e) => {
+                self.banner = Some(Banner::Error(format!("Cannot save to {}: {e}", p.display())));
+                None
+            }
         }
     }
 
@@ -155,11 +180,11 @@ impl MarkiseApp {
         self.files.save_answers.push_back(answer);
     }
 
-    /// The native save dialog (default name `Untitled.md` or the current name, default
-    /// extension `md`).
-    pub(super) fn pick_save_path(&mut self) -> Option<PathBuf> {
+    /// The native save dialog (default name `Untitled.md` or the current name; the Markdown
+    /// filter comes first so the platform adds `.md` and confirms replacing the final name).
+    fn pick_save_path(&mut self) -> Option<PathBuf> {
         if let Some(a) = self.files.save_answers.pop_front() {
-            return a.map(normalize_target);
+            return a;
         }
         let (dir, name) = match &self.doc {
             Some(d) if !d.untitled => (
@@ -181,7 +206,6 @@ impl MarkiseApp {
             .add_filter("Markdown", MARKDOWN_EXTENSIONS)
             .add_filter("Plain text", TEXT_EXTENSIONS)
             .save_file()
-            .map(normalize_target)
     }
 
     /// The document's file is now `path` (Save As, rename): watch it, resolve relative
@@ -285,6 +309,13 @@ impl MarkiseApp {
     /// reason it was refused (an existing name is never replaced).
     pub fn confirm_rename(&mut self) {
         let Some(mut r) = self.files.rename.take() else { return };
+        if self.saving.is_some() {
+            // the running save writes the old path; renaming now could mark text clean
+            // that the new file does not hold
+            r.error = Some("A save is in progress. Try again when it has finished.".into());
+            self.files.rename = Some(r);
+            return;
+        }
         match fsops::rename(&r.path, &r.name) {
             Ok(to) => self.renamed(&r.path, &to),
             Err(e) => {

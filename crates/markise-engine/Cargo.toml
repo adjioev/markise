@@ -24,6 +24,13 @@ markise-pdf.workspace = true
 markise-text.workspace = true
 markise-theme.workspace = true
 
+# atomic no-replace rename (src/fsops.rs)
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 markise-corpus.workspace = true
 markise-testfmt.workspace = true
