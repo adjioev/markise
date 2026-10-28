@@ -49,12 +49,17 @@ mounting a folder had the same synchronous calls.
      UI re-reads and decides as for any external change. The worker reads the file for this
      (off the UI thread). This also closes the older gap between the loader's read and the
      watch registration.
+   - the baseline it compares with is the version the UI last acknowledged: the loaded one,
+     then each successful save and each accepted reload (`FileWatcher::acknowledge`), and
+     after a detected deletion "known missing", so a later recreation is still reported.
 5. Failures are not hidden: a path that cannot be added, or a stream that cannot be started,
    is left out of the active set (so the next request registers it again), reported as
    `WatchEvent::Error` (the UI shows a notice and logs it with `MARKISE_TIMING`), and
    `FileWatcher::sync` returns it.
-6. `FileWatcher::sync` waits until earlier requests are applied (tests and tools only; the
-   theme worker uses it so its watch is in effect before the UI receives it).
+6. `FileWatcher::sync` waits until earlier requests are applied (tests and tools only). The
+   theme folder gets the same catch-up instead: once its watch is in effect the folder itself
+   is reported as changed, so user themes are re-imported and the catalog re-read (the theme
+   worker never waits for a registration; it also saves the settings).
 7. The timing log reports `first-document-frame` for the frame that shows the opened
    document (it used to fire on the click frame, still showing the previous document), and
    the file size for that log line is read only when timing is enabled.
@@ -66,6 +71,9 @@ mounting a folder had the same synchronous calls.
   for 800 ms through `JobHooks::before_watch` and asserts the open stays fast.
 - Dropping a `FileWatcher` no longer blocks: the worker drops the `notify` watcher.
 - Watch registration is asynchronous; code that needs it in effect (tests) calls `sync`.
+  An external change made right after an open is reported once the registration is in
+  effect; under heavy FSEvents load (the UI test suite starting many streams in parallel)
+  that took 7–10 s in measurements. Before, the same wait froze the UI thread instead.
   `tests/watch_gaps.rs` and the `watch` unit tests hold the worker inside a registration
   change and change files meanwhile (tree refresh, folder switch with an open document,
   content-identity comparison, failed registration and retry).

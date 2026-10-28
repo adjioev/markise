@@ -27,7 +27,9 @@ pub enum WatchEvent {
     FileRemoved(PathBuf),
     /// Something changed in this directory of the mounted folder.
     DirChanged(PathBuf),
-    /// A file in the user theme folder changed (live theme reload, ADR 0004).
+    /// A file in the user theme folder changed (live theme reload, ADR 0004). After the theme
+    /// folder's watch (re)started, the folder itself is reported: anything beneath it may have
+    /// changed.
     ThemeChanged(PathBuf),
     /// The watch of the mounted folder (re)started: changes made before it took effect have no
     /// events of their own, so directories listed earlier must be listed again.
@@ -51,6 +53,9 @@ enum Ctl {
     File(PathBuf, Option<DiskVersion>),
     Folder(PathBuf),
     Themes(PathBuf),
+    /// The caller's document is now this version on disk (its own save, an accepted reload);
+    /// `None`: it knows the file is missing.
+    Acknowledge(PathBuf, Option<DiskVersion>),
     /// Answered once every earlier request is applied: `Err` lists watches not in effect.
     Sync(Sender<Result<(), String>>),
 }
@@ -101,14 +106,35 @@ struct Worker {
 /// Compares the open file on disk with the version the caller has (content identity: length
 /// and hash of the bytes, not the modification time, which can be paired with older bytes when
 /// a replace races the caller's read, or be preserved by the replacing tool).
-/// Returns the event to report, if any, and the version now on disk.
-fn reconcile(file: &Path, known: Option<DiskVersion>) -> (Option<WatchEvent>, Option<DiskVersion>) {
+/// What the worker believes the caller's document is on disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Baseline {
+    /// No version given: nothing to compare with.
+    Unknown,
+    /// The file is known not to exist (deleted; saving or an external write recreates it).
+    Missing,
+    Version(DiskVersion),
+}
+
+impl Baseline {
+    fn of(v: Option<DiskVersion>) -> Self {
+        v.map_or(Baseline::Missing, Baseline::Version)
+    }
+}
+
+/// Returns the event to report, if any, and the new baseline (what is on disk now).
+fn reconcile(file: &Path, known: Baseline) -> (Option<WatchEvent>, Baseline) {
+    if known == Baseline::Unknown {
+        return (None, known);
+    }
+    let changed = || Some(WatchEvent::FileChanged(file.to_path_buf()));
     match crate::save::disk_version(file) {
-        Ok(None) => (Some(WatchEvent::FileRemoved(file.to_path_buf())), None),
+        Ok(None) if known == Baseline::Missing => (None, known),
+        Ok(None) => (Some(WatchEvent::FileRemoved(file.to_path_buf())), Baseline::Missing),
         Ok(Some(now)) => match known {
-            Some(k) if k.same_content(&now) => (None, Some(now)),
-            Some(_) => (Some(WatchEvent::FileChanged(file.to_path_buf())), Some(now)),
-            None => (None, None),
+            Baseline::Version(k) if k.same_content(&now) => (None, Baseline::Version(now)),
+            // changed, or recreated after a deletion
+            _ => (changed(), Baseline::Version(now)),
         },
         Err(_) => (None, known),
     }
@@ -130,7 +156,7 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
     } = w;
     let mut active: BTreeMap<PathBuf, bool> = BTreeMap::new();
     let mut want = TargetSet::default();
-    let mut known: Option<DiskVersion> = None;
+    let mut known = Baseline::Unknown;
     let mut failure: Option<String> = None;
     while let Ok(first) = ctl.recv() {
         // coalesce a burst (fast clicks through the file tree) into one update
@@ -140,8 +166,13 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
             match c {
                 Ctl::File(p, version) => {
                     want.file = Some(canonical(&p));
-                    known = version;
+                    known = version.map_or(Baseline::Unknown, Baseline::Version);
                     new_file = true;
+                }
+                Ctl::Acknowledge(p, version) => {
+                    if want.file.as_ref() == Some(&canonical(&p)) {
+                        known = Baseline::of(version);
+                    }
                 }
                 Ctl::Folder(p) => want.folder = Some(canonical(&p)),
                 Ctl::Themes(p) => want.themes = Some(canonical(&p)),
@@ -198,9 +229,12 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
         if restarted && let Some(root) = want.folder.as_ref().filter(|r| active.get(*r) == Some(&true)) {
             out.push(WatchEvent::FolderWatched(root.clone()));
         }
+        if restarted && let Some(root) = want.themes.as_ref().filter(|r| active.get(*r) == Some(&true)) {
+            // the same catch-up for the theme folder: "something beneath it may have changed"
+            out.push(WatchEvent::ThemeChanged(root.clone()));
+        }
         if (restarted || new_file)
             && let Some(f) = &want.file
-            && known.is_some()
         {
             let (e, now) = reconcile(f, known);
             // a difference is reported once; the caller re-reads and decides
@@ -308,6 +342,13 @@ impl FileWatcher {
         let _ = self.ctl.send(Ctl::Themes(dir.to_path_buf()));
     }
 
+    /// The open document `path` is now `version` on disk (after the caller's own save or an
+    /// accepted reload; `None` when it knows the file is gone): later catch-ups compare with
+    /// it. Returns at once.
+    pub fn acknowledge(&self, path: &Path, version: Option<DiskVersion>) {
+        let _ = self.ctl.send(Ctl::Acknowledge(path.to_path_buf(), version));
+    }
+
     /// Blocks until every earlier `watch_*` request has been applied (tests, tools; never call
     /// it on the UI thread). `Err` names the watches that are not in effect.
     pub fn sync(&self) -> Result<(), String> {
@@ -343,7 +384,7 @@ mod tests {
         crate::save::save_atomic(&p, "two").unwrap();
         let t = Instant::now();
         let mut got = None;
-        while t.elapsed() < Duration::from_secs(5) {
+        while t.elapsed() < Duration::from_secs(30) {
             if let Some(e) = w.try_recv() {
                 got = Some(e);
                 break;
@@ -357,7 +398,7 @@ mod tests {
 
     fn wait_event(w: &FileWatcher, want: &WatchEvent) -> bool {
         let t = Instant::now();
-        while t.elapsed() < Duration::from_secs(5) {
+        while t.elapsed() < Duration::from_secs(30) {
             while let Some(e) = w.try_recv() {
                 if &e == want {
                     return true;
@@ -457,7 +498,7 @@ mod tests {
         }
         fn wait_entered(&self) {
             self.entered
-                .recv_timeout(Duration::from_secs(5))
+                .recv_timeout(Duration::from_secs(30))
                 .expect("registration started");
         }
         fn release(&self) {
@@ -519,7 +560,10 @@ mod tests {
         std::fs::write(&p, "new content").unwrap();
         let new_mtime = std::fs::metadata(&p).unwrap().modified().ok();
         let raced = DiskVersion::of_bytes(b"old content", new_mtime);
-        assert_eq!(reconcile(&p, Some(raced)).0, Some(WatchEvent::FileChanged(p.clone())));
+        assert_eq!(
+            reconcile(&p, Baseline::Version(raced)).0,
+            Some(WatchEvent::FileChanged(p.clone()))
+        );
         // a replace that preserves the modification time (same length, too)
         let v = crate::save::disk_version(&p).unwrap().unwrap();
         std::fs::write(&p, "NEW CONTENT").unwrap();
@@ -527,16 +571,22 @@ mod tests {
         f.set_modified(v.mtime.unwrap()).unwrap();
         drop(f);
         assert_eq!(std::fs::metadata(&p).unwrap().modified().ok(), v.mtime);
-        assert_eq!(reconcile(&p, Some(v)).0, Some(WatchEvent::FileChanged(p.clone())));
+        assert_eq!(
+            reconcile(&p, Baseline::Version(v)).0,
+            Some(WatchEvent::FileChanged(p.clone()))
+        );
         // touching without a content change is not a change
         let v = crate::save::disk_version(&p).unwrap().unwrap();
         let f = std::fs::File::options().write(true).open(&p).unwrap();
         f.set_modified(SystemTime::now() + Duration::from_secs(5)).unwrap();
         drop(f);
-        assert_eq!(reconcile(&p, Some(v)).0, None);
+        assert_eq!(reconcile(&p, Baseline::Version(v)).0, None);
         // removed
         std::fs::remove_file(&p).unwrap();
-        assert_eq!(reconcile(&p, Some(v)).0, Some(WatchEvent::FileRemoved(p.clone())));
+        assert_eq!(
+            reconcile(&p, Baseline::Version(v)).0,
+            Some(WatchEvent::FileRemoved(p.clone()))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -574,5 +624,87 @@ mod tests {
         let canon = std::fs::canonicalize(&missing).unwrap();
         assert!(wait_event(&w, &WatchEvent::FolderWatched(canon)));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Lets pending events arrive, then drops them.
+    fn settle(w: &FileWatcher) {
+        w.sync().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        while w.try_recv().is_some() {}
+    }
+
+    /// A document in `root/a/x/doc.md` watched through the mounted folder `root/a`.
+    fn doc_in_folder(name: &str, text: &str) -> (PathBuf, PathBuf, Gate, FileWatcher) {
+        let root = tmp(name);
+        std::fs::create_dir_all(root.join("a").join("x")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        let doc = root.join("a").join("x").join("doc.md");
+        std::fs::write(&doc, text).unwrap();
+        let (gate, hooks) = Gate::new();
+        let mut w = FileWatcher::with_hooks(Arc::new(|| {}), hooks).unwrap();
+        w.watch_folder(&root.join("a"));
+        w.watch_file(&doc, crate::save::disk_version(&doc).unwrap());
+        settle(&w);
+        (root, doc, gate, w)
+    }
+
+    /// Runs `change` while the worker is inside a registration change (folder switch).
+    fn in_gap(w: &mut FileWatcher, gate: &Gate, folder: &Path, change: impl FnOnce()) {
+        gate.hold();
+        w.watch_folder(folder);
+        gate.wait_entered();
+        change();
+        gate.release();
+        w.sync().unwrap();
+    }
+
+    /// Review of #27, round 2 (P1): after the caller's own save the catch-up compares with
+    /// the saved version, so an external restore of the opened version is noticed.
+    #[test]
+    fn catch_ups_compare_with_the_acknowledged_version() {
+        let (root, doc, gate, mut w) = doc_in_folder("ack", "version A");
+        std::fs::write(&doc, "version B").unwrap(); // our save
+        w.acknowledge(&doc, crate::save::disk_version(&doc).unwrap());
+        settle(&w);
+        in_gap(&mut w, &gate, &root.join("b"), || {
+            std::fs::write(&doc, "version A").unwrap()
+        });
+        assert!(wait_event(&w, &WatchEvent::FileChanged(doc.clone())));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Review of #27, round 2 (P2): a detected deletion does not end later catch-ups; a
+    /// recreation in another gap is reported.
+    #[test]
+    fn a_deletion_does_not_end_catch_ups() {
+        let (root, doc, gate, mut w) = doc_in_folder("deleted", "here");
+        in_gap(&mut w, &gate, &root.join("b"), || std::fs::remove_file(&doc).unwrap());
+        assert!(wait_event(&w, &WatchEvent::FileRemoved(doc.clone())));
+        settle(&w);
+        in_gap(&mut w, &gate, &root.join("a"), || {
+            std::fs::write(&doc, "recreated").unwrap()
+        });
+        assert!(wait_event(&w, &WatchEvent::FileChanged(doc.clone())));
+        // still missing, known missing: nothing to report
+        assert_eq!(reconcile(&root.join("gone.md"), Baseline::Missing).0, None);
+        assert_eq!(reconcile(&root.join("gone.md"), Baseline::Unknown).0, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The theme folder gets the same catch-up: once its watch is in effect, the folder is
+    /// reported as changed (a theme edited before that is re-imported).
+    #[test]
+    fn theme_folder_activation_reports_the_folder() {
+        let dir = tmp("themes");
+        let (gate, hooks) = Gate::new();
+        let mut w = FileWatcher::with_hooks(Arc::new(|| {}), hooks).unwrap();
+        gate.hold();
+        w.watch_themes(&dir);
+        gate.wait_entered();
+        std::fs::write(dir.join("edited-in-the-gap.css"), "body {}").unwrap();
+        gate.release();
+        w.sync().unwrap();
+        assert!(wait_event(&w, &WatchEvent::ThemeChanged(dir.clone())));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

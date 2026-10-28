@@ -52,7 +52,7 @@ fn harness(open: Vec<PathBuf>, hooks: Arc<JobHooks>) -> Harness<'static, Markise
 fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(t.elapsed() < Duration::from_secs(30), "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -72,7 +72,7 @@ fn a_file_created_before_the_folder_watch_takes_effect_appears_in_the_tree() {
         a.file_tree_rows().iter().any(|r| r == "first.md")
     });
     entered
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(30))
         .expect("folder watch registration");
     std::fs::write(dir.join("second.md"), "# Second\n").unwrap();
     release(&held);
@@ -80,4 +80,49 @@ fn a_file_created_before_the_folder_watch_takes_effect_appears_in_the_tree() {
         a.file_tree_rows().iter().any(|r| r == "second.md")
     });
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn hold(held: &Held, entered: &Receiver<()>) {
+    while entered.try_recv().is_ok() {}
+    *held.0.lock().unwrap() = true;
+}
+
+/// Review of #27, round 2 (P1): after the app's own save, a later registration gap compares
+/// with the saved version, so restoring the originally opened text on disk is noticed.
+#[test]
+fn an_external_restore_after_our_save_is_noticed_across_a_folder_switch() {
+    let root = std::env::temp_dir().join(format!("markise-watch-gaps-ack-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir_all(root.join("b")).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let doc = root.join("a").join("doc.md");
+    std::fs::write(&doc, "version A\n").unwrap();
+    let (held, entered, hooks) = gate();
+    release(&held);
+    let mut h = harness(vec![doc.clone()], hooks);
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_busy());
+    h.state_mut().toggle_source();
+    h.run_steps(1);
+    h.state_mut()
+        .edit_source_text(|t| *t = t.replace("version A", "version B"));
+    h.run_steps(1);
+    h.state_mut().save();
+    wait_until(&mut h, "save", |a| !a.is_busy() && !a.is_dirty());
+    h.state_mut().toggle_source();
+    std::thread::sleep(Duration::from_millis(300));
+    wait_until(&mut h, "settle", |a| !a.is_busy());
+    assert_eq!(std::fs::read_to_string(&doc).unwrap(), "version B\n");
+
+    hold(&held, &entered);
+    h.state_mut().open(root.join("b")); // mount another folder: the document's watch changes
+    entered
+        .recv_timeout(Duration::from_secs(30))
+        .expect("registration change");
+    std::fs::write(&doc, "version A\n").unwrap();
+    release(&held);
+    wait_until(&mut h, "restored text", |a| {
+        a.viewed_text().is_some_and(|t| t == "version A\n") && !a.is_busy()
+    });
+    let _ = std::fs::remove_dir_all(&root);
 }

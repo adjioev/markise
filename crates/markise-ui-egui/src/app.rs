@@ -1063,6 +1063,9 @@ impl MarkiseApp {
             d.document_changed();
         }
         doc.disk = Some(loaded.version);
+        if let Some(w) = &self.watcher {
+            w.acknowledge(&doc.path, Some(loaded.version));
+        }
         doc.lossy = loaded.lossy;
         doc.deleted = false;
         doc.saved_rev = doc.viewer.ed.session.revision().counter;
@@ -1196,6 +1199,9 @@ impl MarkiseApp {
             match saved.result {
                 Ok(out) => {
                     doc.disk = Some(out.version);
+                    if let Some(w) = &self.watcher {
+                        w.acknowledge(&doc.path, Some(out.version));
+                    }
                     doc.deleted = false;
                     if saved.rev >= doc.saved_rev {
                         doc.saved_rev = saved.rev;
