@@ -27,6 +27,9 @@ pub enum WatchEvent {
     FileRemoved(PathBuf),
     /// Something changed in this directory of the mounted folder.
     DirChanged(PathBuf),
+    /// A file of the mounted folder's Obsidian configuration (`.obsidian/`, e.g. `app.json`)
+    /// changed, also in place (spec 06 §14, E17); carries the mounted folder.
+    VaultConfigChanged(PathBuf),
     /// A file in the user theme folder changed (live theme reload, ADR 0004). After the theme
     /// folder's watch (re)started, the folder itself is reported: anything beneath it may have
     /// changed.
@@ -296,6 +299,10 @@ impl FileWatcher {
                         WatchEvent::FileRemoved(f.clone())
                     };
                     sent |= tx.send(e).is_ok();
+                }
+                // content edits included (DirChanged covers names only)
+                if let Some(root) = folder.as_ref().filter(|root| p.starts_with(root.join(".obsidian"))) {
+                    sent |= tx.send(WatchEvent::VaultConfigChanged(root.clone())).is_ok();
                 }
                 if folder.as_ref().is_some_and(|root| p.starts_with(root))
                     && matches!(
@@ -704,6 +711,29 @@ mod tests {
         // still missing, known missing: nothing to report
         assert_eq!(reconcile(&root.join("gone.md"), Baseline::Missing).0, None);
         assert_eq!(reconcile(&root.join("gone.md"), Baseline::Unknown).0, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Spec 06 E17: editing `.obsidian/app.json` in place (no rename) is reported.
+    #[test]
+    fn obsidian_settings_edited_in_place_are_reported() {
+        let root = tmp("obsidian");
+        std::fs::create_dir_all(root.join(".obsidian")).unwrap();
+        std::fs::write(root.join(".obsidian/app.json"), "{}").unwrap();
+        let mut w = FileWatcher::new(Arc::new(|| {})).unwrap();
+        w.watch_folder(&root);
+        w.sync().unwrap();
+        assert!(wait_event(&w, &WatchEvent::FolderWatched(root.clone())));
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(root.join(".obsidian/app.json"))
+                .unwrap();
+            f.write_all(br#"{"useMarkdownLinks": true}"#).unwrap();
+        }
+        assert!(wait_event(&w, &WatchEvent::VaultConfigChanged(root.clone())));
         let _ = std::fs::remove_dir_all(&root);
     }
 

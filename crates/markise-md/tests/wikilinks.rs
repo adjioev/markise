@@ -202,3 +202,23 @@ fn brackets_followed_by_a_paren_stay_a_standard_link() {
     let t = "[[1]](#ref-1)\n";
     assert_eq!(Document::parse(t, on()).serialize(), t);
 }
+
+/// With wikilinks on, three CommonMark examples read differently by design (spec 06 V2.1:
+/// `[[x]]` is a wikilink wherever Obsidian reads one, reference definitions or not); with
+/// wikilinks off they follow CommonMark (the conformance suite runs that way).
+#[test]
+fn commonmark_examples_that_diverge_by_design() {
+    // CM 548 `[[[foo]]]`: an opening bracket, the link `[[foo]]`, a closing bracket
+    assert_eq!(dump("[[[foo]]]", &on()), ["text:[", "wiki(foo|-|-)", "text:]"]);
+    // CM 559 `[[*foo* bar]]` with `[*foo* bar]` defined: a wikilink, not a bracketed link
+    assert_eq!(wikis("[[*foo* bar]]"), ["wiki(*foo* bar|-|-)"]);
+    // CM 590 `![[foo]]`: an embed (plain text for now) — CommonMark text as well
+    assert_eq!(dump("![[foo]]", &on()), ["text:![[foo]]"]);
+    for s in ["[[[foo]]]", "[[*foo* bar]]", "![[foo]]"] {
+        assert!(wikis_with(s, &off()).is_empty(), "{s}");
+    }
+}
+
+fn wikis_with(s: &str, o: &ParseOptions) -> Vec<String> {
+    dump(s, o).into_iter().filter(|x| x.starts_with("wiki(")).collect()
+}

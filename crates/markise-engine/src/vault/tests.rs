@@ -351,6 +351,13 @@ fn note_creation_stays_inside_the_vault() {
     assert!(create_note(&root, "out/deeper/New.md").is_err());
     assert!(create_note(&root, "cfg/New.md").is_err());
     assert!(create_note(&root, ".obsidian/New.md").is_err());
+    // a symbolic link where the note would go (created by a racing process): refused, the
+    // target outside untouched
+    std::fs::write(outside.join("target.md"), "outside").unwrap();
+    std::os::unix::fs::symlink(outside.join("target.md"), root.join("Link.md")).unwrap();
+    assert!(create_note(&root, "Link.md").is_err());
+    assert_eq!(std::fs::read_to_string(outside.join("target.md")).unwrap(), "outside");
+    std::fs::remove_file(outside.join("target.md")).unwrap();
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
     assert_eq!(std::fs::read_dir(root.join(".obsidian")).unwrap().count(), 0);
     // normal creation, folders included; an existing file is returned unchanged
@@ -363,5 +370,89 @@ fn note_creation_stays_inside_the_vault() {
     assert_eq!(
         rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap(),
         root.join("Top.md")
+    );
+}
+
+/// Review round 2: a new note under an existing NFD folder goes into that folder (no NFC
+/// twin is created).
+#[test]
+fn creation_keeps_the_disk_spelling_of_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let nfd = "Re\u{301}sume\u{301}";
+    std::fs::create_dir_all(root.join(nfd)).unwrap();
+    let p = create_note(&root, "Résumé/New.md").unwrap();
+    assert_eq!(p, root.join(nfd).join("New.md"));
+    let names: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, [nfd.to_string()], "no second folder");
+}
+
+/// Review round 2: every generated link parses back and resolves to the chosen file — with
+/// syntax characters in folder and file names and descendant paths that a shorter form
+/// would send elsewhere.
+#[test]
+fn generated_links_round_trip() {
+    use markise_md::inline::{InlineContext, InlineKind, parse_inlines};
+    let rels = [
+        "A/Here.md",
+        "A/Sub/Note.md",
+        "Sub/Note.md",
+        "Topic].md",
+        "We#ird/Plan.md",
+        "Pipe|Dir/X.md",
+        "Brackets [x]/Y.md",
+        "a b/c d.md",
+        "Star*_name.md",
+        "50% done.md",
+        "Café/Résumé.md",
+    ];
+    for fmt in [LinkFormat::Shortest, LinkFormat::Relative, LinkFormat::Absolute] {
+        for obsidian in [true, false] {
+            let settings = VaultSettings {
+                link_format: fmt,
+                ..if obsidian {
+                    VaultSettings::obsidian(None)
+                } else {
+                    VaultSettings::plain()
+                }
+            };
+            let ix = VaultIndex::from_rels(PathBuf::from("/v"), rels.iter().map(|r| r.to_string()), 1)
+                .with_settings(settings);
+            for from in ["A/Here.md", "Sub/Note.md", "Topic].md"] {
+                for f in ix.files() {
+                    let link = ix.link_for(f, Some(from), obsidian);
+                    let opts = markise_md::ParseOptions::default();
+                    let nodes = parse_inlines(&link, &opts, &InlineContext::default());
+                    assert_eq!(nodes.len(), 1, "{fmt:?} {from} → {}: one node in {link:?}", f.rel);
+                    let got = match &nodes[0].kind {
+                        InlineKind::WikiLink { target, subpath, .. } => {
+                            assert!(subpath.is_none(), "{link}");
+                            ix.resolve_wikilink(target, Some(from)).map(|g| g.rel.clone())
+                        }
+                        InlineKind::Link { dest, .. } => ix.resolve_markdown(dest, Some(from)).map(|r| r.rel),
+                        k => panic!("{link}: {k:?}"),
+                    };
+                    assert_eq!(got.as_deref(), Some(f.rel.as_str()), "{fmt:?} {from}: {link}");
+                }
+            }
+        }
+    }
+    // the descendant case: from A/, A/Sub/Note.md must not be written as `Sub/Note`
+    let ix = VaultIndex::from_rels(PathBuf::from("/v"), rels.iter().map(|r| r.to_string()), 1).with_settings(
+        VaultSettings {
+            link_format: LinkFormat::Relative,
+            ..VaultSettings::obsidian(None)
+        },
+    );
+    let f = ix.file("A/Sub/Note.md").unwrap();
+    assert_eq!(ix.link_for(f, Some("A/Here.md"), true), "[[./Sub/Note]]");
+    let topic = ix.file("Topic].md").unwrap();
+    assert_eq!(
+        ix.link_for(topic, Some("A/Here.md"), true),
+        "[Topic\\]](../Topic%5D.md)"
     );
 }

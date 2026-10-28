@@ -766,6 +766,10 @@ impl<'a> P<'a> {
         if open > end {
             return None;
         }
+        // `[[[x]]]`: the link starts at the innermost `[[` (a target never starts with `[`)
+        if self.b.get(open) == Some(&b'[') {
+            return None;
+        }
         let close = self.find_wiki_close(open, end)?;
         // `[[1]](url)`: brackets directly followed by `(` stay a standard link whose text is
         // `[1]` (citation style); the wikilink reading does not apply

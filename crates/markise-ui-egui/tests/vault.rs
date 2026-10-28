@@ -527,3 +527,27 @@ fn exports_follow_the_wikilinks_switch() {
     assert!(off.contains("[[Other]]"), "{off}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Spec 06 E17 (review round 2): `.obsidian/app.json` edited in place by another app switches
+/// the inserted link syntax without a restart — through the real file watcher.
+#[test]
+fn obsidian_settings_edited_in_place_take_effect() {
+    let d = vault("appjson");
+    make_obsidian(&d);
+    let mut h = harness(&d, None);
+    ready(&mut h, &d.join("Home.md"));
+    assert!(h.state().vault_index().unwrap().settings().wikilinks);
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(d.join(".obsidian/app.json"))
+            .unwrap();
+        f.write_all(br#"{"useMarkdownLinks": true}"#).unwrap();
+    }
+    wait_until(&mut h, "settings re-read", |a| {
+        a.vault_index().is_some_and(|ix| !ix.settings().wikilinks)
+    });
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -403,7 +403,7 @@ impl MarkiseApp {
         {
             let abs = ix.abs(&r.rel);
             if markise_engine::tree::is_markdown(&abs) {
-                self.open_note(abs, segs);
+                self.open_note(abs, segs, true);
                 return true;
             }
             return false;
@@ -416,25 +416,31 @@ impl MarkiseApp {
         let base = self.doc.as_ref().and_then(|d| d.path.parent().map(Path::to_path_buf));
         let p = base.map_or_else(|| PathBuf::from(&path), |b| b.join(&path));
         if markise_engine::tree::is_markdown(&p) {
-            self.open_note(p, segs);
+            self.open_note(p, segs, false);
             return true;
         }
         false
     }
 
-    /// Opens a note (or scrolls the open one) and scrolls to `segs` when given.
-    fn open_note(&mut self, abs: PathBuf, segs: Vec<String>) {
+    /// Opens a note (or scrolls the open one) and scrolls to `segs` when given. `known`: the
+    /// path comes from the vault index (canonical, a file): opened without file-system
+    /// checks on the UI thread.
+    fn open_note(&mut self, abs: PathBuf, segs: Vec<String>, known: bool) {
         if self
             .doc
             .as_ref()
             .and_then(|d| d.file())
-            .is_some_and(|f| super::same_file(f, &abs))
+            .is_some_and(|f| f == abs.as_path())
         {
             self.scroll_to_heading(&segs);
             return;
         }
         self.vault.pending_subpath = (!segs.is_empty()).then(|| (abs.clone(), segs));
-        self.open(abs);
+        if known {
+            self.open_known_file(abs);
+        } else {
+            self.open(abs);
+        }
     }
 
     fn scroll_to_heading(&mut self, segs: &[String]) {
@@ -459,7 +465,7 @@ impl MarkiseApp {
             if let Some(f) = ix.resolve_wikilink(&w.target, from.as_deref()) {
                 let abs = ix.abs(&f.rel);
                 if markise_engine::tree::is_markdown(&abs) {
-                    self.open_note(abs, segs);
+                    self.open_note(abs, segs, true);
                 } else {
                     // an attachment: the OS opens it, after asking (like other non-web links)
                     self.set_ask(Ask::Link(file_url(&abs)));
@@ -546,13 +552,11 @@ impl MarkiseApp {
         self.vault.creating = None;
         match r {
             Ok(path) => {
+                // the scanner lists the folder again; the tree follows the watcher's event
                 if let Some(parent) = path.parent() {
                     self.vault_changed(parent);
-                    if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
-                        t.invalidate(parent, w);
-                    }
                 }
-                self.open(path);
+                self.open_known_file(path);
             }
             Err(e) => self.banner = Some(Banner::Error(format!("Cannot create the note: {e}"))),
         }
@@ -571,7 +575,7 @@ impl MarkiseApp {
         let Some(p) = d.file() else { return };
         let h = &mut self.vault.history;
         if let Some(e) = h.entries.get_mut(h.index)
-            && super::same_file(&e.path, p)
+            && e.path == p
         {
             e.anchor = Some(d.viewer.ed.view.anchor());
             e.selection = Some(d.viewer.ed.session.selection().clone());
@@ -594,12 +598,12 @@ impl MarkiseApp {
         let h = &mut self.vault.history;
         let mut restore = None;
         match self.vault.pending_nav.take() {
-            Some(i) if h.entries.get(i).is_some_and(|e| super::same_file(&e.path, &path)) => {
+            Some(i) if h.entries.get(i).is_some_and(|e| e.path == path) => {
                 h.index = i;
                 restore = Some(h.entries[i].clone());
             }
             _ => {
-                let same = h.entries.get(h.index).is_some_and(|e| super::same_file(&e.path, &path));
+                let same = h.entries.get(h.index).is_some_and(|e| e.path == path);
                 if !same {
                     if !h.entries.is_empty() {
                         h.entries.truncate(h.index + 1);
@@ -630,7 +634,7 @@ impl MarkiseApp {
             }
         }
         if let Some((p, segs)) = self.vault.pending_subpath.take()
-            && super::same_file(&p, &path)
+            && p == path
         {
             self.scroll_to_heading(&segs);
         }
@@ -647,7 +651,7 @@ impl MarkiseApp {
         }
         let at_current = self
             .document_path()
-            .is_some_and(|p| h.entries.get(h.index).is_some_and(|e| super::same_file(&e.path, p)));
+            .is_some_and(|p| h.entries.get(h.index).is_some_and(|e| e.path == p));
         if at_current {
             h.index.checked_sub(1)
         } else {
@@ -659,7 +663,7 @@ impl MarkiseApp {
         let h = &self.vault.history;
         let at_current = self
             .document_path()
-            .is_some_and(|p| h.entries.get(h.index).is_some_and(|e| super::same_file(&e.path, p)));
+            .is_some_and(|p| h.entries.get(h.index).is_some_and(|e| e.path == p));
         (at_current && h.index + 1 < h.entries.len()).then_some(h.index + 1)
     }
 
@@ -705,7 +709,7 @@ impl MarkiseApp {
         self.nav_leave();
         self.vault.pending_nav = Some(i);
         self.vault.pending_subpath = None;
-        self.open(path);
+        self.open_known_file(path);
     }
 
     // ------------------------------------------------------------------ autocomplete

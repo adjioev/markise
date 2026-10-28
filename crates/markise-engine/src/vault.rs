@@ -252,11 +252,17 @@ fn hex(c: u8) -> Option<u8> {
 }
 
 /// Percent-encodes a path for a Markdown link destination (V2.6.3): space, `%`, `#`, `(`,
-/// `)`, `<`, `>`, `^`, `|`, `[`, `]` and control characters; other Unicode stays literal.
+/// `)`, `<`, `>`, `^`, `|`, `[`, `]`, backslash and control characters; other Unicode stays
+/// literal.
 pub fn percent_encode_path(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if c.is_control() || matches!(c, ' ' | '%' | '#' | '(' | ')' | '<' | '>' | '^' | '|' | '[' | ']') {
+        if c.is_control()
+            || matches!(
+                c,
+                ' ' | '%' | '#' | '(' | ')' | '<' | '>' | '^' | '|' | '[' | ']' | '\\'
+            )
+        {
             let mut buf = [0u8; 4];
             for b in c.encode_utf8(&mut buf).bytes() {
                 out.push_str(&format!("%{b:02X}"));
@@ -264,6 +270,27 @@ pub fn percent_encode_path(s: &str) -> String {
         } else {
             out.push(c);
         }
+    }
+    out
+}
+
+/// A target that can be written inside `[[…]]` (V2.1.2 rule 5, for the whole path): none of
+/// `# | ^ : [ ]` or `%%`, no surrounding whitespace (it would be trimmed).
+fn wiki_target_ok(t: &str) -> bool {
+    !t.is_empty() && !t.contains(['#', '|', '^', ':', '[', ']', '\n']) && !t.contains("%%") && t.trim() == t
+}
+
+/// A link label with the Markdown syntax characters backslash-escaped.
+fn escape_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(
+            c,
+            '\\' | '[' | ']' | '*' | '_' | '`' | '<' | '>' | '!' | '&' | '$' | '~' | '=' | '^'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
     }
     out
 }
@@ -342,27 +369,46 @@ impl VaultIndex {
     /// `wikilink` and the name allows one (V2.1.2 rule 5), else a Markdown link with an
     /// encoded path including the extension; the path form follows the vault's settings.
     pub fn link_for(&self, f: &VaultFile, from: Option<&str>, wikilink: bool) -> String {
-        let name = f.name();
-        let wikilink = wikilink && !name.contains(['#', '|', '^', ':', '[', ']']) && !name.contains("%%");
         let from_dir = from.map(folder_of).unwrap_or("");
-        let path = match self.settings.link_format {
+        let relative = relative_rel(from_dir, &f.rel);
+        let primary = match self.settings.link_format {
             LinkFormat::Shortest => {
                 let unique = self.by_name.get(&f.fold_name).is_none_or(|v| v.len() <= 1);
-                if unique { name.to_string() } else { f.rel.clone() }
+                if unique { f.name().to_string() } else { f.rel.clone() }
             }
-            LinkFormat::Relative => relative_rel(from_dir, &f.rel),
+            LinkFormat::Relative => relative.clone(),
             LinkFormat::Absolute => f.rel.clone(),
         };
-        if wikilink {
-            let t = if f.is_note() {
-                markise_md::wikilink::strip_md(&path)
-            } else {
-                path.as_str()
-            };
-            format!("[[{t}]]")
-        } else {
-            format!("[{}]({})", f.stem(), percent_encode_path(&path))
+        // the preferred form first, then longer ones: whichever resolves back to `f` wins
+        // (a shorter form may name another file, e.g. `Sub/Note` from `A/` when a root
+        // `Sub/Note.md` exists)
+        let mut paths = vec![primary];
+        if !relative.starts_with("../") {
+            paths.push(format!("./{relative}"));
         }
+        paths.push(f.rel.clone());
+        paths.push(format!("/{}", f.rel));
+        paths.dedup();
+        if wikilink {
+            for p in &paths {
+                let t = if f.is_note() {
+                    markise_md::wikilink::strip_md(p)
+                } else {
+                    p.as_str()
+                };
+                if wiki_target_ok(t) && self.resolve_wikilink(t, from).is_some_and(|g| g.rel == f.rel) {
+                    return format!("[[{t}]]");
+                }
+            }
+        }
+        let label = escape_label(f.stem());
+        for p in &paths {
+            let enc = percent_encode_path(p);
+            if self.resolve_markdown(&enc, from).is_some_and(|r| r.rel == f.rel) {
+                return format!("[{label}]({enc})");
+            }
+        }
+        format!("[{label}]({})", percent_encode_path(&format!("/{}", f.rel)))
     }
 
     pub fn root(&self) -> &Path {
@@ -725,51 +771,67 @@ pub fn check_new_note(rel: &str) -> Result<(), String> {
 pub fn create_note(root: &Path, rel: &str) -> Result<PathBuf, String> {
     check_new_note(rel)?;
     let canon_root = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    // an existing component: a real folder / file (never a symbolic link) inside the vault;
+    // checked after every step, also when another process created it meanwhile (a race)
+    let check = |p: &Path, seg: &str, dir: bool| -> Result<PathBuf, String> {
+        let m = std::fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        if m.file_type().is_symlink() {
+            return Err(format!(
+                "“{seg}” is a symbolic link; notes are not created through links."
+            ));
+        }
+        if dir && !m.is_dir() {
+            return Err(format!("“{seg}” is not a folder."));
+        }
+        if !dir && !m.is_file() {
+            return Err(format!("“{seg}” exists and is not a file."));
+        }
+        let c = std::fs::canonicalize(p).map_err(|e| e.to_string())?;
+        if !c.starts_with(&canon_root) {
+            return Err("The path leaves the folder.".into());
+        }
+        Ok(c)
+    };
     let segs: Vec<&str> = rel.split('/').collect();
+    let (last, folders) = segs.split_last().ok_or("The name is empty.")?;
     let mut cur = canon_root.clone();
-    for (i, seg) in segs.iter().enumerate() {
+    for seg in folders {
+        let seg = &disk_name(&cur, seg);
         let next = cur.join(seg);
-        let last = i + 1 == segs.len();
-        match std::fs::symlink_metadata(&next) {
-            Ok(m) if m.file_type().is_symlink() => {
-                return Err(format!(
-                    "“{seg}” is a symbolic link; notes are not created through links."
-                ));
-            }
-            Ok(m) if last => {
-                return if m.is_file() {
-                    Ok(next)
-                } else {
-                    Err(format!("“{seg}” exists and is not a file."))
-                };
-            }
-            Ok(m) if m.is_dir() => {
-                let c = std::fs::canonicalize(&next).map_err(|e| e.to_string())?;
-                if !c.starts_with(&canon_root) {
-                    return Err("The path leaves the folder.".into());
-                }
-                cur = c;
-            }
-            Ok(_) => return Err(format!("“{seg}” is not a folder.")),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                if last {
-                    return match std::fs::OpenOptions::new().write(true).create_new(true).open(&next) {
-                        Ok(_) => Ok(next),
-                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(next),
-                        Err(e) => Err(format!("{}: {e}", next.display())),
-                    };
-                }
-                match std::fs::create_dir(&next) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(e) => return Err(format!("{}: {e}", next.display())),
-                }
-                cur = next;
-            }
+        match std::fs::create_dir(&next) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(format!("{}: {e}", next.display())),
         }
+        cur = check(&next, seg, true)?;
     }
-    Err("The name is empty.".into())
+    let last = &disk_name(&cur, last);
+    let file = cur.join(last);
+    // `create_new` (O_CREAT | O_EXCL) never follows a symbolic link at the final component
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&file) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("{}: {e}", file.display())),
+    }
+    check(&file, last, false)?;
+    Ok(file)
+}
+
+/// The spelling of `seg` in `dir` on disk: an existing entry whose name has the same NFC form
+/// (an NFD folder stays NFD), else `seg` itself.
+fn disk_name(dir: &Path, seg: &str) -> String {
+    if std::fs::symlink_metadata(dir.join(seg)).is_ok() {
+        return seg.to_string();
+    }
+    let want = nfc(seg);
+    std::fs::read_dir(dir)
+        .ok()
+        .and_then(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .find(|n| nfc(n) == want)
+        })
+        .unwrap_or_else(|| seg.to_string())
 }
 
 /// [`create_note`] on a short-lived worker thread; the result arrives on the receiver (the

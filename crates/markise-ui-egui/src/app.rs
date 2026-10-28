@@ -864,6 +864,20 @@ impl MarkiseApp {
         self.open_now(path, LoadReason::Open);
     }
 
+    /// Opens a file whose path is already canonical and known to name a file (a vault index
+    /// entry, a note just created): no file-system calls on the UI thread; the loader reports
+    /// a file that vanished meanwhile.
+    pub(crate) fn open_known_file(&mut self, path: PathBuf) {
+        if self.doc.as_ref().is_some_and(|d| d.file() == Some(path.as_path())) {
+            return;
+        }
+        if self.is_dirty() {
+            self.set_ask(Ask::Unsaved(Then::Open(path)));
+            return;
+        }
+        self.open_now(path, LoadReason::Open);
+    }
+
     fn open_now(&mut self, path: PathBuf, reason: LoadReason) {
         if self.tree.is_none()
             && let Some(parent) = path.parent()
@@ -1258,6 +1272,8 @@ impl MarkiseApp {
                     }
                 }
                 // live reload: re-import the affected theme, re-render (new fingerprint)
+                // `.obsidian/app.json` edited (also in place): re-read the vault settings
+                WatchEvent::VaultConfigChanged(root) => self.vault_changed(&root.join(".obsidian")),
                 WatchEvent::ThemeChanged(p) => self.themes.file_changed(&p),
                 // the folder watch (re)started: what changed before it has no events
                 WatchEvent::FolderWatched(_) => {
