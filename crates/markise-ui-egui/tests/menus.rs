@@ -146,10 +146,19 @@ fn menu_actions_run_registry_commands_and_update_state() {
     let bar = h.state().menu_model();
     assert_eq!(bar.item("view.sideBySide").unwrap().check, Check::Radio(true));
     assert_eq!(bar.item("view.rendered").unwrap().check, Check::Radio(false));
-    assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("block.heading2")));
+    // the source pane has the focus on entering: format and block commands are not available
+    // there yet (M2d slice 2), Undo is
+    assert!(!h.state().menu_model().item("block.heading2").unwrap().enabled);
+    assert!(!h.state_mut().menu_action(&ctx, &MenuAction::Command("block.heading2")));
+    assert!(h.state().menu_model().item("edit.redo").unwrap().enabled);
+    assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("edit.redo")));
     h.step();
-    assert_eq!(h.state().document_text().unwrap(), "## Hello menus\n");
-    assert_eq!(h.state().source_buffer(), Some("## Hello menus\n"));
+    assert_eq!(h.state().document_text().unwrap(), "# Hello menus\n");
+    assert_eq!(
+        h.state().source_buffer(),
+        Some("# Hello menus\n"),
+        "both panes show the session"
+    );
     h.state_mut().menu_action(&ctx, &MenuAction::Command("view.rendered"));
     h.step();
     assert_eq!(h.state().view_mode(), ViewMode::Rendered);
@@ -162,7 +171,7 @@ fn menu_actions_run_registry_commands_and_update_state() {
     let bar = h.state().menu_model();
     assert_eq!(bar.item("view.highlightCode").unwrap().check, Check::Toggle(!before));
 
-    // source mode: registry editing commands are disabled (the text field edits)
+    // source mode: format and block commands are disabled in the source editor (M2d slice 2)
     h.state_mut().menu_action(&ctx, &MenuAction::Command("view.sourceMode"));
     h.step();
     assert_eq!(h.state().view_mode(), ViewMode::Source);

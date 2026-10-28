@@ -85,6 +85,9 @@ pub struct DocViewer {
     pending_copy: Option<String>,
     /// Widget id and screen rectangle of the surface at the last frame.
     last_surface: Option<(egui::Id, Rect)>,
+    /// Take the keyboard focus on the next frame (the surface came back after a view mode
+    /// whose widgets held it, e.g. the source editor).
+    refocus: bool,
 }
 
 impl DocViewer {
@@ -118,6 +121,7 @@ impl DocViewer {
             last_top: 0.0,
             pending_copy: None,
             last_surface: None,
+            refocus: false,
         }
     }
 
@@ -129,6 +133,12 @@ impl DocViewer {
     /// The surface's widget id at the last frame (it holds the keyboard focus while editing).
     pub fn surface_id(&self) -> Option<egui::Id> {
         self.last_surface.map(|(id, _)| id)
+    }
+
+    /// Asks the surface to take the keyboard focus on its next frame (after leaving Source or
+    /// Side by Side, whose editor had it), so typing continues without a click.
+    pub fn request_refocus(&mut self) {
+        self.refocus = true;
     }
 
     /// The surface's screen rectangle at the last frame (document painting is clipped to it).
@@ -196,6 +206,7 @@ impl DocViewer {
         join: bool,
     ) -> Result<(), markise_engine::editor::EditError> {
         self.ed.release();
+        // the source pane's selection follows the replacement's diff (its live marks)
         let r = self
             .ed
             .session
@@ -207,7 +218,18 @@ impl DocViewer {
         if caret.primary().end().offset > len {
             self.ed.session.set_selection(Selection::caret(len));
         }
+        // the source pane shows the new text; its selection is mapped through the diff and
+        // snapped to caret positions
+        if let Some(p) = self.ed.source.as_mut() {
+            p.view.rebuild(self.ed.session.text());
+        }
+        self.ed.source_load_selection();
         r
+    }
+
+    /// Font generation the view was last told about.
+    pub fn font_generation(&self) -> u64 {
+        self.font_gen
     }
 
     pub fn set_font_generation(&mut self, g: u64) {
@@ -275,7 +297,7 @@ impl DocViewer {
         self.ed.view.set_params(col_w, theme, ppp);
         let vh = rect.height();
 
-        if resp.clicked() || resp.drag_started() {
+        if resp.clicked() || resp.drag_started() || std::mem::take(&mut self.refocus) {
             resp.request_focus();
         }
         let focused = resp.has_focus();
@@ -463,7 +485,9 @@ impl DocViewer {
         };
         // the available caret stops may have changed under the selection (a diagram or
         // formula became rendered, front matter collapsed): move it to the nearest stop
-        if with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.fix_selection(sh, &*images)) {
+        // (not on a read-only surface without the focus: in Side by Side the session's selection
+        // may be the source pane's, which need not sit on a rendered caret stop)
+        if (focused || editable) && with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.fix_selection(sh, &*images)) {
             self.ed.refresh_focus();
             ctx.request_repaint();
         }
@@ -775,7 +799,11 @@ impl DocViewer {
 }
 
 /// Runs `f` with the text shaper of the active backend.
-fn with_shaper<R>(ctx: &egui::Context, parley: Option<&mut ParleyText>, f: impl FnOnce(&mut dyn TextShaper) -> R) -> R {
+pub(crate) fn with_shaper<R>(
+    ctx: &egui::Context,
+    parley: Option<&mut ParleyText>,
+    f: impl FnOnce(&mut dyn TextShaper) -> R,
+) -> R {
     match parley {
         Some(p) => f(&mut p.shaper),
         None => ctx.fonts_mut(|fonts| f(fonts)),
@@ -920,6 +948,24 @@ fn paint_dashed(painter: &egui::Painter, pts: &[Pos2], stroke: Stroke, d: f32, g
     }
 }
 
+/// Paints one shaped text block (epaint galley or parley block) with its anchor at `pos`.
+pub(crate) fn paint_text_block(
+    painter: &egui::Painter,
+    ui: &Ui,
+    text: &Arc<dyn markise_layout::TextBlock>,
+    pos: Pos2,
+    parley: Option<&mut ParleyText>,
+) {
+    if let Some(galley) = text.galley() {
+        // Re-request the galley: egui's galley cache returns the same Arc while the font atlas
+        // is unchanged, and a freshly rasterised one after an atlas rebuild.
+        let g = painter.layout_job((*galley.job).clone());
+        painter.galley(pos, g, Color32::PLACEHOLDER);
+    } else if let (Some(block), Some(p)) = (text.as_any().downcast_ref::<ParleyBlock>(), parley) {
+        p.atlas.paint(ui.ctx(), painter, block, pos);
+    }
+}
+
 fn paint_layout(
     painter: &egui::Painter,
     ui: &Ui,
@@ -939,16 +985,7 @@ fn paint_layout(
                 if !r.intersects(clip_rect) {
                     continue;
                 }
-                if let Some(galley) = text.galley() {
-                    // Re-request the galley: egui's galley cache returns the same Arc while the
-                    // font atlas is unchanged, and a freshly rasterised one after an atlas rebuild.
-                    let g = painter.layout_job((*galley.job).clone());
-                    painter.galley(*pos + off, g, Color32::PLACEHOLDER);
-                } else if let (Some(block), Some(p)) =
-                    (text.as_any().downcast_ref::<ParleyBlock>(), parley.as_deref_mut())
-                {
-                    p.atlas.paint(ui.ctx(), painter, block, *pos + off);
-                }
+                paint_text_block(painter, ui, text, *pos + off, parley.as_deref_mut());
             }
             Prim::Rect {
                 rect,

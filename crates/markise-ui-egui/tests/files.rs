@@ -74,7 +74,8 @@ fn set_text(h: &mut Harness<'static, MarkiseApp>, text: &str) {
         h.state_mut().toggle_source();
         h.step();
     }
-    *h.state_mut().source_buffer_mut().unwrap() = text.to_string();
+    let text = text.to_string();
+    h.state_mut().edit_source_text(move |t| *t = text);
     h.step();
 }
 

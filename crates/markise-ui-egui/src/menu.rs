@@ -314,6 +314,11 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("view.highlightCode", "Highlight Code", &[]),
     app("view.diagrams", "Diagrams", &[]),
     app("view.fullScreen", "Toggle Full Screen", &[both("Ctrl+Cmd+F", "F11")]),
+    // source editor display preferences (spec 02 §12.1.1), View → Source Editor
+    app("view.sourceLineNumbers", "Line Numbers", &[]),
+    app("view.sourceSoftWrap", "Soft Wrap", &[]),
+    app("view.sourceCurrentLine", "Highlight Current Line", &[]),
+    app("view.sourceWhitespace", "Show Whitespace", &[]),
     app("export.previous", "Export with Previous", &[]),
     app("export.overwritePrevious", "Export and Overwrite with Previous", &[]),
     app("theme.fontAndSize", "Font & Size…", &[]),

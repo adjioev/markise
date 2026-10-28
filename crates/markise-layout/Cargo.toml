@@ -16,6 +16,7 @@ markise-text.workspace = true
 epaint.workspace = true
 ahash.workspace = true
 unicode-segmentation.workspace = true
+memchr.workspace = true
 
 [dev-dependencies]
 # benches only: the real math renderer behind the `Images::math` seam

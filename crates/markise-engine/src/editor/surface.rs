@@ -77,6 +77,9 @@ pub struct EditorView {
     /// `false` freezes the current reveal state (while a pointer drag selects, ADR 0006 §2.4);
     /// [`EditorView::refresh_focus`] recomputes it once this is `true` again.
     pub reveal: bool,
+    /// The source editor (Source and Side by Side modes; M2d), kept in step by
+    /// [`EditorView::sync`].
+    pub source: Option<super::SourcePane>,
 }
 
 impl EditorView {
@@ -92,6 +95,7 @@ impl EditorView {
             path,
             placeholder,
             reveal: true,
+            source: None,
         };
         e.sync();
         e
@@ -129,10 +133,20 @@ impl EditorView {
             DocChange::Edited(e) => {
                 let ch = self.view.model_mut().apply(self.session.doc(), &e);
                 self.view.apply_change(self.session.doc_arc().clone(), &ch);
+                if let Some(p) = self.source.as_mut() {
+                    p.view.apply(self.session.doc().text(), &e);
+                }
+                // a change made elsewhere (the rendered pane, Undo/Redo) moves the source
+                // selection through its patches (live marks); source edits set it afterwards
+                self.source_load_selection();
             }
             DocChange::Replaced => {
                 let model = DocModel::build(self.session.doc(), self.path.as_deref());
                 self.view.set_model(self.session.doc_arc().clone(), model);
+                if let Some(p) = self.source.as_mut() {
+                    p.view.rebuild(self.session.doc().text());
+                }
+                self.source_load_selection();
             }
         }
     }
