@@ -49,3 +49,7 @@ harness = false
 [[bench]]
 name = "source"
 harness = false
+
+[[bench]]
+name = "vault"
+harness = false
