@@ -256,6 +256,10 @@ struct P<'a> {
     /// For the `]]` at `.0`: the start of the last `[[` between its first opener's content
     /// start and it (`.1`), so a content-contains-`[[` check is O(1) per later opener.
     wiki_last_open: Option<(usize, Option<usize>)>,
+    /// `(from, line end)` of the last line-end search.
+    wiki_line: Option<(usize, usize)>,
+    /// Bytes the wikilink searches scanned (linearity test).
+    wiki_scanned: usize,
 }
 
 /// Parses inline content `s` (lines joined with `\n`). Spans are offsets into `s`.
@@ -287,12 +291,22 @@ fn parse_at(s: &str, base: usize, opts: &ParseOptions, ctx: &InlineContext, esca
         angle_fail: None,
         wiki_close: None,
         wiki_last_open: None,
+        wiki_line: None,
+        wiki_scanned: 0,
     };
     p.run();
+    #[cfg(test)]
+    WIKI_SCANNED.with(|c| c.set(c.get() + p.wiki_scanned));
     p.process_emphasis(None);
     let mut out = Vec::new();
     p.collect(p.head, &mut out, 0);
     out
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Bytes scanned by wikilink searches in this thread (linearity tests).
+    static WIKI_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[inline]
@@ -726,21 +740,38 @@ impl<'a> P<'a> {
                 return Some(close);
             }
         }
-        let line_end = memchr::memchr(b'\n', &self.b[from..end]).map_or(end, |i| from + i);
+        // the line end is cached on its own: openers after the last closer on a long line
+        // must not rescan to the line end (review P1-3)
+        let line_end = match self.wiki_line {
+            Some((a, e)) if a <= from && from <= e => e,
+            _ => {
+                let e = memchr::memchr(b'\n', &self.b[from..end]).map_or(end, |i| from + i);
+                self.wiki_scanned += e - from;
+                self.wiki_line = Some((from, e));
+                e
+            }
+        };
         let found = memchr::memmem::find(&self.b[from..line_end], b"]]").map(|i| from + i);
+        self.wiki_scanned += found.map_or(line_end, |c| c + 2) - from;
         self.wiki_close = Some((from, line_end, found.unwrap_or(usize::MAX)));
         found
     }
 
     /// `[[…]]` at `pos` (`embed`: `![[…]]`, shown as plain text for now). Spec 06 V2.1.2:
     /// the content up to the first `]]` on the line must be non-empty and free of `[[`; a code
-    /// span opened inside it and closed after it takes precedence (V2.1.3).
+    /// span opened inside it and closed after it takes precedence (V2.1.3). Followed directly
+    /// by `(`, the brackets are left to the standard link rules (owner decision 2026-10-28).
     fn wikilink(&mut self, pos: usize, end: usize, embed: bool) -> Option<usize> {
         let open = pos + if embed { 3 } else { 2 };
         if open > end {
             return None;
         }
         let close = self.find_wiki_close(open, end)?;
+        // `[[1]](url)`: brackets directly followed by `(` stay a standard link whose text is
+        // `[1]` (citation style); the wikilink reading does not apply
+        if self.b.get(close + 2) == Some(&b'(') {
+            return None;
+        }
         // V2.1.2 rule 1: no `[[` inside (checked against the last `[[` before this `]]`)
         let last = match self.wiki_last_open {
             Some((c, l)) if c == close => l,
@@ -748,6 +779,7 @@ impl<'a> P<'a> {
                 // openers are tried left to right and get non-decreasing closers: scanning from
                 // the first opener of this closer covers every later one (linear overall)
                 let l = memchr::memmem::rfind(&self.b[open..close], b"[[").map(|i| open + i);
+                self.wiki_scanned += close - open;
                 self.wiki_last_open = Some((close, l));
                 l
             }
@@ -1898,6 +1930,39 @@ pub fn decode_entity(e: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Review P1-3: wikilink searches scan O(n) bytes on adversarial lines — counted, not
+    /// timed, so the check is exact under any machine load (issue #42).
+    #[test]
+    fn wikilink_scanning_is_linear() {
+        let opts = crate::options::ParseOptions::default();
+        let ctx = super::InlineContext::default();
+        let cost = |s: &str| {
+            super::WIKI_SCANNED.with(|c| c.set(0));
+            let _ = super::parse_inlines(s, &opts, &ctx);
+            super::WIKI_SCANNED.with(|c| c.get())
+        };
+        type Gen = fn(usize) -> String;
+        let cases: [(&str, Gen); 6] = [
+            ("many links", |n| "[[a]] ".repeat(n)),
+            ("openers then closers", |n| {
+                format!("{}{}", "[".repeat(n), "]".repeat(n))
+            }),
+            ("openers without closers", |n| "[[".repeat(n)),
+            ("links then trailing openers", |n| {
+                format!("{}{}", "[[a]] ".repeat(n), "[[x ".repeat(n))
+            }),
+            ("nested content", |n| format!("{}]]", "[[a".repeat(n))),
+            ("citations", |n| "[[1]](u) ".repeat(n)),
+        ];
+        for (name, f) in cases {
+            let (small, big) = (cost(&f(500)), cost(&f(8000)));
+            assert!(
+                big <= 20 * small.max(1) + 64,
+                "{name}: 16× input scanned {big} bytes vs {small}"
+            );
+        }
+    }
+
     use super::*;
 
     fn kinds(s: &str, o: &ParseOptions) -> String {

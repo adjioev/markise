@@ -171,3 +171,34 @@ fn l26_table_cell_keeps_its_columns() {
     let tree = debug_tree(&d);
     assert!(tree.starts_with("table2"), "{tree}");
 }
+
+/// Owner decision (2026-10-28): `[[…]]` directly followed by `(` is not a wikilink; it stays
+/// a standard link whose text is `[1]` (Typora / Pandoc citation style).
+#[test]
+fn brackets_followed_by_a_paren_stay_a_standard_link() {
+    for o in [on(), off()] {
+        let s = "see [[1]](#ref-1) and [[2]](https://x.org)";
+        let nodes = parse_inlines(s, &o, &InlineContext::default());
+        let links: Vec<(String, String)> = nodes
+            .iter()
+            .filter_map(|n| match &n.kind {
+                InlineKind::Link { dest, .. } => Some((dest.clone(), plain_text(s, &n.children))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            links,
+            [
+                ("#ref-1".to_string(), "[1]".to_string()),
+                ("https://x.org".into(), "[2]".into())
+            ]
+        );
+        assert!(dump(s, &o).iter().all(|k| !k.starts_with("wiki(")));
+    }
+    // a space before the paren: still a wikilink
+    assert_eq!(wikis("[[1]] (x)"), ["wiki(1|-|-)"]);
+    // the embed form likewise falls back to the image rules
+    assert!(dump("![[a]](b.png)", &on()).iter().any(|k| k == "image"));
+    let t = "[[1]](#ref-1)\n";
+    assert_eq!(Document::parse(t, on()).serialize(), t);
+}

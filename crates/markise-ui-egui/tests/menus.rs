@@ -71,12 +71,20 @@ fn mac_menu_bar_from_registry_without_document() {
             "Help"
         ]
     );
-    // ⌘[ is Outdent: Back is ⌃⌘←, Forward ⌃⌘→; disabled with no history
+    // ⌘[ is Outdent: Back is ⌥⌘←, Forward ⌥⌘→; disabled with no history
     let back = bar.item("go.back").unwrap();
-    assert!(back.chord.as_ref().is_some_and(|c| c.meta && c.ctrl && c.key == "Left"));
+    assert!(
+        back.chord
+            .as_ref()
+            .is_some_and(|c| c.meta && c.alt && !c.ctrl && c.key == "Left")
+    );
     assert!(!back.enabled);
     let fwd = bar.item("go.forward").unwrap();
-    assert!(fwd.chord.as_ref().is_some_and(|c| c.meta && c.ctrl && c.key == "Right"));
+    assert!(
+        fwd.chord
+            .as_ref()
+            .is_some_and(|c| c.meta && c.alt && !c.ctrl && c.key == "Right")
+    );
     assert_eq!(bar.menus[0].kind, MenuKind::App);
     assert_eq!(bar.menus[0].items()[0].label, "About Markise");
     assert_eq!(bar.menu("Window").unwrap().kind, MenuKind::Window);

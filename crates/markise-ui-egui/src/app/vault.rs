@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
-use egui::{Context, Key, Modifiers};
+use egui::{Context, Key};
 use markise_doc::{FormatDoc, Selection};
 use markise_engine::vault::{VaultIndex, VaultScanner};
 use markise_layout::{DocModel, LinkTargets};
@@ -99,6 +99,12 @@ pub(crate) struct VaultState {
     /// Session revision counter seen by the last autocomplete update.
     seen_counter: Option<(u64, u64)>,
     reparse: Option<Reparse>,
+    /// A note being created from an unresolved link.
+    creating: Option<Receiver<Result<PathBuf, String>>>,
+    /// An IME composition is in progress: the popup leaves the keys to it.
+    ime_composing: bool,
+    /// Enter / Tab chose the selected row this frame (accepted after the surface's input).
+    accept_pending: bool,
     /// Wikilinks may be on at all (the startup parse options allow them).
     pub(crate) allowed: bool,
 }
@@ -146,25 +152,6 @@ const ATTACHMENT_EXTS: &[&str] = &[
 fn attachment_ext(name: &str) -> bool {
     name.rsplit_once('.')
         .is_some_and(|(_, e)| ATTACHMENT_EXTS.contains(&e.to_ascii_lowercase().as_str()))
-}
-
-/// Why a note name cannot be created (V2.8 rule 4), if it cannot.
-fn invalid_name(rel: &str) -> Option<String> {
-    for seg in rel.split('/') {
-        if seg.is_empty() || seg == "." || seg == ".." {
-            return Some("The name has an empty or relative folder part.".into());
-        }
-        if let Some(c) = seg
-            .chars()
-            .find(|c| matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control())
-        {
-            return Some(format!("Note names cannot contain “{}”.", c.escape_default()));
-        }
-        if seg.ends_with('.') || seg.ends_with(' ') {
-            return Some("Note names cannot end with a dot or a space.".into());
-        }
-    }
-    None
 }
 
 /// Heading text as wikilink subpaths match it (V2.5.1): `# | ^ : [ ] %` as spaces, runs of
@@ -269,6 +256,7 @@ impl MarkiseApp {
             self.apply_wikilinks(want);
         }
         self.poll_reparse();
+        self.poll_create();
         let root = self.vault_root();
         if root != self.vault.mounted {
             self.vault.mounted = root.clone();
@@ -420,10 +408,14 @@ impl MarkiseApp {
             }
             return false;
         }
-        // no index (yet): relative to the document's folder, decoded
+        // no index (yet): relative to the document's folder, decoded (the loader reports a
+        // missing file; no file-system access here)
+        if self.vault.index.is_some() {
+            return false;
+        }
         let base = self.doc.as_ref().and_then(|d| d.path.parent().map(Path::to_path_buf));
         let p = base.map_or_else(|| PathBuf::from(&path), |b| b.join(&path));
-        if markise_engine::tree::is_markdown(&p) && p.is_file() {
+        if markise_engine::tree::is_markdown(&p) {
             self.open_note(p, segs);
             return true;
         }
@@ -432,7 +424,6 @@ impl MarkiseApp {
 
     /// Opens a note (or scrolls the open one) and scrolls to `segs` when given.
     fn open_note(&mut self, abs: PathBuf, segs: Vec<String>) {
-        let abs = std::fs::canonicalize(&abs).unwrap_or(abs);
         if self
             .doc
             .as_ref()
@@ -475,28 +466,15 @@ impl MarkiseApp {
                 }
                 return;
             }
-        } else if let Some(dir) = self.doc.as_ref().and_then(|d| d.path.parent().map(Path::to_path_buf)) {
-            // the folder is still being scanned: the note next to the document, if any
-            let name = if markise_engine::vault::is_note(&w.target) {
-                w.target.clone()
-            } else {
-                format!("{}.md", w.target)
-            };
-            let p = dir.join(&name);
-            if p.is_file() {
-                self.open_note(p, segs);
-                return;
-            }
-            if self.vault_root().is_some() {
-                self.banner = Some(Banner::Info("The folder is still being indexed; try again.".into()));
-                return;
-            }
+            self.offer_create(&w.target, from.as_deref());
+        } else {
+            // the folder is still being scanned (no file-system probing on the UI thread)
+            self.banner = Some(Banner::Info("The folder is still being indexed; try again.".into()));
         }
-        self.offer_create(&w.target, from.as_deref());
     }
 
-    /// Unresolved link (V2.8): asks to create the note, in the vault root unless the target
-    /// has a folder part.
+    /// Unresolved link (V2.8): asks to create the note — at the target's path from the vault
+    /// root when it has a folder part, else in the default location for new notes (Q-V18).
     fn offer_create(&mut self, target: &str, from: Option<&str>) {
         let Some(root) = self.vault_root() else { return };
         let t = markise_engine::vault::nfc(target.trim());
@@ -514,47 +492,75 @@ impl MarkiseApp {
                     return;
                 }
             }
-        } else {
+        } else if t.contains('/') {
+            // V2.8 rule 1: a folder part is taken from the vault root
             t.trim_start_matches('/').to_string()
+        } else {
+            // rule 2: the default location for new notes (§14, Q-V18): the vault root in an
+            // Obsidian vault (or its `newFileLocation`), the current note's folder elsewhere
+            use markise_engine::vault::NewNoteLocation;
+            let loc = self
+                .vault
+                .index
+                .as_ref()
+                .map_or(NewNoteLocation::Current, |ix| ix.settings().new_notes.clone());
+            let dir = match loc {
+                NewNoteLocation::Root => String::new(),
+                NewNoteLocation::Folder(f) => f,
+                NewNoteLocation::Current => from
+                    .map(|f| f.rsplit_once('/').map_or("", |(d, _)| d).to_string())
+                    .unwrap_or_default(),
+            };
+            if dir.is_empty() {
+                t.clone()
+            } else {
+                format!("{dir}/{t}")
+            }
         };
         let rel = if markise_engine::vault::is_note(&rel) {
             rel
         } else {
             format!("{rel}.md")
         };
-        if let Some(why) = invalid_name(&rel) {
+        if let Err(why) = markise_engine::vault::check_new_note(&rel) {
             self.banner = Some(Banner::Info(format!("Cannot create “{rel}”: {why}")));
             return;
         }
-        let mut path = root.clone();
-        path.extend(rel.split('/'));
-        self.set_ask(Ask::CreateNote(path));
+        self.set_ask(Ask::CreateNote { root, rel });
     }
 
-    /// The user confirmed creating `path` (empty file, missing folders created), then opens it.
-    pub(super) fn create_note(&mut self, path: PathBuf) {
-        let made = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .map(|_| ())
-        });
-        match made {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => {
-                self.banner = Some(Banner::Error(format!("Cannot create {}: {e}", path.display())));
-                return;
+    /// The user confirmed creating the note `rel` in the vault at `root`: created on a worker
+    /// (containment checked there, `markise_engine::vault::create_note`), then opened.
+    pub(super) fn create_note(&mut self, root: PathBuf, rel: String) {
+        self.vault.creating = Some(markise_engine::vault::spawn_create_note(root, rel, self.wake_handle()));
+    }
+
+    /// A note creation finished: open the note, or report why not.
+    fn poll_create(&mut self) {
+        let Some(rx) = &self.vault.creating else { return };
+        let r = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("note creation stopped".into()),
+        };
+        self.vault.creating = None;
+        match r {
+            Ok(path) => {
+                if let Some(parent) = path.parent() {
+                    self.vault_changed(parent);
+                    if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
+                        t.invalidate(parent, w);
+                    }
+                }
+                self.open(path);
             }
+            Err(e) => self.banner = Some(Banner::Error(format!("Cannot create the note: {e}"))),
         }
-        if let Some(parent) = path.parent() {
-            self.vault_changed(parent);
-            if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
-                t.invalidate(parent, w);
-            }
-        }
-        self.open(path);
+    }
+
+    /// A note is being created (tests).
+    pub fn is_creating_note(&self) -> bool {
+        self.vault.creating.is_some()
     }
 
     // ------------------------------------------------------------------ history
@@ -681,7 +687,13 @@ impl MarkiseApp {
 
     fn go_to(&mut self, i: usize) {
         let path = self.vault.history.entries[i].path.clone();
-        if !path.is_file() {
+        // gone from the vault (known from the index; files outside it are left to the loader)
+        let gone = self
+            .vault
+            .index
+            .as_ref()
+            .is_some_and(|ix| ix.rel_of(&path).is_some_and(|r| ix.file(&r).is_none()));
+        if gone {
             self.vault.history.entries.remove(i);
             let h = &mut self.vault.history;
             if h.index >= i && h.index > 0 {
@@ -709,20 +721,47 @@ impl MarkiseApp {
         if self.is_asking() {
             return;
         }
-        let Some(c) = self.vault.complete.as_mut() else { return };
+        let Some(c) = self.vault.complete.as_ref() else {
+            self.track_ime(ctx);
+            return;
+        };
         if c.items.is_empty() {
+            self.track_ime(ctx);
             return;
         }
         let n = c.items.len();
-        let (down, up, enter, tab, esc) = ctx.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::ArrowDown),
-                i.consume_key(Modifiers::NONE, Key::ArrowUp),
-                i.consume_key(Modifiers::NONE, Key::Enter),
-                i.consume_key(Modifiers::NONE, Key::Tab),
-                i.consume_key(Modifiers::NONE, Key::Escape),
-            )
+        // keys in event order; while an IME composition is active (Preedit … Commit) the keys
+        // belong to it (e.g. Enter confirming a candidate) and are left alone
+        let mut composing = self.vault.ime_composing;
+        let (mut down, mut up, mut enter, mut tab, mut esc) = (false, false, false, false, false);
+        ctx.input_mut(|i| {
+            i.events.retain(|e| match e {
+                egui::Event::Ime(ime) => {
+                    composing = ime_step(composing, ime);
+                    true
+                }
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if !composing && modifiers.is_none() => {
+                    let flag = match key {
+                        Key::ArrowDown => &mut down,
+                        Key::ArrowUp => &mut up,
+                        Key::Enter => &mut enter,
+                        Key::Tab => &mut tab,
+                        Key::Escape => &mut esc,
+                        _ => return true,
+                    };
+                    *flag = true;
+                    false
+                }
+                _ => true,
+            });
         });
+        self.vault.ime_composing = composing;
+        let Some(c) = self.vault.complete.as_mut() else { return };
         if down {
             c.selected = (c.selected + 1) % n;
         }
@@ -736,35 +775,39 @@ impl MarkiseApp {
             return;
         }
         if enter || tab {
-            let i = c.selected;
-            self.accept_completion(i);
+            // accepted after the surface handled this frame's text (an IME commit or typing
+            // before the key must be part of the query)
+            self.vault.accept_pending = true;
             ctx.request_repaint();
         }
     }
 
+    /// Follows the IME composition state from this frame's events (no keys taken).
+    fn track_ime(&mut self, ctx: &Context) {
+        let mut composing = self.vault.ime_composing;
+        ctx.input(|i| {
+            for e in &i.events {
+                if let egui::Event::Ime(ime) = e {
+                    composing = ime_step(composing, ime);
+                }
+            }
+        });
+        self.vault.ime_composing = composing;
+    }
+
     /// Accepts row `i`: replaces `[[query` (and an auto-paired `]]` after the caret) with the
-    /// link, caret after it. A name that cannot be a wikilink (V2.1.2 rule 5) becomes a
-    /// Markdown link with an encoded path (spec 06 E6).
+    /// link in the vault's link syntax and path form (V14.3, Q-V15). A wikilink leaves the
+    /// caret before `]]` (V3.4), a Markdown link after it. A name that cannot be a wikilink
+    /// (V2.1.2 rule 5) becomes a Markdown link with an encoded path (spec 06 E6).
     pub fn accept_completion(&mut self, i: usize) {
         let Some(c) = self.vault.complete.take() else { return };
         let Some(s) = c.items.get(i) else { return };
         let Some(ix) = self.vault.index.clone() else { return };
         let Some(f) = ix.file(&s.rel) else { return };
-        let stem = f.stem().to_string();
-        let insert = if stem.contains(['#', '|', '^', ':', '[', ']']) || stem.contains("%%") {
-            let from_dir = self
-                .doc
-                .as_ref()
-                .and_then(|d| d.file())
-                .and_then(Path::parent)
-                .map(Path::to_path_buf);
-            let path = from_dir
-                .and_then(|d| markise_engine::vault::relative_path(&d, &ix.abs(&f.rel)))
-                .unwrap_or_else(|| f.rel.clone());
-            format!("[{stem}]({})", markise_engine::vault::percent_encode_path(&path))
-        } else {
-            format!("[[{}]]", ix.shortest_link(f))
-        };
+        // link syntax and path form per the vault's settings (spec 06 §14, Q-V15); Markdown
+        // links while wikilinks are switched off (V3.1)
+        let wikilink = ix.settings().wikilinks && self.parse.wikilinks;
+        let insert = ix.link_for(f, self.current_rel().as_deref(), wikilink);
         let Some(d) = self.doc.as_mut() else { return };
         let caret = d.viewer.ed.session.selection().primary().focus.offset;
         let text = d.viewer.ed.session.text();
@@ -783,6 +826,10 @@ impl MarkiseApp {
                 s.set_selection(Selection::range(c.anchor, end));
                 let r = s.insert_text(&insert);
                 s.close_typing();
+                // V3.4: a wikilink leaves the caret before its `]]` (ready for `#` / `|`)
+                if insert.starts_with("[[") && insert.ends_with("]]") {
+                    s.set_selection(Selection::caret(c.anchor + insert.len() - 2));
+                }
                 r
             })
             .ok();
@@ -793,7 +840,19 @@ impl MarkiseApp {
     /// After the document surface handled input: opens the popup right after `[[` was typed,
     /// follows the query while the caret stays in it, closes it otherwise.
     pub(super) fn complete_update(&mut self) {
-        let live = self.parse.wikilinks && !self.source_visible && !self.side_by_side && !self.is_asking();
+        self.complete_refresh();
+        if std::mem::take(&mut self.vault.accept_pending)
+            && let Some(c) = &self.vault.complete
+            && !c.items.is_empty()
+        {
+            let i = c.selected.min(c.items.len() - 1);
+            self.accept_completion(i);
+        }
+    }
+
+    fn complete_refresh(&mut self) {
+        // V3.1: the list opens also while wikilinks are off (it then inserts Markdown links)
+        let live = !self.source_visible && !self.side_by_side && !self.is_asking();
         let Some(d) = self.doc.as_ref().filter(|_| live) else {
             self.vault.complete = None;
             return;
@@ -930,6 +989,16 @@ impl MarkiseApp {
     }
 }
 
+/// The IME composition state after `ime`: a non-empty preedit is composing, a commit or an
+/// empty preedit ends it.
+fn ime_step(composing: bool, ime: &egui::ImeEvent) -> bool {
+    match ime {
+        egui::ImeEvent::Preedit { text, .. } => !text.is_empty(),
+        egui::ImeEvent::Commit(_) => false,
+        _ => composing,
+    }
+}
+
 /// `dir` joined with a `./` / `../` path (vault paths); `None` when it leaves the vault.
 fn join_vault(dir: &str, rel: &str) -> Option<String> {
     let mut parts: Vec<&str> = if dir.is_empty() {
@@ -970,11 +1039,6 @@ mod tests {
 
     #[test]
     fn create_name_rules_v2_8() {
-        assert!(invalid_name("New idea.md").is_none());
-        assert!(invalid_name("Projects/New/Deep.md").is_none());
-        assert!(invalid_name("a:b.md").is_some(), "E3");
-        assert!(invalid_name("x/../y.md").is_some());
-        assert!(invalid_name("trail. /x.md").is_some());
         assert!(attachment_ext("Missing.png"), "E5");
         assert!(!attachment_ext("Report v1.8"));
     }

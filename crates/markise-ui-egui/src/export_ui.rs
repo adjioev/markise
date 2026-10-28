@@ -204,10 +204,14 @@ impl MarkiseApp {
     }
 
     /// Starts an export without a dialog (menu, tests).
-    pub fn start_export(&mut self, req: ExportRequest) {
+    /// Every export — new, repeated, or confirmed later — parses with the current wikilinks
+    /// setting and resolves wikilinks against the current vault (spec 06 Q-V11).
+    pub fn start_export(&mut self, mut req: ExportRequest) {
         if self.export.job.is_some() {
             return;
         }
+        req.wikilinks = self.wikilinks();
+        req.vault = self.vault_index().cloned();
         let wake = self.wake_handle();
         self.export.message = None;
         self.export.last = Some(req.clone());

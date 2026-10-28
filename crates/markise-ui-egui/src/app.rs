@@ -337,8 +337,9 @@ enum Ask {
     ReplaceTheme { src: PathBuf, existing: Vec<PathBuf> },
     /// Move to Trash from the file tree.
     Trash(PathBuf),
-    /// Create this note for an unresolved link (spec 06 V2.8).
-    CreateNote(PathBuf),
+    /// Create the note `rel` (vault path) in the vault at `root` for an unresolved link
+    /// (spec 06 V2.8).
+    CreateNote { root: PathBuf, rel: String },
 }
 
 enum Banner {
@@ -1933,13 +1934,14 @@ impl MarkiseApp {
                 Question::replace_theme(&file_name(src), &files)
             }
             Some(Ask::Trash(p)) => Question::trash(&file_name(p), p.is_dir()),
-            Some(Ask::CreateNote(p)) => {
-                let folder = match (self.tree.as_ref(), p.parent()) {
-                    (Some(t), Some(dir)) if dir == t.root => "the folder’s top level".to_string(),
-                    (_, Some(dir)) => format!("“{}”", file_name(dir)),
-                    _ => "the folder".to_string(),
+            Some(Ask::CreateNote { rel, .. }) => {
+                let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+                let folder = if dir.is_empty() {
+                    "the folder’s top level".to_string()
+                } else {
+                    format!("“{dir}”")
                 };
-                Question::create_note(&file_name(p), &folder)
+                Question::create_note(name, &folder)
             }
             None => {
                 let req = self.export.pending_overwrite()?;
@@ -1987,7 +1989,7 @@ impl MarkiseApp {
                 then,
             }),
             (Choice::MoveToTrash, Some(Ask::Trash(p))) => self.move_to_trash(&p),
-            (Choice::Create, Some(Ask::CreateNote(p))) => self.create_note(p),
+            (Choice::Create, Some(Ask::CreateNote { root, rel })) => self.create_note(root, rel),
             (_, Some(_)) => {} // Cancel (or a choice the question does not offer)
             (c, None) => {
                 if let Some(r) = self.export.answer_overwrite(c == Choice::Overwrite) {

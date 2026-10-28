@@ -43,6 +43,12 @@ fn vault(name: &str) -> PathBuf {
     d
 }
 
+/// Makes `d` an Obsidian vault (an empty `.obsidian/app.json`: Obsidian's defaults).
+fn make_obsidian(d: &Path) {
+    std::fs::create_dir_all(d.join(".obsidian")).unwrap();
+    std::fs::write(d.join(".obsidian/app.json"), "{}").unwrap();
+}
+
 fn harness(dir: &Path, s: Option<&Arc<Scripted>>) -> H {
     let mut opts = AppOptions {
         open: vec![dir.to_path_buf(), dir.join("Home.md")],
@@ -115,11 +121,11 @@ fn cmd_click_link(h: &mut H, target: &str) {
     click(h, p, command());
 }
 
-/// Back (⌃⌘← on macOS, Alt+← elsewhere).
+/// Back (⌥⌘← on macOS, Alt+← elsewhere).
 fn back_forward(h: &mut H, back: bool) {
     let m = if cfg!(target_os = "macos") {
         Modifiers {
-            ctrl: true,
+            alt: true,
             mac_cmd: true,
             command: true,
             ..Default::default()
@@ -234,12 +240,24 @@ fn an_unresolved_link_offers_to_create_the_note() {
     h.run_steps(2);
     assert_eq!(s.asked().len(), asked, "no question for an attachment");
     assert!(h.state().banner_text().is_some_and(|b| b.contains("Only notes")));
+    // protected and non-portable names are refused before asking (review P1-2, P2-8)
+    for bad in ["[[.obsidian/New]]", "[[CON]]", "[[a:b]]"] {
+        h.state_mut().follow_link(bad);
+        h.run_steps(2);
+        assert_eq!(s.asked().len(), asked, "{bad}: no question");
+        assert!(
+            h.state().banner_text().is_some_and(|b| b.contains("Cannot create")),
+            "{bad}"
+        );
+    }
+    assert!(!d.join(".obsidian").exists());
     let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
 fn typing_double_bracket_offers_notes_and_enter_inserts_the_link() {
     let d = vault("complete");
+    make_obsidian(&d);
     let mut h = harness(&d, None);
     ready(&mut h, &d.join("Home.md"));
     // caret at the end of the first paragraph, surface focused
@@ -265,6 +283,7 @@ fn typing_double_bracket_offers_notes_and_enter_inserts_the_link() {
     h.key_press(Key::Enter);
     h.run_steps(2);
     let text = h.state().document_text().unwrap();
+    // an Obsidian vault writes wikilinks (spec 06 §14), shortest form
     assert!(text.contains("[[Missing note]]. [[Other]]\n"), "{text:?}");
     assert!(!text.contains("[[Other]]]]"));
     let caret = h
@@ -277,11 +296,13 @@ fn typing_double_bracket_offers_notes_and_enter_inserts_the_link() {
         .primary()
         .focus
         .offset;
-    assert_eq!(
-        &text[..caret],
-        &text[..end + " [[Other]]".len()],
-        "caret after the link"
-    );
+    assert_eq!(caret, end + " [[Other".len(), "V3.4: caret before `]]`");
+    // move past the link before typing on
+    {
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.edit(|s| s.set_selection(Selection::caret(caret + 2)));
+    }
+    h.step();
     assert!(h.state().completion().is_none());
 
     // Esc closes it and leaves the typed text
@@ -336,5 +357,173 @@ fn wikilinks_off_shows_plain_text_and_keeps_the_bytes() {
     h.run_steps(2);
     assert!(h.state().link_center("[[Other]]").is_some());
     assert!(!h.state().is_dirty());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Spec 06 Q-V15: in a folder without `.obsidian/` the list inserts a Markdown link with a
+/// relative, encoded path (caret after it); Q-V18: new notes go next to the current note.
+#[test]
+fn plain_folders_write_markdown_links_and_create_next_to_the_note() {
+    let d = vault("plain");
+    std::fs::write(d.join("Sub/Inner.md"), "# Inner\n\nTo [[Fresh]].\n").unwrap();
+    let s = Scripted::new();
+    let mut h = harness(&d, Some(&s));
+    ready(&mut h, &d.join("Home.md"));
+    let end = h.state().document_text().unwrap().find("[[Missing note]].").unwrap() + "[[Missing note]].".len();
+    {
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.edit(|s| s.set_selection(Selection::caret(end)));
+        v.request_refocus();
+    }
+    h.run_steps(2);
+    for t in [" ", "[", "[", "Spac"] {
+        h.event(Event::Text(t.into()));
+        h.step();
+    }
+    assert_eq!(h.state().completion().unwrap().items[0].label, "Spaced Note");
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    let text = h.state().document_text().unwrap();
+    let link = "[Spaced Note](Folder%20A/Spaced%20Note.md)";
+    assert!(text.contains(&format!("[[Missing note]]. {link}\n")), "{text:?}");
+    let caret = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .session
+        .selection()
+        .primary()
+        .focus
+        .offset;
+    assert_eq!(caret, end + 1 + link.len(), "caret after a Markdown link");
+
+    // a note created from a link in Sub/ lands in Sub/
+    h.state_mut().open(d.join("Sub/Inner.md"));
+    h.step();
+    if h.state().is_asking() {
+        s.answer(Choice::DontSave);
+        h.step();
+    }
+    ready(&mut h, &d.join("Sub/Inner.md"));
+    s.answer(Choice::Create);
+    h.state_mut().follow_link("[[Fresh]]");
+    h.step();
+    ready(&mut h, &d.join("Sub/Fresh.md"));
+    assert!(!d.join("Fresh.md").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Q-V18: in an Obsidian vault, notes created from a link in a subfolder go to the root.
+#[test]
+fn obsidian_vaults_create_new_notes_in_the_root() {
+    let d = vault("obsidian-create");
+    make_obsidian(&d);
+    std::fs::write(d.join("Sub/Inner.md"), "To [[Fresh]].\n").unwrap();
+    let s = Scripted::new();
+    let mut h = harness(&d, Some(&s));
+    ready(&mut h, &d.join("Home.md"));
+    h.state_mut().open(d.join("Sub/Inner.md"));
+    ready(&mut h, &d.join("Sub/Inner.md"));
+    s.answer(Choice::Create);
+    h.state_mut().follow_link("[[Fresh]]");
+    h.step();
+    ready(&mut h, &d.join("Fresh.md"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review P2-7: while an IME composition is active the popup leaves Enter to it; a commit
+/// followed by Enter in the same frame accepts.
+#[test]
+fn completion_keys_wait_for_ime_composition() {
+    let d = vault("ime");
+    make_obsidian(&d);
+    let mut h = harness(&d, None);
+    ready(&mut h, &d.join("Home.md"));
+    let end = h.state().document_text().unwrap().find("[[Missing note]].").unwrap() + "[[Missing note]].".len();
+    {
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.edit(|s| s.set_selection(Selection::caret(end)));
+        v.request_refocus();
+    }
+    h.run_steps(2);
+    for t in [" ", "[", "[", "Oth"] {
+        h.event(Event::Text(t.into()));
+        h.step();
+    }
+    assert_eq!(h.state().completion().unwrap().items[0].label, "Other");
+    let enter = Event::Key {
+        key: Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    };
+    // composing: Enter is not the popup's
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit {
+        text: "e".into(),
+        active_range_chars: None,
+    }));
+    h.input_mut().events.push(enter.clone());
+    h.step();
+    assert!(
+        !h.state()
+            .document_text()
+            .unwrap()
+            .contains("[[Missing note]]. [[Other]]")
+    );
+    // commit, then Enter (same frame, in this order): accepted
+    let mut h2 = harness(&d, None);
+    ready(&mut h2, &d.join("Home.md"));
+    {
+        let v = h2.state_mut().viewer().unwrap();
+        v.ed.edit(|s| s.set_selection(Selection::caret(end)));
+        v.request_refocus();
+    }
+    h2.run_steps(2);
+    for t in [" ", "[", "[", "Oth"] {
+        h2.event(Event::Text(t.into()));
+        h2.step();
+    }
+    h2.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit {
+        text: "e".into(),
+        active_range_chars: None,
+    }));
+    h2.step();
+    h2.input_mut()
+        .events
+        .push(Event::Ime(egui::ImeEvent::Commit("e".into())));
+    h2.input_mut().events.push(enter);
+    h2.run_steps(2);
+    let text = h2.state().document_text().unwrap();
+    assert!(text.contains("[[Missing note]]. [[Other]]"), "{text:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review P2-5: exports parse with the current wikilinks setting, repeats included.
+#[test]
+fn exports_follow_the_wikilinks_switch() {
+    let d = vault("export");
+    let mut h = harness(&d, None);
+    ready(&mut h, &d.join("Home.md"));
+    let run = |h: &mut H, out: &Path| {
+        let req = markise_engine::export::ExportRequest::new(
+            markise_engine::export::ExportKind::HtmlPlain,
+            h.state().document_text().unwrap(),
+            Some(d.join("Home.md")),
+            out.to_path_buf(),
+            markise_theme::Theme::light(),
+        );
+        h.state_mut().start_export(req);
+        let o = out.to_path_buf();
+        wait_until(h, "export", move |a| !a.export_state().is_running() && o.exists());
+        std::fs::read_to_string(out).unwrap()
+    };
+    let on = run(&mut h, &d.join("on.html"));
+    assert!(on.contains("<a href=\"Other.md\">Other</a>"), "{on}");
+    h.state_mut().set_wikilinks(false);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    let off = run(&mut h, &d.join("off.html"));
+    assert!(off.contains("[[Other]]"), "{off}");
     let _ = std::fs::remove_dir_all(&d);
 }

@@ -43,8 +43,10 @@ pub fn is_note(name: &str) -> bool {
 /// One file of the vault.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultFile {
-    /// Vault path (`Projects/Plan.md`).
+    /// Vault path (`Projects/Plan.md`), NFC: the lookup form.
     pub rel: String,
+    /// The same path as spelled on disk (possibly NFD): the form files are opened with.
+    pub disk: String,
     fold_rel: String,
     fold_name: String,
     /// Number of `/`-separated segments (1 for a file in the root).
@@ -72,11 +74,123 @@ impl VaultFile {
     }
 }
 
+/// Path form of inserted links (spec 06 V14.3, `newLinkFormat`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkFormat {
+    /// The name when unique, else the vault path.
+    #[default]
+    Shortest,
+    /// Relative to the linking note's folder.
+    Relative,
+    /// The full vault path.
+    Absolute,
+}
+
+/// Where notes created from links go (spec 06 V2.8, `newFileLocation`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum NewNoteLocation {
+    /// The vault root.
+    #[default]
+    Root,
+    /// The linking note's folder.
+    Current,
+    /// This vault folder.
+    Folder(String),
+}
+
+/// The vault's "Files and links" settings (spec 06 §14): Obsidian's (`.obsidian/app.json`,
+/// read only, never written — Q-V1) or Markise's plain-folder defaults (Q-V15, Q-V18).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultSettings {
+    /// The folder has a `.obsidian/` directory.
+    pub obsidian: bool,
+    /// Insert wikilinks (`false`: Markdown links).
+    pub wikilinks: bool,
+    pub link_format: LinkFormat,
+    pub new_notes: NewNoteLocation,
+}
+
+impl Default for VaultSettings {
+    fn default() -> Self {
+        VaultSettings::plain()
+    }
+}
+
+impl VaultSettings {
+    /// A folder without `.obsidian/`: Markdown links with relative paths (Typora-readable,
+    /// Q-V15), new notes next to the current note (Q-V18).
+    pub fn plain() -> Self {
+        VaultSettings {
+            obsidian: false,
+            wikilinks: false,
+            link_format: LinkFormat::Relative,
+            new_notes: NewNoteLocation::Current,
+        }
+    }
+
+    /// An Obsidian vault: Obsidian's defaults (wikilinks, shortest paths, new notes in the
+    /// root), overridden by the keys of `app_json` that are present and understood (key
+    /// names inferred, Q-V3; anything else is ignored).
+    pub fn obsidian(app_json: Option<&str>) -> Self {
+        let mut s = VaultSettings {
+            obsidian: true,
+            wikilinks: true,
+            link_format: LinkFormat::Shortest,
+            new_notes: NewNoteLocation::Root,
+        };
+        let Some(serde_json::Value::Object(m)) = app_json.and_then(|t| serde_json::from_str(t).ok()) else {
+            return s;
+        };
+        if let Some(b) = m.get("useMarkdownLinks").and_then(serde_json::Value::as_bool) {
+            s.wikilinks = !b;
+        }
+        match m.get("newLinkFormat").and_then(serde_json::Value::as_str) {
+            Some("shortest") => s.link_format = LinkFormat::Shortest,
+            Some("relative") => s.link_format = LinkFormat::Relative,
+            Some("absolute") => s.link_format = LinkFormat::Absolute,
+            _ => {}
+        }
+        match m.get("newFileLocation").and_then(serde_json::Value::as_str) {
+            Some("root") => s.new_notes = NewNoteLocation::Root,
+            Some("current") => s.new_notes = NewNoteLocation::Current,
+            Some("folder") => {
+                let f = m
+                    .get("newFileFolderPath")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|p| nfc(p.trim().trim_matches('/')))
+                    .unwrap_or_default();
+                s.new_notes = if f.is_empty() {
+                    NewNoteLocation::Root
+                } else {
+                    NewNoteLocation::Folder(f)
+                };
+            }
+            _ => {}
+        }
+        s
+    }
+
+    /// Reads the settings of the vault at `root` (file I/O: worker threads only).
+    pub fn read(root: &Path) -> Self {
+        let dir = root.join(".obsidian");
+        if !dir.is_dir() {
+            return VaultSettings::plain();
+        }
+        let text = std::fs::File::open(dir.join("app.json")).ok().and_then(|f| {
+            use std::io::Read;
+            let mut t = String::new();
+            f.take(1 << 20).read_to_string(&mut t).ok().map(|_| t)
+        });
+        VaultSettings::obsidian(text.as_deref())
+    }
+}
+
 /// An immutable snapshot of the vault's files.
 #[derive(Clone, Debug, Default)]
 pub struct VaultIndex {
     root: PathBuf,
     generation: u64,
+    settings: VaultSettings,
     /// Sorted by vault path (code-point order).
     files: Vec<VaultFile>,
     by_name: HashMap<String, Vec<u32>>,
@@ -176,17 +290,19 @@ pub struct Resolved {
 }
 
 impl VaultIndex {
-    /// An index of `rels` (vault paths, any order) under `root` (tests, benchmarks, scanner).
+    /// An index of `rels` (vault paths as spelled on disk, any order) under `root` (tests,
+    /// benchmarks, scanner).
     pub fn from_rels(root: PathBuf, rels: impl IntoIterator<Item = String>, generation: u64) -> VaultIndex {
         let mut files: Vec<VaultFile> = rels
             .into_iter()
-            .map(|r| {
-                let rel = nfc(&r);
+            .map(|disk| {
+                let rel = nfc(&disk);
                 let fold_rel = rel.to_lowercase();
                 let fold_name = fold_rel.rsplit('/').next().unwrap_or(&fold_rel).to_string();
                 let depth = rel.split('/').count();
                 VaultFile {
                     rel,
+                    disk,
                     fold_rel,
                     fold_name,
                     depth,
@@ -204,9 +320,48 @@ impl VaultIndex {
         VaultIndex {
             root,
             generation,
+            settings: VaultSettings::plain(),
             files,
             by_name,
             by_rel,
+        }
+    }
+
+    /// The same index with `settings`.
+    pub fn with_settings(mut self, settings: VaultSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// The vault's "Files and links" settings.
+    pub fn settings(&self) -> &VaultSettings {
+        &self.settings
+    }
+
+    /// The link written for `f` in the note at `from` (spec 06 V14.3, V2.6.3): a wikilink when
+    /// `wikilink` and the name allows one (V2.1.2 rule 5), else a Markdown link with an
+    /// encoded path including the extension; the path form follows the vault's settings.
+    pub fn link_for(&self, f: &VaultFile, from: Option<&str>, wikilink: bool) -> String {
+        let name = f.name();
+        let wikilink = wikilink && !name.contains(['#', '|', '^', ':', '[', ']']) && !name.contains("%%");
+        let from_dir = from.map(folder_of).unwrap_or("");
+        let path = match self.settings.link_format {
+            LinkFormat::Shortest => {
+                let unique = self.by_name.get(&f.fold_name).is_none_or(|v| v.len() <= 1);
+                if unique { name.to_string() } else { f.rel.clone() }
+            }
+            LinkFormat::Relative => relative_rel(from_dir, &f.rel),
+            LinkFormat::Absolute => f.rel.clone(),
+        };
+        if wikilink {
+            let t = if f.is_note() {
+                markise_md::wikilink::strip_md(&path)
+            } else {
+                path.as_str()
+            };
+            format!("[[{t}]]")
+        } else {
+            format!("[{}]({})", f.stem(), percent_encode_path(&path))
         }
     }
 
@@ -244,10 +399,11 @@ impl VaultIndex {
         rel_path(&self.root, abs)
     }
 
-    /// The absolute path of a vault path.
+    /// The absolute path of a vault path, spelled as on disk when the file is known.
     pub fn abs(&self, rel: &str) -> PathBuf {
+        let disk = self.file(rel).map_or(rel, |f| f.disk.as_str());
         let mut p = self.root.clone();
-        for s in rel.split('/').filter(|s| !s.is_empty()) {
+        for s in disk.split('/').filter(|s| !s.is_empty()) {
             p.push(s);
         }
         p
@@ -482,6 +638,24 @@ pub fn split_markdown_dest(dest: &str) -> Option<(String, Option<String>)> {
     Some((path, frag.filter(|f| !f.is_empty())))
 }
 
+/// Vault path `to` relative to vault folder `from_dir` (`../x/y.md`).
+fn relative_rel(from_dir: &str, to: &str) -> String {
+    let a: Vec<&str> = if from_dir.is_empty() {
+        Vec::new()
+    } else {
+        from_dir.split('/').collect()
+    };
+    let b: Vec<&str> = to.split('/').collect();
+    let common = a
+        .iter()
+        .zip(&b[..b.len().saturating_sub(1)])
+        .take_while(|(x, y)| x == y)
+        .count();
+    let mut parts: Vec<&str> = vec![".."; a.len() - common];
+    parts.extend(&b[common..]);
+    parts.join("/")
+}
+
 /// The vault path of `abs` under `root` (`None` outside it).
 pub fn rel_path(root: &Path, abs: &Path) -> Option<String> {
     let r = abs.strip_prefix(root).ok()?;
@@ -493,6 +667,126 @@ pub fn rel_path(root: &Path, abs: &Path) -> Option<String> {
         }
     }
     (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// The vault path of `abs` under `root` as spelled on disk (no normalisation).
+fn disk_rel_path(root: &Path, abs: &Path) -> Option<String> {
+    let r = abs.strip_prefix(root).ok()?;
+    let mut parts = Vec::new();
+    for c in r.components() {
+        match c {
+            Component::Normal(s) => parts.push(s.to_string_lossy().into_owned()),
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// Windows device names, reserved in every folder with any extension.
+const RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
+    "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Why the vault path `rel` cannot name a new note (spec 06 V2.8 rule 4: names valid on every
+/// supported platform; V1.3/V1.4: never inside a hidden folder such as `.obsidian/`).
+pub fn check_new_note(rel: &str) -> Result<(), String> {
+    if rel.is_empty() {
+        return Err("The name is empty.".into());
+    }
+    for seg in rel.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return Err("The name has an empty or relative folder part.".into());
+        }
+        if seg.starts_with('.') {
+            return Err("Notes cannot be created in hidden folders or as hidden files.".into());
+        }
+        if let Some(c) = seg
+            .chars()
+            .find(|c| matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control())
+        {
+            return Err(format!("Note names cannot contain “{}”.", c.escape_default()));
+        }
+        if seg.ends_with('.') || seg.ends_with(' ') || seg.starts_with(' ') {
+            return Err("Names cannot start with a space or end with a dot or a space.".into());
+        }
+        let base = seg.split('.').next().unwrap_or(seg).trim_end().to_ascii_uppercase();
+        if RESERVED.contains(&base.as_str()) {
+            return Err(format!("“{seg}” is a reserved name on Windows."));
+        }
+    }
+    Ok(())
+}
+
+/// Creates the empty note `rel` under `root` (file I/O: worker threads only) and returns its
+/// path; an existing file is returned as is. Missing folders are created one at a time; no
+/// existing component may be a symbolic link and every existing folder must resolve inside the
+/// vault, so a link cannot write outside it or into a protected folder (Q-V1).
+pub fn create_note(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    check_new_note(rel)?;
+    let canon_root = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let segs: Vec<&str> = rel.split('/').collect();
+    let mut cur = canon_root.clone();
+    for (i, seg) in segs.iter().enumerate() {
+        let next = cur.join(seg);
+        let last = i + 1 == segs.len();
+        match std::fs::symlink_metadata(&next) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(format!(
+                    "“{seg}” is a symbolic link; notes are not created through links."
+                ));
+            }
+            Ok(m) if last => {
+                return if m.is_file() {
+                    Ok(next)
+                } else {
+                    Err(format!("“{seg}” exists and is not a file."))
+                };
+            }
+            Ok(m) if m.is_dir() => {
+                let c = std::fs::canonicalize(&next).map_err(|e| e.to_string())?;
+                if !c.starts_with(&canon_root) {
+                    return Err("The path leaves the folder.".into());
+                }
+                cur = c;
+            }
+            Ok(_) => return Err(format!("“{seg}” is not a folder.")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if last {
+                    return match std::fs::OpenOptions::new().write(true).create_new(true).open(&next) {
+                        Ok(_) => Ok(next),
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(next),
+                        Err(e) => Err(format!("{}: {e}", next.display())),
+                    };
+                }
+                match std::fs::create_dir(&next) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(format!("{}: {e}", next.display())),
+                }
+                cur = next;
+            }
+            Err(e) => return Err(format!("{}: {e}", next.display())),
+        }
+    }
+    Err("The name is empty.".into())
+}
+
+/// [`create_note`] on a short-lived worker thread; the result arrives on the receiver (the
+/// caller is woken).
+pub fn spawn_create_note(root: PathBuf, rel: String, wake: Wake) -> Receiver<Result<PathBuf, String>> {
+    let (tx, rx) = channel();
+    let spawned = std::thread::Builder::new().name("markise-new-note".into()).spawn({
+        let tx = tx.clone();
+        move || {
+            let _ = tx.send(create_note(&root, &rel));
+            wake();
+        }
+    });
+    if let Err(e) = spawned {
+        let _ = tx.send(Err(format!("cannot start a thread: {e}")));
+    }
+    rx
 }
 
 /// A relative path from folder `from_dir` to `to` (both absolute), `/`-separated (export
@@ -536,6 +830,7 @@ struct ScanState {
     files: BTreeSet<String>,
     dirs: BTreeSet<String>,
     generation: u64,
+    settings: VaultSettings,
 }
 
 impl ScanState {
@@ -552,7 +847,8 @@ impl ScanState {
         let rd = std::fs::read_dir(&abs).ok()?;
         let (mut files, mut dirs) = (Vec::new(), Vec::new());
         for e in rd.flatten() {
-            let name = nfc(&e.file_name().to_string_lossy());
+            // the disk spelling (an NFD name must be listed and opened as NFD)
+            let name = e.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') {
                 continue;
             }
@@ -592,6 +888,7 @@ impl ScanState {
     }
 
     fn mount(&mut self, root: PathBuf) {
+        self.settings = VaultSettings::read(&root);
         self.root = root;
         self.files.clear();
         self.dirs.clear();
@@ -604,13 +901,17 @@ impl ScanState {
         let mut dir = if abs == self.root {
             String::new()
         } else {
-            match rel_path(&self.root, abs) {
+            match disk_rel_path(&self.root, abs) {
                 Some(r) => r,
                 None => return,
             }
         };
         if !dir.is_empty() && self.files.contains(&dir) {
             dir = folder_of(&dir).to_string();
+        }
+        // Obsidian's settings changed (or the config folder appeared / went away)
+        if dir.is_empty() || dir == ".obsidian" || dir.starts_with(".obsidian/") {
+            self.settings = VaultSettings::read(&self.root);
         }
         if dir.split('/').any(|s| s.starts_with('.')) {
             return;
@@ -657,11 +958,10 @@ impl ScanState {
 
     fn snapshot(&mut self) -> Arc<VaultIndex> {
         self.generation += 1;
-        Arc::new(VaultIndex::from_rels(
-            self.root.clone(),
-            self.files.iter().cloned(),
-            self.generation,
-        ))
+        Arc::new(
+            VaultIndex::from_rels(self.root.clone(), self.files.iter().cloned(), self.generation)
+                .with_settings(self.settings.clone()),
+        )
     }
 }
 
@@ -677,6 +977,7 @@ impl VaultScanner {
                     files: BTreeSet::new(),
                     dirs: BTreeSet::new(),
                     generation: 0,
+                    settings: VaultSettings::plain(),
                 };
                 while let Ok(first) = cmd_rx.recv() {
                     // coalesce a burst into one snapshot

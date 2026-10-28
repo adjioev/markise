@@ -315,10 +315,10 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("view.diagrams", "Diagrams", &[]),
     // Markdown dialect extension (spec 06 V2.1; setting `markdown.wikilinks`)
     app("view.wikilinks", "Wikilinks", &[]),
-    // Back / Forward between opened notes (spec 06 §2.7). ⌘[ / ⌘] are Outdent / Indent
-    // (spec 02 §15), so macOS uses ⌃⌘← / ⌃⌘→; Windows and Linux use Alt+← / Alt+→.
-    app("go.back", "Back", &[both("Ctrl+Cmd+Left", "Alt+Left")]),
-    app("go.forward", "Forward", &[both("Ctrl+Cmd+Right", "Alt+Right")]),
+    // Back / Forward between opened notes (spec 06 §2.7): ⌥⌘← / ⌥⌘→ on macOS (⌘[ / ⌘] are
+    // Outdent / Indent, spec 02 §15), Alt+← / Alt+→ on Windows and Linux.
+    app("go.back", "Back", &[both("Opt+Cmd+Left", "Alt+Left")]),
+    app("go.forward", "Forward", &[both("Opt+Cmd+Right", "Alt+Right")]),
     app("view.fullScreen", "Toggle Full Screen", &[both("Ctrl+Cmd+F", "F11")]),
     // whole-window zoom (issue #43); ⌘= / ⌘- without Shift are the heading level commands
     app("view.zoomIn", "Zoom In", &[both("Shift+Cmd+=", "Ctrl+Shift+=")]),

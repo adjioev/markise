@@ -202,3 +202,166 @@ fn scanner_tracks_the_folder() {
     assert!(ix3.file("sub/deep/C.md").is_none());
     assert!(ix3.file("sub/B.md").is_some());
 }
+
+#[test]
+fn settings_q_v15_q_v18_and_app_json() {
+    let plain = VaultSettings::plain();
+    assert!(!plain.obsidian && !plain.wikilinks);
+    assert_eq!(plain.link_format, LinkFormat::Relative);
+    assert_eq!(plain.new_notes, NewNoteLocation::Current);
+    let ob = VaultSettings::obsidian(None);
+    assert!(ob.obsidian && ob.wikilinks);
+    assert_eq!(
+        (ob.link_format, ob.new_notes.clone()),
+        (LinkFormat::Shortest, NewNoteLocation::Root)
+    );
+    assert_eq!(VaultSettings::obsidian(Some("{}")), ob, "E-fixture: empty app.json");
+    let custom = VaultSettings::obsidian(Some(
+        r#"{"useMarkdownLinks": true, "newLinkFormat": "absolute", "newFileLocation": "folder", "newFileFolderPath": "/Inbox/"}"#,
+    ));
+    assert!(!custom.wikilinks);
+    assert_eq!(custom.link_format, LinkFormat::Absolute);
+    assert_eq!(custom.new_notes, NewNoteLocation::Folder("Inbox".into()));
+    // unknown values are ignored
+    let odd = VaultSettings::obsidian(Some(r#"{"newLinkFormat": "weird", "useMarkdownLinks": "yes"}"#));
+    assert_eq!(odd, ob);
+    assert_eq!(VaultSettings::obsidian(Some("not json")), ob);
+}
+
+#[test]
+fn links_written_per_v14_3() {
+    let ix = fixture(false);
+    let f = |r: &str| ix.file(r).unwrap().clone();
+    let from = Some("Areas/Today.md");
+    let with = |fmt: LinkFormat| {
+        fixture(false).with_settings(VaultSettings {
+            link_format: fmt,
+            ..VaultSettings::obsidian(None)
+        })
+    };
+    let sh = with(LinkFormat::Shortest);
+    assert_eq!(sh.link_for(&f("Projects/Plan.md"), from, true), "[[Projects/Plan]]");
+    assert_eq!(sh.link_for(&f("Notes/Q&A.md"), from, true), "[[Q&A]]");
+    let rel = with(LinkFormat::Relative);
+    assert_eq!(rel.link_for(&f("Projects/Plan.md"), from, true), "[[../Projects/Plan]]");
+    assert_eq!(rel.link_for(&f("Areas/Plan.md"), from, true), "[[Plan]]");
+    let abs = with(LinkFormat::Absolute);
+    assert_eq!(abs.link_for(&f("Projects/Plan.md"), from, true), "[[Projects/Plan]]");
+    // Markdown links: extension kept, path encoded (V2.6.3)
+    assert_eq!(
+        rel.link_for(&f("Areas/plan notes.md"), Some("Home.md"), false),
+        "[plan notes](Areas/plan%20notes.md)"
+    );
+    assert_eq!(
+        rel.link_for(&f("Projects/Plan.md"), from, false),
+        "[Plan](../Projects/Plan.md)"
+    );
+    // E6: a name that cannot be a wikilink becomes a Markdown link
+    assert_eq!(
+        abs.link_for(&f("Notes/Hash#Tag.md"), Some("Home.md"), true),
+        "[Hash#Tag](Notes/Hash%23Tag.md)"
+    );
+}
+
+#[test]
+fn scanner_reads_obsidian_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::write(root.join("A.md"), "").unwrap();
+    let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
+    let t = std::time::Duration::from_secs(10);
+    sc.mount(root.clone());
+    assert!(!sc.recv_timeout(t).unwrap().settings().obsidian);
+    std::fs::create_dir_all(root.join(".obsidian")).unwrap();
+    std::fs::write(root.join(".obsidian/app.json"), r#"{"useMarkdownLinks": true}"#).unwrap();
+    sc.changed(root.join(".obsidian"));
+    let s = sc.recv_timeout(t).unwrap().settings().clone();
+    assert!(s.obsidian && !s.wikilinks);
+    assert!(!root.join(".markise").exists());
+}
+
+/// Review P2-6: names stored NFD on disk resolve from NFC links and open with their disk
+/// spelling; NFD folders are scanned.
+#[test]
+fn nfd_names_on_disk_resolve_and_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let nfd_dir = "Re\u{301}sume\u{301}";
+    std::fs::create_dir_all(root.join(nfd_dir)).unwrap();
+    std::fs::write(root.join(nfd_dir).join("Cafe\u{301}.md"), "x").unwrap();
+    let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
+    sc.mount(root.clone());
+    let ix = sc.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let f = ix.resolve_wikilink("café", None).expect("found through NFC");
+    assert_eq!(f.rel, "Résumé/Café.md");
+    let abs = ix.abs(&f.rel);
+    assert_eq!(
+        std::fs::read_to_string(&abs).unwrap(),
+        "x",
+        "opens with the disk spelling"
+    );
+    assert_eq!(ix.rel_of(&abs).as_deref(), Some("Résumé/Café.md"));
+    // a change event for the NFD folder is applied
+    std::fs::write(root.join(nfd_dir).join("Two.md"), "").unwrap();
+    sc.changed(root.join(nfd_dir));
+    let ix2 = sc.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    assert!(ix2.file("Résumé/Two.md").is_some());
+}
+
+/// Review P2-8: portable names only.
+#[test]
+fn new_note_names_are_portable() {
+    for ok in ["New idea.md", "Projects/New/Deep.md", "Console.md", "a.b.md", "Café.md"] {
+        assert!(check_new_note(ok).is_ok(), "{ok}");
+    }
+    for bad in [
+        "a:b.md",
+        "CON.md",
+        "con.txt.md",
+        "Projects/NUL/x.md",
+        "lpt9.md",
+        "COM1 .md",
+        "trail./x.md",
+        "x /y.md",
+        " lead.md",
+        "x/../y.md",
+        ".obsidian/New.md",
+        "Notes/.hidden.md",
+        "q?.md",
+        "",
+    ] {
+        assert!(check_new_note(bad).is_err(), "{bad:?}");
+    }
+}
+
+/// Review P1-1 / P1-2: creation never leaves the vault or enters a protected folder, not even
+/// through symbolic links.
+#[cfg(unix)]
+#[test]
+fn note_creation_stays_inside_the_vault() {
+    let outer = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(outer.path()).unwrap();
+    let root = base.join("vault");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(root.join(".obsidian")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
+    std::os::unix::fs::symlink(root.join(".obsidian"), root.join("cfg")).unwrap();
+    assert!(create_note(&root, "out/New.md").is_err());
+    assert!(create_note(&root, "out/deeper/New.md").is_err());
+    assert!(create_note(&root, "cfg/New.md").is_err());
+    assert!(create_note(&root, ".obsidian/New.md").is_err());
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(root.join(".obsidian")).unwrap().count(), 0);
+    // normal creation, folders included; an existing file is returned unchanged
+    let p = create_note(&root, "Projects/New/Deep.md").unwrap();
+    assert_eq!(p, root.join("Projects/New/Deep.md"));
+    std::fs::write(&p, "kept").unwrap();
+    assert_eq!(create_note(&root, "Projects/New/Deep.md").unwrap(), p);
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "kept");
+    let rx = spawn_create_note(root.clone(), "Top.md".into(), Arc::new(|| {}));
+    assert_eq!(
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap(),
+        root.join("Top.md")
+    );
+}
