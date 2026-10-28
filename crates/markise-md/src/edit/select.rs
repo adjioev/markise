@@ -205,8 +205,10 @@ impl Document {
             }
         }
         let (start, end) = if end >= text.len() {
-            match self.leaf_before(ls) {
-                Some(p) => (p.span.end, le),
+            // the separator after the previous block from the structure — up to its end,
+            // never into it (an empty quote before the block stays; ADR 0011)
+            match self.adjacent_block(leaf.span.start, false) {
+                Some(p) => (p.block.end, le),
                 None => (ls, le),
             }
         } else {

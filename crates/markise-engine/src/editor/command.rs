@@ -611,17 +611,17 @@ fn past_trailing_ws(s: &EditorSession, d: markise_doc::DocPos) -> markise_doc::D
     if d.virt > 0 {
         return d;
     }
-    let t = s.text();
-    let ws = t[d.offset..].bytes().take_while(|b| matches!(b, b' ' | b'\t')).count();
-    let after = d.offset + ws;
-    if ws == 0 || !(after == t.len() || matches!(t.as_bytes()[after], b'\n' | b'\r')) {
-        return d;
-    }
-    match s.doc().leaf(d.offset) {
-        Some(l)
-            if l.kind == markise_doc::LeafKind::Paragraph && l.lines.last().is_some_and(|z| z.start <= d.offset) =>
+    // the paragraph's trailing whitespace from the ownership query (ADR 0011)
+    match s.doc().block_owner(d.offset) {
+        Some(o)
+            if o.leaf.kind == markise_doc::LeafKind::Paragraph
+                && !o.trailing_ws.is_empty()
+                && (o.trailing_ws.start..o.trailing_ws.end).contains(&d.offset) =>
         {
-            markise_doc::DocPos { offset: after, ..d }
+            markise_doc::DocPos {
+                offset: o.trailing_ws.end,
+                ..d
+            }
         }
         _ => d,
     }

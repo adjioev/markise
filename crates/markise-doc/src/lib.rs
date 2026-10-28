@@ -13,12 +13,14 @@
 //! - [`resource`]: resource path resolution;
 //! - [`command`]: pure-data [`CommandDescriptor`]s with [`PlannerId`]s;
 //! - [`plan`]: [`Plan`], [`PlanRequest`], [`TypingPlan`];
+//! - [`owner`]: position → block ownership ([`BlockOwner`], [`Adjacent`], ADR 0011);
 //! - [`format`]: the [`DocumentFormat`] / [`FormatDoc`] / [`EditBehavior`] traits.
 
 pub mod chunked;
 pub mod command;
 pub mod format;
 pub mod hints;
+pub mod owner;
 pub mod patch;
 pub mod plan;
 pub mod pos;
@@ -33,6 +35,7 @@ pub use command::{
 };
 pub use format::{DepChange, DocumentFormat, EditBehavior, EditSummary, FormatDoc, FormatOptions, label_key};
 pub use hints::{HintOrigin, HintSet, LiteralHint};
+pub use owner::{Adjacent, BlockOwner, BlockPart, ContainerAt};
 pub use patch::{Patch, PatchError, PatchSet};
 pub use plan::{
     EditPrefs, Plan, PlanError, PlanRequest, PlanStep, RulePlan, SmartDashes, SmartPunctuation, TypingPlan,

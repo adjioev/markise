@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use crate::command::{CommandDescriptor, PlannerId};
 use crate::hints::{HintSet, LiteralHint};
+use crate::owner::{Adjacent, BlockOwner, BlockPart, ContainerAt};
 use crate::patch::PatchSet;
 use crate::plan::{Plan, PlanError, PlanRequest, TypingPlan, plain_typing};
-use crate::pos::{DocPos, VirtualSlot};
+use crate::pos::{Affinity, DocPos, VirtualSlot};
 use crate::source::SourceToken;
 use crate::text::{LineEnding, Span};
 use crate::view::{FlatEvent, HeadingInfo, InlineSource, LeafView, RichInline, TableView};
@@ -231,29 +232,64 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
     /// `Some(None)` when there is one but no text-holding leaf begins (`forward`) or ends
     /// (backward) at its edge — an empty container, a block the format does not model as a
     /// leaf — and `Some(Some(leaf))` otherwise. A join must never reach past this neighbour.
-    /// Formats with a block tree answer from it; the default scans lines conservatively: the
-    /// first non-blank line must start (end) inside a leaf.
+    /// [`FormatDoc::adjacent_block`] from the leaf's first byte.
     fn adjacent_leaf(&self, leaf: &LeafView, forward: bool) -> Option<Option<LeafView>> {
+        self.adjacent_block(leaf.span.start, forward).map(|a| a.leaf)
+    }
+
+    // ---- block ownership (ADR 0011, `crate::owner`) ------------------------------------
+
+    /// **The** position → block ownership query: the leaf that owns offset `at` and the part
+    /// of it `at` is in, by the rule documented in [`crate::owner`]; `None` between blocks.
+    /// Formats with a block tree answer from it in O(log n); the default uses
+    /// [`FormatDoc::leaf`] plus a scan of `at`'s own line.
+    fn block_owner(&self, at: usize) -> Option<BlockOwner> {
+        crate::owner::owner_by_lines(self.text(), at, &|p| self.leaf(p))
+    }
+    /// [`FormatDoc::block_owner`], with offsets between blocks resolved to the leaf before
+    /// (`Upstream`) or after (`Downstream`) them, part [`BlockPart::Gap`] — never past an
+    /// intervening block without a text leaf (then `None`).
+    fn block_owner_biased(&self, at: usize, bias: Affinity) -> Option<BlockOwner> {
+        if let Some(o) = self.block_owner(at) {
+            return Some(o);
+        }
+        let leaf = self.adjacent_block(at, bias == Affinity::Downstream)?.leaf?;
+        let edge = match bias {
+            Affinity::Upstream => leaf.span.end,
+            Affinity::Downstream => leaf.span.start,
+        };
+        let mut o = BlockOwner::resolve(self.text(), leaf, edge)?;
+        o.at = at;
+        o.part = BlockPart::Gap;
+        Some(o)
+    }
+    /// The block next to offset `at` in document order (after it with `forward`, else before
+    /// it): the sibling of the innermost block holding `at` — or, between blocks, the nearest
+    /// block of the innermost container holding `at` — climbing out of containers that end
+    /// (start) there. Never skips a block: see [`Adjacent`]. The default scans lines
+    /// conservatively (the first non-blank line must start / end inside a leaf).
+    fn adjacent_block(&self, at: usize, forward: bool) -> Option<Adjacent> {
         let text = self.text();
         let b = text.as_bytes();
+        let here = self.leaf(at);
         if forward {
-            let mut p = leaf.span.end;
+            let mut p = here.as_ref().map_or(at, |l| l.span.end.max(at));
             while p < b.len() && !matches!(b[p], b'\n' | b'\r') {
                 p += 1;
             }
-            // the next byte that is not whitespace or a line break
             while p < b.len() && b[p].is_ascii_whitespace() {
                 p += 1;
             }
             if p >= b.len() {
                 return None;
             }
-            Some(
-                self.leaf(p)
-                    .filter(|n| n.span.start > leaf.span.start && n.span.start <= p),
-            )
+            let leaf = self.leaf(p).filter(|n| n.span.start > at && n.span.start <= p);
+            Some(Adjacent {
+                block: leaf.as_ref().map_or(Span::new(p, p), |l| l.span),
+                leaf,
+            })
         } else {
-            let mut p = leaf.span.start;
+            let mut p = here.as_ref().map_or(at, |l| l.span.start.min(at));
             while p > 0 && !matches!(b[p - 1], b'\n' | b'\r') {
                 p -= 1;
             }
@@ -263,11 +299,26 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
             if p == 0 {
                 return None;
             }
-            Some(
-                self.leaf(p - 1)
-                    .filter(|n| n.span.end < leaf.span.start && n.span.end >= p),
-            )
+            let leaf = self.leaf(p - 1).filter(|n| n.span.end < at && n.span.end >= p);
+            Some(Adjacent {
+                block: leaf.as_ref().map_or(Span::new(p, p), |l| l.span),
+                leaf,
+            })
         }
+    }
+    /// The containers holding offset `at`, outermost first, with their spans (also between
+    /// blocks, e.g. on an empty list item). The default knows only the kinds of the leaf at
+    /// `at` and reports the leaf's span for each.
+    fn containers_at(&self, at: usize) -> Vec<ContainerAt> {
+        self.leaf(at).map_or_else(Vec::new, |l| {
+            l.containers
+                .iter()
+                .map(|k| ContainerAt {
+                    kind: k.clone(),
+                    span: l.span,
+                })
+                .collect()
+        })
     }
     /// The neutral inline tree of `leaf`, offsets relative to its first content byte.
     fn inlines(&self, leaf: &LeafView) -> RichInline {

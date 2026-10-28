@@ -92,6 +92,28 @@ pub struct LeafView {
     pub hinted: bool,
 }
 
+impl LeafView {
+    /// From the first content byte to the end of the last content line (`span.start..` for a
+    /// leaf without lines).
+    pub fn content(&self) -> Span {
+        match (self.lines.first(), self.lines.last()) {
+            (Some(f), Some(l)) => Span::new(f.start, l.end.max(f.start)),
+            _ => Span::new(self.span.start, self.span.start),
+        }
+    }
+    /// The leaf's own syntax before its content (ATX `## `); it can end after the span (the
+    /// space of an empty heading `## `).
+    pub fn leading_syntax(&self) -> Span {
+        Span::new(self.span.start, self.content().start.max(self.span.start))
+    }
+    /// The leaf's own syntax after its last content line, inside its span (a setext underline
+    /// line, an ATX closing sequence).
+    pub fn trailing_syntax(&self) -> Span {
+        let last = self.lines.last().map_or(self.span.end, |x| x.end);
+        Span::new(last.min(self.span.end), self.span.end)
+    }
+}
+
 /// Kind of an inline node.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum InlineKind {

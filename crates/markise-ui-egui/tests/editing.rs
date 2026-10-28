@@ -974,6 +974,8 @@ enum St {
     C(Key),
     S(Key),
     T(&'static str),
+    /// Cmd/Ctrl + Alt + Shift + key
+    Cas(Key),
 }
 
 /// `src` with `‸` (caret) or `⟦`…`⟧` (anchor…focus): the plain text and the selection.
@@ -1024,6 +1026,10 @@ fn run_marked(name: &str, src: &str, steps: &[St]) -> String {
                 h.step();
             }
             St::T(s) => type_keys(&mut h, s),
+            St::Cas(k) => {
+                h.key_press_modifiers(cmd().plus(Modifiers::ALT).plus(Modifiers::SHIFT), k);
+                h.step();
+            }
         }
     }
     h.step();
@@ -1247,4 +1253,58 @@ fn joins_stop_at_the_neighbouring_block_issue_16() {
         ),
         "---\ntitle: x\n---\n\n‸Title\n"
     );
+}
+
+#[test]
+fn cross_block_risks_block_ownership() {
+    // ADR 0011: joins, deletions and virtual-paragraph placement take the neighbouring block
+    // from the parsed structure and stop at a block without text (an empty quote `>`, an empty
+    // list item). Each case failed on main before the ownership query (Codex review of #18).
+    use St::*;
+    let cases: &[(&str, &str, &[St], &str)] = &[
+        // hinted-heading Enter (C43 on `## ` typed as paragraph text)
+        (
+            "hinted-quote",
+            "Before\n\n>\n\n‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "Before\n\n>\n\n## \n\nx‸\n",
+        ),
+        (
+            "hinted-after-quote",
+            "> q\n\n‸y\n",
+            &[T("## "), K(Key::Delete), K(Key::Enter), T("x")],
+            "> q\n\nx‸\n",
+        ),
+        // list-item paragraph join
+        (
+            "item-join",
+            "- a\n\n  >\n\n  ‸b\n",
+            &[K(Key::Backspace)],
+            "- a\n\n  >\n\n  ‸b\n",
+        ),
+        ("item-join-plain", "- a\n\n  ‸b\n", &[K(Key::Backspace)], "- a‸b\n"),
+        // final-block deletion (Delete Paragraph / Block)
+        ("final-block", "x\n\n>\n\nab‸c\n", &[Cas(Key::P)], "x\n\n>‸\n"),
+        // virtual-caret placement
+        (
+            "virtual-above",
+            "Before\n\n>\n\n## ‸Title\n",
+            &[K(Key::Enter)],
+            "Before\n\n>\n\n## ‸Title\n",
+        ),
+        (
+            "virtual-first-item",
+            "> q\n\n- ‸\n- b\n",
+            &[K(Key::Enter), T("x")],
+            "> q\n\nx‸\n\n- b\n",
+        ),
+    ];
+    let mut fails = Vec::new();
+    for (name, src, steps, want) in cases {
+        let got = run_marked(&format!("own-{name}"), src, steps);
+        if got != *want {
+            fails.push(format!("{name}: {src:?} -> {got:?}, want {want:?}"));
+        }
+    }
+    assert!(fails.is_empty(), "{}", fails.join("\n"));
 }

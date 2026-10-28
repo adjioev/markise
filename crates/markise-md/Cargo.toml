@@ -24,3 +24,7 @@ markise-corpus.workspace = true
 [[bench]]
 name = "parse"
 harness = false
+
+[[bench]]
+name = "owner"
+harness = false
