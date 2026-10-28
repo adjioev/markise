@@ -2146,7 +2146,9 @@ impl MarkiseApp {
                         self.source_input_ms.push(ms);
                         self.timing.log(&format!("keystroke handle+layout+paint={ms:.2}ms (source)"));
                     }
-                    if let Some((start, bytes)) = self.timing.open_started.take() {
+                    if self.timing.open_started.as_ref().is_some_and(|o| o.2 == d.path)
+                        && let Some((start, bytes, _)) = self.timing.open_started.take()
+                    {
                         self.timing.log(&format!(
                             "first-document-frame bytes={bytes} open_to_frame={:.1}ms laid_out={} rss_mb={} (source)",
                             start.elapsed().as_secs_f64() * 1e3,
