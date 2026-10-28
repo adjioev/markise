@@ -1,8 +1,9 @@
 //! Formatting toolbar (spec 04 §3.2): controls run the registry commands exactly like the
 //! menus (saved bytes), reflect the selection, are disabled where the command is unavailable,
-//! never take the text focus, drop-downs are keyboard-navigable, View → Toolbar is persisted,
-//! narrow windows collapse groups into More, and an idle window with the bar stays quiet
-//! (NFR-10).
+//! never take the text focus, drop-downs are keyboard-navigable, View → Toolbar (on by default)
+//! and View → Toolbar Position are persisted, the bar never covers the document at the top or
+//! the bottom, narrow windows collapse groups into More, and an idle window with the bar stays
+//! quiet (NFR-10).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use egui::{Event, Key, Modifiers, RawInput, ViewportId};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use markise_doc::{DocPos, Selection};
+use markise_engine::settings::ToolbarPosition;
 use markise_ui_egui::menu::{Check, MenuAction};
 use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp, ViewMode};
 
@@ -255,8 +257,10 @@ fn narrow_window_collapses_groups_into_more() {
     assert_eq!(save(&mut h, &p), "> Hello world\n");
 }
 
+/// Owner decision 2026-10-28 (spec 04 §3.2, spec 05): on for fresh settings; turning it off
+/// is persisted and kept on the next start.
 #[test]
-fn view_toolbar_toggle_is_persisted_and_off_by_default() {
+fn view_toolbar_toggle_is_persisted_and_on_by_default() {
     let dir = tmpdir("persist");
     let p = dir.join("t.md");
     std::fs::write(&p, "Hello\n").unwrap();
@@ -266,32 +270,198 @@ fn view_toolbar_toggle_is_persisted_and_off_by_default() {
     {
         let mut h = harness_with(vec![p.clone()], ConfigDir::Dir(cfg.clone()), 1000.0);
         wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
-        assert!(!h.state().show_toolbar(), "spec 05: off by default");
-        assert!(h.query_by_label("Strong").is_none());
+        h.step();
+        assert!(h.state().show_toolbar(), "spec 05: on by default");
+        assert!(h.query_by_label("Strong").is_some());
         let item = h.state().menu_model().item("view.toolbar").cloned().unwrap();
-        assert_eq!(item.check, Check::Toggle(false));
+        assert_eq!(item.check, Check::Toggle(true));
         let ctx = h.ctx.clone();
         assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("view.toolbar")));
         h.step();
         h.step();
-        assert!(h.state().show_toolbar());
-        assert!(h.query_by_label("Strong").is_some());
+        assert!(!h.state().show_toolbar());
+        assert!(h.query_by_label("Strong").is_none());
         assert_eq!(
             h.state().menu_model().item("view.toolbar").unwrap().check,
-            Check::Toggle(true)
+            Check::Toggle(false)
         );
         wait_until(&mut h, "settings written", |_| {
-            std::fs::read_to_string(&settings).is_ok_and(|s| s.contains("\"showToolbar\": true"))
+            std::fs::read_to_string(&settings).is_ok_and(|s| s.contains("\"showToolbar\": false"))
+        });
+    }
+    // the saved choice wins over the new default
+    let mut h = harness_with(vec![p], ConfigDir::Dir(cfg), 1000.0);
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    wait_until(&mut h, "settings applied", |a| !a.show_toolbar());
+}
+
+/// View → Toolbar Position: a Top / Bottom radio pair in the menu model (so native menus show
+/// the check marks), default Top, persisted as `toolbarPosition`.
+#[test]
+fn toolbar_position_is_a_persisted_radio_defaulting_to_top() {
+    let dir = tmpdir("position");
+    let p = dir.join("t.md");
+    std::fs::write(&p, "Hello\n").unwrap();
+    let cfg = dir.join("config");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let settings = cfg.join("markise").join("settings.json");
+    let checks = |h: &Harness<'static, MarkiseApp>| {
+        let m = h.state().menu_model();
+        (
+            m.item("view.toolbarTop").unwrap().check,
+            m.item("view.toolbarBottom").unwrap().check,
+        )
+    };
+    {
+        let mut h = harness_with(vec![p.clone()], ConfigDir::Dir(cfg.clone()), 1000.0);
+        wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+        assert_eq!(h.state().toolbar_position(), ToolbarPosition::Top);
+        assert_eq!(checks(&h), (Check::Radio(true), Check::Radio(false)));
+        let top_bar = h.state().toolbar().bar_rect().unwrap();
+        let ctx = h.ctx.clone();
+        assert!(
+            h.state_mut()
+                .menu_action(&ctx, &MenuAction::Command("view.toolbarBottom"))
+        );
+        h.step();
+        h.step();
+        assert_eq!(h.state().toolbar_position(), ToolbarPosition::Bottom);
+        assert_eq!(checks(&h), (Check::Radio(false), Check::Radio(true)));
+        let bar = h.state().toolbar().bar_rect().unwrap();
+        assert!(
+            bar.top() > 500.0 && bar.top() > top_bar.bottom(),
+            "moved to the bottom: {bar:?}"
+        );
+        assert!((bar.center().x - top_bar.center().x).abs() < 0.5, "still centred");
+        wait_until(&mut h, "settings written", |_| {
+            std::fs::read_to_string(&settings).is_ok_and(|s| s.contains("\"toolbarPosition\": \"bottom\""))
         });
     }
     let mut h = harness_with(vec![p], ConfigDir::Dir(cfg), 1000.0);
     wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
-    wait_until(&mut h, "settings applied", |a| a.show_toolbar());
+    wait_until(&mut h, "settings applied", |a| {
+        a.toolbar_position() == ToolbarPosition::Bottom
+    });
+    assert_eq!(checks(&h), (Check::Radio(false), Check::Radio(true)));
+}
+
+/// Bottom position: the document area ends above the bar (Rendered and Side by Side's rendered
+/// pane), so scrolled to the end the last line is fully visible, not under the bar.
+#[test]
+fn bottom_bar_never_covers_the_document() {
+    let src: String = (1..=80).map(|i| format!("Line {i} of the document.\n\n")).collect();
+    let (mut h, _p) = open("cover-bottom", &src, 1000.0);
+    h.state_mut().set_toolbar_position(ToolbarPosition::Bottom);
+    for _ in 0..3 {
+        h.step();
+    }
+    let check = |h: &mut Harness<'static, MarkiseApp>, what: &str| {
+        let bar = h.state().toolbar().bar_rect().unwrap();
+        let surface = h.state_mut().viewer().unwrap().surface_rect().unwrap();
+        assert!(
+            surface.bottom() <= bar.top(),
+            "{what}: surface {surface:?} above bar {bar:?}"
+        );
+        assert!(
+            surface.x_range().intersects(bar.x_range()),
+            "{what}: bar under this surface"
+        );
+        assert!(bar.bottom() <= 700.0, "{what}: bar inside the window");
+        (bar, surface)
+    };
+    let (_, surface) = check(&mut h, "rendered");
+    assert!(surface.top() < 60.0, "no strip kept at the top: {surface:?}");
+    // the caret to the end of the document: the view scrolls so the last line shows
+    if cfg!(target_os = "macos") {
+        h.key_press_modifiers(cmd(), Key::ArrowDown);
+    } else {
+        h.key_press_modifiers(cmd(), Key::End);
+    }
+    for _ in 0..4 {
+        h.step();
+    }
+    let (bar, surface) = check(&mut h, "rendered, at the end");
+    let last = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .item_screen_rect(src.len() - 5)
+        .expect("last line laid out");
+    assert!(
+        last.bottom() <= surface.bottom() + 0.5 && last.bottom() <= bar.top(),
+        "last line {last:?} visible above the bar {bar:?}"
+    );
+    assert!(last.top() >= surface.top(), "scrolled to the end");
+    h.state_mut().set_view_mode(ViewMode::SideBySide);
+    for _ in 0..4 {
+        h.step();
+    }
+    let (_, surface) = check(&mut h, "side by side");
+    assert!(surface.left() > 400.0, "the rendered pane");
+}
+
+/// Bottom position: the drop-downs open upward and stay inside the window, also in a short
+/// window where the More list has to scroll.
+#[test]
+fn bottom_bar_drop_downs_open_upward_inside_the_window() {
+    let (mut h, _p) = open("upward", "Hello world\n", 1000.0);
+    h.state_mut().set_toolbar_position(ToolbarPosition::Bottom);
+    for _ in 0..3 {
+        h.step();
+    }
+    let bar = h.state().toolbar().bar_rect().unwrap();
+    click(&mut h, "Block Style");
+    let popup = h.state().toolbar().popup_rect().unwrap();
+    assert!(popup.bottom() <= bar.top(), "above the bar: {popup:?} / {bar:?}");
+    assert!(popup.top() >= 0.0, "inside the window: {popup:?}");
+    assert!(h.get_by_label("Heading 1").rect().bottom() <= bar.top());
+    h.key_press(Key::Escape);
+    h.step();
+
+    let dir = tmpdir("upward-short");
+    let p = dir.join("t.md");
+    std::fs::write(&p, "Hello world\n").unwrap();
+    let app = MarkiseApp::new(AppOptions {
+        open: vec![p],
+        ..Default::default()
+    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(480.0, 300.0))
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), app);
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    h.state_mut().set_toolbar_position(ToolbarPosition::Bottom);
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.state().toolbar().collapsed_groups() >= 2, "narrow collapse unchanged");
+    let bar = h.state().toolbar().bar_rect().unwrap();
+    click(&mut h, "More");
+    let popup = h.state().toolbar().popup_rect().unwrap();
+    assert!(popup.top() >= 0.0 && popup.bottom() <= bar.top(), "{popup:?} / {bar:?}");
+    h.key_press(Key::End);
+    for _ in 0..3 {
+        h.step();
+    }
+    let last = h.get_by_label("Horizontal Line").rect();
+    assert!(
+        last.top() >= popup.top() - 0.5 && last.bottom() <= popup.bottom() + 0.5,
+        "last entry {last:?} visible in {popup:?}"
+    );
 }
 
 #[test]
 fn idle_window_with_toolbar_requests_no_repaint() {
-    let dir = tmpdir("idle");
+    idle_check("idle", ToolbarPosition::Top);
+}
+
+#[test]
+fn idle_window_with_bottom_toolbar_requests_no_repaint() {
+    idle_check("idle-bottom", ToolbarPosition::Bottom);
+}
+
+fn idle_check(name: &str, position: ToolbarPosition) {
+    let dir = tmpdir(name);
     let p = dir.join("t.md");
     std::fs::write(&p, "# Title\n\nSome **text** here.\n").unwrap();
     let ctx = egui::Context::default();
@@ -300,6 +470,7 @@ fn idle_window_with_toolbar_requests_no_repaint() {
         ..Default::default()
     });
     app.set_show_toolbar(true);
+    app.set_toolbar_position(position);
     let frame = |app: &mut MarkiseApp| {
         let input = RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 780.0))),

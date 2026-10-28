@@ -283,7 +283,7 @@ const fn mac_only(mac: &'static str) -> DefaultKey {
 /// Commands performed by the application itself (window, files, view and theme state) that
 /// the engine registry does not hold. Same descriptor type as the registry, so labels and
 /// per-platform chords have one source (spec 02 §15).
-pub static APP_COMMANDS: [CommandDescriptor; 25] = [
+pub static APP_COMMANDS: [CommandDescriptor; 27] = [
     app(
         "file.openFolder",
         "Open Folder…",
@@ -305,6 +305,9 @@ pub static APP_COMMANDS: [CommandDescriptor; 25] = [
     // spec 04 §3.3: ⌃⌘/ on macOS, Ctrl+Alt+/ elsewhere (Ctrl+/ is Source Code Mode)
     app("view.sideBySide", "Side by Side", &[both("Ctrl+Cmd+/", "Ctrl+Alt+/")]),
     app("view.toolbar", "Toolbar", &[]),
+    // View → Toolbar Position (spec 04 §3.2); the menu shows them as "Top" / "Bottom"
+    app("view.toolbarTop", "Toolbar at Top", &[]),
+    app("view.toolbarBottom", "Toolbar at Bottom", &[]),
     app("view.highlightCode", "Highlight Code", &[]),
     app("view.diagrams", "Diagrams", &[]),
     app("view.fullScreen", "Toggle Full Screen", &[both("Ctrl+Cmd+F", "F11")]),
