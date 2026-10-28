@@ -752,3 +752,53 @@ fn typing_works_right_after_cancelling_an_in_app_question() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn inline_rename_never_steals_the_focus_back_from_another_widget() {
+    // Codex review round 4 of PR #38: scroll the row away, Tab to another widget, scroll back
+    let d = tmpdir("rename-tab-away");
+    for i in 0..80 {
+        std::fs::write(d.join(format!("n{i:02}.md")), "x\n").unwrap();
+    }
+    let mut h = harness_with(AppOptions {
+        open: vec![d.clone()],
+        ..Default::default()
+    });
+    h.step();
+    h.state_mut().show_files_tab(true);
+    rows_contain(&mut h, "n79.md");
+    let ctx = h.ctx.clone();
+    h.state_mut().tree_action(&ctx, TreeAction::Rename(d.join("n00.md")));
+    field_focused(&mut h);
+    type_text(&mut h, "tabbed");
+    let wheel = |h: &mut H, dy: f32| {
+        h.hover_at(egui::pos2(120.0, 300.0));
+        for _ in 0..10 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, dy),
+                modifiers: Default::default(),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            });
+            h.step();
+        }
+        h.run_steps(2);
+    };
+    wheel(&mut h, -400.0);
+    assert!(h.state().rename_state().is_some(), "scrolling keeps editing");
+    let field = markise_ui_egui::sidebar::rename_field_id();
+    // another widget takes the focus
+    h.key_press(Key::Tab);
+    h.run_steps(2);
+    let other = h.ctx.memory(|m| m.focused());
+    assert!(
+        other.is_some_and(|f| f != field),
+        "Tab focused another widget: {other:?}"
+    );
+    assert!(h.state().rename_state().is_none(), "the rename is resolved");
+    assert!(d.join("tabbed.md").is_file() && !d.join("n00.md").exists(), "committed");
+    wheel(&mut h, 400.0);
+    assert_eq!(h.ctx.memory(|m| m.focused()), other, "the focus stays where it went");
+    let _ = std::fs::remove_dir_all(&d);
+}

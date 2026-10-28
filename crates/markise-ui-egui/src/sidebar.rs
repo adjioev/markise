@@ -731,7 +731,10 @@ impl SideLook {
         }
         if edit.refocus {
             edit.refocus = false;
-            out.response.request_focus();
+            // never take the focus from another widget
+            if ui.memory(|m| m.focused()).is_none_or(|f| f == id) {
+                out.response.request_focus();
+            }
         }
         edit.drawn = true;
         if out.response.has_focus() {

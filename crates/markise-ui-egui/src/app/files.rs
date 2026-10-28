@@ -326,10 +326,19 @@ impl MarkiseApp {
         let field = r.drawn.then(|| ctx.read_response(id).map(|f| f.rect)).flatten();
         if presses.iter().any(|p| !field.is_some_and(|f| f.contains(*p))) {
             self.end_rename(EditEnd::CommitOrCancel);
-        } else if !focused && let Some(r) = self.files.rename.as_mut() {
-            // the focus went with the row (scrolled out of view): the field takes it back
-            // when it is drawn again
-            r.refocus = true;
+        } else if !focused {
+            match ctx.memory(|m| m.focused()) {
+                // another widget took the focus (Tab while the row was scrolled away): a
+                // focus loss, like Tab in the row
+                Some(other) if other != id => self.end_rename(EditEnd::CommitOrCancel),
+                // the focus went with the row (scrolled out of view): the field takes it
+                // back when it is drawn again, unless something else has it by then
+                _ => {
+                    if let Some(r) = self.files.rename.as_mut() {
+                        r.refocus = true;
+                    }
+                }
+            }
         }
     }
 
