@@ -1002,7 +1002,6 @@ fn e04_home_end_in_list_item_and_quote() {
 
 // Expected (C53): caret on a virtual paragraph after the last block; typing appends a new paragraph. Actual: the caret stays.
 #[test]
-#[ignore = "bug: Down at the last block does not open the virtual paragraph (C53)"]
 fn e05_down_at_last_block_virtual_paragraph() {
     // C53
     let mut e = Ed::open("e05", "a\n");
@@ -1016,7 +1015,6 @@ fn e05_down_at_last_block_virtual_paragraph() {
 
 // Expected (C53): caret on the virtual paragraph (virt = 1).
 #[test]
-#[ignore = "bug: Right at the document end does not open the virtual paragraph (C53)"]
 fn e06_right_at_document_end_virtual_paragraph() {
     // C53
     let mut e = Ed::open("e06", "a\n");
@@ -1026,7 +1024,6 @@ fn e06_right_at_document_end_virtual_paragraph() {
 
 // Expected (C53 example): virtual paragraph below the table; `x` gives `...\n\nx`. Actual: typed into the cell.
 #[test]
-#[ignore = "bug: Down from the last table row does not escape the table (C53)"]
 fn e07_down_from_last_table_row_virtual_paragraph() {
     // C53 example
     let mut e = Ed::open("e07", "| a | b |\n|---|---|\n| x | y |\n");
@@ -1036,7 +1033,6 @@ fn e07_down_from_last_table_row_virtual_paragraph() {
 
 // Expected (C53, §5.4): virtual paragraph after the block. Actual: typed into the code.
 #[test]
-#[ignore = "bug: Down from the last code line does not escape the code block (C53)"]
 fn e08_down_from_last_code_line_virtual_paragraph() {
     let mut e = Ed::open("e08", "```\ncode\n```\n");
     e.at(6).key(Key::ArrowDown).typ("x");
@@ -1103,7 +1099,6 @@ fn e14_left_right_step_over_emoji() {
 
 // Expected (C53): two Downs from the last paragraph end on its virtual paragraph.
 #[test]
-#[ignore = "bug: Down at the last block does not open the virtual paragraph (C53)"]
 fn e15_up_from_first_line_and_down_from_virtual_stay_valid() {
     let mut e = Ed::open("e15", "a\n\nb\n");
     e.at(0).key(Key::ArrowUp);

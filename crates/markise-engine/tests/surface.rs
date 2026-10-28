@@ -839,3 +839,33 @@ fn line_end_includes_trailing_whitespace_from_the_file() {
         assert_eq!(t.caret().offset, want, "End in {src:?}");
     }
 }
+
+/// C53: Down on the last visual row / Right at the very end of the last block moves to the
+/// virtual paragraph after it (no source change), also from a table or a code block; Up
+/// returns (#20 e05–e08, e15).
+#[test]
+fn c53_arrows_past_the_last_block_reach_the_virtual_paragraph() {
+    for (src, at, key) in [
+        ("a\n", 1, "caret.down"),
+        ("a\n", 0, "caret.down"),
+        ("a\n", 1, "caret.right"),
+        ("a\n\nb\n", 3, "caret.down"),
+        ("| a | b |\n|---|---|\n| x | y |\n", 22, "caret.down"),
+        ("```\ncode\n```\n", 6, "caret.down"),
+    ] {
+        let mut t = T::new(src);
+        t.ed.edit(|s| s.set_selection(Selection::caret(at)));
+        t.frame();
+        t.run(key);
+        assert_eq!(t.caret().virt, 1, "{key} in {src:?} at {at}: {:?}", t.caret());
+        assert_eq!(t.text(), src);
+        t.run(key);
+        assert_eq!(t.caret().virt, 1, "a second {key} stays");
+    }
+    let mut t = T::new("a\n");
+    t.ed.edit(|s| s.set_selection(Selection::caret(1)));
+    t.frame();
+    t.run("caret.down");
+    t.run("caret.up");
+    assert_eq!((t.caret().offset, t.caret().virt), (1, 0));
+}
