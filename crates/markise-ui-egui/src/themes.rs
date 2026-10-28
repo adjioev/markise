@@ -169,6 +169,8 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                         let watcher = user_dir.as_ref().and_then(|d| {
                             let mut w = FileWatcher::new(wake.clone()).ok()?;
                             w.watch_themes(d);
+                            // registered in the background (never blocks this worker); once
+                            // in effect, the folder is reported as changed (catch-up)
                             Some(w)
                         });
                         Done::Watcher(watcher)
@@ -831,11 +833,12 @@ impl ThemeManager {
         for k in stale {
             self.invalidate(&k);
         }
-        // a theme file added, removed or renamed at the top level changes the catalog
+        // a theme file added, removed or renamed at the top level changes the catalog (the
+        // folder itself: the watch restarted, anything may have changed)
         let top_level = self
             .user_dir
             .as_ref()
-            .is_some_and(|d| path.parent() == Some(d.as_path()));
+            .is_some_and(|d| path.parent() == Some(d.as_path()) || path == d.as_path());
         if top_level && !self.discover_pending {
             self.discover_pending = true;
             self.send(Job::Discover);

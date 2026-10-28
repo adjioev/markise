@@ -209,10 +209,12 @@ impl MarkiseApp {
     }
 
     /// The document's file is now `path` (Save As, rename): watch it, resolve relative
-    /// references against it, show its folder in the sidebar.
-    pub(super) fn document_moved(&mut self, path: &Path) {
+    /// references against it, show its folder in the sidebar. `version`: the disk version the
+    /// document now corresponds to (what Save As wrote; for a rename the unchanged content),
+    /// the watcher's baseline for the new path (ADR 0010).
+    pub(super) fn document_moved(&mut self, path: &Path, version: Option<DiskVersion>) {
         if let Some(w) = self.watcher.as_mut() {
-            w.watch_file(path);
+            w.watch_file(path, version);
         }
         if let Some(d) = self.doc.as_mut() {
             d.viewer.ed.set_path(Some(path.to_path_buf()));
@@ -343,10 +345,12 @@ impl MarkiseApp {
             .and_then(|d| d.file())
             .and_then(|f| fsops::rebase(f, from, to));
         if let Some(p) = moved {
+            let mut version = None;
             if let Some(d) = self.doc.as_mut() {
                 d.path = p.clone();
+                version = d.disk; // a rename keeps the content
             }
-            self.document_moved(&p);
+            self.document_moved(&p, version);
         }
     }
 

@@ -1880,7 +1880,11 @@ fn l12_caret_after_external_reload_shrinks_document() {
     std::fs::write(&e.p, "ab\n").unwrap();
     let t = Instant::now();
     while e.text() != "ab\n" {
-        assert!(t.elapsed() < Duration::from_secs(10), "reload not picked up");
+        // the file watch is registered off the UI thread (ADR 0010) and this write lands
+        // right after the open: it is seen once the registration is in effect, which can take
+        // several seconds while the whole suite starts FSEvents streams in parallel (7-10 s
+        // measured on macOS)
+        assert!(t.elapsed() < Duration::from_secs(60), "reload not picked up");
         e.h.step();
         std::thread::sleep(Duration::from_millis(20));
     }

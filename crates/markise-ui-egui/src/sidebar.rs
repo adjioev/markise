@@ -179,6 +179,20 @@ impl FileTree {
         }
     }
 
+    /// Lists every known directory again (the folder watch restarted: changes made before it
+    /// took effect have no events).
+    pub fn invalidate_all(&mut self, wake: &Wake) {
+        let dirs: Vec<PathBuf> = self.dirs.keys().cloned().collect();
+        for d in dirs {
+            let st = self.dirs.get_mut(&d).expect("key exists");
+            if st.in_flight {
+                st.pending = true;
+            } else {
+                self.issue(&d, wake);
+            }
+        }
+    }
+
     /// Collects finished listings; returns `true` if any arrived.
     pub fn poll(&mut self, wake: &Wake) -> bool {
         let mut got = false;

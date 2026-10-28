@@ -340,13 +340,17 @@ enum Banner {
     },
 }
 
+/// Notice shown while the open file is missing on disk (C18).
+const DELETED_NOTICE: &str = "The file was deleted or moved on disk. Save to write it again.";
+
 /// Measurement log state (env-gated).
 struct Timing {
     enabled: bool,
     start: Instant,
     frames: u64,
     first_frame_logged: bool,
-    open_started: Option<(Instant, usize)>,
+    /// Click/command time, size and path of the open being measured.
+    open_started: Option<(Instant, usize, PathBuf)>,
     exit_after_idle: Option<f32>,
     idle_from: Option<(Instant, u64)>,
     idle_input_frames: u64,
@@ -689,6 +693,17 @@ impl MarkiseApp {
         self.doc.as_ref().is_some_and(|d| d.dirty())
     }
 
+    /// Blocks until the file watcher has applied every earlier request (tests only: never on
+    /// a real UI thread). `Err` names watches that are not in effect.
+    pub fn wait_for_watches(&self) -> Result<(), String> {
+        self.watcher.as_ref().map_or(Ok(()), |w| w.sync())
+    }
+
+    /// The open document's file was deleted on disk and not recreated (tests).
+    pub fn document_deleted(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| d.deleted)
+    }
+
     /// Text of the banner, if any (tests).
     pub fn banner_text(&self) -> Option<String> {
         self.banner.as_ref().map(|b| match b {
@@ -816,9 +831,10 @@ impl MarkiseApp {
                 }
             }
         }
-        if matches!(reason, LoadReason::Open | LoadReason::OpenDiscarding) {
+        if self.timing.enabled && matches!(reason, LoadReason::Open | LoadReason::OpenDiscarding) {
+            // (measurement only: no file access on the UI thread otherwise)
             let size = std::fs::metadata(&path).map(|m| m.len() as usize).unwrap_or(0);
-            self.timing.open_started = Some((Instant::now(), size));
+            self.timing.open_started = Some((Instant::now(), size, path.clone()));
             self.timing
                 .log(&format!("open-start path={} bytes={size}", path.display()));
         }
@@ -1021,8 +1037,13 @@ impl MarkiseApp {
         self.banner = loaded.lossy.then(|| {
             Banner::Info("The file is not valid UTF-8; it was decoded lossily and saving is disabled.".into())
         });
-        if !untitled && let Some(w) = self.watcher.as_mut() {
-            w.watch_file(&loaded.path);
+        if let Some(w) = self.watcher.as_mut() {
+            if untitled {
+                // a new document without a file: nothing on disk to watch
+                w.clear_file();
+            } else {
+                w.watch_file(&loaded.path, Some(loaded.version));
+            }
         }
         let format: Arc<dyn markise_doc::DocumentFormat> = Arc::new(MarkdownFormat {
             opts: self.parse.clone(),
@@ -1067,9 +1088,20 @@ impl MarkiseApp {
         if doc.file() != Some(loaded.path.as_path()) {
             return;
         }
+        // every version of the open file the UI reads is the watcher's new baseline, whatever
+        // is decided below (the same text, a conflict, a reload later): a later change from it
+        // must be reported, a return to an older version included
+        if let Some(w) = &self.watcher {
+            w.acknowledge(&doc.path, Some(loaded.version));
+        }
         if doc.disk.is_some_and(|d| d.same_content(&loaded.version)) {
-            doc.deleted = false;
-            return; // our own save, or a touch without a content change
+            // our own save, a touch without a content change, or the file is back after a
+            // deletion with the same content
+            if std::mem::take(&mut doc.deleted) && matches!(&self.banner, Some(Banner::Info(m)) if m == DELETED_NOTICE)
+            {
+                self.banner = None;
+            }
+            return;
         }
         if self.saving.is_some() {
             self.reload_pending = true; // decide after our save finished
@@ -1112,6 +1144,9 @@ impl MarkiseApp {
             d.document_changed();
         }
         doc.disk = Some(loaded.version);
+        if let Some(w) = &self.watcher {
+            w.acknowledge(&doc.path, Some(loaded.version));
+        }
         doc.lossy = loaded.lossy;
         doc.deleted = false;
         doc.saved_rev = doc.viewer.ed.session.revision().counter;
@@ -1146,9 +1181,12 @@ impl MarkiseApp {
                     {
                         // C18: keep the content, mark it; saving recreates the file.
                         doc.deleted = true;
-                        self.banner = Some(Banner::Info(
-                            "The file was deleted or moved on disk. Save to write it again.".into(),
-                        ));
+                        self.banner = Some(Banner::Info(DELETED_NOTICE.into()));
+                        // later catch-ups know it is gone: a recreation is then reported
+                        // even with the same content
+                        if let Some(w) = &self.watcher {
+                            w.acknowledge(&doc.path, None);
+                        }
                     }
                 }
                 WatchEvent::DirChanged(d) => {
@@ -1158,6 +1196,20 @@ impl MarkiseApp {
                 }
                 // live reload: re-import the affected theme, re-render (new fingerprint)
                 WatchEvent::ThemeChanged(p) => self.themes.file_changed(&p),
+                // the folder watch (re)started: what changed before it has no events
+                WatchEvent::FolderWatched(_) => {
+                    if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
+                        t.invalidate_all(w);
+                    }
+                }
+                WatchEvent::Error(e) => {
+                    self.timing.log(&format!("watch-error {e}"));
+                    if self.banner.is_none() {
+                        self.banner = Some(Banner::Info(format!(
+                            "Changes made by other programs may not be noticed: {e}"
+                        )));
+                    }
+                }
             }
         }
     }
@@ -1273,6 +1325,9 @@ impl MarkiseApp {
                         doc.lossy = false;
                     }
                     doc.disk = Some(out.version);
+                    if let Some(w) = &self.watcher {
+                        w.acknowledge(&doc.path, Some(out.version));
+                    }
                     doc.deleted = false;
                     if saved.rev >= doc.saved_rev {
                         doc.saved_rev = saved.rev;
@@ -1293,11 +1348,17 @@ impl MarkiseApp {
                         ))
                     });
                     if let Some(target) = s.target {
-                        self.document_moved(&target);
+                        // watched from now on, with what was just written as the baseline
+                        let written = self.doc.as_ref().and_then(|d| d.disk);
+                        self.document_moved(&target, written);
                     }
                     self.finish_then(s.then);
                 }
                 Err(SaveError::Conflict { found }) => {
+                    // what the save found on disk is what the UI has now seen
+                    if let Some(w) = &self.watcher {
+                        w.acknowledge(&doc.path, found);
+                    }
                     self.queued_save = None;
                     self.banner = Some(Banner::SaveConflict {
                         found,
@@ -1623,7 +1684,7 @@ impl MarkiseApp {
                 }
             }
             if let Some(w) = self.wake.clone() {
-                self.watcher = FileWatcher::new(w.clone()).ok();
+                self.watcher = FileWatcher::with_hooks(w.clone(), self.hooks.clone()).ok();
                 self.themes.start(w);
             }
             // first frame: wait briefly for the settings and the selected theme (no flash of
@@ -2240,7 +2301,9 @@ impl MarkiseApp {
                         self.source_input_ms.push(ms);
                         self.timing.log(&format!("keystroke handle+layout+paint={ms:.2}ms (source)"));
                     }
-                    if let Some((start, bytes)) = self.timing.open_started.take() {
+                    if self.timing.open_started.as_ref().is_some_and(|o| o.2 == d.path)
+                        && let Some((start, bytes, _)) = self.timing.open_started.take()
+                    {
                         self.timing.log(&format!(
                             "first-document-frame bytes={bytes} open_to_frame={:.1}ms laid_out={} rss_mb={} (source)",
                             start.elapsed().as_secs_f64() * 1e3,
@@ -2267,10 +2330,15 @@ impl MarkiseApp {
                             self.themes.request_fallback();
                             ctx.request_repaint();
                         }
+                        // the frame that shows the opened document (not the previous one, still
+                        // shown while the load runs)
+                        let opened_shown = self.timing.open_started.as_ref().is_some_and(|o| o.2 == d.path);
                         if let Some(link) = out.link {
                             self.open_link(ctx, &link);
                         }
-                        if let Some((start, bytes)) = self.timing.open_started.take() {
+                        if opened_shown
+                            && let Some((start, bytes, _)) = self.timing.open_started.take()
+                        {
                             self.timing.log(&format!(
                                 "first-document-frame bytes={bytes} open_to_frame={:.1}ms painted={} laid_out={} rss_mb={}",
                                 start.elapsed().as_secs_f64() * 1e3,
