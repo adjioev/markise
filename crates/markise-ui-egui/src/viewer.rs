@@ -196,11 +196,7 @@ impl DocViewer {
         join: bool,
     ) -> Result<(), markise_engine::editor::EditError> {
         self.ed.release();
-        // the source pane's selection follows the replacement's diff (live marks of the session)
-        let marks = self.ed.source.as_ref().map(|p| {
-            let s = p.sel.primary();
-            (self.ed.session.add_mark(s.anchor), self.ed.session.add_mark(s.focus))
-        });
+        // the source pane's selection follows the replacement's diff (its live marks)
         let r = self
             .ed
             .session
@@ -214,18 +210,10 @@ impl DocViewer {
         }
         // the source pane shows the new text; its selection is mapped through the diff and
         // snapped to caret positions
-        if let Some((a, f)) = marks {
-            let (pa, pf) = (self.ed.session.mark(a), self.ed.session.mark(f));
-            self.ed.session.remove_mark(a);
-            self.ed.session.remove_mark(f);
-            let text = self.ed.session.text();
-            if let Some(p) = self.ed.source.as_mut() {
-                p.view.rebuild(text);
-                let s = p.sel.primary();
-                let sel = Selection::single(pa.unwrap_or(s.anchor), pf.unwrap_or(s.focus));
-                p.sel = markise_engine::editor::source::snap_selection(text, &sel);
-            }
+        if let Some(p) = self.ed.source.as_mut() {
+            p.view.rebuild(self.ed.session.text());
         }
+        self.ed.source_load_selection();
         r
     }
 

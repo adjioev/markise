@@ -50,6 +50,13 @@ pub(crate) struct SourceSession {
 }
 
 impl EditorSession {
+    /// Moves live mark `id` to `pos` (it is then transformed through every change again).
+    pub fn set_mark(&mut self, id: super::MarkId, pos: DocPos) {
+        if let Some(m) = self.marks.get_mut(id.0) {
+            *m = Some(pos);
+        }
+    }
+
     /// Opens full Source mode's own history (ADR 0006 §4.3). No-op when one is open.
     pub fn begin_source_session(&mut self) {
         if self.source.is_some() {
@@ -225,7 +232,11 @@ impl CaretGeometry for SourceCaret<'_> {
 /// The source editor's state next to the session: its view and its own selection.
 pub struct SourcePane {
     pub view: SourceView,
+    /// The pane's selection. Also held as two live marks of the session (`marks`), so changes
+    /// made outside the pane (the rendered pane, Undo/Redo, a reload) move it through their
+    /// actual patches; write it through [`EditorView::source_store_selection`].
     pub sel: Selection,
+    marks: Option<(super::MarkId, super::MarkId)>,
     /// Spaces inserted by Tab and removed by Shift+Tab (the code indent unit, spec 02 §16).
     pub indent: usize,
 }
@@ -308,37 +319,6 @@ pub fn snap_selection(text: &str, sel: &Selection) -> Selection {
     out
 }
 
-/// A position mapped through one combined change (`EditSummary`: `changed` before the edit,
-/// `new_len` after it): before the change it stays, after it shifts, inside it moves to the
-/// end of the new text.
-fn map_through(pos: DocPos, e: &markise_doc::EditSummary) -> DocPos {
-    let o = pos.offset;
-    let offset = if o < e.changed.start || (o == e.changed.start && e.changed.is_empty() && e.new_len == 0) {
-        o
-    } else if o >= e.changed.end {
-        (o as isize + e.delta).max(0) as usize
-    } else {
-        e.changed.start + e.new_len
-    };
-    DocPos { offset, ..pos }
-}
-
-impl SourcePane {
-    /// Maps the pane's selection through a document change made elsewhere (the rendered pane,
-    /// undo from a menu) and snaps it to caret positions of the new `text`.
-    pub fn map_selection(&mut self, text: &str, e: &markise_doc::EditSummary) {
-        let p = self.sel.primary();
-        let mut s = Selection::single(map_through(p.anchor, e), map_through(p.focus, e));
-        s.goal_x = None;
-        self.sel = snap_selection(text, &s);
-    }
-
-    /// Clamps and snaps the selection to `text` (the document was replaced).
-    pub fn clamp_selection(&mut self, text: &str) {
-        self.sel = snap_selection(text, &self.sel);
-    }
-}
-
 impl EditorView {
     /// Opens the source pane (entering Source or Side by Side): a source view of the current
     /// text with the caret where the session's is (a selection collapses to its focus, spec 02
@@ -351,13 +331,53 @@ impl EditorView {
         self.source = Some(SourcePane {
             view,
             sel: Selection::caret_at(caret),
+            marks: None,
             indent: 4,
         });
+        self.source_store_selection();
     }
 
     /// Drops the source pane (back to the rendered view).
     pub fn close_source(&mut self) {
-        self.source = None;
+        if let Some((a, f)) = self.source.take().and_then(|p| p.marks) {
+            self.session.remove_mark(a);
+            self.session.remove_mark(f);
+        }
+    }
+
+    /// Writes the pane's selection (snapped to caret positions) into its live marks.
+    pub fn source_store_selection(&mut self) {
+        let text = self.session.text();
+        let Some(p) = self.source.as_mut() else { return };
+        p.sel = snap_selection(text, &p.sel);
+        let s = p.sel.primary();
+        match p.marks {
+            Some((a, f)) => {
+                self.session.set_mark(a, s.anchor);
+                self.session.set_mark(f, s.focus);
+            }
+            None => {
+                let a = self.session.add_mark(s.anchor);
+                let f = self.session.add_mark(s.focus);
+                p.marks = Some((a, f));
+            }
+        }
+    }
+
+    /// Reads the pane's selection back from its live marks after a document change (mapped
+    /// through the change's patches) and snaps it to caret positions.
+    pub fn source_load_selection(&mut self) {
+        let text = self.session.text();
+        let Some(p) = self.source.as_mut() else { return };
+        if let Some((a, f)) = p.marks {
+            let s = p.sel.primary();
+            let anchor = self.session.mark(a).unwrap_or(s.anchor);
+            let focus = self.session.mark(f).unwrap_or(s.focus);
+            if (anchor, focus) != (s.anchor, s.focus) {
+                p.sel = Selection::single(anchor, focus);
+            }
+        }
+        p.sel = snap_selection(text, &p.sel);
     }
 
     /// The source pane's caret rectangle in content coordinates.
@@ -432,16 +452,14 @@ impl EditorView {
             return;
         }
         pane.sel = sel.clone();
+        self.source_store_selection();
         self.session.set_selection(sel);
     }
 
     /// Hands the pane's selection to the session (before a session operation).
     fn source_selection_to_session(&mut self) {
         // guard: the pane's selection is always on caret positions of the current text
-        let text = self.session.text();
-        if let Some(pane) = self.source.as_mut() {
-            pane.sel = snap_selection(text, &pane.sel);
-        }
+        self.source_store_selection();
         if let Some(pane) = &self.source
             && self.session.selection() != &pane.sel
         {
@@ -451,11 +469,12 @@ impl EditorView {
     }
 
     /// Takes the session's selection after an operation.
-    fn source_selection_from_session(&mut self) {
+    pub fn source_selection_from_session(&mut self) {
         let text = self.session.text();
         if let Some(pane) = self.source.as_mut() {
             pane.sel = snap_selection(text, self.session.selection());
         }
+        self.source_store_selection();
     }
 
     /// Runs an edit on the session (view reference released, view synced afterwards).

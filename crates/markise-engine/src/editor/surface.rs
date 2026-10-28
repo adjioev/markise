@@ -135,18 +135,18 @@ impl EditorView {
                 self.view.apply_change(self.session.doc_arc().clone(), &ch);
                 if let Some(p) = self.source.as_mut() {
                     p.view.apply(self.session.doc().text(), &e);
-                    // a change made elsewhere (the rendered pane, a menu Undo) moves the
-                    // source selection with the text; source edits set it afterwards
-                    p.map_selection(self.session.doc().text(), &e);
                 }
+                // a change made elsewhere (the rendered pane, Undo/Redo) moves the source
+                // selection through its patches (live marks); source edits set it afterwards
+                self.source_load_selection();
             }
             DocChange::Replaced => {
                 let model = DocModel::build(self.session.doc(), self.path.as_deref());
                 self.view.set_model(self.session.doc_arc().clone(), model);
                 if let Some(p) = self.source.as_mut() {
                     p.view.rebuild(self.session.doc().text());
-                    p.clamp_selection(self.session.doc().text());
                 }
+                self.source_load_selection();
             }
         }
     }

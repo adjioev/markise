@@ -408,3 +408,51 @@ fn deletion_keeps_long_clusters_whole() {
     s.run("caret.left");
     assert_eq!(s.caret(), 0);
 }
+
+/// Review round 2 of PR #23: a multi-patch change made in the rendered pane (Strong adds two
+/// marker runs) maps the source selection through its actual patches — and so do Undo/Redo.
+#[test]
+fn multi_patch_rendered_changes_map_the_source_selection() {
+    let strong = |s: &mut S| {
+        let _ = s.ed.edit(|x| {
+            x.set_selection(Selection::range(2, 6));
+            let reg = markise_engine::editor::command::Registry::for_format(&MarkdownFormat::default());
+            reg.execute(x, "format.strong", &Params::new())
+        });
+    };
+    // caret before, inside and after the word
+    for (at, want, want_undo) in [(1, 1, 1), (4, 6, 4), (7, 11, 7)] {
+        let mut s = S::new("x abcd y\n");
+        s.set(at);
+        strong(&mut s);
+        assert_eq!(s.text(), "x **abcd** y\n");
+        assert_eq!(s.caret(), want, "caret {at} after Strong");
+        let _ = s.ed.edit(|x| x.undo());
+        assert_eq!(s.text(), "x abcd y\n");
+        assert_eq!(s.caret(), want_undo, "caret {at} after Undo");
+        let _ = s.ed.edit(|x| x.redo());
+        assert_eq!(s.caret(), want, "caret {at} after Redo");
+        s.check();
+    }
+    // a selection inside the word keeps its extent
+    let mut s = S::new("x abcd y\n");
+    s.ed.source_set_selection(Selection::range(3, 5));
+    strong(&mut s);
+    let r = s.ed.source.as_ref().unwrap().sel.primary().range();
+    assert_eq!(&s.text()[r], "bc", "the selection follows its text");
+}
+
+/// Review round 2 of PR #23: regional-indicator flags (odd and even runs) and ZWJ sequences in
+/// the source pane.
+#[test]
+fn source_deletion_keeps_flags_and_zwj_sequences_whole() {
+    for (c, n) in [("🇦🇺", 17), ("🇦🇺", 4), ("👩\u{200d}👩\u{200d}👧\u{200d}👦", 9)] {
+        let run = c.repeat(n);
+        let mut s = S::new(&format!("{run}\n"));
+        s.set(run.len());
+        s.run("edit.deleteBackward");
+        assert_eq!(s.text(), format!("{}\n", c.repeat(n - 1)), "{c:?} x{n}");
+        s.run("caret.left");
+        assert_eq!(s.caret(), (n - 2) * c.len());
+    }
+}

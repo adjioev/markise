@@ -1467,9 +1467,11 @@ impl SourceView {
 
 // ---------------------------------------------------------------------- text-based moves
 
-/// The previous grapheme boundary before `at` (a CRLF pair is one grapheme). The segmentation
-/// context grows until the boundary found is a real one (never inside a cluster, however many
-/// combining marks it has); a line break always ends a cluster.
+/// The previous grapheme boundary before `at` (a CRLF pair is one grapheme). Segmentation
+/// starts at a position that is certainly a boundary — between two ASCII characters, or the
+/// line start — so context-dependent rules (regional-indicator pairs, ZWJ sequences, long runs
+/// of combining marks) see everything they need; the window grows (×4) until such a position is
+/// found. A line break always ends a cluster. Shared by the source and the rendered editor.
 pub fn prev_grapheme(t: &str, at: usize) -> usize {
     let at = floor_char(t, at.min(t.len()));
     if at == 0 {
@@ -1482,23 +1484,26 @@ pub fn prev_grapheme(t: &str, at: usize) -> usize {
         return at - 1;
     }
     let line_start = t[..at].rfind('\n').map_or(0, |k| k + 1);
-    let mut k = 32;
-    loop {
-        let from = t[line_start..at]
-            .char_indices()
-            .rev()
-            .nth(k)
-            .map_or(line_start, |(i, _)| line_start + i);
-        let g = t[from..at]
-            .grapheme_indices(true)
-            .next_back()
-            .map_or(from, |(i, _)| from + i);
-        // a boundary at the window start may be an artefact of the window: widen it
-        if g > from || from == line_start {
-            return g;
+    let b = t.as_bytes();
+    let mut k = 64usize;
+    let from = loop {
+        let lo = at.saturating_sub(k).max(line_start);
+        if lo == line_start {
+            break line_start;
         }
-        k *= 4;
-    }
+        // a boundary for sure: between two ASCII characters (no CR involved)
+        let safe = (lo + 1..at)
+            .rev()
+            .find(|&p| b[p - 1].is_ascii() && b[p].is_ascii() && b[p - 1] != b'\r' && b[p] != b'\r');
+        if let Some(p) = safe {
+            break p;
+        }
+        k = k.saturating_mul(4);
+    };
+    t[from..at]
+        .grapheme_indices(true)
+        .next_back()
+        .map_or(from, |(i, _)| from + i)
 }
 
 /// The next grapheme boundary after `at` (see [`prev_grapheme`]).
@@ -1802,6 +1807,27 @@ mod tests {
         assert_eq!(next_grapheme(&long, 0), long.len() - 1);
         assert_eq!(prev_grapheme(&long, long.len() - 1), 0);
         assert_eq!(prev_grapheme(&long, long.len()), long.len() - 1);
+        // regional-indicator pairs need the context before them (review round 2 of PR #23)
+        for n in [1usize, 2, 17, 40] {
+            let flags = "🇦🇺".repeat(n);
+            let mut at = flags.len();
+            for _ in 0..n {
+                let p = prev_grapheme(&flags, at);
+                assert_eq!(at - p, 8, "{n} flags: one flag back from {at}");
+                at = p;
+            }
+            assert_eq!(at, 0);
+            assert_eq!(next_grapheme(&flags, 0), 8);
+        }
+        // an odd run: the last indicator stands alone
+        let odd = format!("x{}", "🇦".repeat(5));
+        assert_eq!(prev_grapheme(&odd, odd.len()), odd.len() - 4);
+        assert_eq!(prev_grapheme(&odd, odd.len() - 4), odd.len() - 12);
+        // ZWJ sequences stay whole
+        let fam = "👩\u{200d}👩\u{200d}👧\u{200d}👦";
+        let zwj = format!("a{}{fam}", fam.repeat(20));
+        assert_eq!(prev_grapheme(&zwj, zwj.len()), zwj.len() - fam.len());
+        assert_eq!(next_grapheme(&zwj, 1), 1 + fam.len());
         assert_eq!(snap_offset("a\r\nb", 2), 1, "not inside CRLF");
         assert_eq!(snap_offset("éb", 1), 0, "a char boundary");
     }

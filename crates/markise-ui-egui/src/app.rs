@@ -632,9 +632,7 @@ impl MarkiseApp {
             .session
             .source_edit("Typing", ps, Some(markise_doc::Selection::caret(caret)));
         ed.sync();
-        if let Some(p) = ed.source.as_mut() {
-            p.sel = ed.session.selection().clone();
-        }
+        ed.source_selection_from_session();
     }
 
     /// The authoritative text of the document.
