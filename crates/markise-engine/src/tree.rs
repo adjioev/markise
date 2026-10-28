@@ -78,6 +78,19 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
     }
 }
 
+/// Whether a directory entry is a folder, without opening the entry itself when its type is
+/// known from the listing (on Windows an open handle, even a momentary one for metadata,
+/// makes a concurrent save's rename over that file fail); only symbolic links are followed
+/// with a metadata call. `None`: the entry vanished.
+pub fn entry_is_dir(e: &std::fs::DirEntry) -> Option<bool> {
+    let t = e.file_type().ok()?;
+    if t.is_symlink() {
+        std::fs::metadata(e.path()).ok().map(|m| m.is_dir())
+    } else {
+        Some(t.is_dir())
+    }
+}
+
 /// Lists one directory: sub-folders and Markdown/text files, hidden entries skipped.
 pub fn list_dir(dir: &Path) -> std::io::Result<Vec<Entry>> {
     let mut out = Vec::new();
@@ -88,8 +101,7 @@ pub fn list_dir(dir: &Path) -> std::io::Result<Vec<Entry>> {
             continue;
         }
         let path = e.path();
-        // follow symlinks for the kind
-        let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+        let is_dir = entry_is_dir(&e).unwrap_or(false);
         if is_dir || is_markdown(&path) {
             out.push(Entry { name, path, is_dir });
         }

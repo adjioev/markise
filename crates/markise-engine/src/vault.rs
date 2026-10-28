@@ -1143,11 +1143,10 @@ impl ScanState {
                 continue;
             }
             let rel = if dir.is_empty() { name } else { format!("{dir}/{name}") };
-            // follow symlinks for the kind
-            match std::fs::metadata(e.path()) {
-                Ok(m) if m.is_dir() => dirs.push(rel),
-                Ok(_) => files.push(rel),
-                Err(_) => {}
+            match crate::tree::entry_is_dir(&e) {
+                Some(true) => dirs.push(rel),
+                Some(false) => files.push(rel),
+                None => {}
             }
         }
         Some((files, dirs))
