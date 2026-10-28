@@ -752,6 +752,15 @@ impl Document {
             return Ok(Plan::default());
         }
         let (x, o) = containers[containers.len() - 1 - levels];
+        // the fresh body paragraph of a callout that has only its tag (spec 02 §2.1): Enter
+        // keeps the caret there instead of leaving an empty callout behind
+        if levels == 0
+            && matches!(x.kind, BlockKind::BlockQuote { alert: Some(_) })
+            && x.children.len() == 1
+            && x.children[0].span.end + o == gap
+        {
+            return Ok(Plan::default());
+        }
         let step = if matches!(x.kind, BlockKind::ListItem { .. }) {
             2
         } else {

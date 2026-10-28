@@ -260,3 +260,41 @@ fn c44_shift_enter_in_headings() {
     script("a‸ - b\n===", &[("edit.softBreak", "a<br/>‸ - b\n===", "h1")]);
     script("a‸ ===\n---", &[("edit.softBreak", "a<br/>‸ ===\n---", "h2")]);
 }
+
+/// Typed one key at a time with auto-pairing: the box / tag closed by the auto-paired `]`
+/// stays literal (the caret on a stop) until the trigger is complete (§2.1, §4.2; #20 h05,
+/// h11, h13).
+#[test]
+fn auto_paired_bracket_does_not_convert_under_the_caret() {
+    let keys = |s: &str| -> Vec<String> { s.chars().map(|c| format!("type:{c}")).collect() };
+    for (src, typed, want, tree) in [
+        ("‸", "- [ ] buy", "- [ ] buy‸", "li[ ]"),
+        ("- ‸\n", "[ ] go", "- [ ] go‸\n", "li[ ]"),
+        ("‸", "- [x] ", "- [x] ‸", "li[x]"),
+    ] {
+        let mut t = T::at(src);
+        for k in keys(typed) {
+            step(&mut t, &k);
+            assert!(t.selection_on_stops(), "after {k}: {}", t.shown());
+            t.check_model();
+        }
+        assert_eq!(t.shown(), want);
+        assert!(t.ed.session.doc().debug_tree().contains(tree));
+    }
+    let mut t = T::at("‸");
+    for k in keys("> [!NOTE") {
+        step(&mut t, &k);
+        assert!(t.selection_on_stops(), "after {k}: {}", t.shown());
+    }
+    assert_eq!(t.shown(), "> [!NOTE‸]");
+    step(&mut t, "type:]");
+    assert_eq!(t.shown(), "> [!NOTE](v)‸");
+    // Enter on the still empty body keeps the caret in the callout
+    step(&mut t, "edit.newline");
+    assert_eq!(t.shown(), "> [!NOTE](v)‸");
+    for k in keys("body") {
+        step(&mut t, &k);
+    }
+    assert_eq!(t.shown(), "> [!NOTE]\n>\n> body‸");
+    assert!(t.ed.session.doc().debug_tree().contains("alert-note"));
+}
