@@ -795,3 +795,93 @@ mod saved_boundaries {
         assert_eq!(s.text(), "A\n");
     }
 }
+
+/// `set_selection` from an API caller clamps offsets past the end or inside a UTF-8
+/// sequence (#20); the editing keys after it must not panic.
+#[test]
+fn set_selection_clamps_out_of_range_offsets() {
+    let (mut s, _) = md_session("- a\n- b\n");
+    s.set_selection(Selection::range(3, 999));
+    let p = s.selection().primary();
+    assert_eq!((p.anchor.offset, p.focus.offset), (3, 8));
+    s.set_selection(Selection::caret(999));
+    assert_eq!(s.selection().primary().focus.offset, 8);
+    s.newline().unwrap();
+    s.delete_backward().unwrap();
+    s.insert_text("x").unwrap();
+    let (mut s, _) = md_session("мир\n");
+    s.set_selection(Selection::caret(1));
+    assert_eq!(s.selection().primary().focus.offset, 0);
+    s.insert_text("x").unwrap();
+    assert_eq!(s.text(), "xмир\n");
+}
+
+/// Select All (first to last caret stop) replaced or deleted takes the hidden block syntax
+/// at the document's edges with it (M2b-3; #20 f03); a partial selection does not.
+#[test]
+fn whole_document_selection_replaces_every_byte() {
+    let src = "# H\n\n- a\n- b\n\n> q\n";
+    let (mut s, _) = md_session(src);
+    s.set_selection(Selection::range(2, src.len() - 1));
+    s.insert_text("new").unwrap();
+    assert_eq!(s.text(), "new");
+    assert!(s.undo());
+    assert_eq!(s.text(), src);
+    s.set_selection(Selection::range(src.len() - 1, 2));
+    s.delete_backward().unwrap();
+    assert_eq!(s.text(), "");
+    let (mut s, _) = md_session(src);
+    s.set_selection(Selection::range(3, src.len() - 1));
+    s.insert_text("x").unwrap();
+    assert_eq!(s.text(), "# Hx\n");
+}
+
+/// Spec 02 §5.3 rule 2: Tab / Shift+Tab in a table move between cells (skipping the
+/// delimiter row) selecting the content; never a literal tab (#20). Adding a row at the last
+/// cell is M2d: until then a no-op.
+#[test]
+fn tab_in_a_table_moves_between_cells() {
+    let src = "| a | b |\n|---|---|\n| x | y |\n";
+    let (mut s, _) = md_session(src);
+    let sel = |s: &EditorSession| {
+        let p = s.selection().primary();
+        (p.anchor.offset, p.focus.offset)
+    };
+    s.set_selection(Selection::caret(3));
+    s.tab(false).unwrap();
+    assert_eq!(sel(&s), (6, 7));
+    s.tab(false).unwrap();
+    assert_eq!(sel(&s), (22, 23));
+    s.tab(true).unwrap();
+    assert_eq!(sel(&s), (6, 7));
+    s.set_selection(Selection::caret(27));
+    s.tab(false).unwrap();
+    assert_eq!(sel(&s), (27, 27));
+    s.set_selection(Selection::caret(2));
+    s.tab(true).unwrap();
+    assert_eq!(s.text(), src);
+}
+
+/// A selection inside a single block keeps that block's syntax, also when the block is the
+/// whole document (BE-4; Codex review of PR #25).
+#[test]
+fn selection_inside_one_block_keeps_its_syntax() {
+    for (src, a, b, want) in [
+        ("# Old\n", 2, 5, "# New\n"),
+        ("- Old\n", 2, 5, "- New\n"),
+        ("> Old\n", 2, 5, "> New\n"),
+        ("## Old ##\n", 3, 6, "## New ##\n"),
+        ("# H\n\n- Old\n\nz\n", 7, 10, "# H\n\n- New\n\nz\n"),
+    ] {
+        let (mut s, _) = md_session(src);
+        s.set_selection(Selection::range(a, b));
+        s.insert_text("New").unwrap();
+        assert_eq!(s.text(), want, "replace {a}..{b} in {src:?}");
+    }
+    // Select All of a multi-block document still clears everything
+    let src = "- a\n- b\n";
+    let (mut s, _) = md_session(src);
+    s.set_selection(Selection::range(2, 7));
+    s.insert_text("x").unwrap();
+    assert_eq!(s.text(), "x");
+}

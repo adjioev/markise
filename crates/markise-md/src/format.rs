@@ -682,6 +682,11 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
         InlineKind::Code { content } | InlineKind::Math { content, .. } => *content,
         _ => match (n.children.first(), n.children.last()) {
             (Some(a), Some(z)) => Span::new(a.span.start, z.span.end),
+            // a link with empty text (`[]()`, spec 02 §3.3 at a caret): empty content after
+            // `[`, so its markers can be revealed and the caret can stand between them
+            _ if matches!(n.kind, InlineKind::Link { .. }) && n.span.slice(s).starts_with('[') => {
+                Span::new(n.span.start + 1, n.span.start + 1)
+            }
             _ => n.span,
         },
     };
@@ -1196,6 +1201,18 @@ impl Document {
                     hints_after: Some(hints),
                 },
                 Some(Selection::caret(at + eol.len() + blank.len())),
+            ));
+        }
+        if ls == 0 && from == 0 && scan::fm_open(line, self.options().remap_unicode_punctuation) {
+            // S-2.4: the delimiter typed on the document's first line opens front matter —
+            // its closing delimiter is written, the caret on the empty line between them
+            let insert = format!("{eol}{eol}{line}");
+            return Ok(Plan::single(
+                PlanStep {
+                    patches: PatchSet::single_verbatim(ce..ce, insert),
+                    hints_after: Some(hints),
+                },
+                Some(Selection::caret(ce + eol.len())),
             ));
         }
         if let Some((_, content, _)) = scan::atx_heading(b, p, b.len(), self.options().strict)
