@@ -283,7 +283,7 @@ const fn mac_only(mac: &'static str) -> DefaultKey {
 /// Commands performed by the application itself (window, files, view and theme state) that
 /// the engine registry does not hold. Same descriptor type as the registry, so labels and
 /// per-platform chords have one source (spec 02 §15).
-pub static APP_COMMANDS: [CommandDescriptor; 27] = [
+pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app(
         "file.openFolder",
         "Open Folder…",
