@@ -324,7 +324,10 @@ impl EditorSession {
 
     /// Sets the selection. Any change not produced by typing is a caret jump and closes the
     /// open typing group (C13, spec 02 §11).
+    /// Offsets past the end of the text or inside a UTF-8 sequence (API / MCP callers) are
+    /// clamped to the nearest valid position before it.
     pub fn set_selection(&mut self, sel: Selection) {
+        let sel = clamp_selection(self.doc.text(), sel);
         if sel != self.sel {
             self.close_typing();
             self.sel = sel;
@@ -349,6 +352,46 @@ impl EditorSession {
             // the escape patch shifts text after it; the selection is transformed like any
             // live mark. A failure leaves the hint (it is materialised before saving).
             let _ = self.expire_hints();
+        }
+    }
+
+    /// A selection from the start of the first block's text to the end of the last block's
+    /// text (Select All: the layout's first and last caret stops) of a document with more than
+    /// one block covers the whole document:
+    /// before it is replaced or deleted it is widened to every byte, so the hidden block syntax
+    /// at its edges (`# ` of a first heading, the final newline…) goes with it (M2b-3).
+    fn widen_whole_document_selection(&mut self) {
+        let p = self.sel.primary();
+        let r = p.range();
+        let t = self.doc.text();
+        if p.is_caret() || self.sel.ranges().len() != 1 || (r.start == 0 && r.end == t.len()) {
+            return;
+        }
+        // the selection starts in the document's first leaf (nothing but syntax before it) and
+        // reaches the end of its last leaf
+        let (Some(first_leaf), Some(last_leaf)) = (self.doc.leaf(r.start), leaf_before(self.doc.as_ref(), t.len()))
+        else {
+            return;
+        };
+        if leaf_before(self.doc.as_ref(), first_leaf.span.start).is_some() {
+            return;
+        }
+        // a selection inside one block keeps that block's syntax (`# Old` → `# New`, BE-4)
+        if first_leaf.span.start == last_leaf.span.start {
+            return;
+        }
+        let first = first_leaf.lines.first().map(|f| f.start);
+        let last = last_leaf.lines.last().map(|z| z.end);
+        let (Some(first), Some(last)) = (first, last) else {
+            return;
+        };
+        if r.start <= first && r.end >= last {
+            let (a, f) = if p.anchor.offset <= p.focus.offset {
+                (0, t.len())
+            } else {
+                (t.len(), 0)
+            };
+            self.sel = Selection::range(a, f);
         }
     }
 
@@ -472,6 +515,7 @@ impl EditorSession {
         {
             self.close_typing();
         }
+        self.widen_whole_document_selection();
         let req = self.request(Params::new());
         let tp = self.doc.on_text(&req, typed);
         let leaf_before = self.leaf_info(self.sel.primary().start().offset);
@@ -510,6 +554,7 @@ impl EditorSession {
     /// the two are merged (rule 5); the start of any other block is a no-op. The remaining
     /// rules (lists, quotes, HR, empty blocks, tables) are M2c/M2d.
     pub fn delete_backward_to(&mut self, prev_stop: Option<usize>) -> Result<(), EditError> {
+        self.widen_whole_document_selection();
         let p = self.sel.primary();
         if p.is_caret() && p.focus.virt > 0 {
             self.set_selection(Selection::caret(p.focus.offset));
@@ -578,6 +623,7 @@ impl EditorSession {
     /// grapheme. At the end of a paragraph or heading followed by a paragraph or heading the
     /// next block's text is merged (C48, M2b subset); at the end of other blocks a no-op.
     pub fn delete_forward_to(&mut self, next_stop: Option<usize>) -> Result<(), EditError> {
+        self.widen_whole_document_selection();
         let p = self.sel.primary();
         if p.is_caret() && p.focus.virt > 0 {
             return Ok(());
@@ -763,6 +809,20 @@ impl EditorSession {
         if !text_like {
             return Some(BlockEdit::Nothing);
         }
+        let prev = leaf_before(self.doc.as_ref(), leaf.span.start).filter(|p| p.span.start < leaf.span.start);
+        // rule 2: a thematic break right before the block is deleted (with the separator
+        // after it); the caret stays at the start of this block's text
+        if let Some(hr) = prev
+            .as_ref()
+            .filter(|p| p.kind == LeafKind::ThematicBreak && p.containers == leaf.containers && !in_list_item(&leaf))
+        {
+            let patches = PatchSet::delete(hr.span.start..leaf.span.start);
+            return Some(BlockEdit::Edit {
+                patches,
+                label: "Delete Horizontal Rule",
+                caret: hr.span.start + (first.start - leaf.span.start),
+            });
+        }
         if let LeafKind::Heading { .. } = leaf.kind {
             // rule 4: the heading becomes a paragraph — its block syntax before the text (ATX
             // `## `) and after it (setext underline, ATX closing sequence) is removed
@@ -783,14 +843,14 @@ impl EditorSession {
                 });
             }
         }
-        // rule 5: merge with the previous paragraph/heading
-        let Some(prev) = leaf_before(self.doc.as_ref(), leaf.span.start) else {
+        // rule 5: merge with the previous paragraph/heading — also the last paragraph of a
+        // container that ends right before this block (a list item, a quote)
+        let Some(prev) = prev else {
             return Some(BlockEdit::Nothing);
         };
-        if prev.span.start >= leaf.span.start
-            || !matches!(prev.kind, LeafKind::Paragraph | LeafKind::Heading { .. })
-            || prev.containers != leaf.containers
-            || in_list_item(&leaf)
+        let same_or_inner =
+            prev.containers.len() >= leaf.containers.len() && prev.containers.starts_with(&leaf.containers);
+        if !matches!(prev.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) || !same_or_inner || in_list_item(&leaf)
         {
             return Some(BlockEdit::Nothing);
         }
@@ -960,6 +1020,13 @@ impl EditorSession {
     /// elsewhere Tab inserts a literal tab (not at a line start, where it would open
     /// indented code) and Shift+Tab does nothing.
     pub fn tab(&mut self, shift: bool) -> Result<(), EditError> {
+        if let Some(sel) = self.table_tab_target(shift) {
+            // rule 2: never a literal tab in a cell (it would be saved into the table)
+            if let Some(sel) = sel {
+                self.set_selection(sel);
+            }
+            return Ok(());
+        }
         let id = if shift { planners::SHIFT_TAB } else { planners::TAB };
         match self.doc.plan(id, &self.request(Params::new())) {
             Ok(plan) => {
@@ -986,6 +1053,41 @@ impl EditorSession {
         }
     }
 
+    /// Tab / Shift+Tab in a table (spec 02 §5.3 rule 2): `None` outside tables; otherwise the
+    /// selection of the next / previous cell's content (`Some(None)`: nowhere to go — adding
+    /// a row at the last cell is part of the table editing of M2d).
+    fn table_tab_target(&self, shift: bool) -> Option<Option<Selection>> {
+        let p = self.sel.primary();
+        if p.focus.virt > 0 {
+            return None;
+        }
+        let at = p.focus.offset;
+        let leaf = self.doc.leaf(at)?;
+        if !matches!(leaf.kind, LeafKind::Table { .. }) {
+            return None;
+        }
+        let t = self.doc.text();
+        let delimiter = |r: &markise_doc::Span| {
+            t[r.start..r.end].bytes().all(|b| b"|:- \t".contains(&b)) && t[r.start..r.end].contains('-')
+        };
+        let cells: Vec<markise_doc::Span> = leaf
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| !(*i == 1 && delimiter(r)))
+            .flat_map(|(_, r)| self.doc.table_row_cells(*r))
+            .collect();
+        let Some(i) = cells.iter().position(|c| c.start <= at && at <= c.end) else {
+            return Some(None);
+        };
+        let j = if shift {
+            i.checked_sub(1)
+        } else {
+            Some(i + 1).filter(|&j| j < cells.len())
+        };
+        Some(j.map(|j| Selection::range(cells[j].start, cells[j].end)))
+    }
+
     /// `edit.newline`: the format's Enter planner; where it has no rule (M2a: everything but
     /// hinted Enter-only lines) a plain line break. Always its own transaction.
     pub fn newline(&mut self) -> Result<(), EditError> {
@@ -1000,6 +1102,7 @@ impl EditorSession {
         }
         if !self.sel.is_caret() {
             // Enter over a selection: delete it, then Enter at the caret — one transaction
+            self.widen_whole_document_selection();
             let r = self.sel.primary().range();
             return self.transact("New Line", TxKind::Structural, |tx| {
                 tx.step(PlanStep::patches(PatchSet::delete(r.clone())))?;
@@ -1387,6 +1490,35 @@ fn snap_selection(text: &str, sel: Selection) -> Selection {
     }
     let p = sel.primary();
     let mut out = Selection::single(snap(p.anchor), snap(p.focus));
+    out.goal_x = sel.goal_x;
+    out
+}
+
+/// `sel` with every offset clamped into `text` and moved back to a char boundary (a request's
+/// selection is untrusted input, unlike a planner's).
+fn clamp_selection(text: &str, sel: Selection) -> Selection {
+    let bad = |p: &DocPos| p.offset > text.len() || !text.is_char_boundary(p.offset);
+    if !sel.ranges().iter().any(|r| bad(&r.anchor) || bad(&r.focus)) {
+        return sel;
+    }
+    let fix = |p: DocPos| -> DocPos {
+        let mut o = p.offset.min(text.len());
+        while !text.is_char_boundary(o) {
+            o -= 1;
+        }
+        DocPos { offset: o, ..p }
+    };
+    let primary = sel.primary();
+    let ranges: Vec<markise_doc::SelRange> = sel
+        .ranges()
+        .iter()
+        .map(|r| markise_doc::SelRange {
+            anchor: fix(r.anchor),
+            focus: fix(r.focus),
+        })
+        .collect();
+    let idx = sel.ranges().iter().position(|r| *r == primary).unwrap_or(0);
+    let mut out = Selection::from_ranges(ranges, idx);
     out.goal_x = sel.goal_x;
     out
 }
