@@ -1692,6 +1692,9 @@ impl MarkiseApp {
             // chrome text (status bar, sidebar, toolbar, dialogs) is not selectable: no I-beam
             // over it (issue #36); text that is worth copying opts back in locally
             ctx.all_styles_mut(|s| s.interaction.selectable_labels = false);
+            // egui's own ⌘+ / ⌘- / ⌘0 zoom would scale the whole UI on top of our heading
+            // level and paragraph commands bound to ⌘= / ⌘- / ⌘0 (issue #39)
+            ctx.options_mut(|o| o.zoom_with_keyboard = false);
             let c = ctx.clone();
             self.wake = Some(Arc::new(move || c.request_repaint()));
             self.ctx = Some(ctx.clone());
