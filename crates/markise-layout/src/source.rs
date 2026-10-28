@@ -235,10 +235,14 @@ fn chunk(text: &str, start: usize, end: usize, mut mid: bool) -> Vec<Item> {
         let mut units = Vec::new();
         let mut newlines = 0u32;
         loop {
-            let nl = memchr::memchr(b'\n', &b[pos..end]).map(|k| pos + k);
+            // look for the line end only within one piece (+ CRLF): a longer line is cut
+            // without scanning the rest of it (no quadratic scans of a huge line)
+            let window = (pos + PIECE_BYTES + 2).min(end);
+            let nl = memchr::memchr(b'\n', &b[pos..window]).map(|k| pos + k);
             let content_end = match nl {
                 Some(n) if n > pos && b[n - 1] == b'\r' => n - 1,
                 Some(n) => n,
+                None if window < end => window, // longer than a piece
                 None => end,
             };
             if content_end - pos > PIECE_BYTES {
@@ -749,6 +753,55 @@ impl SourceView {
 
     pub fn total_height(&self) -> f64 {
         self.heights.total()
+    }
+
+    // ------------------------------------------------------------------ line ↔ y
+
+    /// Content y of the (fractional) physical line `line` (`2.5` = halfway down line 2): exact
+    /// for laid-out items, interpolated over the item's height otherwise.
+    pub fn y_of_line(&self, text: &str, line: f32) -> f64 {
+        let line = line.max(0.0);
+        let l = (line.floor() as usize).min(self.line_count() - 1);
+        let frac = (line - l as f32).clamp(0.0, 1.0);
+        let off = self.line_start(text, l);
+        let i = self.item_at(off);
+        let base = self.item_y(i);
+        let rel = (off - self.item_start(i)) as u32;
+        if let Some(lay) = &self.items[i].layout {
+            if let Some(ln) = lay.lines.iter().rev().find(|ln| ln.start <= rel) {
+                return base + (ln.y + frac * ln.height) as f64;
+            }
+            return base;
+        }
+        let n = self.items[i].units.len() + usize::from(i + 1 == self.items.len() && self.final_line);
+        let k = l - self.first_line_of_item(i);
+        let (a, b) = self.pad(i);
+        let h = (self.height(i) - a - b).max(0.0) as f64;
+        base + h * (k as f64 + frac as f64) / n.max(1) as f64
+    }
+
+    /// The (fractional) physical line at content y (inverse of [`SourceView::y_of_line`]).
+    pub fn line_at_y(&self, y: f64) -> f32 {
+        if self.items.is_empty() {
+            return 0.0;
+        }
+        let y = y.clamp(0.0, self.total_height());
+        let i = self.heights.index_at(y).min(self.items.len() - 1);
+        let first = self.first_line_of_item(i) as f32;
+        let local = (y - self.item_y(i)).max(0.0) as f32;
+        if let Some(lay) = &self.items[i].layout {
+            let k = lay.lines.iter().rposition(|ln| ln.y <= local).unwrap_or(0);
+            let Some(ln) = lay.lines.get(k) else { return first };
+            let line = first + lay.lines[1..=k].iter().filter(|l| l.first).count() as f32;
+            let frac = ((local - ln.y) / ln.height.max(1.0)).clamp(0.0, 0.999);
+            return line + frac;
+        }
+        let n = self.items[i].units.len() + usize::from(i + 1 == self.items.len() && self.final_line);
+        let (a, b) = self.pad(i);
+        let h = (self.height(i) - a - b).max(1.0);
+        let units = local / h * n.max(1) as f32;
+        let lines_in_item = self.items[i].newlines as f32 + usize::from(i + 1 == self.items.len()) as f32;
+        first + units.min(lines_in_item.max(1.0) - 0.001).max(0.0)
     }
 
     // ------------------------------------------------------------------ scrolling

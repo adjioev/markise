@@ -25,6 +25,8 @@ use crate::text::Span;
 
 /// Paragraphs longer than this are parsed inline line by line (range-limited).
 const WHOLE_PARAGRAPH_BYTES: usize = 64 * 1024;
+/// Context parsed around the range on a line longer than [`WHOLE_PARAGRAPH_BYTES`].
+const LINE_WINDOW: usize = 4 * 1024;
 
 /// Paints token classes into a per-byte buffer covering the requested range.
 struct Painter<'a> {
@@ -232,6 +234,21 @@ impl Painter<'_> {
         if let Some(t) = base {
             self.under(s, e, t);
         }
+        // a huge line: parse only a window around the range (constructs crossing the window's
+        // edges may be coloured as plain text)
+        let (s, e) = if e - s > WHOLE_PARAGRAPH_BYTES {
+            let mut a = s.max(self.range.start.saturating_sub(LINE_WINDOW));
+            let mut b = e.min(self.range.end + LINE_WINDOW);
+            while !self.text.is_char_boundary(a) {
+                a -= 1;
+            }
+            while !self.text.is_char_boundary(b) {
+                b += 1;
+            }
+            (a, b)
+        } else {
+            (s, e)
+        };
         let ctx = self.doc.ref_context().clone();
         let nodes = parse_inlines(&self.text[s..e], self.doc.options(), &ctx.inline);
         for n in &nodes {

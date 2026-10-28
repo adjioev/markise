@@ -4,13 +4,13 @@
 //! and headless tests / measurements drive the same code.
 //!
 //! Document state machine (see `docs/adr/0002-ui-layout.md`, "Document lifecycle"):
-//! - **Text is the source of truth.** Once source mode was entered, the editor buffer is the
-//!   authoritative text of the document and survives mode switches; every change bumps
-//!   `text_rev`. The view model is *derived*: background rebuilds bring `model_rev` up to
-//!   `text_rev`; a failed rebuild only leaves the preview behind — the text is never lost.
-//! - **Saving writes a text snapshot** `(text, rev)` (applied to the document as minimal
-//!   patches and serialized in the worker). Success sets `saved_rev = rev` and the new
-//!   [`DiskVersion`]; the document is dirty while `text_rev != saved_rev`.
+//! - **One editor session per document.** The rendered view, full Source mode and both panes
+//!   of Side by Side edit the same session (ADR 0006, M2d); every edit updates the view model
+//!   and the source view incrementally, so there is no derived buffer and no background rebuild.
+//! - **Saving writes a text snapshot** of the session (materialised hints, revision counter).
+//!   Success records the session state as saved and the new [`DiskVersion`]; the document is
+//!   dirty while the session state differs from the saved one (and its text from the saved
+//!   text).
 //! - **Continuations carry their preconditions.** Save-then-Close / Install / Open run only if
 //!   the save covered the current text (`text_rev == saved rev`); otherwise the question is
 //!   asked again. An overwrite authorization (expected disk version) travels with its save
@@ -29,14 +29,14 @@ use std::time::{Duration, Instant};
 use egui::{Context, RichText, ThemePreference};
 use markise_engine::Wake;
 use markise_engine::editor::SaveSnapshot;
-use markise_engine::jobs::{Hooks, Rebuilt, SaveText, Saved, spawn_rebuild, spawn_save};
+use markise_engine::jobs::{Hooks, SaveText, Saved, spawn_save};
 use markise_engine::load::{Loaded, Loader, StageHook};
 use markise_engine::save::{DiskVersion, Expect, SaveError};
 use markise_engine::settings::Appearance;
 use markise_engine::tree::{MARKDOWN_EXTENSIONS, TEXT_EXTENSIONS, is_markdown};
 use markise_engine::watch::{FileWatcher, WatchEvent};
 use markise_layout::{DocModel, block::color};
-use markise_md::{Document, MarkdownFormat, ParseOptions};
+use markise_md::{MarkdownFormat, ParseOptions};
 use markise_theme::Overrides;
 use markise_theme::Theme;
 use markise_theme::catalog::{StyleId, ThemeId};
@@ -44,7 +44,7 @@ use markise_theme::catalog::{StyleId, ThemeId};
 use crate::images::TextureStore;
 use crate::side_by_side::{DEFAULT_SPLIT, SideBySide};
 use crate::sidebar::{FileTree, Tab, outline};
-use crate::source::SourceState;
+use crate::source::SourceEditor;
 use crate::themes::{ConfigDir, InstallDone, ThemeEvent, ThemeManager};
 use crate::viewer::DocViewer;
 
@@ -174,34 +174,15 @@ struct DocState {
     deleted: bool,
     /// The disk content the saved revision corresponds to (loaded or last saved).
     disk: Option<DiskVersion>,
-    /// Editor buffer; once created it is the authoritative text until the document is
-    /// replaced or reloaded (it survives switching back to the preview).
-    buffer: Option<SourceState>,
-    /// Revision of the authoritative text.
-    text_rev: u64,
-    /// Revision the view model reflects (`<= text_rev`).
-    model_rev: u64,
-    /// Revision known to be on disk.
+    /// UI state of the source editor (Source and Side by Side modes).
+    source_ui: SourceEditor,
+    /// Session revision counter of the newest successful save (orders save results).
     saved_rev: u64,
-    /// Revision whose rebuild failed (not retried automatically).
-    failed_rev: Option<u64>,
-    /// Editor session counter folded into `text_rev` (rich-mode edits).
-    seen_counter: u64,
-    /// Session state each recently installed source-mode revision produced (newest last), so
-    /// a save of that revision marks it saved whichever worker finishes first.
-    installed: Vec<(u64, markise_engine::editor::StateId)>,
-    /// Source-buffer texts saved before the session reached them (revision, base document,
-    /// buffer text): materialised as their own "Source Edit" boundary when a later revision
-    /// is installed, so every saved state stays reachable by undo (ADR 0006 §4.3).
-    saved_texts: Vec<(u64, Arc<dyn markise_doc::FormatDoc>, String)>,
-    /// Revision whose incremental Side by Side update failed: the background rebuild takes
-    /// over for it (once), and the incremental path is not retried until the text changes.
-    incr_failed_rev: Option<u64>,
-    /// Content identity of the text the saved revision holds (`saved_rev`): undoing back to
-    /// it reads clean although the revision moved on (ADR 0006 §4.3 intent).
+    /// Content identity of the text the saved revision holds: undoing back to it reads clean
+    /// although the session state differs (ADR 0006 §4.3 intent).
     saved_fp: Option<TextFp>,
-    /// Content identity of the current text, cached per `text_rev`.
-    fp_cache: std::cell::Cell<Option<((u64, u64), TextFp)>>,
+    /// Content identity of the current text, cached per session revision counter.
+    fp_cache: std::cell::Cell<Option<(u64, TextFp)>>,
 }
 
 /// Content identity of a document text: length and hash.
@@ -215,48 +196,23 @@ fn text_fp(text: &str) -> TextFp {
 }
 
 impl DocState {
-    /// Folds pending buffer changes and rich-mode edits into `text_rev`. A rich-mode edit
-    /// updates the model synchronously, so it advances `model_rev` too.
-    fn sync(&mut self) {
-        if let Some(b) = &mut self.buffer
-            && b.dirty
-        {
-            b.dirty = false;
-            self.text_rev += 1;
-        }
-        let c = self.viewer.ed.session.revision().counter;
-        if c != self.seen_counter {
-            self.seen_counter = c;
-            if self.text_rev == self.model_rev {
-                self.text_rev += 1;
-                self.model_rev = self.text_rev;
-            }
-        }
-    }
-
-    /// The source buffer holds text the session does not have yet (a rebuild is pending).
-    fn buffer_ahead(&self) -> bool {
-        self.text_rev != self.model_rev || self.buffer.as_ref().is_some_and(|b| b.dirty)
-    }
+    /// Kept for call sites that fold edits into the document state: the session is the only
+    /// state now, so there is nothing to fold.
+    fn sync(&mut self) {}
 
     fn dirty(&self) -> bool {
-        if self.buffer.as_ref().is_some_and(|b| b.dirty) {
-            return true;
-        }
-        if self.buffer_ahead() {
-            if self.text_rev == self.saved_rev {
-                return false;
-            }
-        } else if !self.viewer.ed.session.is_dirty() {
+        let s = &self.viewer.ed.session;
+        if !s.is_dirty() {
             // the saved state itself (StateId, ADR 0006 §4.3)
             return false;
-        } else if !self.viewer.ed.session.hints().is_empty() {
+        }
+        if !s.hints().is_empty() {
             // a hinted state is never the saved one (saving would materialise escapes)
             return true;
         }
-        // another state with exactly the saved text (e.g. edited back in Side by Side)
+        // another state with exactly the saved text (e.g. edited back by hand)
         let Some(saved) = self.saved_fp else { return true };
-        if !self.buffer_ahead() && self.viewer.ed.session.text().len() != saved.0 {
+        if s.text().len() != saved.0 {
             return true; // no hashing while the length differs (typing)
         }
         self.current_fp() != saved
@@ -265,58 +221,28 @@ impl DocState {
     /// Content identity of the current text (hashed once per revision; only when the length
     /// matches the saved text's).
     fn current_fp(&self) -> TextFp {
-        let key = (self.text_rev, self.viewer.ed.session.revision().counter);
+        let key = self.viewer.ed.session.revision().counter;
         if let Some((k, fp)) = self.fp_cache.get()
             && k == key
         {
             return fp;
         }
-        let fp = match &self.buffer {
-            Some(b) if self.buffer_ahead() => text_fp(&b.doc_text()),
-            _ => text_fp(self.viewer.ed.session.text()),
-        };
+        let fp = text_fp(self.viewer.ed.session.text());
         self.fp_cache.set(Some((key, fp)));
         fp
     }
 
-    /// What a save writes now, its revision and (for a session snapshot) the session state
-    /// it records as saved. Literal hints are materialised first (ADR 0006 §2.6).
+    /// What a save writes now, its revision and the session state it records as saved.
+    /// Literal hints are materialised first (ADR 0006 §2.6).
     fn snapshot(&mut self) -> (SaveText, u64, Option<SaveSnapshot>) {
-        if self.buffer_ahead()
-            && let Some(b) = &self.buffer
-        {
-            let base = self.viewer.ed.session.doc_arc().clone();
-            return (
-                SaveText::Buffer {
-                    base,
-                    text: b.doc_text(),
-                },
-                self.text_rev,
-                None,
-            );
-        }
         match self.viewer.ed.edit(|s| s.prepare_save()) {
-            Ok(snap) => {
-                self.sync();
-                (SaveText::Exact(snap.text.clone()), self.text_rev, Some(snap))
-            }
+            Ok(snap) => (SaveText::Exact(snap.text.clone()), snap.counter, Some(snap)),
             Err(_) => (
                 SaveText::Exact(self.viewer.ed.session.doc().snapshot()),
-                self.text_rev,
+                self.viewer.ed.session.revision().counter,
                 None,
             ),
         }
-    }
-
-    /// The Markdown document (source mode works on the concrete type).
-    fn md(&self) -> &Document {
-        self.viewer
-            .ed
-            .session
-            .doc()
-            .as_any()
-            .downcast_ref::<Document>()
-            .expect("a Markdown document")
     }
 }
 
@@ -336,12 +262,6 @@ struct LoadInfo {
     started: Instant,
     reason: LoadReason,
     generation: u64,
-}
-
-struct Rebuild {
-    doc_id: u64,
-    rev: u64,
-    rx: Receiver<Result<Rebuilt, String>>,
 }
 
 /// What to do after a successful save — only if the save covered the current text.
@@ -429,7 +349,6 @@ pub struct MarkiseApp {
     load: Option<LoadInfo>,
     /// A watcher event arrived while a load / save was running: check again afterwards.
     reload_pending: bool,
-    rebuild: Option<Rebuild>,
     saving: Option<Saving>,
     queued_save: Option<SaveRequest>,
     ask: Option<Ask>,
@@ -440,15 +359,9 @@ pub struct MarkiseApp {
     /// The mode ⌃⌘/ returns to from Side by Side: Source (`true`) or Rendered.
     sbs_return_source: bool,
     sbs: SideBySide,
-    /// Editor ids of replaced buffers: their `TextEdit` state (undo history) is dropped.
-    retired_editors: Vec<egui::Id>,
-    /// Colour the Side by Side source pane (below the size limit, 99 C58).
-    source_highlight: bool,
-    source_highlighter: crate::source_highlight::SourceHighlighter,
-    /// Keystroke → model update times in Side by Side (ms; measurements, tests).
-    pub sbs_apply_ms: Vec<f64>,
-    /// Leaving source mode: scroll the preview to this offset once the model is current.
-    pending_scroll: Option<usize>,
+    /// Keystroke processing times of the source editor (input → laid out and painted, ms;
+    /// measurements, tests).
+    pub source_input_ms: Vec<f64>,
     sidebar_visible: bool,
     /// Formatting toolbar state (spec 04 §3.2; shown per the `showToolbar` setting).
     toolbar: crate::toolbar::Toolbar,
@@ -523,7 +436,6 @@ impl MarkiseApp {
             loader: None,
             load: None,
             reload_pending: false,
-            rebuild: None,
             saving: None,
             queued_save: None,
             ask: None,
@@ -532,11 +444,7 @@ impl MarkiseApp {
             side_by_side: false,
             sbs_return_source: false,
             sbs: SideBySide::default(),
-            retired_editors: Vec::new(),
-            source_highlight: true,
-            source_highlighter: Default::default(),
-            sbs_apply_ms: Vec::new(),
-            pending_scroll: None,
+            source_input_ms: Vec::new(),
             sidebar_visible: true,
             toolbar: Default::default(),
             tab: Tab::Outline,
@@ -606,9 +514,9 @@ impl MarkiseApp {
         self.load.is_some()
     }
 
-    /// A load, rebuild or save job is running.
+    /// A load or save job is running.
     pub fn is_busy(&self) -> bool {
-        self.rebuild.is_some() || self.saving.is_some() || self.load.is_some()
+        self.saving.is_some() || self.load.is_some()
     }
 
     /// A save job is running.
@@ -633,20 +541,48 @@ impl MarkiseApp {
 
     /// Vertical scroll offset of the source editor (points), if it exists.
     pub fn source_scroll_offset(&self) -> Option<f32> {
-        self.doc.as_ref().and_then(|d| d.buffer.as_ref()).map(|b| b.offset)
+        let p = self.doc.as_ref()?.viewer.ed.source.as_ref()?;
+        Some(p.view.scroll_y() as f32)
     }
 
     /// Source line (fractional) at the top of the source editor's viewport.
     pub fn source_top_line(&self) -> Option<f32> {
-        self.doc
-            .as_ref()
-            .and_then(|d| d.buffer.as_ref())
-            .map(|b| b.line_at_y(b.offset))
+        let p = self.doc.as_ref()?.viewer.ed.source.as_ref()?;
+        Some(p.view.line_at_y(p.view.scroll_y()))
     }
 
-    /// Syntax colouring of the Side by Side source pane (on by default; measurements).
-    pub fn set_source_highlighting(&mut self, on: bool) {
-        self.source_highlight = on;
+    /// The source editor's selection (byte offsets), if it is open (tests).
+    pub fn source_selection(&self) -> Option<std::ops::Range<usize>> {
+        let p = self.doc.as_ref()?.viewer.ed.source.as_ref()?;
+        Some(p.sel.primary().range())
+    }
+
+    /// The source editor's caret offset, if it is open (tests).
+    pub fn source_caret(&self) -> Option<usize> {
+        let p = self.doc.as_ref()?.viewer.ed.source.as_ref()?;
+        Some(p.sel.primary().focus.offset)
+    }
+
+    /// Source editor display preferences (View menu; persisted as `source`).
+    pub fn source_prefs(&self) -> markise_engine::settings::SourceSettings {
+        self.themes.source_prefs()
+    }
+
+    pub fn set_source_prefs(&mut self, p: markise_engine::settings::SourceSettings) {
+        self.themes.set_source_prefs(p);
+    }
+
+    /// The source editor's screen rectangle at the last frame (tests click into it).
+    pub fn source_rect(&self) -> Option<egui::Rect> {
+        self.doc.as_ref()?.source_ui.rect()
+    }
+
+    /// Whether the source editor has the keyboard focus.
+    fn source_focused(&self) -> bool {
+        match (&self.doc, &self.ctx) {
+            (Some(d), Some(c)) => d.viewer.ed.source.is_some() && (self.source_visible || d.source_ui.has_focus(c)),
+            _ => false,
+        }
     }
 
     /// Side by Side divider position (fraction of the width for the source pane).
@@ -662,29 +598,48 @@ impl MarkiseApp {
         self.doc.as_mut().map(|d| &mut d.viewer)
     }
 
-    /// The source editor's text, if a buffer exists (tests).
+    /// The document text while the source editor is open (tests).
     pub fn source_buffer(&self) -> Option<&str> {
-        self.doc
-            .as_ref()
-            .and_then(|d| d.buffer.as_ref())
-            .map(|b| b.buffer.as_str())
-    }
-
-    /// The editor buffer, marked as changed (tests type through this).
-    pub fn source_buffer_mut(&mut self) -> Option<&mut String> {
-        self.doc.as_mut().and_then(|d| d.buffer.as_mut()).map(|b| {
-            b.dirty = true;
-            &mut b.buffer
-        })
-    }
-
-    /// The authoritative text of the document (buffer or model).
-    pub fn document_text(&self) -> Option<String> {
         let d = self.doc.as_ref()?;
-        Some(match &d.buffer {
-            Some(b) if d.buffer_ahead() => b.doc_text(),
-            _ => d.viewer.ed.session.text().to_string(),
-        })
+        d.viewer.ed.source.as_ref()?;
+        Some(d.viewer.ed.session.text())
+    }
+
+    /// Test hook: edits the document text as a whole through the source editor (the change is
+    /// applied as verbatim minimal patches — one "Typing" transaction — exactly as if typed).
+    pub fn edit_source_text(&mut self, f: impl FnOnce(&mut String)) {
+        let Some(d) = self.doc.as_mut() else { return };
+        if d.viewer.ed.source.is_none() {
+            return;
+        }
+        let old = d.viewer.ed.session.text().to_string();
+        let mut new = old.clone();
+        f(&mut new);
+        let ps = crate::source::diff_patches(&old, &new);
+        if ps.is_empty() {
+            return;
+        }
+        // the caret after the last change (in post-edit coordinates)
+        let mut shift = 0isize;
+        let mut caret = 0usize;
+        for p in ps.patches() {
+            caret = (p.range.start as isize + shift) as usize + p.insert.len();
+            shift += p.insert.len() as isize - p.range.len() as isize;
+        }
+        let ed = &mut d.viewer.ed;
+        ed.release();
+        let _ = ed
+            .session
+            .source_edit("Typing", ps, Some(markise_doc::Selection::caret(caret)));
+        ed.sync();
+        if let Some(p) = ed.source.as_mut() {
+            p.sel = ed.session.selection().clone();
+        }
+    }
+
+    /// The authoritative text of the document.
+    pub fn document_text(&self) -> Option<String> {
+        Some(self.doc.as_ref()?.viewer.ed.session.text().to_string())
     }
 
     pub fn title(&self) -> &str {
@@ -993,11 +948,8 @@ impl MarkiseApp {
             self.images.clear();
         }
         self.source_visible = false;
-        self.rebuild = None;
-        self.pending_scroll = None;
         self.sbs = SideBySide::default();
         self.sbs.sync_source = true;
-        self.source_highlighter = Default::default();
         self.banner = loaded.lossy.then(|| {
             Banner::Info("The file is not valid UTF-8; it was decoded lossily and saving is disabled.".into())
         });
@@ -1013,11 +965,6 @@ impl MarkiseApp {
         self.document_changed(&mut viewer);
         let id = self.next_doc_id;
         self.next_doc_id += 1;
-        if let Some(old) = self.doc.take()
-            && let Some(b) = old.buffer
-        {
-            self.retired_editors.push(b.id);
-        }
         self.doc = Some(DocState {
             key_bindings_applied: None,
             id,
@@ -1026,15 +973,8 @@ impl MarkiseApp {
             lossy: loaded.lossy,
             deleted: false,
             disk: Some(loaded.version),
-            buffer: None,
-            text_rev: 0,
-            model_rev: 0,
+            source_ui: SourceEditor::new(),
             saved_rev: 0,
-            failed_rev: None,
-            seen_counter: 0,
-            installed: Vec::new(),
-            saved_texts: Vec::new(),
-            incr_failed_rev: None,
             saved_fp,
             fp_cache: std::cell::Cell::new(None),
         });
@@ -1080,16 +1020,22 @@ impl MarkiseApp {
 
     /// Replaces the document's text with `loaded` (explicit decision, or a clean document).
     fn accept_reload(&mut self, loaded: Loaded) {
-        let visible = self.source_visible;
         let Some(doc) = self.doc.as_mut() else { return };
         if doc.path != loaded.path {
             return;
         }
-        // one undoable "Reload from Disk" transaction (ADR 0006 §4.3); disk is now current
+        // one undoable "Reload from Disk" transaction (ADR 0006 §4.3); disk is now current.
+        // In full Source mode the reload is not a source edit: the source session restarts
+        // around it (spec 02 §12.1, external change while in source mode)
+        let in_session = doc.viewer.ed.session.in_source_session();
+        if in_session {
+            doc.viewer.ed.session.end_source_session();
+        }
         let _ = doc.viewer.install(loaded.doc, loaded.model, "Reload from Disk", false);
         doc.viewer.ed.session.mark_current_saved();
-        doc.seen_counter = doc.viewer.ed.session.revision().counter;
-        doc.saved_texts.clear(); // the buffer they came from is dropped below
+        if in_session {
+            doc.viewer.ed.session.begin_source_session();
+        }
         if let Some(h) = &self.highlighter {
             h.document_changed();
         }
@@ -1099,20 +1045,8 @@ impl MarkiseApp {
         doc.disk = Some(loaded.version);
         doc.lossy = loaded.lossy;
         doc.deleted = false;
-        let rev = doc.text_rev.max(doc.model_rev) + 1;
-        doc.text_rev = rev;
-        doc.model_rev = rev;
-        doc.saved_rev = rev;
-        doc.failed_rev = None;
-        doc.incr_failed_rev = None;
+        doc.saved_rev = doc.viewer.ed.session.revision().counter;
         doc.saved_fp = Some(text_fp(doc.viewer.doc().text()));
-        // the buffer belonged to the dropped edits; a visible editor shows the new text
-        let line = doc.buffer.as_ref().map_or(0, |b| b.middle_line());
-        if let Some(b) = doc.buffer.take() {
-            self.retired_editors.push(b.id);
-        }
-        doc.buffer = visible.then(|| SourceState::new(doc.md(), line));
-        self.rebuild = None; // its revision is older than the new text
         if matches!(self.banner, Some(Banner::Conflict(_) | Banner::SaveConflict { .. })) {
             self.banner = None;
         }
@@ -1154,120 +1088,6 @@ impl MarkiseApp {
         }
     }
 
-    // ------------------------------------------------------------------ derived model
-
-    /// Brings the preview model up to the text revision (one rebuild at a time).
-    fn ensure_model(&mut self) {
-        if self.rebuild.is_some() {
-            return;
-        }
-        let (Some(doc), Some(wake)) = (self.doc.as_mut(), self.wake.clone()) else {
-            return;
-        };
-        doc.sync();
-        if doc.model_rev == doc.text_rev || doc.failed_rev == Some(doc.text_rev) {
-            return;
-        }
-        let Some(text) = doc.buffer.as_ref().map(|b| b.doc_text()) else {
-            return;
-        };
-        let rev = doc.text_rev;
-        let rx = spawn_rebuild(
-            doc.viewer.doc().clone(),
-            doc.viewer.model().clone(),
-            text,
-            Some(doc.path.clone()),
-            rev,
-            self.hooks.clone(),
-            wake,
-        );
-        self.rebuild = Some(Rebuild {
-            doc_id: doc.id,
-            rev,
-            rx,
-        });
-    }
-
-    fn poll_rebuild(&mut self) {
-        let Some(r) = &self.rebuild else { return };
-        let res = match r.rx.try_recv() {
-            Ok(x) => x,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            // the worker died (panicked) without answering
-            Err(_) => Err("the rebuild worker stopped unexpectedly".into()),
-        };
-        let r = self.rebuild.take().expect("rebuild");
-        let Some(doc) = self.doc.as_mut().filter(|d| d.id == r.doc_id) else {
-            return;
-        };
-        match res {
-            Ok(done) if done.rev > doc.model_rev && done.rev <= doc.text_rev => {
-                // the source edit joins the open "Source Edit" transaction (one per source
-                // session segment between saves, ADR 0006 §4.3) — not while a save is in
-                // flight: the state it may mark saved must stay a transaction boundary
-                let mut join = self.saving.is_none();
-                // saved source texts older than this revision first, each its own boundary
-                let saved_texts = std::mem::take(&mut doc.saved_texts);
-                for (rev, base, text) in saved_texts {
-                    if rev > done.rev {
-                        doc.saved_texts.push((rev, base, text));
-                        continue;
-                    }
-                    if rev == done.rev {
-                        continue; // this install is that text
-                    }
-                    let mut d = base.clone_box();
-                    markise_engine::edit::apply_text_doc(&mut *d, &text);
-                    let d: Arc<dyn markise_doc::FormatDoc> = Arc::from(d);
-                    doc.viewer.ed.release();
-                    let _ =
-                        doc.viewer
-                            .ed
-                            .session
-                            .replace_doc(d, "Source Edit", markise_engine::editor::TxKind::Bulk, join);
-                    let state = doc.viewer.ed.session.state_id();
-                    doc.installed.push((rev, state));
-                    if doc.saved_rev == rev {
-                        doc.viewer.ed.session.mark_current_saved();
-                    }
-                    join = false;
-                }
-                let _ = doc.viewer.install(done.doc, done.model, "Source Edit", join);
-                let state = doc.viewer.ed.session.state_id();
-                doc.installed.push((done.rev, state));
-                if doc.installed.len() > 16 {
-                    doc.installed.remove(0);
-                }
-                if doc.saved_rev == done.rev {
-                    doc.viewer.ed.session.mark_current_saved();
-                }
-                doc.seen_counter = doc.viewer.ed.session.revision().counter;
-                if let Some(h) = &self.highlighter {
-                    h.document_changed();
-                }
-                if let Some(d) = &self.diagram_renderer {
-                    d.document_changed();
-                }
-                doc.model_rev = done.rev;
-                if doc.model_rev == doc.text_rev
-                    && let Some(offset) = self.pending_scroll.take()
-                {
-                    let len = doc.viewer.ed.session.text().len();
-                    let item = doc.viewer.model().item_at_offset(offset.min(len));
-                    doc.viewer.ed.view.scroll_to_item(item.saturating_sub(2));
-                }
-            }
-            Ok(_) => {} // stale (reloaded meanwhile)
-            Err(e) => {
-                // the text stays in the buffer; only the preview is behind
-                doc.failed_rev = Some(r.rev);
-                self.banner = Some(Banner::Error(format!(
-                    "The preview could not be updated ({e}). Your text is kept; switch to source mode to continue editing."
-                )));
-            }
-        }
-    }
-
     // ------------------------------------------------------------------ saving
 
     fn start_save(&mut self, req: SaveRequest) {
@@ -1302,11 +1122,6 @@ impl MarkiseApp {
             (None, _) => Expect::Missing,
         });
         let (text, rev, snap) = doc.snapshot();
-        if let SaveText::Buffer { base, text } = &text
-            && !doc.saved_texts.iter().any(|(r, _, _)| *r == rev)
-        {
-            doc.saved_texts.push((rev, base.clone(), text.clone()));
-        }
         let fp = match &text {
             SaveText::Exact(t) => text_fp(t),
             SaveText::Buffer { text, .. } => text_fp(text),
@@ -1354,12 +1169,9 @@ impl MarkiseApp {
                     }
                     if let Some(snap) = &s.snap {
                         doc.viewer.ed.session.mark_saved(snap);
-                    } else if let Some(&(_, state)) = doc.installed.iter().rev().find(|(r, _)| *r == saved.rev) {
-                        // a source buffer save whose rebuild was installed first
-                        doc.viewer.ed.session.mark_saved_state(state);
                     } else {
-                        // the saved text is not a session state yet (still in the source
-                        // buffer): no history state is on disk until it is installed
+                        // the snapshot could not be prepared: no history state is known to
+                        // be on disk
                         doc.viewer.ed.session.clear_saved_state();
                     }
                     self.timing.log(&format!("saved bytes={}", saved.bytes));
@@ -1436,43 +1248,45 @@ impl MarkiseApp {
         false
     }
 
-    /// Toggles source-code mode, mapping the viewport middle in both directions. The editor
-    /// buffer is kept when leaving, so re-entering never starts from a stale model.
+    /// Toggles source-code mode, mapping the viewport middle and the caret in both directions
+    /// (spec 02 §12.1). Full Source mode keeps its own undo history (ADR 0006 §4.3).
     pub fn toggle_source(&mut self) {
         if self.side_by_side {
             // ⌘/ from Side by Side → Source, full width (spec 04 §3.3)
             self.set_view_mode(ViewMode::Source);
             return;
         }
-        let Some(doc) = self.doc.as_mut() else { return };
-        doc.sync();
+        if self.doc.is_none() {
+            return;
+        }
         if !self.source_visible {
-            // literal hints expire on a mode switch (ADR 0006 §2.6)
-            let _ = doc.viewer.ed.edit(|s| s.expire_hints());
-            doc.sync();
-            // a buffer the session has caught up with is recreated from the session (the
-            // rich editor may have changed the text since)
-            Self::refresh_stale_buffer(doc, &mut self.retired_editors);
-            if doc.buffer.is_none() {
-                let (item, _) = doc.viewer.ed.view.anchor();
-                let pos = doc.viewer.model().items.start(item).unwrap_or(0);
-                let text = doc.md();
-                let line = text.text().as_bytes()[..pos].iter().filter(|&&b| b == b'\n').count();
-                doc.buffer = Some(SourceState::new(text, line + 8));
-            }
+            self.open_source_pane();
+            let Some(doc) = self.doc.as_mut() else { return };
+            let line = rendered_middle_line(&doc.viewer);
+            doc.source_ui.center_line(line);
+            doc.source_ui.request_focus();
+            doc.viewer.ed.session.begin_source_session();
             self.source_visible = true;
         } else {
             self.source_visible = false;
-            if let Some(b) = &doc.buffer {
-                let offset = b.line_to_doc_offset(b.middle_line());
-                if doc.model_rev == doc.text_rev {
-                    let len = doc.viewer.ed.session.text().len();
-                    let item = doc.viewer.model().item_at_offset(offset.min(len));
-                    doc.viewer.ed.view.scroll_to_item(item.saturating_sub(2));
-                } else {
-                    self.pending_scroll = Some(offset);
-                }
-            }
+            let Some(doc) = self.doc.as_mut() else { return };
+            let vh = doc.source_ui.rect().map_or(600.0, |r| r.height());
+            source_middle_to_rendered(&mut doc.viewer, vh);
+            doc.viewer.ed.session.end_source_session();
+            leave_source_pane(&mut doc.viewer);
+        }
+    }
+
+    /// Creates the source pane (if missing) for the current text: literal hints expire on a
+    /// mode switch (ADR 0006 §2.6).
+    fn open_source_pane(&mut self) {
+        let prefs = self.themes.source_prefs();
+        let Some(doc) = self.doc.as_mut() else { return };
+        let _ = doc.viewer.ed.edit(|s| s.expire_hints());
+        if doc.viewer.ed.source.is_none() {
+            let w = doc.source_ui.rect().map_or(600.0, |r| r.width());
+            let ppp = self.ctx.as_ref().map_or(1.0, |c| c.pixels_per_point());
+            doc.viewer.ed.open_source(crate::source::params(&prefs), w, ppp);
         }
     }
 
@@ -1511,7 +1325,15 @@ impl MarkiseApp {
                 if self.side_by_side {
                     // the panes already show the same place: keep the positions
                     self.side_by_side = false;
-                    self.source_visible = m == ViewMode::Source;
+                    let Some(doc) = self.doc.as_mut() else { return };
+                    if m == ViewMode::Source {
+                        doc.viewer.ed.session.begin_source_session();
+                        doc.source_ui.request_focus();
+                        self.source_visible = true;
+                    } else {
+                        leave_source_pane(&mut doc.viewer);
+                        self.source_visible = false;
+                    }
                 } else if (m == ViewMode::Source) != self.source_visible {
                     self.toggle_source();
                 }
@@ -1520,37 +1342,16 @@ impl MarkiseApp {
     }
 
     fn enter_side_by_side(&mut self) {
-        let Some(doc) = self.doc.as_mut() else { return };
-        doc.sync();
         let from_source = self.source_visible;
+        self.open_source_pane();
+        let Some(doc) = self.doc.as_mut() else { return };
+        // Side by Side edits are transactions of the single live history
+        doc.viewer.ed.session.end_source_session();
         self.source_visible = false;
         self.side_by_side = true;
-        let _ = doc.viewer.ed.edit(|s| s.expire_hints());
-        doc.sync();
-        Self::refresh_stale_buffer(doc, &mut self.retired_editors);
-        if doc.buffer.is_none() {
-            let (item, _) = doc.viewer.ed.view.anchor();
-            let pos = doc.viewer.model().items.start(item).unwrap_or(0);
-            let text = doc.md();
-            let line = text.text().as_bytes()[..pos].iter().filter(|&&b| b == b'\n').count();
-            doc.buffer = Some(SourceState::new(text, line));
-        }
         // the pane the user was looking at leads; the other follows on the first frame
         self.sbs.sync_rendered = from_source;
         self.sbs.sync_source = !from_source;
-    }
-
-    /// Drops a source buffer the rich editor has moved past (its text is no longer the
-    /// session's), so the source editor shows the current text; a buffer that is ahead of
-    /// the session (rebuild pending) or equal to it is kept with its undo history.
-    fn refresh_stale_buffer(doc: &mut DocState, retired: &mut Vec<egui::Id>) {
-        let stale = doc
-            .buffer
-            .as_ref()
-            .is_some_and(|b| !doc.buffer_ahead() && b.doc_text() != doc.viewer.ed.session.text());
-        if stale && let Some(b) = doc.buffer.take() {
-            retired.push(b.id);
-        }
     }
 
     fn open_dialog(&mut self) {
@@ -1742,24 +1543,10 @@ impl MarkiseApp {
             self.open(p);
         }
         self.poll_loading();
-        for id in std::mem::take(&mut self.retired_editors) {
-            ctx.data_mut(|d| d.remove::<egui::text_edit::TextEditState>(id));
-        }
-        self.poll_rebuild();
         self.poll_save();
         self.poll_watcher();
         self.poll_themes(ctx);
         self.export.poll();
-        if let Some(d) = &mut self.doc {
-            d.sync();
-        }
-        // Side by Side updates the model synchronously and incrementally (side_by_side.rs);
-        // only a failed update falls back to the background rebuild (which reports the error)
-        if !self.source_visible
-            && (!self.side_by_side || self.doc.as_ref().is_some_and(|d| d.incr_failed_rev == Some(d.text_rev)))
-        {
-            self.ensure_model();
-        }
         if self.images.poll(ctx)
             && let Some(d) = &mut self.doc
         {
@@ -1969,27 +1756,32 @@ impl MarkiseApp {
         d.key_bindings_applied = Some(cur);
     }
 
-    /// Runs registry command `id` on the document (menus; tests). Not while the source
-    /// buffer is ahead of the session or in source mode. In Side by Side the left pane shows
-    /// the session's text, so a command that changed it rewrites the source buffer (its undo
-    /// history is kept) — both panes stay equal.
+    /// Runs registry command `id` on the document (menus; tests), in the pane that has the
+    /// keyboard focus: the source editor (full Source mode, or its pane of Side by Side) runs
+    /// its own commands — format and block commands are not available there yet (M2d slice 2)
+    /// —, otherwise the rendered view runs it on the session; both panes follow every change.
     pub fn run_command(&mut self, ctx: &Context, id: &str) -> bool {
+        let source = self.source_focused();
         let Some(d) = self.doc.as_mut() else { return false };
-        if d.buffer_ahead() || self.source_visible {
-            return false;
+        if source {
+            if !markise_engine::editor::source::source_command_available(id) {
+                return false;
+            }
+            let vh = d.source_ui.rect().map_or(600.0, |r| r.height());
+            let r = crate::viewer::with_shaper(ctx, self.parley.as_mut(), |sh| {
+                d.viewer.ed.source_execute(id, &markise_doc::Params::new(), sh, vh)
+            });
+            let ok = r.is_ok();
+            if ok {
+                crate::viewer::with_shaper(ctx, self.parley.as_mut(), |sh| {
+                    d.viewer.ed.source_scroll_to_caret(vh, sh)
+                });
+            }
+            return ok;
         }
-        let ok = d
-            .viewer
+        d.viewer
             .run(ctx, self.parley.as_mut(), id, &markise_doc::Params::new())
-            .is_ok();
-        d.sync();
-        if self.side_by_side
-            && let Some(b) = d.buffer.as_mut()
-            && b.doc_text() != d.viewer.ed.session.text()
-        {
-            b.set_doc_text(d.viewer.ed.session.text());
-        }
-        ok
+            .is_ok()
     }
 
     /// "Font & size": user overrides of body font, base size, line height and content width
@@ -2260,12 +2052,15 @@ impl MarkiseApp {
                                 d.viewer.ed.view.scroll_to_item(item);
                                 // Side by Side: the source pane follows the rendered pane
                                 self.sbs.sync_source = true;
-                                if self.source_visible {
-                                    // leave source mode at the heading (preview shows it)
-                                    self.toggle_source();
-                                    if let Some(d) = &mut self.doc {
-                                        d.viewer.ed.view.scroll_to_item(item);
-                                    }
+                                if self.source_visible
+                                    && let Some(p) = d.viewer.ed.source.as_ref()
+                                {
+                                    // owner decision (spec 02 §12.1.1): outline clicks scroll
+                                    // the source to the heading's line
+                                    let text = d.viewer.ed.session.text();
+                                    let line = p.view.line_of(text, model.item_start(item));
+                                    let y = p.view.y_of_line(text, line as f32);
+                                    d.source_ui.scroll_to_px(y);
                                 }
                             }
                         } else {
@@ -2305,20 +2100,32 @@ impl MarkiseApp {
                     ui.add_space(crate::toolbar::RESERVED_H);
                 }
                 if self.source_visible
-                    && let Some(s) = self.doc.as_mut().and_then(|d| d.buffer.as_mut())
+                    && let Some(d) = self.doc.as_mut()
+                    && d.viewer.ed.source.is_some()
                 {
-                    if s.readonly {
-                        ui.weak("Large file: source view is read-only in this version (M1).");
+                    d.viewer.set_font_generation(self.font_gen);
+                    let prefs = self.themes.source_prefs();
+                    let out = d
+                        .source_ui
+                        .show(ui, &mut d.viewer, &t, self.parley.as_mut(), &prefs, true);
+                    if let Some(ms) = out.input_ms {
+                        self.source_input_ms.push(ms);
+                        self.timing.log(&format!("keystroke handle+layout+paint={ms:.2}ms (source)"));
                     }
-                    s.show(ui);
+                    if let Some((start, bytes)) = self.timing.open_started.take() {
+                        self.timing.log(&format!(
+                            "first-document-frame bytes={bytes} open_to_frame={:.1}ms laid_out={} rss_mb={} (source)",
+                            start.elapsed().as_secs_f64() * 1e3,
+                            out.laid_out,
+                            rss_mb()
+                        ));
+                    }
                     return;
                 }
                 match &mut self.doc {
                     Some(d) => {
                         d.viewer.set_font_generation(self.font_gen);
-                        // the rich editor accepts edits once it has the buffer's text
-                        let editable = !d.buffer_ahead();
-                        let out = d.viewer.show(ui, &mut self.images, &t, self.parley.as_mut(), editable);
+                        let out = d.viewer.show(ui, &mut self.images, &t, self.parley.as_mut(), true);
                         if out.edited {
                             d.sync();
                         }
@@ -2374,60 +2181,36 @@ impl MarkiseApp {
         }
     }
 
-    /// Side by Side panes (spec 04 §3.3, interim: the rendered pane is read-only). Returns the
-    /// rendered pane's rectangle.
+    /// Side by Side panes (spec 04 §3.3; the rendered pane is read-only in this version).
+    /// Returns the rendered pane's rectangle.
     fn side_by_side_ui(&mut self, ui: &mut egui::Ui, t: &Theme) -> Option<egui::Rect> {
         let ctx = ui.ctx().clone();
         let split = self.side_by_side_split();
         let show_toolbar = self.toolbar_visible();
-        let doc = self.doc.as_mut()?;
-        if doc.buffer.is_none() {
+        let prefs = self.themes.source_prefs();
+        if self.doc.as_ref().is_some_and(|d| d.viewer.ed.source.is_none()) {
             // a new or reloaded document: the editor starts at the rendered position
-            doc.buffer = Some(SourceState::new(doc.md(), 0));
+            self.open_source_pane();
             self.sbs.sync_source = true;
         }
+        let doc = self.doc.as_mut()?;
         doc.viewer.set_font_generation(self.font_gen);
-        let incremental = doc.incr_failed_rev != Some(doc.text_rev) && doc.failed_rev != Some(doc.text_rev);
-        let behind = doc.model_rev != doc.text_rev && incremental;
-        let (doc_id, text_rev) = (doc.id, doc.text_rev);
-        let buffer = doc.buffer.as_mut().expect("buffer");
         let out = self.sbs.show(
             ui,
-            buffer,
+            &mut doc.source_ui,
             &mut doc.viewer,
             crate::side_by_side::Frame {
                 split,
-                doc_id,
-                text_rev,
-                behind,
-                incremental,
                 images: &mut self.images,
                 theme: t,
                 parley: self.parley.as_mut(),
-                highlighter: self.source_highlight.then_some(&mut self.source_highlighter),
+                prefs: &prefs,
+                editable: true,
                 top_reserve: if show_toolbar { crate::toolbar::RESERVED_H } else { 0.0 },
             },
         );
-        if out.typed {
-            doc.text_rev += 1;
-        }
-        match out.applied {
-            Some(Ok(_)) => {
-                doc.model_rev = doc.text_rev;
-                if let Some(ms) = out.apply_ms
-                    && out.typed
-                {
-                    self.sbs_apply_ms.push(ms);
-                }
-            }
-            Some(Err(e)) => {
-                // the background rebuild takes over for this revision (ensure_model); it
-                // reports an error itself if it fails too
-                eprintln!("markise: incremental preview update failed ({e}); rebuilding");
-                doc.incr_failed_rev = Some(doc.text_rev);
-                ctx.request_repaint();
-            }
-            None => {}
+        if let Some(ms) = out.input_ms {
+            self.source_input_ms.push(ms);
         }
         if doc.viewer.ed.view.missing_glyphs() && !self.themes.fallback_requested() {
             self.themes.request_fallback();
@@ -2588,6 +2371,63 @@ impl MarkiseApp {
             }
         }
     }
+}
+
+/// The physical source line at the rendered view's vertical middle (spec 02 §12.1 position
+/// mapping on entering source mode): the block there, plus the share of its source lines above
+/// the middle when the block is tall.
+fn rendered_middle_line(viewer: &DocViewer) -> f32 {
+    let Some(pane) = viewer.ed.source.as_ref() else {
+        return 0.0;
+    };
+    let v = &viewer.ed.view;
+    if v.is_empty() {
+        return 0.0;
+    }
+    let vh = viewer.surface_rect().map_or(600.0, |r| r.height());
+    let y = v.scroll_y() + vh as f64 * 0.5;
+    let i = v.item_at_y(y);
+    let h = v.height(i).max(1.0);
+    let f = ((y - v.item_y(i)) as f32 / h).clamp(0.0, 1.0);
+    let text = viewer.ed.session.text();
+    let r = crate::side_by_side::item_source_range(viewer.model(), i);
+    let l0 = pane.view.line_of(text, r.start);
+    let l1 = pane.view.line_of(text, r.end.saturating_sub(1).max(r.start));
+    let n = l1.saturating_sub(l0) + 1;
+    let extra = if h > 20.0 { (f * (n - 1) as f32).floor() } else { 0.0 };
+    l0 as f32 + extra
+}
+
+/// Leaving source mode (spec 02 §12.1): the block holding the source line at the source
+/// view's vertical middle is centred in the rendered view (`vh`: the source viewport height).
+fn source_middle_to_rendered(viewer: &mut DocViewer, vh: f32) {
+    let Some(pane) = viewer.ed.source.as_ref() else { return };
+    let text = viewer.ed.session.text();
+    let line = pane.view.line_at_y(pane.view.scroll_y() + vh as f64 * 0.5);
+    let off = pane.view.line_start(text, line.floor().max(0.0) as usize);
+    let model = viewer.model().clone();
+    if model.items.is_empty() {
+        return;
+    }
+    let mut item = model.item_at_offset(off);
+    while item + 1 < model.items.len() && matches!(model.items[item].kind, markise_layout::ItemKind::Hidden) {
+        item += 1;
+    }
+    let rvh = viewer.surface_rect().map_or(vh, |r| r.height());
+    let v = &mut viewer.ed.view;
+    v.scroll_to_item(item);
+    let h = v.height(item);
+    v.scroll_by(h * 0.5 - rvh * 0.5);
+}
+
+/// Back to the rendered view: the caret goes where the source caret was (the rendered view
+/// moves it to its nearest caret stop) and the source pane is dropped.
+fn leave_source_pane(viewer: &mut DocViewer) {
+    if let Some(p) = viewer.ed.source.as_ref() {
+        let caret = markise_doc::Selection::caret_at(p.sel.primary().focus);
+        viewer.ed.session.set_selection(caret);
+    }
+    viewer.ed.close_source();
 }
 
 /// Sets egui's theme preference for the appearance and returns whether the result is dark.

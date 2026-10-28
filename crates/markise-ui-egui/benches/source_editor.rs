@@ -1,11 +1,11 @@
-//! Side by Side keystroke → frame (spec 04 §3.3 interim, NFR-4 budget p99 < 16 ms):
-//! `cargo bench -p markise-ui-egui --bench side_by_side`.
+//! Source editor keystroke → frame (M2d, spec 02 §12.1; NFR-4 budget p99 < 16 ms):
+//! `cargo bench -p markise-ui-egui --bench source_editor`.
 //!
-//! Opens corpora from 120 KB to 1.9 MB (just under the source editor's 2 MB edit limit), switches to Side by
-//! Side, focuses the source editor with a click and types one character per frame. Reports the
-//! CPU time of the whole frame (real app UI: `TextEdit` handling and its full-text relayout,
-//! the incremental document/model/view update, the rendered pane's layout and paint,
-//! tessellation; no GPU) and, separately, the incremental update alone.
+//! Opens corpora from 1 MB to 10 MB in full Source mode and in Side by Side (soft wrap and
+//! line numbers on), focuses the source editor with a click and types one character per frame.
+//! Reports the wall time of the whole frame (real app UI: input, session edit, incremental
+//! rendered model + source view update, layout and paint of the panes, tessellation; no GPU),
+//! the time from opening the file to the first source frame, and a scroll-to-end frame.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -48,10 +48,13 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
     v[((v.len() as f64 - 1.0) * p).round() as usize]
 }
 
-fn run(label: &str, path: &Path, highlight: bool) {
+fn run(label: &str, path: &Path, mode: ViewMode) {
     let ctx = Context::default();
     let mut app = MarkiseApp::new(AppOptions::default());
-    app.set_source_highlighting(highlight);
+    let mut prefs = app.source_prefs();
+    prefs.line_numbers = true;
+    prefs.soft_wrap = true;
+    app.set_source_prefs(prefs);
     frame(&ctx, &mut app, vec![]);
     frame(&ctx, &mut app, vec![]);
     app.open(path.to_path_buf());
@@ -61,12 +64,29 @@ fn run(label: &str, path: &Path, highlight: bool) {
         std::thread::sleep(Duration::from_micros(200));
         assert!(t.elapsed() < Duration::from_secs(30));
     }
-    app.set_view_mode(ViewMode::SideBySide);
+    let open_ms = t.elapsed().as_secs_f64() * 1e3;
+    let t = Instant::now();
+    app.set_view_mode(mode);
+    frame(&ctx, &mut app, vec![]);
+    let first_ms = t.elapsed().as_secs_f64() * 1e3;
     for _ in 0..3 {
         frame(&ctx, &mut app, vec![]);
     }
+    println!("{label}: open {open_ms:.0} ms (load+parse+model), first source frame {first_ms:.1} ms");
+    // scroll to the end with wrap (scrollbar drag to the bottom)
+    let bar = Pos2::new(W - 4.0, H - 2.0);
+    let press = |pressed| Event::PointerButton {
+        pos: bar,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    let t = Instant::now();
+    frame(&ctx, &mut app, vec![Event::PointerMoved(bar), press(true)]);
+    println!("  scroll-to-end frame {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+    frame(&ctx, &mut app, vec![press(false)]);
     // focus the editor: click in the middle of the source pane
-    let p = Pos2::new(W * 0.35, H * 0.5);
+    let p = Pos2::new(if mode == ViewMode::Source { W * 0.6 } else { W * 0.35 }, H * 0.5);
     let click = |pressed| Event::PointerButton {
         pos: p,
         button: egui::PointerButton::Primary,
@@ -76,7 +96,7 @@ fn run(label: &str, path: &Path, highlight: bool) {
     frame(&ctx, &mut app, vec![Event::PointerMoved(p), click(true)]);
     frame(&ctx, &mut app, vec![click(false)]);
     frame(&ctx, &mut app, vec![]);
-    app.sbs_apply_ms.clear();
+    app.source_input_ms.clear();
     let mut times = Vec::new();
     for i in 0..200 {
         let ev = if i % 20 == 19 {
@@ -92,8 +112,8 @@ fn run(label: &str, path: &Path, highlight: bool) {
         };
         times.push(frame(&ctx, &mut app, vec![ev]).as_secs_f64() * 1e3);
     }
-    let typed = app.sbs_apply_ms.len();
-    let mut apply = std::mem::take(&mut app.sbs_apply_ms);
+    let typed = app.source_input_ms.len();
+    let mut apply = std::mem::take(&mut app.source_input_ms);
     let (p50, p99, max) = (pct(&mut times, 0.5), pct(&mut times, 0.99), pct(&mut times, 1.0));
     println!(
         "{label}: keystroke -> frame p50 {p50:.2} ms, p99 {p99:.2} ms, max {max:.2} ms (budget p99 16 ms) -> {}",
@@ -101,7 +121,7 @@ fn run(label: &str, path: &Path, highlight: bool) {
     );
     if typed > 0 {
         let (a50, a99) = (pct(&mut apply, 0.5), pct(&mut apply, 0.99));
-        println!("  incremental update alone ({typed} edits): p50 {a50:.2} ms, p99 {a99:.2} ms");
+        println!("  source editor input → laid out ({typed} frames): p50 {a50:.2} ms, p99 {a99:.2} ms");
     } else {
         println!("  (no edits reached the document: the editor did not get focus)");
     }
@@ -111,20 +131,14 @@ fn main() {
     if std::env::args().any(|a| a == "--list") {
         return;
     }
-    let eighth = corpus("120kb.md", 120 << 10);
-    let quarter = corpus("256kb.md", 256 << 10);
     let one = corpus("1mb.md", 1 << 20);
-    let two = corpus("1900kb.md", 1900 << 10);
+    let ten = corpus("10mb.md", 10 << 20);
     println!(
-        "Side by Side headless measurements (release, {})",
+        "Source editor headless app measurements (release, {})",
         std::env::consts::ARCH
     );
-    // colouring applies up to MARKISE_SOURCE_HIGHLIGHT_LIMIT (default 128 KB): run with a
-    // larger limit to measure colouring of bigger files
-    run("120 KB, plain", &eighth, false);
-    run("120 KB, highlighted", &eighth, true);
-    run("256 KB, plain", &quarter, false);
-    run("256 KB, highlighted (if under the limit)", &quarter, true);
-    run("1 MB, plain", &one, false);
-    run("1.9 MB, plain", &two, false);
+    run("1 MB, Source", &one, ViewMode::Source);
+    run("10 MB, Source", &ten, ViewMode::Source);
+    run("1 MB, Side by Side", &one, ViewMode::SideBySide);
+    run("10 MB, Side by Side", &ten, ViewMode::SideBySide);
 }

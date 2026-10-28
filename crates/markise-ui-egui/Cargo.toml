@@ -37,5 +37,5 @@ name = "viewer"
 harness = false
 
 [[bench]]
-name = "side_by_side"
+name = "source_editor"
 harness = false

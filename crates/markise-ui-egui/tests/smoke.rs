@@ -103,8 +103,7 @@ fn source_mode_edit_and_save_round_trips() {
     h.state_mut().toggle_source();
     h.run_steps(2);
     assert!(h.state().in_source_mode());
-    let buf = h.state_mut().source_buffer_mut().unwrap();
-    *buf = buf.replace("two", "zwei");
+    h.state_mut().edit_source_text(|t| *t = t.replace("two", "zwei"));
     h.run_steps(1);
     assert!(
         h.state().title().contains('•'),

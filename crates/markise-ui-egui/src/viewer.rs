@@ -207,7 +207,19 @@ impl DocViewer {
         if caret.primary().end().offset > len {
             self.ed.session.set_selection(Selection::caret(len));
         }
+        // the source pane shows the new text; its caret stays where it was (clamped)
+        if let Some(p) = self.ed.source.as_mut() {
+            p.view.rebuild(self.ed.session.text());
+            if p.sel.primary().end().offset > len {
+                p.sel = Selection::caret(len);
+            }
+        }
         r
+    }
+
+    /// Font generation the view was last told about.
+    pub fn font_generation(&self) -> u64 {
+        self.font_gen
     }
 
     pub fn set_font_generation(&mut self, g: u64) {
@@ -775,7 +787,11 @@ impl DocViewer {
 }
 
 /// Runs `f` with the text shaper of the active backend.
-fn with_shaper<R>(ctx: &egui::Context, parley: Option<&mut ParleyText>, f: impl FnOnce(&mut dyn TextShaper) -> R) -> R {
+pub(crate) fn with_shaper<R>(
+    ctx: &egui::Context,
+    parley: Option<&mut ParleyText>,
+    f: impl FnOnce(&mut dyn TextShaper) -> R,
+) -> R {
     match parley {
         Some(p) => f(&mut p.shaper),
         None => ctx.fonts_mut(|fonts| f(fonts)),
@@ -920,6 +936,24 @@ fn paint_dashed(painter: &egui::Painter, pts: &[Pos2], stroke: Stroke, d: f32, g
     }
 }
 
+/// Paints one shaped text block (epaint galley or parley block) with its anchor at `pos`.
+pub(crate) fn paint_text_block(
+    painter: &egui::Painter,
+    ui: &Ui,
+    text: &Arc<dyn markise_layout::TextBlock>,
+    pos: Pos2,
+    parley: Option<&mut ParleyText>,
+) {
+    if let Some(galley) = text.galley() {
+        // Re-request the galley: egui's galley cache returns the same Arc while the font atlas
+        // is unchanged, and a freshly rasterised one after an atlas rebuild.
+        let g = painter.layout_job((*galley.job).clone());
+        painter.galley(pos, g, Color32::PLACEHOLDER);
+    } else if let (Some(block), Some(p)) = (text.as_any().downcast_ref::<ParleyBlock>(), parley) {
+        p.atlas.paint(ui.ctx(), painter, block, pos);
+    }
+}
+
 fn paint_layout(
     painter: &egui::Painter,
     ui: &Ui,
@@ -939,16 +973,7 @@ fn paint_layout(
                 if !r.intersects(clip_rect) {
                     continue;
                 }
-                if let Some(galley) = text.galley() {
-                    // Re-request the galley: egui's galley cache returns the same Arc while the
-                    // font atlas is unchanged, and a freshly rasterised one after an atlas rebuild.
-                    let g = painter.layout_job((*galley.job).clone());
-                    painter.galley(*pos + off, g, Color32::PLACEHOLDER);
-                } else if let (Some(block), Some(p)) =
-                    (text.as_any().downcast_ref::<ParleyBlock>(), parley.as_deref_mut())
-                {
-                    p.atlas.paint(ui.ctx(), painter, block, *pos + off);
-                }
+                paint_text_block(painter, ui, text, *pos + off, parley.as_deref_mut());
             }
             Prim::Rect {
                 rect,

@@ -312,6 +312,7 @@ pub struct ThemeManager {
     /// View → Toolbar toggled before the settings file was read.
     chose_toolbar: bool,
     chose_editing: bool,
+    chose_source: bool,
     /// Settings changed and not yet handed to the worker (coalesced, debounced).
     dirty: SettingsPatch,
     save_at: Option<Instant>,
@@ -380,6 +381,7 @@ impl ThemeManager {
             chose_diagrams: false,
             chose_toolbar: false,
             chose_editing: false,
+            chose_source: false,
             dirty: SettingsPatch::default(),
             save_at: None,
             early_overrides: OverridesPatch::default(),
@@ -605,6 +607,21 @@ impl ThemeManager {
         if e != self.settings.editing {
             self.settings.editing = e;
             self.dirty.editing = Some(e);
+        }
+    }
+
+    /// Source editor display preferences (settings key `source`; View menu).
+    pub fn source_prefs(&self) -> markise_engine::settings::SourceSettings {
+        self.settings.source
+    }
+
+    /// Changes the source editor display preferences; persisted like the other settings.
+    pub fn set_source_prefs(&mut self, p: markise_engine::settings::SourceSettings) {
+        self.chose_source = true;
+        if p != self.settings.source {
+            self.settings.source = p;
+            self.dirty.source = Some(p);
+            self.schedule_save();
         }
     }
 
@@ -870,6 +887,9 @@ impl ThemeManager {
                 }
                 if self.chose_editing {
                     self.settings.editing = chosen.editing;
+                }
+                if self.chose_source {
+                    self.settings.source = chosen.source;
                 }
                 // overrides member by member: the ones changed early win
                 self.early_overrides.apply(&mut self.settings.overrides);

@@ -283,7 +283,7 @@ const fn mac_only(mac: &'static str) -> DefaultKey {
 /// Commands performed by the application itself (window, files, view and theme state) that
 /// the engine registry does not hold. Same descriptor type as the registry, so labels and
 /// per-platform chords have one source (spec 02 §15).
-pub static APP_COMMANDS: [CommandDescriptor; 25] = [
+pub static APP_COMMANDS: [CommandDescriptor; 29] = [
     app(
         "file.openFolder",
         "Open Folder…",
@@ -308,6 +308,11 @@ pub static APP_COMMANDS: [CommandDescriptor; 25] = [
     app("view.highlightCode", "Highlight Code", &[]),
     app("view.diagrams", "Diagrams", &[]),
     app("view.fullScreen", "Toggle Full Screen", &[both("Ctrl+Cmd+F", "F11")]),
+    // source editor display preferences (spec 02 §12.1.1), View → Source Editor
+    app("view.sourceLineNumbers", "Line Numbers", &[]),
+    app("view.sourceSoftWrap", "Soft Wrap", &[]),
+    app("view.sourceCurrentLine", "Highlight Current Line", &[]),
+    app("view.sourceWhitespace", "Show Whitespace", &[]),
     app("export.previous", "Export with Previous", &[]),
     app("export.overwritePrevious", "Export and Overwrite with Previous", &[]),
     app("theme.fontAndSize", "Font & Size…", &[]),
