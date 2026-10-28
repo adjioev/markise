@@ -757,13 +757,21 @@ fn enter_in_headings_with_containers_closing_sequences_and_crlf() {
 #[test]
 fn empty_headings_and_merges_with_closing_sequences() {
     let n = "edit.newline";
-    // Enter at an empty heading: no source change (the virtual paragraph; C43 is M2c)
-    for src in ["#\n", "## \n", "- #\n"] {
+    // C43: Enter at an empty heading turns it into an empty paragraph in place
+    for (src, want) in [("#\n", "\n"), ("## \n", "\n"), ("- #\n", "- \n"), ("a\n\n## \n", "a\n")] {
         let mut t = T::new(src);
         t.ed.edit(|s| s.set_selection(Selection::caret(src.find('#').unwrap() + 1)));
         t.frame();
         t.run(n);
-        assert_eq!(t.text(), src, "Enter in the empty heading {src:?}");
+        assert_eq!(t.text(), want, "Enter in the empty heading {src:?}");
+        t.check_model();
+        t.typ("x");
+        let typed = if want == "a\n" {
+            "a\n\nx\n".to_string()
+        } else {
+            want.replace('\n', "x\n")
+        };
+        assert_eq!(t.text(), typed, "typing after Enter in {src:?}");
         t.check_model();
     }
     // Backspace at an empty heading: becomes an (empty) paragraph
@@ -799,4 +807,17 @@ fn enter_with_the_caret_inside_heading_syntax() {
         assert_eq!(t.text(), src);
         assert!(t.caret().virt > 0, "{src:?}: {:?}", t.caret());
     }
+}
+
+/// Spec 02 §5.2 rule 2 (a thematic break before the block is deleted) and rule 5 into the
+/// last paragraph of a container ending right before the block (#20 c04, l07).
+#[test]
+fn backspace_deletes_a_rule_and_merges_into_a_preceding_container() {
+    let b = "edit.deleteBackward";
+    roundtrip("a\n\n---\n\nb\n", 8, b, "a\n\nb\n");
+    roundtrip("---\n\n## T\n", 8, b, "## T\n");
+    roundtrip("> a\n>\n> ***\n>\n> b\n", 16, b, "> a\n>\n> b\n");
+    roundtrip("- a\n\nb\n", 5, b, "- ab\n");
+    roundtrip("- a\n  - b\n\nc\n", 11, b, "- a\n  - bc\n");
+    roundtrip("> q\n\nb\n", 5, b, "> qb\n");
 }

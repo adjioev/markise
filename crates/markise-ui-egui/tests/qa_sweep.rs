@@ -556,7 +556,6 @@ fn b08_enter_on_virtual_paragraph_does_nothing() {
 
 // Expected (C43): `## ` + Enter turns the heading into an empty paragraph; typing `x` gives `x`. Actual: nothing happens, typing gives `## x`.
 #[test]
-#[ignore = "bug: Enter on an empty heading does nothing (C43)"]
 fn b09_enter_on_empty_heading_becomes_paragraph() {
     // C43
     let mut e = Ed::open("b09", "Intro\n\n## \n");
@@ -744,7 +743,6 @@ fn c03_backspace_merges_paragraph_into_heading() {
 
 // Expected (§5.2 rule 2): the HR is deleted. Forward Delete before an HR works (c12).
 #[test]
-#[ignore = "bug: Backspace at the start of a paragraph after an HR does nothing"]
 fn c04_backspace_after_hr_deletes_hr() {
     // §5.2 rule 2
     let mut e = Ed::open("c04", "a\n\n---\n\nb\n");
@@ -1822,7 +1820,6 @@ fn l06_enter_in_middle_of_list_item_splits() {
 
 // Expected (§5.2 rule 5): merge into the last item's paragraph, `- ab`. Actual: no-op.
 #[test]
-#[ignore = "bug: Backspace at a paragraph after a list does nothing"]
 fn l07_backspace_at_paragraph_after_list_merges_into_item() {
     // §5.2 rule 5: merge into the previous block's last paragraph
     let mut e = Ed::open("l07", "- a\n\nb\n");

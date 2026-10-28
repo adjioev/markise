@@ -761,6 +761,20 @@ impl EditorSession {
         if !text_like {
             return Some(BlockEdit::Nothing);
         }
+        let prev = leaf_before(self.doc.as_ref(), leaf.span.start).filter(|p| p.span.start < leaf.span.start);
+        // rule 2: a thematic break right before the block is deleted (with the separator
+        // after it); the caret stays at the start of this block's text
+        if let Some(hr) = prev
+            .as_ref()
+            .filter(|p| p.kind == LeafKind::ThematicBreak && p.containers == leaf.containers && !in_list_item(&leaf))
+        {
+            let patches = PatchSet::delete(hr.span.start..leaf.span.start);
+            return Some(BlockEdit::Edit {
+                patches,
+                label: "Delete Horizontal Rule",
+                caret: hr.span.start + (first.start - leaf.span.start),
+            });
+        }
         if let LeafKind::Heading { .. } = leaf.kind {
             // rule 4: the heading becomes a paragraph — its block syntax before the text (ATX
             // `## `) and after it (setext underline, ATX closing sequence) is removed
@@ -781,14 +795,14 @@ impl EditorSession {
                 });
             }
         }
-        // rule 5: merge with the previous paragraph/heading
-        let Some(prev) = leaf_before(self.doc.as_ref(), leaf.span.start) else {
+        // rule 5: merge with the previous paragraph/heading — also the last paragraph of a
+        // container that ends right before this block (a list item, a quote)
+        let Some(prev) = prev else {
             return Some(BlockEdit::Nothing);
         };
-        if prev.span.start >= leaf.span.start
-            || !matches!(prev.kind, LeafKind::Paragraph | LeafKind::Heading { .. })
-            || prev.containers != leaf.containers
-            || in_list_item(&leaf)
+        let same_or_inner =
+            prev.containers.len() >= leaf.containers.len() && prev.containers.starts_with(&leaf.containers);
+        if !matches!(prev.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) || !same_or_inner || in_list_item(&leaf)
         {
             return Some(BlockEdit::Nothing);
         }

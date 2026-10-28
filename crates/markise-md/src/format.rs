@@ -1161,6 +1161,9 @@ impl Document {
         let ls = line_start(text, at);
         let (ce, _) = line_end(text, ls);
         let Some(hint) = self.hints().get(ls).copied() else {
+            if let Some(plan) = self.empty_heading_enter(at) {
+                return Ok(plan);
+            }
             return self.plan_split(at);
         };
         if hint.origin != HintOrigin::EnterPending || at != ce {
@@ -1236,6 +1239,42 @@ impl Document {
         Ok(Plan::single(
             PlanStep::hints(hints),
             Some(Selection::caret_at(markise_doc::DocPos::with_virt(gap, virt))),
+        ))
+    }
+
+    /// C43 for a parsed ATX heading with no content (`## ` from the file or left after
+    /// deleting its text): Enter turns it into an empty paragraph in place — the heading's
+    /// bytes and the separator before it go, the caret on the virtual paragraph after the
+    /// previous block of the same containers (or on the emptied line when there is none).
+    fn empty_heading_enter(&self, at: usize) -> Option<Plan> {
+        let text = self.text();
+        let leaf = self
+            .leaf(at)
+            .or_else(|| self.leaf_before(at))
+            .filter(|l| line_start(text, l.span.start) == line_start(text, at))?;
+        if !matches!(leaf.kind, LeafKind::Heading { .. }) || leaf.hinted {
+            return None;
+        }
+        let ls = line_start(text, leaf.span.start);
+        let (ce, _) = line_end(text, ls);
+        let b = &text.as_bytes()[leaf.span.start..ce];
+        let p = scan::skip_ws(b, 0, b.len());
+        let (_, content, _) = scan::atx_heading(b, p, b.len(), self.options().strict)?;
+        if !content.is_empty() || at < leaf.span.start || at > ce {
+            return None;
+        }
+        if let Some(prev) = self.leaf_before(ls)
+            && line_start(text, prev.span.end) < ls
+            && prev.containers == leaf.containers
+        {
+            return Some(Plan::single(
+                PlanStep::patches(PatchSet::single_verbatim(prev.span.end..ce, "")),
+                Some(Selection::caret_at(markise_doc::DocPos::with_virt(prev.span.end, 1))),
+            ));
+        }
+        Some(Plan::single(
+            PlanStep::patches(PatchSet::single_verbatim(leaf.span.start..ce, "")),
+            Some(Selection::caret(leaf.span.start)),
         ))
     }
 
