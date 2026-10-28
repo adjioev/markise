@@ -344,3 +344,24 @@ fn link_at_a_caret_puts_the_caret_in_the_empty_text() {
     assert_eq!(t.text(), "see [t]()\n");
     t.check_model();
 }
+
+/// A loaded callout with body text: Enter at the body's end opens the virtual paragraph in
+/// the callout, a second Enter leaves the callout (only a tag-only callout keeps the caret).
+#[test]
+fn enter_leaves_a_callout_that_has_a_body() {
+    for src in ["> [!NOTE]\n> body‸\n", "> [!NOTE]\n>\n> body‸\n"] {
+        let mut t = T::at(src);
+        t.key("edit.newline");
+        let c = t.caret();
+        assert_eq!(c.virt, 1, "{src:?}: {}", t.shown());
+        t.key("edit.newline");
+        assert!(t.caret().virt > c.virt, "{src:?}: second Enter leaves: {}", t.shown());
+        t.typ("x");
+        let text = t.text().to_string();
+        assert!(
+            text.ends_with("\n\nx\n") || text.ends_with("\n\nx"),
+            "{src:?}: {text:?}"
+        );
+        assert!(!text.contains("> x"), "{src:?}: {text:?}");
+    }
+}

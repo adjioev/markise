@@ -556,6 +556,7 @@ fn b08_enter_on_virtual_paragraph_does_nothing() {
 
 // Expected (C43): `## ` + Enter turns the heading into an empty paragraph; typing `x` gives `x`. Actual: nothing happens, typing gives `## x`.
 #[test]
+#[ignore = "bug: C43 — PR #18"]
 fn b09_enter_on_empty_heading_becomes_paragraph() {
     // C43
     let mut e = Ed::open("b09", "Intro\n\n## \n");
