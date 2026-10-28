@@ -1463,6 +1463,7 @@ impl MarkiseApp {
             self.source_visible = true;
         } else {
             self.source_visible = false;
+            doc.viewer.request_refocus();
             if let Some(b) = &doc.buffer {
                 let offset = b.line_to_doc_offset(b.middle_line());
                 if doc.model_rev == doc.text_rev {
@@ -1512,6 +1513,9 @@ impl MarkiseApp {
                     // the panes already show the same place: keep the positions
                     self.side_by_side = false;
                     self.source_visible = m == ViewMode::Source;
+                    if let (ViewMode::Rendered, Some(doc)) = (m, self.doc.as_mut()) {
+                        doc.viewer.request_refocus();
+                    }
                 } else if (m == ViewMode::Source) != self.source_visible {
                     self.toggle_source();
                 }

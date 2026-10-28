@@ -1583,7 +1583,6 @@ fn i05_undo_all_returns_clean() {
 
 // Expected: typing continues in the document after toggling source mode off. Actual: no widget has focus; keys are dropped until the user clicks (l08 passes with a click).
 #[test]
-#[ignore = "bug: keyboard focus is lost after Cmd+/ back to the rendered view"]
 fn j01_source_mode_round_trip_mid_edit() {
     let mut e = Ed::open("j01", "Para\n\n# H\n");
     e.at(4).typ(" one");
@@ -1601,7 +1600,6 @@ fn j01_source_mode_round_trip_mid_edit() {
 
 // Expected: typing continues in the rendered view after Ctrl+Cmd+/ twice. Actual: keys are dropped until a click.
 #[test]
-#[ignore = "bug: keyboard focus is lost after leaving Side by Side"]
 fn j02_side_by_side_mid_edit() {
     let mut e = Ed::open("j02", "Para\n");
     e.at(4).typ(" x");

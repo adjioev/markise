@@ -85,6 +85,9 @@ pub struct DocViewer {
     pending_copy: Option<String>,
     /// Widget id and screen rectangle of the surface at the last frame.
     last_surface: Option<(egui::Id, Rect)>,
+    /// Take the keyboard focus on the next frame (the surface came back after a view mode
+    /// whose widgets held it, e.g. the source editor).
+    refocus: bool,
 }
 
 impl DocViewer {
@@ -118,6 +121,7 @@ impl DocViewer {
             last_top: 0.0,
             pending_copy: None,
             last_surface: None,
+            refocus: false,
         }
     }
 
@@ -129,6 +133,12 @@ impl DocViewer {
     /// The surface's widget id at the last frame (it holds the keyboard focus while editing).
     pub fn surface_id(&self) -> Option<egui::Id> {
         self.last_surface.map(|(id, _)| id)
+    }
+
+    /// Asks the surface to take the keyboard focus on its next frame (after leaving Source or
+    /// Side by Side, whose editor had it), so typing continues without a click.
+    pub fn request_refocus(&mut self) {
+        self.refocus = true;
     }
 
     /// The surface's screen rectangle at the last frame (document painting is clipped to it).
@@ -275,7 +285,7 @@ impl DocViewer {
         self.ed.view.set_params(col_w, theme, ppp);
         let vh = rect.height();
 
-        if resp.clicked() || resp.drag_started() {
+        if resp.clicked() || resp.drag_started() || std::mem::take(&mut self.refocus) {
             resp.request_focus();
         }
         let focused = resp.has_focus();
