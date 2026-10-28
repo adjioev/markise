@@ -315,6 +315,7 @@ pub struct ThemeManager {
     chose_diagrams: bool,
     /// View → Toolbar toggled before the settings file was read.
     chose_toolbar: bool,
+    chose_recent: bool,
     chose_toolbar_position: bool,
     chose_editing: bool,
     chose_source: bool,
@@ -386,6 +387,7 @@ impl ThemeManager {
             chose_zoom: false,
             chose_diagrams: false,
             chose_toolbar: false,
+            chose_recent: false,
             chose_toolbar_position: false,
             chose_editing: false,
             chose_source: false,
@@ -663,6 +665,22 @@ impl ThemeManager {
         }
     }
 
+    /// Whether the sidebar shows its Recent section (settings key `sidebar.showRecent`,
+    /// default on).
+    pub fn show_recent(&self) -> bool {
+        self.settings.show_recent
+    }
+
+    /// View → Show Recent Files; persisted like the other settings.
+    pub fn set_show_recent(&mut self, on: bool) {
+        self.chose_recent = true;
+        if on != self.settings.show_recent {
+            self.settings.show_recent = on;
+            self.dirty.show_recent = Some(on);
+            self.schedule_save();
+        }
+    }
+
     /// Formatting toolbar placement (settings key `toolbarPosition`, default top).
     pub fn toolbar_position(&self) -> markise_engine::settings::ToolbarPosition {
         self.settings.toolbar_position
@@ -930,6 +948,9 @@ impl ThemeManager {
                 }
                 if self.chose_toolbar {
                     self.settings.show_toolbar = chosen.show_toolbar;
+                }
+                if self.chose_recent {
+                    self.settings.show_recent = chosen.show_recent;
                 }
                 if self.chose_toolbar_position {
                     self.settings.toolbar_position = chosen.toolbar_position;

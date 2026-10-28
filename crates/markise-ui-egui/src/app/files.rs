@@ -206,6 +206,7 @@ impl MarkiseApp {
     /// document now corresponds to (what Save As wrote; for a rename the unchanged content),
     /// the watcher's baseline for the new path (ADR 0010).
     pub(super) fn document_moved(&mut self, path: &Path, version: Option<DiskVersion>) {
+        self.side.opened(path);
         if let Some(w) = self.watcher.as_mut() {
             w.watch_file(path, version);
         }
@@ -384,6 +385,7 @@ impl MarkiseApp {
 
     /// `from` was renamed to `to`: the document (in it, or it) follows.
     fn renamed(&mut self, from: &Path, to: &Path) {
+        self.side.renamed(from, to);
         if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
             t.renamed(from, to, w);
         }
@@ -420,6 +422,7 @@ impl MarkiseApp {
     pub(super) fn move_to_trash(&mut self, p: &Path) {
         match fsops::move_to_trash(p) {
             Ok(()) => {
+                self.side.removed(p);
                 if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
                     t.renamed(p, p, w); // forget its listing; list the parent again
                 }

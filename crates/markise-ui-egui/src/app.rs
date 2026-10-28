@@ -411,6 +411,8 @@ pub struct MarkiseApp {
     /// Formatting toolbar state (spec 04 §3.2; shown per the `showToolbar` setting).
     toolbar: crate::toolbar::Toolbar,
     tab: Tab,
+    /// Recent files of the session and the sidebar's collapsed sections.
+    side: crate::sidebar::SideState,
     tree: Option<FileTree>,
     themes: ThemeManager,
     /// The theme report window is open.
@@ -505,6 +507,7 @@ impl MarkiseApp {
             sidebar_visible: true,
             toolbar: Default::default(),
             tab: Tab::Outline,
+            side: Default::default(),
             tree: None,
             themes,
             theme_report: false,
@@ -812,6 +815,11 @@ impl MarkiseApp {
         self.tree.as_ref().map(|t| t.row_names()).unwrap_or_default()
     }
 
+    /// The sidebar's Recent files, the most recent first (tests).
+    pub fn recent_files(&self) -> &[PathBuf] {
+        self.side.recent()
+    }
+
     /// Shows the Files (`true`) or Outline tab of the sidebar.
     pub fn show_files_tab(&mut self, files: bool) {
         self.tab = if files { Tab::Files } else { Tab::Outline };
@@ -909,7 +917,13 @@ impl MarkiseApp {
         let Some(r) = got else { return };
         let l = self.load.take().expect("load");
         match r {
-            Err(e) => self.banner = Some(Banner::Error(e)),
+            Err(e) => {
+                // a file that cannot be opened (gone, unreadable) leaves Recent
+                if matches!(l.reason, LoadReason::Open | LoadReason::OpenDiscarding) {
+                    self.side.forget(&l.path);
+                }
+                self.banner = Some(Banner::Error(e));
+            }
             Ok(loaded) => {
                 let t = loaded.timings;
                 self.timing.log(&format!(
@@ -1032,6 +1046,17 @@ impl MarkiseApp {
         self.toolbar_position() == markise_engine::settings::ToolbarPosition::Bottom
     }
 
+    /// Whether the sidebar shows its Recent section (View → Show Recent Files, persisted as
+    /// `sidebar.showRecent`; issue #57).
+    pub fn show_recent(&self) -> bool {
+        self.themes.show_recent()
+    }
+
+    /// View → Show Recent Files, and Hide Recent in the section's context menu.
+    pub fn set_show_recent(&mut self, on: bool) {
+        self.themes.set_show_recent(on);
+    }
+
     /// View → Toolbar.
     pub fn set_show_toolbar(&mut self, on: bool) {
         self.themes.set_show_toolbar(on);
@@ -1073,6 +1098,9 @@ impl MarkiseApp {
     /// Replaces the document; `untitled`: a new document without a file (`loaded.path` is
     /// its placeholder, not watched).
     fn install_doc(&mut self, loaded: Loaded, untitled: bool) {
+        if !untitled {
+            self.side.opened(&loaded.path);
+        }
         let same = !untitled
             && self
                 .doc
@@ -2315,37 +2343,35 @@ impl MarkiseApp {
         let t = self.theme.clone();
         egui::Panel::left("markise-sidebar")
             .resizable(true)
-            .default_size(240.0)
-            .frame(egui::Frame::new().fill(color(t.chrome.sidebar_bg)).inner_margin(8.0))
+            .default_size(272.0)
+            .frame(egui::Frame::new().fill(color(t.chrome.sidebar_bg)))
             .show(ui, |ui| {
                 let look = crate::sidebar::SideLook::new(&t);
-                ui.horizontal(|ui| {
-                    for (tab, label) in [(Tab::Files, "Files"), (Tab::Outline, "Outline")] {
-                        let on = self.tab == tab;
-                        let text = RichText::new(label)
-                            .font(if on { look.bold_font.clone() } else { look.font.clone() })
-                            .color(if on { look.active_text } else { look.text });
-                        let r = ui.add(egui::Button::new(text).frame(false));
-                        if on {
-                            let y = r.rect.bottom() + 1.0;
-                            ui.painter().line_segment(
-                                [egui::pos2(r.rect.left(), y), egui::pos2(r.rect.right(), y)],
-                                egui::Stroke::new(2.0, look.outline_active_text),
-                            );
-                        }
-                        if r.clicked() {
-                            self.tab = tab;
-                        }
-                    }
-                });
-                ui.add_space(2.0);
-                ui.separator();
+                // the activity bar at the left edge, the chosen view beside it
+                let full = ui.available_rect_before_wrap();
+                let bar =
+                    egui::Rect::from_min_size(full.min, egui::vec2(crate::sidebar::ACTIVITY_BAR_W, full.height()));
+                crate::sidebar::activity_bar(ui, bar, &mut self.tab, &look);
+                let content = egui::Rect::from_min_max(
+                    egui::pos2(bar.right() + 8.0, full.top() + 8.0),
+                    egui::pos2((full.right() - 8.0).max(bar.right() + 8.0), full.bottom() - 8.0),
+                );
+                ui.advance_cursor_after_rect(full);
+                let ui = &mut ui.new_child(egui::UiBuilder::new().id_salt("markise-sidebar-view").max_rect(content));
                 match self.tab {
                     Tab::Files => {
                         let current = self.document_path().map(Path::to_path_buf);
                         let mut actions = Vec::new();
+                        if self.themes.show_recent() {
+                            let (open, hide) =
+                                crate::sidebar::recent_section(ui, &mut self.side, current.as_deref(), &look);
+                            actions.extend(open);
+                            if hide {
+                                self.themes.set_show_recent(false);
+                            }
+                        }
                         if let (Some(tree), Some(wake)) = (self.tree.as_mut(), self.wake.as_ref()) {
-                            actions = tree.show(ui, current.as_deref(), wake, &look, self.files.rename.as_mut());
+                            actions.extend(tree.show(ui, current.as_deref(), wake, &look, self.files.rename.as_mut()));
                         } else {
                             ui.weak("No folder open");
                             if ui.button("Open Folder…").clicked() {
