@@ -88,6 +88,8 @@ pub struct DocViewer {
     /// Take the keyboard focus on the next frame (the surface came back after a view mode
     /// whose widgets held it, e.g. the source editor).
     refocus: bool,
+    /// Screen rectangle of the caret at the last frame it was drawn (popups anchor to it).
+    pub caret_screen: Option<Rect>,
 }
 
 impl DocViewer {
@@ -122,6 +124,7 @@ impl DocViewer {
             pending_copy: None,
             last_surface: None,
             refocus: false,
+            caret_screen: None,
         }
     }
 
@@ -240,6 +243,27 @@ impl DocViewer {
     }
 
     /// Scrolls so that heading `anchor` (`#slug`) is at the top.
+    /// Screen centre of the first visible link whose target is `target` (last frame's
+    /// geometry; tests click it).
+    pub fn link_center(&self, target: &str) -> Option<Pos2> {
+        for &(idx, y) in &self.last_visible {
+            let Some(l) = self.ed.view.cache_peek(idx) else {
+                continue;
+            };
+            for hit in l.links.iter().filter(|h| h.target == target) {
+                let Some(markise_layout::Prim::Text { pos, text, .. }) = l.prims.get(hit.prim) else {
+                    continue;
+                };
+                if let Some(sp) = text.ink_spans(&hit.range).first() {
+                    let x = self.last_left + pos.x + (sp.x0 + sp.x1) * 0.5;
+                    let yy = self.last_top + y + pos.y + sp.baseline - sp.ascent * 0.4;
+                    return Some(pos2(x, yy));
+                }
+            }
+        }
+        None
+    }
+
     pub fn scroll_to_anchor(&mut self, anchor: &str) -> bool {
         let item = self.model().heading_by_anchor(anchor).map(|e| e.item);
         if let Some(i) = item {
@@ -545,9 +569,11 @@ impl DocViewer {
             let since = now - self.blink_from;
             let on = since >= BLINK_FOR || ((since / BLINK_HALF) as u64).is_multiple_of(2);
             let caret = with_shaper(&ctx, parley, |sh| self.ed.caret_rect(sh, &*images));
+            self.caret_screen = None;
             if let Some(c) = caret {
                 let y = c.min.y - self.ed.view.scroll_y() as f32 + rect.top();
                 let r = Rect::from_min_size(pos2(left + c.min.x - 0.75, y), vec2(1.5, c.height().max(4.0)));
+                self.caret_screen = Some(r);
                 if on && r.intersects(rect) {
                     painter.rect_filled(r, 0.0, color(theme.text));
                 }

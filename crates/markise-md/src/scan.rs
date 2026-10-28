@@ -355,10 +355,11 @@ pub(crate) fn footnote_def_start(b: &[u8], p: usize, end: usize) -> Option<(Span
     Some((Span::new(ls, q), q + 2))
 }
 
-/// `[toc]` and friends (R3.11.1); `remap` also accepts `【toc】` (R4.5.2).
-pub(crate) fn is_toc_marker(s: &str, remap: bool) -> bool {
+/// `[toc]` and friends (R3.11.1); `remap` also accepts `【toc】` (R4.5.2). With `wikilinks`
+/// on, `[[_TOC_]]` is a wikilink instead (spec 06 V1.6 f, Q-V12).
+pub(crate) fn is_toc_marker(s: &str, remap: bool, wikilinks: bool) -> bool {
     let t = s.trim_matches([' ', '\t']);
-    if t.eq_ignore_ascii_case("[toc]") || t.eq_ignore_ascii_case("[[_toc_]]") {
+    if t.eq_ignore_ascii_case("[toc]") || (!wikilinks && t.eq_ignore_ascii_case("[[_toc_]]")) {
         return true;
     }
     if remap
@@ -568,10 +569,13 @@ mod tests {
     #[test]
     fn toc() {
         for t in ["[toc]", "[TOC]", " {:toc} ", "{: toc levels=2}", "[[_TOC_]]"] {
-            assert!(is_toc_marker(t, false), "{t}");
+            assert!(is_toc_marker(t, false, false), "{t}");
         }
-        assert!(!is_toc_marker("【toc】", false));
-        assert!(is_toc_marker("【toc】", true));
-        assert!(!is_toc_marker("[tocx]", false));
+        assert!(!is_toc_marker("【toc】", false, false));
+        assert!(is_toc_marker("【toc】", true, false));
+        assert!(!is_toc_marker("[tocx]", false, false));
+        // spec 06 L30: with wikilinks on, `[[_TOC_]]` is a link to a note named `_TOC_`
+        assert!(!is_toc_marker("[[_TOC_]]", false, true));
+        assert!(is_toc_marker("[toc]", false, true));
     }
 }

@@ -15,6 +15,7 @@ pub mod load;
 pub mod save;
 pub mod settings;
 pub mod tree;
+pub mod vault;
 pub mod watch;
 
 /// Callback that wakes the UI (e.g. `egui::Context::request_repaint`).

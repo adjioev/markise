@@ -261,6 +261,11 @@ impl EditorSession {
     pub fn format(&self) -> &Arc<dyn DocumentFormat> {
         &self.format
     }
+    /// Replaces the format (the same format with other parse options, e.g. a dialect
+    /// extension switched; the caller installs a document re-parsed with them).
+    pub fn set_format(&mut self, format: Arc<dyn DocumentFormat>) {
+        self.format = format;
+    }
     pub fn doc(&self) -> &dyn FormatDoc {
         self.doc.as_ref()
     }

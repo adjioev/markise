@@ -142,6 +142,28 @@ pub struct HtmlOptions {
     pub diagrams: DiagramExport,
     /// Math as SVG (default) or TeX source.
     pub math: MathExport,
+    /// Where wikilinks point (spec 06 Q-V11): without a resolver, or for an unresolved target,
+    /// a wikilink is written as its label in plain text.
+    pub wikilinks: WikiLinkHrefs,
+}
+
+/// Resolves a wikilink (`target`, `subpath`) to the `href` written for it (a relative path to
+/// the linked file, percent-encoded, with a `#fragment` for a heading), or `None` when it does
+/// not resolve.
+pub type WikiLinkResolver = dyn Fn(&str, Option<&str>) -> Option<String> + Send + Sync;
+
+/// The wikilink resolver of an export ([`HtmlOptions::wikilinks`]).
+#[derive(Clone, Default)]
+pub struct WikiLinkHrefs(pub Option<std::sync::Arc<WikiLinkResolver>>);
+
+impl std::fmt::Debug for WikiLinkHrefs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "WikiLinkHrefs(resolver)"
+        } else {
+            "WikiLinkHrefs(none)"
+        })
+    }
 }
 
 /// Treatment of local image references in exported HTML. Remote URLs (`http:`, `https:`, …)
@@ -888,6 +910,24 @@ impl<'a> Ctx<'a> {
             }
             InlineKind::Emoji { emoji } => {
                 let _ = write!(out, "<span class='md-emoji'>{emoji}</span>");
+            }
+            InlineKind::WikiLink {
+                target, subpath, inner, ..
+            } => {
+                let c = inner.slice(s);
+                let label = markise_md::wikilink::split(c).map(|w| w.label(c)).unwrap_or_default();
+                let href = self
+                    .opts
+                    .wikilinks
+                    .0
+                    .as_ref()
+                    .and_then(|r| r(target, subpath.as_deref()));
+                match href.as_deref().and_then(|h| self.url(h, false)) {
+                    Some(h) => {
+                        let _ = write!(out, "<a href=\"{}\">{}</a>", esc_url(h), esc(&label));
+                    }
+                    None => escape_html(&label, out),
+                }
             }
         }
     }

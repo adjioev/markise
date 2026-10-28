@@ -568,6 +568,13 @@ impl Builder<'_> {
                 self.footnote_numbers.get(label).copied().unwrap_or(0),
             )),
             InlineKind::Emoji { emoji } => out.push(ExInline::Text((*emoji).to_string())),
+            // wikilinks: their label as text (PDF/PNG/Pandoc have no vault to resolve against)
+            InlineKind::WikiLink { inner, .. } => {
+                let c = inner.slice(s);
+                if let Some(w) = markise_md::wikilink::split(c) {
+                    out.push(ExInline::Text(w.label(c)));
+                }
+            }
         }
     }
 }

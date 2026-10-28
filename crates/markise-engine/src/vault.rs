@@ -1,0 +1,750 @@
+//! Vault file-name map and link resolution (spec 06 §1–§3, owner decisions §17.1).
+//!
+//! The vault is the opened folder (the sidebar's mounted folder). [`VaultScanner`] keeps an
+//! in-memory list of its files on a background thread — a full walk when a folder is mounted,
+//! then one directory at a time from the file watcher's events — and publishes immutable
+//! [`VaultIndex`] snapshots. Nothing is stored on disk and nothing in the vault is written.
+//!
+//! [`VaultIndex`] answers format-neutral questions on the UI thread without I/O:
+//! - wikilink targets (V2.3, V2.4, tie-break Q-V2: exact case → same folder as the linking
+//!   note → fewest folder levels → path order);
+//! - Markdown link paths (V2.6: `%20` and `<…>` forms, relative first, then root, then name);
+//! - the shortest unique link text for a file (V14.3 "shortest");
+//! - fuzzy note-name matching for link autocomplete (V3.3).
+//!
+//! Vault paths use `/` separators and NFC; names compare case-insensitively (lower-cased NFC,
+//! an approximation of simple case folding).
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, channel};
+
+use unicode_normalization::UnicodeNormalization;
+
+use crate::Wake;
+
+/// NFC form of `s`.
+pub fn nfc(s: &str) -> String {
+    if s.is_ascii() { s.to_string() } else { s.nfc().collect() }
+}
+
+/// Case-insensitive comparison key: NFC, lower case.
+pub fn fold(s: &str) -> String {
+    nfc(s).to_lowercase()
+}
+
+/// `true` for a vault file that is a note (`.md`, any case).
+pub fn is_note(name: &str) -> bool {
+    let n = name.len();
+    n > 3 && name.is_char_boundary(n - 3) && name[n - 3..].eq_ignore_ascii_case(".md")
+}
+
+/// One file of the vault.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultFile {
+    /// Vault path (`Projects/Plan.md`).
+    pub rel: String,
+    fold_rel: String,
+    fold_name: String,
+    /// Number of `/`-separated segments (1 for a file in the root).
+    pub depth: usize,
+}
+
+impl VaultFile {
+    /// The basename (`Plan.md`).
+    pub fn name(&self) -> &str {
+        self.rel.rsplit('/').next().unwrap_or(&self.rel)
+    }
+
+    /// The basename without a trailing `.md` (`Plan`).
+    pub fn stem(&self) -> &str {
+        markise_md::wikilink::strip_md(self.name())
+    }
+
+    /// The folder part (`Projects`; empty in the root).
+    pub fn folder(&self) -> &str {
+        self.rel.rsplit_once('/').map_or("", |(d, _)| d)
+    }
+
+    pub fn is_note(&self) -> bool {
+        is_note(&self.rel)
+    }
+}
+
+/// An immutable snapshot of the vault's files.
+#[derive(Clone, Debug, Default)]
+pub struct VaultIndex {
+    root: PathBuf,
+    generation: u64,
+    /// Sorted by vault path (code-point order).
+    files: Vec<VaultFile>,
+    by_name: HashMap<String, Vec<u32>>,
+    by_rel: HashMap<String, Vec<u32>>,
+}
+
+/// Folder part of a vault path.
+fn folder_of(rel: &str) -> &str {
+    rel.rsplit_once('/').map_or("", |(d, _)| d)
+}
+
+/// Joins `base` (a vault folder) and `rel`, resolving `.` and `..`; `None` when the path
+/// leaves the vault.
+fn join_rel(base: &str, rel: &str) -> Option<String> {
+    let mut parts: Vec<&str> = if base.is_empty() {
+        Vec::new()
+    } else {
+        base.split('/').collect()
+    };
+    for seg in rel.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            s => parts.push(s),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// Percent-decodes `s` (UTF-8; invalid sequences stay as written).
+pub fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
+        {
+            out.push(h * 16 + l);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+fn hex(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Percent-encodes a path for a Markdown link destination (V2.6.3): space, `%`, `#`, `(`,
+/// `)`, `<`, `>`, `^`, `|`, `[`, `]` and control characters; other Unicode stays literal.
+pub fn percent_encode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() || matches!(c, ' ' | '%' | '#' | '(' | ')' | '<' | '>' | '^' | '|' | '[' | ']') {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A URL scheme at the start of `s` (`https:`), not a Windows drive letter.
+fn has_scheme(s: &str) -> bool {
+    s.split_once(':').is_some_and(|(sch, _)| {
+        sch.len() >= 2
+            && sch.starts_with(|c: char| c.is_ascii_alphabetic())
+            && sch
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
+    })
+}
+
+/// How a link was matched: a file and the fragment / subpath it carried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resolved {
+    /// Vault path of the target file.
+    pub rel: String,
+    /// `#fragment` of a Markdown link (percent-decoded) — `None` for wikilinks, whose subpath
+    /// the caller already has.
+    pub fragment: Option<String>,
+}
+
+impl VaultIndex {
+    /// An index of `rels` (vault paths, any order) under `root` (tests, benchmarks, scanner).
+    pub fn from_rels(root: PathBuf, rels: impl IntoIterator<Item = String>, generation: u64) -> VaultIndex {
+        let mut files: Vec<VaultFile> = rels
+            .into_iter()
+            .map(|r| {
+                let rel = nfc(&r);
+                let fold_rel = rel.to_lowercase();
+                let fold_name = fold_rel.rsplit('/').next().unwrap_or(&fold_rel).to_string();
+                let depth = rel.split('/').count();
+                VaultFile {
+                    rel,
+                    fold_rel,
+                    fold_name,
+                    depth,
+                }
+            })
+            .collect();
+        files.sort_by(|a, b| a.rel.cmp(&b.rel));
+        files.dedup_by(|a, b| a.rel == b.rel);
+        let mut by_name: HashMap<String, Vec<u32>> = HashMap::with_capacity(files.len());
+        let mut by_rel: HashMap<String, Vec<u32>> = HashMap::with_capacity(files.len());
+        for (i, f) in files.iter().enumerate() {
+            by_name.entry(f.fold_name.clone()).or_default().push(i as u32);
+            by_rel.entry(f.fold_rel.clone()).or_default().push(i as u32);
+        }
+        VaultIndex {
+            root,
+            generation,
+            files,
+            by_name,
+            by_rel,
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Changes with every new snapshot.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    pub fn files(&self) -> &[VaultFile] {
+        &self.files
+    }
+
+    /// The file at vault path `rel` (exact).
+    pub fn file(&self, rel: &str) -> Option<&VaultFile> {
+        self.files
+            .binary_search_by(|f| f.rel.as_str().cmp(rel))
+            .ok()
+            .map(|i| &self.files[i])
+    }
+
+    /// The vault path of an absolute path inside the vault.
+    pub fn rel_of(&self, abs: &Path) -> Option<String> {
+        rel_path(&self.root, abs)
+    }
+
+    /// The absolute path of a vault path.
+    pub fn abs(&self, rel: &str) -> PathBuf {
+        let mut p = self.root.clone();
+        for s in rel.split('/').filter(|s| !s.is_empty()) {
+            p.push(s);
+        }
+        p
+    }
+
+    fn by_rel_candidates(&self, rel: &str) -> Vec<u32> {
+        self.by_rel.get(&fold(rel)).cloned().unwrap_or_default()
+    }
+
+    /// Candidates for path `p` (no leading `/`) with the extension rule (V2.3.2).
+    fn rel_with_ext(&self, p: &str) -> (Vec<u32>, String) {
+        if is_note(p) {
+            return (self.by_rel_candidates(p), p.to_string());
+        }
+        let md = format!("{p}.md");
+        let c = self.by_rel_candidates(&md);
+        if !c.is_empty() {
+            return (c, md);
+        }
+        (self.by_rel_candidates(p), p.to_string())
+    }
+
+    /// Picks among `cands` (V2.4.4): exact case of `wanted` (compared with the whole vault path
+    /// when `whole`, else with the name) → same folder as `from` → fewest segments → path.
+    fn pick(&self, cands: &[u32], wanted: &str, whole: bool, from: Option<&str>) -> Option<&VaultFile> {
+        let from_dir = from.map(folder_of);
+        cands.iter().map(|&i| &self.files[i as usize]).min_by(|a, b| {
+            let exact = |f: &VaultFile| {
+                let s = if whole { f.rel.as_str() } else { f.name() };
+                s != wanted
+            };
+            let same = |f: &VaultFile| from_dir.is_none_or(|d| f.folder() != d);
+            exact(a)
+                .cmp(&exact(b))
+                .then_with(|| same(a).cmp(&same(b)))
+                .then_with(|| a.depth.cmp(&b.depth))
+                .then_with(|| a.rel.cmp(&b.rel))
+        })
+    }
+
+    /// Resolves a wikilink target as written (V2.3, V2.4). `from`: the linking note's vault
+    /// path (relative forms and the same-folder preference need it). An empty target is the
+    /// linking note itself.
+    pub fn resolve_wikilink(&self, target: &str, from: Option<&str>) -> Option<&VaultFile> {
+        // V2.3.1: trim, NFC, collapse repeated `/` (a backslash is an ordinary character)
+        let mut t = nfc(target.trim());
+        while t.contains("//") {
+            t = t.replace("//", "/");
+        }
+        if t.is_empty() {
+            return from.and_then(|f| self.file(f));
+        }
+        if !t.contains('/') {
+            // V2.4.2: basename form, any folder
+            let (cands, wanted) = if is_note(&t) {
+                (
+                    self.by_name.get(&t.to_lowercase()).cloned().unwrap_or_default(),
+                    t.clone(),
+                )
+            } else {
+                let md = format!("{t}.md");
+                match self.by_name.get(&md.to_lowercase()) {
+                    Some(c) if !c.is_empty() => (c.clone(), md),
+                    _ => (
+                        self.by_name.get(&t.to_lowercase()).cloned().unwrap_or_default(),
+                        t.clone(),
+                    ),
+                }
+            };
+            return self.pick(&cands, &wanted, false, from);
+        }
+        let from_dir = from.map(folder_of).unwrap_or("");
+        // V2.4.3 (1): `./`, `../` only relative to the linking note
+        if t.starts_with("./") || t.starts_with("../") {
+            let p = join_rel(from_dir, &t)?;
+            let (c, w) = self.rel_with_ext(&p);
+            return self.pick(&c, &w, true, from);
+        }
+        // (2): `/` only from the vault root
+        if let Some(rest) = t.strip_prefix('/') {
+            let (c, w) = self.rel_with_ext(rest);
+            return self.pick(&c, &w, true, from);
+        }
+        // (3a) from the root, (3b) relative to the note, (3c) suffix match
+        let (c, w) = self.rel_with_ext(&t);
+        if !c.is_empty() {
+            return self.pick(&c, &w, true, from);
+        }
+        if let Some(p) = join_rel(from_dir, &t) {
+            let (c, w) = self.rel_with_ext(&p);
+            if !c.is_empty() {
+                return self.pick(&c, &w, true, from);
+            }
+        }
+        let last = t.rsplit('/').next().unwrap_or(&t);
+        for (name, suffix) in if is_note(&t) {
+            vec![(last.to_string(), t.clone())]
+        } else {
+            vec![(format!("{last}.md"), format!("{t}.md")), (last.to_string(), t.clone())]
+        } {
+            let want = format!("/{}", suffix.to_lowercase());
+            let cands: Vec<u32> = self
+                .by_name
+                .get(&name.to_lowercase())
+                .map(|v| {
+                    v.iter()
+                        .copied()
+                        .filter(|&i| self.files[i as usize].fold_rel.ends_with(&want))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !cands.is_empty() {
+                return self.pick(&cands, &name, false, from);
+            }
+        }
+        None
+    }
+
+    /// Resolves a Markdown link destination (V2.6.1, V2.6.2): `None` for URLs, same-document
+    /// `#fragment` links and paths that resolve to no vault file or leave the vault.
+    pub fn resolve_markdown(&self, dest: &str, from: Option<&str>) -> Option<Resolved> {
+        let (path, fragment) = split_markdown_dest(dest)?;
+        let from_dir = from.map(folder_of).unwrap_or("");
+        let found = |rel: &str| -> Option<&VaultFile> {
+            let (c, w) = self.rel_with_ext(rel);
+            self.pick(&c, &w, true, from)
+        };
+        let file = if let Some(rest) = path.strip_prefix('/') {
+            found(rest)
+        } else {
+            // leaving the vault: unresolved, never searched elsewhere
+            let r = join_rel(from_dir, &path)?;
+            found(&r).or_else(|| found(&path)).or_else(|| {
+                (!path.contains('/'))
+                    .then(|| self.resolve_wikilink(&path, from))
+                    .flatten()
+            })
+        }?;
+        Some(Resolved {
+            rel: file.rel.clone(),
+            fragment,
+        })
+    }
+
+    /// The link text written for `f` with the "shortest" format (V14.3): the stem (notes) or
+    /// name (attachments) when no other file has the same name, else the full vault path
+    /// (without `.md` for notes).
+    pub fn shortest_link(&self, f: &VaultFile) -> String {
+        let unique = self.by_name.get(&f.fold_name).is_none_or(|v| v.len() <= 1);
+        let shown = if unique { f.name() } else { f.rel.as_str() };
+        if f.is_note() {
+            markise_md::wikilink::strip_md(shown).to_string()
+        } else {
+            shown.to_string()
+        }
+    }
+
+    /// Notes matching `query` for link autocomplete (V3.3): fuzzy subsequence match on the
+    /// stem, then on the vault path; ranking exact stem > prefix > word-start subsequence >
+    /// other subsequence > path-only match; ties: shorter path, then path order. At most
+    /// `limit` results.
+    pub fn suggest(&self, query: &str, limit: usize) -> Vec<&VaultFile> {
+        let q = fold(query.trim());
+        let mut scored: Vec<(u8, usize, &str, &VaultFile)> = Vec::new();
+        for f in self.files.iter().filter(|f| f.is_note()) {
+            let stem = markise_md::wikilink::strip_md(&f.fold_name);
+            let rank = if q.is_empty() {
+                Some(4)
+            } else if stem == q {
+                Some(0)
+            } else if stem.starts_with(&q) {
+                Some(1)
+            } else if let Some(word_start) = subsequence(stem, &q) {
+                Some(if word_start { 2 } else { 3 })
+            } else if subsequence(&f.fold_rel, &q).is_some() {
+                Some(4)
+            } else {
+                None
+            };
+            if let Some(r) = rank {
+                scored.push((r, f.rel.len(), &f.rel, f));
+            }
+        }
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then_with(|| a.2.cmp(b.2)));
+        scored.into_iter().take(limit).map(|x| x.3).collect()
+    }
+}
+
+/// Whether `q` is a subsequence of `s`; `Some(true)` when every matched character starts a
+/// word (or the match is contiguous from a word start).
+fn subsequence(s: &str, q: &str) -> Option<bool> {
+    let mut it = q.chars().peekable();
+    let mut prev: Option<char> = None;
+    let mut prev_matched = false;
+    let mut word_starts = true;
+    for c in s.chars() {
+        let Some(&want) = it.peek() else { break };
+        if c == want {
+            let at_start = prev.is_none_or(|p| !p.is_alphanumeric());
+            if !at_start && !prev_matched {
+                word_starts = false;
+            }
+            it.next();
+            prev_matched = true;
+        } else {
+            prev_matched = false;
+        }
+        prev = Some(c);
+    }
+    it.peek().is_none().then_some(word_starts)
+}
+
+/// The path and fragment of a Markdown link destination (V2.6.1): `None` for URLs and
+/// same-document `#…` links.
+pub fn split_markdown_dest(dest: &str) -> Option<(String, Option<String>)> {
+    let d = dest.trim();
+    let d = d.strip_prefix('<').and_then(|x| x.strip_suffix('>')).unwrap_or(d);
+    if d.is_empty() || d.starts_with('#') || has_scheme(d) {
+        return None;
+    }
+    let (p, frag) = match d.find('#') {
+        Some(i) => (&d[..i], Some(percent_decode(&d[i + 1..]))),
+        None => (d, None),
+    };
+    let mut path = nfc(&percent_decode(p).replace('\\', "/"));
+    while path.contains("//") {
+        path = path.replace("//", "/");
+    }
+    if path.is_empty() {
+        return None;
+    }
+    Some((path, frag.filter(|f| !f.is_empty())))
+}
+
+/// The vault path of `abs` under `root` (`None` outside it).
+pub fn rel_path(root: &Path, abs: &Path) -> Option<String> {
+    let r = abs.strip_prefix(root).ok()?;
+    let mut parts = Vec::new();
+    for c in r.components() {
+        match c {
+            Component::Normal(s) => parts.push(nfc(&s.to_string_lossy())),
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// A relative path from folder `from_dir` to `to` (both absolute), `/`-separated (export
+/// links). `None` when no relative path exists (another drive).
+pub fn relative_path(from_dir: &Path, to: &Path) -> Option<String> {
+    let a: Vec<Component> = from_dir.components().collect();
+    let b: Vec<Component> = to.components().collect();
+    if a.first() != b.first() {
+        return None;
+    }
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut parts: Vec<String> = Vec::new();
+    for _ in common..a.len() {
+        parts.push("..".into());
+    }
+    for c in &b[common..] {
+        parts.push(c.as_os_str().to_string_lossy().into_owned());
+    }
+    Some(parts.join("/"))
+}
+
+// ------------------------------------------------------------------ background scanner
+
+enum Cmd {
+    Mount(PathBuf),
+    Changed(PathBuf),
+    Rescan,
+}
+
+/// Keeps a [`VaultIndex`] of the mounted folder current on a background thread.
+pub struct VaultScanner {
+    tx: Sender<Cmd>,
+    rx: Receiver<Arc<VaultIndex>>,
+}
+
+/// Directory entries the scanner follows at most (cycle and runaway guard).
+const MAX_DEPTH: usize = 64;
+
+struct ScanState {
+    root: PathBuf,
+    files: BTreeSet<String>,
+    dirs: BTreeSet<String>,
+    generation: u64,
+}
+
+impl ScanState {
+    /// Lists `dir` (vault path, `""` = root): its files and sub-folders (hidden entries
+    /// skipped, V1.3).
+    fn list(&self, dir: &str) -> Option<(Vec<String>, Vec<String>)> {
+        let abs = if dir.is_empty() {
+            self.root.clone()
+        } else {
+            let mut p = self.root.clone();
+            p.extend(dir.split('/'));
+            p
+        };
+        let rd = std::fs::read_dir(&abs).ok()?;
+        let (mut files, mut dirs) = (Vec::new(), Vec::new());
+        for e in rd.flatten() {
+            let name = nfc(&e.file_name().to_string_lossy());
+            if name.starts_with('.') {
+                continue;
+            }
+            let rel = if dir.is_empty() { name } else { format!("{dir}/{name}") };
+            // follow symlinks for the kind
+            match std::fs::metadata(e.path()) {
+                Ok(m) if m.is_dir() => dirs.push(rel),
+                Ok(_) => files.push(rel),
+                Err(_) => {}
+            }
+        }
+        Some((files, dirs))
+    }
+
+    fn walk(&mut self, dir: &str, depth: usize, seen: &mut HashSet<PathBuf>) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let abs = self.root.join(dir);
+        if let Ok(c) = std::fs::canonicalize(&abs)
+            && !seen.insert(c)
+        {
+            return; // a symlink back into a folder already walked
+        }
+        let Some((files, dirs)) = self.list(dir) else { return };
+        self.dirs.insert(dir.to_string());
+        self.files.extend(files);
+        for d in dirs {
+            self.walk(&d, depth + 1, seen);
+        }
+    }
+
+    fn remove_subtree(&mut self, dir: &str) {
+        let prefix = format!("{dir}/");
+        self.files.retain(|f| !f.starts_with(&prefix));
+        self.dirs.retain(|d| d != dir && !d.starts_with(&prefix));
+    }
+
+    fn mount(&mut self, root: PathBuf) {
+        self.root = root;
+        self.files.clear();
+        self.dirs.clear();
+        let mut seen = HashSet::new();
+        self.walk("", 0, &mut seen);
+    }
+
+    /// `abs` changed (a directory, or something inside one): list its directory again.
+    fn changed(&mut self, abs: &Path) {
+        let mut dir = if abs == self.root {
+            String::new()
+        } else {
+            match rel_path(&self.root, abs) {
+                Some(r) => r,
+                None => return,
+            }
+        };
+        if !dir.is_empty() && self.files.contains(&dir) {
+            dir = folder_of(&dir).to_string();
+        }
+        if dir.split('/').any(|s| s.starts_with('.')) {
+            return;
+        }
+        let Some((files, dirs)) = self.list(&dir) else {
+            // gone: drop it and everything below
+            if dir.is_empty() {
+                self.files.clear();
+                self.dirs.clear();
+            } else {
+                self.files.remove(&dir);
+                self.remove_subtree(&dir);
+            }
+            return;
+        };
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
+        let direct = |p: &str| p.starts_with(&prefix) && !p[prefix.len()..].contains('/');
+        self.files.retain(|f| !direct(f));
+        self.files.extend(files);
+        let known: Vec<String> = self
+            .dirs
+            .iter()
+            .filter(|d| !d.is_empty() && direct(d))
+            .cloned()
+            .collect();
+        let now: HashSet<&String> = dirs.iter().collect();
+        for d in known {
+            if !now.contains(&d) {
+                self.remove_subtree(&d);
+            }
+        }
+        self.dirs.insert(dir.clone());
+        for d in dirs {
+            if !self.dirs.contains(&d) {
+                let mut seen = HashSet::new();
+                self.walk(&d, d.split('/').count(), &mut seen);
+            }
+        }
+    }
+
+    fn snapshot(&mut self) -> Arc<VaultIndex> {
+        self.generation += 1;
+        Arc::new(VaultIndex::from_rels(
+            self.root.clone(),
+            self.files.iter().cloned(),
+            self.generation,
+        ))
+    }
+}
+
+impl VaultScanner {
+    pub fn new(wake: Wake) -> Result<VaultScanner, String> {
+        let (tx, cmd_rx) = channel::<Cmd>();
+        let (res_tx, rx) = channel();
+        std::thread::Builder::new()
+            .name("markise-vault".into())
+            .spawn(move || {
+                let mut st = ScanState {
+                    root: PathBuf::new(),
+                    files: BTreeSet::new(),
+                    dirs: BTreeSet::new(),
+                    generation: 0,
+                };
+                while let Ok(first) = cmd_rx.recv() {
+                    // coalesce a burst into one snapshot
+                    let mut batch = vec![first];
+                    while let Ok(c) = cmd_rx.try_recv() {
+                        batch.push(c);
+                    }
+                    // the last mount wins; changes before it are moot
+                    if let Some(i) = batch.iter().rposition(|c| matches!(c, Cmd::Mount(_))) {
+                        batch.drain(..i);
+                    }
+                    let mut mounted = !st.root.as_os_str().is_empty();
+                    for c in batch {
+                        match c {
+                            Cmd::Mount(r) => {
+                                st.mount(r);
+                                mounted = true;
+                            }
+                            Cmd::Changed(p) if mounted => st.changed(&p),
+                            Cmd::Rescan if mounted => {
+                                let r = st.root.clone();
+                                st.mount(r);
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !mounted {
+                        continue;
+                    }
+                    if res_tx.send(st.snapshot()).is_err() {
+                        break;
+                    }
+                    wake();
+                }
+            })
+            .map_err(|e| format!("cannot start vault thread: {e}"))?;
+        Ok(VaultScanner { tx, rx })
+    }
+
+    /// Scans `root` from scratch (a folder was mounted).
+    pub fn mount(&self, root: PathBuf) {
+        let _ = self.tx.send(Cmd::Mount(root));
+    }
+
+    /// Something changed in (or at) `path` (watcher event).
+    pub fn changed(&self, path: PathBuf) {
+        let _ = self.tx.send(Cmd::Changed(path));
+    }
+
+    /// Walks the mounted folder again (the folder watch restarted).
+    pub fn rescan(&self) {
+        let _ = self.tx.send(Cmd::Rescan);
+    }
+
+    /// The newest snapshot published since the last call, if any.
+    pub fn try_recv(&self) -> Option<Arc<VaultIndex>> {
+        let mut last = None;
+        while let Ok(i) = self.rx.try_recv() {
+            last = Some(i);
+        }
+        last
+    }
+
+    /// Waits up to `timeout` for a snapshot (tests).
+    pub fn recv_timeout(&self, timeout: std::time::Duration) -> Option<Arc<VaultIndex>> {
+        self.rx.recv_timeout(timeout).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests;

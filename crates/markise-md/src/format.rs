@@ -637,6 +637,27 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
                 text: 0..0,
             };
         }
+        InlineKind::WikiLink {
+            target, subpath, inner, ..
+        } => {
+            let content = inner.slice(s);
+            let label = crate::wikilink::split(content)
+                .map(|w| w.label(content))
+                .unwrap_or_default();
+            let inner_src = map(inner.start)..map(inner.end);
+            let child = InlineNode::leaf(NK::Text, inner_src.clone(), push_value(pool, &label));
+            return InlineNode {
+                kind: NK::WikiLink {
+                    target: target.as_str().into(),
+                    subpath: subpath.as_deref().map(Into::into),
+                },
+                source: map(n.span.start)..map(n.span.end),
+                content: inner_src.clone(),
+                markers: vec![map(n.span.start)..inner_src.start, inner_src.end..map(n.span.end)],
+                children: vec![child],
+                text: 0..0,
+            };
+        }
         InlineKind::BareUrl { url } => {
             let src = map(n.span.start)..map(n.span.end);
             let child = InlineNode::leaf(NK::Text, src.clone(), push_value(pool, n.span.slice(s)));

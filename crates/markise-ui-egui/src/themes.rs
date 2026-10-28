@@ -316,6 +316,8 @@ pub struct ThemeManager {
     chose_toolbar_position: bool,
     chose_editing: bool,
     chose_source: bool,
+    /// View → Wikilinks toggled before the settings file was read.
+    chose_markdown: bool,
     /// Settings changed and not yet handed to the worker (coalesced, debounced).
     dirty: SettingsPatch,
     save_at: Option<Instant>,
@@ -386,6 +388,7 @@ impl ThemeManager {
             chose_toolbar_position: false,
             chose_editing: false,
             chose_source: false,
+            chose_markdown: false,
             dirty: SettingsPatch::default(),
             save_at: None,
             early_overrides: OverridesPatch::default(),
@@ -625,6 +628,21 @@ impl ThemeManager {
         if p != self.settings.source {
             self.settings.source = p;
             self.dirty.source = Some(p);
+            self.schedule_save();
+        }
+    }
+
+    /// Whether wikilinks are parsed (settings key `markdown.wikilinks`, default on).
+    pub fn wikilinks(&self) -> bool {
+        self.settings.markdown.wikilinks
+    }
+
+    /// View → Wikilinks; persisted like the other settings.
+    pub fn set_wikilinks(&mut self, on: bool) {
+        self.chose_markdown = true;
+        if on != self.settings.markdown.wikilinks {
+            self.settings.markdown.wikilinks = on;
+            self.dirty.markdown = Some(self.settings.markdown);
             self.schedule_save();
         }
     }
@@ -913,6 +931,9 @@ impl ThemeManager {
                 }
                 if self.chose_source {
                     self.settings.source = chosen.source;
+                }
+                if self.chose_markdown {
+                    self.settings.markdown = chosen.markdown;
                 }
                 // overrides member by member: the ones changed early win
                 self.early_overrides.apply(&mut self.settings.overrides);

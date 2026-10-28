@@ -36,6 +36,7 @@ pub enum Choice {
     Open,
     Replace,
     Overwrite,
+    Create,
 }
 
 /// How a button is drawn: the accented primary action, a red destructive one, or plain.
@@ -61,6 +62,7 @@ pub enum Kind {
     OpenLink,
     ReplaceTheme,
     ExportOverwrite,
+    CreateNote,
 }
 
 /// A question with its buttons.
@@ -184,6 +186,19 @@ impl Question {
             ),
             buttons: vec![button(Choice::Overwrite, "Overwrite", Role::Destructive), cancel()],
             default: Choice::Cancel,
+        }
+    }
+
+    /// Cmd/Ctrl+click on a link to a note that does not exist (spec 06 V2.8): create it?
+    /// Creating loses nothing, so Create is the default.
+    pub fn create_note(name: &str, folder: &str) -> Question {
+        Question {
+            id: 0,
+            kind: Kind::CreateNote,
+            message: format!("Create the note “{name}”?"),
+            detail: format!("No note of that name exists yet. It is created empty in {folder} and opened."),
+            buttons: vec![button(Choice::Create, "Create", Role::Primary), cancel()],
+            default: Choice::Create,
         }
     }
 
@@ -556,6 +571,7 @@ mod tests {
             Question::replace_theme("t", &["t.css".into()]),
             Question::export_overwrite(std::path::Path::new("a.html")),
             Question::open_link("vscode://x"),
+            Question::create_note("New idea.md", "the vault folder"),
         ];
         for os in [Os::Mac, Os::Windows, Os::Linux] {
             for q in &all {

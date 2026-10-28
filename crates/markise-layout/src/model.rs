@@ -195,6 +195,9 @@ pub struct Item {
     /// A math block, or source that may contain inline math (`$`, `\(`): layout depends on
     /// math render state ([`crate::math`]). Over-approximated; only costs a re-layout.
     pub has_math: bool,
+    /// The source contains `[[` (a possible wikilink): its style depends on which link targets
+    /// exist ([`crate::links`]). Over-approximated; only costs a re-layout.
+    pub has_wikilink: bool,
     /// For a heading, its index in [`DocModel::outline`].
     pub heading: Option<u32>,
     /// Set when this item is one part of a large block.
@@ -651,13 +654,16 @@ impl DocModel {
                     *text_hash = pieces_hash(text, new.iter().map(|s| Span::new(s.start + start, s.end + start)));
                     let mut img = false;
                     let mut math = it.kind == ItemKind::Math;
+                    let mut wiki = false;
                     for s in new.iter() {
                         let t = &text[s.start + start..s.end + start];
                         img |= memchr_img(t);
                         math |= may_have_math(t);
+                        wiki |= may_have_wikilink(t);
                     }
                     it.has_image = img;
                     it.has_math = math;
+                    it.has_wikilink = wiki;
                     it.est_chars = (it.est_chars as isize + delta) as u32;
                     *spans = new;
                 } else if j > k {
@@ -1348,22 +1354,24 @@ impl Flattener<'_> {
         kind.hash(&mut h);
         containers.hash(&mut h);
         gap.hash(&mut h);
-        let (est_lines, est_chars, has_image, mut has_math) = match &segment {
+        let (est_lines, est_chars, has_image, mut has_math, has_wikilink) = match &segment {
             // the pieces' texts are covered by the segment's `text_hash`
             Some(Segment::Lines { spans, .. }) => {
                 let mut chars = 0;
                 let mut img = false;
                 let mut math = false;
+                let mut wiki = false;
                 for sp in spans.iter() {
                     let t = &self.text[span.start + sp.start..span.start + sp.end];
                     chars += t.len();
                     img |= memchr_img(t);
                     math |= may_have_math(t);
+                    wiki |= may_have_wikilink(t);
                 }
-                (spans.len() as u32, chars as u32, img, math)
+                (spans.len() as u32, chars as u32, img, math, wiki)
             }
             // row texts are covered by `rows_hash`, the header / width sample by `widths_hash`
-            Some(Segment::Rows { start, end, .. }) => (*end - *start + 1, 0, false, true),
+            Some(Segment::Rows { start, end, .. }) => (*end - *start + 1, 0, false, true, true),
             Some(Segment::Toc { .. }) | None => {
                 let src = span.slice(self.text);
                 src.hash(&mut h);
@@ -1372,6 +1380,7 @@ impl Flattener<'_> {
                     src.len() as u32,
                     memchr_img(src),
                     may_have_math(src),
+                    may_have_wikilink(src),
                 )
             }
         };
@@ -1390,6 +1399,7 @@ impl Flattener<'_> {
             est_lines,
             has_image,
             has_math,
+            has_wikilink,
             heading: None,
             segment,
             code: None,
@@ -1557,6 +1567,10 @@ fn group_units<T>(units: &[T], len: impl Fn(&T) -> usize) -> Vec<std::ops::Range
 
 fn may_have_math(s: &str) -> bool {
     s.contains('$') || s.contains("\\(")
+}
+
+fn may_have_wikilink(s: &str) -> bool {
+    s.contains("[[")
 }
 
 fn memchr_img(s: &str) -> bool {

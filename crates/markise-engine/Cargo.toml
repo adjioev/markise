@@ -17,6 +17,7 @@ tempfile.workspace = true
 similar.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
+unicode-normalization.workspace = true
 epaint.workspace = true
 # export jobs (src/export.rs)
 markise-export.workspace = true

@@ -142,6 +142,14 @@ pub enum InlineKind {
     FootnoteRef {
         label: Box<str>,
     },
+    /// A link to another document by name (wikilink, spec 06 V2.1): `target` as written
+    /// (trimmed; may be empty for a same-document link), `subpath` after the first `#`. Its
+    /// markers are the opening and closing brackets; `content` is the text between them, and
+    /// its one child holds the collapsed label (display text, or target and subpath).
+    WikiLink {
+        target: Box<str>,
+        subpath: Option<Box<str>>,
+    },
     RawInline,
     Break {
         hard: bool,
@@ -223,6 +231,7 @@ impl RichInline {
                 InlineKind::Link { .. } => "link".to_string(),
                 InlineKind::Image { .. } => "image".to_string(),
                 InlineKind::FootnoteRef { .. } => "fnref".to_string(),
+                InlineKind::WikiLink { .. } => "wikilink".to_string(),
                 InlineKind::Math { .. } => "math".to_string(),
                 InlineKind::Break { hard } => if *hard { "hardbreak" } else { "softbreak" }.to_string(),
                 k => format!("{k:?}").to_lowercase(),

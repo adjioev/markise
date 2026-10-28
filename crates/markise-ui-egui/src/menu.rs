@@ -313,6 +313,12 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("view.toolbarBottom", "Toolbar at Bottom", &[]),
     app("view.highlightCode", "Highlight Code", &[]),
     app("view.diagrams", "Diagrams", &[]),
+    // Markdown dialect extension (spec 06 V2.1; setting `markdown.wikilinks`)
+    app("view.wikilinks", "Wikilinks", &[]),
+    // Back / Forward between opened notes (spec 06 §2.7). ⌘[ / ⌘] are Outdent / Indent
+    // (spec 02 §15), so macOS uses ⌃⌘← / ⌃⌘→; Windows and Linux use Alt+← / Alt+→.
+    app("go.back", "Back", &[both("Ctrl+Cmd+Left", "Alt+Left")]),
+    app("go.forward", "Forward", &[both("Ctrl+Cmd+Right", "Alt+Right")]),
     app("view.fullScreen", "Toggle Full Screen", &[both("Ctrl+Cmd+F", "F11")]),
     // source editor display preferences (spec 02 §12.1.1), View → Source Editor
     app("view.sourceLineNumbers", "Line Numbers", &[]),

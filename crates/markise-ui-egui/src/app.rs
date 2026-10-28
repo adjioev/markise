@@ -50,7 +50,9 @@ use crate::viewer::DocViewer;
 
 mod files;
 mod menus;
+mod vault;
 pub use menus::MenuHost;
+pub use vault::{Completion, NavHistory, Suggestion};
 
 /// The three mutually exclusive view modes (spec 04 §3.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -332,6 +334,8 @@ enum Ask {
     ReplaceTheme { src: PathBuf, existing: Vec<PathBuf> },
     /// Move to Trash from the file tree.
     Trash(PathBuf),
+    /// Create this note for an unresolved link (spec 06 V2.8).
+    CreateNote(PathBuf),
 }
 
 enum Banner {
@@ -466,12 +470,16 @@ pub struct MarkiseApp {
     /// The widget that had the keyboard focus when the open question appeared (given back
     /// after the answer; nothing has the focus while a question is open).
     focus_before_question: Option<(egui::Id, u8)>,
+    /// Vault file map, link following, Back / Forward, link autocomplete (spec 06).
+    vault: vault::VaultState,
 }
 
 impl MarkiseApp {
-    pub fn new(opts: AppOptions) -> Self {
+    pub fn new(mut opts: AppOptions) -> Self {
         let themes = ThemeManager::new(opts.config, opts.system_fonts);
         let diagrams = themes.diagrams();
+        let vault = vault::VaultState::new(opts.parse.wikilinks);
+        opts.parse.wikilinks &= themes.wikilinks();
         MarkiseApp {
             host_keymap: markise_engine::editor::keymap::Keymap::new(
                 &markise_engine::editor::command::Registry::for_format(&markise_md::MarkdownFormat::default()),
@@ -543,6 +551,7 @@ impl MarkiseApp {
             confirm: opts.confirm,
             question_id: 0,
             focus_before_question: None,
+            vault,
         }
     }
 
@@ -1064,6 +1073,7 @@ impl MarkiseApp {
                 w.watch_file(&loaded.path, Some(loaded.version));
             }
         }
+        self.nav_leave();
         let format: Arc<dyn markise_doc::DocumentFormat> = Arc::new(MarkdownFormat {
             opts: self.parse.clone(),
         });
@@ -1087,6 +1097,7 @@ impl MarkiseApp {
             saved_fp,
             fp_cache: std::cell::Cell::new(None),
         });
+        self.nav_installed(untitled);
     }
 
     // ------------------------------------------------------------------ external changes
@@ -1209,6 +1220,7 @@ impl MarkiseApp {
                     }
                 }
                 WatchEvent::DirChanged(d) => {
+                    self.vault_changed(&d);
                     if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
                         t.invalidate(&d, w);
                     }
@@ -1217,6 +1229,7 @@ impl MarkiseApp {
                 WatchEvent::ThemeChanged(p) => self.themes.file_changed(&p),
                 // the folder watch (re)started: what changed before it has no events
                 WatchEvent::FolderWatched(_) => {
+                    self.vault_rescan();
                     if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
                         t.invalidate_all(w);
                     }
@@ -1677,6 +1690,9 @@ impl MarkiseApp {
     }
 
     fn open_link(&mut self, ctx: &Context, target: &str) {
+        if self.follow_vault_link(target) {
+            return;
+        }
         let base = self.doc.as_ref().and_then(|d| d.path.parent().map(Path::to_path_buf));
         match classify_link(target, base.as_deref()) {
             LinkAction::Open(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
@@ -1771,6 +1787,7 @@ impl MarkiseApp {
         if let (Some(t), Some(w)) = (&mut self.tree, &self.wake) {
             t.poll(w);
         }
+        self.vault_poll();
         self.resolve_theme(ctx);
         // the settings file (read in the background) may switch diagrams
         if self.themes.diagrams() != self.diagrams {
@@ -1831,7 +1848,10 @@ impl MarkiseApp {
             self.tree_action(ctx, TreeAction::EndRename(EditEnd::CommitOrCancel));
         }
         self.rename_blur(ctx);
+        self.complete_pre_input(ctx);
         self.central(ui);
+        self.complete_update();
+        self.complete_ui(ctx);
         self.theme_report_window(ctx);
         self.font_window(ctx);
         self.about.show(ctx, self.commit.as_deref());
@@ -1871,6 +1891,14 @@ impl MarkiseApp {
                 Question::replace_theme(&file_name(src), &files)
             }
             Some(Ask::Trash(p)) => Question::trash(&file_name(p), p.is_dir()),
+            Some(Ask::CreateNote(p)) => {
+                let folder = match (self.tree.as_ref(), p.parent()) {
+                    (Some(t), Some(dir)) if dir == t.root => "the folder’s top level".to_string(),
+                    (_, Some(dir)) => format!("“{}”", file_name(dir)),
+                    _ => "the folder".to_string(),
+                };
+                Question::create_note(&file_name(p), &folder)
+            }
             None => {
                 let req = self.export.pending_overwrite()?;
                 Question::export_overwrite(&req.output)
@@ -1917,6 +1945,7 @@ impl MarkiseApp {
                 then,
             }),
             (Choice::MoveToTrash, Some(Ask::Trash(p))) => self.move_to_trash(&p),
+            (Choice::Create, Some(Ask::CreateNote(p))) => self.create_note(p),
             (_, Some(_)) => {} // Cancel (or a choice the question does not offer)
             (c, None) => {
                 if let Some(r) = self.export.answer_overwrite(c == Choice::Overwrite) {

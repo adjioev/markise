@@ -184,6 +184,8 @@ pub struct FileTree {
     pub requests: u64,
     /// Rows drawn by the last frame (the virtualised range).
     shown: std::ops::Range<usize>,
+    /// A file to scroll into view once its row is listed ([`FileTree::reveal`]).
+    pending_reveal: Option<PathBuf>,
 }
 
 impl FileTree {
@@ -198,6 +200,7 @@ impl FileTree {
             lister_error: None,
             requests: 0,
             shown: 0..0,
+            pending_reveal: None,
         }
     }
 
@@ -388,6 +391,26 @@ impl FileTree {
         self.rows_dirty = true;
     }
 
+    /// Expands the folders down to `path` and scrolls its row into view once listed (a note
+    /// was opened through a link, Back / Forward). Paths outside the tree are ignored.
+    pub fn reveal(&mut self, path: &Path) {
+        if !path.starts_with(&self.root) || path == self.root {
+            return;
+        }
+        self.expand_to(path);
+        self.pending_reveal = Some(path.to_path_buf());
+    }
+
+    /// The file waiting to be scrolled into view (tests).
+    pub fn pending_reveal(&self) -> Option<&Path> {
+        self.pending_reveal.as_deref()
+    }
+
+    /// Whether `dir` is expanded (tests).
+    pub fn is_expanded(&self, dir: &Path) -> bool {
+        self.expanded.contains(dir)
+    }
+
     /// `from` was renamed to `to`: expanded folders follow, the parent is listed again.
     pub fn renamed(&mut self, from: &Path, to: &Path, wake: &Wake) {
         let moved: Vec<PathBuf> = self.expanded.iter().filter(|p| p.starts_with(from)).cloned().collect();
@@ -437,12 +460,23 @@ impl FileTree {
         .context_menu(|ui| row_menu(ui, &root, true, true, &mut action));
         let n = self.rows(wake).len();
         // a new editor whose row is not drawn: scroll it into view
-        let scroll_to = edit
+        let mut scroll_to = edit
             .as_deref()
             .filter(|e| e.select)
             .and_then(|e| self.rows.iter().position(|r| r.note.is_none() && r.path == e.path))
             .filter(|i| !self.shown.contains(i))
             .map(|i| (i as f32 - 2.0).max(0.0) * look.row_h);
+        // a revealed file: scroll once its row is listed (until then its folders are listing)
+        if let Some(p) = self.pending_reveal.clone()
+            && let Some(i) = self.rows.iter().position(|r| r.note.is_none() && r.path == p)
+        {
+            self.pending_reveal = None;
+            // fully visible rows only: the first and last drawn rows may be cut off
+            let inside = self.shown.start < i && i + 1 < self.shown.end;
+            if scroll_to.is_none() && !inside {
+                scroll_to = Some((i as f32 - 2.0).max(0.0) * look.row_h);
+            }
+        }
         // an item outside the mounted folder (File → Rename of such a document): its editor
         // sits above the tree
         if let Some(e) = edit.as_deref_mut().filter(|e| !e.path.starts_with(&self.root)) {

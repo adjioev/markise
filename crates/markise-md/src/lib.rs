@@ -29,6 +29,7 @@ pub mod table;
 pub mod text;
 mod ticks;
 mod tops;
+pub mod wikilink;
 pub mod write;
 
 use std::collections::HashMap;
