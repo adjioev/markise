@@ -1297,6 +1297,23 @@ fn spaces_after_a_final_heading_are_drawn() {
     }
 }
 
+/// The owner's settings on top of built-in style `style`: font size override 17.5, dark
+/// appearance, toolbar at the bottom.
+fn owner_look(h: &mut Harness<'static, MarkiseApp>, style: &str) {
+    let st = h.state_mut();
+    st.select_style(markise_theme::catalog::StyleId::Builtin(style.into()));
+    st.set_overrides(markise_theme::Overrides {
+        font_size: Some(17.5),
+        ..Default::default()
+    });
+    st.set_theme_choice(markise_ui_egui::Appearance::Dark);
+    st.set_show_toolbar(true);
+    st.set_toolbar_position(markise_engine::settings::ToolbarPosition::Bottom);
+    for _ in 0..3 {
+        h.step();
+    }
+}
+
 /// Opens an untitled document (File → New) with `style`, and types `src` into it.
 fn untitled_with(backend: markise_ui_egui::TextBackend, style: &str, src: &str) -> Harness<'static, MarkiseApp> {
     let app = MarkiseApp::new(AppOptions {
@@ -1311,8 +1328,7 @@ fn untitled_with(backend: markise_ui_egui::TextBackend, style: &str, src: &str) 
     h.key_press_modifiers(cmd(), Key::N);
     h.step();
     assert!(h.state().is_untitled());
-    h.state_mut()
-        .select_style(markise_theme::catalog::StyleId::Builtin(style.into()));
+    owner_look(&mut h, style);
     wait_until(&mut h, "new document", |a| a.model().is_some() && !a.is_loading());
     focus_doc(&mut h);
     type_keys(&mut h, src);
@@ -1321,63 +1337,73 @@ fn untitled_with(backend: markise_ui_egui::TextBackend, style: &str, src: &str) 
 
 #[test]
 fn spaces_after_a_heading_move_the_caret_in_every_style_and_level() {
-    // owner report: Space at the end of an H1 changed the text but not the screen. Root cause:
-    // the Classic style centres H1, and epaint aligns a centred row on its text without the
-    // trailing whitespace and puts a caret at the row end there — every Space left the caret
-    // in place. The caret's pixel x must grow with each Space, and a letter typed after them
-    // must appear after the gap; for every heading level, in a saved file and an untitled
-    // document, in the default style and in styles with other fonts and alignments.
+    // owner reports: Space at the end of an H1 changed the text but not the screen.
+    // - Classic centres H1: epaint aligned the centred row without its trailing whitespace and
+    //   put the caret at the text end;
+    // - Technical (the owner's style) draws a generated "# " prefix and a rule under H1.
+    // The caret's pixel x must grow with each Space, and a letter typed after them must appear
+    // after the gap; for every built-in style (the registry, incl. justified text), every
+    // heading level, both text backends, a saved file and an untitled document, with the
+    // owner's settings (font size 17.5, dark, toolbar at the bottom).
     use markise_ui_egui::TextBackend::{Epaint, Parley};
+    let styles: Vec<&str> = markise_theme::style::BUILTIN_STYLES.iter().map(|s| s.id).collect();
+    assert!(styles.len() >= 5, "{styles:?}");
+    let mut fails = Vec::new();
     for backend in [Epaint, Parley] {
-        for style in ["markise", "classic", "modern"] {
+        for style in &styles {
             for level in 1..=6 {
                 let hashes = "#".repeat(level);
                 let what = format!("{backend:?} {style} h{level}");
-                // a saved file (heading followed by an empty paragraph's line and a paragraph)
+                // a saved file (heading, an empty line, a paragraph)
                 let src = format!("{hashes} Title\n\nPara\n");
                 let (mut h, p) = open_with("ws-styles", &src, backend);
-                h.state_mut()
-                    .select_style(markise_theme::catalog::StyleId::Builtin(style.into()));
-                h.step();
+                owner_look(&mut h, style);
                 key(&mut h, Key::End);
                 let at = caret(&mut h);
                 assert_eq!(at, level + 6, "{what}");
-                assert_spaces_and_letter(&mut h, at, &what);
-                assert_eq!(save(&mut h, &p), format!("{hashes} Title   x\n\nPara\n"), "{what}");
+                if let Err(e) = spaces_and_letter(&mut h, at, &what) {
+                    fails.push(e);
+                } else {
+                    assert_eq!(save(&mut h, &p), format!("{hashes} Title   x\n\nPara\n"), "{what}");
+                }
                 // an untitled document
                 let mut h = untitled_with(backend, style, &format!("{hashes} Title"));
                 let at = caret(&mut h);
-                assert_spaces_and_letter(&mut h, at, &format!("{what} untitled"));
-                assert!(text(&h).starts_with(&format!("{hashes} Title   x")), "{what} untitled");
+                if let Err(e) = spaces_and_letter(&mut h, at, &format!("{what} untitled")) {
+                    fails.push(e);
+                } else {
+                    assert!(text(&h).starts_with(&format!("{hashes} Title   x")), "{what} untitled");
+                }
             }
         }
     }
+    assert!(fails.is_empty(), "{}", fails.join("\n"));
 }
 
 /// Three Spaces move the drawn caret right each time; a letter after them lands after the gap.
-fn assert_spaces_and_letter(h: &mut Harness<'static, MarkiseApp>, at: usize, what: &str) {
+fn spaces_and_letter(h: &mut Harness<'static, MarkiseApp>, at: usize, what: &str) -> Result<(), String> {
     let x0 = caret_screen(h);
     let mut x = x0;
     for i in 1..=3 {
         type_keys(h, " ");
-        assert_eq!(caret(h), at + i, "{what}: offset after space {i}");
+        if caret(h) != at + i {
+            return Err(format!("{what}: offset after space {i}: {}", caret(h)));
+        }
         let r = caret_screen(h);
-        assert_eq!(r.center().y, x.center().y, "{what}: same line after space {i}");
-        assert!(
-            r.min.x > x.min.x + 1.0,
-            "{what}: caret x after space {i}: {} -> {}",
-            x.min.x,
-            r.min.x
-        );
+        if r.center().y != x.center().y {
+            return Err(format!("{what}: caret left the line after space {i}"));
+        }
+        if r.min.x <= x.min.x + 1.0 {
+            return Err(format!("{what}: caret x after space {i}: {} -> {}", x.min.x, r.min.x));
+        }
         x = r;
     }
     type_keys(h, "x");
     let after = caret_screen(h);
-    assert!(
-        after.min.x > x.min.x + 2.0,
-        "{what}: the letter is drawn after the spaces"
-    );
-    assert!(x.min.x - x0.min.x > 3.0, "{what}: a visible gap before the letter");
+    if after.min.x <= x.min.x + 2.0 || x.min.x - x0.min.x <= 3.0 {
+        return Err(format!("{what}: no visible gap before the letter"));
+    }
+    Ok(())
 }
 
 #[test]
@@ -1433,3 +1459,4 @@ fn cross_block_risks_block_ownership() {
     }
     assert!(fails.is_empty(), "{}", fails.join("\n"));
 }
+
