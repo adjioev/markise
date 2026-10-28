@@ -776,3 +776,66 @@ fn dropping_the_scanner_releases_the_root() {
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
+
+/// Round 7: dropping a scanner whose worker is stuck (here: a hook blocking its walk) returns
+/// within the bound; the worker is detached and finishes on its own later.
+#[test]
+fn dropping_a_blocked_scanner_returns_promptly() {
+    let base = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(base.path()).unwrap().join("blocked");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let entered_tx = std::sync::Mutex::new(entered_tx);
+    let target = root.clone();
+    *SCAN_HOOK.lock().unwrap() = Some(Arc::new(move |r: &Path| {
+        if r == target {
+            let _ = entered_tx.lock().unwrap().send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(30));
+        }
+    }));
+    let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
+    sc.mount(root.clone());
+    sc.changed(root.join("sub"));
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("worker blocked");
+    let t = std::time::Instant::now();
+    drop(sc);
+    let took = t.elapsed();
+    let _ = release_tx.send(());
+    *SCAN_HOOK.lock().unwrap() = None;
+    assert!(took < std::time::Duration::from_secs(1), "drop took {took:?}");
+    // the folder can be removed and re-created although the detached worker held its handle
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+}
+
+/// Round 7: a FIFO (or device) named `.obsidian/app.json` is not opened: settings read
+/// returns at once with Obsidian's defaults.
+#[cfg(unix)]
+#[test]
+fn a_fifo_app_json_does_not_block() {
+    let base = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(base.path()).unwrap();
+    std::fs::create_dir_all(root.join(".obsidian")).unwrap();
+    let fifo = std::ffi::CString::new(root.join(".obsidian/app.json").to_string_lossy().as_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+    let t = std::time::Instant::now();
+    let s = VaultSettings::read(&root);
+    assert!(t.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(s, VaultSettings::obsidian(None));
+    let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
+    sc.mount(root.clone());
+    assert!(
+        sc.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .settings()
+            .obsidian
+    );
+}

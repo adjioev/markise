@@ -213,14 +213,20 @@ impl VaultSettings {
         if !dir.is_dir() {
             return VaultSettings::plain();
         }
-        let text = std::fs::File::open(dir.join("app.json")).ok().and_then(|f| {
+        // a regular file of sane size only: a FIFO or device would block the open or read
+        let app = dir.join("app.json");
+        let regular = std::fs::symlink_metadata(&app).is_ok_and(|m| m.is_file() && m.len() <= APP_JSON_MAX);
+        let text = regular.then(|| std::fs::File::open(&app).ok()).flatten().and_then(|f| {
             use std::io::Read;
             let mut t = String::new();
-            f.take(1 << 20).read_to_string(&mut t).ok().map(|_| t)
+            f.take(APP_JSON_MAX).read_to_string(&mut t).ok().map(|_| t)
         });
         VaultSettings::obsidian(text.as_deref())
     }
 }
+
+/// Largest `.obsidian/app.json` read (a settings file is a few hundred bytes).
+const APP_JSON_MAX: u64 = 1 << 20;
 
 /// An immutable snapshot of the vault's files.
 #[derive(Clone, Debug, Default)]
@@ -1048,6 +1054,8 @@ enum Cmd {
 
 /// Keeps a [`VaultIndex`] of the mounted folder current on a background thread.
 pub struct VaultScanner {
+    /// Set on drop: the worker stops at the next directory entry.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
     tx: Option<Sender<Cmd>>,
     rx: Receiver<Arc<VaultIndex>>,
     /// Joined on drop: the worker holds the vault root's directory handle, which must be
@@ -1056,13 +1064,42 @@ pub struct VaultScanner {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
+/// How long dropping a scanner waits for its worker (on the UI thread).
+const DROP_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl Drop for VaultScanner {
     fn drop(&mut self) {
-        // closing the command channel ends the worker's loop
+        // cancel: the worker stops between directory entries and discards queued commands;
+        // closing the command channel ends its loop
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         self.tx = None;
-        if let Some(w) = self.worker.take() {
+        let Some(w) = self.worker.take() else { return };
+        let t = std::time::Instant::now();
+        while !w.is_finished() && t.elapsed() < DROP_WAIT {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        if w.is_finished() {
             let _ = w.join();
         }
+        // else: detached — it exits on its own once its blocking call returns; its root handle
+        // does not keep the folder from being renamed, deleted or re-created (Unix; Windows
+        // opens it sharing delete access, see `open_root`)
+    }
+}
+
+/// Test hook run before each folder the scanner walks, with the vault root (a test blocks a
+/// worker of one root without touching other tests' scanners).
+#[cfg(test)]
+pub(crate) type ScanHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+#[cfg(test)]
+pub(crate) static SCAN_HOOK: std::sync::Mutex<Option<ScanHook>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn scan_hook(root: &Path) {
+    let h = SCAN_HOOK.lock().ok().and_then(|g| g.clone());
+    if let Some(h) = h {
+        h(root);
     }
 }
 
@@ -1079,6 +1116,8 @@ struct ScanState {
     dirty: bool,
     /// The root directory opened once at mount (see the threat model).
     root_dir: Option<Arc<cap_std::fs::Dir>>,
+    /// The owning scanner was dropped: stop as soon as possible.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ScanState {
@@ -1095,6 +1134,9 @@ impl ScanState {
         let rd = std::fs::read_dir(&abs).ok()?;
         let (mut files, mut dirs) = (Vec::new(), Vec::new());
         for e in rd.flatten() {
+            if self.cancelled() {
+                return None;
+            }
             // the disk spelling (an NFD name must be listed and opened as NFD)
             let name = e.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') {
@@ -1111,10 +1153,16 @@ impl ScanState {
         Some((files, dirs))
     }
 
+    fn cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn walk(&mut self, dir: &str, depth: usize, seen: &mut HashSet<PathBuf>) {
-        if depth > MAX_DEPTH {
+        if depth > MAX_DEPTH || self.cancelled() {
             return;
         }
+        #[cfg(test)]
+        scan_hook(&self.root);
         let abs = self.root.join(dir);
         if let Ok(c) = std::fs::canonicalize(&abs)
             && !seen.insert(c)
@@ -1271,6 +1319,8 @@ impl VaultScanner {
     pub fn new(wake: Wake) -> Result<VaultScanner, String> {
         let (tx, cmd_rx) = channel::<Cmd>();
         let (res_tx, rx) = channel();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
         let worker = std::thread::Builder::new()
             .name("markise-vault".into())
             .spawn(move || {
@@ -1282,8 +1332,12 @@ impl VaultScanner {
                     settings: VaultSettings::plain(),
                     dirty: false,
                     root_dir: None,
+                    cancel: worker_cancel,
                 };
                 while let Ok(first) = cmd_rx.recv() {
+                    if st.cancelled() {
+                        break; // queued commands are discarded
+                    }
                     // coalesce a burst into one snapshot
                     let mut batch = vec![first];
                     while let Ok(c) = cmd_rx.try_recv() {
@@ -1305,6 +1359,9 @@ impl VaultScanner {
                             _ => {}
                         }
                     }
+                    if st.cancelled() {
+                        break;
+                    }
                     // nothing visible changed (e.g. Obsidian rewrote app.json unchanged): no new
                     // snapshot, so layouts and autocomplete keep their state
                     if !mounted || !std::mem::take(&mut st.dirty) {
@@ -1318,6 +1375,7 @@ impl VaultScanner {
             })
             .map_err(|e| format!("cannot start vault thread: {e}"))?;
         Ok(VaultScanner {
+            cancel,
             tx: Some(tx),
             rx,
             worker: Some(worker),
