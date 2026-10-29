@@ -219,7 +219,11 @@ fn folder_settings_root_same_folder_and_absolute_paths() {
     paste_image(&mut h);
     let abs = d.join("Notes/img").join(PASTED);
     assert!(is_png(&abs));
-    let want = abs.to_string_lossy().replace('\\', "/").replace(' ', "%20");
+    let want = markise_engine::attach::destination(None, None, &abs, false);
+    assert!(
+        want.ends_with("/Notes/img/Pasted%20image%2020261029101500.png"),
+        "{want}"
+    );
     assert!(text(&h).contains(&format!("![]({want})")), "{}", text(&h));
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -281,7 +285,8 @@ fn untitled_document_pastes_into_user_images() {
     paste_image(&mut h);
     let png = cfg.join("markise/user-images").join(PASTED);
     assert!(is_png(&png), "{}", png.display());
-    let want = png.to_string_lossy().replace('\\', "/").replace(' ', "%20");
+    let want = markise_engine::attach::destination(None, None, &png, false);
+    assert!(!want.contains('\\') && !want.contains("%3F"), "{want}");
     assert_eq!(text(&h).trim_end(), format!("![]({want})"));
 
     // no settings folder: nothing written, a message instead
@@ -317,11 +322,8 @@ fn dropped_files_insert_at_the_drop_point() {
     let at = egui::pos2(r.left() + 2.0, r.center().y);
     drop_files(&mut h, at, &[src.join("photo one.jpg"), src.join("report.pdf")]);
     let t = text(&h);
-    let pdf = markise_engine::attach::link_path(Some(&d), &src.join("report.pdf"), true);
-    let want = format!(
-        "![](assets/photo%20one.jpg)\n[report.pdf]({})",
-        markise_engine::vault::percent_encode_path(&pdf)
-    );
+    let pdf = markise_engine::attach::destination(Some(&d), None, &src.join("report.pdf"), true);
+    let want = format!("![](assets/photo%20one.jpg)\n[report.pdf]({pdf})");
     let pos = t.find(&want).unwrap_or_else(|| panic!("{t}"));
     assert!(pos < t.find("Second").unwrap(), "inserted in the first paragraph: {t}");
     assert_eq!(
@@ -616,5 +618,66 @@ fn slow_clipboard_text_fallback_and_cancel_on_edit() {
     assert!(text(&h).contains("Second paragraph.X"));
     assert!(h.state().banner_text().is_some_and(|b| b.contains("cancelled")));
     assert_eq!(slow.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Codex P2: two pastes made while the clipboard is still being read both go in, in order
+/// (the second is re-based through the first's insertion, not cancelled).
+#[test]
+fn queued_pastes_apply_in_order() {
+    let (mut h, slow, d, _) = slow_app(Vec::new(), Duration::from_millis(150));
+    h.event(Event::Paste(" one".into()));
+    h.step();
+    h.event(Event::Paste(" two".into()));
+    h.step();
+    assert_eq!(text(&h), NOTE);
+    wait_until(&mut h, "both pastes", |a| !a.is_attaching());
+    assert_eq!(text(&h), NOTE.replace("Second paragraph.", "Second paragraph. one two"));
+    assert!(h.state().banner_text().is_none(), "{:?}", h.state().banner_text());
+    assert_eq!(slow.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // two undo steps
+    h.key_press_modifiers(cmd(), Key::Z);
+    h.step();
+    assert_eq!(text(&h), NOTE.replace("Second paragraph.", "Second paragraph. one"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Codex P2: with absolute paths and a `typora-root-url`, a file below the root is written
+/// root-relative and one elsewhere as a `file:` URL; both resolve to the written files.
+#[test]
+fn absolute_paths_with_a_resource_root() {
+    let d = tmpdir("rooturl");
+    std::fs::create_dir_all(d.join("site/docs")).unwrap();
+    let note = d.join("site/docs/n.md");
+    std::fs::write(&note, format!("---\ntypora-root-url: ..\n---\n\n{NOTE}")).unwrap();
+    let mut h = open(vec![note.clone()], &note, AppOptions::default());
+    focus_end(&mut h);
+    set_images(
+        &mut h,
+        ImageSettings {
+            relative_paths: false,
+            ..Default::default()
+        },
+    );
+    paste_image(&mut h);
+    let png = d.join("site/docs/assets").join(PASTED);
+    assert!(is_png(&png));
+    let t = text(&h);
+    let start = t.find("![](").unwrap() + 4;
+    let dest = &t[start..start + t[start..].find(')').unwrap()];
+    assert_eq!(
+        dest,
+        format!("/docs/assets/{PASTED_ENC}"),
+        "root-relative below the root"
+    );
+    let docs = PathBuf::from(markise_engine::attach::simplify_verbatim(
+        &d.join("site").join("docs").to_string_lossy(),
+    ));
+    let got = markise_doc::resource::local_file(&docs, Some(".."), dest).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(got.path).unwrap(),
+        std::fs::canonicalize(&png).unwrap(),
+        "{dest}"
+    );
     let _ = std::fs::remove_dir_all(&d);
 }

@@ -74,10 +74,40 @@ impl PendingPaste {
     }
 }
 
+/// An insertion made by this module (not by the user): queued pastes captured before it are
+/// re-based through it instead of being cancelled.
+#[derive(Clone, Copy, Debug)]
+struct OwnEdit {
+    doc_id: u64,
+    /// Session revision counters before and after the insertion.
+    from: u64,
+    to: u64,
+    /// The replaced range's start, its length and the inserted length.
+    pos: usize,
+    removed: usize,
+    inserted: usize,
+}
+
+impl OwnEdit {
+    /// `o` after this edit (a position at the insertion point moves past the inserted text, so
+    /// queued pastes stay in order).
+    fn map(&self, o: usize) -> usize {
+        if o < self.pos {
+            o
+        } else if o >= self.pos + self.removed {
+            o - self.removed + self.inserted
+        } else {
+            self.pos + self.inserted
+        }
+    }
+}
+
 pub(crate) struct AttachState {
     clipboard: Arc<dyn crate::clipboard::ClipboardFiles>,
     pending: Vec<Pending>,
     pastes: VecDeque<PendingPaste>,
+    /// Our own insertions since the oldest queued paste was captured.
+    own_edits: Vec<OwnEdit>,
     /// Fixed `YYYYMMDDHHMMSS` for pasted image names (tests).
     stamp: Option<String>,
 }
@@ -88,6 +118,7 @@ impl AttachState {
             clipboard,
             pending: Vec::new(),
             pastes: VecDeque::new(),
+            own_edits: Vec::new(),
             stamp: None,
         }
     }
@@ -270,6 +301,7 @@ impl MarkiseApp {
             obsidian_folder,
             user_images: self.user_images_folder(),
             stamp: self.attach.stamp.clone().unwrap_or_else(attach::stamp_now),
+            resource_root: d.viewer.ed.session.doc().resource_root(),
         };
         let rx = attach::spawn(req, self.wake_handle());
         self.attach.pending.push(Pending {
@@ -321,7 +353,17 @@ impl MarkiseApp {
     /// an image). Cancelled when the document changed meanwhile; a file list that takes longer
     /// than [`CLIPBOARD_TIMEOUT`] is not waited for (the text goes in, a late list is ignored).
     fn paste_poll(&mut self) {
+        if self.attach.pastes.is_empty() {
+            if self.attach.pending.is_empty() {
+                self.attach.own_edits.clear();
+            }
+            return;
+        }
         while let Some(p) = self.attach.pastes.front() {
+            // in order: a paste that became a file job goes in before the next paste
+            if !self.attach.pending.is_empty() {
+                return;
+            }
             let files = match p.rx.try_recv() {
                 Ok(f) => f,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => Vec::new(),
@@ -336,14 +378,23 @@ impl MarkiseApp {
                     Vec::new()
                 }
             };
-            let Some(p) = self.attach.pastes.pop_front() else {
+            let Some(mut p) = self.attach.pastes.pop_front() else {
                 return;
             };
             let Some(ctx) = self.ctx.clone() else { return };
+            // re-base through the insertions of earlier pastes (ours); any other change to the
+            // document since the paste cancels it
+            let (mut counter, mut a, mut f) = (p.counter, p.sel.primary().anchor.offset, p.sel.primary().focus.offset);
+            for e in self.attach.own_edits.iter().filter(|e| e.doc_id == p.doc_id) {
+                if e.from == counter {
+                    (counter, a, f) = (e.to, e.map(a), e.map(f));
+                }
+            }
+            p.sel = Selection::range(a, f);
             let current = self
                 .doc
                 .as_ref()
-                .is_some_and(|d| d.id == p.doc_id && d.viewer.ed.session.revision().counter == p.counter);
+                .is_some_and(|d| d.id == p.doc_id && d.viewer.ed.session.revision().counter == counter);
             if !current {
                 if self.doc.as_ref().is_some_and(|d| d.id == p.doc_id) {
                     self.banner = Some(Banner::Info(
@@ -386,13 +437,22 @@ impl MarkiseApp {
         // is read-only)
         let source = self.source_visible || self.side_by_side;
         let Some(d) = self.doc.as_mut() else { return };
+        let (from, old_len) = (d.viewer.ed.session.revision().counter, d.viewer.ed.session.text().len());
+        let range;
         if source && d.viewer.ed.source.is_some() {
             if let Some(o) = at {
-                let o = o.min(d.viewer.ed.session.text().len());
-                d.viewer.ed.source_set_selection(Selection::caret(o));
+                d.viewer.ed.source_set_selection(Selection::caret(o.min(old_len)));
             }
+            range = d
+                .viewer
+                .ed
+                .source
+                .as_ref()
+                .map(|p| p.sel.primary().range())
+                .unwrap_or(0..0);
             let _ = d.viewer.ed.source_insert(md, true);
         } else {
+            let mut r0 = 0..0;
             d.viewer
                 .ed
                 .edit(|s| {
@@ -400,14 +460,28 @@ impl MarkiseApp {
                     if let Some(o) = at {
                         s.set_selection(Selection::caret(o.min(s.text().len())));
                     }
+                    r0 = s.selection().primary().range();
                     let r = s.insert_text(md);
                     s.close_typing();
                     r
                 })
                 .ok();
+            range = r0;
             d.viewer.ed.refresh_focus();
         }
         d.sync();
+        let (to, new_len) = (d.viewer.ed.session.revision().counter, d.viewer.ed.session.text().len());
+        if to != from {
+            let removed = range.len();
+            self.attach.own_edits.push(OwnEdit {
+                doc_id: d.id,
+                from,
+                to,
+                pos: range.start,
+                removed,
+                inserted: (new_len + removed).saturating_sub(old_len),
+            });
+        }
         ctx.request_repaint();
     }
 }

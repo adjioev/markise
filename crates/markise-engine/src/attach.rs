@@ -204,17 +204,105 @@ pub fn markdown_dest(path: &str, form: DestForm) -> String {
     }
 }
 
-/// The path written for `file`: relative to `note_dir` when `relative` and a relative path
-/// exists (same drive), else absolute; `/`-separated.
-pub fn link_path(note_dir: Option<&Path>, file: &Path, relative: bool) -> String {
-    if relative
-        && let Some(dir) = note_dir
-        && let Some(r) = crate::vault::relative_path(dir, file)
-    {
-        return r;
+/// `s` without a Windows verbatim prefix: `\\?\C:\x` → `C:\x`, `\\?\UNC\srv\share` →
+/// `\\srv\share` (what `canonicalize` returns on Windows; such paths are not valid in links).
+pub fn simplify_verbatim(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
     }
-    let s = file.to_string_lossy().into_owned();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if rest.len() >= 2 && rest.as_bytes()[1] == b':' && rest.as_bytes()[0].is_ascii_alphabetic() => {
+            rest.to_string()
+        }
+        _ => s.to_string(),
+    }
+}
+
+/// [`simplify_verbatim`] for paths (identity outside Windows).
+fn simplify(p: &Path) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(simplify_verbatim(&p.to_string_lossy()))
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// `p` with `/` separators (Windows backslashes turned around).
+fn slashed(p: &Path) -> String {
+    let s = p.to_string_lossy().into_owned();
     if cfg!(windows) { s.replace('\\', "/") } else { s }
+}
+
+/// A `file:` URL for the absolute path `file` (path percent-encoded like destinations):
+/// `file:///home/a/x.png`, `file:///C:/a/x.png`, `file://server/share/x.png`.
+pub fn file_url(file: &Path) -> String {
+    let s = slashed(&simplify(file));
+    let enc = |p: &str| markdown_dest(p, DestForm::Percent);
+    if let Some(unc) = s.strip_prefix("//") {
+        return format!("file://{}", enc(unc));
+    }
+    if s.starts_with('/') {
+        format!("file://{}", enc(&s))
+    } else {
+        format!("file:///{}", enc(&s))
+    }
+}
+
+/// The resolved resource root (`typora-root-url`, spec 01 R8.1) of a note in `note_dir`:
+/// absolute as written, otherwise relative to the note's folder.
+pub fn resource_root_dir(note_dir: Option<&Path>, root: &str) -> Option<PathBuf> {
+    let root = root.trim();
+    if root.is_empty() {
+        return None;
+    }
+    let p = if markise_doc::resource::is_absolute_like(root) {
+        PathBuf::from(root)
+    } else {
+        note_dir?.join(root.trim_start_matches("./"))
+    };
+    // `..` and `.` resolved lexically, so files below the root are recognised
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                if !out.pop() {
+                    return Some(p);
+                }
+            }
+            Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// The Markdown destination (encoded) written for `file` from a note in `note_dir`:
+/// - relative to the note's folder when `relative` and a relative path exists;
+/// - else, when the document has a resource root (`root`, resolved: [`resource_root_dir`]),
+///   root-relative (`/assets/x.png`) for a file below it, a `file:` URL otherwise (a plain
+///   absolute path would be read as root-relative);
+/// - else the absolute path (`/home/a/x.png`; `C:/a/x.png` on Windows; a `file:` URL for UNC
+///   paths).
+///
+/// Windows verbatim prefixes are removed first. Every form resolves back to `file` through
+/// `markise_doc::resource::local_file`.
+pub fn destination(note_dir: Option<&Path>, root: Option<&Path>, file: &Path, relative: bool) -> String {
+    let enc = |p: &str| markdown_dest(p, DestForm::Percent);
+    let file = simplify(file);
+    if relative
+        && let Some(dir) = note_dir.map(simplify)
+        && let Some(r) = crate::vault::relative_path(&dir, &file)
+    {
+        return enc(&r);
+    }
+    if let Some(root) = root.map(simplify) {
+        return match rel_below(&root, &file) {
+            Some(r) => format!("/{}", enc(&r)),
+            None => file_url(&file),
+        };
+    }
+    let s = slashed(&file);
+    if s.starts_with("//") { file_url(&file) } else { enc(&s) }
 }
 
 /// A Markdown label with its syntax characters escaped.
@@ -230,9 +318,9 @@ fn escape_label(s: &str) -> String {
 }
 
 /// The Markdown inserted for `file`: an image for image files, else a link labelled with the
-/// file name.
-pub fn markdown_for(note_dir: Option<&Path>, file: &Path, relative: bool) -> String {
-    let dest = markdown_dest(&link_path(note_dir, file, relative), DestForm::Percent);
+/// file name; the destination per [`destination`].
+pub fn markdown_for(note_dir: Option<&Path>, root: Option<&Path>, file: &Path, relative: bool) -> String {
+    let dest = destination(note_dir, root, file, relative);
     let name = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -335,6 +423,8 @@ pub struct Request {
     pub user_images: Option<PathBuf>,
     /// `YYYYMMDDHHMMSS` for pasted image names ([`stamp_now`]; fixed in tests).
     pub stamp: String,
+    /// The document's resource root as written (`typora-root-url`), if any.
+    pub resource_root: Option<String>,
 }
 
 /// The result of a [`Request`].
@@ -511,6 +601,11 @@ pub fn run(req: &Request) -> Outcome {
     let note_dir = req.note.as_deref().and_then(Path::parent);
     // a never-saved document has no folder to be relative to
     let relative = req.settings.relative_paths && note_dir.is_some();
+    let res_root = req
+        .resource_root
+        .as_deref()
+        .and_then(|r| resource_root_dir(note_dir, r));
+    let res_root = res_root.as_deref();
     let mut target_cache: Option<Result<Target, String>> = None;
     let mut target = |req: &Request| -> Result<(cap_std::fs::Dir, PathBuf, String), String> {
         let t = target_cache.get_or_insert_with(|| target(req));
@@ -538,10 +633,7 @@ pub fn run(req: &Request) -> Outcome {
                             e
                         }
                     })?;
-                let md = format!(
-                    "![]({})",
-                    markdown_dest(&link_path(note_dir, &path, relative), DestForm::Percent)
-                );
+                let md = format!("![]({})", destination(note_dir, res_root, &path, relative));
                 out.written.push(path);
                 Ok(md)
             })(),
@@ -567,7 +659,7 @@ pub fn run(req: &Request) -> Outcome {
                     .or(note_dir)
                     .is_some_and(|r| src.starts_with(r));
                 if !copy || inside {
-                    return Ok(markdown_for(note_dir, src, relative));
+                    return Ok(markdown_for(note_dir, res_root, src, relative));
                 }
                 if meta.len() > MAX_BYTES {
                     return Err(too_large(&format!("“{name}”"), meta.len()));
@@ -582,7 +674,7 @@ pub fn run(req: &Request) -> Outcome {
                     }
                     Ok(())
                 })?;
-                let md = markdown_for(note_dir, &path, relative);
+                let md = markdown_for(note_dir, res_root, &path, relative);
                 out.written.push(path);
                 Ok(md)
             })(),
@@ -739,6 +831,7 @@ mod tests {
     #[test]
     fn link_paths_and_destinations() {
         let note_dir = Path::new("/v/Notes");
+        let link_path = |dir: Option<&Path>, f: &Path, rel: bool| destination(dir, None, f, rel);
         assert_eq!(
             link_path(Some(note_dir), Path::new("/v/Notes/assets/a.png"), true),
             "assets/a.png"
@@ -762,11 +855,11 @@ mod tests {
         assert_eq!(markdown_dest("my pics/a b.png", DestForm::Angle), "<my pics/a b.png>");
         assert_eq!(markdown_dest("a<b>.png", DestForm::Angle), "<a%3Cb%3E.png>");
         assert_eq!(
-            markdown_for(Some(note_dir), Path::new("/v/Notes/doc [v2].pdf"), true),
+            markdown_for(Some(note_dir), None, Path::new("/v/Notes/doc [v2].pdf"), true),
             "[doc \\[v2\\].pdf](doc%20%5Bv2%5D.pdf)"
         );
         assert_eq!(
-            markdown_for(Some(note_dir), Path::new("/v/x/a b.png"), true),
+            markdown_for(Some(note_dir), None, Path::new("/v/x/a b.png"), true),
             "![](../x/a%20b.png)"
         );
     }
@@ -862,20 +955,66 @@ mod tests {
                 d.join("Other dir").join(name)
             };
             std::fs::write(&file, b"x").unwrap();
-            for relative in [true, false] {
-                let md = markdown_for(Some(&note_dir), &file, relative);
+            let elsewhere = tmp("roundtrip-root");
+            // as a user writes them (no Windows verbatim prefix: those take no `/` separators)
+            let plain = |p: &Path| simplify_verbatim(&p.to_string_lossy());
+            let roots: [Option<String>; 4] = [None, Some(plain(&d)), Some(plain(&elsewhere)), Some("..".into())];
+            let doc_dir = PathBuf::from(plain(&note_dir));
+            for (relative, root) in [true, false]
+                .into_iter()
+                .flat_map(|r| roots.iter().map(move |o| (r, o)))
+            {
+                let root_dir = root.as_deref().and_then(|r| resource_root_dir(Some(&note_dir), r));
+                let md = markdown_for(Some(&note_dir), root_dir.as_deref(), &file, relative);
                 let nodes = parse_inlines(&md, &opts, &InlineContext::default());
                 assert_eq!(nodes.len(), 1, "{name}: one node in {md}");
                 let dest = match &nodes[0].kind {
                     InlineKind::Image { dest, .. } | InlineKind::Link { dest, .. } => dest.clone(),
                     k => panic!("{name}: {md} → {k:?}"),
                 };
-                let got = markise_doc::resource::local_file(&note_dir, None, &dest)
+                if !relative && root.as_deref() == Some(plain(&d).as_str()) {
+                    assert!(
+                        dest.starts_with('/') && !dest.starts_with("//"),
+                        "{name}: root-relative {dest}"
+                    );
+                }
+                let got = markise_doc::resource::local_file(&doc_dir, root.as_deref(), &dest)
                     .unwrap_or_else(|| panic!("{name}: {md} not local"));
                 assert!(got.suffix.is_empty(), "{name}: {md} split a suffix {:?}", got.suffix);
                 let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|e| panic!("{name}: {md}: {e}"));
                 assert_eq!(canon(&got.path), canon(&file), "{name}: {md}");
             }
+        }
+    }
+
+    #[test]
+    fn windows_verbatim_prefixes_and_file_urls() {
+        assert_eq!(simplify_verbatim(r"\\?\C:\Users\a\x.png"), r"C:\Users\a\x.png");
+        assert_eq!(simplify_verbatim(r"\\?\UNC\srv\share\x.png"), r"\\srv\share\x.png");
+        assert_eq!(simplify_verbatim(r"\\?\Volume{x}\a"), r"\\?\Volume{x}\a");
+        assert_eq!(simplify_verbatim("/home/a"), "/home/a");
+        #[cfg(unix)]
+        {
+            assert_eq!(file_url(Path::new("/home/a b/x?.png")), "file:///home/a%20b/x%3F.png");
+            // a resource root: root-relative below it, a file URL elsewhere
+            let root = Path::new("/v/site");
+            let note = Path::new("/v/site/docs");
+            assert_eq!(
+                destination(Some(note), Some(root), Path::new("/v/site/img/a.png"), false),
+                "/img/a.png"
+            );
+            assert_eq!(
+                destination(Some(note), Some(root), Path::new("/tmp/a b.png"), false),
+                "file:///tmp/a%20b.png"
+            );
+            assert_eq!(
+                destination(Some(note), Some(root), Path::new("/v/site/docs/a.png"), true),
+                "a.png"
+            );
+            assert_eq!(
+                destination(Some(note), None, Path::new("/tmp/a.png"), false),
+                "/tmp/a.png"
+            );
         }
     }
 
@@ -926,6 +1065,7 @@ mod tests {
             obsidian_folder: None,
             user_images: None,
             stamp: "20261029101500".into(),
+            resource_root: None,
         };
         let out = run(&req);
         assert!(out.errors.is_empty(), "{:?}", out.errors);
@@ -950,17 +1090,12 @@ mod tests {
             obsidian_folder: None,
             user_images: Some(d.join("user-images")),
             stamp: "20260101000000".into(),
+            resource_root: None,
         };
         let out = run(&req);
         let p = d.join("user-images/Pasted image 20260101000000.png");
         assert!(p.is_file(), "{out:?}");
-        assert_eq!(
-            out.inserts,
-            [format!(
-                "![]({})",
-                crate::vault::percent_encode_path(&link_path(None, &p, false))
-            )]
-        );
+        assert_eq!(out.inserts, [format!("![]({})", destination(None, None, &p, false))]);
         req.user_images = None;
         assert_eq!(run(&req).errors.len(), 1);
     }
@@ -985,15 +1120,16 @@ mod tests {
             obsidian_folder: None,
             user_images: None,
             stamp: "1".into(),
+            resource_root: None,
         };
         let out = run(&req);
         assert!(out.errors.is_empty(), "{:?}", out.errors);
-        let pdf = link_path(Some(&d), &src.join("report.pdf"), true);
+        let pdf = destination(Some(&d), None, &src.join("report.pdf"), true);
         assert_eq!(
             out.inserts,
             [
                 "![](assets/photo%20one.jpg)".to_string(),
-                format!("[report.pdf]({})", crate::vault::percent_encode_path(&pdf)),
+                format!("[report.pdf]({pdf})"),
                 "![](inside.png)".to_string(),
             ]
         );
@@ -1030,6 +1166,7 @@ mod tests {
             obsidian_folder: None,
             user_images: None,
             stamp: "1".into(),
+            resource_root: None,
         };
         let out = run(&req);
         assert!(out.inserts.is_empty());
@@ -1051,6 +1188,7 @@ mod tests {
             obsidian_folder: Some("Attachments".into()),
             user_images: None,
             stamp: "2".into(),
+            resource_root: None,
         };
         let out = run(&req);
         assert_eq!(out.inserts, ["![](../Attachments/Pasted%20image%202.png)"]);
