@@ -1,7 +1,7 @@
 //! Formatting toolbar (spec 04 §3.2): controls run the registry commands exactly like the
 //! menus (saved bytes), reflect the selection, are disabled where the command is unavailable,
 //! never take the text focus, drop-downs are keyboard-navigable, View → Toolbar (on by default)
-//! and View → Toolbar Position are persisted, the bar never covers the document at the top or
+//! and Preferences → Appearance → Toolbar position are persisted, the bar never covers the document at the top or
 //! the bottom, narrow windows collapse groups into More, and an idle window with the bar stays
 //! quiet (NFR-10).
 
@@ -295,8 +295,9 @@ fn view_toolbar_toggle_is_persisted_and_on_by_default() {
     wait_until(&mut h, "settings applied", |a| !a.show_toolbar());
 }
 
-/// View → Toolbar Position: a Top / Bottom radio pair in the menu model (so native menus show
-/// the check marks), default Top, persisted as `toolbarPosition`.
+/// Toolbar position (Preferences → Appearance since issue #50; the `view.toolbarTop` /
+/// `view.toolbarBottom` commands still run by id): default Top, persisted as `toolbarPosition`,
+/// shown by the Preferences window.
 #[test]
 fn toolbar_position_is_a_persisted_radio_defaulting_to_top() {
     let dir = tmpdir("position");
@@ -305,18 +306,12 @@ fn toolbar_position_is_a_persisted_radio_defaulting_to_top() {
     let cfg = dir.join("config");
     std::fs::create_dir_all(&cfg).unwrap();
     let settings = cfg.join("markise").join("settings.json");
-    let checks = |h: &Harness<'static, MarkiseApp>| {
-        let m = h.state().menu_model();
-        (
-            m.item("view.toolbarTop").unwrap().check,
-            m.item("view.toolbarBottom").unwrap().check,
-        )
-    };
+    let shown = |h: &Harness<'static, MarkiseApp>| h.state().preference_values().toolbar_position;
     {
         let mut h = harness_with(vec![p.clone()], ConfigDir::Dir(cfg.clone()), 1000.0);
         wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
         assert_eq!(h.state().toolbar_position(), ToolbarPosition::Top);
-        assert_eq!(checks(&h), (Check::Radio(true), Check::Radio(false)));
+        assert_eq!(shown(&h), ToolbarPosition::Top);
         let top_bar = h.state().toolbar().bar_rect().unwrap();
         let ctx = h.ctx.clone();
         assert!(
@@ -326,7 +321,7 @@ fn toolbar_position_is_a_persisted_radio_defaulting_to_top() {
         h.step();
         h.step();
         assert_eq!(h.state().toolbar_position(), ToolbarPosition::Bottom);
-        assert_eq!(checks(&h), (Check::Radio(false), Check::Radio(true)));
+        assert_eq!(shown(&h), ToolbarPosition::Bottom);
         let bar = h.state().toolbar().bar_rect().unwrap();
         assert!(
             bar.top() > 500.0 && bar.top() > top_bar.bottom(),
@@ -342,7 +337,7 @@ fn toolbar_position_is_a_persisted_radio_defaulting_to_top() {
     wait_until(&mut h, "settings applied", |a| {
         a.toolbar_position() == ToolbarPosition::Bottom
     });
-    assert_eq!(checks(&h), (Check::Radio(false), Check::Radio(true)));
+    assert_eq!(shown(&h), ToolbarPosition::Bottom);
 }
 
 /// Bottom position: the document area ends above the bar (Rendered and Side by Side's rendered
