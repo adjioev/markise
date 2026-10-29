@@ -808,3 +808,58 @@ fn delayed_file_paste_after_switching_documents_copies_nothing() {
     let _ = std::fs::remove_dir_all(&other);
     let _ = std::fs::remove_dir_all(&src);
 }
+
+/// Codex P2 (round 5): Save As while a paste's job runs: the file stays where it was written
+/// (next to the old location) and the inserted link is generated for the note's new location,
+/// so it resolves to that file.
+#[test]
+fn save_as_during_a_pending_job_links_the_written_file() {
+    let a = tmpdir("saveas-a");
+    let b = tmpdir("saveas-b");
+    let note = a.join("n.md");
+    std::fs::write(&note, NOTE).unwrap();
+    let mut h = open(vec![note.clone()], &note, AppOptions::default());
+    focus_end(&mut h);
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let g = gate.clone();
+    h.state_mut().set_attach_job_test(
+        Duration::from_secs(20),
+        Some(Arc::new(move || {
+            let (m, cv) = &*g;
+            let mut open = m.lock().unwrap();
+            while !*open {
+                open = cv.wait(open).unwrap();
+            }
+        })),
+    );
+    h.event(Event::PasteImage(image()));
+    h.step();
+    let moved = b.join("n.md");
+    h.state_mut().queue_save_dialog_answer(Some(moved.clone()));
+    h.state_mut().save_as();
+    let m = moved.clone();
+    wait_until(&mut h, "saved as", move |s| {
+        s.document_path() == Some(m.as_path()) && !s.is_saving()
+    });
+    {
+        let (m, cv) = &*gate;
+        *m.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    wait_until(&mut h, "inserted", |s| !s.is_attaching());
+    let written = a.join("assets").join(PASTED);
+    assert!(is_png(&written), "written next to the old location");
+    let t = text(&h);
+    let start = t.find("![](").expect("image inserted") + 4;
+    let dest = &t[start..start + t[start..].find(')').unwrap()];
+    assert_ne!(dest, format!("assets/{PASTED_ENC}"), "not the stale relative path");
+    let docs = PathBuf::from(markise_engine::attach::simplify_verbatim(&b.to_string_lossy()));
+    let got = markise_doc::resource::local_file(&docs, None, dest).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(got.path).unwrap(),
+        std::fs::canonicalize(&written).unwrap(),
+        "{dest}"
+    );
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}

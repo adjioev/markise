@@ -507,7 +507,10 @@ impl MarkiseApp {
                     if unchanged {
                         self.restore_selection(&e.sel, e.source);
                     }
-                    self.insert_attachment_text(&ctx, &out.text());
+                    // links generated again for where the note is now (Save As may have moved it
+                    // while the job ran); the files stay where they were written
+                    let md = self.render_for_current_note(&out);
+                    self.insert_attachment_text(&ctx, &md);
                 }
                 if !out.errors.is_empty() {
                     self.banner = Some(Banner::Error(out.errors.join(" ")));
@@ -515,6 +518,25 @@ impl MarkiseApp {
             }
             Stage::Clipboard { .. } | Stage::Job(..) => {}
         }
+    }
+
+    /// `out`'s Markdown for the open document's current file, resource root and relative-paths
+    /// setting.
+    fn render_for_current_note(&self, out: &Outcome) -> String {
+        let Some(d) = &self.doc else { return out.text() };
+        let note_dir = d.file().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+        let root = d
+            .viewer
+            .ed
+            .session
+            .doc()
+            .resource_root()
+            .and_then(|r| attach::resource_root_dir(note_dir.as_deref(), &r));
+        out.render(
+            note_dir.as_deref(),
+            root.as_deref(),
+            self.themes.image_settings().relative_paths,
+        )
     }
 
     /// Puts a captured selection back (it may have moved without an edit).

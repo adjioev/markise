@@ -430,8 +430,11 @@ pub struct Request {
 /// The result of a [`Request`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
-    /// Markdown per item that succeeded, in item order.
+    /// Markdown per item that succeeded, in item order (for the note's location at request
+    /// time; see [`Outcome::render`]).
     pub inserts: Vec<String>,
+    /// The file each insert points to (the written copy, or the original when linked in place).
+    pub targets: Vec<PathBuf>,
     /// Files created.
     pub written: Vec<PathBuf>,
     /// One message per item that failed.
@@ -442,6 +445,19 @@ impl Outcome {
     /// The Markdown to insert: one line per item.
     pub fn text(&self) -> String {
         self.inserts.join("\n")
+    }
+
+    /// The Markdown to insert for a note that is now in `note_dir` (it may have been saved
+    /// under another name meanwhile), with the resolved resource root `root` and the
+    /// relative-paths setting `relative`: the links are generated again from [`Self::targets`]
+    /// with [`markdown_for`], so they resolve to the files wherever the note is now.
+    pub fn render(&self, note_dir: Option<&Path>, root: Option<&Path>, relative: bool) -> String {
+        let relative = relative && note_dir.is_some();
+        self.targets
+            .iter()
+            .map(|t| markdown_for(note_dir, root, t, relative))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -619,7 +635,7 @@ pub fn run(req: &Request) -> Outcome {
         }
     };
     for item in &req.items {
-        let r: Result<String, String> = match item {
+        let r: Result<(String, PathBuf), String> = match item {
             Item::Image(img) => (|| {
                 check_dimensions(img)?;
                 let (dir, root, folder) = target(req)?;
@@ -633,9 +649,9 @@ pub fn run(req: &Request) -> Outcome {
                             e
                         }
                     })?;
-                let md = format!("![]({})", destination(note_dir, res_root, &path, relative));
-                out.written.push(path);
-                Ok(md)
+                let md = markdown_for(note_dir, res_root, &path, relative);
+                out.written.push(path.clone());
+                Ok((md, path))
             })(),
             Item::File(src) => (|| {
                 let name = src
@@ -659,7 +675,7 @@ pub fn run(req: &Request) -> Outcome {
                     .or(note_dir)
                     .is_some_and(|r| src.starts_with(r));
                 if !copy || inside {
-                    return Ok(markdown_for(note_dir, res_root, src, relative));
+                    return Ok((markdown_for(note_dir, res_root, src, relative), src.clone()));
                 }
                 if meta.len() > MAX_BYTES {
                     return Err(too_large(&format!("“{name}”"), meta.len()));
@@ -675,12 +691,15 @@ pub fn run(req: &Request) -> Outcome {
                     Ok(())
                 })?;
                 let md = markdown_for(note_dir, res_root, &path, relative);
-                out.written.push(path);
-                Ok(md)
+                out.written.push(path.clone());
+                Ok((md, path))
             })(),
         };
         match r {
-            Ok(md) => out.inserts.push(md),
+            Ok((md, target)) => {
+                out.inserts.push(md);
+                out.targets.push(target);
+            }
             Err(e) => out.errors.push(e),
         }
     }
@@ -1016,6 +1035,34 @@ mod tests {
                 "/tmp/a.png"
             );
         }
+    }
+
+    /// The links of a finished request are generated again for the note's current location
+    /// (Save As while the job ran).
+    #[test]
+    fn outcome_renders_for_the_current_note_location() {
+        let a = tmp("render-a");
+        let b = tmp("render-b");
+        std::fs::write(a.join("n.md"), "x").unwrap();
+        let out = run(&Request {
+            items: vec![Item::Image(red())],
+            settings: ImageSettings::default(),
+            note: Some(a.join("n.md")),
+            vault: None,
+            obsidian_folder: None,
+            user_images: None,
+            stamp: "3".into(),
+            resource_root: None,
+        });
+        assert_eq!(out.text(), "![](assets/Pasted%20image%203.png)");
+        assert_eq!(out.render(Some(&a), None, true), out.text());
+        let moved = out.render(Some(&b), None, true);
+        let dest = &moved[4..moved.len() - 1];
+        let got = markise_doc::resource::local_file(&b, None, dest).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(got.path).unwrap(),
+            std::fs::canonicalize(a.join("assets/Pasted image 3.png")).unwrap()
+        );
     }
 
     #[test]
