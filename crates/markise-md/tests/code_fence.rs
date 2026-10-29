@@ -104,3 +104,37 @@ fn language_edit_reparses_into_a_diagram_language() {
     let leaf = d.leaf(8).unwrap();
     assert!(matches!(leaf.kind, markise_doc::LeafKind::CodeBlock { ref info } if &**info == "mermaid"));
 }
+
+/// Codex review: a language starting with the fence character must not lengthen the fence
+/// (the old closing fence would become too short and swallow what follows).
+#[test]
+fn a_language_cannot_extend_the_fence() {
+    let src = "~~~rust\nx\n~~~\n\nafter\n";
+    let out = relang(src, 8, "~foo");
+    assert_eq!(out, "~~~ ~foo\nx\n~~~\n\nafter\n");
+    // block boundaries unchanged: same code content, the paragraph after is still one
+    let d = parse(&out);
+    let f = d.code_fence(out.find("x\n").unwrap()).unwrap();
+    assert_eq!(f.content(&out), "x");
+    assert_eq!(f.lang(&out).slice(&out), "~foo");
+    assert_eq!(d.code_fence(out.find("after").unwrap()), None);
+    // also from an empty info string, and a long fence
+    assert_eq!(relang("~~~~\nx\n~~~~\n", 5, "~~a"), "~~~~ ~~a\nx\n~~~~\n");
+    // a language after a space already keeps its space
+    assert_eq!(relang("~~~ rust\nx\n~~~\n", 9, "~b"), "~~~ ~b\nx\n~~~\n");
+    // backtick fences: backticks never reach the info string (refused characters)
+    let b = "```rust\nx\n```\n\nafter\n";
+    let out = relang(b, 8, "`foo");
+    assert_eq!(out, "```foo\nx\n```\n\nafter\n");
+    let d = parse(&out);
+    assert_eq!(d.code_fence(out.find("x\n").unwrap()).unwrap().content(&out), "x");
+    assert_eq!(d.code_fence(out.find("after").unwrap()), None);
+    assert!(
+        parse(b).code_lang_patch(8, "``").is_some_and(|p| {
+            let mut d = parse(b);
+            markise_doc::FormatDoc::apply(&mut d, &p);
+            d.text() == "```\nx\n```\n\nafter\n"
+        }),
+        "only backticks: the language is removed"
+    );
+}

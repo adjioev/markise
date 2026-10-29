@@ -2025,7 +2025,8 @@ fn next_item_prefix(prefix: &str) -> String {
 /// The edit making `lang` the first info word of fence `f` (spec 02 §7): only the language word
 /// changes; the fence characters and any further info text (attributes) keep their bytes.
 /// Characters a fence line cannot hold are dropped (line breaks; backticks after a backtick
-/// fence, CommonMark §4.5). An empty language removes the word together with the space
+/// fence, CommonMark §4.5); a language starting with the fence character is kept apart
+/// from the fence by a space. An empty language removes the word together with the space
 /// before it when nothing follows it. `None` when nothing changes.
 pub(crate) fn lang_edit(text: &str, f: &CodeFenceView, fence_char: u8, lang: &str) -> Option<(Range<usize>, String)> {
     let clean: String = lang
@@ -2045,6 +2046,11 @@ pub(crate) fn lang_edit(text: &str, f: &CodeFenceView, fence_char: u8, lang: &st
         } else {
             (old.start..old.end, String::new())
         });
+    }
+    // a language right after the fence must not lengthen it (`~~~` + `~foo` would read as a
+    // `~~~~` fence whose old closing line is too short): keep it apart with a space
+    if old.start == fence_end && clean.as_bytes()[0] == fence_char {
+        return Some((old.start..old.end, format!(" {clean}")));
     }
     Some((old.start..old.end, clean.to_string()))
 }
