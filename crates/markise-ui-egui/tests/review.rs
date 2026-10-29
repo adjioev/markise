@@ -300,6 +300,9 @@ fn stale_panel_rows_act_on_their_own_mark() {
     let (mut h, _p) = open("stale-gone", "x {--A--}\n");
     h.state_mut().set_comments_debounce(Duration::from_secs(3600));
     show_panel(&mut h);
+    // the first list is shown before the mark goes away
+    assert!(has_text(&mut h, "A"));
+    assert!(h.state().comments_panel_ready());
     {
         let v = h.state_mut().viewer().unwrap();
         v.ed.edit(|s| {
@@ -709,18 +712,17 @@ fn panel_switch_changes_the_setting() {
 #[test]
 fn enter_inside_a_comment_makes_a_multi_line_comment() {
     for (name, src, want) in [
-        ("para", "A {>>one<<} b\n", "A {>>one\ntwo<<} b\n"),
-        ("quote", "> A {>>one<<} b\n", "> A {>>one\n> two<<} b\n"),
-        ("item", "- A {>>one<<} b\n", "- A {>>one\n  two<<} b\n"),
+        ("para", "A {>>onetwo<<} b\n", "A {>>one\ntwo<<} b\n"),
+        ("quote", "> A {>>onetwo<<} b\n", "> A {>>one\n> two<<} b\n"),
+        ("item", "- A {>>onetwo<<} b\n", "- A {>>one\n  two<<} b\n"),
     ] {
         let (mut h, p) = open(&format!("ml-{name}"), src);
-        let at = src.find("<<}").unwrap();
+        let at = src.find("two<<}").unwrap();
         caret_at(&mut h, at);
         h.key_press(Key::Enter);
         h.step();
         h.key_press(Key::Enter);
         h.step();
-        typ(&mut h, "two");
         assert_eq!(text(&h), want, "{name}");
         let saved = save_and_read(&mut h, &p);
         assert_eq!(saved, want);

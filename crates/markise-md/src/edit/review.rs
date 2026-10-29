@@ -203,39 +203,63 @@ impl Document {
     /// for a clean copy). The caret is mapped through the patches by the session.
     fn plan_resolve_all(&self, how: Resolve, clean: bool) -> Result<Plan, PlanError> {
         self.review_on()?;
-        let marks = review::all_marks(self);
-        let text = self.text();
-        let mut changes = Vec::new();
-        let mut i = 0;
-        while i < marks.len() {
-            let m = &marks[i];
-            let attached = marks
-                .get(i + 1)
-                .is_some_and(|c| c.kind == CriticKind::Comment && c.attached);
-            if m.is_suggestion() {
-                changes.push(resolve_change(text, &marks, i, how));
-            } else if clean {
-                changes.push(remove_comment_change(text, &marks, i));
-            } else {
-                i += 1;
-                continue;
+        // literally one mark after another (review round 2, P2-6): each is resolved with the
+        // one-mark planner on a working copy that is re-parsed incrementally, so the result is
+        // by construction the one-by-one result; the overall difference is one patch (one undo
+        // step). Every step removes at least the mark's delimiters, so this terminates.
+        let mut work: Box<dyn FormatDoc> = self.clone_box();
+        let mut from = 0usize;
+        let mut any = false;
+        while let Some(m) = review::first_mark_from(work.as_ref(), from, |m| m.is_suggestion() || clean) {
+            let id = match (m.is_suggestion(), how) {
+                (true, Resolve::Accept) => planners::REVIEW_ACCEPT,
+                (true, Resolve::Reject) => planners::REVIEW_REJECT,
+                (false, _) => planners::REVIEW_DELETE_COMMENT,
+            };
+            let req = PlanRequest {
+                params: markise_doc::Params::new().with("at", markise_doc::ParamValue::Int(m.content.start as i64)),
+                ..Default::default()
+            };
+            let before = work.text().len();
+            let plan = work.plan(id, &req)?;
+            for step in plan.steps {
+                work.apply(&step.patches);
             }
-            // the attached comment went with the mark
-            i += if attached { 2 } else { 1 };
+            if work.text().len() >= before {
+                return Err(PlanError::NotApplicable("a mark could not be resolved"));
+            }
+            any = true;
+            // a `{` just before the mark may open a new mark with the restored text
+            from = m.range.start.saturating_sub(3);
         }
-        if changes.is_empty() {
+        if !any {
             return Err(PlanError::NotApplicable(if clean {
                 "no comments or suggestions"
             } else {
                 "no suggestions"
             }));
         }
-        let (patches, _) = apply_in_order(text, &changes);
-        let mut ed = Edits::new();
-        for (r, t) in patches {
-            ed.push(r, t);
+        // the overall change: the differing middle between the old and the new text
+        let (old, new) = (self.text(), work.text());
+        let pre = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+        let max_suf = old.len().min(new.len()) - pre;
+        let suf = old
+            .bytes()
+            .rev()
+            .zip(new.bytes().rev())
+            .take(max_suf)
+            .take_while(|(a, b)| a == b)
+            .count();
+        // keep the cut on char boundaries
+        let (mut a, mut e_old, mut e_new) = (pre, old.len() - suf, new.len() - suf);
+        while !old.is_char_boundary(a) || !new.is_char_boundary(a) {
+            a -= 1;
         }
-        let ps = ed.build().ok_or(PlanError::NotApplicable("overlap"))?;
+        while !old.is_char_boundary(e_old) || !new.is_char_boundary(e_new) {
+            e_old += 1;
+            e_new += 1;
+        }
+        let ps = markise_doc::PatchSet::single_verbatim(a..e_old, &new[a..e_new]);
         Ok(Plan::single(PlanStep::patches(ps), None))
     }
 
@@ -260,21 +284,44 @@ impl Document {
             return None;
         }
         let text = self.text();
-        let b = text.as_bytes();
         let leaf = self.leaf(at)?;
-        let line = leaf.lines.iter().find(|l| l.start <= at && at <= l.end)?;
-        let after_break = at == line.start && leaf.lines.first().is_some_and(|f| f.start != line.start);
-        let before_break = at == line.end && at < m.content.end;
-        if after_break || before_break || matches!(b.get(at), Some(b'\n' | b'\r')) {
-            return Some(Ok(Plan::select(req.selection.clone())));
+        let ignore = || Some(Ok(Plan::select(req.selection.clone())));
+        // single-line blocks (headings, table rows): a line break would break the block
+        if !matches!(leaf.kind, LeafKind::Paragraph) {
+            return ignore();
         }
-        // the continuation prefix: container syntax of the caret's line with list markers
-        // (and a task box) turned into spaces
+        let line = leaf.lines.iter().find(|l| l.start <= at && at <= l.end)?;
+        // never a blank or whitespace-only line inside the mark: both parts of the comment's
+        // line around the caret must keep some text
+        let blank = |s: &str| s.trim_matches([' ', '\t']).is_empty();
+        let before = &text[line.start.max(m.content.start)..at];
+        let after = &text[at..line.end.min(m.content.end).max(at)];
+        if blank(before) || blank(after) {
+            return ignore();
+        }
+        // the continuation prefix: a continuation line repeats its own prefix; the first line
+        // of a list item gives quote markers plus the item's content indent (marker and its
+        // spaces, a task box not included); a quote gives its markers
         let ls = crate::line_start(text, line.start);
-        let prefix: String = text[ls..line.start]
-            .chars()
-            .map(|c| if matches!(c, '>' | ' ' | '\t') { c } else { ' ' })
-            .collect();
+        let first = leaf.lines.first().is_some_and(|f| f.start == line.start);
+        let prefix: String = if !first {
+            text[ls..line.start].to_string()
+        } else {
+            let item = self
+                .containers_at(at)
+                .into_iter()
+                .rev()
+                .find(|c| matches!(c.kind, markise_doc::ContainerKind::ListItem { .. }))
+                .filter(|c| c.span.start >= ls && c.span.start <= line.start);
+            let upto = match item {
+                Some(c) => item_content_start(text.as_bytes(), c.span.start, line.start),
+                None => line.start,
+            };
+            text[ls..upto]
+                .chars()
+                .map(|c| if c == '>' || c == '\t' { c } else { ' ' })
+                .collect()
+        };
         let insert = format!("{}{prefix}", self.line_ending().as_str());
         let caret = at + insert.len();
         let ps = markise_doc::PatchSet::single_verbatim(at..at, insert);
@@ -321,6 +368,28 @@ fn single_change_plan(text: &str, ch: Change) -> Result<Plan, PlanError> {
     }
     let ps = ed.build().ok_or(PlanError::NotApplicable("overlap"))?;
     Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(carets[0]))))
+}
+
+/// Where a list item's content starts: after its marker (`-`, `*`, `+`, `1.`, `1)`) and the
+/// spaces after it (at most four), not after a task box; never past `limit`.
+fn item_content_start(b: &[u8], marker: usize, limit: usize) -> usize {
+    let mut i = marker;
+    if matches!(b.get(i), Some(b'-' | b'*' | b'+')) {
+        i += 1;
+    } else {
+        while b.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        if matches!(b.get(i), Some(b'.' | b')')) {
+            i += 1;
+        }
+    }
+    let mut n = 0;
+    while n < 4 && b.get(i) == Some(&b' ') {
+        i += 1;
+        n += 1;
+    }
+    i.min(limit)
 }
 
 /// Every node, depth-first.

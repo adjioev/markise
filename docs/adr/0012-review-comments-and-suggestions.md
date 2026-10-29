@@ -79,10 +79,13 @@ openers, and only leaves holding an opener are parsed. Planner ids `review.addCo
   overrides it in-app for Add Comment, as Google Docs does, so it is taken off the
   reserved-chord list. It is the key equivalent of our own menu item (Edit → Comments &
   Suggestions), so AppKit should route it to the app — to be verified by hand on macOS.
-- **Enter inside a comment** inserts one line break inside the comment, followed by the
-  paragraph's continuation prefix (`> ` in a quote, the item's indentation in a list), so the
-  paragraph stays one block; Enter right before or after a line break does nothing (no blank
-  line inside a mark).
+- **Enter inside a comment** (paragraphs only) inserts one line break inside the comment,
+  followed by the continuation prefix: a continuation line repeats its own prefix; the first
+  line of a list or task item gets the quote markers plus the item's content indent (marker and
+  its spaces, the task box not included); a quote line its markers. In single-line blocks
+  (headings, setext headings, table rows) Enter inside a comment is ignored, and so it is when
+  either part of the comment's line around the caret would be empty or whitespace only (no
+  blank line inside a mark).
 - **Accept / Reject** at the caret or at an offset (`at` parameter: the panel and the hover bar):
   insertion accepted → its text, rejected → nothing; deletion the other way round; substitution
   → new / old text. A comment written directly after the suggestion goes with it. The caret
@@ -91,11 +94,11 @@ openers, and only leaves holding an opener are parsed. Planner ids `review.addCo
   together; the highlighted text stays).
 - **Whitespace.** When a mark is removed without replacement, one adjacent space goes too: the
   following one when there are spaces on both sides or the mark starts its line, otherwise the
-  preceding one when the mark is followed by punctuation or the line end. Accept All, Reject
-  All and clean copies give exactly the result of resolving the marks one by one in document
-  order (marks separated only by spaces are resolved as one run against the text the previous
-  ones left; one patch set, one undo step); a property test compares bulk and one-by-one
-  results.
+  preceding one when the mark is followed by punctuation or the line end.
+- **Accept All, Reject All and clean copies** are literally one mark after another: each mark
+  is resolved by the one-mark planner on a working copy of the document (incrementally
+  re-parsed), the next mark is looked up after it, and the overall difference becomes one patch
+  (one undo step). A property test compares the result with resolving one by one.
 - Menu `enabled` checks for the whole-document commands answer from the setting alone (menus
   are built every frame); one-mark commands parse only the caret's leaf.
 

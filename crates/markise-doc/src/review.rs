@@ -162,6 +162,32 @@ pub fn all_marks(doc: &dyn FormatDoc) -> Vec<ReviewMark> {
     out
 }
 
+/// The first mark that starts at or after `from` and satisfies `want`, in document order
+/// (only leaves holding an opener after `from` are parsed).
+pub fn first_mark_from(doc: &dyn FormatDoc, from: usize, want: impl Fn(&ReviewMark) -> bool) -> Option<ReviewMark> {
+    let text = doc.text();
+    let from = from.min(text.len());
+    let mut done_to = from;
+    let mut out = Vec::new();
+    for rel in critic_openers(&text[from..]) {
+        let at = from + rel;
+        if at < done_to {
+            continue;
+        }
+        let Some(leaf) = doc.leaf(at) else { continue };
+        done_to = leaf.span.end.max(at + 1);
+        if !inline_leaf(&leaf.kind) {
+            continue;
+        }
+        out.clear();
+        leaf_marks(doc, &leaf, &mut out);
+        if let Some(m) = out.iter().find(|m| m.range.start >= from && want(m)) {
+            return Some(m.clone());
+        }
+    }
+    None
+}
+
 /// The marks of the leaf at `at` (none when it holds no opener).
 pub fn marks_near(doc: &dyn FormatDoc, at: usize) -> Vec<ReviewMark> {
     let mut out = Vec::new();

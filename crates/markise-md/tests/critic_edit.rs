@@ -259,10 +259,7 @@ mod bulk_equals_sequential {
         #![proptest_config(ProptestConfig { cases: 2000, ..ProptestConfig::default() })]
         #[test]
         fn accept_reject_and_clean_copy(parts in proptest::collection::vec(piece(), 0..14)) {
-            // a word first: one-by-one resolution may otherwise shift the line into an indented
-            // code block midway (four leading spaces), where the remaining marks stop being
-            // marks — a block change bulk resolution does not go through
-            let src = format!("W {}\n", parts.concat());
+            let src = format!("{}\n", parts.concat());
             let all = |id, p: Params| {
                 run(&src, id, Selection::caret(0), p).map(|r| r.0).unwrap_or_else(|_| src.clone())
             };
@@ -284,6 +281,11 @@ fn enter_inside_a_comment_breaks_the_line_and_keeps_the_paragraph() {
         ("> A {>>one|two<<} b\n", "> A {>>one\n> |two<<} b\n"),
         ("- A {>>one|two<<} b\n", "- A {>>one\n  |two<<} b\n"),
         ("1. A {>>one|two<<} b\n", "1. A {>>one\n   |two<<} b\n"),
+        // review round 2: a task item continues at its content indent (not past the box)
+        ("- [ ] A {>>one|two<<} b\n", "- [ ] A {>>one\n  |two<<} b\n"),
+        ("> - [x] A {>>one|two<<}\n", "> - [x] A {>>one\n>   |two<<}\n"),
+        // a continuation line repeats its own prefix
+        ("- A\n  B {>>one|two<<}\n", "- A\n  B {>>one\n  |two<<}\n"),
     ];
     for (src, want) in cases {
         let (t, c) = at_caret(src, planners::NEWLINE).unwrap();
@@ -297,6 +299,20 @@ fn enter_inside_a_comment_breaks_the_line_and_keeps_the_paragraph() {
         let marks = markise_doc::review::all_marks(&doc);
         assert_eq!(marks.len(), 1, "{t:?}");
         assert_eq!(marks[0].kind, markise_doc::CriticKind::Comment);
+    }
+    // single-line blocks and whitespace-only results: Enter does nothing
+    for src in [
+        "# Title {>>one|two<<}\n",
+        "Title {>>one|two<<}\n===\n",
+        "| a {>>one|two<<} | b |\n|---|---|\n",
+        "A {>>one|  \ntwo<<} b\n",
+        "A {>>one\n  |two<<} b\n",
+        "A {>>one  |<<} b\n",
+    ] {
+        let at = src.find('|').unwrap();
+        let clean = src.replacen('|', "", 1);
+        let (t, _) = run(&clean, planners::NEWLINE, Selection::caret(at), Params::new()).unwrap();
+        assert_eq!(t, clean, "{src:?}: ignored");
     }
     // outside a comment Enter splits the paragraph as before
     let (t, _) = at_caret("A {>>x<<} b|c\n", planners::NEWLINE).unwrap();

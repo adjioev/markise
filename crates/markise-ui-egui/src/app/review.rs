@@ -28,12 +28,42 @@ use crate::sidebar::SideLook;
 /// The panel's list is refreshed this long after the last edit.
 pub const PANEL_DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// One row of the panel: a mark and the comment attached to it, with what is shown.
+/// A comment's preview: its author (`@name:`) and at most [`PREVIEW`] characters of text on
+/// one line.
+type CommentPreview = (Option<String>, String);
+
+/// Characters of text a panel row shows.
+const PREVIEW: usize = 120;
+
+/// One row of the panel: a mark and the comment attached to it, as shown — bounded previews
+/// computed on the worker — and a cheap identity of the mark (kind, length and hash of its
+/// source bytes) for actions on a newer revision.
 struct PanelRow {
-    mark: ReviewMark,
-    attached: Option<ReviewMark>,
-    /// The mark's source bytes (its identity for actions on a newer revision).
-    ident: String,
+    kind: CriticKind,
+    start: usize,
+    content_start: usize,
+    len: usize,
+    hash: u64,
+    /// The text (substitution: the new text), the old text of a substitution, and the comment
+    /// of a comment row.
+    text: String,
+    old_text: String,
+    comment: Option<CommentPreview>,
+    /// The comment attached to the mark.
+    attached: Option<CommentPreview>,
+}
+
+/// Hash of a mark's source bytes (its identity with kind and length).
+fn ident_hash(bytes: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
+}
+
+fn comment_preview(m: &ReviewMark) -> CommentPreview {
+    let (author, text) = m.author();
+    (author.map(str::to_string), short(text))
 }
 
 /// The listed marks of one document revision, with the counts.
@@ -58,11 +88,17 @@ impl PanelList {
             if matches!(m.kind, CriticKind::Comment | CriticKind::Highlight) || attached.is_some() {
                 comments += 1;
             }
-            let ident = text.get(m.range.clone()).unwrap_or_default().to_string();
+            let src = text.get(m.range.clone()).unwrap_or_default();
             rows.push(PanelRow {
-                mark: m,
-                attached,
-                ident,
+                kind: m.kind,
+                start: m.range.start,
+                content_start: m.content.start,
+                len: src.len(),
+                hash: ident_hash(src),
+                text: short(&m.text),
+                old_text: short(&m.old_text),
+                comment: (m.kind == CriticKind::Comment).then(|| comment_preview(&m)),
+                attached: attached.as_ref().map(comment_preview),
             });
         }
         PanelList {
@@ -77,8 +113,6 @@ impl PanelList {
 
 /// A list being built on the worker.
 struct PendingList {
-    doc_id: u64,
-    counter: u64,
     rx: Receiver<PanelList>,
 }
 
@@ -89,7 +123,8 @@ struct Target {
     kind: CriticKind,
     start: usize,
     content_start: usize,
-    ident: String,
+    len: usize,
+    hash: u64,
 }
 
 /// A clean copy being written.
@@ -247,7 +282,11 @@ impl MarkiseApp {
         let text = doc.text();
         review::all_marks(doc)
             .into_iter()
-            .filter(|m| m.kind == t.kind && text.get(m.range.clone()) == Some(t.ident.as_str()))
+            .filter(|m| {
+                m.kind == t.kind
+                    && m.range.len() == t.len
+                    && text.get(m.range.clone()).is_some_and(|b| ident_hash(b) == t.hash)
+            })
             .min_by_key(|m| m.range.start.abs_diff(t.start))
             .map(|m| m.content.start)
     }
@@ -272,12 +311,8 @@ impl MarkiseApp {
         if self.review.list.as_ref().is_some_and(current) {
             return;
         }
-        if self
-            .review
-            .pending
-            .as_ref()
-            .is_some_and(|p| p.doc_id == doc_id && p.counter == counter)
-        {
+        // one worker at a time: when it is done, the latest revision is listed next
+        if self.review.pending.is_some() {
             return;
         }
         let since = self.review.changed.map_or(Duration::MAX, |(_, _, t)| now - t);
@@ -301,7 +336,7 @@ impl MarkiseApp {
                 wake();
             });
         if spawned.is_ok() {
-            self.review.pending = Some(PendingList { doc_id, counter, rx });
+            self.review.pending = Some(PendingList { rx });
         }
     }
 
@@ -375,7 +410,7 @@ impl MarkiseApp {
             .auto_shrink([false, true])
             .show_rows(ui, row_h, list.rows.len(), |ui, range| {
                 for r in &list.rows[range] {
-                    ui.push_id(("markise-review-row", r.mark.range.start), |ui| {
+                    ui.push_id(("markise-review-row", r.start), |ui| {
                         if let Some(a) = row(ui, look, &rc, r, counter, row_h) {
                             act = Some(a);
                         }
@@ -613,17 +648,18 @@ fn row(
     counter: u64,
     row_h: f32,
 ) -> Option<PanelAction> {
-    let m = &r.mark;
-    let target = Target {
+    let target = || Target {
         counter,
-        kind: m.kind,
-        start: m.range.start,
-        content_start: m.content.start,
-        ident: r.ident.clone(),
+        kind: r.kind,
+        start: r.start,
+        content_start: r.content_start,
+        len: r.len,
+        hash: r.hash,
     };
+    let suggestion = r.kind.is_suggestion();
     let mut act = None;
     let mut jump = false;
-    let (badge, badge_color) = match m.kind {
+    let (badge, badge_color) = match r.kind {
         CriticKind::Insert => ("Insert", color(rc.insert)),
         CriticKind::Delete => ("Delete", color(rc.delete)),
         CriticKind::Substitute => ("Replace", color(rc.insert)),
@@ -646,30 +682,30 @@ fn row(
                         &mut jump,
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if m.is_suggestion() {
+                        if suggestion {
                             if ui.small_button("Reject").clicked() {
-                                act = Some(PanelAction::Run("review.reject", Some(target.clone())));
+                                act = Some(PanelAction::Run("review.reject", Some(target())));
                             }
                             if ui.small_button("Accept").clicked() {
-                                act = Some(PanelAction::Run("review.accept", Some(target.clone())));
+                                act = Some(PanelAction::Run("review.accept", Some(target())));
                             }
                         } else if ui.small_button("Delete").clicked() {
-                            act = Some(PanelAction::Run("review.deleteComment", Some(target.clone())));
+                            act = Some(PanelAction::Run("review.deleteComment", Some(target())));
                         }
                     });
                 });
-                match m.kind {
+                match r.kind {
                     CriticKind::Insert => {
                         link_label(
                             ui,
-                            RichText::new(format!("+ {}", short(&m.text))).color(color(rc.insert)),
+                            RichText::new(format!("+ {}", r.text)).color(color(rc.insert)),
                             &mut jump,
                         );
                     }
                     CriticKind::Delete => {
                         link_label(
                             ui,
-                            RichText::new(short(&m.text)).strikethrough().color(color(rc.delete)),
+                            RichText::new(r.text.as_str()).strikethrough().color(color(rc.delete)),
                             &mut jump,
                         );
                     }
@@ -677,23 +713,27 @@ fn row(
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(short(&m.old_text))
+                                    RichText::new(r.old_text.as_str())
                                         .strikethrough()
                                         .color(color(rc.delete)),
                                 )
                                 .truncate(),
                             );
-                            link_label(ui, RichText::new(short(&m.text)).color(color(rc.insert)), &mut jump);
+                            link_label(ui, RichText::new(r.text.as_str()).color(color(rc.insert)), &mut jump);
                         });
                     }
                     CriticKind::Highlight => {
                         link_label(
                             ui,
-                            RichText::new(format!("“{}”", short(&m.text))).background_color(color(rc.highlight_bg)),
+                            RichText::new(format!("“{}”", r.text)).background_color(color(rc.highlight_bg)),
                             &mut jump,
                         );
                     }
-                    _ => comment_text(ui, look, m, &mut jump),
+                    _ => {
+                        if let Some(c) = &r.comment {
+                            comment_text(ui, look, c, &mut jump);
+                        }
+                    }
                 }
                 if let Some(c) = &r.attached {
                     comment_text(ui, look, c, &mut jump);
@@ -701,31 +741,43 @@ fn row(
             });
     });
     if act.is_none() && jump {
-        act = Some(PanelAction::Jump(target));
+        act = Some(PanelAction::Jump(target()));
     }
     act
 }
 
 /// `s` on one line, at most 120 characters.
 fn short(s: &str) -> String {
-    let one: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one.chars().count() > 120 {
-        format!("{}…", one.chars().take(119).collect::<String>())
-    } else {
-        one
+    // reads no more of `s` than the preview needs
+    let mut out = String::new();
+    let mut n = 0;
+    for w in s.split_whitespace() {
+        if n > 0 {
+            out.push(' ');
+            n += 1;
+        }
+        for c in w.chars() {
+            if n >= PREVIEW - 1 {
+                out.push('…');
+                return out;
+            }
+            out.push(c);
+            n += 1;
+        }
     }
+    out
 }
 
-fn comment_text(ui: &mut Ui, look: &SideLook, m: &ReviewMark, jump: &mut bool) {
-    let (author, text) = m.author();
+fn comment_text(ui: &mut Ui, look: &SideLook, c: &CommentPreview, jump: &mut bool) {
+    let (author, text) = c;
     ui.horizontal(|ui| {
         if let Some(a) = author {
             link_label(ui, RichText::new(format!("@{a}")).strong().color(look.text), jump);
         }
         let t = if text.is_empty() {
-            "(empty comment)".to_string()
+            "(empty comment)"
         } else {
-            short(text)
+            text.as_str()
         };
         link_label(ui, RichText::new(t).color(look.text), jump);
     });

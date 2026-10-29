@@ -858,13 +858,15 @@ impl DocViewer {
             let w = (margin - 36.0).min(240.0);
             let mut next_y = rect.top();
             for (i, c) in shown.iter_mut().enumerate() {
-                let galley = look.galley(&ctx, &c.text, w);
+                // nothing is shaped for a card that would start below the viewport; the stack
+                // only grows downwards, so the rest would too
                 let y = (c.glyph.top() - 4.0).max(next_y);
+                if y > rect.bottom() {
+                    break;
+                }
+                let galley = look.galley(&ctx, &c.text, w);
                 let card = Rect::from_min_size(pos2(x, y), look.size(&galley, w));
                 next_y = card.bottom() + 6.0;
-                if card.top() > rect.bottom() {
-                    continue;
-                }
                 // the connector from the bubble's line to its card, in the margin only (it never
                 // crosses text), starting with a dot at the column edge
                 let from = pos2(left + col_w + 6.0, c.glyph.center().y);
