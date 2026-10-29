@@ -141,6 +141,11 @@ fn undo(h: &mut H) {
 
 /// Clicks the first widget labelled `label` (panel buttons repeat per row).
 fn click_first(h: &mut H, label: &str) {
+    // panel rows act only on a current listing (older ones are disabled)
+    if h.state().sidebar_tab() == Tab::Comments {
+        wait_until(h, "panel list", |a| a.comments_panel_ready());
+        h.run_steps(2);
+    }
     assert!(has_text(h, label), "{label}");
     h.query_all_by_label(label)
         .next()
@@ -163,10 +168,6 @@ fn has_text(h: &mut H, s: &str) -> bool {
         h.step();
         std::thread::sleep(Duration::from_millis(5));
     }
-}
-
-fn has_text_now(h: &H, s: &str) -> bool {
-    h.query_all_by(|n| text_is(n, s)).next().is_some()
 }
 
 fn text_is(n: &egui_kittest::kittest::AccessKitNode<'_>, s: &str) -> bool {
@@ -273,12 +274,14 @@ It was fine. {==Costs==}{>>numbers?<<} stay low.\n"
     assert_eq!(save_and_read(&mut h, &p), want);
 }
 
-/// Review P1-1: a row's action applies to its own mark even when the list is older than the
-/// text (the 250 ms debounce): `{++A++}` listed, `{++B++}` prepended, Accept on the A row.
+/// Review rounds 1 and 4: a row listed at an older revision is disabled (no-op) until the
+/// next listing — with two identical `{++A++}` and the first deleted, the stale row must not
+/// act on the remaining one; after the new listing it does.
 #[test]
-fn stale_panel_rows_act_on_their_own_mark() {
-    let (mut h, _p) = open("stale", "{++A++}\n");
-    // the list must stay old for the whole test, however slow the machine
+fn stale_panel_rows_are_disabled_until_the_next_listing() {
+    let src = "{++A++} {++A++}\n";
+    let (mut h, _p) = open("stale", src);
+    // the list must stay old until the test releases it, however slow the machine
     h.state_mut().set_comments_debounce(Duration::from_secs(3600));
     show_panel(&mut h);
     assert!(has_text(&mut h, "+ A"));
@@ -286,34 +289,65 @@ fn stale_panel_rows_act_on_their_own_mark() {
     {
         let v = h.state_mut().viewer().unwrap();
         v.ed.edit(|s| {
-            s.apply_external(&markise_doc::PatchSet::insert(0, "{++B++} "), "Test Edit", false)
+            s.apply_external(&markise_doc::PatchSet::delete(0..8), "Test Edit", false)
                 .unwrap()
         });
     }
-    h.step();
+    h.run_steps(2);
     assert!(!h.state().comments_panel_ready(), "the list is still the old one");
-    assert!(!has_text_now(&h, "+ B"), "the list is still the old one");
-
+    let accept = h.query_all_by_label("Accept").next().expect("a stale row");
+    assert!(
+        egui_kittest::kittest::NodeT::accesskit_node(&accept).is_disabled(),
+        "stale rows are disabled"
+    );
+    accept.click();
+    h.run_steps(3);
+    assert_eq!(text(&h), "{++A++}\n", "a click on a stale row does nothing");
+    // the next listing arrives: the row acts on its mark
+    h.state_mut().set_comments_debounce(Duration::ZERO);
+    wait_until(&mut h, "panel list", |a| a.comments_panel_ready());
+    h.run_steps(2);
     click_first(&mut h, "Accept");
-    assert_eq!(text(&h), "{++B++} A\n");
-    // a mark that is gone: nothing happens
-    let (mut h, _p) = open("stale-gone", "x {--A--}\n");
-    h.state_mut().set_comments_debounce(Duration::from_secs(3600));
-    show_panel(&mut h);
-    // the first list is shown before the mark goes away
-    assert!(has_text(&mut h, "A"));
-    assert!(h.state().comments_panel_ready());
+    assert_eq!(text(&h), "A\n");
+}
+
+/// Review round 4: the hover bar never acts on an obsolete offset — hover A, move onto the
+/// bar, delete A (an edit while the pointer is on the bar), click Reject: nothing happens and
+/// B stays.
+#[test]
+fn hover_bar_drops_its_target_after_an_edit() {
+    let src = "One {--two --}mid {--four--} end.\n";
+    let (mut h, _p) = open("hover-stale", src);
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(0).expect("visible");
+    h.hover_at(egui::pos2(r.left() + 48.0, r.top() + 10.0));
+    h.run_steps(3);
+    let bar = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .hover_bar_rect()
+        .expect("the bar over A");
+    // onto the bar (it stays), then delete A from the keyboard
+    h.hover_at(bar.center());
+    h.run_steps(2);
     {
         let v = h.state_mut().viewer().unwrap();
         v.ed.edit(|s| {
-            s.apply_external(&markise_doc::PatchSet::delete(2..9), "Test Edit", false)
+            s.apply_external(&markise_doc::PatchSet::delete(4..14), "Test Edit", false)
                 .unwrap()
         });
     }
-    h.step();
-    assert!(!h.state().comments_panel_ready(), "the list is still the old one (2)");
-    click_first(&mut h, "Reject");
-    assert_eq!(text(&h), "x \n");
+    h.run_steps(3);
+    assert_eq!(text(&h), "One mid {--four--} end.\n");
+    assert!(
+        h.state_mut().viewer().unwrap().hover_bar_rect().is_none(),
+        "no suggestion where A was hit: the bar is gone"
+    );
+    if let Some(n) = h.query_all_by_label("Reject").next() {
+        n.click();
+    }
+    h.run_steps(3);
+    assert_eq!(text(&h), "One mid {--four--} end.\n", "B stays");
 }
 
 #[test]

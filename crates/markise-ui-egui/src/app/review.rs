@@ -7,8 +7,8 @@
 //! while it is shown. The list is built on a worker from a text snapshot when the text
 //! changed and the typing has paused ([`PANEL_DEBOUNCE`]), with every row's display data and
 //! the counts precomputed; only the visible rows are drawn. A row's actions carry the
-//! revision and the mark's identity (kind and source bytes): on a newer revision the mark is
-//! found again by identity before anything is applied (review P1-1). Nothing here runs per
+//! revision it was listed at: while the document is at another revision the rows are
+//! disabled until the next listing arrives (review rounds 1 and 4). Nothing here runs per
 //! keystroke while the panel is hidden.
 
 use std::path::{Path, PathBuf};
@@ -120,7 +120,6 @@ struct PendingList {
 #[derive(Clone, Debug)]
 struct Target {
     counter: u64,
-    kind: CriticKind,
     start: usize,
     content_start: usize,
     len: usize,
@@ -269,26 +268,19 @@ impl MarkiseApp {
             .is_some_and(|l| l.doc_id == d.id && l.counter == d.viewer.ed.session.revision().counter)
     }
 
-    /// The source offset an action on `t` applies at now: its listed position when the text
-    /// has not changed since, else the mark found again by kind and source bytes (the nearest
-    /// such mark), `None` when it is gone.
+    /// The source offset an action on `t` applies at: its listed position, only while the
+    /// document is still at the revision it was listed at (`None` otherwise).
     fn resolve_target(&self, t: &Target) -> Option<usize> {
         let d = self.doc.as_ref()?;
         let s = &d.viewer.ed.session;
-        if s.revision().counter == t.counter {
-            return Some(t.content_start);
+        // only on the revision it was listed at (review round 4): a stale row is disabled
+        // until the next listing; the identity is checked against the text as a safeguard
+        if s.revision().counter != t.counter {
+            return None;
         }
-        let doc = s.doc();
-        let text = doc.text();
-        review::all_marks(doc)
-            .into_iter()
-            .filter(|m| {
-                m.kind == t.kind
-                    && m.range.len() == t.len
-                    && text.get(m.range.clone()).is_some_and(|b| ident_hash(b) == t.hash)
-            })
-            .min_by_key(|m| m.range.start.abs_diff(t.start))
-            .map(|m| m.content.start)
+        let text = s.doc().text();
+        let src = text.get(t.start..t.start + t.len)?;
+        (ident_hash(src) == t.hash).then_some(t.content_start)
     }
 
     /// Keeps the panel's list current: a worker lists the marks of a text snapshot once the
@@ -405,13 +397,18 @@ impl MarkiseApp {
         let line = ui.text_style_height(&egui::TextStyle::Body);
         let row_h = (line + 4.0) * 3.0 + 18.0;
         let counter = list.counter;
+        // rows of an older revision are shown disabled until the next listing
+        let stale = self
+            .doc
+            .as_ref()
+            .is_some_and(|d| d.viewer.ed.session.revision().counter != counter);
         egui::ScrollArea::vertical()
             .id_salt("markise-comments-list")
             .auto_shrink([false, true])
             .show_rows(ui, row_h, list.rows.len(), |ui, range| {
                 for r in &list.rows[range] {
                     ui.push_id(("markise-review-row", r.start), |ui| {
-                        if let Some(a) = row(ui, look, &rc, r, counter, row_h) {
+                        if let Some(a) = row(ui, look, &rc, r, counter, row_h, stale) {
                             act = Some(a);
                         }
                     });
@@ -647,10 +644,10 @@ fn row(
     r: &PanelRow,
     counter: u64,
     row_h: f32,
+    stale: bool,
 ) -> Option<PanelAction> {
     let target = || Target {
         counter,
-        kind: r.kind,
         start: r.start,
         content_start: r.content_start,
         len: r.len,
@@ -682,14 +679,19 @@ fn row(
                         &mut jump,
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let button = |ui: &mut Ui, label: &str| {
+                            ui.add_enabled(!stale, egui::Button::new(label).small())
+                                .on_disabled_hover_text("Updating the list…")
+                                .clicked()
+                        };
                         if suggestion {
-                            if ui.small_button("Reject").clicked() {
+                            if button(ui, "Reject") {
                                 act = Some(PanelAction::Run("review.reject", Some(target())));
                             }
-                            if ui.small_button("Accept").clicked() {
+                            if button(ui, "Accept") {
                                 act = Some(PanelAction::Run("review.accept", Some(target())));
                             }
-                        } else if ui.small_button("Delete").clicked() {
+                        } else if button(ui, "Delete") {
                             act = Some(PanelAction::Run("review.deleteComment", Some(target())));
                         }
                     });
@@ -740,7 +742,7 @@ fn row(
                 }
             });
     });
-    if act.is_none() && jump {
+    if act.is_none() && jump && !stale {
         act = Some(PanelAction::Jump(target()));
     }
     act

@@ -150,10 +150,12 @@ PDF/PNG/Pandoc (export model): insertions underlined, deletions struck, comments
   document order with counts, Accept All / Reject All, per-item Accept / Reject / Delete; a click
   on an item's text jumps to it. The list is built on a worker from a text snapshot once typing
   has paused for 250 ms (row data and counts precomputed) and only visible rows are drawn.
-  Every row action carries the revision it was listed at and the mark's identity (kind and
-  source bytes); on a newer revision the mark is found again by identity before anything is
-  applied (nothing happens when it is gone), so a stale row never acts on another mark.
+  Every row action carries the revision it was listed at: while the document is at another
+  revision the rows are disabled (a click does nothing) until the next listing arrives, so a
+  stale row never acts on another mark.
 - Hover bar: Accept / Reject above a suggestion under the pointer (rendered view, editable).
+  After any edit its target is found again at the point where it was hit; if no suggestion of
+  the same kind is there, the bar goes.
 - **Save Copy Without Comments…** (File): asks through the confirm seam whether to accept or
   reject pending suggestions (skipped when there are none), asks for a new file (default
   `<name> (clean).md`), refuses the document's own file, and writes through the checked save
