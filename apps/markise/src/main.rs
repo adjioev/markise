@@ -23,6 +23,8 @@
 mod diag;
 #[cfg(target_os = "macos")]
 mod macos_open;
+#[cfg(target_os = "macos")]
+mod menu_tracking;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native_menu;
 

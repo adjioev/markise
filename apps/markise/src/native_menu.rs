@@ -4,9 +4,13 @@
 //! - Items are keyed by [`Item::key`]; chosen items arrive through muda's event handler, which
 //!   queues the key and requests a repaint (no polling: idle stays at zero frames, NFR-10).
 //!   The app drains the queue at the start of its frame ([`MenuHost::take_actions`]).
-//! - [`MenuHost::sync`] runs after each frame: enabled/checked/label changes are applied to the
-//!   existing items; the native menus are rebuilt only when the structure changes (theme list,
-//!   new registry commands).
+//! - [`MenuHost::sync`] runs after each frame. [`MenuSync`] diffs the model against what the
+//!   native menus show: an unchanged model makes no native call, enabled/checked/label changes
+//!   are applied to the existing items, and the native menus are rebuilt only when the
+//!   structure changes (theme list, new registry commands).
+//! - While a menu is open (macOS: `menu_tracking`) nothing is changed at all — replacing the
+//!   main menu dismisses an open menu (issue #81); held-back changes are applied after it
+//!   closed.
 //! - macOS draws and routes the key equivalents itself, so the menu performs a shortcut before
 //!   egui sees the key (same action as the egui shortcut path). On Windows the accelerators
 //!   are shown only: muda's accelerator table needs `TranslateAcceleratorW` in the message
@@ -20,6 +24,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 use markise_ui_egui::MenuHost;
 use markise_ui_egui::menu::{Check, Entry, Item, Menu, MenuAction, MenuBar, MenuKind, Role, Trigger, accelerator_text};
+use markise_ui_egui::menu_sync::{MenuOp, MenuSync};
 use muda::accelerator::Accelerator;
 use muda::{CheckMenuItem, IsMenuItem, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 
@@ -28,18 +33,14 @@ enum Handle {
     Check(CheckMenuItem),
 }
 
-struct State {
-    label: String,
-    enabled: bool,
-}
-
 pub struct NativeMenu {
     menu: Option<muda::Menu>,
-    structure: String,
-    items: HashMap<String, (Handle, State)>,
+    /// What the native menus show (diffs the model each frame).
+    shown: MenuSync,
+    items: HashMap<String, Handle>,
     actions: HashMap<String, MenuAction>,
-    /// Submenus in depth-first order with their enabled state.
-    submenus: Vec<(Submenu, bool)>,
+    /// Submenus in depth-first order (the order of [`MenuOp::SubmenuEnabled`]).
+    submenus: Vec<Submenu>,
     rx: Receiver<(String, Trigger)>,
     #[cfg(windows)]
     hwnd: isize,
@@ -63,9 +64,11 @@ impl NativeMenu {
             let _ = tx.send((e.id.0, trigger()));
             ctx.request_repaint();
         }));
+        #[cfg(target_os = "macos")]
+        crate::menu_tracking::install(&cc.egui_ctx);
         Some(NativeMenu {
             menu: None,
-            structure: String::new(),
+            shown: MenuSync::new(cfg!(target_os = "macos")),
             items: HashMap::new(),
             actions: HashMap::new(),
             submenus: Vec::new(),
@@ -81,7 +84,7 @@ impl NativeMenu {
         self.submenus.clear();
         let menu = muda::Menu::new();
         for m in &bar.menus {
-            if !cfg!(target_os = "macos") && matches!(m.kind, MenuKind::App | MenuKind::Window) {
+            if !self.shown.shows(m) {
                 continue;
             }
             let sub = self.submenu(m);
@@ -112,7 +115,7 @@ impl NativeMenu {
 
     fn submenu(&mut self, m: &Menu) -> Submenu {
         let sub = Submenu::new(esc(&m.title), m.enabled);
-        self.submenus.push((sub.clone(), m.enabled));
+        self.submenus.push(sub.clone());
         for e in &m.entries {
             match e {
                 Entry::Item(i) => {
@@ -122,16 +125,7 @@ impl NativeMenu {
                         Handle::Check(x) => sub.append(x),
                     };
                     self.actions.insert(i.key.clone(), i.action.clone());
-                    self.items.insert(
-                        i.key.clone(),
-                        (
-                            h,
-                            State {
-                                label: i.label.clone(),
-                                enabled: i.enabled,
-                            },
-                        ),
-                    );
+                    self.items.insert(i.key.clone(), h);
                 }
                 Entry::Separator => {
                     let _ = sub.append(&PredefinedMenuItem::separator());
@@ -171,63 +165,31 @@ impl NativeMenu {
         }
     }
 
-    fn update(&mut self, bar: &MenuBar) {
-        for i in bar.items() {
-            let Some((h, s)) = self.items.get_mut(&i.key) else {
-                continue;
-            };
-            if s.label != i.label {
-                match h {
-                    Handle::Plain(x) => x.set_text(esc(&i.label)),
-                    Handle::Check(x) => x.set_text(esc(&i.label)),
+    /// Applies in-place changes (anything but [`MenuOp::Rebuild`]).
+    fn apply(&mut self, op: &MenuOp) {
+        match op {
+            MenuOp::Rebuild => {}
+            MenuOp::Label { key, label } => match self.items.get(key) {
+                Some(Handle::Plain(x)) => x.set_text(esc(label)),
+                Some(Handle::Check(x)) => x.set_text(esc(label)),
+                None => {}
+            },
+            MenuOp::Enabled { key, enabled } => match self.items.get(key) {
+                Some(Handle::Plain(x)) => x.set_enabled(*enabled),
+                Some(Handle::Check(x)) => x.set_enabled(*enabled),
+                None => {}
+            },
+            MenuOp::Checked { key, checked } => {
+                if let Some(Handle::Check(x)) = self.items.get(key) {
+                    x.set_checked(*checked);
                 }
-                s.label = i.label.clone();
             }
-            if s.enabled != i.enabled {
-                match h {
-                    Handle::Plain(x) => x.set_enabled(i.enabled),
-                    Handle::Check(x) => x.set_enabled(i.enabled),
-                }
-                s.enabled = i.enabled;
-            }
-            // against the native state: muda flips a check item itself when it is clicked, so
-            // clicking the selected radio item would otherwise lose its check mark
-            if let Handle::Check(x) = h
-                && let Some(on) = check_fix(x.is_checked(), i.check)
-            {
-                x.set_checked(on);
-            }
-            self.actions.insert(i.key.clone(), i.action.clone());
-        }
-        let mut enabled = Vec::with_capacity(self.submenus.len());
-        fn walk(m: &Menu, out: &mut Vec<bool>) {
-            out.push(m.enabled);
-            for e in &m.entries {
-                if let Entry::Submenu(c) = e {
-                    walk(c, out);
+            MenuOp::SubmenuEnabled { index, enabled } => {
+                if let Some(sub) = self.submenus.get(*index) {
+                    sub.set_enabled(*enabled);
                 }
             }
         }
-        for m in &bar.menus {
-            if cfg!(target_os = "macos") || !matches!(m.kind, MenuKind::App | MenuKind::Window) {
-                walk(m, &mut enabled);
-            }
-        }
-        for ((sub, was), now) in self.submenus.iter_mut().zip(enabled) {
-            if *was != now {
-                sub.set_enabled(now);
-                *was = now;
-            }
-        }
-    }
-}
-
-/// The checked state to set on a native check item showing `native` for the model's `check`,
-/// if they differ.
-fn check_fix(native: bool, check: Check) -> Option<bool> {
-    match check {
-        Check::Toggle(on) | Check::Radio(on) if on != native => Some(on),
-        _ => None,
     }
 }
 
@@ -295,12 +257,24 @@ impl MenuHost for NativeMenu {
     }
 
     fn sync(&mut self, bar: &MenuBar) {
-        let st = bar.structure();
-        if st != self.structure || self.menu.is_none() {
-            self.rebuild(bar);
-            self.structure = st;
-        } else {
-            self.update(bar);
+        #[cfg(target_os = "macos")]
+        let tracking = crate::menu_tracking::is_tracking();
+        // Windows: menu tracking is not observed (issue #81 was reported on macOS)
+        #[cfg(not(target_os = "macos"))]
+        let tracking = false;
+        let items = &self.items;
+        // against the native state: a native check item flips itself when it is clicked
+        let native = |key: &str| match items.get(key) {
+            Some(Handle::Check(x)) => Some(x.is_checked()),
+            _ => None,
+        };
+        let ops = self.shown.plan(bar, tracking, native);
+        for op in &ops {
+            if *op == MenuOp::Rebuild {
+                self.rebuild(bar);
+            } else {
+                self.apply(op);
+            }
         }
     }
 }
@@ -309,23 +283,12 @@ impl MenuHost for NativeMenu {
 mod tests {
     use markise_ui_egui::menu::{Platform, accelerator_text};
 
-    /// Every shortcut of the menu model (both platforms) is expressible as a native accelerator.
-    /// Clicking the selected radio item makes muda clear its check mark; the next sync must
-    /// restore it although the model did not change (Codex review of PR #34).
-    #[test]
-    fn check_marks_follow_the_model_not_the_last_sync() {
-        use markise_ui_egui::menu::Check;
-        assert_eq!(super::check_fix(false, Check::Radio(true)), Some(true));
-        assert_eq!(super::check_fix(true, Check::Radio(false)), Some(false));
-        assert_eq!(super::check_fix(true, Check::Toggle(true)), None);
-        assert_eq!(super::check_fix(true, Check::None), None);
-    }
-
     #[test]
     fn ampersands_are_escaped_for_muda() {
         assert_eq!(super::esc("Font & Size…"), "Font && Size…");
     }
 
+    /// Every shortcut of the menu model (both platforms) is expressible as a native accelerator.
     #[test]
     fn model_accelerators_parse_as_native_accelerators() {
         let mut app = markise_ui_egui::MarkiseApp::new(Default::default());
