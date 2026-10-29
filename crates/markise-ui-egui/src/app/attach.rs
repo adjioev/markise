@@ -4,8 +4,11 @@
 //! Before the document surface sees the frame's input, [`MarkiseApp::attach_pre_input`] takes:
 //! - clipboard image data ([`egui::Event::PasteImage`], e.g. a screenshot) while the document
 //!   (rendered view or source editor) has the keyboard focus;
-//! - a text paste while files are on the clipboard ([`crate::clipboard`]: a file manager copy
-//!   arrives only as the file's name): treated like dropping those files at the caret;
+//! - a text paste, when the clipboard seam may hold files ([`crate::clipboard`]: a file
+//!   manager copy arrives only as the file's name): the paste waits while a worker reads the
+//!   file list (never on the UI thread; at most [`CLIPBOARD_TIMEOUT`]), then the files go in
+//!   like a drop at the paste position, or else the text is pasted at the selection it was
+//!   made at — one undo step either way, cancelled when the document changed meanwhile;
 //! - a pasted image URL (setting `images.paste_urls`): inserted as `![](url)` at once (no I/O);
 //! - dropped files (anywhere in the window while a document is open): inserted at the drop
 //!   point when it is over the rendered document, else at the caret. Without a document, a
@@ -18,9 +21,11 @@
 //! (`<config>/markise/user-images/`) with absolute paths; without a settings folder (tests that
 //! do not set one) the user is asked to save first.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
 use egui::{Context, Event};
 use markise_doc::Selection;
@@ -38,9 +43,41 @@ struct Pending {
     rx: Receiver<Outcome>,
 }
 
+/// How long a paste waits for the clipboard's file list before it goes in as text.
+const CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// A text paste waiting for the clipboard's file list (read on a worker).
+struct PendingPaste {
+    doc_id: u64,
+    /// The session revision counter at paste time: if the document changed meanwhile, the paste
+    /// is cancelled (its selection would no longer be where the user pasted).
+    counter: u64,
+    /// The selection at paste time (the source pane's in Source / Side by Side).
+    sel: Selection,
+    source: bool,
+    text: String,
+    started: Instant,
+    rx: Receiver<Vec<PathBuf>>,
+}
+
+impl PendingPaste {
+    fn new(d: &super::DocState, sel: Selection, source: bool, text: String, rx: Receiver<Vec<PathBuf>>) -> Self {
+        PendingPaste {
+            doc_id: d.id,
+            counter: d.viewer.ed.session.revision().counter,
+            sel,
+            source,
+            text,
+            started: Instant::now(),
+            rx,
+        }
+    }
+}
+
 pub(crate) struct AttachState {
     clipboard: Arc<dyn crate::clipboard::ClipboardFiles>,
     pending: Vec<Pending>,
+    pastes: VecDeque<PendingPaste>,
     /// Fixed `YYYYMMDDHHMMSS` for pasted image names (tests).
     stamp: Option<String>,
 }
@@ -50,6 +87,7 @@ impl AttachState {
         AttachState {
             clipboard,
             pending: Vec::new(),
+            pastes: VecDeque::new(),
             stamp: None,
         }
     }
@@ -61,9 +99,10 @@ impl MarkiseApp {
         self.attach.stamp = stamp;
     }
 
-    /// Pasted or dropped files are still being written.
+    /// A paste waits for the clipboard's file list, or pasted or dropped files are still
+    /// being written.
     pub fn is_attaching(&self) -> bool {
-        !self.attach.pending.is_empty()
+        !self.attach.pending.is_empty() || !self.attach.pastes.is_empty()
     }
 
     /// The app-data folder for images pasted into never-saved documents (`None` without a
@@ -116,24 +155,21 @@ impl MarkiseApp {
         if !has_image && !has_text {
             return;
         }
-        // the clipboard's file list only when there is a text paste (a file manager copy)
-        let files = if has_text {
-            self.attach.clipboard.files()
-        } else {
-            Vec::new()
-        };
         let paste_urls = self.themes.image_settings().paste_urls;
+        // a text paste may stand for a file manager copy: its file list is read on a worker
+        // (a slow clipboard owner must not freeze the window), the paste waits for it
+        let ask_files = has_text && self.attach.clipboard.may_have_files();
         let mut images = Vec::new();
         let mut urls = Vec::new();
-        let mut file_paste = false;
+        let mut texts = Vec::new();
         ctx.input_mut(|i| {
             i.events.retain(|e| match e {
                 Event::PasteImage(img) => {
                     images.push(Item::Image(img.clone()));
                     false
                 }
-                Event::Paste(_) if !files.is_empty() => {
-                    file_paste = true;
+                Event::Paste(t) if ask_files => {
+                    texts.push(t.clone());
                     false
                 }
                 Event::Paste(t) if paste_urls && attach::is_image_url(t) => {
@@ -146,12 +182,45 @@ impl MarkiseApp {
         for md in urls {
             self.insert_attachment_text(ctx, &md, None);
         }
-        if file_paste {
-            images.extend(files.into_iter().map(Item::File));
-        }
         if !images.is_empty() {
             self.start_attach(images, None);
         }
+        if !texts.is_empty() {
+            self.start_paste(texts.concat());
+        }
+    }
+
+    /// Starts reading the clipboard's file list for the text paste `text` on a worker; the paste
+    /// is applied by [`Self::attach_poll`] at the selection it had now.
+    fn start_paste(&mut self, text: String) {
+        let source = self.source_visible || self.side_by_side;
+        let Some(d) = &self.doc else { return };
+        let sel = match (&d.viewer.ed.source, source) {
+            (Some(p), true) => p.sel.clone(),
+            _ => d.viewer.ed.session.selection().clone(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let clipboard = self.attach.clipboard.clone();
+        let wake = self.wake_handle();
+        let spawned = std::thread::Builder::new()
+            .name("markise-clipboard".into())
+            .spawn(move || {
+                let _ = tx.send(clipboard.files());
+                wake();
+            });
+        if spawned.is_err() {
+            // no thread: the paste is plain text (nothing was read)
+            drop(rx);
+            let (tx, rx2) = std::sync::mpsc::channel();
+            let _ = tx.send(Vec::new());
+            return self.queue_paste(PendingPaste::new(d, sel, source, text, rx2));
+        }
+        let p = PendingPaste::new(d, sel, source, text, rx);
+        self.queue_paste(p);
+    }
+
+    fn queue_paste(&mut self, p: PendingPaste) {
+        self.attach.pastes.push_back(p);
     }
 
     /// Files dropped on the window: inserted into the open document (at the drop point over the
@@ -214,6 +283,7 @@ impl MarkiseApp {
     /// Per frame: inserts the Markdown of finished attachment jobs (in start order) and reports
     /// failures.
     pub(super) fn attach_poll(&mut self) {
+        self.paste_poll();
         while let Some(p) = self.attach.pending.first() {
             let out = match p.rx.try_recv() {
                 Ok(o) => o,
@@ -246,6 +316,69 @@ impl MarkiseApp {
         }
     }
 
+    /// Applies the text pastes whose clipboard file list arrived (in paste order): the files
+    /// go in like a drop at the paste position, otherwise the text is pasted (an image URL as
+    /// an image). Cancelled when the document changed meanwhile; a file list that takes longer
+    /// than [`CLIPBOARD_TIMEOUT`] is not waited for (the text goes in, a late list is ignored).
+    fn paste_poll(&mut self) {
+        while let Some(p) = self.attach.pastes.front() {
+            let files = match p.rx.try_recv() {
+                Ok(f) => f,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Vec::new(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    let waited = p.started.elapsed();
+                    if waited < CLIPBOARD_TIMEOUT {
+                        if let Some(c) = &self.ctx {
+                            c.request_repaint_after(CLIPBOARD_TIMEOUT - waited);
+                        }
+                        return;
+                    }
+                    Vec::new()
+                }
+            };
+            let Some(p) = self.attach.pastes.pop_front() else {
+                return;
+            };
+            let Some(ctx) = self.ctx.clone() else { return };
+            let current = self
+                .doc
+                .as_ref()
+                .is_some_and(|d| d.id == p.doc_id && d.viewer.ed.session.revision().counter == p.counter);
+            if !current {
+                if self.doc.as_ref().is_some_and(|d| d.id == p.doc_id) {
+                    self.banner = Some(Banner::Info(
+                        "The paste was cancelled: the document changed while the clipboard was read.".into(),
+                    ));
+                }
+                continue;
+            }
+            if files.is_empty() {
+                let text = if self.themes.image_settings().paste_urls && attach::is_image_url(&p.text) {
+                    format!("![]({})", p.text.trim())
+                } else {
+                    p.text.clone()
+                };
+                self.restore_paste_selection(&p);
+                self.insert_attachment_text(&ctx, &text, None);
+            } else {
+                let at = p.sel.primary().start().offset;
+                self.restore_paste_selection(&p);
+                self.start_attach(files.into_iter().map(Item::File).collect(), Some(at));
+            }
+        }
+    }
+
+    /// Puts the selection a paste was made at back (it may have moved without an edit).
+    fn restore_paste_selection(&mut self, p: &PendingPaste) {
+        let Some(d) = self.doc.as_mut() else { return };
+        if p.source && d.viewer.ed.source.is_some() {
+            d.viewer.ed.source_set_selection(p.sel.clone());
+        } else {
+            d.viewer.ed.session.set_selection(p.sel.clone());
+            d.viewer.ed.refresh_focus();
+        }
+    }
+
     /// Inserts `md` as one undo step: in the source editor when it has the focus, else in the
     /// rendered document at `at` (or the current selection).
     fn insert_attachment_text(&mut self, ctx: &Context, md: &str, at: Option<usize>) {
@@ -254,6 +387,10 @@ impl MarkiseApp {
         let source = self.source_visible || self.side_by_side;
         let Some(d) = self.doc.as_mut() else { return };
         if source && d.viewer.ed.source.is_some() {
+            if let Some(o) = at {
+                let o = o.min(d.viewer.ed.session.text().len());
+                d.viewer.ed.source_set_selection(Selection::caret(o));
+            }
             let _ = d.viewer.ed.source_insert(md, true);
         } else {
             d.viewer

@@ -370,6 +370,7 @@ fn pasted_file_manager_copy_is_like_a_drop() {
     clip.set(Vec::new());
     h.event(Event::Paste(" plain".into()));
     h.step();
+    wait_until(&mut h, "text paste", |a| !a.is_attaching());
     // (the caret after an image at a paragraph end sits on the next caret stop)
     assert!(
         text(&h).contains(" plain") && text(&h).matches("chart.png").count() == 1,
@@ -506,5 +507,114 @@ fn image_settings_in_preferences() {
     h.state_mut().reset_preferences(Section::Files);
     h.run_steps(2);
     assert_eq!(h.state().preference_values().images, ImageSettings::default());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A clipboard seam that blocks (a slow clipboard owner) and counts its calls.
+struct Slow {
+    files: Vec<PathBuf>,
+    delay: Duration,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ClipboardFiles for Slow {
+    fn files(&self) -> Vec<PathBuf> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        self.files.clone()
+    }
+}
+
+fn slow_app(files: Vec<PathBuf>, delay: Duration) -> (H, Arc<Slow>, PathBuf, PathBuf) {
+    let d = tmpdir(&format!("slow-{}", files.len()));
+    let note = d.join("note.md");
+    std::fs::write(&note, NOTE).unwrap();
+    let slow = Arc::new(Slow {
+        files,
+        delay,
+        calls: Default::default(),
+    });
+    let mut h = open(
+        vec![note.clone()],
+        &note,
+        AppOptions {
+            clipboard_files: slow.clone() as Arc<dyn ClipboardFiles>,
+            ..Default::default()
+        },
+    );
+    focus_end(&mut h);
+    (h, slow, d, note)
+}
+
+/// Codex P1: the clipboard's file list is read on a worker; frames keep running while a slow
+/// clipboard owner answers, and the paste is applied once, at the position it was made at.
+#[test]
+fn slow_clipboard_does_not_block_and_applies_once() {
+    let src = tmpdir("slow-src");
+    std::fs::write(src.join("pic.png"), b"png").unwrap();
+    let (mut h, slow, d, _) = slow_app(vec![src.join("pic.png")], Duration::from_millis(400));
+    let caret = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .session
+        .selection()
+        .primary()
+        .focus
+        .offset;
+    h.event(Event::Paste("pic.png".into()));
+    let t = Instant::now();
+    h.step();
+    assert!(
+        t.elapsed() < Duration::from_millis(200),
+        "the paste frame did not wait for the clipboard"
+    );
+    assert!(h.state().is_attaching());
+    // the window stays responsive meanwhile (and nothing is inserted yet)
+    for _ in 0..5 {
+        let t = Instant::now();
+        h.step();
+        assert!(t.elapsed() < Duration::from_millis(200));
+    }
+    assert_eq!(text(&h), NOTE);
+    wait_until(&mut h, "paste applied", |a| !a.is_attaching());
+    h.run_steps(3);
+    let t = text(&h);
+    assert_eq!(t.matches("![](assets/pic.png)").count(), 1, "{t}");
+    assert_eq!(t.find("![](assets/pic.png)"), Some(caret), "{t}");
+    assert_eq!(slow.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(d.join("assets/pic.png").is_file());
+    // one undo step
+    h.key_press_modifiers(cmd(), Key::Z);
+    h.step();
+    assert_eq!(text(&h), NOTE);
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&src);
+}
+
+/// Without files on the clipboard the original text goes in (one step); typing while the
+/// clipboard is read cancels the paste instead of inserting at a stale position.
+#[test]
+fn slow_clipboard_text_fallback_and_cancel_on_edit() {
+    let (mut h, slow, d, _) = slow_app(Vec::new(), Duration::from_millis(150));
+    h.event(Event::Paste(" pasted".into()));
+    h.step();
+    assert_eq!(text(&h), NOTE, "waits for the file list");
+    wait_until(&mut h, "text paste", |a| !a.is_attaching());
+    assert_eq!(text(&h), NOTE.replace("Second paragraph.", "Second paragraph. pasted"));
+    h.key_press_modifiers(cmd(), Key::Z);
+    h.step();
+    assert_eq!(text(&h), NOTE);
+    // an edit while the clipboard is read: cancelled, with a message
+    h.event(Event::Paste(" late".into()));
+    h.step();
+    h.event(Event::Text("X".into()));
+    h.step();
+    wait_until(&mut h, "paste resolved", |a| !a.is_attaching());
+    assert!(!text(&h).contains("late"), "{}", text(&h));
+    assert!(text(&h).contains("Second paragraph.X"));
+    assert!(h.state().banner_text().is_some_and(|b| b.contains("cancelled")));
+    assert_eq!(slow.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     let _ = std::fs::remove_dir_all(&d);
 }

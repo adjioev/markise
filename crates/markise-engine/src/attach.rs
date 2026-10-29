@@ -22,8 +22,11 @@
 //! `..`, no hidden components (so never `.obsidian/`), names valid on every platform. A name
 //! that is taken gets a numeric suffix (`Pasted image 20261029101500 1.png`, V14.4).
 //!
-//! **Limits:** files above [`MAX_BYTES`] (encoded size for pasted images) are refused with a
-//! message; clipboard images above [`MAX_PIXELS`] are refused before encoding.
+//! **Limits:** files above [`MAX_BYTES`] are refused with a message. Clipboard images above
+//! [`MAX_PIXELS`] are refused before anything is allocated; the PNG is streamed row by row into
+//! the new file through a writer that aborts past [`MAX_BYTES`] (the partial file is removed),
+//! so no second copy of the pixels and no whole PNG is held in memory; at most two encodes run
+//! at once.
 //!
 //! Undo of the inserted text does not delete the written file (a file is never deleted
 //! behind the user's back); the file watcher reports the new file like any other.
@@ -171,7 +174,9 @@ pub fn image_folder(
 /// How a destination is written in Markdown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DestForm {
-    /// Percent-encoded (V2.6.3: space → `%20`, …); readable by Obsidian and Typora.
+    /// Percent-encoded: the V2.6.3 set (space, `%`, `#`, `(`, `)`, `<`, `>`, `^`, `|`, `[`, `]`,
+    /// `\\`, controls) plus `?`, which the resource resolver would otherwise split off as a
+    /// query (`markise_doc::resource::local_file`); readable by Obsidian and Typora.
     Percent,
     /// Wrapped in `<…>` (CommonMark), only `<`, `>` and line breaks escaped.
     Angle,
@@ -180,7 +185,7 @@ pub enum DestForm {
 /// `path` (`/`-separated) as a Markdown link destination.
 pub fn markdown_dest(path: &str, form: DestForm) -> String {
     match form {
-        DestForm::Percent => crate::vault::percent_encode_path(path),
+        DestForm::Percent => crate::vault::percent_encode_path(path).replace('?', "%3F"),
         DestForm::Angle => {
             let mut out = String::with_capacity(path.len() + 2);
             out.push('<');
@@ -387,33 +392,109 @@ fn target(req: &Request) -> Result<Target, String> {
     Ok(Target { dir, root, folder })
 }
 
-/// Encodes clipboard pixels as PNG.
-fn encode_png(img: &epaint::ColorImage) -> Result<Vec<u8>, String> {
+/// Checks clipboard pixels against the dimension budget before anything is allocated.
+fn check_dimensions(img: &epaint::ColorImage) -> Result<(), String> {
     let [w, h] = img.size;
-    if w == 0 || h == 0 {
-        return Err("The clipboard image is empty.".into());
-    }
-    if (w as u64) * (h as u64) > MAX_PIXELS {
+    if w > u32::MAX as usize || h > u32::MAX as usize || (w as u64).saturating_mul(h as u64) > MAX_PIXELS {
         return Err(format!("The clipboard image is too large ({w}×{h} pixels)."));
     }
-    let mut rgba = Vec::with_capacity(w * h * 4);
-    for c in &img.pixels {
-        rgba.extend_from_slice(&c.to_srgba_unmultiplied());
+    if w == 0 || h == 0 || img.pixels.len() != w * h {
+        return Err("The clipboard image is empty.".into());
     }
-    let mut out = Vec::new();
-    {
-        let mut enc = png::Encoder::new(&mut out, w as u32, h as u32);
+    Ok(())
+}
+
+/// Concurrent PNG encodes (each holds a row buffer and the encoder's state; the pixels belong
+/// to the paste event).
+const ENCODE_SLOTS: usize = 2;
+static ENCODES: (std::sync::Mutex<usize>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+/// One of the [`ENCODE_SLOTS`]; released on drop.
+struct EncodeSlot;
+
+impl EncodeSlot {
+    fn acquire() -> EncodeSlot {
+        let (m, cv) = &ENCODES;
+        let mut n = m.lock().unwrap_or_else(|e| e.into_inner());
+        while *n >= ENCODE_SLOTS {
+            n = cv.wait(n).unwrap_or_else(|e| e.into_inner());
+        }
+        *n += 1;
+        EncodeSlot
+    }
+}
+
+impl Drop for EncodeSlot {
+    fn drop(&mut self) {
+        let (m, cv) = &ENCODES;
+        let mut n = m.lock().unwrap_or_else(|e| e.into_inner());
+        *n = n.saturating_sub(1);
+        cv.notify_one();
+    }
+}
+
+/// A writer that fails once more than `left` bytes were written (the encoded file stays below
+/// [`MAX_BYTES`] without buffering it whole). `over` records that the limit was hit (the
+/// encoder may wrap the error in its own kind).
+struct Limited<'a> {
+    inner: &'a mut dyn Write,
+    left: u64,
+    over: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+const TOO_LARGE: &str = "the image is larger than the size limit";
+
+impl Write for Limited<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() as u64 > self.left {
+            self.over.set(true);
+            return Err(std::io::Error::new(std::io::ErrorKind::FileTooLarge, TOO_LARGE));
+        }
+        let n = self.inner.write(buf)?;
+        self.left -= n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Streams clipboard pixels as PNG into `out`, one row at a time (premultiplied → straight
+/// alpha per row; no second copy of the image, no buffered PNG). Fails past [`MAX_BYTES`].
+fn encode_png_into(img: &epaint::ColorImage, out: &mut dyn Write, limit: u64) -> std::io::Result<()> {
+    let [w, h] = img.size;
+    let over = std::rc::Rc::new(std::cell::Cell::new(false));
+    let r = (|| -> std::io::Result<()> {
+        let limited = Limited {
+            inner: out,
+            left: limit,
+            over: over.clone(),
+        };
+        let mut enc = png::Encoder::new(limited, w as u32, h as u32);
         enc.set_color(png::ColorType::Rgba);
         enc.set_depth(png::BitDepth::Eight);
         enc.set_compression(png::Compression::Fast);
-        let mut wr = enc
-            .write_header()
-            .map_err(|e| format!("Cannot encode the image: {e}"))?;
-        wr.write_image_data(&rgba)
-            .map_err(|e| format!("Cannot encode the image: {e}"))?;
-        wr.finish().map_err(|e| format!("Cannot encode the image: {e}"))?;
+        let io = |e: png::EncodingError| match e {
+            png::EncodingError::IoError(e) => e,
+            e => std::io::Error::other(e.to_string()),
+        };
+        let mut writer = enc.write_header().map_err(io)?;
+        let mut stream = writer.stream_writer().map_err(io)?;
+        let mut row = Vec::with_capacity(w * 4);
+        for y in 0..h {
+            row.clear();
+            for c in &img.pixels[y * w..(y + 1) * w] {
+                row.extend_from_slice(&c.to_srgba_unmultiplied());
+            }
+            stream.write_all(&row)?;
+        }
+        stream.finish().map_err(io)?;
+        writer.finish().map_err(io)
+    })();
+    if over.get() {
+        return Err(std::io::Error::new(std::io::ErrorKind::FileTooLarge, TOO_LARGE));
     }
-    Ok(out)
+    r
 }
 
 fn too_large(what: &str, bytes: u64) -> String {
@@ -445,13 +526,18 @@ pub fn run(req: &Request) -> Outcome {
     for item in &req.items {
         let r: Result<String, String> = match item {
             Item::Image(img) => (|| {
-                let png = encode_png(img)?;
-                if png.len() as u64 > MAX_BYTES {
-                    return Err(too_large("The pasted image", png.len() as u64));
-                }
+                check_dimensions(img)?;
                 let (dir, root, folder) = target(req)?;
                 let name = pasted_image_name(&req.stamp);
-                let path = create_unique(&dir, &root, &folder, &name, &mut |f| f.write_all(&png))?;
+                let _slot = EncodeSlot::acquire();
+                let path = create_unique(&dir, &root, &folder, &name, &mut |f| encode_png_into(img, f, MAX_BYTES))
+                    .map_err(|e| {
+                        if e.contains(TOO_LARGE) {
+                            format!("The pasted image is too large (the limit is {} MB).", MAX_BYTES >> 20)
+                        } else {
+                            e
+                        }
+                    })?;
                 let md = format!(
                     "![]({})",
                     markdown_dest(&link_path(note_dir, &path, relative), DestForm::Percent)
@@ -687,6 +773,110 @@ mod tests {
 
     fn red() -> Arc<epaint::ColorImage> {
         Arc::new(epaint::ColorImage::new([2, 1], vec![epaint::Color32::RED; 2]))
+    }
+
+    /// Clipboard images: the dimension budget is checked before any allocation, the PNG is
+    /// streamed through a size-limited writer that aborts past the limit.
+    #[test]
+    fn png_streaming_and_limits() {
+        // 20000×20000 claimed without pixels: refused by size, nothing allocated
+        let huge = epaint::ColorImage {
+            size: [20_000, 20_000],
+            source_size: epaint::Vec2::ZERO,
+            pixels: Vec::new(),
+        };
+        assert!(check_dimensions(&huge).unwrap_err().contains("too large"));
+        let empty = epaint::ColorImage::new([0, 0], Vec::new());
+        assert!(check_dimensions(&empty).is_err());
+        // noise does not compress: 64×64 RGBA ≈ 16 KiB, so a 4 KiB limit aborts
+        let mut seed = 1u32;
+        let px: Vec<epaint::Color32> = (0..64 * 64)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let b = seed.to_le_bytes();
+                epaint::Color32::from_rgba_unmultiplied(b[0], b[1], b[2], 255)
+            })
+            .collect();
+        let noise = epaint::ColorImage::new([64, 64], px);
+        let mut out = Vec::new();
+        let e = encode_png_into(&noise, &mut out, 4096).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(out.len() <= 4096);
+        // within the limit: a valid PNG with straight alpha
+        let half = epaint::ColorImage::new([1, 1], vec![epaint::Color32::from_rgba_unmultiplied(200, 100, 0, 128)]);
+        let mut out = Vec::new();
+        encode_png_into(&half, &mut out, MAX_BYTES).unwrap();
+        let mut dec = png::Decoder::new(std::io::Cursor::new(out)).read_info().unwrap();
+        let mut buf = vec![0; dec.output_buffer_size().unwrap()];
+        dec.next_frame(&mut buf).unwrap();
+        assert_eq!(buf[3], 128);
+        assert!((buf[0] as i32 - 200).abs() <= 2, "{buf:?}");
+        // a refused write leaves no file behind
+        let d = tmp("png-limit");
+        let dir = crate::vault::open_root(&d).unwrap();
+        let r = create_unique(&dir, &d, "", "n.png", &mut |f| encode_png_into(&noise, f, 4096));
+        assert!(r.unwrap_err().contains(TOO_LARGE));
+        assert!(!d.join("n.png").exists());
+    }
+
+    /// Parser → resolver round trip: for every name the inserted Markdown parses to a
+    /// destination that `markise_doc::resource::local_file` resolves to exactly that file.
+    #[test]
+    fn inserted_destinations_resolve_back_to_the_file() {
+        use markise_md::inline::{InlineContext, InlineKind, parse_inlines};
+        let d = tmp("roundtrip");
+        let note_dir = d.join("Notes");
+        std::fs::create_dir_all(note_dir.join("assets")).unwrap();
+        std::fs::create_dir_all(d.join("Other dir")).unwrap();
+        let nfd = "Cafe\u{301}.png";
+        let names = [
+            "plain.png",
+            "a b.png",
+            "a b?.png",
+            "what?#.png",
+            "50% done.png",
+            "100%25.png",
+            "x#y.png",
+            "(paren) [brack].png",
+            "a)b(c.png",
+            "]x[.png",
+            "<angle>.png".trim_matches(|c| cfg!(windows) && (c == '<' || c == '>')),
+            "pipe|caret^.png",
+            "Café.png",
+            nfd,
+            "日本語 名前.png",
+            "quote\"s'.png",
+            "back`tick.png",
+            "amp&semi;.png",
+            "doc v2.pdf",
+            "x?y.pdf",
+        ];
+        let opts = markise_md::ParseOptions::default();
+        for (i, name) in names.iter().enumerate() {
+            if cfg!(windows) && name.contains(['<', '>', '|', '?', '"']) {
+                continue;
+            }
+            let file = if i % 2 == 0 {
+                note_dir.join("assets").join(name)
+            } else {
+                d.join("Other dir").join(name)
+            };
+            std::fs::write(&file, b"x").unwrap();
+            for relative in [true, false] {
+                let md = markdown_for(Some(&note_dir), &file, relative);
+                let nodes = parse_inlines(&md, &opts, &InlineContext::default());
+                assert_eq!(nodes.len(), 1, "{name}: one node in {md}");
+                let dest = match &nodes[0].kind {
+                    InlineKind::Image { dest, .. } | InlineKind::Link { dest, .. } => dest.clone(),
+                    k => panic!("{name}: {md} → {k:?}"),
+                };
+                let got = markise_doc::resource::local_file(&note_dir, None, &dest)
+                    .unwrap_or_else(|| panic!("{name}: {md} not local"));
+                assert!(got.suffix.is_empty(), "{name}: {md} split a suffix {:?}", got.suffix);
+                let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|e| panic!("{name}: {md}: {e}"));
+                assert_eq!(canon(&got.path), canon(&file), "{name}: {md}");
+            }
+        }
     }
 
     #[test]
