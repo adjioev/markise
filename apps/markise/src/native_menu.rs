@@ -11,6 +11,9 @@
 //!   egui sees the key (same action as the egui shortcut path). On Windows the accelerators
 //!   are shown only: muda's accelerator table needs `TranslateAcceleratorW` in the message
 //!   loop, which is not installed, so keys keep reaching egui (no double dispatch).
+//! - AppKit inserts its own "Enter/Exit Full Screen" item into any menu titled "View"; the
+//!   model therefore has no Full Screen item on macOS (the app's shortcut path keeps ⌃⌘F for
+//!   the case the system item does not answer it). Do not add one here.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, channel};

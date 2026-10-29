@@ -31,6 +31,7 @@ use markise_theme::{
 };
 
 use crate::fonts::{FontRequest, ResolvedFonts};
+use crate::prefs::Swatch;
 
 /// Where the app keeps its configuration.
 #[derive(Clone, Debug, Default)]
@@ -60,6 +61,9 @@ enum Job {
     Save(u64, SettingsPatch),
     /// Register the watcher on the user theme folder.
     Watch,
+    /// Import a CSS theme only for its preview colours (Preferences' theme cards): the
+    /// import is dropped on the worker, only the [`Swatch`] comes back; generation as Import.
+    Preview(PathBuf, bool, u64),
 }
 
 /// Outcome of "Import theme…".
@@ -94,6 +98,8 @@ enum Done {
     Fonts(u64, Arc<ResolvedFonts>),
     /// Result of `Job::Save` by id; an error says whether retrying can help.
     Saved(u64, Result<(), (String, bool)>),
+    /// Preview colours of a CSS theme variant (`None`: the import failed).
+    Preview(PathBuf, bool, u64, Option<Swatch>),
 }
 
 struct Worker {
@@ -187,6 +193,12 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                             result,
                             deps,
                         }
+                    }
+                    Job::Preview(path, dark_variant, generation) => {
+                        let swatch = import_theme_file(&path, &ImportOptions::default())
+                            .ok()
+                            .map(|r| Swatch::of(r.variant(dark_variant)));
+                        Done::Preview(path, dark_variant, generation, swatch)
                     }
                     Job::Install(src, replace) => match &user_dir {
                         None => Done::Installed(
@@ -311,7 +323,7 @@ pub struct ThemeManager {
     chose_split: bool,
     /// The window was zoomed before the settings file arrived.
     chose_zoom: bool,
-    /// View → Diagrams toggled before the settings file was read.
+    /// Diagrams switched (Preferences) before the settings file was read.
     chose_diagrams: bool,
     /// View → Toolbar toggled before the settings file was read.
     chose_toolbar: bool,
@@ -319,7 +331,7 @@ pub struct ThemeManager {
     chose_toolbar_position: bool,
     chose_editing: bool,
     chose_source: bool,
-    /// View → Wikilinks toggled before the settings file was read.
+    /// Wikilinks switched (Preferences) before the settings file was read.
     chose_markdown: bool,
     /// Settings changed and not yet handed to the worker (coalesced, debounced).
     dirty: SettingsPatch,
@@ -361,6 +373,11 @@ pub struct ThemeManager {
     watch_requested: bool,
     /// Fallback fonts (CJK) were asked for by the document; loaded with the next font job.
     want_fallback: bool,
+    /// Preview colours of theme variants (Preferences' theme cards): a few colours per
+    /// variant, kept apart from the full imports (`None`: the import failed).
+    previews: Vec<(VariantSource, Option<Swatch>)>,
+    /// Preview imports handed to the worker and not answered yet.
+    previews_pending: Vec<VariantSource>,
 }
 
 impl ThemeManager {
@@ -420,6 +437,8 @@ impl ThemeManager {
             watcher: None,
             watch_requested: false,
             want_fallback: false,
+            previews: Vec::new(),
+            previews_pending: Vec::new(),
         }
     }
 
@@ -493,6 +512,14 @@ impl ThemeManager {
     /// The canonical user theme folder, once the worker has created it.
     pub fn user_dir(&self) -> Option<&Path> {
         self.user_dir.as_deref()
+    }
+
+    /// The settings file of this session (`None`: settings are not persisted, e.g. tests).
+    pub fn settings_file(&self) -> Option<PathBuf> {
+        match &self.config {
+            ConfigDir::Dir(d) => Some(settings_path(d)),
+            ConfigDir::None => None,
+        }
     }
 
     /// The session has a user theme folder (it may not be known yet).
@@ -608,7 +635,7 @@ impl ThemeManager {
         self.settings.key_bindings()
     }
 
-    /// Editing preferences (settings key `editing`; Edit menu).
+    /// Editing preferences (settings key `editing`; Preferences → Editor).
     pub fn editing(&self) -> markise_engine::settings::EditingSettings {
         self.settings.editing
     }
@@ -619,10 +646,11 @@ impl ThemeManager {
         if e != self.settings.editing {
             self.settings.editing = e;
             self.dirty.editing = Some(e);
+            self.schedule_save();
         }
     }
 
-    /// Source editor display preferences (settings key `source`; View menu).
+    /// Source editor display preferences (settings key `source`; Preferences → Source Mode).
     pub fn source_prefs(&self) -> markise_engine::settings::SourceSettings {
         self.settings.source
     }
@@ -642,7 +670,7 @@ impl ThemeManager {
         self.settings.markdown.wikilinks
     }
 
-    /// View → Wikilinks; persisted like the other settings.
+    /// Preferences → Markdown → Wikilinks; persisted like the other settings.
     pub fn set_wikilinks(&mut self, on: bool) {
         self.chose_markdown = true;
         if on != self.settings.markdown.wikilinks {
@@ -688,7 +716,7 @@ impl ThemeManager {
         self.settings.diagrams
     }
 
-    /// View → Diagrams; persisted like the other settings (DG-7).
+    /// Preferences → Markdown → Render diagrams; persisted like the other settings (DG-7).
     pub fn set_diagrams(&mut self, on: bool) {
         self.chose_diagrams = true;
         if on != self.settings.diagrams {
@@ -735,7 +763,7 @@ impl ThemeManager {
         self.settings.toolbar_position
     }
 
-    /// View → Toolbar Position; persisted like the other settings.
+    /// Preferences → Appearance → Toolbar position; persisted like the other settings.
     pub fn set_toolbar_position(&mut self, p: markise_engine::settings::ToolbarPosition) {
         self.chose_toolbar_position = true;
         if p != self.settings.toolbar_position {
@@ -923,6 +951,24 @@ impl ThemeManager {
         for k in stale {
             self.invalidate(&k);
         }
+        // preview colours of themes under the changed path are read again (a pending one
+        // is answered for an older generation and dropped)
+        let under = |v: &VariantSource| matches!(v, VariantSource::Css { path: p, .. } if p.starts_with(path));
+        let mut bumped = Vec::new();
+        for v in self.previews.iter().map(|(v, _)| v).chain(&self.previews_pending) {
+            if let VariantSource::Css { path: p, .. } = v
+                && p.starts_with(path)
+            {
+                bumped.push(p.clone());
+            }
+        }
+        bumped.sort();
+        bumped.dedup();
+        for p in bumped {
+            *self.gens.entry(p).or_default() += 1;
+        }
+        self.previews.retain(|(v, _)| !under(v));
+        self.previews_pending.retain(|v| !under(v));
         // a theme file added, removed or renamed at the top level changes the catalog (the
         // folder itself: the watch restarted, anything may have changed)
         let top_level = self
@@ -1066,6 +1112,15 @@ impl ThemeManager {
                     out.push(ThemeEvent::Fonts(fonts));
                 }
             }
+            Done::Preview(path, dark_variant, generation, swatch) => {
+                if self.gens.get(&path).copied().unwrap_or(0) != generation {
+                    return; // the file changed meanwhile
+                }
+                let src = VariantSource::Css { path, dark_variant };
+                self.previews_pending.retain(|v| *v != src);
+                self.previews.retain(|(v, _)| *v != src);
+                self.previews.push((src, swatch));
+            }
             Done::Saved(id, r) => {
                 let patch = self
                     .in_flight
@@ -1160,6 +1215,40 @@ impl ThemeManager {
             }
             css => self.variant_theme(css, dark).map(|t| t.colors()),
         }
+    }
+
+    /// Number of full theme imports held (tests: previews must not add any).
+    pub fn cached_imports(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Preview colours of theme family `id` in the wanted appearance (Preferences' theme
+    /// cards). Native themes and CSS themes already imported for use answer at once; other CSS
+    /// themes are imported on the worker for their colours only (the full import is not kept),
+    /// so `None` until that arrives, or when it failed.
+    pub fn preview(&mut self, id: &ThemeId, dark: bool) -> Option<Swatch> {
+        let src = self.family(id)?.pick(dark).clone();
+        if let Some((_, s)) = self.previews.iter().find(|(v, _)| *v == src) {
+            return *s;
+        }
+        let swatch = match &src {
+            VariantSource::Native { id } => Some(Swatch::of(
+                &Theme::native(id).unwrap_or_else(|| if dark { Theme::dark() } else { Theme::light() }),
+            )),
+            VariantSource::Css { path, dark_variant } => match self.cache.get(path) {
+                Some(c) => Some(Swatch::of(c.result.variant(*dark_variant))),
+                None => {
+                    if !self.previews_pending.contains(&src) && self.worker.is_some() {
+                        self.previews_pending.push(src.clone());
+                        let generation = self.gens.get(path).copied().unwrap_or(0);
+                        self.send(Job::Preview(path.clone(), *dark_variant, generation));
+                    }
+                    return None;
+                }
+            },
+        };
+        self.previews.push((src, swatch));
+        swatch
     }
 
     /// Menu label of the selected style.

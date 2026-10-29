@@ -96,8 +96,8 @@ reveal), styled the same. The source editor colours marks with the existing toke
 ### 5. Export
 
 HTML: suggestions as `<ins class="critic">` / `<del class="critic">` (a substitution as both);
-with comments kept (default, setting `markdown.exportComments`, File → Export → Include
-Comments) a highlight is `<mark class="critic" title="its comment">` and a comment
+with comments kept (default, setting `markdown.exportComments`, Preferences → Markdown and
+File → Export → Include Comments) a highlight is `<mark class="critic" title="its comment">` and a comment
 `<span class="critic comment">`; stripped, highlights are plain text and comments are dropped.
 PDF/PNG/Pandoc (export model): insertions underlined, deletions struck, comments as
 `[comment]` in italics or dropped.
@@ -114,8 +114,8 @@ PDF/PNG/Pandoc (export model): insertions underlined, deletions struck, comments
   `<name> (clean).md`), refuses the document's own file, and writes through the checked save
   path (`save_checked`, never overwriting a file changed since the dialog). The open document is
   not changed.
-- The switch lives in View → Comments & Suggestions until the Preferences window (PR #68) lands;
-  then it moves to Preferences → Markdown.
+- The switches live in Preferences → Markdown ("Comments & suggestions (CriticMarkup)", "Keep
+  comments in exports"); the export one is also File → Export → Include Comments.
 
 ### 7. CommonMark conformance
 

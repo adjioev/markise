@@ -50,6 +50,7 @@ use crate::viewer::DocViewer;
 
 mod files;
 mod menus;
+mod prefs;
 mod review;
 mod vault;
 pub use menus::MenuHost;
@@ -342,6 +343,8 @@ enum Ask {
     CreateNote { rel: String },
     /// Save Copy Without Comments: accept or reject the pending suggestions in the copy?
     CleanCopy { suggestions: usize },
+    /// Preferences → Reset to Defaults for this section.
+    ResetPrefs(crate::prefs::Section),
 }
 
 enum Banner {
@@ -426,6 +429,10 @@ pub struct MarkiseApp {
     theme_report: bool,
     /// The "Font & size" window is open.
     font_window: bool,
+    /// The Preferences window (issue #50).
+    prefs: crate::prefs::PrefsState,
+    /// Colours of the Preferences theme cards (refreshed while the window is open).
+    swatches: Vec<(ThemeId, Option<crate::prefs::Swatch>)>,
     /// Summary of the last "Import theme…" (shown in the report window).
     installed: Option<InstallDone>,
     /// Fingerprint of the theme the egui visuals were built from.
@@ -527,6 +534,8 @@ impl MarkiseApp {
             themes,
             theme_report: false,
             font_window: false,
+            prefs: Default::default(),
+            swatches: Vec::new(),
             installed: None,
             visuals_fp: None,
             theme_gen: 0,
@@ -1067,13 +1076,13 @@ impl MarkiseApp {
         self.themes.show_toolbar()
     }
 
-    /// Where the formatting toolbar sits (View → Toolbar Position, persisted as
+    /// Where the formatting toolbar sits (Preferences → Appearance, persisted as
     /// `toolbarPosition`; spec 04 §3.2).
     pub fn toolbar_position(&self) -> markise_engine::settings::ToolbarPosition {
         self.themes.toolbar_position()
     }
 
-    /// View → Toolbar Position → Top / Bottom.
+    /// Preferences → Appearance → Toolbar position (commands `view.toolbarTop` / `view.toolbarBottom`).
     pub fn set_toolbar_position(&mut self, p: markise_engine::settings::ToolbarPosition) {
         if p != self.toolbar_position() {
             // an open drop-down belongs to the old placement
@@ -1958,6 +1967,7 @@ impl MarkiseApp {
         self.complete_ui(ctx);
         self.theme_report_window(ctx);
         self.font_window(ctx);
+        self.preferences_window(ctx);
         self.about.show(ctx, self.commit.as_deref());
         self.dialogs(ctx);
         self.update_title(ctx);
@@ -2000,6 +2010,7 @@ impl MarkiseApp {
                 Question::create_note(name, dir)
             }
             Some(Ask::CleanCopy { suggestions }) => Question::clean_copy(*suggestions),
+            Some(Ask::ResetPrefs(s)) => Question::reset_settings(s.label()),
             None => {
                 let req = self.export.pending_overwrite()?;
                 Question::export_overwrite(&req.output)
@@ -2049,6 +2060,7 @@ impl MarkiseApp {
             (Choice::Create, Some(Ask::CreateNote { rel })) => self.create_note(rel),
             (Choice::AcceptAll, Some(Ask::CleanCopy { .. })) => self.write_clean_copy(false),
             (Choice::RejectAll, Some(Ask::CleanCopy { .. })) => self.write_clean_copy(true),
+            (Choice::Reset, Some(Ask::ResetPrefs(s))) => self.reset_preferences(s),
             (_, Some(_)) => {} // Cancel (or a choice the question does not offer)
             (c, None) => {
                 if let Some(r) = self.export.answer_overwrite(c == Choice::Overwrite) {
@@ -2171,80 +2183,15 @@ impl MarkiseApp {
         }
         let mut o = self.themes.overrides().clone();
         let before = o.clone();
-        let t = &self.theme;
         // the style's own values (shown while not overridden)
-        let style_font = t.fonts.body.iter().find(|f| Some(*f) != o.body_font.as_ref()).cloned();
+        let defaults = self.font_defaults();
         let open = crate::dialog::window(
             ctx,
             "markise-font-window",
             "Font & size",
             crate::dialog::Width::Medium,
             |ui, look| {
-                egui::Grid::new("font-overrides")
-                    .num_columns(2)
-                    .spacing([12.0, 8.0])
-                    .show(ui, |ui| {
-                        ui.label("Body font");
-                        let mut name = o.body_font.clone().unwrap_or_default();
-                        let hint = style_font.clone().unwrap_or_else(|| "style default".into());
-                        if ui
-                            .add(
-                                egui::TextEdit::singleline(&mut name)
-                                    .hint_text(hint)
-                                    .desired_width(200.0),
-                            )
-                            .changed()
-                        {
-                            o.body_font = (!name.trim().is_empty()).then_some(name);
-                        }
-                        ui.end_row();
-                        let row = |ui: &mut egui::Ui,
-                                   label: &str,
-                                   v: &mut Option<f32>,
-                                   current: f32,
-                                   (lo, hi): (f32, f32),
-                                   step: f64| {
-                            ui.label(label);
-                            ui.horizontal(|ui| {
-                                let mut on = v.is_some();
-                                if ui.checkbox(&mut on, "").on_hover_text("Override the style").changed() {
-                                    *v = on.then_some(current);
-                                }
-                                let mut x = v.unwrap_or(current);
-                                if ui
-                                    .add_enabled(on, egui::Slider::new(&mut x, lo..=hi).step_by(step))
-                                    .changed()
-                                {
-                                    *v = Some(x);
-                                }
-                            });
-                            ui.end_row();
-                        };
-                        row(
-                            ui,
-                            "Base size",
-                            &mut o.font_size,
-                            t.font_size,
-                            Overrides::FONT_SIZE,
-                            0.5,
-                        );
-                        row(
-                            ui,
-                            "Line height",
-                            &mut o.line_height,
-                            t.line_height,
-                            Overrides::LINE_HEIGHT,
-                            0.05,
-                        );
-                        row(
-                            ui,
-                            "Content width",
-                            &mut o.content_width,
-                            t.column_max_width,
-                            (Overrides::CONTENT_WIDTH.0, 1600.0),
-                            10.0,
-                        );
-                    });
+                crate::prefs::font_controls(ui, &mut o, &defaults);
                 crate::dialog::footer(ui, |ui| {
                     let done = crate::dialog::primary(ui, look, "Done").clicked();
                     if ui

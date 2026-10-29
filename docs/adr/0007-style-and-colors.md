@@ -145,6 +145,12 @@ line height, content width; each override has an on/off box; applied live and pe
 "Use the style's values" clears them), then Import / Open Theme Folder / Theme Report as before.
 The theme report shows the import of the colors' CSS theme, else of the style's.
 
+**Amended (issue #50, Preferences window).** The top-level Theme menu is gone. Style, colors,
+complete theme, the Appearance radios, the Font & size controls and Import / Open Theme Folder /
+Theme Report live in Preferences → Appearance; View → Theme ▸ keeps a quick switcher between the
+complete themes (radio items) and ends with "Theme Settings…", which opens that section. The
+"Font & size" window and every former menu command still exist and run by id.
+
 ## Consequences
 
 - Every built-in style × native scheme combination passes WCAG AA for body text, links, inline

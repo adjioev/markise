@@ -1,4 +1,4 @@
-//! Headless screenshots of the app's dialogs (issue #35): each scene opens one dialog in the
+//! Headless screenshots of the app's dialogs (issue #35) and the Preferences window (issue #50): each scene opens one dialog in the
 //! real app UI and saves a PNG, in the light and the dark appearance.
 //!
 //! `cargo run -p markise-ui-egui --release --example dialog_shots [-- <out-dir> [<prefix>]]`
@@ -16,6 +16,7 @@ use egui::{Context, TextureId};
 use markise_engine::export::{ExportKind, ExportRequest};
 use markise_ui_egui::export_ui::ExportAction;
 use markise_ui_egui::menu::MenuAction;
+use markise_ui_egui::prefs::{Change, Section};
 use markise_ui_egui::sidebar::TreeAction;
 use markise_ui_egui::{AppOptions, Appearance, ConfigDir, MarkiseApp};
 
@@ -86,6 +87,52 @@ fn scenes() -> Vec<(&'static str, Setup)> {
         ("theme-report", |app, ctx, _| {
             app.menu_action(ctx, &MenuAction::Command("theme.report"));
         }),
+        // the Preferences window (issue #50)
+        ("preferences-general", |app, ctx, _| {
+            app.menu_action(ctx, &MenuAction::Command("app.preferences"));
+        }),
+        ("preferences-editor", |app, ctx, _| {
+            app.open_preferences_at(Section::Editor);
+            app.apply_preference(
+                ctx,
+                Change::Editing(markise_engine::settings::EditingSettings {
+                    smart_punctuation: true,
+                    ..Default::default()
+                }),
+            );
+        }),
+        ("preferences-markdown", |app, _, _| {
+            app.open_preferences_at(Section::Markdown)
+        }),
+        ("preferences-appearance", |app, _, _| {
+            app.open_preferences_at(Section::Appearance)
+        }),
+        ("preferences-source", |app, _, _| {
+            app.open_preferences_at(Section::Source)
+        }),
+        ("preferences-files", |app, _, _| app.open_preferences_at(Section::Files)),
+        ("preferences-export", |app, _, _| {
+            app.open_preferences_at(Section::Export)
+        }),
+        ("preferences-search", |app, _, _| {
+            app.open_preferences_at(Section::General);
+            app.preferences().query = "line".into();
+        }),
+        ("preferences-reset", |app, ctx, _| {
+            app.open_preferences_at(Section::Editor);
+            app.apply_preference(
+                ctx,
+                Change::Editing(markise_engine::settings::EditingSettings {
+                    auto_pair_markdown: true,
+                    ..Default::default()
+                }),
+            );
+            app.apply_preference(ctx, Change::AskReset(Section::Editor));
+        }),
+        ("preferences-zoom-150", |app, _, _| {
+            app.set_zoom(1.5);
+            app.open_preferences_at(Section::Appearance);
+        }),
         // the sidebar itself (issue #57): a nested folder, a plain-text file, a long name
         ("sidebar", |app, ctx, dir| {
             app.toggle_folder(&dir.join("drafts"));
@@ -154,9 +201,13 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
     let mut texs: HashMap<TextureId, Tex> = HashMap::new();
     // the sidebar scenes point at a row (hover highlight)
     let hover = name.starts_with("sidebar").then_some(egui::pos2(150.0, 230.0));
-    let input = || {
+    // like egui-winit: the window's size in points shrinks with the app's zoom factor
+    let input = |zoom: f32| {
         let mut raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(w_pt, h_pt) / zoom,
+            )),
             events: hover.map(egui::Event::PointerMoved).into_iter().collect(),
             ..Default::default()
         };
@@ -170,7 +221,8 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
     let mut stable = 0;
     let mut done = false;
     loop {
-        let mut full = ctx.run_ui(input(), |ui| app.ui(ui));
+        let zoom = ctx.zoom_factor();
+        let mut full = ctx.run_ui(input(zoom), |ui| app.ui(ui));
         apply_all(&mut texs, &mut full.textures_delta);
         let ready = app.model().is_some()
             && !app.is_busy()
@@ -195,7 +247,15 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
         }
         if stable >= 12 || start.elapsed() > Duration::from_secs(20) {
             let prims = ctx.tessellate(full.shapes, full.pixels_per_point);
-            let r = rasterize(&prims, &texs, ppp, (w_pt * ppp) as usize, (h_pt * ppp) as usize);
+            // the app's zoom raises pixels_per_point above the native scale: tessellated
+            // coordinates are points × that factor, the image keeps the native pixel size
+            let r = rasterize(
+                &prims,
+                &texs,
+                full.pixels_per_point,
+                (w_pt * ppp) as usize,
+                (h_pt * ppp) as usize,
+            );
             save_png(&r, out);
             break;
         }

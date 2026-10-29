@@ -18,16 +18,16 @@
 //! | `style` | `"style:<id>"` (built-in style: `markise`, `classic`, `modern`, `technical`, `compact`) or `"theme:<theme id>"` (the style of a complete theme) | `"style:markise"` |
 //! | `colors` | theme family id: `"markise"`, `"palette:<id>"`, `"builtin:<id>"` (`drake`, `lapis`, `phycat`), `"user:<key>"` (user theme family: lowercase file stem without a `-dark`/`-light` suffix) | `"markise"` |
 //! | `appearance` | `"system"`, `"light"`, `"dark"` | `"system"` |
-//! | `diagrams` | `true` / `false`: render `mermaid`/`sequence`/`flow` fences (spec 01 §4.6; View → Diagrams) | `true` |
-//! | `showToolbar` | `true` / `false`: show the formatting toolbar (spec 04 §3.2, spec 05; View → Toolbar) | `true` |
-//! | `sidebar.showRecent` | `true` / `false`: show the sidebar's Recent section (View → Show Recent Files, issue #57) | `true` |
-//! | `toolbarPosition` | `"top"` / `"bottom"`: where the formatting toolbar sits (View → Toolbar Position) | `"top"` |
+//! | `diagrams` | `true` / `false`: render `mermaid`/`sequence`/`flow` fences (spec 01 §4.6; Preferences → Markdown) | `true` |
+//! | `showToolbar` | `true` / `false`: show the formatting toolbar (spec 04 §3.2, spec 05; View → Toolbar, Preferences → Appearance) | `true` |
+//! | `sidebar.showRecent` | `true` / `false`: show the sidebar's Recent section (View → Show Recent Files, Preferences → Appearance; issue #57) | `true` |
+//! | `toolbarPosition` | `"top"` / `"bottom"`: where the formatting toolbar sits (Preferences → Appearance) | `"top"` |
 //! | `consumed_pending` | names of recovery files already merged into this file (written with the merge; see [`update_file`]); omitted when empty | none |
 //! | `overrides` | object with optional `font_family` (string), `font_size`, `line_height`, `content_width` (numbers); omitted when empty | none |
-//! | `editing` | object: `auto_pair_brackets` (default `true`), `auto_pair_markdown` (`false`), `smart_punctuation` (convert on input, `false`), `smart_dashes_em` (`--` → em dash, `false`) (spec 02 §4, §13, §16; Edit menu) | defaults |
-//! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`) — source editor display (spec 02 §12.1.1; View menu) | defaults |
+//! | `editing` | object: `auto_pair_brackets` (default `true`), `auto_pair_markdown` (`false`), `smart_punctuation` (convert on input, `false`), `smart_dashes_em` (`--` → em dash, `false`) (spec 02 §4, §13, §16; Preferences → Editor) | defaults |
+//! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`) — source editor display (spec 02 §12.1.1; Preferences → Source Mode) | defaults |
 //! | `keyBinding` | object: command label (menu title) or id → accelerator (`"Ctrl+Shift+K"`), `""` unbinds (spec 05 §4.7); read only, kept verbatim | none |
-//! | `markdown` | object: `wikilinks` (default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; View menu) | defaults |
+//! | `markdown` | object: `wikilinks` (default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
 //! | `side_by_side_split` | Side by Side divider position: fraction of the editor width given to the source pane, `0.15`–`0.85` (spec 04 §3.3); omitted until the divider is moved | `0.5` |
 //! | `zoom` | whole-window zoom factor, `0.5`–`3.0` (View → Zoom In / Zoom Out / Actual Size, issue #43); omitted until zoomed | `1.0` |
 //!

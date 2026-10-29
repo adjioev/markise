@@ -13,6 +13,7 @@ use egui_kittest::kittest::Queryable;
 use markise_doc::{CriticKind, Selection};
 use markise_ui_egui::confirm::{Choice, Confirm, Kind, Scripted};
 use markise_ui_egui::menu::MenuAction;
+use markise_ui_egui::prefs::Section;
 use markise_ui_egui::sidebar::Tab;
 use markise_ui_egui::{AppOptions, MarkiseApp};
 
@@ -296,11 +297,24 @@ fn switching_off_shows_plain_text_and_keeps_the_bytes() {
     let (mut h, _p) = open("toggle", REVIEWED);
     show_panel(&mut h);
     assert!(h.state().critic_markup());
-    assert!(h.state().menu_model().item("view.criticMarkup").is_some());
-    h.state_mut().set_critic_markup(false);
+    // the switch lives in Preferences → Markdown
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("app.preferences")));
+    h.run_steps(3);
+    h.get_by_role_and_label(egui::Role::Button, Section::Markdown.label())
+        .click();
+    h.run_steps(2);
+    let label = "Comments & suggestions (CriticMarkup)";
+    h.get_by_role_and_label(egui::Role::Switch, label).focus();
+    h.run_steps(1);
+    h.key_press(Key::Space);
+    h.run_steps(2);
+    h.key_press(Key::Escape);
+    h.run_steps(2);
     wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
     h.run_steps(3);
     assert!(!h.state().critic_markup());
+    assert!(!h.state().preference_values().critic_markup);
     assert!(h.state().review_marks().is_empty(), "no marks: plain text");
     assert!(h.query_by_label("Comments and suggestions are off.").is_some());
     assert_eq!(text(&h), REVIEWED, "byte-identical");

@@ -318,12 +318,12 @@ impl MarkiseApp {
 
     // ------------------------------------------------------------------ wikilinks switch
 
-    /// Whether wikilinks are parsed (View → Wikilinks, setting `markdown.wikilinks`).
+    /// Whether wikilinks are parsed (Preferences → Markdown, setting `markdown.wikilinks`).
     pub fn wikilinks(&self) -> bool {
         self.parse.wikilinks
     }
 
-    /// View → Wikilinks: switches the dialect extension (persisted) and re-parses the open
+    /// Preferences → Markdown → Wikilinks: switches the dialect extension (persisted) and re-parses the open
     /// document in the background.
     pub fn set_wikilinks(&mut self, on: bool) {
         self.themes.set_wikilinks(on);

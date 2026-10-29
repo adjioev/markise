@@ -1,5 +1,5 @@
 //! Yes/no questions (issue #35): unsaved changes, Move to Trash, opening a link with another
-//! application, replacing a theme, export overwrite.
+//! application, replacing a theme, export overwrite, resetting a Preferences section.
 //!
 //! The application describes a question as a [`Question`] and hands it to a [`Confirm`]
 //! implementation every frame until that returns the user's [`Choice`]. This is the seam:
@@ -40,6 +40,7 @@ pub enum Choice {
     /// Save Copy Without Comments: accept / reject the pending suggestions in the copy.
     AcceptAll,
     RejectAll,
+    Reset,
 }
 
 /// How a button is drawn: the accented primary action, a red destructive one, or plain.
@@ -67,6 +68,7 @@ pub enum Kind {
     ExportOverwrite,
     CreateNote,
     CleanCopy,
+    ResetSettings,
 }
 
 /// A question with its buttons.
@@ -232,6 +234,18 @@ impl Question {
                 cancel(),
             ],
             default: Choice::AcceptAll,
+        }
+    }
+
+    /// Preferences → "Reset to Defaults" for one section (issue #50).
+    pub fn reset_settings(section: &str) -> Question {
+        Question {
+            id: 0,
+            kind: Kind::ResetSettings,
+            message: format!("Reset the {section} settings to their defaults?"),
+            detail: "Every setting in this section goes back to its default value.".into(),
+            buttons: vec![button(Choice::Reset, "Reset", Role::Destructive), cancel()],
+            default: Choice::Cancel,
         }
     }
 
@@ -605,6 +619,7 @@ mod tests {
             Question::export_overwrite(std::path::Path::new("a.html")),
             Question::open_link("vscode://x"),
             Question::create_note("New idea.md", "Inbox"),
+            Question::reset_settings("Editor"),
         ];
         for os in [Os::Mac, Os::Windows, Os::Linux] {
             for q in &all {
