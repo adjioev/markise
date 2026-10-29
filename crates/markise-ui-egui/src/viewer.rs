@@ -26,6 +26,7 @@ use crate::images::TextureStore;
 use crate::text_paint::ParleyText;
 
 mod code_tools;
+mod comment_place;
 pub use code_tools::{LangEdit, LangItem, ShownTools, lang_matches};
 
 const SCROLLBAR_W: f32 = 10.0;
@@ -95,8 +96,6 @@ struct Popover {
 
 /// The pointer must rest on a bubble this long before its popover opens.
 pub const POPOVER_DELAY: f64 = 0.15;
-/// Narrowest right margin that still holds comment cards.
-const MIN_MARGIN: f32 = 190.0;
 
 /// Commands of the document's context menu (ADR 0012), `None`: separator.
 pub const CONTEXT_COMMANDS: &[Option<&str>] = &[
@@ -913,22 +912,27 @@ impl DocViewer {
         }
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
-        let margin = rect.right() - SCROLLBAR_W - (left + col_w);
-        let use_margin =
-            self.comment_display == markise_engine::settings::CommentDisplay::Margin && margin >= MIN_MARGIN;
+        // issue #91: cards and popovers go only where the surface is actually on screen (not
+        // past the window's or the parent's clip edge, not over the scrollbar), and margin
+        // cards only into the real room right of the content column (after its max-width,
+        // padding and centring; a glyph further right, e.g. in a wide table, counts too)
+        let vis = comment_place::visible_area(rect, SCROLLBAR_W, ui.clip_rect(), ctx.content_rect());
+        let col_right = shown.iter().map(|c| c.glyph.right()).fold(left + col_w, f32::max);
+        let slot = (self.comment_display == markise_engine::settings::CommentDisplay::Margin)
+            .then(|| comment_place::margin_column(vis, col_right))
+            .flatten();
+        let use_margin = slot.is_some();
         let look = CardLook::new(theme, &ctx);
-        let painter = ui.painter_at(rect);
+        let painter = ui.painter_at(vis);
         let mut clicked = None;
-        if use_margin {
+        if let Some((x, w)) = slot {
             self.popover = None;
-            let x = left + col_w + 20.0;
-            let w = (margin - 36.0).min(240.0);
             let mut next_y = rect.top();
             for (i, c) in shown.iter_mut().enumerate() {
                 // nothing is shaped for a card that would start below the viewport; the stack
                 // only grows downwards, so the rest would too
                 let y = (c.glyph.top() - 4.0).max(next_y);
-                if y > rect.bottom() {
+                if y > vis.bottom() {
                     break;
                 }
                 let galley = look.galley(&ctx, &c.text, w);
@@ -936,7 +940,7 @@ impl DocViewer {
                 next_y = card.bottom() + 6.0;
                 // the connector from the bubble's line to its card, in the margin only (it never
                 // crosses text), starting with a dot at the column edge
-                let from = pos2(left + col_w + 6.0, c.glyph.center().y);
+                let from = pos2(col_right + 6.0, c.glyph.center().y);
                 let to = pos2(card.left(), card.top() + 12.0);
                 let line = Stroke::new(1.0, look.accent.gamma_multiply(0.5));
                 painter.circle_filled(from, 2.0, look.accent.gamma_multiply(0.7));
@@ -995,18 +999,14 @@ impl DocViewer {
                 let wait = POPOVER_DELAY - (now - pop.since);
                 if pop.pinned || wait <= 0.0 {
                     let c = &shown[i];
-                    let w = 240.0f32.min(rect.width() - 24.0).max(120.0);
+                    let w = comment_place::popover_width(vis);
                     let galley = look.galley(&ctx, &c.text, w);
                     let size = look.size(&galley, w);
-                    let mut at = pos2(c.glyph.left() - 8.0, c.glyph.bottom() + 4.0);
-                    at.x =
-                        at.x.min(rect.right() - SCROLLBAR_W - size.x - 4.0)
-                            .max(rect.left() + 4.0);
-                    if at.y + size.y > rect.bottom() {
-                        at.y = (c.glyph.top() - 4.0 - size.y).max(rect.top());
-                    }
+                    // below the bubble, flipped left / up near the visible area's edges
+                    let at = comment_place::popover_pos(c.glyph, size, vis);
                     let area = egui::Area::new(egui::Id::unique(("markise-comment-popover", pop.key)))
                         .order(egui::Order::Foreground)
+                        .constrain_to(vis)
                         .fixed_pos(at)
                         .show(&ctx, |ui| {
                             let (r, resp) = ui.allocate_exact_size(size, Sense::click());
@@ -1444,7 +1444,11 @@ impl CardLook {
 
     fn size(&self, galley: &egui::Galley, w: f32) -> Vec2 {
         let gw = galley.size().x + 2.0 * CARD_PAD + CARD_ICON;
-        vec2(gw.clamp(80.0, w), galley.size().y.max(CARD_ICON) + 2.0 * CARD_PAD)
+        // at least 80 wide, unless the room itself is narrower (a tiny visible area)
+        vec2(
+            gw.min(w).max(80.0f32.min(w)),
+            galley.size().y.max(CARD_ICON) + 2.0 * CARD_PAD,
+        )
     }
 
     fn paint(&self, p: &egui::Painter, r: Rect, galley: Arc<egui::Galley>) {

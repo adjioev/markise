@@ -766,3 +766,242 @@ fn enter_inside_a_comment_makes_a_multi_line_comment() {
         assert_eq!(marks[0].kind, CriticKind::Comment);
     }
 }
+
+// ------------------------------------------------------------------ cards stay on screen (#91)
+
+/// A comment at the start of a long line and one at the end of it, so the cards' anchors span
+/// the whole column.
+const WIDE: &str = "Intro {>>Card text that is long enough to wrap onto a few lines in the margin<<} \
+the rest of a fairly long paragraph line that fills the whole column width and wraps at least \
+once, ending here {>>@bot: Ca done<<}.\n\nSecond paragraph.\n";
+
+/// Checks the shown comments of the current frame: each margin card lies fully inside the
+/// window's visible area and the document surface (not under the sidebar, not past the right
+/// edge, not over the scrollbar); returns the problems found.
+fn check_cards_on_screen(h: &mut H, what: &str) -> Vec<String> {
+    let screen = h.ctx.content_rect();
+    let surface = h.state_mut().viewer().unwrap().surface_rect().expect("surface");
+    let mut bad = Vec::new();
+    if surface.right() > screen.right() + 0.5 {
+        bad.push(format!("{what}: surface {surface:?} past the window {screen:?}"));
+    }
+    // the document area without the scrollbar (10 pt)
+    let area = Rect::from_min_max(surface.min, egui::pos2(surface.right() - 10.0, surface.bottom()));
+    let cs = comments(h);
+    if cs.len() != 2 {
+        bad.push(format!("{what}: {} comments shown", cs.len()));
+    }
+    for c in &cs {
+        if let Some(card) = c.card
+            && !(area.expand(0.5).contains_rect(card) && screen.expand(0.5).contains_rect(card))
+        {
+            bad.push(format!("{what}: card {card:?} outside {area:?} / window {screen:?}"));
+        }
+    }
+    bad
+}
+
+use egui::Rect;
+
+/// Bubbles: hovers each shown glyph until its popover opens and checks that the popover lies
+/// inside the window and the document surface; moves the pointer away afterwards.
+fn check_popovers_on_screen(h: &mut H, what: &str) -> Vec<String> {
+    let screen = h.ctx.content_rect();
+    let surface = h.state_mut().viewer().unwrap().surface_rect().expect("surface");
+    let mut bad = Vec::new();
+    let n = comments(h).len();
+    for i in 0..n {
+        let g = comments(h)[i].glyph;
+        if !surface.contains(g.center()) {
+            continue;
+        }
+        h.hover_at(g.center());
+        let t = Instant::now();
+        while comments(h)[i].card.is_none() && t.elapsed() < Duration::from_secs(5) {
+            h.step();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        match comments(h)[i].card {
+            None => bad.push(format!("{what}: popover {i} did not open")),
+            Some(card) => {
+                if !(surface.expand(0.5).contains_rect(card) && screen.expand(0.5).contains_rect(card)) {
+                    bad.push(format!(
+                        "{what}: popover {card:?} outside {surface:?} / window {screen:?}"
+                    ));
+                }
+            }
+        }
+        h.hover_at(egui::pos2(surface.center().x, surface.bottom() - 2.0));
+        h.run_steps(3);
+    }
+    bad
+}
+
+/// Issue #91: in margin mode a comment card is drawn inside the visible area, or the comment
+/// falls back to a bubble (no card) when the right margin is too narrow — for every built-in
+/// style and CSS theme, several window widths and zoom levels, with the sidebar shown.
+#[test]
+fn margin_cards_stay_inside_the_window_in_every_style_and_theme() {
+    // a Retina display (2 px per point), like the owner's
+    let dir = tmpdir("on-screen");
+    let doc = dir.join("draft.md");
+    std::fs::write(&doc, WIDE).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 760.0))
+        .with_pixels_per_point(2.0)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| app.ui(ui),
+            MarkiseApp::new(AppOptions {
+                open: vec![doc],
+                ..Default::default()
+            }),
+        );
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    assert_eq!(h.state().comment_display(), CommentDisplay::Margin);
+    type Apply = Box<dyn Fn(&mut MarkiseApp)>;
+    let mut looks: Vec<(String, Apply)> = Vec::new();
+    for s in markise_theme::style::BUILTIN_STYLES.iter().map(|s| s.id) {
+        looks.push((
+            format!("style {s}"),
+            Box::new(move |a: &mut MarkiseApp| a.select_style(markise_theme::catalog::StyleId::Builtin(s.into()))),
+        ));
+    }
+    for t in markise_theme::builtin::BUILTIN_THEMES.iter().map(|t| t.id) {
+        looks.push((
+            format!("theme {t}"),
+            Box::new(move |a: &mut MarkiseApp| a.select_theme(markise_theme::catalog::ThemeId::Builtin(t.into()))),
+        ));
+    }
+    assert!(looks.len() >= 8, "registry");
+    let mut bad = Vec::new();
+    let mut margin_seen = 0;
+    let mut bubbles_seen = 0;
+    for (name, apply) in &looks {
+        let before = h.state().theme().clone();
+        apply(h.state_mut());
+        let t = Instant::now();
+        while *h.state().theme() == before && t.elapsed() < Duration::from_secs(10) {
+            h.step();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for sidebar in [true, false] {
+            for zoom in [1.0, 1.5] {
+                for width in [900.0, 1100.0, 1400.0, 1900.0] {
+                    // the zoom first (egui applies it at the next pass), then the window size in
+                    // points (kittest's size is in points; a zoomed window has fewer)
+                    h.state_mut().set_zoom(zoom);
+                    h.run_steps(2);
+                    h.set_size(egui::vec2(width / zoom, 760.0 / zoom));
+                    h.run_steps(4);
+                    let screen = h.ctx.content_rect();
+                    assert!(
+                        (screen.width() - width / zoom).abs() < 1.0,
+                        "window {screen:?} at {width} / {zoom}"
+                    );
+                    let what = format!("{name} sidebar={sidebar} zoom={zoom} width={width}");
+                    bad.extend(check_cards_on_screen(&mut h, &what));
+                    if comments(&mut h).iter().any(|c| c.card.is_some()) {
+                        margin_seen += 1;
+                    } else {
+                        bubbles_seen += 1;
+                        bad.extend(check_popovers_on_screen(&mut h, &what));
+                    }
+                }
+            }
+            let ctx = h.ctx.clone();
+            h.state_mut()
+                .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    assert!(
+        margin_seen > 0 && bubbles_seen > 0,
+        "margin {margin_seen}, bubbles {bubbles_seen}"
+    );
+}
+
+/// Issue #91, the mechanism: when the document surface is laid out wider than what is visible
+/// (here the whole app UI is given 420 pt more than the window, so its right part is clipped
+/// away), margin cards must not go into the invisible part: they stay in the visible margin
+/// or the comments fall back to bubbles, whose popovers stay on screen too.
+#[test]
+fn cards_stay_visible_when_the_surface_is_wider_than_the_window() {
+    let dir = tmpdir("wider-surface");
+    let doc = dir.join("draft.md");
+    std::fs::write(&doc, WIDE).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1500.0, 760.0))
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| {
+                let r = ui.max_rect();
+                let wide = Rect::from_min_size(r.min, egui::vec2(r.width() + 420.0, r.height()));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(wide));
+                app.ui(&mut child)
+            },
+            MarkiseApp::new(AppOptions {
+                open: vec![doc],
+                ..Default::default()
+            }),
+        );
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+    let screen = h.ctx.content_rect();
+    let mut bad = Vec::new();
+    for width in [None, Some(480.0), Some(700.0)] {
+        h.state_mut().set_overrides(markise_theme::Overrides {
+            content_width: width,
+            ..Default::default()
+        });
+        h.run_steps(4);
+        let surface = h.state_mut().viewer().unwrap().surface_rect().unwrap();
+        assert!(
+            surface.right() > screen.right() + 300.0,
+            "the surface is wider: {surface:?}"
+        );
+        let cs = comments(&mut h);
+        assert_eq!(cs.len(), 2);
+        for c in &cs {
+            if let Some(card) = c.card
+                && !screen.contains_rect(card)
+            {
+                bad.push(format!(
+                    "content width {width:?}: card {card:?} outside the window {screen:?}"
+                ));
+            }
+        }
+        if cs.iter().all(|c| c.card.is_none()) {
+            // bubbles: each popover on screen
+            for (i, c) in cs.iter().enumerate() {
+                h.hover_at(c.glyph.center());
+                let t = Instant::now();
+                while comments(&mut h)[i].card.is_none() && t.elapsed() < Duration::from_secs(5) {
+                    h.step();
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let card = comments(&mut h)[i].card.expect("popover");
+                if !screen.contains_rect(card) {
+                    bad.push(format!(
+                        "content width {width:?}: popover {card:?} outside the window {screen:?}"
+                    ));
+                }
+                h.hover_at(egui::pos2(100.0, 700.0));
+                h.run_steps(3);
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    // with a narrow column the visible margin holds cards
+    h.state_mut().set_overrides(markise_theme::Overrides {
+        content_width: Some(480.0),
+        ..Default::default()
+    });
+    h.run_steps(4);
+    assert!(
+        comments(&mut h).iter().all(|c| c.card.is_some()),
+        "margin cards in the visible margin"
+    );
+}

@@ -122,11 +122,16 @@ Show comments, and a switch in the comments panel header):
 - `margin` (default): its body is a rounded card in the right margin, aligned with its line
   (cards stack downwards when they would overlap): bubble icon, `@author` (from the `@name:`
   prefix) in bold, then the text in the normal-weight UI font, wrapped at about 240 pt, line
-  breaks kept. A thin connector in the margin and the comment tint link it to its line. When the
-  margin is too narrow (under ~190 pt) the bubbles behaviour applies.
+  breaks kept. A thin connector in the margin and the comment tint link it to its line. The
+  margin is the room actually visible between the content column's right edge (after the
+  theme's max-width, padding and centring) and the visible right edge of the document surface
+  (window and clip edge, scrollbar excluded); when it is too narrow for a card of at least
+  154 pt (margin under 190 pt, e.g. a full-width column) the bubbles behaviour applies (issue
+  #91).
 - `bubbles`: only the glyph; resting the pointer on it for 150 ms opens a non-modal popover card
   (same look) that stays while the pointer is on the glyph or the card and closes when it
-  leaves.
+  leaves. The popover opens below the glyph and flips left or up near the visible area's
+  edges, so it always stays on screen.
 - A click on the glyph or the card puts the caret at the end of the comment's text (its source
   is revealed for editing); in bubbles mode the popover stays pinned until Esc.
 - Only the visible items' comments are looked at and only shown cards are shaped (layout
