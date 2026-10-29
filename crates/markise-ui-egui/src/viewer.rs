@@ -59,11 +59,8 @@ pub struct ViewerOutput {
 #[derive(Clone, Debug)]
 struct HoverBar {
     mark: markise_doc::review::ReviewMark,
-    /// The document revision the mark was found in: on any other revision the bar's target is
-    /// invalid until it is found again.
+    /// The document revision the mark was found in: on any other revision the bar is hidden.
     counter: u64,
-    /// The screen point the mark was hit at (re-hit-tested after an edit).
-    hit_at: Pos2,
     /// Where the bar sits (screen, top left), fixed while the same mark is hovered.
     anchor: Pos2,
     /// The bar's rectangle at the last frame (the pointer may move onto it).
@@ -1152,19 +1149,11 @@ impl DocViewer {
         if let Some(id) = chosen {
             out.review = Some((id, None));
         }
-        // hover bar: after any edit its target is found again where it was hit, or the bar
-        // goes (review round 4: never act on an obsolete offset)
+        // hover bar: any edit hides it (review round 5: never act on an obsolete or a
+        // different mark); it comes back with fresh data on the next pointer move over a mark
         let counter = self.ed.session.revision().counter;
-        if let Some(h) = self.hover.clone()
-            && h.counter != counter
-        {
-            let kind = h.mark.kind;
-            let again = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
-                self.hit_screen(h.hit_at, rect.top(), sh, images)
-            })
-            .and_then(|pos| self.suggestion_at(pos.offset))
-            .filter(|m| m.kind == kind);
-            self.hover = again.map(|m| HoverBar { mark: m, counter, ..h });
+        if self.hover.as_ref().is_some_and(|h| h.counter != counter) {
+            self.hover = None;
         }
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let on_bar = self
@@ -1192,7 +1181,6 @@ impl DocViewer {
                         self.hover = Some(HoverBar {
                             mark: m,
                             counter: self.ed.session.revision().counter,
-                            hit_at: p,
                             anchor: pos2(p.x - 24.0, p.y - 40.0),
                             rect: None,
                         });

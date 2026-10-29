@@ -311,12 +311,12 @@ fn stale_panel_rows_are_disabled_until_the_next_listing() {
     assert_eq!(text(&h), "A\n");
 }
 
-/// Review round 4: the hover bar never acts on an obsolete offset — hover A, move onto the
-/// bar, delete A (an edit while the pointer is on the bar), click Reject: nothing happens and
-/// B stays.
+/// Review rounds 4 and 5: the hover bar never acts on an obsolete or a different mark —
+/// hover `two`, move onto the bar, delete that mark so the adjacent `four` slides under the
+/// point, click Reject: nothing happens (any edit hides the bar).
 #[test]
-fn hover_bar_drops_its_target_after_an_edit() {
-    let src = "One {--two --}mid {--four--} end.\n";
+fn hover_bar_hides_after_an_edit() {
+    let src = "One {--two--}{--four--} end.\n";
     let (mut h, _p) = open("hover-stale", src);
     let r = h.state_mut().viewer().unwrap().item_screen_rect(0).expect("visible");
     h.hover_at(egui::pos2(r.left() + 48.0, r.top() + 10.0));
@@ -326,28 +326,29 @@ fn hover_bar_drops_its_target_after_an_edit() {
         .viewer()
         .unwrap()
         .hover_bar_rect()
-        .expect("the bar over A");
-    // onto the bar (it stays), then delete A from the keyboard
+        .expect("the bar over two");
+    // onto the bar (it stays), then the first mark goes away
     h.hover_at(bar.center());
     h.run_steps(2);
+    assert!(h.state_mut().viewer().unwrap().hover_bar_rect().is_some(), "on the bar");
     {
         let v = h.state_mut().viewer().unwrap();
         v.ed.edit(|s| {
-            s.apply_external(&markise_doc::PatchSet::delete(4..14), "Test Edit", false)
+            s.apply_external(&markise_doc::PatchSet::delete(4..13), "Test Edit", false)
                 .unwrap()
         });
     }
     h.run_steps(3);
-    assert_eq!(text(&h), "One mid {--four--} end.\n");
+    assert_eq!(text(&h), "One {--four--} end.\n");
     assert!(
         h.state_mut().viewer().unwrap().hover_bar_rect().is_none(),
-        "no suggestion where A was hit: the bar is gone"
+        "any edit hides the bar"
     );
     if let Some(n) = h.query_all_by_label("Reject").next() {
         n.click();
     }
     h.run_steps(3);
-    assert_eq!(text(&h), "One mid {--four--} end.\n", "B stays");
+    assert_eq!(text(&h), "One {--four--} end.\n", "four stays");
 }
 
 #[test]

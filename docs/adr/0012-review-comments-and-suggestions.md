@@ -154,8 +154,7 @@ PDF/PNG/Pandoc (export model): insertions underlined, deletions struck, comments
   revision the rows are disabled (a click does nothing) until the next listing arrives, so a
   stale row never acts on another mark.
 - Hover bar: Accept / Reject above a suggestion under the pointer (rendered view, editable).
-  After any edit its target is found again at the point where it was hit; if no suggestion of
-  the same kind is there, the bar goes.
+  Any edit hides it; it comes back with fresh data on the next pointer move over a mark.
 - **Save Copy Without Comments…** (File): asks through the confirm seam whether to accept or
   reject pending suggestions (skipped when there are none), asks for a new file (default
   `<name> (clean).md`), refuses the document's own file, and writes through the checked save
