@@ -336,6 +336,12 @@ struct Ctx<'a> {
     /// Heading ids in document order, assigned in a first pass.
     headings: Vec<Heading>,
     next_heading: usize,
+    /// The `[toc]` block's HTML, formatted on first use and copied for every further `[toc]`
+    /// (each lists the same headings; issue #29).
+    toc_html: Option<String>,
+    /// TOC entries formatted so far (work counter for the scaling test).
+    #[cfg(test)]
+    toc_entries_formatted: usize,
     /// Footnote label → number (definition order).
     footnote_numbers: HashMap<String, usize>,
     footnotes: Vec<(usize, String)>,
@@ -443,6 +449,9 @@ impl<'a> Ctx<'a> {
             opts,
             headings: Vec::new(),
             next_heading: 0,
+            toc_html: None,
+            #[cfg(test)]
+            toc_entries_formatted: 0,
             footnote_numbers: HashMap::new(),
             footnotes: Vec::new(),
             san: RefCell::new(sanitize::Sanitizer::new()),
@@ -762,7 +771,16 @@ impl<'a> Ctx<'a> {
     }
 
     fn toc(&mut self, out: &mut String) {
-        out.push_str("<div class='md-toc' mdtype='toc'><p class='md-toc-content' role='list'>");
+        if self.toc_html.is_none() {
+            self.toc_html = Some(self.format_toc());
+        }
+        if let Some(html) = &self.toc_html {
+            out.push_str(html);
+        }
+    }
+
+    fn format_toc(&mut self) -> String {
+        let mut out = String::from("<div class='md-toc' mdtype='toc'><p class='md-toc-content' role='list'>");
         for (i, h) in self.headings.iter().enumerate() {
             let _ = write!(
                 out,
@@ -773,6 +791,11 @@ impl<'a> Ctx<'a> {
             );
         }
         out.push_str("</p></div>\n");
+        #[cfg(test)]
+        {
+            self.toc_entries_formatted += self.headings.len();
+        }
+        out
     }
 
     fn inlines(&self, s: &str, nodes: &[Inline], out: &mut String) {
@@ -1279,6 +1302,52 @@ mod tests {
         assert!(h.contains(
             "<span class='md-toc-item md-toc-h2' data-ref='n1'><a class='md-toc-inner' href='#b'>B</a></span>"
         ));
+    }
+
+    /// `n` headings with a `[toc]` every `n / m` headings (`m` TOCs).
+    fn toc_doc(n: usize, m: usize) -> String {
+        let every = n / m;
+        let mut s = String::new();
+        for i in 0..n {
+            if i % every == 0 {
+                s.push_str("[TOC]\n\n");
+            }
+            s.push_str(&format!("## H *{i}*\n\ntext {i}\n\n"));
+        }
+        s
+    }
+
+    /// Issue #29: the table of contents is formatted once per export however many `[toc]`
+    /// blocks there are; every `[toc]` still lists all headings (spec 01 R3.11.1).
+    #[test]
+    fn toc_formatted_once_per_export() {
+        for (n, m) in [(100, 1), (100, 10), (100, 100), (1000, 10), (1000, 100), (2000, 50)] {
+            let doc = parse(&toc_doc(n, m));
+            let opts = HtmlOptions::default();
+            let mut ctx = Ctx::new(&doc, &opts);
+            let html = ctx.render_write();
+            assert_eq!(ctx.headings.len(), n);
+            // work: linear in the headings, independent of the TOC count
+            assert_eq!(ctx.toc_entries_formatted, n, "{n} headings × {m} TOCs");
+            // semantics: every TOC lists every heading
+            assert_eq!(html.matches("<div class='md-toc'").count(), m);
+            assert_eq!(html.matches("class='md-toc-item").count(), n * m);
+            let tocs: Vec<&str> = html
+                .split("<div class='md-toc'")
+                .skip(1)
+                .map(|t| t.split("</div>").next().unwrap_or(""))
+                .collect();
+            assert!(tocs.windows(2).all(|w| w[0] == w[1]), "all TOCs identical");
+        }
+    }
+
+    #[test]
+    fn toc_without_toc_blocks_formats_nothing() {
+        let doc = parse("# A\n\n## B\n");
+        let opts = HtmlOptions::default();
+        let mut ctx = Ctx::new(&doc, &opts);
+        ctx.render_write();
+        assert_eq!(ctx.toc_entries_formatted, 0);
     }
 
     fn tex_body(md: &str) -> String {

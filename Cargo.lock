@@ -2716,6 +2716,7 @@ dependencies = [
 name = "markise-export"
 version = "0.1.0-beta.1"
 dependencies = [
+ "criterion",
  "libc",
  "markise-blocks",
  "markise-corpus",
