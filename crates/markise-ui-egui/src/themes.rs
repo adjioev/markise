@@ -1140,6 +1140,17 @@ impl ThemeManager {
         }
     }
 
+    /// The theme family `id` in the wanted appearance, for a preview (Preferences' theme
+    /// cards): native at once, a CSS theme from the import cache — requested on the worker when
+    /// missing, so `None` until it arrives (or when it failed).
+    pub fn preview(&mut self, id: &ThemeId, dark: bool) -> Option<Theme> {
+        let src = self.family(id)?.pick(dark).clone();
+        match &src {
+            VariantSource::Css { path, .. } if self.failed.contains_key(path) => None,
+            _ => self.variant_theme(&src, dark),
+        }
+    }
+
     /// Menu label of the selected style.
     fn style_label(&self) -> String {
         match &self.selection.style {

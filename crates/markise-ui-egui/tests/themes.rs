@@ -228,8 +228,9 @@ fn style_colors_and_overrides_are_independent_and_persisted() {
         assert!(h.state().is_preferences_open());
         h.get_by_label("Style");
         h.get_by_label("Colors");
-        h.get_by_label("Complete theme");
-        h.get_by_label("Follow system");
+        // the complete themes are preview cards, light/dark a segmented control
+        h.get_by_role_and_label(egui::Role::RadioButton, "Phycat");
+        h.get_by_role_and_label(egui::Role::RadioButton, "System");
         h.get_by_role_and_label(egui::Role::Slider, "Line height");
         h.key_press(egui::Key::Escape);
         h.run_steps(2);

@@ -95,8 +95,17 @@ fn open_at(h: &mut H, s: Section) {
     h.run_steps(2);
 }
 
+/// Activates a control that may be below the fold of the settings pane: keyboard focus and
+/// Space, as a keyboard user would (a pointer click needs the row scrolled into view).
+fn click(h: &mut H, role: egui::Role, label: &str) {
+    h.get_by_role_and_label(role, label).focus();
+    h.run_steps(1);
+    h.key_press(Key::Space);
+    h.run_steps(2);
+}
+
 fn toggled(h: &H, label: &str) -> bool {
-    h.get_by_role_and_label(egui::Role::CheckBox, label)
+    h.get_by_role_and_label(egui::Role::Switch, label)
         .accesskit_node()
         .toggled()
         == Some(Toggled::True)
@@ -130,7 +139,9 @@ fn opens_with_cmd_comma_and_from_the_menus_and_esc_closes() {
     h.get_by_label_contains("Preferences…").click();
     h.run_steps(2);
     assert!(h.state().is_preferences_open());
-    h.get_by_label("Done").click();
+    // no Done button (changes apply live): the × closes
+    assert!(h.query_by_label("Done").is_none());
+    h.get_by_label("Close").click();
     h.run_steps(2);
     assert!(!h.state().is_preferences_open());
 
@@ -172,10 +183,11 @@ fn every_section_renders_its_settings() {
         (
             Section::Appearance,
             &[
-                "Complete theme",
+                "Markise",
+                "Drake",
                 "Style",
                 "Colors",
-                "Follow system",
+                "System",
                 "Body font",
                 "Show toolbar",
                 "Top",
@@ -218,8 +230,7 @@ fn window_and_menus_change_the_same_settings_both_ways() {
     open_at(&mut h, Section::Appearance);
     assert!(h.state().toolbar_state().is_some());
     assert_eq!(menu_check(&h, "view.toolbar"), Check::Toggle(true));
-    h.get_by_label("Show toolbar").click();
-    h.run_steps(2);
+    click(&mut h, egui::Role::Switch, "Show toolbar");
     assert!(h.state().toolbar_state().is_none(), "the toolbar is gone");
     assert_eq!(menu_check(&h, "view.toolbar"), Check::Toggle(false));
     wait_for_file(&mut h, &settings, "showToolbar written", |s| {
@@ -282,7 +293,7 @@ fn window_and_menus_change_the_same_settings_both_ways() {
 
     // Appearance → light/dark and the View → Theme switcher
     open_at(&mut h, Section::Appearance);
-    h.get_by_label("Dark").click();
+    h.get_by_role_and_label(egui::Role::RadioButton, "Dark").click();
     h.run_steps(2);
     assert_eq!(h.state().theme_manager().appearance(), Appearance::Dark);
     wait_until(&mut h, "dark theme", |a| a.theme().dark);
@@ -317,7 +328,7 @@ fn search_filters_settings_by_label() {
     h.key_press_modifiers(cmd(), Key::A);
     h.get_by_label("Search settings").type_text("dark");
     h.run_steps(2);
-    assert!(h.query_by_label("Follow system").is_some());
+    assert!(h.query_by_label("System").is_some());
     assert!(h.query_by_label("Soft wrap").is_none());
     // nothing matches
     h.key_press_modifiers(cmd(), Key::A);
@@ -359,8 +370,7 @@ fn reset_to_defaults_asks_then_restores_the_section() {
     open_at(&mut h, Section::Editor);
 
     // Cancel keeps everything
-    h.get_by_label("Reset to Defaults").click();
-    h.run_steps(2);
+    click(&mut h, egui::Role::Button, "Reset to Defaults");
     let q = s.last().expect("asked");
     assert_eq!(q.kind, Kind::ResetSettings);
     assert!(q.message.contains("Editor"));
@@ -370,8 +380,7 @@ fn reset_to_defaults_asks_then_restores_the_section() {
     assert_eq!(h.state().preference_values().editing, changed);
 
     // Reset restores the defaults, in the app and the file
-    h.get_by_label("Reset to Defaults").click();
-    h.run_steps(2);
+    click(&mut h, egui::Role::Button, "Reset to Defaults");
     s.answer(Choice::Reset);
     h.run_steps(2);
     assert_eq!(h.state().preference_values().editing, EditingSettings::default());
@@ -386,8 +395,7 @@ fn reset_to_defaults_asks_then_restores_the_section() {
     h.state_mut().set_theme_choice(Appearance::Dark);
     h.state_mut().set_show_toolbar(false);
     open_at(&mut h, Section::Appearance);
-    h.get_by_label("Reset to Defaults").click();
-    h.run_steps(2);
+    click(&mut h, egui::Role::Button, "Reset to Defaults");
     s.answer(Choice::Reset);
     h.run_steps(3);
     assert!((h.state().zoom() - 1.0).abs() < 1e-4);
@@ -417,13 +425,10 @@ fn tab_moves_between_controls() {
     seen.dedup();
     assert!(seen.len() >= 6, "the focus moved through the controls: {seen:?}");
     // the source-mode check boxes are among them, reachable by name
-    let line_numbers = h.get_by_role_and_label(egui::Role::CheckBox, "Line numbers");
+    let line_numbers = h.get_by_role_and_label(egui::Role::Switch, "Line numbers");
     line_numbers.focus();
     h.run_steps(1);
-    assert!(
-        h.get_by_role_and_label(egui::Role::CheckBox, "Line numbers")
-            .is_focused()
-    );
+    assert!(h.get_by_role_and_label(egui::Role::Switch, "Line numbers").is_focused());
     h.key_press(Key::Space);
     h.run_steps(2);
     assert!(h.state().source_prefs().line_numbers, "Space toggles the focused box");
@@ -443,11 +448,12 @@ fn survives_150_percent_zoom_and_dark_mode() {
     let screen = h.ctx.content_rect();
     for s in markise_ui_egui::prefs::Section::ALL {
         open_at(&mut h, s);
-        let done = h.get_by_label("Done").rect();
+        let close = h.get_by_label("Close").rect();
         let search = h.get_by_label("Search settings").rect();
+        let export = h.get_by_role_and_label(egui::Role::Button, "Export").rect();
         assert!(
-            screen.contains_rect(done) && screen.contains_rect(search),
-            "{s:?}: {done:?} / {search:?} inside {screen:?}"
+            screen.contains_rect(close) && screen.contains_rect(search) && screen.contains_rect(export),
+            "{s:?}: {close:?} / {search:?} / {export:?} inside {screen:?}"
         );
     }
     assert!((h.ctx.zoom_factor() - 1.5).abs() < 1e-3);
@@ -455,5 +461,61 @@ fn survives_150_percent_zoom_and_dark_mode() {
         markise_ui_egui::dialog::Look::get(&h.ctx).dark,
         "dialog colours follow dark mode"
     );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The restyled controls: a switch row toggles from anywhere on the row, the segmented
+/// control picks one segment, and a theme card applies that theme and writes settings.json.
+#[test]
+fn switches_segments_and_theme_cards() {
+    let d = tmpdir("controls");
+    let mut h = harness(&d);
+    let settings = settings_file(&d);
+    open_at(&mut h, Section::Source);
+    // switch: role, state, toggled by a click on the row
+    assert!(toggled(&h, "Soft wrap"));
+    h.get_by_role_and_label(egui::Role::Switch, "Soft wrap").click();
+    h.run_steps(2);
+    assert!(!toggled(&h, "Soft wrap"));
+    assert!(!h.state().source_prefs().soft_wrap);
+
+    // segmented control: one segment selected; clicking another picks it
+    open_at(&mut h, Section::Appearance);
+    let selected = |h: &H, l: &str| {
+        h.get_by_role_and_label(egui::Role::RadioButton, l)
+            .accesskit_node()
+            .toggled()
+            == Some(Toggled::True)
+    };
+    assert!(selected(&h, "System") && !selected(&h, "Light") && !selected(&h, "Dark"));
+    h.get_by_role_and_label(egui::Role::RadioButton, "Light").click();
+    h.run_steps(2);
+    assert_eq!(h.state().theme_manager().appearance(), Appearance::Light);
+    assert!(selected(&h, "Light") && !selected(&h, "System"));
+
+    // theme cards: Markise is selected; clicking Drake applies it and persists it
+    assert!(selected(&h, "Markise"));
+    h.get_by_role_and_label(egui::Role::RadioButton, "Drake").click();
+    h.run_steps(2);
+    wait_until(&mut h, "Drake applied", |a| a.theme().name.starts_with("Drake"));
+    assert!(selected(&h, "Drake") && !selected(&h, "Markise"));
+    wait_for_file(&mut h, &settings, "theme written", |s| {
+        s.contains("\"colors\": \"builtin:drake\"") && s.contains("\"style\": \"theme:builtin:drake\"")
+    });
+    // the cards show the themes' own colours once imported
+    wait_until(&mut h, "previews", |a| {
+        let v = a.preference_values();
+        v.themes.len() >= 4 && v.themes.iter().all(|t| t.swatch.is_some())
+    });
+
+    // a typography override shows ↺, which puts the style's value back
+    h.state_mut().set_overrides(markise_theme::Overrides {
+        line_height: Some(2.0),
+        ..Default::default()
+    });
+    h.run_steps(2);
+    click(&mut h, egui::Role::Button, "Use the style’s line height");
+    assert!(h.state().theme_manager().overrides().line_height.is_none());
+    assert!(h.query_by_label("Use the style’s line height").is_none());
     let _ = std::fs::remove_dir_all(&d);
 }

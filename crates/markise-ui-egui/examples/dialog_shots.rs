@@ -172,9 +172,13 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
     let mut texs: HashMap<TextureId, Tex> = HashMap::new();
     // the sidebar scenes point at a row (hover highlight)
     let hover = name.starts_with("sidebar").then_some(egui::pos2(150.0, 230.0));
-    let input = || {
+    // like egui-winit: the window's size in points shrinks with the app's zoom factor
+    let input = |zoom: f32| {
         let mut raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(w_pt, h_pt) / zoom,
+            )),
             events: hover.map(egui::Event::PointerMoved).into_iter().collect(),
             ..Default::default()
         };
@@ -188,7 +192,8 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
     let mut stable = 0;
     let mut done = false;
     loop {
-        let mut full = ctx.run_ui(input(), |ui| app.ui(ui));
+        let zoom = ctx.zoom_factor();
+        let mut full = ctx.run_ui(input(zoom), |ui| app.ui(ui));
         apply_all(&mut texs, &mut full.textures_delta);
         let ready = app.model().is_some()
             && !app.is_busy()
@@ -213,7 +218,15 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
         }
         if stable >= 12 || start.elapsed() > Duration::from_secs(20) {
             let prims = ctx.tessellate(full.shapes, full.pixels_per_point);
-            let r = rasterize(&prims, &texs, ppp, (w_pt * ppp) as usize, (h_pt * ppp) as usize);
+            // the app's zoom raises pixels_per_point above the native scale: tessellated
+            // coordinates are points × that factor, the image keeps the native pixel size
+            let r = rasterize(
+                &prims,
+                &texs,
+                full.pixels_per_point,
+                (w_pt * ppp) as usize,
+                (h_pt * ppp) as usize,
+            );
             save_png(&r, out);
             break;
         }

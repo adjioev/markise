@@ -428,6 +428,8 @@ pub struct MarkiseApp {
     font_window: bool,
     /// The Preferences window (issue #50).
     prefs: crate::prefs::PrefsState,
+    /// Colours of the Preferences theme cards (refreshed while the window is open).
+    swatches: Vec<(ThemeId, Option<crate::prefs::Swatch>)>,
     /// Summary of the last "Import theme…" (shown in the report window).
     installed: Option<InstallDone>,
     /// Fingerprint of the theme the egui visuals were built from.
@@ -526,6 +528,7 @@ impl MarkiseApp {
             theme_report: false,
             font_window: false,
             prefs: Default::default(),
+            swatches: Vec::new(),
             installed: None,
             visuals_fp: None,
             theme_gen: 0,

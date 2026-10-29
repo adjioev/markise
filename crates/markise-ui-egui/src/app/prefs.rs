@@ -10,7 +10,7 @@ use markise_theme::Overrides;
 use markise_theme::catalog::{Origin, Selection, ThemeFamily, ThemeId};
 
 use super::{Ask, Banner, MarkiseApp};
-use crate::prefs::{Change, FontDefaults, Section, Values};
+use crate::prefs::{Change, FontDefaults, Section, Swatch, ThemeCard, Values};
 
 /// The family's name as the Themes menu shows it.
 fn family_label(f: &ThemeFamily) -> String {
@@ -76,7 +76,11 @@ impl MarkiseApp {
             themes: families
                 .iter()
                 .filter(|f| f.id == ThemeId::Markise || matches!(f.origin, Origin::Builtin | Origin::User))
-                .map(|f| (f.id.clone(), family_label(f)))
+                .map(|f| ThemeCard {
+                    id: f.id.clone(),
+                    name: family_label(f),
+                    swatch: self.swatches.iter().find(|(id, _)| *id == f.id).and_then(|(_, s)| *s),
+                })
                 .collect(),
             theme: sel.complete_theme().cloned(),
             styles: t.style_choices().into_iter().map(|(id, n, _)| (id, n)).collect(),
@@ -103,12 +107,34 @@ impl MarkiseApp {
         if !self.prefs.is_open() {
             return;
         }
+        self.update_swatches();
         let values = self.preference_values();
         let mut changes = Vec::new();
         crate::prefs::show(ctx, &mut self.prefs, &values, &mut changes);
         for c in changes {
             self.apply_preference(ctx, c);
         }
+    }
+
+    /// Colours of the theme preview cards in the current appearance (CSS themes are imported
+    /// on the theme worker the first time; their card fills in when the import arrives).
+    fn update_swatches(&mut self) {
+        let dark = self.theme.dark;
+        let ids: Vec<ThemeId> = self
+            .themes
+            .families()
+            .iter()
+            .filter(|f| f.id == ThemeId::Markise || matches!(f.origin, Origin::Builtin | Origin::User))
+            .map(|f| f.id.clone())
+            .collect();
+        let swatches: Vec<(ThemeId, Option<Swatch>)> = ids
+            .into_iter()
+            .map(|id| {
+                let s = self.themes.preview(&id, dark).map(|t| Swatch::of(&t));
+                (id, s)
+            })
+            .collect();
+        self.swatches = swatches;
     }
 
     /// Applies one change from the Preferences window exactly as the menu item would.
