@@ -68,6 +68,24 @@ pub mod planners {
     pub const DELETE_LINE: PlannerId = PlannerId("delete.line");
     pub const DELETE_SCOPE: PlannerId = PlannerId("delete.scope");
     pub const DELETE_BLOCK: PlannerId = PlannerId("delete.block");
+    /// Review (ADR 0012): wrap the selection as a highlighted passage with an empty comment
+    /// after it (a collapsed caret: an empty comment), the caret inside the comment.
+    pub const REVIEW_ADD_COMMENT: PlannerId = PlannerId("review.addComment");
+    /// Accept the suggestion at the caret (or at the `at` parameter, a source offset).
+    pub const REVIEW_ACCEPT: PlannerId = PlannerId("review.accept");
+    /// Reject the suggestion at the caret (or at `at`).
+    pub const REVIEW_REJECT: PlannerId = PlannerId("review.reject");
+    /// Accept every suggestion of the document.
+    pub const REVIEW_ACCEPT_ALL: PlannerId = PlannerId("review.acceptAll");
+    /// Reject every suggestion of the document.
+    pub const REVIEW_REJECT_ALL: PlannerId = PlannerId("review.rejectAll");
+    /// Delete the comment (or highlight) at the caret (or at `at`): a highlight and the
+    /// comment attached to it go together, the highlighted text stays.
+    pub const REVIEW_DELETE_COMMENT: PlannerId = PlannerId("review.deleteComment");
+    /// The patches that turn the document into a clean copy (every comment and highlight
+    /// removed, every suggestion accepted — or rejected with the `reject` parameter). Only
+    /// for building a copy: the plan is not meant to be applied to the open document.
+    pub const REVIEW_CLEAN_COPY: PlannerId = PlannerId("review.cleanCopy");
 
     /// Heading level for a `block.headingN` id.
     pub fn heading_level(id: PlannerId) -> Option<u8> {

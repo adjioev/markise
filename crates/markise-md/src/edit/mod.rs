@@ -4,6 +4,7 @@
 
 pub(crate) mod blocks;
 pub(crate) mod inline_fmt;
+pub(crate) mod review;
 pub(crate) mod rules;
 pub(crate) mod select;
 pub(crate) mod structure;

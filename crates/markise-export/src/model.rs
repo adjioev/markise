@@ -163,6 +163,10 @@ impl ExDoc {
 pub struct ModelOptions {
     /// Run the code highlighter on fenced code with a language.
     pub highlight: bool,
+    /// Review comments kept (as bracketed italic text after the passage, highlights
+    /// highlighted) or stripped (ADR 0012). Suggestions are always shown as underlined
+    /// insertions and struck deletions.
+    pub comments: crate::CommentExport,
 }
 
 /// Plain text of inline content (alt text, outline titles).
@@ -568,6 +572,22 @@ impl Builder<'_> {
                 self.footnote_numbers.get(label).copied().unwrap_or(0),
             )),
             InlineKind::Emoji { emoji } => out.push(ExInline::Text((*emoji).to_string())),
+            InlineKind::Critic { kind, content } => {
+                use markise_md::inline::CriticKind as K;
+                let keep = self.opts.comments == crate::CommentExport::Keep;
+                match kind {
+                    K::Insert | K::New => out.push(ExInline::Underline(self.inlines(s, &n.children))),
+                    K::Delete | K::Old => out.push(ExInline::Strike(self.inlines(s, &n.children))),
+                    K::Substitute => out.extend(self.inlines(s, &n.children)),
+                    K::Highlight if keep => out.push(ExInline::Highlight(self.inlines(s, &n.children))),
+                    K::Highlight => out.extend(self.inlines(s, &n.children)),
+                    K::Comment if keep => {
+                        let t = content.slice(s).split(['\n', '\r']).collect::<Vec<_>>().join(" ");
+                        out.push(ExInline::Emph(vec![ExInline::Text(format!(" [{}]", t.trim()))]));
+                    }
+                    K::Comment => {}
+                }
+            }
             // wikilinks: their label as text (PDF/PNG/Pandoc have no vault to resolve against)
             InlineKind::WikiLink { inner, .. } => {
                 let c = inner.slice(s);
@@ -632,7 +652,13 @@ mod tests {
     use markise_md::parse;
 
     fn model(md: &str) -> ExDoc {
-        ExDoc::build(&parse(md), &ModelOptions { highlight: true })
+        ExDoc::build(
+            &parse(md),
+            &ModelOptions {
+                highlight: true,
+                ..Default::default()
+            },
+        )
     }
 
     #[test]

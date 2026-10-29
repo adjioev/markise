@@ -22,10 +22,12 @@ pub mod discover;
 pub mod import;
 pub mod install;
 pub mod palettes;
+pub mod review;
 pub mod style;
 pub mod syntax;
 
 pub use import::{ImportOptions, ImportReport, ImportResult, Issue, Location, import_css, import_theme_file};
+pub use review::ReviewColors;
 pub use style::{ColorScheme, Overrides, Style, compose, compose_with};
 pub use syntax::{TokenKind, TokenLook, TokenRun};
 

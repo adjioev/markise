@@ -212,6 +212,14 @@ impl MarkiseApp {
         }
         req.wikilinks = self.wikilinks();
         req.vault = self.vault_index().cloned();
+        // comments and suggestions (ADR 0012): parsed as in the editor, comments kept or
+        // stripped by File → Export → Include Comments
+        req.critic_markup = self.critic_markup();
+        req.comments = if self.export_comments() {
+            markise_engine::export::CommentExport::Keep
+        } else {
+            markise_engine::export::CommentExport::Strip
+        };
         let wake = self.wake_handle();
         self.export.message = None;
         self.export.last = Some(req.clone());

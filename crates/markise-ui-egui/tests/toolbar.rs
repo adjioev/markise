@@ -622,3 +622,44 @@ fn long_drop_down_is_bounded_and_scrolls() {
     let first = h.get_by_label("Strong").rect();
     assert!(first.top() >= popup.top() - 0.5, "first entry {first:?} back in view");
 }
+
+/// Owner addition to issue #69 (ADR 0012): the Comment button runs Add Comment — a selection
+/// is wrapped and the caret goes into the comment, a caret gets an empty comment; one undo
+/// step; the button is gone while comments and suggestions are off.
+#[test]
+fn comment_button_adds_a_comment() {
+    let (mut h, p) = open("comment", "Hello world\n", 1000.0);
+    let c = control(&h, "review.addComment");
+    assert_eq!(c.label, "Comment");
+    assert!(c.tooltip().starts_with("Comment ("), "{}", c.tooltip());
+    select(&mut h, 0, 5);
+    click(&mut h, "Comment");
+    assert_eq!(text(&h), "{==Hello==}{>><<} world\n");
+    let caret = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .session
+        .selection()
+        .primary()
+        .focus
+        .offset;
+    assert_eq!(caret, 14, "the caret is inside the empty comment");
+    assert!(doc_focused(&mut h));
+    // one undo step
+    h.key_press_modifiers(cmd(), Key::Z);
+    h.step();
+    assert_eq!(text(&h), "Hello world\n");
+    // no selection: an empty comment at the caret
+    select(&mut h, 5, 5);
+    click(&mut h, "Comment");
+    assert_eq!(text(&h), "Hello{>><<} world\n");
+    assert_eq!(save(&mut h, &p), "Hello{>><<} world\n");
+    // off in Preferences: no button
+    h.state_mut().set_critic_markup(false);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    h.step();
+    assert!(h.state().toolbar_state().unwrap().get("review.addComment").is_none());
+    assert!(h.query_by_label("Comment").is_none());
+}

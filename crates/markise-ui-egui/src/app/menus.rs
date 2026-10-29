@@ -134,6 +134,10 @@ impl MarkiseApp {
         };
         let controls = crate::toolbar::all_ids()
             .filter_map(|id| {
+                // Add Comment only while comments and suggestions are on (ADR 0012)
+                if id == "review.addComment" && !self.critic_markup() {
+                    return None;
+                }
                 let spec = reg.get(id)?;
                 let enabled = active && self.command_enabled(id, false);
                 let shortcut = km
@@ -141,7 +145,12 @@ impl MarkiseApp {
                     .map(|c| crate::menu::shortcut_text(c, self.menu_platform));
                 Some(crate::toolbar::Control {
                     id: spec.desc.id,
-                    label: spec.desc.label,
+                    // the toolbar button reads "Comment" (owner, issue #69)
+                    label: if id == "review.addComment" {
+                        "Comment"
+                    } else {
+                        spec.desc.label
+                    },
                     shortcut,
                     enabled,
                     // state is shown even where the command is a no-op (Paragraph in a
@@ -250,6 +259,7 @@ impl MarkiseApp {
             Entry::Separator,
             self.item(MenuAction::Command("file.save"), "Save", has_doc, Check::None),
             self.item(MenuAction::Command("file.saveAs"), "Save As…", has_doc, Check::None),
+            self.app_item("file.saveCopyClean", has_doc, Check::None),
             Entry::Separator,
             self.app_item("file.rename", has_file, Check::None),
             self.item(
@@ -269,6 +279,8 @@ impl MarkiseApp {
         }
         menus.push(Menu::new("File", file));
         let mut edit = self.registry_menu("Edit", EDIT_ORDER, text_field);
+        edit.entries.push(Entry::Separator);
+        edit.entries.push(Entry::Submenu(self.review_menu(text_field)));
         if !mac {
             // Windows and Linux: Preferences at the end of the Edit menu (the GNOME/KDE
             // convention; macOS has it in the application menu)
@@ -314,6 +326,21 @@ impl MarkiseApp {
         }
     }
 
+    /// Edit → Comments & Suggestions (ADR 0012).
+    fn review_menu(&self, text_field: bool) -> Menu {
+        let ids: [Option<&'static str>; 8] = [
+            Some("review.addComment"),
+            None,
+            Some("review.accept"),
+            Some("review.reject"),
+            Some("review.deleteComment"),
+            None,
+            Some("review.acceptAll"),
+            Some("review.rejectAll"),
+        ];
+        Menu::new("Comments & Suggestions", self.command_entries(&ids, text_field))
+    }
+
     fn export_menu(&self) -> Menu {
         let mut v: Vec<Entry> = [
             ExportKind::Pdf,
@@ -345,6 +372,8 @@ impl MarkiseApp {
             Check::None,
         ));
         v.push(self.app_item("export.overwritePrevious", prev.is_some(), Check::None));
+        v.push(Entry::Separator);
+        v.push(self.app_item("export.comments", true, Check::Toggle(self.export_comments())));
         Menu::new("Export", v).enabled(self.doc.is_some() && !self.export.is_running())
     }
 
@@ -530,6 +559,9 @@ impl MarkiseApp {
             "view.highlightCode" => self.set_highlight_code(!self.highlight_code),
             "view.diagrams" => self.set_diagrams(!self.diagrams),
             "view.wikilinks" => self.set_wikilinks(!self.wikilinks()),
+            "view.criticMarkup" => self.set_critic_markup(!self.critic_markup()),
+            "file.saveCopyClean" if self.doc.is_some() => self.save_copy_without_comments(),
+            "export.comments" => self.set_export_comments(!self.export_comments()),
             "go.back" => self.go_back(),
             "go.forward" => self.go_forward(),
             "view.sourceLineNumbers" | "view.sourceSoftWrap" | "view.sourceCurrentLine" | "view.sourceWhitespace" => {

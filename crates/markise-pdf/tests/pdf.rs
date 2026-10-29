@@ -23,7 +23,13 @@ fn engine() -> std::sync::MutexGuard<'static, TextEngine> {
 }
 
 fn model(md: &str) -> ExDoc {
-    ExDoc::build(&markise_md::parse(md), &ModelOptions { highlight: true })
+    ExDoc::build(
+        &markise_md::parse(md),
+        &ModelOptions {
+            highlight: true,
+            ..Default::default()
+        },
+    )
 }
 
 fn pdf_of(md: &str, opts: PdfOptions) -> (Vec<u8>, usize) {

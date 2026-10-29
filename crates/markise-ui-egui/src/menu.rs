@@ -317,6 +317,11 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("view.diagrams", "Diagrams", &[]),
     // Markdown dialect extension (spec 06 V2.1; setting `markdown.wikilinks`)
     app("view.wikilinks", "Wikilinks", &[]),
+    // CriticMarkup comments and suggestions (ADR 0012; setting `markdown.criticMarkup`; shown
+    // in Preferences → Markdown, like Wikilinks)
+    app("view.criticMarkup", "Comments & Suggestions", &[]),
+    app("file.saveCopyClean", "Save Copy Without Comments…", &[]),
+    app("export.comments", "Include Comments", &[]),
     // Back / Forward between opened notes (spec 06 §2.7): ⌥⌘← / ⌥⌘→ on macOS (⌘[ / ⌘] are
     // Outdent / Indent, spec 02 §15), Alt+← / Alt+→ on Windows and Linux.
     app("go.back", "Back", &[both("Opt+Cmd+Left", "Alt+Left")]),

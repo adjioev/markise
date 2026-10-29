@@ -27,6 +27,21 @@ use raster::{Tex, apply_all, rasterize, save_png};
 const DOC: &str =
     "# Harbour log\n\nThe lamp was trimmed at dusk and the log written at dawn.\n\n- wind: NW 4\n- visibility: good\n";
 
+/// An AI-revised note with comments and suggestions (ADR 0012).
+const REVIEW_DOC: &str = "# Launch plan\n\n\
+Our product launches on {~~March 3~>March 10~~}{>>@ai: moved, the date was not confirmed<<}. \
+The marketing team will publish a blog post{-- and a newsletter--} on the same day.\n\n\
+- Budget: {~~$40,000~>$45,000~~} for ads\n\
+- Owner: Dana{++ (backup: Lee)++}\n\n\
+{==Risks are low because the beta had no major bugs.==}{>>too optimistic<<}\n";
+
+/// Replaces the document with [`REVIEW_DOC`] in the rendered view, the comments panel shown.
+fn review_setup(app: &mut MarkiseApp) {
+    app.edit_source_text(|t| *t = REVIEW_DOC.into());
+    app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
+    app.set_sidebar_tab(markise_ui_egui::sidebar::Tab::Comments);
+}
+
 type Setup = fn(&mut MarkiseApp, &Context, &Path);
 
 fn scenes() -> Vec<(&'static str, Setup)> {
@@ -123,6 +138,29 @@ fn scenes() -> Vec<(&'static str, Setup)> {
             app.toggle_folder(&dir.join("drafts"));
             // a second file: the Recent section lists both
             app.tree_action(ctx, TreeAction::Open(dir.join("tides.md")));
+        }),
+        ("review-panel", |app, _, _| review_setup(app)),
+        // comments as margin cards: a narrower column leaves room on the right
+        ("review-margin", |app, ctx, _| {
+            review_setup(app);
+            app.menu_action(ctx, &MenuAction::Command("view.toggleSidebar"));
+            app.set_overrides(markise_theme::Overrides {
+                content_width: Some(480.0),
+                ..Default::default()
+            });
+        }),
+        ("review-reveal", |app, _, _| {
+            review_setup(app);
+            let at = REVIEW_DOC.find("March 10").unwrap();
+            if let Some(v) = app.viewer() {
+                v.ed.edit(|s| s.set_selection(markise_doc::Selection::caret(at)));
+                v.ed.refresh_focus();
+                v.request_refocus();
+            }
+        }),
+        ("review-clean-copy", |app, _, _| {
+            review_setup(app);
+            app.save_copy_without_comments();
         }),
         ("sidebar-outline", |app, _, _| {
             app.show_files_tab(false);

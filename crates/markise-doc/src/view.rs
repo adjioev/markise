@@ -154,8 +154,55 @@ pub enum InlineKind {
     Break {
         hard: bool,
     },
+    /// A review mark (CriticMarkup in Markdown, ADR 0012): a suggested insertion, deletion
+    /// or substitution, a highlight or a comment. Its markers are the opening and closing
+    /// delimiters (a substitution also has its separator as the middle marker). Insertions,
+    /// deletions and highlights hold their parsed content as children; a comment holds one
+    /// `Text` child with its text; a substitution holds exactly two children,
+    /// [`CriticKind::Old`] then [`CriticKind::New`] (marker-less containers of the old and
+    /// the new text).
+    Critic(CriticKind),
     /// Atomic substitution (entity, escape, emoji…): one caret stop over its source range.
     Atom,
+}
+
+/// Kind of a review mark ([`InlineKind::Critic`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CriticKind {
+    /// Suggested insertion (`{++…++}`).
+    Insert,
+    /// Suggested deletion (`{--…--}`).
+    Delete,
+    /// Suggested replacement (`{~~old~>new~~}`); children: [`CriticKind::Old`], [`CriticKind::New`].
+    Substitute,
+    /// Highlighted passage (`{==…==}`), usually followed by a comment.
+    Highlight,
+    /// Comment (`{>>…<<}`).
+    Comment,
+    /// The old text of a substitution (child of [`CriticKind::Substitute`]).
+    Old,
+    /// The new text of a substitution (child of [`CriticKind::Substitute`]).
+    New,
+}
+
+impl CriticKind {
+    /// Short name used by debug trees and tests (`insert`, `delete`, …).
+    pub fn name(self) -> &'static str {
+        match self {
+            CriticKind::Insert => "insert",
+            CriticKind::Delete => "delete",
+            CriticKind::Substitute => "substitute",
+            CriticKind::Highlight => "highlight",
+            CriticKind::Comment => "comment",
+            CriticKind::Old => "old",
+            CriticKind::New => "new",
+        }
+    }
+
+    /// A suggestion the user can accept or reject.
+    pub fn is_suggestion(self) -> bool {
+        matches!(self, CriticKind::Insert | CriticKind::Delete | CriticKind::Substitute)
+    }
 }
 
 /// One inline node. Ranges are byte offsets relative to the request's base
@@ -232,6 +279,7 @@ impl RichInline {
                 InlineKind::Image { .. } => "image".to_string(),
                 InlineKind::FootnoteRef { .. } => "fnref".to_string(),
                 InlineKind::WikiLink { .. } => "wikilink".to_string(),
+                InlineKind::Critic(k) => format!("critic.{}", k.name()),
                 InlineKind::Math { .. } => "math".to_string(),
                 InlineKind::Break { hard } => if *hard { "hardbreak" } else { "softbreak" }.to_string(),
                 k => format!("{k:?}").to_lowercase(),

@@ -49,7 +49,66 @@ pub struct ViewerOutput {
     /// Keystroke processing time this frame (input → laid out and painted), when there was
     /// keyboard input (`MARKISE_TIMING`).
     pub input_ms: Option<f64>,
+    /// A review command chosen in the document's context menu or the hover bar of a
+    /// suggestion (ADR 0012): command id and the source offset it acts at (`None`: at the
+    /// selection).
+    pub review: Option<(&'static str, Option<usize>)>,
 }
+
+/// The suggestion under the pointer and its floating Accept / Reject bar (ADR 0012).
+#[derive(Clone, Debug)]
+struct HoverBar {
+    mark: markise_doc::review::ReviewMark,
+    /// The document revision the mark was found in: on any other revision the bar is hidden.
+    counter: u64,
+    /// Where the bar sits (screen, top left), fixed while the same mark is hovered.
+    anchor: Pos2,
+    /// The bar's rectangle at the last frame (the pointer may move onto it).
+    rect: Option<Rect>,
+}
+
+/// A review comment shown in the visible part of the document (last frame), screen
+/// coordinates and absolute source offsets (ADR 0012).
+#[derive(Clone, Debug)]
+pub struct ShownComment {
+    /// The bubble glyph (revealed: the first row of the raw text).
+    pub glyph: Rect,
+    /// The whole mark and its text.
+    pub source: std::ops::Range<usize>,
+    pub content: std::ops::Range<usize>,
+    pub text: Arc<str>,
+    pub revealed: bool,
+    /// Its card (margin card or open popover), when one was drawn.
+    pub card: Option<Rect>,
+}
+
+/// The bubbles-mode popover (ADR 0012).
+#[derive(Clone, Copy, Debug)]
+struct Popover {
+    /// Source start of the comment it shows.
+    key: usize,
+    /// When the pointer came onto the glyph (egui time).
+    since: f64,
+    /// Clicked: stays until Esc or another comment.
+    pinned: bool,
+}
+
+/// The pointer must rest on a bubble this long before its popover opens.
+pub const POPOVER_DELAY: f64 = 0.15;
+/// Narrowest right margin that still holds comment cards.
+const MIN_MARGIN: f32 = 190.0;
+
+/// Commands of the document's context menu (ADR 0012), `None`: separator.
+pub const CONTEXT_COMMANDS: &[Option<&str>] = &[
+    Some("review.addComment"),
+    None,
+    Some("review.accept"),
+    Some("review.reject"),
+    Some("review.deleteComment"),
+    None,
+    Some("review.acceptAll"),
+    Some("review.rejectAll"),
+];
 
 /// Selection granularity of a pointer drag (single, double, triple click).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +154,17 @@ pub struct DocViewer {
     refocus: bool,
     /// Screen rectangle of the caret at the last frame it was drawn (popups anchor to it).
     pub caret_screen: Option<Rect>,
+    /// The hovered suggestion's action bar.
+    hover: Option<HoverBar>,
+    /// Last suggestion lookup under the pointer: (revision counter, offset, result).
+    hover_cache: Option<(u64, usize, Option<markise_doc::review::ReviewMark>)>,
+    /// Pointer position and revision counter of the last hover lookup.
+    hover_key: Option<(Pos2, u64)>,
+    /// How comments are shown (setting `markdown.commentDisplay`).
+    comment_display: markise_engine::settings::CommentDisplay,
+    /// Comments of the visible items at the last frame, with their cards.
+    comments: Vec<ShownComment>,
+    popover: Option<Popover>,
     /// Copy button and language field of fenced code blocks (issue #76).
     code: code_tools::CodeTools,
 }
@@ -133,6 +203,12 @@ impl DocViewer {
             last_surface: None,
             refocus: false,
             caret_screen: None,
+            hover: None,
+            hover_cache: None,
+            hover_key: None,
+            comment_display: Default::default(),
+            comments: Vec::new(),
+            popover: None,
             code: Default::default(),
         }
     }
@@ -445,8 +521,20 @@ impl DocViewer {
                 out.edited = true;
             }
         }
+        // a press on a comment's bubble or card opens the comment for editing (ADR 0012)
+        let comment_press = if pressed && task.is_none() {
+            ui.input(|i| i.pointer.interact_pos()).and_then(|p| self.comment_at(p))
+        } else {
+            None
+        };
+        if let Some(i) = comment_press {
+            self.open_comment(i, true);
+            out.edited = true;
+            self.blink_from = now;
+        }
         if pressed
             && task.is_none()
+            && comment_press.is_none()
             && let Some(p) = ui.input(|i| i.pointer.interact_pos())
             && !self.on_toggle_or_link(p, rect.top(), modifiers)
         {
@@ -582,6 +670,9 @@ impl DocViewer {
             self.code_tools_ui(ui, &visible, rect, left, theme, focused, editable, &mut out, &mut sh);
         }
 
+        // ---- review comments: margin cards or bubble popovers (visible items only)
+        self.comment_cards(ui, &visible, rect, left, col_w, theme);
+
         // ---- selection and caret
         let sel = self.ed.session.selection().primary();
         if !sel.is_caret() {
@@ -610,7 +701,7 @@ impl DocViewer {
         if focused {
             let since = now - self.blink_from;
             let on = since >= BLINK_FOR || ((since / BLINK_HALF) as u64).is_multiple_of(2);
-            let caret = with_shaper(&ctx, parley, |sh| self.ed.caret_rect(sh, &*images));
+            let caret = with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.caret_rect(sh, &*images));
             self.caret_screen = None;
             if let Some(c) = caret {
                 let y = c.min.y - self.ed.view.scroll_y() as f32 + rect.top();
@@ -676,6 +767,11 @@ impl DocViewer {
             ctx.request_repaint();
         }
 
+        // ---- review: context menu and the hover bar of suggestions (ADR 0012)
+        if editable {
+            self.review_ui(ui, &resp, rect, parley, images, &mut out);
+        }
+
         // ---- scrollbar
         let total = self.ed.view.total_height().max(1.0);
         if total > vh as f64 + 1.0 {
@@ -729,6 +825,210 @@ impl DocViewer {
 
     /// The front-matter toggle or a Cmd/Ctrl-clicked link is under `p` (the press is not a
     /// caret placement).
+    /// Sets how comments are shown (setting `markdown.commentDisplay`).
+    pub fn set_comment_display(&mut self, d: markise_engine::settings::CommentDisplay) {
+        self.comment_display = d;
+    }
+
+    /// The comments of the visible items at the last frame, with their cards (tests).
+    pub fn shown_comments(&self) -> &[ShownComment] {
+        &self.comments
+    }
+
+    /// The suggestion hover bar's rectangle at the last frame, when shown (tests).
+    pub fn hover_bar_rect(&self) -> Option<Rect> {
+        self.hover.as_ref().and_then(|h| h.rect)
+    }
+
+    /// A bubbles-mode popover is open (tests).
+    pub fn popover_open(&self) -> bool {
+        self.comments.iter().any(|c| c.card.is_some()) && self.popover.is_some()
+    }
+
+    /// The text of the visible items at the last frame, item after item (tests).
+    pub fn visible_text(&self) -> String {
+        let mut out = String::new();
+        for &(idx, _) in &self.last_visible {
+            if let Some(l) = self.ed.view.cache_peek(idx) {
+                for p in &l.prims {
+                    if let markise_layout::Prim::Text { text, .. } = p {
+                        out.push_str(text.text());
+                        out.push('\n');
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The shown comment whose bubble or card is under screen point `p`.
+    fn comment_at(&self, p: Pos2) -> Option<usize> {
+        self.comments
+            .iter()
+            .position(|c| (!c.revealed && c.glyph.expand(2.0).contains(p)) || c.card.is_some_and(|r| r.contains(p)))
+    }
+
+    /// Puts the caret at the end of comment `i`'s text (its source is then revealed for
+    /// editing); `pin`: its popover stays open.
+    fn open_comment(&mut self, i: usize, pin: bool) {
+        let Some(c) = self.comments.get(i).cloned() else { return };
+        self.ed.set_selection(Selection::caret(c.content.end));
+        self.ed.refresh_focus();
+        self.refocus = true;
+        if pin {
+            self.popover = Some(Popover {
+                key: c.source.start,
+                since: 0.0,
+                pinned: true,
+            });
+        }
+    }
+
+    /// Lays out and paints the comment cards of the visible items: in the right margin when it
+    /// is wide enough and the setting says so, else as a popover over the hovered (or pinned)
+    /// bubble. Only visible items are looked at; card text is shaped only for cards shown.
+    fn comment_cards(
+        &mut self,
+        ui: &mut Ui,
+        visible: &[markise_layout::Visible],
+        rect: Rect,
+        left: f32,
+        col_w: f32,
+        theme: &Theme,
+    ) {
+        let model = self.ed.view.model().clone();
+        let mut shown = Vec::new();
+        for v in visible {
+            let base = model.item_start(v.idx);
+            for c in &v.layout.comments {
+                shown.push(ShownComment {
+                    glyph: c.rect.translate(vec2(left, rect.top() + v.y)),
+                    source: base + c.source.start as usize..base + c.source.end as usize,
+                    content: base + c.content.start as usize..base + c.content.end as usize,
+                    text: c.text.clone(),
+                    revealed: c.revealed,
+                    card: None,
+                });
+            }
+        }
+        let ctx = ui.ctx().clone();
+        let now = ctx.input(|i| i.time);
+        let margin = rect.right() - SCROLLBAR_W - (left + col_w);
+        let use_margin =
+            self.comment_display == markise_engine::settings::CommentDisplay::Margin && margin >= MIN_MARGIN;
+        let look = CardLook::new(theme, &ctx);
+        let painter = ui.painter_at(rect);
+        let mut clicked = None;
+        if use_margin {
+            self.popover = None;
+            let x = left + col_w + 20.0;
+            let w = (margin - 36.0).min(240.0);
+            let mut next_y = rect.top();
+            for (i, c) in shown.iter_mut().enumerate() {
+                // nothing is shaped for a card that would start below the viewport; the stack
+                // only grows downwards, so the rest would too
+                let y = (c.glyph.top() - 4.0).max(next_y);
+                if y > rect.bottom() {
+                    break;
+                }
+                let galley = look.galley(&ctx, &c.text, w);
+                let card = Rect::from_min_size(pos2(x, y), look.size(&galley, w));
+                next_y = card.bottom() + 6.0;
+                // the connector from the bubble's line to its card, in the margin only (it never
+                // crosses text), starting with a dot at the column edge
+                let from = pos2(left + col_w + 6.0, c.glyph.center().y);
+                let to = pos2(card.left(), card.top() + 12.0);
+                let line = Stroke::new(1.0, look.accent.gamma_multiply(0.5));
+                painter.circle_filled(from, 2.0, look.accent.gamma_multiply(0.7));
+                painter.line_segment([from, to], line);
+                look.paint(&painter, card, galley);
+                let r = ui.interact(
+                    card,
+                    ui.scope_id().with(("markise-comment-card", c.source.start)),
+                    Sense::click(),
+                );
+                let r = r.on_hover_cursor(CursorIcon::PointingHand);
+                if r.clicked() {
+                    clicked = Some(i);
+                }
+                c.card = Some(card);
+            }
+        } else {
+            // bubbles: a popover over the hovered (after a short rest) or pinned bubble
+            let pointer = ctx.input(|i| i.pointer.hover_pos());
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.popover = None;
+            }
+            let over_card = |p: Pos2| {
+                self.comments
+                    .iter()
+                    .any(|c| c.card.is_some_and(|r| r.expand(4.0).contains(p)))
+            };
+            let hovered = pointer.and_then(|p| {
+                shown
+                    .iter()
+                    .find(|c| !c.revealed && c.glyph.expand(2.0).contains(p))
+                    .map(|c| c.source.start)
+            });
+            match (hovered, self.popover) {
+                (Some(k), Some(pop)) if pop.key == k => {}
+                (Some(k), Some(pop)) if pop.pinned && pop.key != k => {
+                    self.popover = Some(Popover {
+                        key: k,
+                        since: now,
+                        pinned: false,
+                    })
+                }
+                (Some(k), _) => {
+                    self.popover = Some(Popover {
+                        key: k,
+                        since: now,
+                        pinned: false,
+                    })
+                }
+                (None, Some(pop)) if !pop.pinned && !pointer.is_some_and(over_card) => self.popover = None,
+                _ => {}
+            }
+            if let Some(pop) = self.popover
+                && let Some(i) = shown.iter().position(|c| c.source.start == pop.key)
+            {
+                let wait = POPOVER_DELAY - (now - pop.since);
+                if pop.pinned || wait <= 0.0 {
+                    let c = &shown[i];
+                    let w = 240.0f32.min(rect.width() - 24.0).max(120.0);
+                    let galley = look.galley(&ctx, &c.text, w);
+                    let size = look.size(&galley, w);
+                    let mut at = pos2(c.glyph.left() - 8.0, c.glyph.bottom() + 4.0);
+                    at.x =
+                        at.x.min(rect.right() - SCROLLBAR_W - size.x - 4.0)
+                            .max(rect.left() + 4.0);
+                    if at.y + size.y > rect.bottom() {
+                        at.y = (c.glyph.top() - 4.0 - size.y).max(rect.top());
+                    }
+                    let area = egui::Area::new(egui::Id::unique(("markise-comment-popover", pop.key)))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(at)
+                        .show(&ctx, |ui| {
+                            let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+                            look.paint(ui.painter(), r, galley);
+                            resp.on_hover_cursor(CursorIcon::PointingHand)
+                        });
+                    if area.inner.clicked() {
+                        clicked = Some(i);
+                    }
+                    shown[i].card = Some(area.response.rect);
+                } else {
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait.max(0.01)));
+                }
+            }
+        }
+        self.comments = shown;
+        if let Some(i) = clicked {
+            self.open_comment(i, !use_margin);
+            ctx.request_repaint();
+        }
+    }
+
     fn on_toggle_or_link(&self, p: Pos2, top: f32, m: egui::Modifiers) -> bool {
         for &(idx, y) in &self.last_visible {
             let Some(l) = self.ed.view.cache_peek(idx) else {
@@ -795,6 +1095,138 @@ impl DocViewer {
     }
 
     /// The document position under screen point `p` (last frame's geometry).
+    /// The document's context menu (Add Comment, Accept / Reject, Delete Comment, Accept /
+    /// Reject All; a right click outside the selection moves the caret there first) and the
+    /// Accept / Reject bar over a hovered suggestion.
+    fn review_ui(
+        &mut self,
+        ui: &mut Ui,
+        resp: &egui::Response,
+        rect: Rect,
+        mut parley: Option<&mut ParleyText>,
+        images: &TextureStore,
+        out: &mut ViewerOutput,
+    ) {
+        let ctx = ui.ctx().clone();
+        if resp.secondary_clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let pos = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
+                self.hit_screen(p, rect.top(), sh, images)
+            });
+            if let Some(pos) = pos {
+                let sel = self.ed.session.selection().primary();
+                let r = sel.range();
+                if sel.is_caret() || pos.offset < r.start || pos.offset > r.end {
+                    self.ed.set_selection(Selection::single(pos, pos));
+                    self.ed.refresh_focus();
+                }
+            }
+            resp.request_focus();
+        }
+        let mut chosen = None;
+        resp.context_menu(|ui| {
+            let enabled = |id: &str| self.ed.registry.enabled(&self.ed.session, id).is_ok();
+            for e in CONTEXT_COMMANDS {
+                match e {
+                    None => {
+                        ui.separator();
+                    }
+                    Some(id) => {
+                        let Some(spec) = self.ed.registry.get(id) else { continue };
+                        let mut b = egui::Button::new(spec.desc.label);
+                        if let Some(c) = self.keymap.shown_chord_of(id) {
+                            b = b.shortcut_text(crate::menu::shortcut_text(c, self.platform));
+                        }
+                        if ui.add_enabled(enabled(id), b).clicked() {
+                            chosen = Some(spec.desc.id);
+                            ui.close();
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(id) = chosen {
+            out.review = Some((id, None));
+        }
+        // hover bar: any edit hides it (review round 5: never act on an obsolete or a
+        // different mark); it comes back with fresh data on the next pointer move over a mark
+        let counter = self.ed.session.revision().counter;
+        if self.hover.as_ref().is_some_and(|h| h.counter != counter) {
+            self.hover = None;
+        }
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let on_bar = self
+            .hover
+            .as_ref()
+            .and_then(|h| h.rect)
+            .zip(pointer)
+            .is_some_and(|(r, p)| r.expand(6.0).contains(p));
+        // looked up again only when the pointer moved or the text changed
+        let key = pointer.map(|p| (p, self.ed.session.revision().counter));
+        let moved = key != self.hover_key;
+        self.hover_key = key;
+        if !on_bar && moved {
+            let idle = self.drag.is_none() && !ui.input(|i| i.pointer.any_down());
+            let found = match pointer {
+                Some(p) if idle && resp.hovered() => {
+                    let pos = with_shaper(&ctx, parley, |sh| self.hit_screen(p, rect.top(), sh, images));
+                    pos.and_then(|pos| self.suggestion_at(pos.offset)).map(|m| (m, p))
+                }
+                _ => None,
+            };
+            match found {
+                Some((m, p)) => {
+                    if self.hover.as_ref().is_none_or(|h| h.mark != m) {
+                        self.hover = Some(HoverBar {
+                            mark: m,
+                            counter: self.ed.session.revision().counter,
+                            anchor: pos2(p.x - 24.0, p.y - 40.0),
+                            rect: None,
+                        });
+                    }
+                }
+                None => self.hover = None,
+            }
+        }
+        if let Some(h) = self.hover.as_mut() {
+            let at = h.mark.content.start;
+            let area = egui::Area::new(egui::Id::unique("markise-review-hover"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(h.anchor)
+                .show(&ctx, |ui| {
+                    egui::Frame::popup(ui.style()).inner_margin(4.0).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.button("Accept").on_hover_text("Accept this suggestion").clicked() {
+                                out.review = Some(("review.accept", Some(at)));
+                            }
+                            if ui.button("Reject").on_hover_text("Reject this suggestion").clicked() {
+                                out.review = Some(("review.reject", Some(at)));
+                            }
+                        });
+                    });
+                });
+            h.rect = Some(area.response.rect);
+            if out.review.is_some() {
+                self.hover = None;
+            }
+        }
+    }
+
+    /// The suggestion whose source contains `offset` (cached per revision and offset).
+    fn suggestion_at(&mut self, offset: usize) -> Option<markise_doc::review::ReviewMark> {
+        let counter = self.ed.session.revision().counter;
+        if let Some((c, o, m)) = &self.hover_cache
+            && *c == counter
+            && *o == offset
+        {
+            return m.clone();
+        }
+        let m = markise_doc::review::mark_at(self.ed.session.doc(), offset, |k| k.is_suggestion());
+        self.hover_cache = Some((counter, offset, m.clone()));
+        m
+    }
+
     fn hit_screen(
         &mut self,
         p: Pos2,
@@ -950,6 +1382,96 @@ pub(crate) fn with_shaper<R>(
 }
 
 /// The engine keymap's chord of an egui key press.
+/// How a comment card looks (ADR 0012): a rounded card on the comment tint with a thin
+/// accent border, a speech-bubble icon, the author (`@name:`) in bold, then the text as
+/// written (plain, upright, wrapped, its line breaks kept).
+struct CardLook {
+    fill: Color32,
+    accent: Color32,
+    text: Color32,
+    size: f32,
+}
+
+const CARD_PAD: f32 = 8.0;
+const CARD_ICON: f32 = 18.0;
+
+impl CardLook {
+    fn new(theme: &Theme, ctx: &egui::Context) -> Self {
+        let rc = theme.review_colors();
+        let [pr, pg, pb, _] = theme.page_bg.0;
+        let [tr, tg, tb, ta] = rc.comment_bg.0;
+        // the comment tint over the page, opaque (the card hides what is under it); computed
+        // on the straight (not premultiplied) theme colours
+        let a = ta as f32 / 255.0 * 0.75;
+        let mix = |p: u8, t: u8| (p as f32 * (1.0 - a) + t as f32 * a).round() as u8;
+        let fill = Color32::from_rgb(mix(pr, tr), mix(pg, tg), mix(pb, tb));
+        let _ = ctx;
+        CardLook {
+            fill,
+            accent: color(theme.chrome.accent),
+            text: color(theme.text),
+            size: (theme.font_size * 0.82).clamp(11.0, 18.0),
+        }
+    }
+
+    fn galley(&self, ctx: &egui::Context, text: &str, w: f32) -> Arc<egui::Galley> {
+        let (author, body) = markise_doc::review::split_author(text);
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = (w - 2.0 * CARD_PAD - CARD_ICON).max(40.0);
+        let body_fmt = egui::TextFormat {
+            font_id: egui::FontId::proportional(self.size),
+            color: self.text,
+            ..Default::default()
+        };
+        if let Some(a) = author {
+            let bold = egui::FontFamily::Name(markise_layout::FAMILY_BOLD.into());
+            let has_bold = ctx.fonts(|f| f.families().contains(&bold));
+            job.append(
+                &format!("@{a}\n"),
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::new(self.size, if has_bold { bold } else { egui::FontFamily::Proportional }),
+                    color: self.text,
+                    ..Default::default()
+                },
+            );
+        }
+        // the author's prefix is shown above; the rest as written (keeps inner line breaks)
+        let rest = if author.is_some() { body } else { text.trim() };
+        job.append(if rest.is_empty() { "…" } else { rest }, 0.0, body_fmt);
+        ctx.fonts_mut(|f| f.layout_job(job))
+    }
+
+    fn size(&self, galley: &egui::Galley, w: f32) -> Vec2 {
+        let gw = galley.size().x + 2.0 * CARD_PAD + CARD_ICON;
+        vec2(gw.clamp(80.0, w), galley.size().y.max(CARD_ICON) + 2.0 * CARD_PAD)
+    }
+
+    fn paint(&self, p: &egui::Painter, r: Rect, galley: Arc<egui::Galley>) {
+        p.rect(
+            r,
+            CornerRadius::same(6),
+            self.fill,
+            Stroke::new(1.0, self.accent.gamma_multiply(0.35)),
+            StrokeKind::Inside,
+        );
+        // a small speech bubble
+        let o = r.min + vec2(CARD_PAD, CARD_PAD + 1.0);
+        let b = Rect::from_min_size(o, vec2(12.0, 9.0));
+        let stroke = Stroke::new(1.3, self.accent);
+        p.rect_stroke(b, CornerRadius::same(2), stroke, StrokeKind::Middle);
+        p.line_segment(
+            [b.left_bottom() + vec2(3.0, 0.0), b.left_bottom() + vec2(2.5, 3.5)],
+            stroke,
+        );
+        p.line_segment(
+            [b.left_bottom() + vec2(2.5, 3.5), b.left_bottom() + vec2(6.0, 0.0)],
+            stroke,
+        );
+        p.galley(r.min + vec2(CARD_PAD + CARD_ICON, CARD_PAD), galley, self.text);
+    }
+}
+
 pub fn chord_of(key: egui::Key, modifiers: egui::Modifiers, platform: Platform) -> Option<Chord> {
     Some(Chord {
         ctrl: if platform == Platform::Mac {

@@ -28,7 +28,7 @@
 //! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`) — source editor display (spec 02 §12.1.1; Preferences → Source Mode) | defaults |
 //! | `keyBinding` | object: command label (menu title) or id → accelerator (`"Ctrl+Shift+K"`), `""` unbinds (spec 05 §4.7); read only, kept verbatim | none |
 //! | `images` | object: `location` (`"note_folder"`: a folder next to the note, `"root_folder"`: a folder below the vault / opened folder root, `"same_folder"`: the note's own folder; default `"note_folder"`), `folder` (the folder for the first two, default `"assets"`), `obsidian` (use an Obsidian vault's `attachmentFolderPath` when set, `true`), `relative_paths` (`true`), `copy_images` (copy dropped image files into the image folder, `true`), `copy_files` (also copy other dropped files, `false`), `paste_urls` (a pasted image URL becomes an image, `true`) — pasted and dropped images (spec 04 §7, spec 05 §4.4; Preferences → Files & Images) | defaults |
-//! | `markdown` | object: `wikilinks` (default `true`) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
+//! | `markdown` | object: `wikilinks` (default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`), `commentDisplay` (`"margin"` cards, default, or `"bubbles"` with hover popovers) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
 //! | `side_by_side_split` | Side by Side divider position: fraction of the editor width given to the source pane, `0.15`–`0.85` (spec 04 §3.3); omitted until the divider is moved | `0.5` |
 //! | `zoom` | whole-window zoom factor, `0.5`–`3.0` (View → Zoom In / Zoom Out / Actual Size, issue #43); omitted until zoomed | `1.0` |
 //!
@@ -287,6 +287,32 @@ impl SourceSettings {
     }
 }
 
+/// How review comments are shown (setting `markdown.commentDisplay`, ADR 0012).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommentDisplay {
+    /// Cards in the right margin next to their line (bubbles when the window is too narrow).
+    #[default]
+    Margin,
+    /// Only the bubble glyph; the comment shows in a popover on hover.
+    Bubbles,
+}
+
+impl CommentDisplay {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommentDisplay::Margin => "margin",
+            CommentDisplay::Bubbles => "bubbles",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "margin" => Some(CommentDisplay::Margin),
+            "bubbles" => Some(CommentDisplay::Bubbles),
+            _ => None,
+        }
+    }
+}
+
 /// Where pasted and dropped images go (spec 04 §7.3, spec 05 §4.4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ImageLocation {
@@ -398,11 +424,22 @@ impl ImageSettings {
 pub struct MarkdownSettings {
     /// Wikilinks `[[Note]]` (spec 06 V2.1; owner default on).
     pub wikilinks: bool,
+    /// CriticMarkup comments and suggestions (ADR 0012; owner default on, issue #69).
+    pub critic_markup: bool,
+    /// Review comments are kept in HTML/PDF exports (`false`: stripped).
+    pub export_comments: bool,
+    /// How comments are shown in the editor.
+    pub comment_display: CommentDisplay,
 }
 
 impl Default for MarkdownSettings {
     fn default() -> Self {
-        MarkdownSettings { wikilinks: true }
+        MarkdownSettings {
+            wikilinks: true,
+            critic_markup: true,
+            export_comments: true,
+            comment_display: CommentDisplay::Margin,
+        }
     }
 }
 
@@ -410,6 +447,9 @@ impl MarkdownSettings {
     fn to_json(self) -> Value {
         let mut m = Map::new();
         m.insert("wikilinks".into(), Value::from(self.wikilinks));
+        m.insert("criticMarkup".into(), Value::from(self.critic_markup));
+        m.insert("exportComments".into(), Value::from(self.export_comments));
+        m.insert("commentDisplay".into(), Value::from(self.comment_display.as_str()));
         Value::Object(m)
     }
     fn from_json(v: &Value) -> Option<Self> {
@@ -417,6 +457,19 @@ impl MarkdownSettings {
         let d = MarkdownSettings::default();
         Some(MarkdownSettings {
             wikilinks: m.get("wikilinks").and_then(Value::as_bool).unwrap_or(d.wikilinks),
+            critic_markup: m
+                .get("criticMarkup")
+                .and_then(Value::as_bool)
+                .unwrap_or(d.critic_markup),
+            export_comments: m
+                .get("exportComments")
+                .and_then(Value::as_bool)
+                .unwrap_or(d.export_comments),
+            comment_display: m
+                .get("commentDisplay")
+                .and_then(Value::as_str)
+                .and_then(CommentDisplay::parse)
+                .unwrap_or(d.comment_display),
         })
     }
 }
@@ -1227,13 +1280,40 @@ mod tests {
         assert!(!off.markdown.wikilinks);
         assert!(!Settings::from_json(&off.to_json()).unwrap().markdown.wikilinks);
         let p = SettingsPatch {
-            markdown: Some(MarkdownSettings { wikilinks: false }),
+            markdown: Some(MarkdownSettings {
+                wikilinks: false,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         assert_eq!(SettingsPatch::from_json(&p.to_json()).unwrap().markdown, p.markdown);
         let mut s = Settings::default();
         p.apply(&mut s);
         assert!(!s.markdown.wikilinks);
+    }
+
+    /// ADR 0012: CriticMarkup and kept export comments default on, round-trip, and an older
+    /// file without the keys keeps the defaults.
+    #[test]
+    fn critic_markup_settings_default_on_and_round_trip() {
+        let d = Settings::default();
+        assert!(d.markdown.critic_markup && d.markdown.export_comments);
+        let old = Settings::from_json(r#"{"version": 2, "markdown": {"wikilinks": false}}"#).unwrap();
+        assert!(old.markdown.critic_markup && old.markdown.export_comments);
+        let off =
+            Settings::from_json(r#"{"version": 2, "markdown": {"criticMarkup": false, "exportComments": false}}"#)
+                .unwrap();
+        assert!(!off.markdown.critic_markup && !off.markdown.export_comments && off.markdown.wikilinks);
+        assert_eq!(Settings::from_json(&off.to_json()).unwrap().markdown, off.markdown);
+        assert_eq!(d.markdown.comment_display, CommentDisplay::Margin);
+        let b = Settings::from_json(r#"{"version": 2, "markdown": {"commentDisplay": "bubbles"}}"#).unwrap();
+        assert_eq!(b.markdown.comment_display, CommentDisplay::Bubbles);
+        assert!(
+            b.to_json().contains("\"commentDisplay\": \"bubbles\"")
+                || b.to_json().contains("\"commentDisplay\":\"bubbles\"")
+        );
+        let bad = Settings::from_json(r#"{"version": 2, "markdown": {"commentDisplay": "x"}}"#).unwrap();
+        assert_eq!(bad.markdown.comment_display, CommentDisplay::Margin);
     }
 
     #[test]

@@ -10,6 +10,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+pub use markise_export::CommentExport;
 use markise_export::job::JobControl;
 use markise_export::model::{ExDoc, ModelOptions};
 use markise_export::pandoc::{self, PandocFormat, PandocOptions};
@@ -90,6 +91,11 @@ pub struct ExportRequest {
     /// The vault's files: HTML export writes resolved wikilinks as relative links to the
     /// linked files (spec 06 Q-V11); without it they are plain text.
     pub vault: Option<std::sync::Arc<crate::vault::VaultIndex>>,
+    /// Parse CriticMarkup comments and suggestions (the `markdown.criticMarkup` setting,
+    /// ADR 0012).
+    pub critic_markup: bool,
+    /// Keep or strip review comments in the output (setting `export.comments`, ADR 0012).
+    pub comments: CommentExport,
 }
 
 impl ExportRequest {
@@ -107,6 +113,8 @@ impl ExportRequest {
             timeout: Duration::from_secs(120),
             wikilinks: true,
             vault: None,
+            critic_markup: true,
+            comments: CommentExport::Keep,
         }
     }
 
@@ -198,6 +206,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
         req.text.clone(),
         ParseOptions {
             wikilinks: req.wikilinks,
+            critic_markup: req.critic_markup,
             ..ParseOptions::default()
         },
     );
@@ -231,6 +240,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
                 images: html_images(&doc, base_dir.as_deref(), &req.output, plain),
                 control: Some(control.clone()),
                 wikilinks: wikilink_hrefs(req),
+                comments: req.comments,
                 ..Default::default()
             };
             control.set_progress(0.3);
@@ -240,7 +250,13 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
             publish(&req.output, html.as_bytes(), control)?;
         }
         ExportKind::Pdf => {
-            let ex = ExDoc::build(&doc, &ModelOptions { highlight: true });
+            let ex = ExDoc::build(
+                &doc,
+                &ModelOptions {
+                    highlight: true,
+                    comments: req.comments,
+                },
+            );
             let mut opts = PdfOptions {
                 theme: req.theme.clone(),
                 base_dir: base_dir.clone(),
@@ -263,7 +279,13 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
             publish(&req.output, &out.files[0], control)?;
         }
         ExportKind::Png => {
-            let ex = ExDoc::build(&doc, &ModelOptions { highlight: true });
+            let ex = ExDoc::build(
+                &doc,
+                &ModelOptions {
+                    highlight: true,
+                    comments: req.comments,
+                },
+            );
             let opts = PngOptions {
                 theme: req.theme.clone(),
                 base_dir: base_dir.clone(),
@@ -302,14 +324,26 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
                 .ok_or_else(|| pandoc::PandocError::NotFound.to_string())?;
             let info = pandoc::probe(&exe, control).map_err(|e| e.to_string())?;
             control.set_progress(0.1);
-            let ex = ExDoc::build(&doc, &ModelOptions::default());
+            let ex = ExDoc::build(
+                &doc,
+                &ModelOptions {
+                    comments: req.comments,
+                    ..Default::default()
+                },
+            );
             let mut opts = PandocOptions::new(*format);
             opts.resource_dir = base_dir.clone();
             opts.timeout = req.timeout;
             pandoc::export(&info, &ex, &req.output, &opts, control).map_err(|e| e.to_string())?;
         }
         ExportKind::Custom { command, .. } => {
-            let ex = ExDoc::build(&doc, &ModelOptions::default());
+            let ex = ExDoc::build(
+                &doc,
+                &ModelOptions {
+                    comments: req.comments,
+                    ..Default::default()
+                },
+            );
             let vars = Vars::for_export(
                 req.doc_path.as_deref(),
                 &req.output,
@@ -321,7 +355,13 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
         }
     }
     if let Some(after) = &req.after_command {
-        let ex = ExDoc::build(&doc, &ModelOptions::default());
+        let ex = ExDoc::build(
+            &doc,
+            &ModelOptions {
+                comments: req.comments,
+                ..Default::default()
+            },
+        );
         let vars = Vars::for_export(
             req.doc_path.as_deref(),
             &req.output,

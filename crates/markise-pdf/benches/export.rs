@@ -12,10 +12,28 @@ use markise_pdf::{PdfOptions, PngOptions, export_pdf, export_png, system_engine}
 
 fn bench(c: &mut Criterion) {
     let mut eng = system_engine(Duration::from_secs(30));
-    let sample = ExDoc::build(&markise_md::parse(SAMPLE), &ModelOptions { highlight: true });
-    let code = ExDoc::build(&markise_md::parse(CODE_SAMPLES), &ModelOptions { highlight: true });
+    let sample = ExDoc::build(
+        &markise_md::parse(SAMPLE),
+        &ModelOptions {
+            highlight: true,
+            ..Default::default()
+        },
+    );
+    let code = ExDoc::build(
+        &markise_md::parse(CODE_SAMPLES),
+        &ModelOptions {
+            highlight: true,
+            ..Default::default()
+        },
+    );
     let big: String = std::iter::repeat_n(SAMPLE.split_once("\n---\n").map(|x| x.1).unwrap_or(SAMPLE), 10).collect();
-    let big = ExDoc::build(&markise_md::parse(&big), &ModelOptions { highlight: true });
+    let big = ExDoc::build(
+        &markise_md::parse(&big),
+        &ModelOptions {
+            highlight: true,
+            ..Default::default()
+        },
+    );
     let control = JobControl::new();
     let mut g = c.benchmark_group("export");
     g.sample_size(10);

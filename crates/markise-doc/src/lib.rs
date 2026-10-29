@@ -11,6 +11,7 @@
 //! - [`source`]: source-mode token classes ([`SourceTok`]);
 //! - [`chunked`]: [`chunked::RelChunks`], relative-offset storage (gate G1);
 //! - [`resource`]: resource path resolution;
+//! - [`review`]: review marks (comments and suggestions, ADR 0012) through the inline views;
 //! - [`command`]: pure-data [`CommandDescriptor`]s with [`PlannerId`]s;
 //! - [`plan`]: [`Plan`], [`PlanRequest`], [`TypingPlan`];
 //! - [`owner`]: position → block ownership ([`BlockOwner`], [`Adjacent`], ADR 0011);
@@ -25,6 +26,7 @@ pub mod patch;
 pub mod plan;
 pub mod pos;
 pub mod resource;
+pub mod review;
 pub mod source;
 pub mod text;
 pub mod view;
@@ -45,7 +47,7 @@ pub use pos::{Affinity, DocPos, SelRange, Selection, VirtualSlot};
 pub use source::{SourceTok, SourceToken};
 pub use text::{LineEnding, Span};
 pub use view::{
-    CalloutKind, CodeFenceView, ColumnAlign, ContainerKind, FlatContainer, FlatEvent, FlatLeaf, HeadingInfo,
-    InlineKind, InlineNode, InlineSource, LeafKind, LeafView, ListMarker, MapPiece, PieceKind, RichInline, SourceMap,
-    TableView,
+    CalloutKind, CodeFenceView, ColumnAlign, ContainerKind, CriticKind, FlatContainer, FlatEvent, FlatLeaf,
+    HeadingInfo, InlineKind, InlineNode, InlineSource, LeafKind, LeafView, ListMarker, MapPiece, PieceKind, RichInline,
+    SourceMap, TableView,
 };

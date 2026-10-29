@@ -37,6 +37,9 @@ pub enum Choice {
     Replace,
     Overwrite,
     Create,
+    /// Save Copy Without Comments: accept / reject the pending suggestions in the copy.
+    AcceptAll,
+    RejectAll,
     Reset,
 }
 
@@ -64,6 +67,7 @@ pub enum Kind {
     ReplaceTheme,
     ExportOverwrite,
     CreateNote,
+    CleanCopy,
     ResetSettings,
 }
 
@@ -207,6 +211,29 @@ impl Question {
             detail: "No note of that name exists yet. It is created empty and opened.".into(),
             buttons: vec![button(Choice::Create, "Create", Role::Primary), cancel()],
             default: Choice::Create,
+        }
+    }
+
+    /// File → Save Copy Without Comments with `n` pending suggestions (ADR 0012): the copy
+    /// has no comments; accept or reject the suggestions in it? Nothing is lost either way
+    /// (the open document is unchanged), so accepting is the default.
+    pub fn clean_copy(n: usize) -> Question {
+        let what = if n == 1 {
+            "the pending suggestion".to_string()
+        } else {
+            format!("the {n} pending suggestions")
+        };
+        Question {
+            id: 0,
+            kind: Kind::CleanCopy,
+            message: format!("Accept or reject {what} in the copy?"),
+            detail: "The copy is saved without comments. The open document is not changed.".into(),
+            buttons: vec![
+                button(Choice::AcceptAll, "Accept All", Role::Primary),
+                button(Choice::RejectAll, "Reject All", Role::Primary),
+                cancel(),
+            ],
+            default: Choice::AcceptAll,
         }
     }
 

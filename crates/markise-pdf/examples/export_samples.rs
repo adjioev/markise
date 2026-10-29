@@ -32,7 +32,13 @@ fn main() {
     let control = JobControl::new();
     for (name, text) in [("sample", SAMPLE), ("code-samples", CODE_SAMPLES)] {
         std::fs::write(out.join(format!("{name}.md")), text).unwrap();
-        let doc = ExDoc::build(&markise_md::parse(text), &ModelOptions { highlight: true });
+        let doc = ExDoc::build(
+            &markise_md::parse(text),
+            &ModelOptions {
+                highlight: true,
+                ..Default::default()
+            },
+        );
         for theme in [Theme::light(), Theme::native("markise-dark").unwrap()] {
             let suffix = if theme.dark { "-dark" } else { "" };
             let mut opts = PdfOptions {

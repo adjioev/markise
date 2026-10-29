@@ -11,7 +11,8 @@ use std::sync::Arc;
 use epaint::text::{FontData, FontDefinitions, FontFamily};
 use epaint::{Color32, Pos2, Rect, Stroke, emath::Align, pos2, vec2};
 use markise_doc::{
-    CalloutKind, ColumnAlign, FormatDoc, InlineKind, InlineNode, InlineSource, PieceKind, RichInline, SourceMap, Span,
+    CalloutKind, ColumnAlign, CriticKind, FormatDoc, InlineKind, InlineNode, InlineSource, PieceKind, RichInline,
+    SourceMap, Span,
 };
 use markise_theme::{BoxStyle, Rgba, TextAlign, TextTransform, Theme, TokenKind, TokenRun};
 
@@ -209,6 +210,22 @@ pub struct LinkHit {
     pub target: String,
 }
 
+/// A review comment shown in the item (ADR 0012): where its bubble glyph (or, while its
+/// source is revealed, its raw text) is, which source it stands for and its text, so the
+/// viewer can show it as a card in the margin or a popover.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommentHit {
+    /// Item-local rectangle of the glyph (revealed: of the first row of the raw text).
+    pub rect: Rect,
+    /// Item-relative source of the whole mark (`{>>…<<}`) and of its text.
+    pub source: Range<u32>,
+    pub content: Range<u32>,
+    /// The comment's text, lines separated by `\n` (plain text, as written).
+    pub text: Arc<str>,
+    /// The caret is inside: the raw source is shown.
+    pub revealed: bool,
+}
+
 /// Result of laying out one item.
 #[derive(Clone, Debug, Default)]
 pub struct BlockLayout {
@@ -229,6 +246,8 @@ pub struct BlockLayout {
     /// Caret rectangle (item-local) of the editor-only empty paragraph shown after the item
     /// ([`ItemFocus::virtual_after`], ADR 0006 §2.2).
     pub virtual_caret: Option<Rect>,
+    /// Review comments of the item (glyph positions and texts, ADR 0012).
+    pub comments: Vec<CommentHit>,
 }
 
 impl BlockLayout {
@@ -244,6 +263,9 @@ impl BlockLayout {
         }
         for l in &self.links {
             b += 32 + l.target.len();
+        }
+        for c in &self.comments {
+            b += std::mem::size_of::<CommentHit>() + c.text.len();
         }
         b
     }
@@ -364,7 +386,14 @@ pub fn reveal_set(rich: &RichInline, caret: u32) -> Vec<Range<u32>> {
                 continue;
             }
             // images and formulas render as one object: one atomic caret stop, not revealed
-            if !n.markers.is_empty() && !matches!(n.kind, InlineKind::Image { .. } | InlineKind::Math { .. }) {
+            // a comment opens only with the caret in its text, not next to the mark (owner,
+            // ADR 0012): it is one caret stop until then
+            let comment_closed = n.kind == InlineKind::Critic(CriticKind::Comment)
+                && !(n.content.start <= caret && caret <= n.content.end);
+            if !n.markers.is_empty()
+                && !comment_closed
+                && !matches!(n.kind, InlineKind::Image { .. } | InlineKind::Math { .. })
+            {
                 out.push(n.source.clone());
             }
             go(&n.children, caret, out);
@@ -374,6 +403,9 @@ pub fn reveal_set(rich: &RichInline, caret: u32) -> Vec<Range<u32>> {
     go(&rich.nodes, caret, &mut out);
     out
 }
+
+/// The glyph a collapsed comment shows in the text (ADR 0012).
+pub const COMMENT_GLYPH: &str = "\u{1F4AC}";
 
 pub fn color(c: Rgba) -> Color32 {
     let [r, g, b, a] = c.0;
@@ -525,6 +557,10 @@ enum Mark {
     /// Strikethrough drawn through the glyphs (epaint's own sits at the line-box centre,
     /// far below the glyphs when the line height is large).
     Strike(Color32),
+    /// Underline just below the baseline (suggested insertions, ADR 0012).
+    Underline(Color32),
+    /// A review comment's glyph or revealed text (ADR 0012): recorded as a [`CommentHit`].
+    Comment(Arc<CommentHit>),
     /// A background box hugging the glyphs (inline code, `mark`): padding, corner radius.
     /// The padding is part of the run's advance (neighbours keep their distance).
     /// `stretch`: spaces inside may be widened by justification (not inside code).
@@ -926,6 +962,11 @@ impl<'a> InlineBuilder<'a> {
     }
 
     fn node(&mut self, r: &RichInline, n: &InlineNode, st: &Style, top: bool) {
+        if let InlineKind::Critic(k) = n.kind {
+            let revealed = !self.reveal.is_empty() && !n.markers.is_empty() && self.reveal.contains(&n.source);
+            self.critic(r, n, k, st, revealed);
+            return;
+        }
         if let InlineKind::WikiLink { target, subpath } = &n.kind {
             let revealed = !self.reveal.is_empty() && self.reveal.contains(&n.source);
             self.wikilink(r, n, target, subpath.as_deref(), st, revealed);
@@ -946,6 +987,123 @@ impl<'a> InlineBuilder<'a> {
             self.markers(n, st, true);
         }
         self.node_inner(r, n, st, top);
+        if revealed {
+            self.markers(n, st, false);
+        }
+    }
+
+    /// A review mark (ADR 0012): insertions green and underlined, deletions red and struck
+    /// through, a substitution as both, highlights on the highlight colour, a comment as a
+    /// small bubble with its text (one caret stop); the caret inside shows the raw source
+    /// (spec 02 inline reveal), styled the same.
+    fn critic(&mut self, r: &RichInline, n: &InlineNode, k: CriticKind, st: &Style, revealed: bool) {
+        let rc = self.theme.review_colors();
+        if revealed {
+            self.markers(n, st, true);
+        }
+        match k {
+            CriticKind::Insert | CriticKind::New => {
+                let mut c = st.clone();
+                c.color = color(rc.insert);
+                let start = self.job.text.len();
+                self.nodes(r, &n.children, &c, false);
+                self.links.push((start..self.job.text.len(), Mark::Underline(c.color)));
+            }
+            CriticKind::Delete | CriticKind::Old => {
+                let mut c = st.clone();
+                c.color = color(rc.delete);
+                let start = self.job.text.len();
+                self.nodes(r, &n.children, &c, false);
+                self.links.push((start..self.job.text.len(), Mark::Strike(c.color)));
+            }
+            CriticKind::Substitute => {
+                if let Some(old) = n.children.first() {
+                    self.critic(r, old, CriticKind::Old, st, false);
+                }
+                // the separator `~>` (the middle marker) while revealed
+                if revealed
+                    && let Some(m) = n.markers.get(1).filter(|_| n.markers.len() == 3)
+                    && let Some(text) = self.src.get(m.start as usize..m.end as usize)
+                {
+                    let mut ms = st.clone();
+                    ms.color = color(self.theme.meta_text);
+                    ms.transform = TextTransform::None;
+                    let a = self.job.text.len() as u32;
+                    self.append(text, 0.0, &ms);
+                    let b = self.job.text.len() as u32;
+                    self.map.push(a..b, m.clone(), PieceKind::Marker);
+                }
+                if let Some(new) = n.children.get(1) {
+                    self.critic(r, new, CriticKind::New, st, false);
+                }
+            }
+            CriticKind::Highlight => {
+                let start = self.job.text.len();
+                self.pending_lead += 1.0;
+                self.nodes(r, &n.children, st, false);
+                self.pending_lead += 1.0;
+                self.links.push((
+                    start..self.job.text.len(),
+                    Mark::Box {
+                        fill: color(rc.highlight_bg),
+                        pad: 1.0,
+                        radius: 2.0,
+                        stretch: true,
+                    },
+                ));
+            }
+            CriticKind::Comment => {
+                // the card's text: the lines as written (plain text)
+                let mut text = String::new();
+                for ch in &n.children {
+                    match ch.kind {
+                        InlineKind::Break { .. } => text.push('\n'),
+                        _ => text.push_str(r.value(ch)),
+                    }
+                }
+                let hit = Arc::new(CommentHit {
+                    rect: Rect::NOTHING,
+                    source: n.source.clone(),
+                    content: n.content.clone(),
+                    text: text.into(),
+                    revealed,
+                });
+                let start = self.job.text.len();
+                if revealed {
+                    // the raw text, byte for byte (caret stops inside), plain and upright
+                    let mut c = st.clone();
+                    c.color = color(rc.comment_text);
+                    c.transform = TextTransform::None;
+                    self.nodes(r, &n.children, &c, false);
+                    if n.children.is_empty() {
+                        self.push_src("", &c, &n.content, true);
+                    }
+                    let end = self.job.text.len();
+                    if end > start {
+                        self.links.push((
+                            start..end,
+                            Mark::Box {
+                                fill: color(rc.comment_bg),
+                                pad: 2.0,
+                                radius: 3.0,
+                                stretch: false,
+                            },
+                        ));
+                    }
+                } else {
+                    // collapsed: a speech-bubble glyph in the accent colour (the text is in
+                    // the margin card or the popover)
+                    let mut c = st.clone();
+                    c.color = color(self.theme.chrome.accent);
+                    c.transform = TextTransform::None;
+                    c.italic = false;
+                    self.push_src(COMMENT_GLYPH, &c, &n.source, false);
+                }
+                let end = self.job.text.len();
+                let range = if end > start { start..end } else { start..start };
+                self.links.push((range, Mark::Comment(hit)));
+            }
+        }
         if revealed {
             self.markers(n, st, false);
         }
@@ -1147,8 +1305,8 @@ impl<'a> InlineBuilder<'a> {
                 self.push_src(&format!("[{label}]"), &c, &n.source, false);
             }
             InlineKind::Underline => self.nodes(r, &n.children, st, false),
-            // handled in `node` (it needs the reveal state)
-            InlineKind::WikiLink { .. } => {}
+            // handled in `node` (they need the reveal state)
+            InlineKind::WikiLink { .. } | InlineKind::Critic(_) => {}
         }
     }
 }
@@ -1156,6 +1314,7 @@ impl<'a> InlineBuilder<'a> {
 struct Out {
     prims: Vec<Prim>,
     links: Vec<LinkHit>,
+    comments: Vec<CommentHit>,
     /// Underline links in this color (`text-decoration: underline` on `a`).
     underline: Option<Color32>,
     /// Column bounds (item-local x): inline boxes are clamped to them, so a box starting a
@@ -1188,6 +1347,26 @@ impl Out {
                 Mark::Strike(c) => {
                     for sp in spans {
                         let y = sp.baseline - sp.ascent * 0.32;
+                        after.push(Prim::Line {
+                            a: pos + vec2(sp.x0, y),
+                            b: pos + vec2(sp.x1, y),
+                            stroke: Stroke::new(sp.stroke, *c),
+                        });
+                    }
+                }
+                Mark::Comment(c) => {
+                    if let Some(sp) = spans.first() {
+                        let rect = Rect::from_min_max(
+                            pos2(sp.x0, sp.baseline - sp.ascent),
+                            pos2(sp.x1, sp.baseline + sp.descent),
+                        )
+                        .translate(pos.to_vec2());
+                        self.comments.push(CommentHit { rect, ..(**c).clone() });
+                    }
+                }
+                Mark::Underline(c) => {
+                    for sp in spans {
+                        let y = sp.baseline + (sp.descent * 0.35).max(1.5);
                         after.push(Prim::Line {
                             a: pos + vec2(sp.x0, y),
                             b: pos + vec2(sp.x1, y),
@@ -1653,6 +1832,7 @@ pub fn layout_item(
     let mut out = Out {
         prims: Vec::new(),
         links: Vec::new(),
+        comments: Vec::new(),
         underline: t.link_underline.then(|| color(t.link)),
         col: (x, x + width),
     };
@@ -2251,6 +2431,7 @@ pub fn layout_item(
     let shift = deco.len();
     let mut prims = deco;
     prims.extend(out.prims);
+    let comments = out.comments;
     let links = out
         .links
         .into_iter()
@@ -2284,6 +2465,7 @@ pub fn layout_item(
         tasks,
         empty_anchor,
         virtual_caret,
+        comments,
     }
 }
 

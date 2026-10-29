@@ -12,6 +12,8 @@ use markise_layout::OutlineEntry;
 pub enum Tab {
     Files,
     Outline,
+    /// Comments and suggestions of the document (ADR 0012).
+    Comments,
 }
 
 /// What the user asked for in the file tree: a click, or a context-menu item (spec 04 §4.1
@@ -1161,6 +1163,7 @@ enum BarGlyph {
     Files,
     Search,
     Outline,
+    Comments,
 }
 
 /// One activity bar item: the tab it shows, or `None` for a placeholder (disabled) — more
@@ -1172,7 +1175,7 @@ struct Activity {
     tab: Option<Tab>,
 }
 
-const ACTIVITIES: [Activity; 3] = [
+const ACTIVITIES: [Activity; 4] = [
     Activity {
         label: "Files",
         tooltip: "Files",
@@ -1191,6 +1194,12 @@ const ACTIVITIES: [Activity; 3] = [
         tooltip: "Outline",
         glyph: BarGlyph::Outline,
         tab: Some(Tab::Outline),
+    },
+    Activity {
+        label: "Comments",
+        tooltip: "Comments and suggestions",
+        glyph: BarGlyph::Comments,
+        tab: Some(Tab::Comments),
     },
 ];
 
@@ -1275,6 +1284,14 @@ fn paint_bar_glyph(p: &egui::Painter, r: egui::Rect, glyph: BarGlyph, color: Col
         BarGlyph::Search => {
             p.circle_stroke(pt(8.5, 8.5), 5.5, stroke);
             line(vec![pt(12.6, 12.6), pt(17.0, 17.0)]);
+        }
+        BarGlyph::Comments => {
+            // a speech bubble with a tail and two text lines
+            let r = egui::Rect::from_min_max(pt(2.5, 3.0), pt(17.5, 14.0));
+            p.rect_stroke(r, 3.0, stroke, egui::StrokeKind::Middle);
+            line(vec![pt(6.0, 14.0), pt(5.5, 18.0), pt(10.0, 14.0)]);
+            line(vec![pt(6.0, 7.0), pt(14.0, 7.0)]);
+            line(vec![pt(6.0, 10.3), pt(11.5, 10.3)]);
         }
         BarGlyph::Outline => {
             // a heading tree: short lines with stepped indentation, a dot at each start

@@ -123,8 +123,36 @@ const fn link_cmd(id: &'static str, label: &'static str, keys: &'static [Default
     }
 }
 
+const AT_PARAM: ParamSchema = ParamSchema(&[markise_doc::ParamSpec {
+    name: "at",
+    kind: markise_doc::ParamKind::Int,
+    required: false,
+}]);
+
+/// A review command (ADR 0012): Edit → Comments & Suggestions, the document's context menu
+/// and the comments panel (not placed in a menu by id). The clean copy planner
+/// (`review.cleanCopy`) is not a command: it only builds a copy's patches.
+const fn review_cmd(
+    id: &'static str,
+    label: &'static str,
+    keys: &'static [DefaultKey],
+    params: ParamSchema,
+    effect: Effect,
+) -> CommandDescriptor {
+    CommandDescriptor {
+        id,
+        label,
+        menu: None,
+        keys,
+        scope: Scope::Editor,
+        effect,
+        params,
+        planner: Some(PlannerId(id)),
+    }
+}
+
 /// Commands implemented by the Markdown planners (spec 02 §10, §15; ADR 0006 §3.2).
-pub static MARKDOWN_COMMANDS: [CommandDescriptor; 39] = [
+pub static MARKDOWN_COMMANDS: [CommandDescriptor; 45] = [
     cmd("block.toggleTask", "Toggle Task Status", &[mac_only("Ctrl+X")], S),
     cmd("block.paragraph", "Paragraph", &[key("Cmd+0", "Ctrl+0")], S),
     cmd("block.heading1", "Heading 1", &[key("Cmd+1", "Ctrl+1")], S),
@@ -209,6 +237,49 @@ pub static MARKDOWN_COMMANDS: [CommandDescriptor; 39] = [
         "Horizontal Line",
         &[key("Opt+Cmd+-", "Ctrl+Alt+-")],
         S,
+    ),
+    // review (ADR 0012, issue #69): ⌥⌘M / Ctrl+Alt+M adds a comment
+    review_cmd(
+        "review.addComment",
+        "Add Comment",
+        &[key("Opt+Cmd+M", "Ctrl+Alt+M")],
+        ParamSchema::NONE,
+        Effect::Mutates { group: F },
+    ),
+    review_cmd(
+        "review.accept",
+        "Accept Suggestion",
+        &[],
+        AT_PARAM,
+        Effect::Mutates { group: F },
+    ),
+    review_cmd(
+        "review.reject",
+        "Reject Suggestion",
+        &[],
+        AT_PARAM,
+        Effect::Mutates { group: F },
+    ),
+    review_cmd(
+        "review.acceptAll",
+        "Accept All Suggestions",
+        &[],
+        ParamSchema::NONE,
+        Effect::Mutates { group: UndoGroup::Bulk },
+    ),
+    review_cmd(
+        "review.rejectAll",
+        "Reject All Suggestions",
+        &[],
+        ParamSchema::NONE,
+        Effect::Mutates { group: UndoGroup::Bulk },
+    ),
+    review_cmd(
+        "review.deleteComment",
+        "Delete Comment",
+        &[],
+        AT_PARAM,
+        Effect::Mutates { group: F },
     ),
 ];
 
@@ -689,6 +760,57 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
                 content: inner_src.clone(),
                 markers: vec![map(n.span.start)..inner_src.start, inner_src.end..map(n.span.end)],
                 children: vec![child],
+                text: 0..0,
+            };
+        }
+        InlineKind::Critic { kind, content } => {
+            let src = map(n.span.start)..map(n.span.end);
+            let inner = map(content.start)..map(content.end);
+            let mut markers = vec![src.start..inner.start, inner.end..src.end];
+            let children = match kind {
+                // the comment's text, plain (no Markdown inside): one text leaf per line and a
+                // soft break between lines, so a multi-line comment maps to its source (the
+                // container prefixes of later lines lie in the breaks)
+                crate::inline::CriticKind::Comment => {
+                    let c = content.slice(s);
+                    let mut v = Vec::new();
+                    let mut from = 0;
+                    for (i, _) in c.match_indices('\n').chain(std::iter::once((c.len(), ""))) {
+                        let a = content.start + from;
+                        let b = content.start + i;
+                        if b > a || v.is_empty() {
+                            v.push(InlineNode::leaf(
+                                NK::Text,
+                                map(a)..map(b),
+                                push_value(pool, &c[from..i]),
+                            ));
+                        }
+                        if i < c.len() {
+                            v.push(InlineNode::leaf(NK::Break { hard: false }, map(b)..map(b + 1), 0..0));
+                        }
+                        from = i + 1;
+                    }
+                    v
+                }
+                crate::inline::CriticKind::Substitute => {
+                    // the separator `~>` between the old and the new text
+                    if let (Some(old), Some(new)) = (n.children.first(), n.children.get(1)) {
+                        markers.insert(1, map(old.span.end)..map(new.span.start));
+                    }
+                    n.children.iter().map(|c| neutral_inline(s, c, map, pool)).collect()
+                }
+                _ => n.children.iter().map(|c| neutral_inline(s, c, map, pool)).collect(),
+            };
+            // the parts of a substitution: marker-less, their content is their source
+            if matches!(kind, crate::inline::CriticKind::Old | crate::inline::CriticKind::New) {
+                markers.clear();
+            }
+            return InlineNode {
+                kind: NK::Critic(*kind),
+                source: src,
+                content: inner,
+                markers,
+                children,
                 text: 0..0,
             };
         }
@@ -1840,6 +1962,13 @@ impl Document {
 }
 
 impl EditBehavior for Document {
+    fn can_plan(&self, id: PlannerId, req: &PlanRequest) -> bool {
+        if let Some(ok) = self.can_plan_review(id, req) {
+            return ok;
+        }
+        self.plan(id, req).is_ok()
+    }
+
     fn plan_checked(&self, id: PlannerId, req: &PlanRequest) -> bool {
         if let Some(st) = style_of(id) {
             return self.format_active(st, req);
@@ -1868,6 +1997,9 @@ impl EditBehavior for Document {
         if let Some(st) = style_of(id) {
             return self.plan_format(st, req);
         }
+        if let Some(r) = self.plan_review(id, req) {
+            return r;
+        }
         match id {
             planners::LINK => return self.plan_link(false, req),
             planners::IMAGE => return self.plan_link(true, req),
@@ -1878,6 +2010,10 @@ impl EditBehavior for Document {
             return r;
         }
         if id == planners::NEWLINE {
+            // Enter inside a comment: a line break inside the comment (ADR 0012)
+            if let Some(r) = self.plan_comment_newline(req) {
+                return r;
+            }
             return self.plan_newline(req);
         }
         if id == planners::TOGGLE_TASK {

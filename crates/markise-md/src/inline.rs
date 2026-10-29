@@ -8,6 +8,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+pub use markise_doc::CriticKind;
+
 use crate::options::ParseOptions;
 use crate::text::{Span, is_punct_or_symbol};
 use crate::ticks::TickRuns;
@@ -92,6 +94,15 @@ pub enum InlineKind {
         subpath: Option<String>,
         inner: Span,
         display: Option<Span>,
+    },
+    /// CriticMarkup review mark (ADR 0012, [`ParseOptions::critic_markup`]): `content` is
+    /// the text between the delimiters. Insertions, deletions and highlights have their
+    /// parsed content as children; a comment has none (its text is `content`, unparsed); a
+    /// substitution has two children, `Critic { kind: Old }` and `Critic { kind: New }`,
+    /// whose spans and contents are the text before and after `~>`.
+    Critic {
+        kind: CriticKind,
+        content: Span,
     },
 }
 
@@ -260,6 +271,21 @@ struct P<'a> {
     wiki_line: Option<(usize, usize)>,
     /// Bytes the wikilink searches scanned (linearity test).
     wiki_scanned: usize,
+    /// CriticMarkup closer search memo per mark kind (`++}`, `--}`, `~~}`, `==}`, `<<}`):
+    /// `(from, close)` — the first closer at or after `from` is at `close` (`None`: there is
+    /// none before the end). Openers are tried left to right, so a later opener at or before
+    /// `close` gets the same answer without a new search (linear on runs of openers).
+    critic_close: [Option<(usize, Option<usize>)>; 5],
+    /// Per mark kind, for its closer at `.0`: the first backtick run between the first
+    /// opener's content start and the closer whose code span ends after the closer (`.1`), if
+    /// any. Kept per kind (review P1-2): openers of different kinds alternating must not evict
+    /// each other's answer.
+    critic_ticks: [Option<(usize, Option<usize>)>; 5],
+    /// Substitution separator memo `(close, from, arrow)`: the first `~>` at or after `from`
+    /// and before `close`.
+    critic_arrow: Option<(usize, usize, Option<usize>)>,
+    /// Bytes the CriticMarkup searches scanned (linearity test).
+    critic_scanned: usize,
 }
 
 /// Parses inline content `s` (lines joined with `\n`). Spans are offsets into `s`.
@@ -293,10 +319,17 @@ fn parse_at(s: &str, base: usize, opts: &ParseOptions, ctx: &InlineContext, esca
         wiki_last_open: None,
         wiki_line: None,
         wiki_scanned: 0,
+        critic_close: [None; 5],
+        critic_ticks: [None; 5],
+        critic_arrow: None,
+        critic_scanned: 0,
     };
     p.run();
     #[cfg(test)]
     WIKI_SCANNED.with(|c| c.set(c.get() + p.wiki_scanned));
+    if p.critic_scanned > 0 {
+        CRITIC_SCANNED.with(|c| c.set(c.get() + p.critic_scanned));
+    }
     p.process_emphasis(None);
     let mut out = Vec::new();
     p.collect(p.head, &mut out, 0);
@@ -307,6 +340,18 @@ fn parse_at(s: &str, base: usize, opts: &ParseOptions, ctx: &InlineContext, esca
 thread_local! {
     /// Bytes scanned by wikilink searches in this thread (linearity tests).
     static WIKI_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+thread_local! {
+    /// Bytes scanned by CriticMarkup searches in this thread (linearity tests).
+    static CRITIC_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Bytes scanned by CriticMarkup searches in this thread since the last call, and resets the
+/// count (linearity tests count work instead of timing it).
+#[doc(hidden)]
+pub fn critic_scanned_reset() -> usize {
+    CRITIC_SCANNED.with(|c| c.replace(0))
 }
 
 #[inline]
@@ -378,6 +423,7 @@ impl<'a> P<'a> {
                 b'^' => self.opts.superscript,
                 b'!' => pos + 1 < end && self.b[pos + 1] == b'[',
                 b':' => self.opts.emoji,
+                b'{' => self.opts.critic_markup,
                 0xE3 => self.opts.remap_unicode_punctuation,
                 _ => false,
             };
@@ -412,6 +458,7 @@ impl<'a> P<'a> {
                 b'<' => self.angle(pos, end),
                 b'&' => self.entity(pos, end),
                 b':' => self.emoji(pos, end),
+                b'{' => self.critic(pos, end),
                 _ => {
                     if self.s[pos..].starts_with('【') {
                         Some(self.open_bracket(pos, false))
@@ -827,6 +874,157 @@ impl<'a> P<'a> {
             close + 2,
         );
         Some(close + 2)
+    }
+
+    /// The first closer `pat` of mark kind `k` at or after `from` (before `end`).
+    fn find_critic_close(&mut self, k: usize, pat: &[u8; 3], from: usize, end: usize) -> Option<usize> {
+        if let Some((a, close)) = self.critic_close[k]
+            && a <= from
+            && close.is_none_or(|c| from <= c)
+        {
+            return close;
+        }
+        let found = find_from(self.b, from, end, pat);
+        self.critic_scanned += found.map_or(end, |c| c + pat.len()).saturating_sub(from);
+        self.critic_close[k] = Some((from, found));
+        found
+    }
+
+    /// Whether a code span that starts inside `open..close` ends after `close` (it then wins
+    /// over the mark, like code spans and wikilinks). A backslash-escaped backtick opens no
+    /// code span (review P2-5). Memoised per mark kind `k` and closer: every opener that shares
+    /// the closer sees the same backtick pairing (it is not inside a code span itself).
+    fn code_crosses(&mut self, k: usize, open: usize, close: usize, end: usize) -> bool {
+        if let Some((c, fail)) = self.critic_ticks[k]
+            && c == close
+        {
+            return fail.is_some_and(|f| open <= f);
+        }
+        let mut fail = None;
+        let mut i = open;
+        while let Some(rel) = memchr::memchr2(b'`', b'\\', &self.b[i..close]) {
+            let a = i + rel;
+            if self.b[a] == b'\\' {
+                // `\x`: an escape (as the main loop reads it) — the next byte is literal
+                let esc = self.b.get(a + 1).is_some_and(|&c| is_escapable(c, self.opts));
+                i = (a + if esc { 2 } else { 1 }).min(close);
+                if i >= close {
+                    break;
+                }
+                continue;
+            }
+            let mut q = a;
+            while q < end && self.b[q] == b'`' {
+                q += 1;
+            }
+            let n = q - a;
+            match crate::ticks::find_run(self.b, 0, q, end, n, SCAN_BUDGET, &mut self.ticks) {
+                Some(r) if r + n > close => {
+                    fail = Some(a);
+                    break;
+                }
+                Some(r) => i = (r + n).min(close),
+                None => i = q.min(close),
+            }
+            if i >= close {
+                break;
+            }
+        }
+        self.critic_scanned += fail.unwrap_or(close).saturating_sub(open);
+        self.critic_ticks[k] = Some((close, fail));
+        fail.is_some()
+    }
+
+    /// The first `~>` in `from..close`.
+    fn find_arrow(&mut self, from: usize, close: usize) -> Option<usize> {
+        if let Some((c, a, arrow)) = self.critic_arrow
+            && c == close
+            && a <= from
+            && arrow.is_none_or(|x| from <= x)
+        {
+            return arrow;
+        }
+        let found = find_from(self.b, from, close, b"~>");
+        self.critic_scanned += found.map_or(close, |x| x + 2).saturating_sub(from);
+        self.critic_arrow = Some((close, from, found));
+        found
+    }
+
+    /// Inline content `a..b` parsed as the children of a review mark: CriticMarkup itself is
+    /// off inside (marks do not nest), trailing spaces are kept as text (the content parse
+    /// strips them like at the end of a paragraph).
+    fn critic_children(&self, a: usize, b: usize) -> Vec<Inline> {
+        let inner = &self.s[a..b];
+        let opts = ParseOptions {
+            critic_markup: false,
+            ..self.opts.clone()
+        };
+        let mut v = parse_at(inner, self.base + a, &opts, self.ctx, false);
+        let kept = inner.trim_end_matches([' ', '\t']).len();
+        if kept < inner.len() {
+            v.push(Inline {
+                kind: InlineKind::Text,
+                span: self.sp(a + kept, b),
+                children: Vec::new(),
+            });
+        }
+        v
+    }
+
+    /// A CriticMarkup mark at `pos` (`{++`, `{--`, `{~~`, `{==`, `{>>`; ADR 0012): the content
+    /// runs to the first matching closer within the block's content (marks never span
+    /// blocks); no nesting; a code span that starts inside and ends after the closer wins
+    /// (not for comments, whose text is plain); a substitution needs a `~>`.
+    fn critic(&mut self, pos: usize, end: usize) -> Option<usize> {
+        let b = self.b;
+        if pos + 3 > end {
+            return None;
+        }
+        let (k, kind, pat): (usize, CriticKind, &[u8; 3]) = match (b[pos + 1], b[pos + 2]) {
+            (b'+', b'+') => (0, CriticKind::Insert, b"++}"),
+            (b'-', b'-') => (1, CriticKind::Delete, b"--}"),
+            (b'~', b'~') => (2, CriticKind::Substitute, b"~~}"),
+            (b'=', b'=') => (3, CriticKind::Highlight, b"==}"),
+            (b'>', b'>') => (4, CriticKind::Comment, b"<<}"),
+            _ => return None,
+        };
+        let open = pos + 3;
+        let close = self.find_critic_close(k, pat, open, end)?;
+        // a comment's text is opaque (owner decision, ADR 0012): no inline parsing inside, so
+        // a backtick in it opens nothing
+        if kind != CriticKind::Comment && self.code_crosses(k, open, close, end) {
+            return None;
+        }
+        let stop = close + 3;
+        let content = self.sp(open, close);
+        let children = match kind {
+            CriticKind::Comment => Vec::new(),
+            CriticKind::Substitute => {
+                let arrow = self.find_arrow(open, close)?;
+                vec![
+                    Inline {
+                        kind: InlineKind::Critic {
+                            kind: CriticKind::Old,
+                            content: self.sp(open, arrow),
+                        },
+                        span: self.sp(open, arrow),
+                        children: self.critic_children(open, arrow),
+                    },
+                    Inline {
+                        kind: InlineKind::Critic {
+                            kind: CriticKind::New,
+                            content: self.sp(arrow + 2, close),
+                        },
+                        span: self.sp(arrow + 2, close),
+                        children: self.critic_children(arrow + 2, close),
+                    },
+                ]
+            }
+            _ => self.critic_children(open, close),
+        };
+        let id = self.push(InlineKind::Critic { kind, content }, pos, stop);
+        self.set_children(id, children);
+        Some(stop)
     }
 
     fn open_bracket(&mut self, pos: usize, image: bool) -> usize {
@@ -1870,6 +2068,13 @@ pub fn plain_text(s: &str, nodes: &[Inline]) -> String {
                     }
                 }
                 InlineKind::Html | InlineKind::FootnoteRef { .. } => {}
+                // review marks: the text as it reads before any suggestion is accepted
+                // (insertions and comments are not part of it; a substitution reads as its old
+                // text)
+                InlineKind::Critic {
+                    kind: CriticKind::Insert | CriticKind::Comment | CriticKind::New,
+                    ..
+                } => {}
                 _ => go(s, &n.children, out),
             }
         }

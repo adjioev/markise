@@ -24,7 +24,7 @@ use egui::{
     Stroke, StrokeKind, Ui, UiBuilder, WidgetInfo, pos2, vec2,
 };
 use markise_engine::settings::{
-    Appearance, EditingSettings, ImageLocation, ImageSettings, SourceSettings, ToolbarPosition,
+    Appearance, CommentDisplay, EditingSettings, ImageLocation, ImageSettings, SourceSettings, ToolbarPosition,
 };
 use markise_theme::Overrides;
 use markise_theme::catalog::{StyleId, ThemeId};
@@ -99,6 +99,9 @@ pub enum RowId {
     SmartDashesEm,
     Diagrams,
     Wikilinks,
+    CriticMarkup,
+    CommentDisplay,
+    ExportComments,
     HighlightCode,
     Theme,
     Style,
@@ -203,6 +206,27 @@ pub const ROWS: &[Row] = &[
         "Extensions",
         "Wikilinks [[Note]]",
         "links vault obsidian",
+    ),
+    row(
+        R::CriticMarkup,
+        S::Markdown,
+        "Comments",
+        "Comments & suggestions (CriticMarkup)",
+        "review criticmarkup annotate track changes ai",
+    ),
+    row(
+        R::CommentDisplay,
+        S::Markdown,
+        "Comments",
+        "Show comments",
+        "margin bubbles cards popover hover",
+    ),
+    row(
+        R::ExportComments,
+        S::Markdown,
+        "Comments",
+        "Keep comments in exports",
+        "review export html pdf strip",
     ),
     row(
         R::HighlightCode,
@@ -452,6 +476,9 @@ pub struct Values {
     pub source: SourceSettings,
     pub diagrams: bool,
     pub wikilinks: bool,
+    pub critic_markup: bool,
+    pub comment_display: CommentDisplay,
+    pub export_comments: bool,
     pub highlight_code: bool,
     /// Complete themes and the selected one (`None`: style and colors mixed).
     pub themes: Vec<ThemeCard>,
@@ -484,6 +511,9 @@ pub enum Change {
     Source(SourceSettings),
     Diagrams(bool),
     Wikilinks(bool),
+    CriticMarkup(bool),
+    CommentDisplay(CommentDisplay),
+    ExportComments(bool),
     HighlightCode(bool),
     Theme(ThemeId),
     Style(StyleId),
@@ -1163,6 +1193,26 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                 out.push(Change::Wikilinks(on));
             }
         }
+        R::CriticMarkup => {
+            if let Some(on) = switch(ui, v.critic_markup) {
+                out.push(Change::CriticMarkup(on));
+            }
+        }
+        R::CommentDisplay => {
+            let items = [
+                (CommentDisplay::Margin, "In the margin"),
+                (CommentDisplay::Bubbles, "As bubbles (hover to read)"),
+            ];
+            let picked = control_row(ui, p, r.label, |ui| segmented(ui, p, &items, v.comment_display));
+            if let Some(d) = picked {
+                out.push(Change::CommentDisplay(d));
+            }
+        }
+        R::ExportComments => {
+            if let Some(on) = switch(ui, v.export_comments) {
+                out.push(Change::ExportComments(on));
+            }
+        }
         R::HighlightCode => {
             if let Some(on) = switch(ui, v.highlight_code) {
                 out.push(Change::HighlightCode(on));
@@ -1623,7 +1673,14 @@ pub fn section_at_defaults(s: Section, v: &Values) -> bool {
     match s {
         Section::Editor => v.editing == EditingSettings::default(),
         Section::Source => v.source == SourceSettings::default(),
-        Section::Markdown => v.diagrams && v.wikilinks && v.highlight_code,
+        Section::Markdown => {
+            v.diagrams
+                && v.wikilinks
+                && v.critic_markup
+                && v.comment_display == CommentDisplay::Margin
+                && v.export_comments
+                && v.highlight_code
+        }
         Section::Appearance => {
             let sel = markise_theme::catalog::Selection::default();
             v.style.as_ref() == Some(&sel.style)
