@@ -341,8 +341,8 @@ fn wikilinks_off_shows_plain_text_and_keeps_the_bytes() {
     let before = h.state().document_text().unwrap();
     assert!(h.state().wikilinks());
     assert!(h.state().link_center("[[Other]]").is_some());
-    let bar = h.state().menu_model();
-    assert!(bar.item("view.wikilinks").is_some());
+    // the switch lives in Preferences → Markdown (issue #50)
+    assert!(h.state().preference_values().wikilinks);
 
     h.state_mut().set_wikilinks(false);
     wait_until(&mut h, "re-parse", |a| !a.is_reparsing());

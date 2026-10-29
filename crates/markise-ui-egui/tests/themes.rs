@@ -44,6 +44,14 @@ fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&Mark
     }
 }
 
+/// Opens View → Theme in the egui menu bar.
+fn open_view_theme_menu(h: &mut Harness<'static, MarkiseApp>) {
+    h.get_by_label("View").click();
+    h.run_steps(2);
+    h.get_by_label("Theme").click();
+    h.run_steps(2);
+}
+
 #[test]
 fn builtin_theme_and_appearance_are_selected_and_persisted() {
     let cfg = tmpdir("persist");
@@ -53,11 +61,9 @@ fn builtin_theme_and_appearance_are_selected_and_persisted() {
         h.step();
         h.step();
         assert_eq!(h.state().theme().name, "Markise Light");
-        // the Theme menu lists the families; clicking one selects it
-        h.get_by_label("Themes").click();
-        h.run_steps(2);
+        // View → Theme lists the complete themes; clicking one selects it (issue #50)
+        open_view_theme_menu(&mut h);
         h.get_by_label("Phycat");
-        h.get_by_label("Follow System");
         h.get_by_label("Drake").click();
         wait_until(&mut h, "Drake Light", |a| a.theme().name == "Drake Light");
         // palette themes are native: selected immediately, light/dark pairs follow appearance
@@ -214,17 +220,27 @@ fn style_colors_and_overrides_are_independent_and_persisted() {
         wait_until(&mut h, "overrides applied", |a| {
             a.theme().line_height == 2.0 && a.theme().column_max_width == 900.0
         });
-        // the menu offers both parts, complete themes and the overrides window
-        h.get_by_label("Themes").click();
+        // Preferences → Appearance offers both parts, complete themes, light/dark and the
+        // overrides (issue #50: they left the Themes menu); View → Theme → Theme Settings…
+        open_view_theme_menu(&mut h);
+        h.get_by_label("Theme Settings…").click();
         h.run_steps(2);
+        assert!(h.state().is_preferences_open());
         h.get_by_label("Style");
         h.get_by_label("Colors");
-        h.get_by_label("Complete Themes");
-        h.get_by_label("Font & Size… (Custom)").click();
+        h.get_by_label("Complete theme");
+        h.get_by_label("Follow system");
+        h.get_by_role_and_label(egui::Role::Slider, "Line height");
+        h.key_press(egui::Key::Escape);
         h.run_steps(2);
-        // the window and its title line
+        assert!(!h.state().is_preferences_open());
+        // the Font & size window itself still opens by its command
+        let ctx = h.ctx.clone();
+        h.state_mut()
+            .menu_action(&ctx, &markise_ui_egui::menu::MenuAction::Command("theme.fontAndSize"));
+        h.run_steps(2);
         assert!(h.query_all_by_label("Font & size").count() >= 1);
-        h.get_by_label("Line height");
+        h.get_by_role_and_label(egui::Role::Slider, "Line height");
         wait_until(&mut h, "settings written", |_| {
             std::fs::read_to_string(&settings).is_ok_and(|s| {
                 s.contains("\"version\": 2")
@@ -252,8 +268,7 @@ fn complete_theme_menu_click_marks_style_and_colors_chosen() {
     let mut h = harness(&cfg);
     h.step();
     assert_eq!(h.state().theme_manager().chosen_parts(), (false, false));
-    h.get_by_label("Themes").click();
-    h.run_steps(2);
+    open_view_theme_menu(&mut h);
     h.get_by_label("Markise").click(); // the complete theme, already the current selection
     h.run_steps(2);
     assert_eq!(h.state().theme_manager().chosen_parts(), (true, true));

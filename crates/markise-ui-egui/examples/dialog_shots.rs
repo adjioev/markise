@@ -1,4 +1,4 @@
-//! Headless screenshots of the app's dialogs (issue #35): each scene opens one dialog in the
+//! Headless screenshots of the app's dialogs (issue #35) and the Preferences window (issue #50): each scene opens one dialog in the
 //! real app UI and saves a PNG, in the light and the dark appearance.
 //!
 //! `cargo run -p markise-ui-egui --release --example dialog_shots [-- <out-dir> [<prefix>]]`
@@ -16,6 +16,7 @@ use egui::{Context, TextureId};
 use markise_engine::export::{ExportKind, ExportRequest};
 use markise_ui_egui::export_ui::ExportAction;
 use markise_ui_egui::menu::MenuAction;
+use markise_ui_egui::prefs::{Change, Section};
 use markise_ui_egui::sidebar::TreeAction;
 use markise_ui_egui::{AppOptions, Appearance, ConfigDir, MarkiseApp};
 
@@ -70,6 +71,52 @@ fn scenes() -> Vec<(&'static str, Setup)> {
         }),
         ("theme-report", |app, ctx, _| {
             app.menu_action(ctx, &MenuAction::Command("theme.report"));
+        }),
+        // the Preferences window (issue #50)
+        ("preferences-general", |app, ctx, _| {
+            app.menu_action(ctx, &MenuAction::Command("app.preferences"));
+        }),
+        ("preferences-editor", |app, ctx, _| {
+            app.open_preferences_at(Section::Editor);
+            app.apply_preference(
+                ctx,
+                Change::Editing(markise_engine::settings::EditingSettings {
+                    smart_punctuation: true,
+                    ..Default::default()
+                }),
+            );
+        }),
+        ("preferences-markdown", |app, _, _| {
+            app.open_preferences_at(Section::Markdown)
+        }),
+        ("preferences-appearance", |app, _, _| {
+            app.open_preferences_at(Section::Appearance)
+        }),
+        ("preferences-source", |app, _, _| {
+            app.open_preferences_at(Section::Source)
+        }),
+        ("preferences-files", |app, _, _| app.open_preferences_at(Section::Files)),
+        ("preferences-export", |app, _, _| {
+            app.open_preferences_at(Section::Export)
+        }),
+        ("preferences-search", |app, _, _| {
+            app.open_preferences_at(Section::General);
+            app.preferences().query = "line".into();
+        }),
+        ("preferences-reset", |app, ctx, _| {
+            app.open_preferences_at(Section::Editor);
+            app.apply_preference(
+                ctx,
+                Change::Editing(markise_engine::settings::EditingSettings {
+                    auto_pair_markdown: true,
+                    ..Default::default()
+                }),
+            );
+            app.apply_preference(ctx, Change::AskReset(Section::Editor));
+        }),
+        ("preferences-zoom-150", |app, _, _| {
+            app.set_zoom(1.5);
+            app.open_preferences_at(Section::Appearance);
         }),
         // the sidebar itself (issue #57): a nested folder, a plain-text file, a long name
         ("sidebar", |app, ctx, dir| {

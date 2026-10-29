@@ -300,6 +300,7 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("edit.cut", "Cut", &[both("Cmd+X", "Ctrl+X")]),
     app("edit.copy", "Copy", &[both("Cmd+C", "Ctrl+C")]),
     app("edit.paste", "Paste", &[both("Cmd+V", "Ctrl+V")]),
+    // editing preferences: Preferences → Editor since issue #50 (no menu item; run by id)
     app("edit.autoPairBrackets", "Auto Pair Brackets and Quotes", &[]),
     app("edit.autoPairMarkdown", "Auto Pair Markdown Syntax", &[]),
     app("edit.smartPunctuation", "Smart Punctuation: Convert on Input", &[]),
@@ -309,7 +310,7 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("view.sideBySide", "Side by Side", &[both("Ctrl+Cmd+/", "Ctrl+Alt+/")]),
     app("view.showRecent", "Show Recent Files", &[]),
     app("view.toolbar", "Toolbar", &[]),
-    // View → Toolbar Position (spec 04 §3.2); the menu shows them as "Top" / "Bottom"
+    // toolbar position (spec 04 §3.2): Preferences → Appearance since issue #50; no menu item
     app("view.toolbarTop", "Toolbar at Top", &[]),
     app("view.toolbarBottom", "Toolbar at Bottom", &[]),
     app("view.highlightCode", "Highlight Code", &[]),
@@ -325,13 +326,15 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("view.zoomIn", "Zoom In", &[both("Shift+Cmd+=", "Ctrl+Shift+=")]),
     app("view.zoomOut", "Zoom Out", &[both("Shift+Cmd+-", "Ctrl+Shift+-")]),
     app("view.actualSize", "Actual Size", &[both("Shift+Cmd+0", "Ctrl+Shift+0")]),
-    // source editor display preferences (spec 02 §12.1.1), View → Source Editor
+    // source editor display preferences (spec 02 §12.1.1): Preferences → Source Mode; no menu item
     app("view.sourceLineNumbers", "Line Numbers", &[]),
     app("view.sourceSoftWrap", "Soft Wrap", &[]),
     app("view.sourceCurrentLine", "Highlight Current Line", &[]),
     app("view.sourceWhitespace", "Show Whitespace", &[]),
     app("export.previous", "Export with Previous", &[]),
     app("export.overwritePrevious", "Export and Overwrite with Previous", &[]),
+    // View → Theme's last item: Preferences → Appearance (issue #50)
+    app("view.themeSettings", "Theme Settings…", &[]),
     app("theme.fontAndSize", "Font & Size…", &[]),
     app("theme.import", "Import Theme…", &[]),
     app("theme.openFolder", "Open Theme Folder", &[]),

@@ -1554,7 +1554,7 @@ numbered M2d-n (proposed for `99-open-questions.md`).
   Side by Side opens. The formatting toolbar stays hidden in full Source mode and inactive over
   the read-only rendered pane, honouring the top/bottom reservation.
 - **M2d-8 — display preferences.** Settings key `source` (`line_numbers` false, `soft_wrap`
-  true, `current_line` true, `whitespace_marks` false), View → Source Editor. Line numbers are
+  true, `current_line` true, `whitespace_marks` false), Preferences → Source Mode (View → Source Editor until issue #50). Line numbers are
   a gutter numbering every line; whitespace marks show `·` for spaces and an arrow for tabs,
   and a faint return arrow after two or more trailing spaces before a line break is always
   shown (SE-2), all at paint time; the

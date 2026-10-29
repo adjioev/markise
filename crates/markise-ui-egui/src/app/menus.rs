@@ -10,10 +10,10 @@ use egui::{Context, Key, Modifiers};
 use markise_engine::editor::command::Registry;
 use markise_engine::editor::keymap::{Keymap, Platform};
 use markise_engine::export::ExportKind;
-use markise_engine::settings::{Appearance, ToolbarPosition, ZOOM_RANGE};
+use markise_engine::settings::{ToolbarPosition, ZOOM_RANGE};
 use markise_export::pandoc::PandocFormat;
 use markise_md::MarkdownFormat;
-use markise_theme::catalog::{Origin, Selection, ThemeFamily, ThemeId};
+use markise_theme::catalog::{Origin, Selection, ThemeId};
 
 use super::{MarkiseApp, ViewMode};
 use crate::export_ui::ExportAction;
@@ -54,6 +54,10 @@ const TEXT_FIELD_KEYS: [(&str, Modifiers, Key); 3] = [
     ("edit.redo", Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z),
     ("select.all", Modifiers::COMMAND, Key::A),
 ];
+
+/// Application commands that have no item in the macOS menus because AppKit adds its own
+/// (View → Enter Full Screen); their chords stay handled by the app's shortcut path.
+const MAC_SYSTEM_MENU_COMMANDS: [&str; 1] = ["view.fullScreen"];
 
 fn text_field_focused(ctx: &Context) -> bool {
     ctx.memory(|m| m.focused())
@@ -148,22 +152,6 @@ impl MarkiseApp {
         crate::toolbar::Model { controls }
     }
 
-    /// Edit menu tail: auto-pair and smart punctuation preferences (spec 02 §4, §13).
-    fn editing_pref_entries(&self) -> Vec<Entry> {
-        let e = self.themes.editing();
-        vec![
-            Entry::Separator,
-            self.app_item("edit.autoPairBrackets", true, Check::Toggle(e.auto_pair_brackets)),
-            self.app_item("edit.autoPairMarkdown", true, Check::Toggle(e.auto_pair_markdown)),
-            self.app_item("edit.smartPunctuation", true, Check::Toggle(e.smart_punctuation)),
-            self.app_item(
-                "edit.smartDashesEm",
-                e.smart_punctuation,
-                Check::Toggle(e.smart_dashes_em),
-            ),
-        ]
-    }
-
     fn item(&self, action: MenuAction, label: impl Into<String>, enabled: bool, check: Check) -> Entry {
         let chord = match &action {
             MenuAction::Command(id) => {
@@ -239,8 +227,7 @@ impl MarkiseApp {
                     vec![
                         self.app_item("app.about", true, Check::None),
                         Entry::Separator,
-                        // the preferences window (spec 05) does not exist yet
-                        self.app_item("app.preferences", false, Check::None),
+                        self.app_item("app.preferences", true, Check::None),
                         Entry::Separator,
                         Entry::Role(Role::Services),
                         Entry::Separator,
@@ -281,7 +268,12 @@ impl MarkiseApp {
         }
         menus.push(Menu::new("File", file));
         let mut edit = self.registry_menu("Edit", EDIT_ORDER, text_field);
-        edit.entries.extend(self.editing_pref_entries());
+        if !mac {
+            // Windows and Linux: Preferences at the end of the Edit menu (the GNOME/KDE
+            // convention; macOS has it in the application menu)
+            edit.entries.push(Entry::Separator);
+            edit.entries.push(self.app_item("app.preferences", true, Check::None));
+        }
         menus.push(edit);
         menus.push(self.registry_menu("Paragraph", PARAGRAPH_ORDER, text_field));
         let format = self.registry_menu("Format", FORMAT_ORDER, text_field);
@@ -296,7 +288,6 @@ impl MarkiseApp {
                 self.app_item("go.forward", self.can_go_forward(), Check::None),
             ],
         ));
-        menus.push(self.themes_menu());
         if mac {
             menus.push(
                 Menu::new(
@@ -363,161 +354,83 @@ impl MarkiseApp {
             .registry()
             .get("view.sourceMode")
             .map_or("Source Code Mode", |s| s.desc.label);
-        Menu::new(
-            "View",
-            vec![
-                self.app_item("view.rendered", has_doc, Check::Radio(mode == ViewMode::Rendered)),
-                self.item(
-                    MenuAction::Command("view.sourceMode"),
-                    src_label,
-                    has_doc,
-                    Check::Radio(mode == ViewMode::Source),
-                ),
-                self.app_item("view.sideBySide", has_doc, Check::Radio(mode == ViewMode::SideBySide)),
-                Entry::Separator,
-                self.item(
-                    MenuAction::Command("view.toggleSidebar"),
-                    "Toggle Sidebar",
-                    true,
-                    Check::None,
-                ),
-                self.app_item("view.showRecent", true, Check::Toggle(self.show_recent())),
-                self.app_item("view.toolbar", true, Check::Toggle(self.show_toolbar())),
-                Entry::Submenu(Menu::new("Toolbar Position", {
-                    let bottom = self.toolbar_position() == ToolbarPosition::Bottom;
-                    vec![
-                        self.item(
-                            MenuAction::Command("view.toolbarTop"),
-                            "Top",
-                            true,
-                            Check::Radio(!bottom),
-                        ),
-                        self.item(
-                            MenuAction::Command("view.toolbarBottom"),
-                            "Bottom",
-                            true,
-                            Check::Radio(bottom),
-                        ),
-                    ]
-                })),
-                Entry::Separator,
-                self.app_item("view.highlightCode", true, Check::Toggle(self.highlight_code)),
-                self.app_item("view.diagrams", true, Check::Toggle(self.diagrams)),
-                self.app_item("view.wikilinks", true, Check::Toggle(self.wikilinks())),
-                Entry::Submenu(self.source_menu()),
-                Entry::Separator,
-                self.app_item("view.zoomIn", self.zoom() < ZOOM_RANGE.1, Check::None),
-                self.app_item("view.zoomOut", self.zoom() > ZOOM_RANGE.0, Check::None),
-                self.app_item("view.actualSize", true, Check::None),
-                Entry::Separator,
-                self.app_item("view.fullScreen", true, Check::None),
-            ],
-        )
-    }
-
-    /// View → Source Editor: the source editor's display preferences (spec 02 §12.1.1).
-    fn source_menu(&self) -> Menu {
-        let p = self.themes.source_prefs();
-        Menu::new(
-            "Source Editor",
-            vec![
-                self.app_item("view.sourceLineNumbers", true, Check::Toggle(p.line_numbers)),
-                self.app_item("view.sourceSoftWrap", true, Check::Toggle(p.soft_wrap)),
-                self.app_item("view.sourceCurrentLine", true, Check::Toggle(p.current_line)),
-                self.app_item("view.sourceWhitespace", true, Check::Toggle(p.whitespace_marks)),
-            ],
-        )
-    }
-
-    /// Themes menu (ADR 0007): Style and Colors submenus pick the two parts independently;
-    /// "Complete Themes" pick a theme's own style and colors together.
-    fn themes_menu(&self) -> Menu {
-        let sel = self.themes.selection().clone();
-        let families: &[ThemeFamily] = self.themes.families();
-        let label = |f: &ThemeFamily| match (&f.light, &f.dark) {
-            (Some(_), Some(_)) => f.name.clone(),
-            (None, Some(_)) => format!("{} (dark only)", f.name),
-            _ => format!("{} (light only)", f.name),
-        };
-        let mut style = Vec::new();
-        let mut from_themes = false;
-        for (id, name, theme) in self.themes.style_choices() {
-            if theme && !from_themes {
-                from_themes = true;
-                style.push(Entry::Separator);
-                style.push(Entry::Header("From Themes".into()));
-            }
-            let on = sel.style == id;
-            style.push(self.item(MenuAction::Style(id), name, true, Check::Radio(on)));
-        }
-        let mut colors = Vec::new();
-        let mut section = None;
-        for f in families {
-            let group = match f.origin {
-                Origin::Markise => 0,
-                Origin::Palette => 1,
-                Origin::Builtin | Origin::User => 2,
-            };
-            if section != Some(group) {
-                if section.is_some() {
-                    colors.push(Entry::Separator);
-                }
-                section = Some(group);
-                match group {
-                    1 => colors.push(Entry::Header("Palettes".into())),
-                    2 => colors.push(Entry::Header("From Themes".into())),
-                    _ => {}
-                }
-            }
-            let on = sel.colors == f.id;
-            colors.push(self.item(MenuAction::Colors(f.id.clone()), label(f), true, Check::Radio(on)));
-        }
-        let mut v = vec![
-            Entry::Submenu(Menu::new("Style", style)),
-            Entry::Submenu(Menu::new("Colors", colors)),
+        let mut entries = vec![
+            self.app_item("view.rendered", has_doc, Check::Radio(mode == ViewMode::Rendered)),
+            self.item(
+                MenuAction::Command("view.sourceMode"),
+                src_label,
+                has_doc,
+                Check::Radio(mode == ViewMode::Source),
+            ),
+            self.app_item("view.sideBySide", has_doc, Check::Radio(mode == ViewMode::SideBySide)),
             Entry::Separator,
-            Entry::Header("Complete Themes".into()),
+            self.item(
+                MenuAction::Command("view.toggleSidebar"),
+                "Toggle Sidebar",
+                true,
+                Check::None,
+            ),
+            self.app_item("view.showRecent", true, Check::Toggle(self.show_recent())),
+            self.app_item("view.toolbar", true, Check::Toggle(self.show_toolbar())),
+            Entry::Separator,
+            self.app_item("view.highlightCode", true, Check::Toggle(self.highlight_code)),
+            Entry::Submenu(self.theme_menu()),
+            Entry::Separator,
+            self.app_item("view.zoomIn", self.zoom() < ZOOM_RANGE.1, Check::None),
+            self.app_item("view.zoomOut", self.zoom() > ZOOM_RANGE.0, Check::None),
+            self.app_item("view.actualSize", true, Check::None),
         ];
+        // macOS adds its own "Enter/Exit Full Screen" item to every menu titled "View" (for
+        // full-screen capable windows) and flips its title itself; a second item of ours
+        // would show twice. ⌃⌘F stays bound: the system item answers it, and when it does not,
+        // the key reaches the app's shortcut path (see `app_shortcuts`). Windows and Linux
+        // have no system item: ours, with a check mark.
+        if self.menu_platform != Platform::Mac {
+            let full = self
+                .ctx
+                .as_ref()
+                .is_some_and(|c| c.input(|i| i.viewport().fullscreen.unwrap_or(false)));
+            entries.push(Entry::Separator);
+            entries.push(self.item(
+                MenuAction::Command("view.fullScreen"),
+                "Full Screen",
+                true,
+                Check::Toggle(full),
+            ));
+        }
+        Menu::new("View", entries)
+    }
+
+    /// View → Theme: a quick switcher between the installed complete themes (Markise, the
+    /// built-in and the user CSS themes; selecting one sets its style and colors), then
+    /// "Theme Settings…" (Preferences → Appearance: style, colors, light/dark, font & size,
+    /// theme files). Issue #50 replaced the top-level Themes menu with it.
+    fn theme_menu(&self) -> Menu {
+        let current = self.themes.selection().complete_theme().cloned();
+        let mut v = Vec::new();
         let mut user = false;
-        for f in families
+        for f in self
+            .themes
+            .families()
             .iter()
             .filter(|f| f.id == ThemeId::Markise || matches!(f.origin, Origin::Builtin | Origin::User))
         {
             if f.origin == Origin::User && !user {
                 user = true;
+                v.push(Entry::Separator);
                 v.push(Entry::Header("My Themes".into()));
             }
-            let on = sel.complete_theme() == Some(&f.id);
-            v.push(self.item(MenuAction::Theme(f.id.clone()), label(f), true, Check::Radio(on)));
+            let label = match (&f.light, &f.dark) {
+                (Some(_), Some(_)) => f.name.clone(),
+                (None, Some(_)) => format!("{} (dark only)", f.name),
+                _ => format!("{} (light only)", f.name),
+            };
+            let on = current.as_ref() == Some(&f.id);
+            v.push(self.item(MenuAction::Theme(f.id.clone()), label, true, Check::Radio(on)));
         }
         v.push(Entry::Separator);
-        v.push(Entry::Header("Appearance".into()));
-        let a = self.themes.appearance();
-        for (ap, name) in [
-            (Appearance::System, "Follow System"),
-            (Appearance::Light, "Light"),
-            (Appearance::Dark, "Dark"),
-        ] {
-            v.push(self.item(MenuAction::Appearance(ap), name, true, Check::Radio(a == ap)));
-        }
-        v.push(Entry::Separator);
-        let custom = if self.themes.overrides().is_empty() {
-            ""
-        } else {
-            " (Custom)"
-        };
-        v.push(self.item(
-            MenuAction::Command("theme.fontAndSize"),
-            format!("Font & Size…{custom}"),
-            true,
-            Check::None,
-        ));
-        v.push(Entry::Separator);
-        let has_user = self.themes.has_user_dir();
-        v.push(self.app_item("theme.import", has_user, Check::None));
-        v.push(self.app_item("theme.openFolder", has_user, Check::None));
-        v.push(self.app_item("theme.report", true, Check::None));
-        Menu::new("Themes", v)
+        v.push(self.app_item("view.themeSettings", true, Check::None));
+        Menu::new("Theme", v)
     }
 
     /// Performs a menu item exactly like its shortcut: registry commands through
@@ -592,7 +505,7 @@ impl MarkiseApp {
                 }
             }
             "file.close" | "app.quit" | "app.exit" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            "app.preferences" => return false,
+            "app.preferences" => self.open_preferences(),
             "app.about" => self.about.open(),
             // the focused widget (rich view or a text field) handles these as from the keyboard
             "edit.cut" => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCut),
@@ -656,6 +569,7 @@ impl MarkiseApp {
                 self.themes.set_editing(e);
             }
             "theme.fontAndSize" => self.font_window = true,
+            "view.themeSettings" => self.open_preferences_at(crate::prefs::Section::Appearance),
             "theme.import" => self.import_theme_dialog(),
             "theme.openFolder" => self.open_theme_folder(),
             "theme.report" => {
@@ -707,14 +621,15 @@ impl MarkiseApp {
     /// so every shortcut a menu shows works: on Windows/Linux (menus only display them) and
     /// on macOS without a native menu. With the native macOS menu the menu routes them.
     pub(super) fn app_shortcuts(&mut self, ctx: &Context) {
-        if self.menu_platform == Platform::Mac && self.menu_host.is_some() {
-            return;
-        }
+        // with the native macOS menu the menu routes the chords of its items; commands without
+        // a menu item there (Full Screen: the system's item replaces ours) are still ours
+        let native_mac = self.menu_platform == Platform::Mac && self.menu_host.is_some();
         // exact chords (a binding with extra modifiers is another chord), and a chord that a
         // `keyBinding` gives to a registry command is not the application command's any more
         let platform = self.menu_platform;
         let cmds: Vec<(&'static str, markise_engine::editor::keymap::Chord)> = crate::menu::app_shortcuts(platform)
             .into_iter()
+            .filter(|(id, _)| !native_mac || MAC_SYSTEM_MENU_COMMANDS.contains(id))
             .filter_map(|(id, _)| Some((id, descriptor_chord(app_command(id)?, platform)?)))
             .filter(|(_, c)| self.effective_keymap().lookup(c).is_empty())
             .collect();

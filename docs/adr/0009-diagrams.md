@@ -173,6 +173,6 @@ thread is idle; nothing is parsed).
   is new; the egui viewer paints it, dashed strokes included). Errors show the notice above the
   source.
 - `markise-ui-egui::diagram::DiagramRenderer` adapts `DiagramService` (lazy worker start, document
-  generations, label size from the theme, label metrics from layout). View → Diagrams switches
-  rendering (default on, persisted, DG-2/DG-7). Cancellation of a superseded job wakes the UI and
+  generations, label size from the theme, label metrics from layout). Preferences → Markdown → Render diagrams
+  (View → Diagrams until issue #50) switches rendering (default on, persisted, DG-2/DG-7). Cancellation of a superseded job wakes the UI and
   a re-request for the current document replaces a pending request of an older one.

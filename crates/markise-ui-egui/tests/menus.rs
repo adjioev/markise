@@ -66,7 +66,7 @@ fn mac_menu_bar_from_registry_without_document() {
             "View",
             // Back / Forward between opened notes (spec 06 §2.7)
             "Go",
-            "Themes",
+            // issue #50: no Themes menu (View → Theme, Preferences → Appearance)
             "Window",
             "Help"
         ]
@@ -117,7 +117,7 @@ fn other_platform_menus_use_ctrl_chords_and_have_no_app_menu() {
     let bar = app.menu_model();
     assert_eq!(
         titles(&bar),
-        ["File", "Edit", "Paragraph", "Format", "View", "Go", "Themes", "Help"]
+        ["File", "Edit", "Paragraph", "Format", "View", "Go", "Help"]
     );
     let back = bar.item("go.back").unwrap();
     assert!(
@@ -526,4 +526,164 @@ fn role_accelerators_are_reserved_for_key_bindings() {
             "{r:?}"
         );
     }
+}
+
+/// Issue #50: the Preferences window took over the settings toggles. The menus keep the view
+/// switches and the theme quick switcher; moved commands keep running by id (shortcuts,
+/// command palette), and Preferences is in the application menu (macOS) or the Edit menu.
+#[test]
+fn menus_are_simplified_and_moved_commands_still_run() {
+    let moved = [
+        "edit.autoPairBrackets",
+        "edit.autoPairMarkdown",
+        "edit.smartPunctuation",
+        "edit.smartDashesEm",
+        "view.diagrams",
+        "view.wikilinks",
+        "view.sourceLineNumbers",
+        "view.sourceSoftWrap",
+        "view.sourceCurrentLine",
+        "view.sourceWhitespace",
+        "view.toolbarTop",
+        "view.toolbarBottom",
+        "theme.fontAndSize",
+        "theme.import",
+        "theme.openFolder",
+        "theme.report",
+    ];
+    for p in [Platform::Mac, Platform::Other] {
+        let mut app = MarkiseApp::new(AppOptions::default());
+        app.set_menu_platform(p);
+        let bar = app.menu_model();
+        for id in moved {
+            assert!(bar.item(id).is_none(), "{p:?}: {id} is in Preferences only");
+        }
+        assert!(bar.menu("Themes").is_none());
+        // kept in View
+        for id in [
+            "view.rendered",
+            "view.sourceMode",
+            "view.sideBySide",
+            "view.toggleSidebar",
+            "view.showRecent",
+            "view.toolbar",
+            "view.highlightCode",
+            "view.zoomIn",
+            "view.zoomOut",
+            "view.actualSize",
+        ] {
+            assert!(bar.item(id).is_some(), "{p:?}: {id} stays in the menus");
+        }
+        // View → Theme: the installed themes as radios, then Theme Settings…
+        let view = bar.menu("View").unwrap();
+        let theme = view
+            .entries
+            .iter()
+            .find_map(|e| match e {
+                Entry::Submenu(m) if m.title == "Theme" => Some(m),
+                _ => None,
+            })
+            .expect("View → Theme");
+        let radios: Vec<_> = theme
+            .items()
+            .into_iter()
+            .filter(|i| matches!(i.action, MenuAction::Theme(_)))
+            .collect();
+        assert!(radios.len() >= 4, "Markise and the built-in themes");
+        assert_eq!(
+            radios.iter().filter(|i| i.check == Check::Radio(true)).count(),
+            1,
+            "the current theme is checked"
+        );
+        assert_eq!(theme.items().last().unwrap().key, "view.themeSettings");
+        // Preferences…, enabled, with ⌘, / Ctrl+,
+        let prefs = bar.item("app.preferences").expect("Preferences item");
+        assert!(prefs.enabled);
+        let c = prefs.chord.as_ref().unwrap();
+        assert_eq!(c.key, ",");
+        let home = if p == Platform::Mac { "Markise" } else { "Edit" };
+        assert!(
+            bar.menu(home)
+                .unwrap()
+                .items()
+                .iter()
+                .any(|i| i.key == "app.preferences"),
+            "{p:?}: Preferences in {home}"
+        );
+        // Full Screen: AppKit adds its own item to macOS's View menu; elsewhere ours, checked
+        match p {
+            Platform::Mac => assert!(bar.item("view.fullScreen").is_none()),
+            Platform::Other => {
+                let f = bar.item("view.fullScreen").unwrap();
+                assert_eq!(f.label, "Full Screen");
+                assert_eq!(f.check, Check::Toggle(false));
+            }
+        }
+    }
+
+    // moved commands still run by id, exactly as their old menu items did
+    let mut h = harness(Vec::new());
+    h.run();
+    let ctx = h.ctx.clone();
+    let before = h.state().source_prefs().line_numbers;
+    assert!(
+        h.state_mut()
+            .menu_action(&ctx, &MenuAction::Command("view.sourceLineNumbers"))
+    );
+    assert_ne!(h.state().source_prefs().line_numbers, before);
+    assert!(
+        h.state_mut()
+            .menu_action(&ctx, &MenuAction::Command("view.toolbarBottom"))
+    );
+    assert_eq!(
+        h.state().toolbar_position(),
+        markise_engine::settings::ToolbarPosition::Bottom
+    );
+    // Theme Settings… opens Preferences at Appearance
+    assert!(
+        h.state_mut()
+            .menu_action(&ctx, &MenuAction::Command("view.themeSettings"))
+    );
+    h.run();
+    assert!(h.state().is_preferences_open());
+    assert_eq!(
+        h.state_mut().preferences().section,
+        markise_ui_egui::prefs::Section::Appearance
+    );
+}
+
+/// macOS with the native menu: the menu has no Full Screen item (AppKit's replaces it), so the
+/// app's shortcut path still answers ⌃⌘F.
+#[test]
+fn full_screen_shortcut_survives_without_a_mac_menu_item() {
+    let seen = Arc::new(Mutex::new(false));
+    let rec = seen.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .allow_missing_glyphs()
+        .build_ui_state(
+            move |ui, app: &mut MarkiseApp| {
+                app.ui(ui);
+                let full = ui.ctx().viewport(|v| {
+                    v.commands
+                        .iter()
+                        .any(|c| matches!(c, egui::ViewportCommand::Fullscreen(true)))
+                });
+                *rec.lock().unwrap() |= full;
+            },
+            MarkiseApp::new(AppOptions::default()),
+        );
+    h.state_mut().set_menu_platform(Platform::Mac);
+    h.state_mut().set_menu_host(Box::new(FakeHost::default()));
+    h.run();
+    assert!(!*seen.lock().unwrap());
+    let m = egui::Modifiers {
+        ctrl: true,
+        mac_cmd: true,
+        command: true,
+        ..Default::default()
+    };
+    h.key_press_modifiers(m, egui::Key::F);
+    h.run_steps(2);
+    assert!(*seen.lock().unwrap(), "⌃⌘F asked for full screen");
 }

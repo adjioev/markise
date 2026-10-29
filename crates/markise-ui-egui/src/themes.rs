@@ -311,7 +311,7 @@ pub struct ThemeManager {
     chose_split: bool,
     /// The window was zoomed before the settings file arrived.
     chose_zoom: bool,
-    /// View → Diagrams toggled before the settings file was read.
+    /// Diagrams switched (Preferences) before the settings file was read.
     chose_diagrams: bool,
     /// View → Toolbar toggled before the settings file was read.
     chose_toolbar: bool,
@@ -319,7 +319,7 @@ pub struct ThemeManager {
     chose_toolbar_position: bool,
     chose_editing: bool,
     chose_source: bool,
-    /// View → Wikilinks toggled before the settings file was read.
+    /// Wikilinks switched (Preferences) before the settings file was read.
     chose_markdown: bool,
     /// Settings changed and not yet handed to the worker (coalesced, debounced).
     dirty: SettingsPatch,
@@ -495,6 +495,14 @@ impl ThemeManager {
         self.user_dir.as_deref()
     }
 
+    /// The settings file of this session (`None`: settings are not persisted, e.g. tests).
+    pub fn settings_file(&self) -> Option<PathBuf> {
+        match &self.config {
+            ConfigDir::Dir(d) => Some(settings_path(d)),
+            ConfigDir::None => None,
+        }
+    }
+
     /// The session has a user theme folder (it may not be known yet).
     pub fn has_user_dir(&self) -> bool {
         matches!(self.config, ConfigDir::Dir(_))
@@ -608,7 +616,7 @@ impl ThemeManager {
         self.settings.key_bindings()
     }
 
-    /// Editing preferences (settings key `editing`; Edit menu).
+    /// Editing preferences (settings key `editing`; Preferences → Editor).
     pub fn editing(&self) -> markise_engine::settings::EditingSettings {
         self.settings.editing
     }
@@ -619,10 +627,11 @@ impl ThemeManager {
         if e != self.settings.editing {
             self.settings.editing = e;
             self.dirty.editing = Some(e);
+            self.schedule_save();
         }
     }
 
-    /// Source editor display preferences (settings key `source`; View menu).
+    /// Source editor display preferences (settings key `source`; Preferences → Source Mode).
     pub fn source_prefs(&self) -> markise_engine::settings::SourceSettings {
         self.settings.source
     }
@@ -642,7 +651,7 @@ impl ThemeManager {
         self.settings.markdown.wikilinks
     }
 
-    /// View → Wikilinks; persisted like the other settings.
+    /// Preferences → Markdown → Wikilinks; persisted like the other settings.
     pub fn set_wikilinks(&mut self, on: bool) {
         self.chose_markdown = true;
         if on != self.settings.markdown.wikilinks {
@@ -657,7 +666,7 @@ impl ThemeManager {
         self.settings.diagrams
     }
 
-    /// View → Diagrams; persisted like the other settings (DG-7).
+    /// Preferences → Markdown → Render diagrams; persisted like the other settings (DG-7).
     pub fn set_diagrams(&mut self, on: bool) {
         self.chose_diagrams = true;
         if on != self.settings.diagrams {
@@ -704,7 +713,7 @@ impl ThemeManager {
         self.settings.toolbar_position
     }
 
-    /// View → Toolbar Position; persisted like the other settings.
+    /// Preferences → Appearance → Toolbar position; persisted like the other settings.
     pub fn set_toolbar_position(&mut self, p: markise_engine::settings::ToolbarPosition) {
         self.chose_toolbar_position = true;
         if p != self.settings.toolbar_position {

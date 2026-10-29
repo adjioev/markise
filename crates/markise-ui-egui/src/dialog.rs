@@ -1,5 +1,5 @@
 //! One style for the app's egui dialogs (issue #35): About, Licences, Font & size, Theme
-//! report and the in-app yes/no question ([`crate::confirm::InApp`]).
+//! report, Preferences and the in-app yes/no question ([`crate::confirm::InApp`]).
 //!
 //! Every dialog has the same frame (padding, corner radius, shadow), a title line, a width
 //! from [`Width`] and a footer of right-aligned buttons: the primary action accented with the
@@ -228,12 +228,26 @@ fn close_button(ui: &mut Ui, look: &Look, at: egui::Pos2) -> egui::Response {
 }
 
 /// A tool window (Font & size, Theme report) in the shared style, centred when it opens.
-/// Returns false when it should close (✕, its close button, Esc, or `body` returning true).
+/// Returns false when it should close (✕, its close button, Esc, Enter, or `body` returning
+/// true).
 pub fn window(
     ctx: &Context,
     id: &str,
     title_text: &str,
     width: Width,
+    body: impl FnOnce(&mut Ui, &Look) -> bool,
+) -> bool {
+    window_with(ctx, id, title_text, width.points(), true, body)
+}
+
+/// [`window`] `width_pt` points wide; `enter_closes`: Return closes it too (not for windows
+/// whose text fields take Return, e.g. the Preferences search).
+pub fn window_with(
+    ctx: &Context,
+    id: &str,
+    title_text: &str,
+    width_pt: f32,
+    enter_closes: bool,
     body: impl FnOnce(&mut Ui, &Look) -> bool,
 ) -> bool {
     let look = Look::get(ctx);
@@ -247,10 +261,10 @@ pub fn window(
         .pivot(egui::Align2::CENTER_CENTER)
         .default_pos(ctx.content_rect().center())
         .show(ctx, |ui| {
-            ui.set_width(width.points());
+            ui.set_width(width_pt);
             let top = ui.cursor().min;
             title(ui, &look, title_text);
-            if close_button(ui, &look, egui::pos2(top.x + width.points() - 16.0, top.y + 2.0)).clicked() {
+            if close_button(ui, &look, egui::pos2(top.x + width_pt - 16.0, top.y + 2.0)).clicked() {
                 keep = false;
             }
             if body(ui, &look) {
@@ -259,7 +273,7 @@ pub fn window(
         });
     if let Some(r) = out {
         let (enter, esc) = keys(ctx, r.response.layer_id);
-        if enter || esc {
+        if (enter && enter_closes) || esc {
             keep = false;
         }
     }

@@ -12,6 +12,7 @@ pub mod highlight;
 pub mod icons;
 pub mod images;
 pub mod menu;
+pub mod prefs;
 pub mod side_by_side;
 pub mod sidebar;
 pub mod source;
