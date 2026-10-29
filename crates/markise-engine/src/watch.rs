@@ -70,6 +70,10 @@ enum Ctl {
 pub struct FileWatcher {
     rx: Receiver<WatchEvent>,
     ctl: Sender<Ctl>,
+    /// Requests posted, and the number of them covered by the last completed [`Self::sync`]
+    /// (tests: [`Self::is_synced`]).
+    requests: std::sync::atomic::AtomicU64,
+    synced: std::sync::atomic::AtomicU64,
 }
 
 fn same(a: &Path, b: &Path) -> bool {
@@ -363,7 +367,12 @@ impl FileWatcher {
                 run_worker(watcher, w)
             })
             .map_err(|e| notify::Error::generic(&format!("watcher thread: {e}")))?;
-        Ok(FileWatcher { rx, ctl })
+        Ok(FileWatcher {
+            rx,
+            ctl,
+            requests: Default::default(),
+            synced: Default::default(),
+        })
     }
 
     /// Watches the open document (replacing the previous one). Returns at once. `version` is
@@ -372,41 +381,59 @@ impl FileWatcher {
     /// [`WatchEvent::FileChanged`] (or `FileRemoved`) follows, so a change made in between is
     /// not lost.
     pub fn watch_file(&mut self, path: &Path, version: Option<DiskVersion>) {
-        let _ = self.ctl.send(Ctl::File(path.to_path_buf(), version));
+        self.post(Ctl::File(path.to_path_buf(), version));
     }
 
     /// Watches the mounted folder recursively (replacing the previous one). Returns at once.
     pub fn watch_folder(&mut self, dir: &Path) {
-        let _ = self.ctl.send(Ctl::Folder(dir.to_path_buf()));
+        self.post(Ctl::Folder(dir.to_path_buf()));
     }
 
     /// Watches the user theme folder recursively (replacing the previous one); events arrive as
     /// [`WatchEvent::ThemeChanged`]. The folder must exist. Returns at once.
     pub fn watch_themes(&mut self, dir: &Path) {
-        let _ = self.ctl.send(Ctl::Themes(dir.to_path_buf()));
+        self.post(Ctl::Themes(dir.to_path_buf()));
     }
 
     /// Stops watching the open document (the editor now shows a document without a file).
     /// Returns at once.
     pub fn clear_file(&mut self) {
-        let _ = self.ctl.send(Ctl::NoFile);
+        self.post(Ctl::NoFile);
     }
 
     /// The open document `path` is now `version` on disk (after the caller's own save or an
     /// accepted reload; `None` when it knows the file is gone): later catch-ups compare with
     /// it. Returns at once.
     pub fn acknowledge(&self, path: &Path, version: Option<DiskVersion>) {
-        let _ = self.ctl.send(Ctl::Acknowledge(path.to_path_buf(), version));
+        self.post(Ctl::Acknowledge(path.to_path_buf(), version));
     }
 
     /// Blocks until every earlier `watch_*` request has been applied (tests, tools; never call
     /// it on the UI thread). `Err` names the watches that are not in effect.
     pub fn sync(&self) -> Result<(), String> {
+        use std::sync::atomic::Ordering;
+        let covered = self.requests.load(Ordering::Acquire);
         let (tx, rx) = channel();
         self.ctl
             .send(Ctl::Sync(tx))
             .map_err(|_| "watcher stopped".to_string())?;
-        rx.recv().map_err(|_| "watcher stopped".to_string())?
+        let r = rx.recv().map_err(|_| "watcher stopped".to_string())?;
+        self.synced.fetch_max(covered, Ordering::AcqRel);
+        r
+    }
+
+    /// Test hook: every request posted so far was covered by a completed [`Self::sync`], so
+    /// the catch-up events of every registration change are already queued for
+    /// [`Self::try_recv`].
+    #[doc(hidden)]
+    pub fn is_synced(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.synced.load(Ordering::Acquire) >= self.requests.load(Ordering::Acquire)
+    }
+
+    fn post(&self, c: Ctl) {
+        self.requests.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let _ = self.ctl.send(c);
     }
 
     pub fn try_recv(&self) -> Option<WatchEvent> {
@@ -419,6 +446,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime};
+
+    /// Upper bound for waiting on a watcher event: a hang guard, not a latency expectation
+    /// (FSEvents stream restarts take seconds while a whole suite runs in parallel; issue #42).
+    const HANG_GUARD: Duration = Duration::from_secs(180);
 
     #[test]
     fn reports_changes_of_the_open_file() {
@@ -434,7 +465,7 @@ mod tests {
         crate::save::save_atomic(&p, "two").unwrap();
         let t = Instant::now();
         let mut got = None;
-        while t.elapsed() < Duration::from_secs(30) {
+        while t.elapsed() < HANG_GUARD {
             if let Some(e) = w.try_recv() {
                 got = Some(e);
                 break;
@@ -448,15 +479,36 @@ mod tests {
 
     fn wait_event(w: &FileWatcher, want: &WatchEvent) -> bool {
         let t = Instant::now();
-        while t.elapsed() < Duration::from_secs(30) {
+        let mut seen = Vec::new();
+        while t.elapsed() < HANG_GUARD {
             while let Some(e) = w.try_recv() {
                 if &e == want {
                     return true;
                 }
+                seen.push(e);
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        eprintln!("waited for {want:?}, saw {seen:?}");
         false
+    }
+
+    /// Test hook (issue #42): `is_synced` holds only once a completed `sync` covered every
+    /// request posted before it.
+    #[test]
+    fn is_synced_tracks_requests_covered_by_sync() {
+        let dir = tmp("synced");
+        let mut w = FileWatcher::new(Arc::new(|| {})).unwrap();
+        assert!(w.is_synced(), "nothing requested");
+        w.watch_folder(&dir);
+        assert!(!w.is_synced());
+        w.sync().unwrap();
+        assert!(w.is_synced());
+        w.acknowledge(&dir.join("x.md"), None);
+        assert!(!w.is_synced());
+        w.sync().unwrap();
+        assert!(w.is_synced());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -547,9 +599,7 @@ mod tests {
             *self.held.0.lock().unwrap() = true;
         }
         fn wait_entered(&self) {
-            self.entered
-                .recv_timeout(Duration::from_secs(30))
-                .expect("registration started");
+            self.entered.recv_timeout(HANG_GUARD).expect("registration started");
         }
         fn release(&self) {
             *self.held.0.lock().unwrap() = false;
@@ -761,7 +811,7 @@ mod tests {
         std::fs::write(root.join("marker.md"), "").unwrap();
         let t = Instant::now();
         let mut marker = false;
-        while !marker && t.elapsed() < Duration::from_secs(30) {
+        while !marker && t.elapsed() < HANG_GUARD {
             while let Some(e) = w.try_recv() {
                 marker |= matches!(&e, WatchEvent::DirChanged(d) if norm_path(d) == norm_path(&root));
             }

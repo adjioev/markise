@@ -4,6 +4,8 @@
 //! filters by label; Reset to Defaults asks through the confirm seam; Esc closes and Tab moves
 //! between controls; the window fits at 150 % zoom and follows dark mode.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -118,7 +120,7 @@ fn menu_check(h: &H, id: &str) -> Check {
 #[test]
 fn opens_with_cmd_comma_and_from_the_menus_and_esc_closes() {
     let mut h = harness_with(AppOptions::default());
-    h.run();
+    common::run(&mut h);
     assert!(!h.state().is_preferences_open());
     // ⌘, (Ctrl+, elsewhere): the app's shortcut path
     h.key_press_modifiers(cmd(), Key::Comma);
@@ -133,7 +135,7 @@ fn opens_with_cmd_comma_and_from_the_menus_and_esc_closes() {
 
     // Windows/Linux: Edit → Preferences… in the egui menu bar, Ctrl+, shown
     h.state_mut().set_menu_platform(Platform::Other);
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Edit").click();
     h.run_steps(2);
     h.get_by_label_contains("Preferences…").click();
@@ -321,7 +323,7 @@ fn window_and_menus_change_the_same_settings_both_ways() {
 #[test]
 fn search_filters_settings_by_label() {
     let mut h = harness_with(AppOptions::default());
-    h.run();
+    common::run(&mut h);
     open_at(&mut h, Section::Editor);
     h.get_by_label("Search settings").focus();
     h.run_steps(1);
@@ -419,7 +421,7 @@ fn reset_to_defaults_asks_then_restores_the_section() {
 #[test]
 fn tab_moves_between_controls() {
     let mut h = harness_with(AppOptions::default());
-    h.run();
+    common::run(&mut h);
     open_at(&mut h, Section::Source);
     h.get_by_label("Search settings").focus();
     h.run_steps(2);
@@ -535,7 +537,7 @@ fn switches_segments_and_theme_cards() {
 #[test]
 fn accessible_states_of_dependent_switches_and_override_boxes() {
     let mut h = harness_with(AppOptions::default());
-    h.run();
+    common::run(&mut h);
     open_at(&mut h, Section::Editor);
     let dashes = "Smart dashes: -- as em dash";
     let disabled = |h: &H| {

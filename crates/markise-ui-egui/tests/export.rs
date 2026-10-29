@@ -1,6 +1,8 @@
 //! File → Export wiring: the menu entries exist, an export runs off the UI thread, the status
 //! bar reports the result, and "Export and Overwrite with Previous" repeats it.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -49,14 +51,14 @@ fn export_menu_runs_jobs_and_previous() {
 
     // the submenu is reachable
     h.get_by_label("File").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Export").hover();
-    h.run();
+    common::run(&mut h);
     assert!(h.query_by_label("PDF").is_some());
     assert!(h.query_by_label("HTML (without styles)").is_some());
     assert!(h.query_by_label("Other Formats via Pandoc").is_some());
     h.key_press(egui::Key::Escape);
-    h.run();
+    common::run(&mut h);
 
     let out = dir.join("note.html");
     let req = ExportRequest::new(
@@ -84,7 +86,7 @@ fn export_menu_runs_jobs_and_previous() {
     h.state_mut().export_action_for_test(ExportAction::OverwritePrevious);
     assert!(h.state().export_state().is_asking_overwrite());
     h.state_mut().answer_overwrite_for_test(false);
-    h.run();
+    common::run(&mut h);
     assert!(!out.exists());
     h.state_mut().export_action_for_test(ExportAction::OverwritePrevious);
     h.state_mut().answer_overwrite_for_test(true);

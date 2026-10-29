@@ -163,6 +163,12 @@ enum PanelAction {
 }
 
 impl MarkiseApp {
+    /// Test hook ([`MarkiseApp::background_settled`]): no panel list or clean copy is being
+    /// built.
+    pub(super) fn review_settled(&self) -> bool {
+        self.review.pending.is_none() && self.review.copy.is_none()
+    }
+
     // ------------------------------------------------------------------ the switch
 
     /// Whether CriticMarkup comments and suggestions are parsed (View → Comments &

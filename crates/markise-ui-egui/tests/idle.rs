@@ -1,5 +1,7 @@
 //! NFR-10: with a document open and no input, the app schedules no repaint.
 
+mod common;
+
 use std::time::{Duration, Instant};
 
 use egui::{Context, RawInput, ViewportId};
@@ -31,14 +33,23 @@ fn idle_document_requests_no_repaint() {
         open: vec![p],
         ..Default::default()
     });
-    // run until the document is loaded and painted
+    // run until the document is loaded and every background job has finished (issue #42:
+    // late one-shot completions — theme worker, vault scan, loader, image decodes — used to
+    // land in the measured frames under load). Waits on the app's signal, not on time.
     let t = Instant::now();
-    while (app.model().is_none() || app.is_loading()) && t.elapsed() < Duration::from_secs(20) {
+    loop {
+        let _ = app.sync_background_watches();
         frame(&ctx, &mut app);
-        std::thread::sleep(Duration::from_millis(5));
+        if app.model().is_some() && !app.is_loading() && app.background_settled() {
+            break;
+        }
+        assert!(
+            t.elapsed() < common::HANG_GUARD,
+            "document load / background never settled"
+        );
+        std::thread::sleep(Duration::from_millis(2));
     }
-    assert!(app.model().is_some(), "document loaded");
-    // settle: a few frames for egui's own first-frame layout passes
+    // a few frames for egui's own layout passes; the background can no longer wake us
     let mut delays = Vec::new();
     for _ in 0..6 {
         delays.push(frame(&ctx, &mut app));

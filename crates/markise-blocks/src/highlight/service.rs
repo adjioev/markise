@@ -561,7 +561,7 @@ mod tests {
             if let Lookup::Ready(v) = s.lookup(key, range.clone()) {
                 return v;
             }
-            assert!(t.elapsed() < Duration::from_secs(120), "timed out");
+            assert!(t.elapsed() < crate::TEST_HANG_GUARD, "timed out");
             std::thread::sleep(Duration::from_millis(2));
         }
     }
@@ -610,7 +610,7 @@ mod tests {
         s.set_generation(1);
         let t = Instant::now();
         while s.busy() {
-            assert!(t.elapsed() < Duration::from_secs(10), "cancelled job must stop");
+            assert!(t.elapsed() < crate::TEST_HANG_GUARD, "cancelled job must stop");
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(s.lookup(key, 0..10), Lookup::Missing, "partial result dropped");
@@ -636,31 +636,56 @@ mod tests {
         assert!(last.end as usize > big.len() - 10, "highlighted to the end");
     }
 
-    /// Huge block: highlighted incrementally; the first segment is ready long before the end;
-    /// bounded time overall.
+    /// Huge block: highlighted incrementally (results are published chunk by chunk, so the
+    /// first segment is ready after a small fraction of the work) with bounded work per step.
+    /// Counted from the published chunks, not timed (issue #42: wall-clock ratios failed under
+    /// load); throughput is measured in `benches/`.
     #[test]
     fn huge_block_incremental_and_bounded() {
         let (s, _) = service();
         let unit = "pub fn f(x: u32) -> u32 { x * 2 + 1 } // c\n";
         let big = unit.repeat(5_000); // ~215 KB
         let key = block_key("rust", [big.as_str()]);
-        let t = Instant::now();
+        let first_seg = unit.len() * 64;
         s.request_text(key, "rust", big.clone());
-        wait(&s, key, 0..unit.len() * 64);
-        let first = t.elapsed();
+        wait(&s, key, 0..first_seg);
         let all = wait(&s, key, 0..big.len());
-        let total = t.elapsed();
         assert!(!all.is_empty());
+        let st = s.shared.lock();
+        let e = &st.entries[&key];
+        assert!(e.complete && !e.truncated);
+        // contiguous chunks from the start to the end
+        assert_eq!(e.chunks.first().map(|c| c.start), Some(0));
+        assert_eq!(e.chunks.last().map(|c| c.end as usize), Some(big.len()));
+        assert!(e.chunks.windows(2).all(|w| w[0].end == w[1].start));
+        // bounded work per step: at most CHUNK_LINES lines, CHUNK_BYTES plus one line
+        for c in &e.chunks {
+            let text = &big[c.start as usize..c.end as usize];
+            assert!(
+                text.lines().count() <= CHUNK_LINES,
+                "{} lines in one step",
+                text.lines().count()
+            );
+            assert!(
+                text.len() <= CHUNK_BYTES + unit.len(),
+                "{} bytes in one step",
+                text.len()
+            );
+        }
+        // incremental: the first segment is ready once the chunks covering it are published,
+        // a small part of the whole block (the lookup answers per chunk)
+        let covering: usize = e
+            .chunks
+            .iter()
+            .take_while(|c| (c.start as usize) < first_seg)
+            .map(|c| (c.end - c.start) as usize)
+            .sum();
         assert!(
-            first * 4 < total || total < Duration::from_millis(200),
-            "first {first:?} total {total:?}"
+            covering * 4 < big.len(),
+            "first segment needs {covering} of {} bytes",
+            big.len()
         );
-        // generous bound for debug builds on slow CI; release throughput is in benches/
-        assert!(total < Duration::from_secs(60), "{total:?}");
-        // bounded work per step (short lines: the time budget plus one line)
-        let max = s.stats().max_step;
-        assert!(max < Duration::from_millis(250), "max step {max:?}");
-        assert!(s.stats().chunks >= 5_000 / CHUNK_LINES as u64, "{:?}", s.stats());
+        assert!(st.stats.chunks >= 5_000 / CHUNK_LINES as u64, "{:?}", st.stats);
     }
 
     #[test]
@@ -796,7 +821,7 @@ mod tests {
         s.set_generation(5);
         let t = Instant::now();
         while s.busy() {
-            assert!(t.elapsed() < Duration::from_secs(10));
+            assert!(t.elapsed() < crate::TEST_HANG_GUARD);
             std::thread::sleep(Duration::from_millis(2));
         }
         std::thread::sleep(Duration::from_millis(20));

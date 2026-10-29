@@ -1,6 +1,8 @@
 //! Theme UI (ADR 0004): selecting a built-in theme and appearance, persistence in the settings
 //! file, "Import theme…" and live reload of a user theme — through the real `MarkiseApp`.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -19,10 +21,13 @@ fn tmpdir(name: &str) -> PathBuf {
 }
 
 fn harness(config: &Path) -> Harness<'static, MarkiseApp> {
-    let app = MarkiseApp::new(AppOptions {
+    let mut app = MarkiseApp::new(AppOptions {
         config: ConfigDir::Dir(config.to_path_buf()),
         ..Default::default()
     });
+    // the first frame waits for the saved theme however loaded the machine is (its normal
+    // budget is a startup-time trade-off, not what these tests check)
+    app.set_first_theme_wait(common::HANG_GUARD);
     Harness::builder()
         .with_size(egui::vec2(900.0, 600.0))
         // the menu's ⌘/⇧ shortcut hints are not in egui's bundled fonts: tofu, as in the app
@@ -34,13 +39,13 @@ fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&Mark
     let t = Instant::now();
     while !f(h.state()) {
         assert!(
-            t.elapsed() < Duration::from_secs(15),
+            t.elapsed() < common::HANG_GUARD,
             "timed out waiting for {what} (theme: {}, banner: {:?})",
             h.state().theme().name,
             h.state().banner_text()
         );
         h.step();
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -121,8 +126,10 @@ fn import_theme_copies_selects_and_live_reloads() {
         &Selection::complete(ThemeId::User("harbour".into()))
     );
 
-    // live reload: editing the installed file re-imports and re-renders
-    std::thread::sleep(Duration::from_millis(300));
+    // live reload: editing the installed file re-imports and re-renders. The theme folder
+    // watch is registered in the background; wait until it is in effect and its catch-up
+    // re-import is applied (issue #42: a fixed sleep raced the registration under load)
+    common::settle(&mut h);
     std::fs::write(
         pkg.join("harbour.css"),
         "body { background: #102030; color: #ddd } #write a { color: #8a2be2 }",

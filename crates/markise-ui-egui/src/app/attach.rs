@@ -127,6 +127,11 @@ impl AttachState {
 }
 
 impl MarkiseApp {
+    /// Test hook ([`MarkiseApp::background_settled`]): no paste or drop is being resolved.
+    pub(super) fn attach_settled(&self) -> bool {
+        self.attach.queue.is_empty()
+    }
+
     /// Uses `stamp` (`YYYYMMDDHHMMSS`) instead of the clock for pasted image names (tests).
     pub fn set_paste_stamp(&mut self, stamp: Option<String>) {
         self.attach.stamp = stamp;

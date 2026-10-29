@@ -1074,6 +1074,10 @@ pub struct VaultScanner {
     /// closed when the scanner goes (on Windows an open handle keeps a deleted folder
     /// pending, so the same path cannot be created again).
     worker: Option<std::thread::JoinHandle<()>>,
+    /// Commands sent and not fully processed yet (tests: [`VaultScanner::is_idle`]).
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+    /// A snapshot taken off the channel by [`VaultScanner::is_idle`], handed out next.
+    stash: std::sync::Mutex<Option<Arc<VaultIndex>>>,
 }
 
 /// How long dropping a scanner waits for its worker (on the UI thread).
@@ -1332,6 +1336,8 @@ impl VaultScanner {
         let (res_tx, rx) = channel();
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = cancel.clone();
+        let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker_pending = pending.clone();
         let worker = std::thread::Builder::new()
             .name("markise-vault".into())
             .spawn(move || {
@@ -1354,6 +1360,11 @@ impl VaultScanner {
                     while let Ok(c) = cmd_rx.try_recv() {
                         batch.push(c);
                     }
+                    // processed once its snapshot (if any) is sent
+                    let n = batch.len();
+                    let done = || {
+                        worker_pending.fetch_sub(n, std::sync::atomic::Ordering::AcqRel);
+                    };
                     // the last mount wins; changes before it are moot
                     if let Some(i) = batch.iter().rposition(|c| matches!(c, Cmd::Mount(_))) {
                         batch.drain(..i);
@@ -1376,11 +1387,13 @@ impl VaultScanner {
                     // nothing visible changed (e.g. Obsidian rewrote app.json unchanged): no new
                     // snapshot, so layouts and autocomplete keep their state
                     if !mounted || !std::mem::take(&mut st.dirty) {
+                        done();
                         continue;
                     }
                     if res_tx.send(st.snapshot()).is_err() {
                         break;
                     }
+                    done();
                     wake();
                 }
             })
@@ -1390,13 +1403,34 @@ impl VaultScanner {
             tx: Some(tx),
             rx,
             worker: Some(worker),
+            pending,
+            stash: Default::default(),
         })
     }
 
     fn send(&self, c: Cmd) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(c);
+            self.pending.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            if tx.send(c).is_err() {
+                self.pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
         }
+    }
+
+    /// Test hook: every command sent so far is processed and its snapshot (if any) was taken
+    /// with [`VaultScanner::try_recv`]; the scanner publishes nothing more until asked again.
+    #[doc(hidden)]
+    pub fn is_idle(&self) -> bool {
+        // the worker sends a snapshot before it counts the command as processed: once the
+        // count is zero, every snapshot is already in the channel
+        if self.pending.load(std::sync::atomic::Ordering::Acquire) != 0 {
+            return false;
+        }
+        let mut stash = self.stash.lock().unwrap_or_else(|e| e.into_inner());
+        while let Ok(i) = self.rx.try_recv() {
+            *stash = Some(i);
+        }
+        stash.is_none()
     }
 
     /// Scans `root` from scratch (a folder was mounted).
@@ -1416,7 +1450,7 @@ impl VaultScanner {
 
     /// The newest snapshot published since the last call, if any.
     pub fn try_recv(&self) -> Option<Arc<VaultIndex>> {
-        let mut last = None;
+        let mut last = self.stash.lock().unwrap_or_else(|e| e.into_inner()).take();
         while let Ok(i) = self.rx.try_recv() {
             last = Some(i);
         }
@@ -1425,6 +1459,9 @@ impl VaultScanner {
 
     /// Waits up to `timeout` for a snapshot (tests).
     pub fn recv_timeout(&self, timeout: std::time::Duration) -> Option<Arc<VaultIndex>> {
+        if let Some(i) = self.stash.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            return Some(i);
+        }
         self.rx.recv_timeout(timeout).ok()
     }
 }

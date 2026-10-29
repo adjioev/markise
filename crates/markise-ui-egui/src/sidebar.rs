@@ -193,6 +193,12 @@ pub struct FileTree {
 }
 
 impl FileTree {
+    /// Test hook: no listing is running or queued.
+    #[doc(hidden)]
+    pub fn is_idle(&self) -> bool {
+        self.dirs.values().all(|d| !d.in_flight && !d.pending)
+    }
+
     pub fn new(root: PathBuf) -> Self {
         FileTree {
             root,

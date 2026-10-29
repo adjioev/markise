@@ -263,6 +263,11 @@ impl ImageLoader {
     }
 }
 
+/// Upper bound for tests waiting on a worker's result: a hang guard, not a latency
+/// expectation (issue #42: fixed deadlines failed on loaded machines).
+#[cfg(test)]
+pub(crate) const TEST_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(180);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,7 +283,7 @@ mod tests {
     fn recv(loader: &ImageLoader, n: usize) -> Vec<Decoded> {
         let t = Instant::now();
         let mut v = Vec::new();
-        while v.len() < n && t.elapsed() < Duration::from_secs(10) {
+        while v.len() < n && t.elapsed() < crate::TEST_HANG_GUARD {
             match loader.try_recv() {
                 Some(d) => v.push(d),
                 None => std::thread::sleep(Duration::from_millis(5)),

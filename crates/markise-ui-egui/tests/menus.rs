@@ -2,6 +2,8 @@
 //! accelerators, enabled/checked state, dispatch through `menu_action` / `run_command`, and a
 //! native menu host replacing the egui menu bar without breaking idle (NFR-10).
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -39,7 +41,7 @@ fn harness(open: Vec<PathBuf>) -> Harness<'static, MarkiseApp> {
 fn wait_loaded(h: &mut Harness<'static, MarkiseApp>) {
     let t = Instant::now();
     while h.state().model().is_none() || h.state().is_busy() {
-        assert!(t.elapsed() < Duration::from_secs(30), "timed out loading");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out loading");
         h.step();
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -286,26 +288,19 @@ fn idle_with_native_menu_requests_no_repaint_and_no_rebuild() {
         ..Default::default()
     });
     app.set_menu_host(Box::new(host.clone()));
+    // load, then wait until every background job has finished (issue #42)
     let t = Instant::now();
-    while (app.model().is_none() || app.is_loading()) && t.elapsed() < Duration::from_secs(20) {
+    loop {
+        let _ = app.sync_background_watches();
         frame(&ctx, &mut app);
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(app.model().is_some());
-    // settle: egui's first-frame layout passes and any background result
-    let mut delays = Vec::new();
-    let t = Instant::now();
-    while t.elapsed() < Duration::from_secs(10) {
-        let d = frame(&ctx, &mut app);
-        delays.push(d);
-        if d == Duration::MAX {
+        if app.model().is_some() && !app.is_loading() && app.background_settled() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        assert!(t.elapsed() < common::HANG_GUARD, "load / background never settled");
+        std::thread::sleep(Duration::from_millis(2));
     }
-    for _ in 0..3 {
-        delays.push(frame(&ctx, &mut app));
-    }
+    // egui's own layout passes, then idle frames
+    let delays: Vec<Duration> = (0..6).map(|_| frame(&ctx, &mut app)).collect();
     assert!(delays.iter().rev().take(4).all(|d| *d == Duration::MAX), "{delays:?}");
     let rebuilds = host.0.lock().unwrap().rebuilds;
     for _ in 0..3 {
@@ -519,24 +514,24 @@ fn app_shortcut_keys_dispatch_on_windows_and_linux() {
 fn about_command_opens_the_about_window() {
     let mut h = harness(Vec::new());
     h.state_mut().set_menu_platform(Platform::Other);
-    h.run();
+    common::run(&mut h);
     // the Linux egui menu bar: Help → About Markise
     h.get_by_label("Help").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("About Markise").click();
-    h.run();
+    common::run(&mut h);
     assert!(h.state().is_about_open());
     assert!(h.query_by_label_contains("The marquise of Markdown editors").is_some());
     assert!(h.query_by_label_contains(env!("CARGO_PKG_VERSION")).is_some());
     assert!(h.query_by_label("© The Markise contributors").is_some());
     assert!(h.query_by_label("Website").is_some() && h.query_by_label("GitHub").is_some());
     h.get_by_label("Licences & Third-Party Notices…").click();
-    h.run();
+    common::run(&mut h);
     assert!(h.query_by_label_contains("Document").is_some(), "licence viewer open");
     h.key_press(egui::Key::Escape);
-    h.run();
+    common::run(&mut h);
     h.key_press(egui::Key::Escape);
-    h.run();
+    common::run(&mut h);
     assert!(!h.state().is_about_open());
 
     // macOS: the application menu's item runs the same command
@@ -546,7 +541,7 @@ fn about_command_opens_the_about_window() {
     let item = bar.menus[0].items()[0].clone();
     assert_eq!(item.key, "app.about");
     assert!(h.state_mut().menu_action(&ctx, &item.action));
-    h.run();
+    common::run(&mut h);
     assert!(h.state().is_about_open());
 }
 
@@ -559,7 +554,7 @@ fn egui_fallback_shows_shortcuts_on_radio_items() {
     h.state_mut().set_menu_platform(Platform::Other);
     wait_loaded(&mut h);
     h.get_by_label("View").click();
-    h.run();
+    common::run(&mut h);
     assert!(
         h.query_by_label("Source Code Mode Ctrl+/").is_some(),
         "radio item with its shortcut"
@@ -733,7 +728,7 @@ fn menus_are_simplified_and_moved_commands_still_run() {
 
     // moved commands still run by id, exactly as their old menu items did
     let mut h = harness(Vec::new());
-    h.run();
+    common::run(&mut h);
     let ctx = h.ctx.clone();
     let before = h.state().source_prefs().line_numbers;
     assert!(
@@ -754,11 +749,10 @@ fn menus_are_simplified_and_moved_commands_still_run() {
         h.state_mut()
             .menu_action(&ctx, &MenuAction::Command("view.themeSettings"))
     );
-    // a fixed number of frames, not `run()`: the two settings changes above schedule a
-    // debounced settings write, and the opened window asks the theme worker for its preview
-    // cards; their wake-ups land after a variable number of frames (worker timing), so `run()`
-    // failed intermittently on main as well (4/20 locally)
-    h.run_steps(8);
+    // the two settings changes above schedule a debounced settings write, and the opened
+    // window asks the theme worker for its preview cards: wait for that background work to
+    // finish (issue #42), then for egui's own frames
+    common::run(&mut h);
     assert!(h.state().is_preferences_open());
     assert_eq!(
         h.state_mut().preferences().section,
@@ -789,7 +783,7 @@ fn full_screen_shortcut_survives_without_a_mac_menu_item() {
         );
     h.state_mut().set_menu_platform(Platform::Mac);
     h.state_mut().set_menu_host(Box::new(FakeHost::default()));
-    h.run();
+    common::run(&mut h);
     assert!(!*seen.lock().unwrap());
     let m = egui::Modifiers {
         ctrl: true,

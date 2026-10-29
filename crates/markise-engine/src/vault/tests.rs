@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// Upper bound for waiting on a scanner snapshot: a hang guard, not a latency expectation
+/// (issue #42).
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Waits until the scanner has processed every command; `true` when it published no
+/// snapshot meanwhile (exact, unlike waiting a while for nothing to arrive).
+fn quiet(sc: &VaultScanner) -> bool {
+    let t = std::time::Instant::now();
+    loop {
+        if sc.is_idle() {
+            return true;
+        }
+        if sc.try_recv().is_some() {
+            return false;
+        }
+        assert!(t.elapsed() < HANG_GUARD, "scanner never finished");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 /// The §16.1 fixture tree (`.md` unless shown; dot-folders are never indexed, so they are left
 /// out here as the scanner leaves them out). `case_sensitive`: also `Case/draft.md`.
 fn fixture(case_sensitive: bool) -> VaultIndex {
@@ -182,7 +202,7 @@ fn scanner_tracks_the_folder() {
     std::fs::write(root.join("sub/deep/C.md"), "").unwrap();
     std::fs::write(root.join(".obsidian/app.json"), "{}").unwrap();
     let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
-    let t = std::time::Duration::from_secs(10);
+    let t = HANG_GUARD;
     sc.mount(root.clone());
     let ix = sc.recv_timeout(t).unwrap();
     let rels: Vec<&str> = ix.files().iter().map(|f| f.rel.as_str()).collect();
@@ -278,7 +298,7 @@ fn scanner_reads_obsidian_settings() {
     let root = std::fs::canonicalize(dir.path()).unwrap();
     std::fs::write(root.join("A.md"), "").unwrap();
     let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
-    let t = std::time::Duration::from_secs(10);
+    let t = HANG_GUARD;
     sc.mount(root.clone());
     assert!(!sc.recv_timeout(t).unwrap().settings().obsidian);
     std::fs::create_dir_all(root.join(".obsidian")).unwrap();
@@ -291,10 +311,7 @@ fn scanner_reads_obsidian_settings() {
     std::fs::write(root.join(".obsidian/workspace.json"), "{}").unwrap();
     sc.changed(root.join(".obsidian"));
     sc.changed(root.join(".obsidian/workspace.json"));
-    assert!(
-        sc.recv_timeout(std::time::Duration::from_millis(500)).is_none(),
-        "no snapshot"
-    );
+    assert!(quiet(&sc), "no snapshot");
     // a real change does publish
     std::fs::write(root.join(".obsidian/app.json"), r#"{"useMarkdownLinks":false}"#).unwrap();
     sc.changed(root.join(".obsidian"));
@@ -313,7 +330,7 @@ fn nfd_names_on_disk_resolve_and_open() {
     std::fs::write(root.join(nfd_dir).join("Cafe\u{301}.md"), "x").unwrap();
     let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
     sc.mount(root.clone());
-    let ix = sc.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let ix = sc.recv_timeout(HANG_GUARD).unwrap();
     let f = ix.resolve_wikilink("café", None).expect("found through NFC");
     assert_eq!(f.rel, "Résumé/Café.md");
     let abs = ix.abs(&f.rel);
@@ -326,7 +343,7 @@ fn nfd_names_on_disk_resolve_and_open() {
     // a change event for the NFD folder is applied
     std::fs::write(root.join(nfd_dir).join("Two.md"), "").unwrap();
     sc.changed(root.join(nfd_dir));
-    let ix2 = sc.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let ix2 = sc.recv_timeout(HANG_GUARD).unwrap();
     assert!(ix2.file("Résumé/Two.md").is_some());
 }
 
@@ -394,10 +411,7 @@ fn note_creation_stays_inside_the_vault() {
         ))),
     );
     let rx = spawn_create_note(ix, "Top.md".into(), Arc::new(|| {}));
-    assert_eq!(
-        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap().unwrap(),
-        root.join("Top.md")
-    );
+    assert_eq!(rx.recv_timeout(HANG_GUARD).unwrap().unwrap(), root.join("Top.md"));
 }
 
 /// Review round 2: a new note under an existing NFD folder goes into that folder (no NFC
@@ -698,13 +712,13 @@ fn swapping_the_root_after_mount_does_not_redirect_creation() {
     std::fs::write(root.join("A.md"), "").unwrap();
     let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
     sc.mount(root.clone());
-    let ix = sc.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let ix = sc.recv_timeout(HANG_GUARD).unwrap();
     assert!(ix.root_dir().is_some());
     // the root path now names another place
     std::fs::rename(&root, base.join("vault-moved")).unwrap();
     std::os::unix::fs::symlink(&outside, &root).unwrap();
     let rx = spawn_create_note(ix, "Sub/New.md".into(), Arc::new(|| {}));
-    let r = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let r = rx.recv_timeout(HANG_GUARD).unwrap();
     assert!(r.is_ok(), "{r:?}");
     assert!(walk_files(&outside).is_empty(), "nothing at the new target");
     assert!(
@@ -722,14 +736,13 @@ fn no_snapshot_without_a_visible_change() {
     std::fs::write(root.join("A.md"), "one").unwrap();
     std::fs::write(root.join("Sub/B.md"), "").unwrap();
     let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
-    let t = std::time::Duration::from_secs(10);
-    let quiet = std::time::Duration::from_millis(400);
+    let t = HANG_GUARD;
     sc.mount(root.clone());
     let g1 = sc.recv_timeout(t).unwrap().generation();
     // a duplicate notification
     sc.changed(root.clone());
     sc.changed(root.join("Sub"));
-    assert!(sc.recv_timeout(quiet).is_none(), "duplicate events");
+    assert!(quiet(&sc), "duplicate events");
     // an existing note replaced atomically (same name)
     std::fs::write(root.join(".A.md.tmp"), "two").unwrap();
     std::fs::rename(root.join(".A.md.tmp"), root.join("A.md")).unwrap();
@@ -740,7 +753,7 @@ fn no_snapshot_without_a_visible_change() {
     sc.changed(root.clone());
     sc.changed(root.join(".git"));
     sc.rescan();
-    assert!(sc.recv_timeout(quiet).is_none(), "atomic replace, hidden files, rescan");
+    assert!(quiet(&sc), "atomic replace, hidden files, rescan");
     // a real change publishes, with the next generation
     std::fs::write(root.join("Sub/C.md"), "").unwrap();
     sc.changed(root.join("Sub"));
@@ -761,7 +774,7 @@ fn dropping_the_scanner_releases_the_root() {
         std::fs::write(root.join("A.md"), "x").unwrap();
         let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
         sc.mount(root.clone());
-        let ix = sc.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let ix = sc.recv_timeout(HANG_GUARD).unwrap();
         assert!(ix.root_dir().is_some(), "round {round}");
         // the user can still rename the vault folder while it is open (Windows: the root
         // handle shares delete access)
@@ -801,9 +814,7 @@ fn dropping_a_blocked_scanner_returns_promptly() {
     let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
     sc.mount(root.clone());
     sc.changed(root.join("sub"));
-    entered_rx
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("worker blocked");
+    entered_rx.recv_timeout(HANG_GUARD).expect("worker blocked");
     let t = std::time::Instant::now();
     drop(sc);
     let took = t.elapsed();
@@ -832,10 +843,5 @@ fn a_fifo_app_json_does_not_block() {
     assert_eq!(s, VaultSettings::obsidian(None));
     let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
     sc.mount(root.clone());
-    assert!(
-        sc.recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap()
-            .settings()
-            .obsidian
-    );
+    assert!(sc.recv_timeout(HANG_GUARD).unwrap().settings().obsidian);
 }

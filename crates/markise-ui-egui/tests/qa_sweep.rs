@@ -10,6 +10,8 @@
 //! --ignored`. Spec references are short IDs from the editing specification (S-x.y, Cxx,
 //! M2b-x, M2c-x, §x.y).
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -32,7 +34,7 @@ fn tmpdir(name: &str) -> PathBuf {
 fn wait_until(h: &mut H, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -271,7 +273,7 @@ impl Ed {
         let t = Instant::now();
         while self.h.state().is_busy() || self.h.state().is_dirty() {
             assert!(
-                t.elapsed() < Duration::from_secs(10),
+                t.elapsed() < common::HANG_GUARD,
                 "{}: save did not finish (dirty={})",
                 self.name,
                 self.h.state().is_dirty()
@@ -1881,10 +1883,10 @@ fn l12_caret_after_external_reload_shrinks_document() {
     let t = Instant::now();
     while e.text() != "ab\n" {
         // the file watch is registered off the UI thread (ADR 0010) and this write lands
-        // right after the open: it is seen once the registration is in effect, which can take
-        // several seconds while the whole suite starts FSEvents streams in parallel (7-10 s
-        // measured on macOS)
-        assert!(t.elapsed() < Duration::from_secs(60), "reload not picked up");
+        // right after the open, on purpose: it is seen by the catch-up once the registration
+        // is in effect, which can take long while the whole suite starts FSEvents streams in
+        // parallel (the bound is only a hang guard)
+        assert!(t.elapsed() < common::HANG_GUARD, "reload not picked up");
         e.h.step();
         std::thread::sleep(Duration::from_millis(20));
     }
