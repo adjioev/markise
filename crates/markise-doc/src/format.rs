@@ -15,7 +15,7 @@ use crate::plan::{Plan, PlanError, PlanRequest, TypingPlan, plain_typing};
 use crate::pos::{Affinity, DocPos, VirtualSlot};
 use crate::source::SourceToken;
 use crate::text::{LineEnding, Span};
-use crate::view::{FlatEvent, HeadingInfo, InlineSource, LeafView, RichInline, TableView};
+use crate::view::{CodeFenceView, FlatEvent, HeadingInfo, InlineSource, LeafView, RichInline, TableView};
 
 /// Format-neutral options for opening a document. Format-specific settings (e.g. Markdown's
 /// parse options) live in the `DocumentFormat` instance.
@@ -351,6 +351,19 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
     }
     /// The table leaf starting at absolute offset `at` (its `FlatLeaf::abs_span().start`).
     fn table(&self, at: usize) -> Option<TableView>;
+    /// The fenced code block holding offset `at` (its fence lines included), if any. Formats
+    /// without fenced code keep the default.
+    fn code_fence(&self, at: usize) -> Option<CodeFenceView> {
+        let _ = at;
+        None
+    }
+    /// The edit that makes `lang` the language (first info word) of the fenced code block at
+    /// `at`, leaving the fence characters and the rest of the info string as they are; an empty
+    /// `lang` removes the language. `None` when there is no such block or nothing changes.
+    fn code_lang_patch(&self, at: usize, lang: &str) -> Option<PatchSet> {
+        let _ = (at, lang);
+        None
+    }
     /// Cell content spans (absolute, trimmed) of one table row (absolute span of the row).
     fn table_row_cells(&self, row: Span) -> Vec<Span>;
     /// Outline contribution of the heading leaf starting at absolute offset `at`.

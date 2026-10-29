@@ -45,6 +45,7 @@ pub use pos::{Affinity, DocPos, SelRange, Selection, VirtualSlot};
 pub use source::{SourceTok, SourceToken};
 pub use text::{LineEnding, Span};
 pub use view::{
-    CalloutKind, ColumnAlign, ContainerKind, FlatContainer, FlatEvent, FlatLeaf, HeadingInfo, InlineKind, InlineNode,
-    InlineSource, LeafKind, LeafView, ListMarker, MapPiece, PieceKind, RichInline, SourceMap, TableView,
+    CalloutKind, CodeFenceView, ColumnAlign, ContainerKind, FlatContainer, FlatEvent, FlatLeaf, HeadingInfo,
+    InlineKind, InlineNode, InlineSource, LeafKind, LeafView, ListMarker, MapPiece, PieceKind, RichInline, SourceMap,
+    TableView,
 };

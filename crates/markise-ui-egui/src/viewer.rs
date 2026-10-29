@@ -25,6 +25,9 @@ use markise_theme::Theme;
 use crate::images::TextureStore;
 use crate::text_paint::ParleyText;
 
+mod code_tools;
+pub use code_tools::{LangEdit, LangItem, ShownTools, lang_matches};
+
 const SCROLLBAR_W: f32 = 10.0;
 /// Caret blink half-period (seconds).
 const BLINK_HALF: f64 = 0.53;
@@ -90,6 +93,8 @@ pub struct DocViewer {
     refocus: bool,
     /// Screen rectangle of the caret at the last frame it was drawn (popups anchor to it).
     pub caret_screen: Option<Rect>,
+    /// Copy button and language field of fenced code blocks (issue #76).
+    code: code_tools::CodeTools,
 }
 
 impl DocViewer {
@@ -125,6 +130,7 @@ impl DocViewer {
             last_surface: None,
             refocus: false,
             caret_screen: None,
+            code: Default::default(),
         }
     }
 
@@ -197,6 +203,7 @@ impl DocViewer {
         );
         view.set_model(doc, model);
         self.ed = EditorView::new(session, view, path);
+        self.code = Default::default();
     }
 
     /// Installs `doc`/`model` as one undoable transaction `label` (reload from disk, a
@@ -538,6 +545,14 @@ impl DocViewer {
         }
         for src in requests {
             images.request(&ctx, &src);
+        }
+        // ---- code block tools (copy button, language field)
+        {
+            let imgs: &TextureStore = images;
+            let mut sh = |f: &mut dyn FnMut(&mut dyn TextShaper, &dyn markise_layout::Images)| {
+                with_shaper(&ctx, parley.as_deref_mut(), |s| f(s, imgs))
+            };
+            self.code_tools_ui(ui, &visible, rect, left, theme, focused, editable, &mut out, &mut sh);
         }
 
         // ---- selection and caret

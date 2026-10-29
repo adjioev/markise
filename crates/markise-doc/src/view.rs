@@ -358,6 +358,49 @@ pub enum ColumnAlign {
     Right,
 }
 
+/// A fenced code block (spec 02 §7): its opening fence, info string and content lines, for the
+/// language field and copying the code. Absolute spans.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeFenceView {
+    /// The opening fence line (from the fence characters, container prefixes excluded,
+    /// trailing whitespace excluded).
+    pub opener: Span,
+    /// The trimmed info string. Without one, an empty span right after the fence characters
+    /// (where a new info string goes).
+    pub info: Span,
+    /// Content lines without their terminators (container prefixes and fence indentation
+    /// excluded).
+    pub lines: Vec<Span>,
+}
+
+impl CodeFenceView {
+    /// The language: the first word of the info string (spec 01 R3.5.2), as an absolute span
+    /// (empty at `info.start` when there is none).
+    pub fn lang(&self, text: &str) -> Span {
+        let info = self.info.slice(text);
+        let end = info.find(char::is_whitespace).unwrap_or(info.len());
+        Span::new(self.info.start, self.info.start + end)
+    }
+
+    /// The code as stored: the content lines joined with the line endings that follow them in
+    /// the source (no terminator after the last line; empty for an empty block).
+    pub fn content(&self, text: &str) -> String {
+        let mut out = String::new();
+        for (i, l) in self.lines.iter().enumerate() {
+            if i > 0 {
+                let prev = self.lines[i - 1];
+                out.push_str(if text[prev.end..].starts_with("\r\n") {
+                    "\r\n"
+                } else {
+                    "\n"
+                });
+            }
+            out.push_str(l.slice(text));
+        }
+        out
+    }
+}
+
 /// A table leaf: column alignments and the physical rows (absolute spans; row 0 is the header,
 /// row 1 the delimiter row when the format has one).
 #[derive(Clone, Debug, PartialEq, Eq)]
