@@ -15,7 +15,7 @@ use markise_layout::Prim;
 use markise_theme::Overrides;
 use markise_theme::catalog::ThemeId;
 use markise_ui_egui::menu::MenuAction;
-use markise_ui_egui::{AppOptions, MarkiseApp};
+use markise_ui_egui::{AppOptions, MarkiseApp, ViewMode};
 
 type H = Harness<'static, MarkiseApp>;
 
@@ -78,21 +78,36 @@ fn caret(h: &mut H) -> (usize, usize) {
 }
 
 /// Screen centre (last frame) of the checkbox painted for the item holding `offset`, from the
-/// layout geometry the viewer painted.
+/// layout geometry the viewer painted (the innermost box when the leaf draws several).
 fn box_center(h: &mut H, offset: usize) -> egui::Pos2 {
+    box_center_nth(h, offset, None)
+}
+
+/// Screen centre of the `nth` checkbox painted for the item holding `offset` (`None`: the
+/// last one), checked against the painted `Prim::Checkbox` rectangles.
+fn box_center_nth(h: &mut H, offset: usize, nth: Option<usize>) -> egui::Pos2 {
     h.step();
     let v = h.state_mut().viewer().unwrap();
     let r = v.item_screen_rect(offset).expect("item visible");
     let i = v.ed.view.model().item_at_offset(offset);
     let l = v.ed.view.cache_peek(i).expect("item laid out");
-    let b = l
+    let painted: Vec<egui::Rect> = l
         .prims
         .iter()
-        .find_map(|p| match p {
+        .filter_map(|p| match p {
             Prim::Checkbox { rect, .. } => Some(*rect),
             _ => None,
         })
-        .expect("a checkbox is painted for the item");
+        .collect();
+    assert_eq!(
+        painted,
+        l.tasks.iter().map(|t| t.0).collect::<Vec<_>>(),
+        "hit rects = painted boxes"
+    );
+    let b = match nth {
+        Some(n) => painted[n],
+        None => *painted.last().expect("a checkbox is painted for the item"),
+    };
     r.min + b.center().to_vec2()
 }
 
@@ -107,10 +122,14 @@ fn click_at(h: &mut H, p: egui::Pos2) {
     h.step();
 }
 
-/// Clicks the checkbox of the item holding `offset`.
+/// Clicks the (innermost) checkbox of the item holding `offset`.
 fn click_box(h: &mut H, offset: usize) {
     let p = box_center(h, offset);
     click_at(h, p);
+}
+
+fn undo_len(h: &mut H) -> usize {
+    h.state_mut().viewer().unwrap().ed.session.history().undo_len()
 }
 
 /// Clicks at the end of the first visual line of the item holding `offset` (caret there).
@@ -286,4 +305,88 @@ fn owner_settings_drake_theme_font_17_5() {
         doc,
         "# Todo\n\n- [ ] milk\n  - [x] nested\n> - [x] quoted\n",
     );
+}
+
+#[test]
+fn two_boxes_on_one_line_toggle_their_own_items() {
+    // one leaf draws the boxes of the outer and of the inner item
+    let doc = "- [ ] - [x] child\n";
+    let (mut h, p) = open("two-boxes", doc);
+    let outer = box_center_nth(&mut h, 12, Some(0));
+    click_at(&mut h, outer);
+    assert_eq!(text(&h), "- [x] - [x] child\n", "the outer box toggles the outer item");
+    let inner = box_center_nth(&mut h, 12, Some(1));
+    click_at(&mut h, inner);
+    assert_eq!(text(&h), "- [x] - [ ] child\n", "the inner box toggles the inner item");
+    undo(&mut h);
+    assert_eq!(text(&h), "- [x] - [x] child\n");
+    undo(&mut h);
+    assert_eq!(text(&h), doc);
+    redo(&mut h);
+    redo(&mut h);
+    assert_eq!(save_and_read(&mut h, &p), "- [x] - [ ] child\n");
+    // the outer item's box again, now on the item whose inner one is unchecked
+    let outer = box_center_nth(&mut h, 12, Some(0));
+    click_at(&mut h, outer);
+    assert_eq!(text(&h), "- [ ] - [ ] child\n");
+}
+
+#[test]
+fn a_selection_is_kept_and_only_the_box_toggles() {
+    let doc = "- [ ] milk and eggs\n- [ ] bread\n";
+    let (mut h, p) = open("selection", doc);
+    click_line_end(&mut h, 6);
+    for _ in 0..4 {
+        h.key_press_modifiers(Modifiers::SHIFT, Key::ArrowLeft);
+        h.step();
+    }
+    let (a, f) = caret(&mut h);
+    assert_ne!(a, f, "a non-collapsed selection");
+    // the other item's box: the selection (and its text) stay
+    toggle_round_trip(&mut h, &p, 26, doc, "- [ ] milk and eggs\n- [x] bread\n");
+    assert_eq!(caret(&mut h), (a, f));
+    // the selected item's own box
+    toggle_round_trip(&mut h, &p, 6, doc, "- [x] milk and eggs\n- [ ] bread\n");
+    assert_eq!(caret(&mut h), (a, f));
+}
+
+/// A press on the box dragged into the text and released there is not a click: no toggle, no
+/// selection, no undo step (the toggle happens on release over the same box).
+#[test]
+fn a_press_on_the_box_dragged_into_text_does_nothing() {
+    let doc = "- [ ] milk and eggs\n";
+    let (mut h, _p) = open("drag", doc);
+    let sel = caret(&mut h);
+    let undo = undo_len(&mut h);
+    let from = box_center(&mut h, 6);
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(6).unwrap();
+    let to = egui::pos2(r.left() + 80.0, from.y);
+    h.hover_at(from);
+    h.step();
+    h.drag_at(from);
+    h.step();
+    for k in 1..=4 {
+        h.hover_at(from + (to - from) * (k as f32 / 4.0));
+        h.step();
+    }
+    h.drop_at(to);
+    h.step();
+    h.step();
+    assert_eq!(text(&h), doc, "no toggle");
+    assert_eq!(caret(&mut h), sel, "no selection");
+    assert_eq!(undo_len(&mut h), undo, "no undo step");
+}
+
+/// The rendered pane of Side by Side is read-only: a click on its box changes nothing.
+#[test]
+fn read_only_view_click_changes_nothing() {
+    let doc = "- [ ] milk\n";
+    let (mut h, _p) = open("read-only", doc);
+    h.state_mut().set_view_mode(ViewMode::SideBySide);
+    h.run_steps(4);
+    let undo = undo_len(&mut h);
+    click_box(&mut h, 6);
+    assert_eq!(text(&h), doc);
+    assert_eq!(undo_len(&mut h), undo);
+    assert!(!h.state().is_dirty());
 }
