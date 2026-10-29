@@ -72,7 +72,8 @@ impl MenuSync {
 
     /// The native calls that make the menus show `bar`, and records them as applied.
     ///
-    /// - `tracking`: a menu is open; nothing is changed (see the module documentation).
+    /// - `tracking`: a menu is open; nothing is changed, not even the first build (see the
+    ///   module documentation).
     /// - `native_checked`: the check mark a native item shows now, when the platform can say
     ///   (a native check item flips itself when it is clicked, so clicking the selected radio
     ///   item would otherwise lose its check mark); `None` uses the last applied state.
@@ -84,7 +85,9 @@ impl MenuSync {
         tracking: bool,
         native_checked: impl Fn(&str) -> Option<bool>,
     ) -> Vec<MenuOp> {
-        if tracking && self.structure.is_some() {
+        // also before the first build: a menu open then (e.g. the default menu AppKit shows
+        // before ours) would be dismissed by installing the menu bar
+        if tracking {
             return Vec::new();
         }
         let st = bar.structure();
@@ -357,6 +360,18 @@ mod tests {
                 enabled: true
             }]
         );
+    }
+
+    /// Codex review of PR #83: a menu already open before the first sync is not replaced
+    /// either; the menus are built once it closed.
+    #[test]
+    fn first_build_waits_for_an_open_menu_to_close() {
+        let mut s = MenuSync::new(true);
+        for _ in 0..10 {
+            assert!(s.plan(&base(), true, |_| None).is_empty());
+        }
+        assert_eq!(s.plan(&base(), false, |_| None), [MenuOp::Rebuild]);
+        assert!(s.plan(&base(), false, |_| None).is_empty());
     }
 
     #[test]
