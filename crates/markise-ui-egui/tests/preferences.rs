@@ -519,3 +519,72 @@ fn switches_segments_and_theme_cards() {
     assert!(h.query_by_label("Use the style’s line height").is_none());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Accessibility state (Codex round 2): a dependent switch is reported disabled while its
+/// prerequisite is off, and the Font & size window's override boxes report checked or not
+/// (never "mixed").
+#[test]
+fn accessible_states_of_dependent_switches_and_override_boxes() {
+    let mut h = harness_with(AppOptions::default());
+    h.run();
+    open_at(&mut h, Section::Editor);
+    let dashes = "Smart dashes: -- as em dash";
+    let disabled = |h: &H| {
+        h.get_by_role_and_label(egui::Role::Switch, dashes)
+            .accesskit_node()
+            .is_disabled()
+    };
+    assert!(!h.state().preference_values().editing.smart_punctuation);
+    assert!(disabled(&h), "announced as disabled while smart punctuation is off");
+    h.get_by_role_and_label(egui::Role::Switch, dashes).click();
+    h.run_steps(2);
+    assert!(
+        !h.state().preference_values().editing.smart_dashes_em,
+        "no input while disabled"
+    );
+    h.get_by_role_and_label(egui::Role::Switch, "Smart punctuation (convert on input)")
+        .click();
+    h.run_steps(2);
+    assert!(!disabled(&h));
+
+    // Font & size window: the override box's toggled state before and after a click
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("theme.fontAndSize"));
+    h.run_steps(2);
+    let state = |h: &H| {
+        h.get_by_role_and_label(egui::Role::CheckBox, "Override line height")
+            .accesskit_node()
+            .toggled()
+    };
+    assert_eq!(state(&h), Some(Toggled::False));
+    h.get_by_role_and_label(egui::Role::CheckBox, "Override line height")
+        .click();
+    h.run_steps(2);
+    assert_eq!(state(&h), Some(Toggled::True));
+    assert!(h.state().theme_manager().overrides().line_height.is_some());
+}
+
+/// Theme previews keep only a few colours per theme: opening Appearance imports the CSS
+/// themes for their cards without keeping full imports (Codex round 2, memory budget).
+#[test]
+fn theme_previews_do_not_keep_full_imports() {
+    let d = tmpdir("previews");
+    let mut h = harness(&d);
+    wait_until(&mut h, "Markise", |a| a.theme().name.starts_with("Markise"));
+    let before = h.state().theme_manager().cached_imports();
+    open_at(&mut h, Section::Appearance);
+    wait_until(&mut h, "previews", |a| {
+        let v = a.preference_values();
+        v.themes.len() >= 4 && v.themes.iter().all(|t| t.swatch.is_some())
+    });
+    assert_eq!(h.state().theme_manager().cached_imports(), before);
+    // the cards differ: they come from the themes' own colours
+    let v = h.state().preference_values();
+    let mut pages: Vec<_> = v.themes.iter().map(|t| t.swatch.unwrap().heading).collect();
+    pages.dedup();
+    assert!(pages.len() >= 2);
+    let _ = std::fs::remove_dir_all(&d);
+}

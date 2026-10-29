@@ -31,6 +31,7 @@ use markise_theme::{
 };
 
 use crate::fonts::{FontRequest, ResolvedFonts};
+use crate::prefs::Swatch;
 
 /// Where the app keeps its configuration.
 #[derive(Clone, Debug, Default)]
@@ -60,6 +61,9 @@ enum Job {
     Save(u64, SettingsPatch),
     /// Register the watcher on the user theme folder.
     Watch,
+    /// Import a CSS theme only for its preview colours (Preferences' theme cards): the
+    /// import is dropped on the worker, only the [`Swatch`] comes back; generation as Import.
+    Preview(PathBuf, bool, u64),
 }
 
 /// Outcome of "Import theme…".
@@ -94,6 +98,8 @@ enum Done {
     Fonts(u64, Arc<ResolvedFonts>),
     /// Result of `Job::Save` by id; an error says whether retrying can help.
     Saved(u64, Result<(), (String, bool)>),
+    /// Preview colours of a CSS theme variant (`None`: the import failed).
+    Preview(PathBuf, bool, u64, Option<Swatch>),
 }
 
 struct Worker {
@@ -187,6 +193,12 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                             result,
                             deps,
                         }
+                    }
+                    Job::Preview(path, dark_variant, generation) => {
+                        let swatch = import_theme_file(&path, &ImportOptions::default())
+                            .ok()
+                            .map(|r| Swatch::of(r.variant(dark_variant)));
+                        Done::Preview(path, dark_variant, generation, swatch)
                     }
                     Job::Install(src, replace) => match &user_dir {
                         None => Done::Installed(
@@ -361,6 +373,11 @@ pub struct ThemeManager {
     watch_requested: bool,
     /// Fallback fonts (CJK) were asked for by the document; loaded with the next font job.
     want_fallback: bool,
+    /// Preview colours of theme variants (Preferences' theme cards): a few colours per
+    /// variant, kept apart from the full imports (`None`: the import failed).
+    previews: Vec<(VariantSource, Option<Swatch>)>,
+    /// Preview imports handed to the worker and not answered yet.
+    previews_pending: Vec<VariantSource>,
 }
 
 impl ThemeManager {
@@ -420,6 +437,8 @@ impl ThemeManager {
             watcher: None,
             watch_requested: false,
             want_fallback: false,
+            previews: Vec::new(),
+            previews_pending: Vec::new(),
         }
     }
 
@@ -901,6 +920,24 @@ impl ThemeManager {
         for k in stale {
             self.invalidate(&k);
         }
+        // preview colours of themes under the changed path are read again (a pending one
+        // is answered for an older generation and dropped)
+        let under = |v: &VariantSource| matches!(v, VariantSource::Css { path: p, .. } if p.starts_with(path));
+        let mut bumped = Vec::new();
+        for v in self.previews.iter().map(|(v, _)| v).chain(&self.previews_pending) {
+            if let VariantSource::Css { path: p, .. } = v
+                && p.starts_with(path)
+            {
+                bumped.push(p.clone());
+            }
+        }
+        bumped.sort();
+        bumped.dedup();
+        for p in bumped {
+            *self.gens.entry(p).or_default() += 1;
+        }
+        self.previews.retain(|(v, _)| !under(v));
+        self.previews_pending.retain(|v| !under(v));
         // a theme file added, removed or renamed at the top level changes the catalog (the
         // folder itself: the watch restarted, anything may have changed)
         let top_level = self
@@ -1044,6 +1081,15 @@ impl ThemeManager {
                     out.push(ThemeEvent::Fonts(fonts));
                 }
             }
+            Done::Preview(path, dark_variant, generation, swatch) => {
+                if self.gens.get(&path).copied().unwrap_or(0) != generation {
+                    return; // the file changed meanwhile
+                }
+                let src = VariantSource::Css { path, dark_variant };
+                self.previews_pending.retain(|v| *v != src);
+                self.previews.retain(|(v, _)| *v != src);
+                self.previews.push((src, swatch));
+            }
             Done::Saved(id, r) => {
                 let patch = self
                     .in_flight
@@ -1140,15 +1186,38 @@ impl ThemeManager {
         }
     }
 
-    /// The theme family `id` in the wanted appearance, for a preview (Preferences' theme
-    /// cards): native at once, a CSS theme from the import cache — requested on the worker when
-    /// missing, so `None` until it arrives (or when it failed).
-    pub fn preview(&mut self, id: &ThemeId, dark: bool) -> Option<Theme> {
+    /// Number of full theme imports held (tests: previews must not add any).
+    pub fn cached_imports(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Preview colours of theme family `id` in the wanted appearance (Preferences' theme
+    /// cards). Native themes and CSS themes already imported for use answer at once; other CSS
+    /// themes are imported on the worker for their colours only (the full import is not kept),
+    /// so `None` until that arrives, or when it failed.
+    pub fn preview(&mut self, id: &ThemeId, dark: bool) -> Option<Swatch> {
         let src = self.family(id)?.pick(dark).clone();
-        match &src {
-            VariantSource::Css { path, .. } if self.failed.contains_key(path) => None,
-            _ => self.variant_theme(&src, dark),
+        if let Some((_, s)) = self.previews.iter().find(|(v, _)| *v == src) {
+            return *s;
         }
+        let swatch = match &src {
+            VariantSource::Native { id } => Some(Swatch::of(
+                &Theme::native(id).unwrap_or_else(|| if dark { Theme::dark() } else { Theme::light() }),
+            )),
+            VariantSource::Css { path, dark_variant } => match self.cache.get(path) {
+                Some(c) => Some(Swatch::of(c.result.variant(*dark_variant))),
+                None => {
+                    if !self.previews_pending.contains(&src) && self.worker.is_some() {
+                        self.previews_pending.push(src.clone());
+                        let generation = self.gens.get(path).copied().unwrap_or(0);
+                        self.send(Job::Preview(path.clone(), *dark_variant, generation));
+                    }
+                    return None;
+                }
+            },
+        };
+        self.previews.push((src, swatch));
+        swatch
     }
 
     /// Menu label of the selected style.

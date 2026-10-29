@@ -843,10 +843,11 @@ fn info_row(ui: &mut Ui, p: &Palette, label: &str, control: impl FnOnce(&mut Ui)
 
 /// A switch row: the whole row toggles; the switch is drawn on the right.
 fn switch_row(ui: &mut Ui, p: &Palette, label: &str, on: bool, enabled: bool) -> Option<bool> {
-    let (rect, r) = ui.allocate_exact_size(
-        vec2(ui.available_width(), ROW_H),
-        if enabled { Sense::click() } else { Sense::hover() },
-    );
+    // disabled through egui, so the switch is reported as disabled (and takes no input)
+    let w = ui.available_width();
+    let (rect, r) = ui
+        .add_enabled_ui(enabled, |ui| ui.allocate_exact_size(vec2(w, ROW_H), Sense::click()))
+        .inner;
     name_selected(&r, Role::Switch, on, label);
     paint_label(ui, p, rect, label, enabled);
     let sw = Rect::from_min_size(pos2(rect.right() - 38.0, rect.center().y - 11.0), vec2(38.0, 22.0));
@@ -1440,7 +1441,8 @@ pub fn font_controls(ui: &mut Ui, o: &mut Overrides, d: &FontDefaults) {
                 ui.horizontal(|ui| {
                     let mut on = v.is_some();
                     let c = ui.checkbox(&mut on, "").on_hover_text("Override the style");
-                    name(&c, Role::CheckBox, &format!("Override {}", label.to_lowercase()));
+                    // keep the checked state in the accessible info (a plain name would drop it)
+                    name_selected(&c, Role::CheckBox, on, &format!("Override {}", label.to_lowercase()));
                     if c.changed() {
                         *v = on.then_some(current);
                     }

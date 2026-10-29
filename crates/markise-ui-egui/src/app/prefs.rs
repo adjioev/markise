@@ -130,7 +130,7 @@ impl MarkiseApp {
         let swatches: Vec<(ThemeId, Option<Swatch>)> = ids
             .into_iter()
             .map(|id| {
-                let s = self.themes.preview(&id, dark).map(|t| Swatch::of(&t));
+                let s = self.themes.preview(&id, dark);
                 (id, s)
             })
             .collect();
