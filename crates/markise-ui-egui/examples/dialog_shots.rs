@@ -140,6 +140,15 @@ fn scenes() -> Vec<(&'static str, Setup)> {
             app.tree_action(ctx, TreeAction::Open(dir.join("tides.md")));
         }),
         ("review-panel", |app, _, _| review_setup(app)),
+        // comments as margin cards: a narrower column leaves room on the right
+        ("review-margin", |app, ctx, _| {
+            review_setup(app);
+            app.menu_action(ctx, &MenuAction::Command("view.toggleSidebar"));
+            app.set_overrides(markise_theme::Overrides {
+                content_width: Some(480.0),
+                ..Default::default()
+            });
+        }),
         ("review-reveal", |app, _, _| {
             review_setup(app);
             let at = REVIEW_DOC.find("March 10").unwrap();

@@ -463,7 +463,12 @@ fn review_marks_render_styled_and_reveal_at_the_caret() {
         })
         .unwrap();
     let shown = text.text().to_string();
-    assert_eq!(shown, "a new old xy\u{1F4AC} @ai: why b");
+    assert_eq!(shown, "a new old xy\u{1F4AC} b");
+    // the comment is a glyph; its text is reported for the card
+    assert_eq!(l.comments.len(), 1);
+    assert_eq!(&*l.comments[0].text, "@ai: why");
+    assert!(!l.comments[0].revealed);
+    assert!(l.comments[0].rect.width() > 0.0);
     let galley = text.galley().unwrap();
     let color_at = |needle: &str| {
         let at = shown.find(needle).unwrap();
@@ -500,5 +505,32 @@ fn review_marks_render_styled_and_reveal_at_the_caret() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(shown, "a new old {~~x~>y~~}\u{1F4AC} @ai: why b");
+    assert_eq!(shown, "a new old {~~x~>y~~}\u{1F4AC} b");
+    // the caret next to the comment does not open it; inside its text it does
+    let c0 = src.find("{>>").unwrap() as u32;
+    let rich_reveal = |caret: u32| {
+        let doc = markise_md::parse(src);
+        let leaf = markise_doc::FormatDoc::leaf(&doc, 0).unwrap();
+        let r = markise_doc::FormatDoc::inlines(&doc, &leaf);
+        markise_layout::block::reveal_set(&r, caret)
+    };
+    assert!(!rich_reveal(c0).iter().any(|r| r.start == c0), "before the mark");
+    assert!(!rich_reveal(c0 + 14).iter().any(|r| r.start == c0), "after the mark");
+    assert!(rich_reveal(c0 + 3).iter().any(|r| r.start == c0), "inside its text");
+    let focus = markise_layout::ItemFocus {
+        reveal: std::iter::once(c0..c0 + 14).collect(),
+        ..Default::default()
+    };
+    v.set_focus(Some((0, focus)));
+    let l = v.layout(0, &mut f, &NoImages);
+    let shown = l
+        .prims
+        .iter()
+        .find_map(|p| match p {
+            Prim::Text { text, .. } => Some(text.text().to_string()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(shown, "a new old xy{>>@ai: why<<} b");
+    assert!(l.comments[0].revealed);
 }

@@ -182,6 +182,9 @@ fn every_section_renders_its_settings() {
                 "Render diagrams",
                 "Wikilinks [[Note]]",
                 "Comments & suggestions (CriticMarkup)",
+                // "Show comments" labels the segments (filtered as a label node)
+                "In the margin",
+                "As bubbles (hover to read)",
                 "Keep comments in exports",
                 "Highlight code (this session)",
             ],

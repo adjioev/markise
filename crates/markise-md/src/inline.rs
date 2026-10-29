@@ -276,9 +276,11 @@ struct P<'a> {
     /// none before the end). Openers are tried left to right, so a later opener at or before
     /// `close` gets the same answer without a new search (linear on runs of openers).
     critic_close: [Option<(usize, Option<usize>)>; 5],
-    /// For the closer at `.0`: the first backtick run between the first opener's content
-    /// start and the closer whose code span ends after the closer (`.1`), if any.
-    critic_ticks: Option<(usize, Option<usize>)>,
+    /// Per mark kind, for its closer at `.0`: the first backtick run between the first
+    /// opener's content start and the closer whose code span ends after the closer (`.1`), if
+    /// any. Kept per kind (review P1-2): openers of different kinds alternating must not evict
+    /// each other's answer.
+    critic_ticks: [Option<(usize, Option<usize>)>; 5],
     /// Substitution separator memo `(close, from, arrow)`: the first `~>` at or after `from`
     /// and before `close`.
     critic_arrow: Option<(usize, usize, Option<usize>)>,
@@ -318,7 +320,7 @@ fn parse_at(s: &str, base: usize, opts: &ParseOptions, ctx: &InlineContext, esca
         wiki_line: None,
         wiki_scanned: 0,
         critic_close: [None; 5],
-        critic_ticks: None,
+        critic_ticks: [None; 5],
         critic_arrow: None,
         critic_scanned: 0,
     };
@@ -889,18 +891,28 @@ impl<'a> P<'a> {
     }
 
     /// Whether a code span that starts inside `open..close` ends after `close` (it then wins
-    /// over the mark, like code spans and wikilinks). Memoised per closer: every opener that
-    /// shares the closer sees the same backtick pairing (it is not inside a code span itself).
-    fn code_crosses(&mut self, open: usize, close: usize, end: usize) -> bool {
-        if let Some((c, fail)) = self.critic_ticks
+    /// over the mark, like code spans and wikilinks). A backslash-escaped backtick opens no
+    /// code span (review P2-5). Memoised per mark kind `k` and closer: every opener that shares
+    /// the closer sees the same backtick pairing (it is not inside a code span itself).
+    fn code_crosses(&mut self, k: usize, open: usize, close: usize, end: usize) -> bool {
+        if let Some((c, fail)) = self.critic_ticks[k]
             && c == close
         {
             return fail.is_some_and(|f| open <= f);
         }
         let mut fail = None;
         let mut i = open;
-        while let Some(rel) = memchr::memchr(b'`', &self.b[i..close]) {
+        while let Some(rel) = memchr::memchr2(b'`', b'\\', &self.b[i..close]) {
             let a = i + rel;
+            if self.b[a] == b'\\' {
+                // `\x`: an escape (as the main loop reads it) — the next byte is literal
+                let esc = self.b.get(a + 1).is_some_and(|&c| is_escapable(c, self.opts));
+                i = (a + if esc { 2 } else { 1 }).min(close);
+                if i >= close {
+                    break;
+                }
+                continue;
+            }
             let mut q = a;
             while q < end && self.b[q] == b'`' {
                 q += 1;
@@ -919,7 +931,7 @@ impl<'a> P<'a> {
             }
         }
         self.critic_scanned += fail.unwrap_or(close).saturating_sub(open);
-        self.critic_ticks = Some((close, fail));
+        self.critic_ticks[k] = Some((close, fail));
         fail.is_some()
     }
 
@@ -961,8 +973,8 @@ impl<'a> P<'a> {
 
     /// A CriticMarkup mark at `pos` (`{++`, `{--`, `{~~`, `{==`, `{>>`; ADR 0012): the content
     /// runs to the first matching closer within the block's content (marks never span
-    /// blocks); no nesting; a code span that starts inside and ends after the closer wins; a
-    /// substitution needs a `~>`.
+    /// blocks); no nesting; a code span that starts inside and ends after the closer wins
+    /// (not for comments, whose text is plain); a substitution needs a `~>`.
     fn critic(&mut self, pos: usize, end: usize) -> Option<usize> {
         let b = self.b;
         if pos + 3 > end {
@@ -978,7 +990,9 @@ impl<'a> P<'a> {
         };
         let open = pos + 3;
         let close = self.find_critic_close(k, pat, open, end)?;
-        if self.code_crosses(open, close, end) {
+        // a comment's text is opaque (owner decision, ADR 0012): no inline parsing inside, so
+        // a backtick in it opens nothing
+        if kind != CriticKind::Comment && self.code_crosses(k, open, close, end) {
             return None;
         }
         let stop = close + 3;

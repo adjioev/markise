@@ -141,10 +141,41 @@ fn undo(h: &mut H) {
 
 /// Clicks the first widget labelled `label` (panel buttons repeat per row).
 fn click_first(h: &mut H, label: &str) {
+    assert!(has_text(h, label), "{label}");
     h.query_all_by_label(label)
         .next()
         .unwrap_or_else(|| panic!("no “{label}”"))
         .click();
+    h.run_steps(3);
+}
+
+/// A widget or text with exactly this label or text (labels that label another widget too).
+/// Steps a few frames until it shows (fonts arriving on a busy machine re-layout the UI).
+fn has_text(h: &mut H, s: &str) -> bool {
+    let t = Instant::now();
+    loop {
+        if h.query_all_by(|n| text_is(n, s)).next().is_some() {
+            return true;
+        }
+        if t.elapsed() > Duration::from_secs(5) {
+            return false;
+        }
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn has_text_now(h: &H, s: &str) -> bool {
+    h.query_all_by(|n| text_is(n, s)).next().is_some()
+}
+
+fn text_is(n: &egui_kittest::kittest::AccessKitNode<'_>, s: &str) -> bool {
+    n.label().as_deref() == Some(s) || n.value().as_deref() == Some(s)
+}
+
+fn click_text(h: &mut H, s: &str) {
+    assert!(has_text(h, s), "{s}");
+    h.get_by(|n| text_is(n, s)).click();
     h.run_steps(3);
 }
 
@@ -202,12 +233,11 @@ fn panel_lists_marks_and_jumps_to_them() {
             CriticKind::Comment
         ]
     );
-    assert!(h.query_by_label("2 comments · 3 suggestions").is_some());
-    assert!(h.query_by_label("@ai").is_some(), "the author of a comment");
-    assert!(h.query_by_label("past tense").is_some());
+    assert!(has_text(&mut h, "2 comments · 3 suggestions"));
+    assert!(has_text(&mut h, "@ai"), "the author of a comment");
+    assert!(has_text(&mut h, "past tense"));
     // a click on an item's text puts the caret at the mark
-    h.get_by_label("numbers?").click();
-    h.run_steps(3);
+    click_text(&mut h, "numbers?");
     let hl = marks.iter().find(|m| m.kind == CriticKind::Highlight).unwrap();
     assert_eq!(caret(&mut h), hl.range.start);
 }
@@ -241,6 +271,46 @@ It was fine. {==Costs==}{>>numbers?<<} stay low.\n"
     let want = "# Plan\n\nWe ship the beta on Friday.\n\nThe team really likes it.\n\nIt was fine. Costs stay low.\n";
     assert_eq!(text(&h), want);
     assert_eq!(save_and_read(&mut h, &p), want);
+}
+
+/// Review P1-1: a row's action applies to its own mark even when the list is older than the
+/// text (the 250 ms debounce): `{++A++}` listed, `{++B++}` prepended, Accept on the A row.
+#[test]
+fn stale_panel_rows_act_on_their_own_mark() {
+    let (mut h, _p) = open("stale", "{++A++}\n");
+    // the list must stay old for the whole test, however slow the machine
+    h.state_mut().set_comments_debounce(Duration::from_secs(3600));
+    show_panel(&mut h);
+    assert!(has_text(&mut h, "+ A"));
+    assert!(h.state().comments_panel_ready());
+    {
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.edit(|s| {
+            s.apply_external(&markise_doc::PatchSet::insert(0, "{++B++} "), "Test Edit", false)
+                .unwrap()
+        });
+    }
+    h.step();
+    assert!(!h.state().comments_panel_ready(), "the list is still the old one");
+    assert!(!has_text_now(&h, "+ B"), "the list is still the old one");
+
+    click_first(&mut h, "Accept");
+    assert_eq!(text(&h), "{++B++} A\n");
+    // a mark that is gone: nothing happens
+    let (mut h, _p) = open("stale-gone", "x {--A--}\n");
+    h.state_mut().set_comments_debounce(Duration::from_secs(3600));
+    show_panel(&mut h);
+    {
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.edit(|s| {
+            s.apply_external(&markise_doc::PatchSet::delete(2..9), "Test Edit", false)
+                .unwrap()
+        });
+    }
+    h.step();
+    assert!(!h.state().comments_panel_ready(), "the list is still the old one (2)");
+    click_first(&mut h, "Reject");
+    assert_eq!(text(&h), "x \n");
 }
 
 #[test]
@@ -316,7 +386,7 @@ fn switching_off_shows_plain_text_and_keeps_the_bytes() {
     assert!(!h.state().critic_markup());
     assert!(!h.state().preference_values().critic_markup);
     assert!(h.state().review_marks().is_empty(), "no marks: plain text");
-    assert!(h.query_by_label("Comments and suggestions are off.").is_some());
+    assert!(has_text(&mut h, "Comments and suggestions are off."));
     assert_eq!(text(&h), REVIEWED, "byte-identical");
     assert!(!h.state().is_dirty());
     // Add Comment is not available while off
@@ -462,4 +532,200 @@ newsletter on the same day.\n\n\
 Risks are moderate: the beta found two major bugs, both fixed.\n"
     );
     assert!(h.state().review_marks().is_empty());
+}
+
+// ------------------------------------------------------------------ comment display
+
+use markise_engine::settings::CommentDisplay;
+
+/// A document whose column leaves room for margin cards (sidebar hidden, narrow column).
+fn open_roomy(name: &str, text: &str) -> (H, PathBuf) {
+    let (mut h, p) = open(name, text);
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+    h.state_mut().set_overrides(markise_theme::Overrides {
+        content_width: Some(480.0),
+        ..Default::default()
+    });
+    h.run_steps(4);
+    (h, p)
+}
+
+fn click_at(h: &mut H, p: egui::Pos2) {
+    h.hover_at(p);
+    h.step();
+    h.drag_at(p);
+    h.step();
+    h.drop_at(p);
+    h.step();
+}
+
+fn visible_text(h: &mut H) -> String {
+    h.state_mut().viewer().unwrap().visible_text()
+}
+
+fn comments(h: &mut H) -> Vec<markise_ui_egui::viewer::ShownComment> {
+    h.state_mut().viewer().unwrap().shown_comments().to_vec()
+}
+
+fn caret_at(h: &mut H, at: usize) {
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| s.set_selection(Selection::caret(at)));
+    v.ed.refresh_focus();
+    v.request_refocus();
+    h.run_steps(3);
+}
+
+const NOTE: &str = "Note {==this==}{>>check **this** `x`<<} end.\n";
+
+/// Owner feedback: the comment's markers are not painted unless the caret is inside its text
+/// (not merely before or after the mark).
+#[test]
+fn comment_markers_show_only_with_the_caret_inside() {
+    let (mut h, _p) = open("markers", NOTE);
+    let start = NOTE.find("{>>").unwrap();
+    let end = NOTE.find("<<}").unwrap() + 3;
+    for at in [0, start, end, NOTE.len() - 1] {
+        caret_at(&mut h, at);
+        let t = visible_text(&mut h);
+        assert!(!t.contains("{>>") && !t.contains("<<}"), "caret at {at}: {t:?}");
+    }
+    caret_at(&mut h, start + 5);
+    assert!(visible_text(&mut h).contains("{>>check **this** `x`<<}"));
+}
+
+/// Margin cards: the text as written (plain, with its line breaks) beside its line; a click
+/// on the card puts the caret in the comment (its source shows).
+#[test]
+fn margin_cards_show_the_text_and_open_for_editing() {
+    let src = "Plan {==date==}{>>first line\nsecond **line** [l](u)<<} ok.\n\nMore {>>solo<<} text.\n";
+    let (mut h, _p) = open_roomy("margin", src);
+    assert_eq!(h.state().comment_display(), CommentDisplay::Margin);
+    let cs = comments(&mut h);
+    assert_eq!(cs.len(), 2, "{cs:#?}");
+    assert_eq!(
+        &*cs[0].text, "first line\nsecond **line** [l](u)",
+        "lines and literal Markdown"
+    );
+    assert_eq!(&*cs[1].text, "solo", "a standalone comment has a card too");
+    let card = cs[0].card.expect("a margin card");
+    assert!(card.left() > cs[0].glyph.right(), "in the margin");
+    assert!((card.top() - cs[0].glyph.top()).abs() < 12.0, "aligned with its line");
+    click_at(&mut h, card.center());
+    h.run_steps(3);
+    let c = caret(&mut h);
+    assert!(
+        cs[0].content.start <= c && c <= cs[0].content.end,
+        "caret in the comment: {c}"
+    );
+    assert!(visible_text(&mut h).contains("{>>first line"));
+}
+
+/// Bubbles: hovering the glyph opens a popover after a short rest, leaving closes it,
+/// clicking the glyph opens the comment for editing and pins the popover; Esc closes it.
+#[test]
+fn bubbles_show_a_popover_on_hover() {
+    let (mut h, _p) = open_roomy("bubbles", NOTE);
+    h.state_mut().set_comment_display(CommentDisplay::Bubbles);
+    h.run_steps(3);
+    let cs = comments(&mut h);
+    assert!(cs[0].card.is_none(), "no card until hovered");
+    let glyph = cs[0].glyph;
+    h.hover_at(glyph.center());
+    let t = Instant::now();
+    while !h.state_mut().viewer().unwrap().popover_open() {
+        assert!(t.elapsed() < Duration::from_secs(5), "popover did not open");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(&*comments(&mut h)[0].text, "check **this** `x`");
+    // the pointer leaves: closed
+    h.hover_at(glyph.center() + egui::vec2(0.0, 200.0));
+    h.run_steps(3);
+    assert!(!h.state_mut().viewer().unwrap().popover_open());
+    // a click on the glyph: editing, pinned
+    click_at(&mut h, glyph.center());
+    h.run_steps(3);
+    let c = caret(&mut h);
+    assert!(cs[0].content.start <= c && c <= cs[0].content.end);
+    h.hover_at(glyph.center() + egui::vec2(0.0, 200.0));
+    h.run_steps(3);
+    assert!(h.state_mut().viewer().unwrap().popover_open(), "pinned");
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert!(!h.state_mut().viewer().unwrap().popover_open());
+}
+
+/// The setting switches the rendering; the panel's switch writes it to settings.json.
+#[test]
+fn panel_switch_changes_the_setting() {
+    let dir = tmpdir("display-setting");
+    let doc = dir.join("note.md");
+    std::fs::write(&doc, NOTE).unwrap();
+    let cfg = dir.join("config");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 760.0))
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| app.ui(ui),
+            MarkiseApp::new(AppOptions {
+                open: vec![doc],
+                config: markise_ui_egui::ConfigDir::Dir(cfg.clone()),
+                ..Default::default()
+            }),
+        );
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    show_panel(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+    h.state_mut().set_overrides(markise_theme::Overrides {
+        content_width: Some(420.0),
+        ..Default::default()
+    });
+    h.run_steps(4);
+    assert!(comments(&mut h)[0].card.is_some(), "margin card");
+    h.get_by_label("Show comments as bubbles").click();
+    h.run_steps(3);
+    assert_eq!(h.state().comment_display(), CommentDisplay::Bubbles);
+    assert!(comments(&mut h)[0].card.is_none(), "bubbles: no card until hovered");
+    let settings = cfg.join("markise").join("settings.json");
+    wait_until(&mut h, "settings.json", move |_| {
+        std::fs::read_to_string(&settings).is_ok_and(|s| s.contains("\"commentDisplay\": \"bubbles\""))
+    });
+    h.get_by_label("Show comments in the margin").click();
+    h.run_steps(3);
+    assert_eq!(h.state().comment_display(), CommentDisplay::Margin);
+}
+
+// ------------------------------------------------------------------ multi-line comments
+
+/// Owner decision: Enter inside a comment adds a line break inside it (keeping the quote or
+/// list prefix), a second Enter adds nothing; the comment round-trips.
+#[test]
+fn enter_inside_a_comment_makes_a_multi_line_comment() {
+    for (name, src, want) in [
+        ("para", "A {>>one<<} b\n", "A {>>one\ntwo<<} b\n"),
+        ("quote", "> A {>>one<<} b\n", "> A {>>one\n> two<<} b\n"),
+        ("item", "- A {>>one<<} b\n", "- A {>>one\n  two<<} b\n"),
+    ] {
+        let (mut h, p) = open(&format!("ml-{name}"), src);
+        let at = src.find("<<}").unwrap();
+        caret_at(&mut h, at);
+        h.key_press(Key::Enter);
+        h.step();
+        h.key_press(Key::Enter);
+        h.step();
+        typ(&mut h, "two");
+        assert_eq!(text(&h), want, "{name}");
+        let saved = save_and_read(&mut h, &p);
+        assert_eq!(saved, want);
+        let marks = h.state().review_marks();
+        assert_eq!(marks.len(), 1, "{name}: one comment");
+        assert_eq!(marks[0].kind, CriticKind::Comment);
+    }
 }

@@ -44,11 +44,16 @@ exactly this, readable without tools and already understood by AI models and sev
   needs `~>` (otherwise text). Empty marks are marks (`{>><<}` is the comment Add Comment
   creates).
 - **Content.** Insertions, deletions, highlights and both sides of a substitution are parsed as
-  Markdown (so `{++**bold**++}` is bold); trailing spaces inside are kept as text. A comment's
-  text is not parsed.
-- **Linear time.** Closer searches are memoised per mark kind, the code-span crossing check per
-  closer and the `~>` search per closer; a test counts the bytes scanned (not time) for 1× and
-  16× adversarial inputs.
+  Markdown (so `{++**bold**++}` is bold); trailing spaces inside are kept as text.
+- **Comments are plain text** (owner decision): no inline parsing inside `{>>…<<}` — `**x**`,
+  links and code show literally — and a backtick in a comment opens no code span, so the
+  code-span precedence rule does not apply to comments. A single line break inside a comment is
+  allowed (a soft break of the paragraph); a comment containing a blank line is two paragraphs
+  and stays plain text (v1 limitation).
+- **Linear time.** Closer searches and the code-span crossing check are memoised per mark kind
+  and closer (alternating kinds do not evict each other), the `~>` search per closer; a test
+  counts the bytes scanned (not time) for 1× and 16× adversarial inputs, mixed kinds included.
+  The crossing check honours backslash escapes (an escaped backtick opens nothing).
 - **Plain text** (outline entries, image alt text) reads the original text: insertions, the new
   side of substitutions and comments are left out.
 
@@ -68,9 +73,16 @@ openers, and only leaves holding an opener are parsed. Planner ids `review.addCo
   menu): a selection becomes `{==selection==}{>><<}`, a caret gets `{>><<}`; the caret goes into
   the comment, which is revealed as source, so the user types the comment in place. Selection
   ends that cut through a styled span are widened to the whole span; selections over several
-  blocks, inside code or math, or touching an existing mark are refused. ⌥⌘M was in the
-  reserved-chord list (macOS Minimize All, only reachable by Option-clicking the Window menu);
-  it is taken off that list.
+  blocks, inside code or math, or touching an existing mark are refused. The formatting
+  toolbar has a Comment button (speech bubble) for the same command, shown only while
+  CriticMarkup is on. **Shortcut:** Apple documents ⌥⌘M as Minimize All; Markise deliberately
+  overrides it in-app for Add Comment, as Google Docs does, so it is taken off the
+  reserved-chord list. It is the key equivalent of our own menu item (Edit → Comments &
+  Suggestions), so AppKit should route it to the app — to be verified by hand on macOS.
+- **Enter inside a comment** inserts one line break inside the comment, followed by the
+  paragraph's continuation prefix (`> ` in a quote, the item's indentation in a list), so the
+  paragraph stays one block; Enter right before or after a line break does nothing (no blank
+  line inside a mark).
 - **Accept / Reject** at the caret or at an offset (`at` parameter: the panel and the hover bar):
   insertion accepted → its text, rejected → nothing; deletion the other way round; substitution
   → new / old text. A comment written directly after the suggestion goes with it. The caret
@@ -79,19 +91,43 @@ openers, and only leaves holding an opener are parsed. Planner ids `review.addCo
   together; the highlighted text stays).
 - **Whitespace.** When a mark is removed without replacement, one adjacent space goes too: the
   following one when there are spaces on both sides or the mark starts its line, otherwise the
-  preceding one when the mark is followed by punctuation or the line end.
+  preceding one when the mark is followed by punctuation or the line end. Accept All, Reject
+  All and clean copies give exactly the result of resolving the marks one by one in document
+  order (marks separated only by spaces are resolved as one run against the text the previous
+  ones left; one patch set, one undo step); a property test compares bulk and one-by-one
+  results.
 - Menu `enabled` checks for the whole-document commands answer from the setting alone (menus
   are built every frame); one-mark commands parse only the caret's leaf.
 
-### 4. Rendering (`markise-layout`, `markise-theme`)
+### 4. Rendering (`markise-layout`, `markise-theme`, `markise-ui-egui`)
 
 Insertions green and underlined, deletions red and struck through, a substitution as both,
-highlights on the highlight colour, a comment as a small bubble (speech mark + text, at most 60
-characters, one caret stop). Colours come from the theme (`Theme::review_colors`): the tip and
-caution alert accents and the `mark` background when they have the expected hue, otherwise
-fixed light/dark fallbacks. The caret entering a mark shows its raw source (spec 02 inline
-reveal), styled the same. The source editor colours marks with the existing token classes
-(inserted text as link text, deleted text struck, highlights marked, comments as metadata).
+highlights on a soft highlight colour. Colours come from the theme (`Theme::review_colors`):
+the tip and caution alert accents and the `mark` background when they have the expected hue,
+otherwise fixed light/dark fallbacks. The caret entering a mark shows its raw source (spec 02
+inline reveal) — for a **comment only when the caret is inside its text**, not when it merely
+sits before or after the mark (owner feedback); until then a comment is one caret stop.
+
+**Comments** (Google Docs style; setting `markdown.commentDisplay`, Preferences → Markdown →
+Show comments, and a switch in the comments panel header):
+
+- In the text a comment collapses to a speech-bubble glyph in the accent colour after its
+  passage (the highlighted text stays in the flow).
+- `margin` (default): its body is a rounded card in the right margin, aligned with its line
+  (cards stack downwards when they would overlap): bubble icon, `@author` (from the `@name:`
+  prefix) in bold, then the text in the normal-weight UI font, wrapped at about 240 pt, line
+  breaks kept. A thin connector in the margin and the comment tint link it to its line. When the
+  margin is too narrow (under ~190 pt) the bubbles behaviour applies.
+- `bubbles`: only the glyph; resting the pointer on it for 150 ms opens a non-modal popover card
+  (same look) that stays while the pointer is on the glyph or the card and closes when it
+  leaves.
+- A click on the glyph or the card puts the caret at the end of the comment's text (its source
+  is revealed for editing); in bubbles mode the popover stays pinned until Esc.
+- Only the visible items' comments are looked at and only shown cards are shaped (layout
+  reports glyph positions per item, `BlockLayout::comments`).
+
+The source editor colours marks with the existing token classes (inserted text as link text,
+deleted text struck, highlights marked, comments as metadata).
 
 ### 5. Export
 
@@ -106,16 +142,20 @@ PDF/PNG/Pandoc (export model): insertions underlined, deletions struck, comments
 
 - Comments panel: an activity-bar item (speech bubble) listing comments and suggestions in
   document order with counts, Accept All / Reject All, per-item Accept / Reject / Delete; a click
-  on an item's text jumps to it. The list is computed only while the panel is shown, when the
-  text changed and typing has paused for 250 ms.
+  on an item's text jumps to it. The list is built on a worker from a text snapshot once typing
+  has paused for 250 ms (row data and counts precomputed) and only visible rows are drawn.
+  Every row action carries the revision it was listed at and the mark's identity (kind and
+  source bytes); on a newer revision the mark is found again by identity before anything is
+  applied (nothing happens when it is gone), so a stale row never acts on another mark.
 - Hover bar: Accept / Reject above a suggestion under the pointer (rendered view, editable).
 - **Save Copy Without Comments…** (File): asks through the confirm seam whether to accept or
   reject pending suggestions (skipped when there are none), asks for a new file (default
   `<name> (clean).md`), refuses the document's own file, and writes through the checked save
   path (`save_checked`, never overwriting a file changed since the dialog). The open document is
   not changed.
-- The switches live in Preferences → Markdown ("Comments & suggestions (CriticMarkup)", "Keep
-  comments in exports"); the export one is also File → Export → Include Comments.
+- The switches live in Preferences → Markdown ("Comments & suggestions (CriticMarkup)", "Show
+  comments: In the margin / As bubbles", "Keep comments in exports"); the export one is also
+  File → Export → Include Comments, the display one also the comments panel's switch.
 
 ### 7. CommonMark conformance
 

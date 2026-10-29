@@ -151,6 +151,15 @@ fn code_spans_and_math_win() {
     assert_eq!(d[1], "math");
 }
 
+/// Review P2-5: an escaped backtick opens no code span, so it cannot cancel a mark.
+#[test]
+fn escaped_backticks_do_not_cancel_marks() {
+    assert_eq!(marks("a {++x \\`++} tail"), ["insert(x \\`)"]);
+    assert_eq!(marks("a {--x \\` y--} `z`"), ["delete(x \\` y)"]);
+    // an unescaped one still does
+    assert!(marks("a {++x `++} tail`").is_empty());
+}
+
 #[test]
 fn code_blocks_and_math_blocks_are_not_scanned() {
     let doc = Document::parse("```\n{++x++}\n```\n\n$$\n{--y--}\n$$\n", on());
@@ -280,7 +289,20 @@ fn round_trip_is_byte_identical_on_and_off() {
 #[test]
 fn adversarial_inputs_parse_in_linear_time() {
     type Gen = fn(usize) -> String;
-    let cases: [(&str, Gen); 9] = [
+    let cases: [(&str, Gen); 15] = [
+        // review P1-2: alternating kinds whose closers a code span crosses
+        ("mixed openers, crossing code", |n| {
+            format!("{}`~~}}++}}`", "{~~{++".repeat(n))
+        }),
+        ("all kinds, crossing code", |n| {
+            format!("{}`++}}--}}~~}}==}}<<}}`", "{++{--{~~{=={>>".repeat(n))
+        }),
+        ("highlight and comment, crossing", |n| {
+            format!("{}`==}}<<}}`", "{=={>>".repeat(n))
+        }),
+        ("mixed with arrows", |n| format!("{}`~~}}++}}`", "{~~a~>{++".repeat(n))),
+        ("escaped ticks", |n| format!("{}++}}", "\\`{++".repeat(n))),
+        ("mixed, no closers", |n| "{~~`{++`{--".repeat(n)),
         ("openers without closers", |n| "{++".repeat(n)),
         ("all openers", |n| "{++{--{~~{=={>>".repeat(n)),
         ("openers then one closer", |n| format!("{}++}}", "{++".repeat(n))),
@@ -337,4 +359,39 @@ fn find(r: &RichInline, k: CriticKind) -> Option<&markise_doc::InlineNode> {
         None
     }
     go(&r.nodes, k)
+}
+
+/// Owner decision (ADR 0012): a comment's text is plain — no Markdown inside, and a backtick
+/// in it opens no code span.
+#[test]
+fn comment_text_is_plain() {
+    assert_eq!(marks("a {>>use `x and **b**<<} c `d`"), ["comment(use `x and **b**)"]);
+    let d = dump("{>>**b** [l](u)<<}", &on());
+    assert_eq!(d, ["comment(**b** [l](u))"], "no children: not parsed");
+    // a multi-line comment in a quote: one text leaf per line, the prefix inside the break
+    let src = "> a {>>one\n> two<<}\n";
+    let doc = Document::parse(src, on());
+    let l = &leaves(&doc)[0];
+    let r = doc.inlines(l);
+    let c = find(&r, CriticKind::Comment).unwrap();
+    let base = l.content().start;
+    let parts: Vec<(String, String)> = c
+        .children
+        .iter()
+        .map(|n| {
+            let s = &src[base + n.source.start as usize..base + n.source.end as usize];
+            (format!("{:?}", n.kind), s.to_string())
+        })
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            ("Text".to_string(), "one".to_string()),
+            ("Break { hard: false }".to_string(), "\n> ".to_string()),
+            ("Text".to_string(), "two".to_string())
+        ]
+    );
+    // a blank line inside: not a comment (two paragraphs)
+    let doc = Document::parse("a {>>one\n\ntwo<<}\n", on());
+    assert!(markise_doc::review::all_marks(&doc).is_empty());
 }

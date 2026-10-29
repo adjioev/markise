@@ -696,6 +696,21 @@ impl ThemeManager {
         }
     }
 
+    /// How comments are shown (settings key `markdown.commentDisplay`).
+    pub fn comment_display(&self) -> markise_engine::settings::CommentDisplay {
+        self.settings.markdown.comment_display
+    }
+
+    /// Preferences → Markdown → Show comments, and the comments panel's toggle.
+    pub fn set_comment_display(&mut self, d: markise_engine::settings::CommentDisplay) {
+        self.chose_markdown = true;
+        if d != self.settings.markdown.comment_display {
+            self.settings.markdown.comment_display = d;
+            self.dirty.markdown = Some(self.settings.markdown);
+            self.schedule_save();
+        }
+    }
+
     /// Whether exports keep review comments (settings key `markdown.exportComments`).
     pub fn export_comments(&self) -> bool {
         self.settings.markdown.export_comments

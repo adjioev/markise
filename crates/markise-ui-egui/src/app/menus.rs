@@ -133,6 +133,10 @@ impl MarkiseApp {
         };
         let controls = crate::toolbar::all_ids()
             .filter_map(|id| {
+                // Add Comment only while comments and suggestions are on (ADR 0012)
+                if id == "review.addComment" && !self.critic_markup() {
+                    return None;
+                }
                 let spec = reg.get(id)?;
                 let enabled = active && self.command_enabled(id, false);
                 let shortcut = km
@@ -140,7 +144,12 @@ impl MarkiseApp {
                     .map(|c| crate::menu::shortcut_text(c, self.menu_platform));
                 Some(crate::toolbar::Control {
                     id: spec.desc.id,
-                    label: spec.desc.label,
+                    // the toolbar button reads "Comment" (owner, issue #69)
+                    label: if id == "review.addComment" {
+                        "Comment"
+                    } else {
+                        spec.desc.label
+                    },
                     shortcut,
                     enabled,
                     // state is shown even where the command is a no-op (Paragraph in a

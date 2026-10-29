@@ -734,13 +734,29 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
             let inner = map(content.start)..map(content.end);
             let mut markers = vec![src.start..inner.start, inner.end..src.end];
             let children = match kind {
-                // the comment's text, unparsed (its rendered value)
+                // the comment's text, plain (no Markdown inside): one text leaf per line and a
+                // soft break between lines, so a multi-line comment maps to its source (the
+                // container prefixes of later lines lie in the breaks)
                 crate::inline::CriticKind::Comment => {
-                    vec![InlineNode::leaf(
-                        NK::Text,
-                        inner.clone(),
-                        push_value(pool, content.slice(s)),
-                    )]
+                    let c = content.slice(s);
+                    let mut v = Vec::new();
+                    let mut from = 0;
+                    for (i, _) in c.match_indices('\n').chain(std::iter::once((c.len(), ""))) {
+                        let a = content.start + from;
+                        let b = content.start + i;
+                        if b > a || v.is_empty() {
+                            v.push(InlineNode::leaf(
+                                NK::Text,
+                                map(a)..map(b),
+                                push_value(pool, &c[from..i]),
+                            ));
+                        }
+                        if i < c.len() {
+                            v.push(InlineNode::leaf(NK::Break { hard: false }, map(b)..map(b + 1), 0..0));
+                        }
+                        from = i + 1;
+                    }
+                    v
                 }
                 crate::inline::CriticKind::Substitute => {
                     // the separator `~>` between the old and the new text
@@ -1960,6 +1976,10 @@ impl EditBehavior for Document {
             return r;
         }
         if id == planners::NEWLINE {
+            // Enter inside a comment: a line break inside the comment (ADR 0012)
+            if let Some(r) = self.plan_comment_newline(req) {
+                return r;
+            }
             return self.plan_newline(req);
         }
         if id == planners::TOGGLE_TASK {

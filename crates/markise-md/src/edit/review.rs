@@ -195,13 +195,8 @@ impl Document {
             })
             .ok_or(PlanError::NotApplicable("no suggestion here"))?;
         let text = self.text();
-        let mut taken = 0;
-        let ch = resolve_change(text, &marks, i, how, &mut taken);
-        let caret = ch.range.start + ch.insert.len();
-        let mut ed = Edits::new();
-        ed.push(ch.range, ch.insert);
-        let ps = ed.build().ok_or(PlanError::NotApplicable("overlap"))?;
-        Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(caret))))
+        let ch = resolve_change(text, &marks, i, how);
+        single_change_plan(text, ch)
     }
 
     /// Accept or reject every suggestion (`clean`: also remove every comment and highlight,
@@ -210,36 +205,80 @@ impl Document {
         self.review_on()?;
         let marks = review::all_marks(self);
         let text = self.text();
-        let mut ed = Edits::new();
-        let mut taken = 0usize;
+        let mut changes = Vec::new();
         let mut i = 0;
-        let mut any = false;
         while i < marks.len() {
             let m = &marks[i];
-            if m.range.start < taken {
+            let attached = marks
+                .get(i + 1)
+                .is_some_and(|c| c.kind == CriticKind::Comment && c.attached);
+            if m.is_suggestion() {
+                changes.push(resolve_change(text, &marks, i, how));
+            } else if clean {
+                changes.push(remove_comment_change(text, &marks, i));
+            } else {
                 i += 1;
                 continue;
             }
-            if m.is_suggestion() {
-                let ch = resolve_change(text, &marks, i, how, &mut taken);
-                ed.push(ch.range, ch.insert);
-                any = true;
-            } else if clean {
-                let ch = remove_comment_change(text, &marks, i, &mut taken);
-                ed.push(ch.range, ch.insert);
-                any = true;
-            }
-            i += 1;
+            // the attached comment went with the mark
+            i += if attached { 2 } else { 1 };
         }
-        if !any {
+        if changes.is_empty() {
             return Err(PlanError::NotApplicable(if clean {
                 "no comments or suggestions"
             } else {
                 "no suggestions"
             }));
         }
+        let (patches, _) = apply_in_order(text, &changes);
+        let mut ed = Edits::new();
+        for (r, t) in patches {
+            ed.push(r, t);
+        }
         let ps = ed.build().ok_or(PlanError::NotApplicable("overlap"))?;
         Ok(Plan::single(PlanStep::patches(ps), None))
+    }
+
+    // ---------------------------------------------------------------- Enter in a comment
+
+    /// Enter with the caret inside a comment's text (owner decision, ADR 0012): one line break
+    /// inside the comment, followed by the paragraph's continuation prefix (`> ` of a quote,
+    /// the indentation of a list item), so the paragraph and the mark stay intact. A blank
+    /// line would end the paragraph, so Enter right before or after a line break does
+    /// nothing. `None`: the caret is not in a comment.
+    pub(crate) fn plan_comment_newline(&self, req: &PlanRequest) -> Option<Result<Plan, PlanError>> {
+        if !self.options().critic_markup || req.source_mode {
+            return None;
+        }
+        let sel = req.selection.primary();
+        if !sel.is_caret() || sel.focus.virt > 0 {
+            return None;
+        }
+        let at = sel.focus.offset;
+        let m = review::mark_at(self, at, |k| k == CriticKind::Comment)?;
+        if !(m.content.start <= at && at <= m.content.end) {
+            return None;
+        }
+        let text = self.text();
+        let b = text.as_bytes();
+        let leaf = self.leaf(at)?;
+        let line = leaf.lines.iter().find(|l| l.start <= at && at <= l.end)?;
+        let after_break = at == line.start && leaf.lines.first().is_some_and(|f| f.start != line.start);
+        let before_break = at == line.end && at < m.content.end;
+        if after_break || before_break || matches!(b.get(at), Some(b'\n' | b'\r')) {
+            return Some(Ok(Plan::select(req.selection.clone())));
+        }
+        // the continuation prefix: container syntax of the caret's line with list markers
+        // (and a task box) turned into spaces
+        let ls = crate::line_start(text, line.start);
+        let prefix: String = text[ls..line.start]
+            .chars()
+            .map(|c| if matches!(c, '>' | ' ' | '\t') { c } else { ' ' })
+            .collect();
+        let insert = format!("{}{prefix}", self.line_ending().as_str());
+        let caret = at + insert.len();
+        let ps = markise_doc::PatchSet::single_verbatim(at..at, insert);
+        Some(Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(caret)))))
     }
 
     // ---------------------------------------------------------------- delete comment
@@ -259,8 +298,6 @@ impl Document {
             })
             .ok_or(PlanError::NotApplicable("no comment here"))?;
         let text = self.text();
-        let mut taken = 0;
-        let mut ed = Edits::new();
         let mut i = i;
         // a comment attached to a highlight: start from the highlight (both go)
         if marks[i].kind == CriticKind::Comment
@@ -270,12 +307,20 @@ impl Document {
         {
             i -= 1;
         }
-        let ch = remove_comment_change(text, &marks, i, &mut taken);
-        let caret = ch.range.start + ch.insert.len();
-        ed.push(ch.range, ch.insert);
-        let ps = ed.build().ok_or(PlanError::NotApplicable("overlap"))?;
-        Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(caret))))
+        let ch = remove_comment_change(text, &marks, i);
+        single_change_plan(text, ch)
     }
+}
+
+/// The plan of one change, the caret after its result.
+fn single_change_plan(text: &str, ch: Change) -> Result<Plan, PlanError> {
+    let (patches, carets) = apply_in_order(text, std::slice::from_ref(&ch));
+    let mut ed = Edits::new();
+    for (r, t) in patches {
+        ed.push(r, t);
+    }
+    let ps = ed.build().ok_or(PlanError::NotApplicable("overlap"))?;
+    Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(carets[0]))))
 }
 
 /// Every node, depth-first.
@@ -287,7 +332,7 @@ fn flat<'a>(nodes: &'a [InlineNode], out: &mut Vec<&'a InlineNode>) {
 }
 
 /// The change resolving suggestion `marks[i]` (its attached comment goes with it).
-fn resolve_change(text: &str, marks: &[ReviewMark], i: usize, how: Resolve, taken: &mut usize) -> Change {
+fn resolve_change(text: &str, marks: &[ReviewMark], i: usize, how: Resolve) -> Change {
     let m = &marks[i];
     let raw = |r: &std::ops::Range<usize>| text[r.clone()].to_string();
     let keep = match (m.kind, how) {
@@ -303,12 +348,15 @@ fn resolve_change(text: &str, marks: &[ReviewMark], i: usize, how: Resolve, take
     {
         end = c.range.end;
     }
-    replace_with_cleanup(text, m.range.start..end, keep, taken)
+    Change {
+        range: m.range.start..end,
+        insert: keep,
+    }
 }
 
 /// The change removing comment or highlight `marks[i]`: a highlight keeps its text and takes
 /// its attached comment with it; a comment goes away.
-fn remove_comment_change(text: &str, marks: &[ReviewMark], i: usize, taken: &mut usize) -> Change {
+fn remove_comment_change(text: &str, marks: &[ReviewMark], i: usize) -> Change {
     let m = &marks[i];
     let mut end = m.range.end;
     let keep = if m.kind == CriticKind::Highlight {
@@ -322,30 +370,70 @@ fn remove_comment_change(text: &str, marks: &[ReviewMark], i: usize, taken: &mut
     } else {
         String::new()
     };
-    replace_with_cleanup(text, m.range.start..end, keep, taken)
-}
-
-/// Replaces `range` with `keep`; when nothing is kept, one adjacent space goes too (see the
-/// module docs). `taken`: the end of the previous change (a space it already took is not
-/// taken again); updated.
-fn replace_with_cleanup(text: &str, range: std::ops::Range<usize>, keep: String, taken: &mut usize) -> Change {
-    let b = text.as_bytes();
-    let (mut s, mut e) = (range.start, range.end);
-    if keep.is_empty() {
-        let before = if s > 0 { Some(b[s - 1]) } else { None };
-        let after = b.get(e).copied();
-        let line_start = matches!(before, None | Some(b'\n' | b'\r'));
-        let ends = matches!(after, None | Some(b'\n' | b'\r'))
-            || after.is_some_and(|c| matches!(c, b'.' | b',' | b';' | b':' | b'!' | b'?' | b')'));
-        if after == Some(b' ') && (before == Some(b' ') || line_start) {
-            e += 1;
-        } else if before == Some(b' ') && ends && s > *taken {
-            s -= 1;
-        }
-    }
-    *taken = e;
     Change {
-        range: s..e,
+        range: m.range.start..end,
         insert: keep,
     }
+}
+
+/// Applies `changes` (disjoint, in document order) exactly as if they were applied one after
+/// another, each with the whitespace rule of the module docs looking at the text as the
+/// previous changes left it (review P2-4: Accept All equals accepting one by one). Changes
+/// separated only by spaces or tabs form a run; each run becomes one patch over its window
+/// (the run plus at most one space on each side). Returns the patches (original coordinates)
+/// and, per change, the offset right after its result in the new text.
+fn apply_in_order(text: &str, changes: &[Change]) -> (Vec<(std::ops::Range<usize>, String)>, Vec<usize>) {
+    let b = text.as_bytes();
+    let mut patches = Vec::new();
+    let mut carets = Vec::with_capacity(changes.len());
+    let mut delta: isize = 0;
+    let mut i = 0;
+    while i < changes.len() {
+        // the run: changes whose gaps are only spaces or tabs
+        let mut j = i + 1;
+        while j < changes.len()
+            && b[changes[j - 1].range.end..changes[j].range.start]
+                .iter()
+                .all(|c| matches!(c, b' ' | b'\t'))
+        {
+            j += 1;
+        }
+        let first = changes[i].range.start;
+        let last = changes[j - 1].range.end;
+        let ws = if first > 0 && b[first - 1] == b' ' {
+            first - 1
+        } else {
+            first
+        };
+        let we = if b.get(last) == Some(&b' ') { last + 1 } else { last };
+        let outside = if ws > 0 { Some(b[ws - 1]) } else { None };
+        let new_ws = (ws as isize + delta) as usize;
+        let mut out = String::new();
+        let mut pos = ws;
+        for c in &changes[i..j] {
+            out.push_str(&text[pos..c.range.start]);
+            let mut e = c.range.end;
+            if c.insert.is_empty() {
+                let before = out.as_bytes().last().copied().or(outside);
+                let after = b.get(e).copied();
+                let line_start = matches!(before, None | Some(b'\n' | b'\r'));
+                let ends = matches!(after, None | Some(b'\n' | b'\r'))
+                    || after.is_some_and(|c| matches!(c, b'.' | b',' | b';' | b':' | b'!' | b'?' | b')'));
+                if after == Some(b' ') && (before == Some(b' ') || line_start) {
+                    e += 1;
+                } else if before == Some(b' ') && ends && !out.is_empty() {
+                    out.pop();
+                }
+            }
+            out.push_str(&c.insert);
+            carets.push(new_ws + out.len());
+            pos = e;
+        }
+        let we = we.max(pos);
+        out.push_str(&text[pos..we]);
+        delta += out.len() as isize - (we - ws) as isize;
+        patches.push((ws..we, out));
+        i = j;
+    }
+    (patches, carets)
 }

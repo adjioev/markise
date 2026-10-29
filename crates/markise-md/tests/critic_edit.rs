@@ -192,3 +192,113 @@ fn clean_copy_patches() {
     let (t, _) = run(src, planners::REVIEW_CLEAN_COPY, Selection::caret(0), p(true)).unwrap();
     assert_eq!(t, "# T\n\nA b f g.\n\n`{++code++}`\n");
 }
+
+/// Review P2-4: the exact cases where resolving all at once used to differ from resolving one
+/// by one.
+#[test]
+fn adjacent_removals_resolve_like_one_by_one() {
+    let accept_all = |src: &str| {
+        run(src, planners::REVIEW_ACCEPT_ALL, Selection::caret(0), Params::new())
+            .unwrap()
+            .0
+    };
+    assert_eq!(accept_all("A {--b--}{--c--} D\n"), "A D\n");
+    assert_eq!(accept_all("A {--b--} {--c--}.\n"), "A.\n");
+    assert_eq!(accept_all("{--a--} {--b--} c\n"), "c\n");
+    assert_eq!(
+        accept_all("x {++a ++}{--b--}.\n"),
+        sequential("x {++a ++}{--b--}.\n", Some(true))
+    );
+}
+
+/// Resolves every mark one at a time in document order with the one-mark planners
+/// (`accept`: `Some(true)` accept / `Some(false)` reject suggestions only; `None`: clean copy,
+/// accepting and deleting comments too).
+fn sequential(src: &str, accept: Option<bool>) -> String {
+    let mut t = src.to_string();
+    loop {
+        let doc = Document::parse(t.as_str(), ParseOptions::default());
+        let marks = markise_doc::review::all_marks(&doc);
+        let next = marks.iter().find(|m| accept.is_none() || m.is_suggestion());
+        let Some(m) = next else { return t };
+        let id = match (m.is_suggestion(), accept) {
+            (true, Some(false)) => planners::REVIEW_REJECT,
+            (true, _) => planners::REVIEW_ACCEPT,
+            (false, _) => planners::REVIEW_DELETE_COMMENT,
+        };
+        let at = Params::new().with("at", ParamValue::Int(m.content.start as i64));
+        t = run(&t, id, Selection::caret(0), at).unwrap().0;
+    }
+}
+
+mod bulk_equals_sequential {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn piece() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("a".to_string()),
+            Just("bc".to_string()),
+            Just(" ".to_string()),
+            Just("  ".to_string()),
+            Just(".".to_string()),
+            Just(",".to_string()),
+            Just("\n".to_string()),
+            Just("{--x--}".to_string()),
+            Just("{-- y--}".to_string()),
+            Just("{++z++}".to_string()),
+            Just("{++w ++}".to_string()),
+            Just("{~~o~>n~~}".to_string()),
+            Just("{~~o~>~~}".to_string()),
+            Just("{>>c<<}".to_string()),
+            Just("{==h==}".to_string()),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 2000, ..ProptestConfig::default() })]
+        #[test]
+        fn accept_reject_and_clean_copy(parts in proptest::collection::vec(piece(), 0..14)) {
+            // a word first: one-by-one resolution may otherwise shift the line into an indented
+            // code block midway (four leading spaces), where the remaining marks stop being
+            // marks — a block change bulk resolution does not go through
+            let src = format!("W {}\n", parts.concat());
+            let all = |id, p: Params| {
+                run(&src, id, Selection::caret(0), p).map(|r| r.0).unwrap_or_else(|_| src.clone())
+            };
+            prop_assert_eq!(all(planners::REVIEW_ACCEPT_ALL, Params::new()), sequential(&src, Some(true)));
+            prop_assert_eq!(all(planners::REVIEW_REJECT_ALL, Params::new()), sequential(&src, Some(false)));
+            let clean = Params::new().with("reject", ParamValue::Bool(false));
+            prop_assert_eq!(all(planners::REVIEW_CLEAN_COPY, clean), sequential(&src, None));
+        }
+    }
+}
+
+/// Owner decision (ADR 0012): Enter inside a comment adds one line break inside it, keeping
+/// the paragraph's container prefix; a second Enter adds nothing; the result round-trips and
+/// is still one comment.
+#[test]
+fn enter_inside_a_comment_breaks_the_line_and_keeps_the_paragraph() {
+    let cases = [
+        ("A {>>one|two<<} b\n", "A {>>one\n|two<<} b\n"),
+        ("> A {>>one|two<<} b\n", "> A {>>one\n> |two<<} b\n"),
+        ("- A {>>one|two<<} b\n", "- A {>>one\n  |two<<} b\n"),
+        ("1. A {>>one|two<<} b\n", "1. A {>>one\n   |two<<} b\n"),
+    ];
+    for (src, want) in cases {
+        let (t, c) = at_caret(src, planners::NEWLINE).unwrap();
+        assert_eq!(with_caret(&t, c), want, "{src}");
+        // a second Enter: nothing
+        let (t2, _) = run(&t, planners::NEWLINE, Selection::caret(c), Params::new()).unwrap();
+        assert_eq!(t2, t, "{src}: no blank line");
+        // still one comment over two lines, byte-identical round-trip
+        let doc = Document::parse(t.as_str(), ParseOptions::default());
+        assert_eq!(doc.serialize(), t);
+        let marks = markise_doc::review::all_marks(&doc);
+        assert_eq!(marks.len(), 1, "{t:?}");
+        assert_eq!(marks[0].kind, markise_doc::CriticKind::Comment);
+    }
+    // outside a comment Enter splits the paragraph as before
+    let (t, _) = at_caret("A {>>x<<} b|c\n", planners::NEWLINE).unwrap();
+    assert!(t.contains("\n\n"), "{t:?}");
+}

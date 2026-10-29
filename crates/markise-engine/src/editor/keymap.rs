@@ -83,8 +83,9 @@ impl Chord {
 /// Chords the operating system (or its standard menu roles) owns: `keyBinding` cannot take
 /// them (ADR 0006 §3.3). macOS: Hide ⌘H, Hide Others ⌥⌘H, Minimize ⌘M, Quit ⌘Q,
 /// Preferences ⌘,, app switching ⌘Tab / ⌘`, Spotlight ⌘Space; elsewhere: Alt+F4, Alt+Tab.
-/// ⌥⌘M (Minimize All, only reachable by Option-clicking the Window menu's Minimize; the app
-/// installs no key equivalent for it) is Add Comment (owner, issue #69, ADR 0012).
+/// ⌥⌘M is deliberately not reserved: Apple documents it as Minimize All, but Markise
+/// overrides it in-app for Add Comment, as Google Docs does (owner, issue #69, ADR 0012). It
+/// is a key equivalent of our own menu item, so AppKit routes it to the app.
 pub fn reserved_chords(platform: Platform) -> Vec<Chord> {
     let list: &[&str] = match platform {
         Platform::Mac => &[

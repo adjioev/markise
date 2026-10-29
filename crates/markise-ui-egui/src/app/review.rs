@@ -4,8 +4,11 @@
 //! Comments.
 //!
 //! The comments panel lists the document's marks ([`markise_doc::review::all_marks`]) only
-//! while it is shown, recomputed when the text changed and the typing has paused
-//! ([`PANEL_DEBOUNCE`]); a document without marks costs one byte scan. Nothing here runs per
+//! while it is shown. The list is built on a worker from a text snapshot when the text
+//! changed and the typing has paused ([`PANEL_DEBOUNCE`]), with every row's display data and
+//! the counts precomputed; only the visible rows are drawn. A row's actions carry the
+//! revision and the mark's identity (kind and source bytes): on a newer revision the mark is
+//! found again by identity before anything is applied (review P1-1). Nothing here runs per
 //! keystroke while the panel is hidden.
 
 use std::path::{Path, PathBuf};
@@ -16,6 +19,7 @@ use egui::{Context, RichText, Ui};
 use markise_doc::review::{self, ReviewMark};
 use markise_doc::{CriticKind, Params, Selection, planners};
 use markise_engine::save::{Expect, SaveError, SaveOutcome};
+use markise_engine::settings::CommentDisplay;
 use markise_layout::block::color;
 
 use super::{Ask, Banner, MarkiseApp};
@@ -24,11 +28,68 @@ use crate::sidebar::SideLook;
 /// The panel's list is refreshed this long after the last edit.
 pub const PANEL_DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// The listed marks of one document revision.
+/// One row of the panel: a mark and the comment attached to it, with what is shown.
+struct PanelRow {
+    mark: ReviewMark,
+    attached: Option<ReviewMark>,
+    /// The mark's source bytes (its identity for actions on a newer revision).
+    ident: String,
+}
+
+/// The listed marks of one document revision, with the counts.
 struct PanelList {
     doc_id: u64,
     counter: u64,
-    marks: Vec<ReviewMark>,
+    rows: Vec<PanelRow>,
+    comments: usize,
+    suggestions: usize,
+}
+
+impl PanelList {
+    /// Builds the rows and counts of `marks` (the text they were found in: `text`).
+    fn build(doc_id: u64, counter: u64, text: &str, marks: Vec<ReviewMark>) -> PanelList {
+        let suggestions = marks.iter().filter(|m| m.is_suggestion()).count();
+        let mut rows = Vec::new();
+        let mut comments = 0;
+        let mut it = marks.into_iter().peekable();
+        while let Some(m) = it.next() {
+            let attached = it.next_if(|c| c.kind == CriticKind::Comment && c.attached);
+            // a comment, a highlight, or a suggestion with a comment: one comment thread
+            if matches!(m.kind, CriticKind::Comment | CriticKind::Highlight) || attached.is_some() {
+                comments += 1;
+            }
+            let ident = text.get(m.range.clone()).unwrap_or_default().to_string();
+            rows.push(PanelRow {
+                mark: m,
+                attached,
+                ident,
+            });
+        }
+        PanelList {
+            doc_id,
+            counter,
+            rows,
+            comments,
+            suggestions,
+        }
+    }
+}
+
+/// A list being built on the worker.
+struct PendingList {
+    doc_id: u64,
+    counter: u64,
+    rx: Receiver<PanelList>,
+}
+
+/// The mark a panel action is for: the revision it was listed at and its identity.
+#[derive(Clone, Debug)]
+struct Target {
+    counter: u64,
+    kind: CriticKind,
+    start: usize,
+    content_start: usize,
+    ident: String,
 }
 
 /// A clean copy being written.
@@ -43,6 +104,10 @@ pub(crate) struct ReviewState {
     /// CriticMarkup may be on at all (the startup parse options allow it).
     pub(crate) allowed: bool,
     list: Option<PanelList>,
+    pending: Option<PendingList>,
+    /// How long typing must pause before the list is rebuilt ([`PANEL_DEBOUNCE`]; tests may
+    /// lengthen it).
+    debounce: Option<Duration>,
     /// The revision counter seen changing last, and when.
     changed: Option<(u64, u64, Instant)>,
     copy: Option<CopyJob>,
@@ -59,8 +124,8 @@ impl ReviewState {
 
 /// What the user chose in the comments panel.
 enum PanelAction {
-    Jump(usize),
-    Run(&'static str, Option<usize>),
+    Jump(Target),
+    Run(&'static str, Option<Target>),
 }
 
 impl MarkiseApp {
@@ -88,6 +153,20 @@ impl MarkiseApp {
             self.reparse_document("Comments & Suggestions");
         }
         self.poll_clean_copy();
+        let display = self.themes.comment_display();
+        if let Some(d) = self.doc.as_mut() {
+            d.viewer.set_comment_display(display);
+        }
+    }
+
+    /// How comments are shown in the document (setting `markdown.commentDisplay`).
+    pub fn comment_display(&self) -> CommentDisplay {
+        self.themes.comment_display()
+    }
+
+    /// Preferences → Markdown → Show comments; the comments panel's switch.
+    pub fn set_comment_display(&mut self, d: CommentDisplay) {
+        self.themes.set_comment_display(d);
     }
 
     /// File → Export → Include Comments (setting `markdown.exportComments`).
@@ -141,12 +220,97 @@ impl MarkiseApp {
 
     // ------------------------------------------------------------------ the panel
 
+    /// Sets how long typing must pause before the comments panel's list is rebuilt (tests).
+    pub fn set_comments_debounce(&mut self, d: Duration) {
+        self.review.debounce = Some(d);
+    }
+
+    /// The comments panel shows the list of the current revision (tests).
+    pub fn comments_panel_ready(&self) -> bool {
+        let Some(d) = self.doc.as_ref() else { return false };
+        self.review
+            .list
+            .as_ref()
+            .is_some_and(|l| l.doc_id == d.id && l.counter == d.viewer.ed.session.revision().counter)
+    }
+
+    /// The source offset an action on `t` applies at now: its listed position when the text
+    /// has not changed since, else the mark found again by kind and source bytes (the nearest
+    /// such mark), `None` when it is gone.
+    fn resolve_target(&self, t: &Target) -> Option<usize> {
+        let d = self.doc.as_ref()?;
+        let s = &d.viewer.ed.session;
+        if s.revision().counter == t.counter {
+            return Some(t.content_start);
+        }
+        let doc = s.doc();
+        let text = doc.text();
+        review::all_marks(doc)
+            .into_iter()
+            .filter(|m| m.kind == t.kind && text.get(m.range.clone()) == Some(t.ident.as_str()))
+            .min_by_key(|m| m.range.start.abs_diff(t.start))
+            .map(|m| m.content.start)
+    }
+
+    /// Keeps the panel's list current: a worker lists the marks of a text snapshot once the
+    /// typing paused; the stale list stays shown meanwhile.
+    fn refresh_panel_list(&mut self, ctx: &Context) {
+        if let Some(p) = &self.review.pending
+            && let Ok(list) = p.rx.try_recv()
+        {
+            self.review.pending = None;
+            self.review.list = Some(list);
+        }
+        let Some(d) = self.doc.as_ref() else { return };
+        let (doc_id, counter) = (d.id, d.viewer.ed.session.revision().counter);
+        let now = Instant::now();
+        match self.review.changed {
+            Some((id, c, _)) if id == doc_id && c == counter => {}
+            _ => self.review.changed = Some((doc_id, counter, now)),
+        }
+        let current = |l: &PanelList| l.doc_id == doc_id && l.counter == counter;
+        if self.review.list.as_ref().is_some_and(current) {
+            return;
+        }
+        if self
+            .review
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.doc_id == doc_id && p.counter == counter)
+        {
+            return;
+        }
+        let since = self.review.changed.map_or(Duration::MAX, |(_, _, t)| now - t);
+        let fresh_doc = self.review.list.as_ref().is_none_or(|l| l.doc_id != doc_id);
+        let debounce = self.review.debounce.unwrap_or(PANEL_DEBOUNCE);
+        if !fresh_doc && since < debounce {
+            ctx.request_repaint_after(debounce - since);
+            return;
+        }
+        // a snapshot of the text (one copy) parsed and listed off the UI thread
+        let text = d.viewer.ed.session.doc().snapshot();
+        let format = d.viewer.ed.session.format().clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wake = self.wake_handle();
+        let spawned = std::thread::Builder::new()
+            .name("markise-review-list".into())
+            .spawn(move || {
+                let doc = format.parse(text.to_string(), &markise_doc::FormatOptions::default());
+                let marks = review::all_marks(doc.as_ref());
+                let _ = tx.send(PanelList::build(doc_id, counter, doc.text(), marks));
+                wake();
+            });
+        if spawned.is_ok() {
+            self.review.pending = Some(PendingList { doc_id, counter, rx });
+        }
+    }
+
     /// The comments panel (activity bar → Comments): comments and suggestions in document
     /// order; a click jumps to the mark; Accept / Reject on suggestions, Delete on comments;
     /// Accept All / Reject All on top.
     pub(super) fn comments_panel(&mut self, ui: &mut Ui, look: &SideLook) {
+        ui.label(RichText::new("Comments").font(look.bold_font.clone()).color(look.text));
         if !self.parse.critic_markup {
-            ui.label(RichText::new("Comments").font(look.bold_font.clone()).color(look.text));
             ui.add_space(4.0);
             ui.weak("Comments and suggestions are off.");
             if ui.button("Turn On").clicked() {
@@ -154,41 +318,26 @@ impl MarkiseApp {
             }
             return;
         }
-        let Some(d) = self.doc.as_ref() else {
+        if self.doc.is_none() {
             ui.weak("No document");
             return;
-        };
-        let (doc_id, counter) = (d.id, d.viewer.ed.session.revision().counter);
-        let now = Instant::now();
-        match self.review.changed {
-            Some((id, c, _)) if id == doc_id && c == counter => {}
-            _ => self.review.changed = Some((doc_id, counter, now)),
         }
-        let stale = self
+        self.refresh_panel_list(&ui.ctx().clone());
+        let rc = self.theme.review_colors();
+        let mut act = None;
+        let Some(list) = self
             .review
             .list
             .as_ref()
-            .is_none_or(|l| l.doc_id != doc_id || l.counter != counter);
-        let since = self.review.changed.map_or(Duration::MAX, |(_, _, t)| now - t);
-        let fresh_doc = self.review.list.as_ref().is_none_or(|l| l.doc_id != doc_id);
-        if stale && (fresh_doc || since >= PANEL_DEBOUNCE) {
-            self.review.list = Some(PanelList {
-                doc_id,
-                counter,
-                marks: review::all_marks(d.viewer.ed.session.doc()),
-            });
-        } else if stale {
-            ui.ctx().request_repaint_after(PANEL_DEBOUNCE - since);
-        }
-        let marks: &[ReviewMark] = self.review.list.as_ref().map_or(&[], |l| &l.marks);
-        let suggestions = marks.iter().filter(|m| m.is_suggestion()).count();
-        let comments = marks
-            .iter()
-            .filter(|m| m.kind == CriticKind::Comment || (m.kind == CriticKind::Highlight && !has_comment(marks, m)))
-            .count();
-        let rc = self.theme.review_colors();
-        let mut act = None;
-        ui.label(RichText::new("Comments").font(look.bold_font.clone()).color(look.text));
+            .filter(|l| Some(l.doc_id) == self.doc.as_ref().map(|d| d.id))
+        else {
+            ui.weak("Listing comments…");
+            return;
+        };
+        let (comments, suggestions) = (list.comments, list.suggestions);
+        // how comments are shown in the document: the same setting as Preferences
+        let display = self.themes.comment_display();
+        let picked = display_toggle(ui, look, display);
         ui.label(
             RichText::new(format!(
                 "{comments} comment{} · {suggestions} suggestion{}",
@@ -214,33 +363,47 @@ impl MarkiseApp {
             }
         });
         ui.add_space(6.0);
-        if marks.is_empty() {
+        if list.rows.is_empty() {
             ui.weak("No comments or suggestions. Select text and press Add Comment.");
         }
+        // fixed-height rows: only the visible ones are built
+        let line = ui.text_style_height(&egui::TextStyle::Body);
+        let row_h = (line + 4.0) * 3.0 + 18.0;
+        let counter = list.counter;
         egui::ScrollArea::vertical()
             .id_salt("markise-comments-list")
             .auto_shrink([false, true])
-            .show(ui, |ui| {
-                let mut i = 0;
-                while i < marks.len() {
-                    let m = &marks[i];
-                    // a comment attached to the previous mark is shown with it
-                    let attached = marks.get(i + 1).filter(|c| c.kind == CriticKind::Comment && c.attached);
-                    ui.push_id(("markise-review-row", m.range.start), |ui| {
-                        if let Some(a) = row(ui, look, &rc, m, attached) {
+            .show_rows(ui, row_h, list.rows.len(), |ui, range| {
+                for r in &list.rows[range] {
+                    ui.push_id(("markise-review-row", r.mark.range.start), |ui| {
+                        if let Some(a) = row(ui, look, &rc, r, counter, row_h) {
                             act = Some(a);
                         }
                     });
-                    i += if attached.is_some() { 2 } else { 1 };
-                    ui.add_space(4.0);
                 }
             });
+        if let Some(d) = picked {
+            self.themes.set_comment_display(d);
+        }
+        let ctx = ui.ctx().clone();
         match act {
-            Some(PanelAction::Jump(off)) => self.jump_to(off),
-            Some(PanelAction::Run(id, at)) => {
-                let ctx = ui.ctx().clone();
-                self.run_review(&ctx, id, at);
+            Some(PanelAction::Jump(t)) => {
+                if let Some(off) = self.resolve_target(&t) {
+                    self.jump_to(off.saturating_sub(t.content_start - t.start));
+                }
             }
+            Some(PanelAction::Run(id, t)) => match t {
+                None => {
+                    self.run_review(&ctx, id, None);
+                }
+                Some(t) => match self.resolve_target(&t) {
+                    Some(off) => {
+                        self.run_review(&ctx, id, Some(off));
+                    }
+                    // gone since it was listed: show the current list
+                    None => self.review.list = None,
+                },
+            },
             None => {}
         }
     }
@@ -363,13 +526,6 @@ impl MarkiseApp {
     }
 }
 
-/// Whether highlight `m` has an attached comment right after it.
-fn has_comment(marks: &[ReviewMark], m: &ReviewMark) -> bool {
-    marks
-        .iter()
-        .any(|c| c.kind == CriticKind::Comment && c.attached && c.range.start == m.range.end)
-}
-
 fn same_path(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -380,23 +536,91 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// A clickable label (a click on a row's text jumps to the mark).
+/// The comments panel's display switch (margin cards / bubbles), right-aligned in the header
+/// row: two small icon buttons, the current one highlighted.
+fn display_toggle(ui: &mut Ui, look: &SideLook, current: CommentDisplay) -> Option<CommentDisplay> {
+    let mut picked = None;
+    let size = egui::vec2(22.0, 20.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (d, label) in [
+            (CommentDisplay::Margin, "Show comments in the margin"),
+            (CommentDisplay::Bubbles, "Show comments as bubbles"),
+        ] {
+            let (r, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+            let on = d == current;
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, label));
+            let p = ui.painter_at(r);
+            if on {
+                p.rect_filled(r, look.radius, look.selected_bg);
+            } else if resp.hovered() {
+                p.rect_filled(r, look.radius, look.hover_bg);
+            }
+            let c = if on { look.accent } else { look.icon };
+            let stroke = egui::Stroke::new(1.3, c);
+            let o = r.center();
+            match d {
+                CommentDisplay::Margin => {
+                    // a page with lines and a card on its right
+                    let page = egui::Rect::from_center_size(o - egui::vec2(3.0, 0.0), egui::vec2(9.0, 12.0));
+                    p.rect_stroke(page, 1.0, stroke, egui::StrokeKind::Middle);
+                    let card = egui::Rect::from_min_size(page.right_top() + egui::vec2(2.5, 2.0), egui::vec2(5.0, 4.0));
+                    p.rect_filled(card, 1.0, c);
+                }
+                CommentDisplay::Bubbles => {
+                    let b = egui::Rect::from_center_size(o - egui::vec2(0.0, 1.0), egui::vec2(12.0, 9.0));
+                    p.rect_stroke(b, 2.0, stroke, egui::StrokeKind::Middle);
+                    p.line_segment(
+                        [
+                            b.left_bottom() + egui::vec2(3.0, 0.0),
+                            b.left_bottom() + egui::vec2(2.5, 3.5),
+                        ],
+                        stroke,
+                    );
+                    p.line_segment(
+                        [
+                            b.left_bottom() + egui::vec2(2.5, 3.5),
+                            b.left_bottom() + egui::vec2(6.0, 0.0),
+                        ],
+                        stroke,
+                    );
+                }
+            }
+            if resp.on_hover_text(label).clicked() && !on {
+                picked = Some(d);
+            }
+        }
+    });
+    picked
+}
+
+/// A clickable, one-line label (a click on a row's text jumps to the mark).
 fn link_label(ui: &mut Ui, text: RichText, jump: &mut bool) {
-    let r = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+    let r = ui.add(egui::Label::new(text).truncate().sense(egui::Sense::click()));
     if r.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     *jump |= r.clicked();
 }
 
-/// One panel row: the mark (and its attached comment); returns the chosen action.
+/// One panel row of fixed height `row_h`: badge and buttons, the text, the comment; returns
+/// the chosen action, bound to the listed revision and the mark's identity.
 fn row(
     ui: &mut Ui,
     look: &SideLook,
     rc: &markise_theme::ReviewColors,
-    m: &ReviewMark,
-    attached: Option<&ReviewMark>,
+    r: &PanelRow,
+    counter: u64,
+    row_h: f32,
 ) -> Option<PanelAction> {
+    let m = &r.mark;
+    let target = Target {
+        counter,
+        kind: m.kind,
+        start: m.range.start,
+        content_start: m.content.start,
+        ident: r.ident.clone(),
+    };
     let mut act = None;
     let mut jump = false;
     let (badge, badge_color) = match m.kind {
@@ -405,71 +629,79 @@ fn row(
         CriticKind::Substitute => ("Replace", color(rc.insert)),
         _ => ("Comment", look.accent),
     };
-    egui::Frame::new()
-        .fill(look.hover_bg.gamma_multiply(0.5))
-        .corner_radius(look.radius)
-        .inner_margin(6.0)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            link_label(
-                ui,
-                RichText::new(badge).font(look.small_font.clone()).color(badge_color),
-                &mut jump,
-            );
-            match m.kind {
-                CriticKind::Insert => {
+    let w = ui.available_width();
+    ui.allocate_ui(egui::vec2(w, row_h), |ui| {
+        ui.set_height(row_h - 4.0);
+        egui::Frame::new()
+            .fill(look.hover_bg.gamma_multiply(0.5))
+            .corner_radius(look.radius)
+            .inner_margin(6.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_height(row_h - 16.0);
+                ui.horizontal(|ui| {
                     link_label(
                         ui,
-                        RichText::new(format!("+ {}", short(&m.text))).color(color(rc.insert)),
+                        RichText::new(badge).font(look.small_font.clone()).color(badge_color),
                         &mut jump,
                     );
-                }
-                CriticKind::Delete => {
-                    link_label(
-                        ui,
-                        RichText::new(short(&m.text)).strikethrough().color(color(rc.delete)),
-                        &mut jump,
-                    );
-                }
-                CriticKind::Substitute => {
-                    // old text struck, the new text under it (no arrow glyph: the UI font may
-                    // lack it)
-                    link_label(
-                        ui,
-                        RichText::new(short(&m.old_text))
-                            .strikethrough()
-                            .color(color(rc.delete)),
-                        &mut jump,
-                    );
-                    link_label(ui, RichText::new(short(&m.text)).color(color(rc.insert)), &mut jump);
-                }
-                CriticKind::Highlight => {
-                    link_label(
-                        ui,
-                        RichText::new(format!("“{}”", short(&m.text))).background_color(color(rc.highlight_bg)),
-                        &mut jump,
-                    );
-                }
-                _ => comment_text(ui, look, m, &mut jump),
-            }
-            if let Some(c) = attached {
-                comment_text(ui, look, c, &mut jump);
-            }
-            ui.horizontal(|ui| {
-                if m.is_suggestion() {
-                    if ui.small_button("Accept").clicked() {
-                        act = Some(PanelAction::Run("review.accept", Some(m.content.start)));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if m.is_suggestion() {
+                            if ui.small_button("Reject").clicked() {
+                                act = Some(PanelAction::Run("review.reject", Some(target.clone())));
+                            }
+                            if ui.small_button("Accept").clicked() {
+                                act = Some(PanelAction::Run("review.accept", Some(target.clone())));
+                            }
+                        } else if ui.small_button("Delete").clicked() {
+                            act = Some(PanelAction::Run("review.deleteComment", Some(target.clone())));
+                        }
+                    });
+                });
+                match m.kind {
+                    CriticKind::Insert => {
+                        link_label(
+                            ui,
+                            RichText::new(format!("+ {}", short(&m.text))).color(color(rc.insert)),
+                            &mut jump,
+                        );
                     }
-                    if ui.small_button("Reject").clicked() {
-                        act = Some(PanelAction::Run("review.reject", Some(m.content.start)));
+                    CriticKind::Delete => {
+                        link_label(
+                            ui,
+                            RichText::new(short(&m.text)).strikethrough().color(color(rc.delete)),
+                            &mut jump,
+                        );
                     }
-                } else if ui.small_button("Delete").clicked() {
-                    act = Some(PanelAction::Run("review.deleteComment", Some(m.content.start)));
+                    CriticKind::Substitute => {
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(short(&m.old_text))
+                                        .strikethrough()
+                                        .color(color(rc.delete)),
+                                )
+                                .truncate(),
+                            );
+                            link_label(ui, RichText::new(short(&m.text)).color(color(rc.insert)), &mut jump);
+                        });
+                    }
+                    CriticKind::Highlight => {
+                        link_label(
+                            ui,
+                            RichText::new(format!("“{}”", short(&m.text))).background_color(color(rc.highlight_bg)),
+                            &mut jump,
+                        );
+                    }
+                    _ => comment_text(ui, look, m, &mut jump),
+                }
+                if let Some(c) = &r.attached {
+                    comment_text(ui, look, c, &mut jump);
                 }
             });
-        });
+    });
     if act.is_none() && jump {
-        act = Some(PanelAction::Jump(m.range.start));
+        act = Some(PanelAction::Jump(target));
     }
     act
 }
@@ -486,7 +718,7 @@ fn short(s: &str) -> String {
 
 fn comment_text(ui: &mut Ui, look: &SideLook, m: &ReviewMark, jump: &mut bool) {
     let (author, text) = m.author();
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         if let Some(a) = author {
             link_label(ui, RichText::new(format!("@{a}")).strong().color(look.text), jump);
         }

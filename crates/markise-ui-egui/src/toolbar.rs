@@ -35,8 +35,15 @@ pub const BLOCK_IDS: [&str; 7] = [
     "block.heading5",
     "block.heading6",
 ];
-/// Inline toggles (group 2).
-pub const INLINE_IDS: [&str; 4] = ["format.strong", "format.emph", "format.code", "format.link"];
+/// Inline toggles (group 2); Add Comment (ADR 0012) is only in the model while CriticMarkup
+/// is on.
+pub const INLINE_IDS: [&str; 5] = [
+    "format.strong",
+    "format.emph",
+    "format.code",
+    "format.link",
+    "review.addComment",
+];
 /// List drop-down entries (part of group 3).
 pub const LIST_IDS: [&str; 3] = ["block.bulletList", "block.orderedList", "block.taskList"];
 /// Group 3 buttons before the list drop-down.
@@ -163,10 +170,13 @@ const POPUP_W: f32 = 240.0;
 const POPUP_PAD: f32 = 4.0;
 const SEP_H: f32 = 9.0;
 
-fn group_width(g: Group) -> f32 {
+fn group_width(g: Group, m: &Model) -> f32 {
     match g {
         Group::Block => BLOCK_W,
-        Group::Inline => 4.0 * BTN + 3.0 * GAP,
+        Group::Inline => {
+            let n = INLINE_IDS.iter().filter(|id| m.get(id).is_some()).count().max(1) as f32;
+            n * BTN + (n - 1.0) * GAP
+        }
         Group::Insert => 2.0 * BTN + LIST_W + 2.0 * GAP,
     }
 }
@@ -183,7 +193,7 @@ fn group_present(g: Group, m: &Model) -> bool {
 /// right) and the bar's width.
 fn fit(m: &Model, avail: f32) -> (Vec<Group>, f32) {
     let mut shown: Vec<Group> = GROUPS.iter().copied().filter(|g| group_present(*g, m)).collect();
-    let width = |s: &[Group]| 2.0 * PAD + s.iter().map(|g| group_width(*g) + DIVIDER).sum::<f32>() + BTN;
+    let width = |s: &[Group]| 2.0 * PAD + s.iter().map(|g| group_width(*g, m) + DIVIDER).sum::<f32>() + BTN;
     while !shown.is_empty() && width(&shown) > avail {
         shown.pop();
     }
@@ -453,15 +463,16 @@ impl Toolbar {
                             x += BLOCK_W;
                         }
                         Group::Inline => {
-                            for (k, id) in INLINE_IDS.iter().enumerate() {
-                                if k > 0 {
+                            let mut first = true;
+                            for id in INLINE_IDS {
+                                let Some(c) = m.get(id) else { continue };
+                                if !first {
                                     x += GAP;
                                 }
-                                if let Some(c) = m.get(id) {
-                                    let r = slot(x, BTN);
-                                    if tool_button(ui, r, look, c, icon_for(id)) {
-                                        chosen = Some(c.id);
-                                    }
+                                first = false;
+                                let r = slot(x, BTN);
+                                if tool_button(ui, r, look, c, icon_for(id)) {
+                                    chosen = Some(c.id);
                                 }
                                 x += BTN;
                             }
@@ -797,9 +808,11 @@ pub enum ToolIcon {
     Task,
     Chevron,
     Check,
+    /// A speech bubble (Add Comment).
+    Comment,
 }
 
-const ICONS: [(ToolIcon, &str); 11] = [
+const ICONS: [(ToolIcon, &str); 12] = [
     (
         ToolIcon::Bold,
         "M7 4H13.5A4 4 0 0 1 13.5 12H7Z M7 12H14.5A4 4 0 0 1 14.5 20H7Z",
@@ -830,6 +843,7 @@ const ICONS: [(ToolIcon, &str); 11] = [
     ),
     (ToolIcon::Chevron, "M6 9L12 15L18 9"),
     (ToolIcon::Check, "M4 12.5L9.5 18L20 6"),
+    (ToolIcon::Comment, "M4 5H20V16H11L6.5 20V16H4Z M8 9H16 M8 12.5H13.5"),
 ];
 
 fn icon_lines(icon: ToolIcon) -> &'static Lines {
@@ -848,6 +862,7 @@ fn icon_for(id: &str) -> ToolIcon {
         "block.quote" => ToolIcon::Quote,
         "block.orderedList" => ToolIcon::Ordered,
         "block.taskList" => ToolIcon::Task,
+        "review.addComment" => ToolIcon::Comment,
         _ => ToolIcon::Bullet,
     }
 }
