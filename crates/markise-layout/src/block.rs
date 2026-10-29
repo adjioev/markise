@@ -235,6 +235,10 @@ pub struct BlockLayout {
     pub links: Vec<LinkHit>,
     /// Clickable header of a collapsible block (front matter).
     pub toggle: Option<Rect>,
+    /// Task checkboxes (item-local rectangles) and the list item each belongs to, as the
+    /// ordinal among the leaf's enclosing list items (0 = outermost): one leaf can draw the
+    /// boxes of several items (`- [ ] - [x] a`).
+    pub tasks: Vec<(Rect, u16)>,
     /// Caret anchor of an item without rendered text (empty paragraph or heading, ADR 0006
     /// §2.2 "explicit anchors"): the caret rectangle (item-local, zero width) and the
     /// item-relative source offset it stands for.
@@ -1779,6 +1783,8 @@ pub fn layout_item(
     let mut quote_prefix_here = false;
     // x before each container and its level count (for the virtual paragraph's indentation)
     let mut level_x: Vec<(f32, u16)> = Vec::new();
+    // ordinal of the next list item container (outermost first)
+    let mut list_item = 0u16;
     for c in item.containers.iter() {
         level_x.push((x, if matches!(c, Container::ListItem { .. }) { 2 } else { 1 }));
         match c {
@@ -1807,8 +1813,9 @@ pub fn layout_item(
             Container::ListItem { marker, .. } => {
                 quote_prefix_here = false;
                 if let Some(m) = marker {
-                    markers.push((x, t.list_indent, MarkerKind::List(m.clone())));
+                    markers.push((x, t.list_indent, MarkerKind::List(m.clone(), list_item)));
                 }
+                list_item += 1;
                 x += t.list_indent;
             }
             Container::Footnote { label } => {
@@ -2305,10 +2312,11 @@ pub fn layout_item(
         let g = shaper.shape(&StyledText::single("x", st.text_style()), None);
         g.half_leading()
     };
+    let mut tasks = Vec::new();
     for (mx, mw, m) in markers {
         let cy = content_top + lead + (t.font_size * 0.62).min(first_line_h * 0.5);
         match m {
-            MarkerKind::List(Marker::Bullet { depth }) => {
+            MarkerKind::List(Marker::Bullet { depth }, _) => {
                 let center = pos2(mx + mw * 0.45, cy);
                 let c = color(t.list_marker);
                 let styled = (!t.list_styles.bullets.is_empty()).then(|| {
@@ -2344,19 +2352,21 @@ pub fn layout_item(
                     }),
                 }
             }
-            MarkerKind::List(Marker::Task { checked }) => {
+            MarkerKind::List(Marker::Task { checked }, li) => {
                 let s = (t.font_size * 0.85).round();
+                let rect = Rect::from_center_size(
+                    pos2(mx + (mw * 0.45).min(mw - s * 0.5 - 5.0).max(s * 0.5), cy),
+                    vec2(s, s),
+                );
+                tasks.push((rect, li));
                 deco.push(Prim::Checkbox {
-                    rect: Rect::from_center_size(
-                        pos2(mx + (mw * 0.45).min(mw - s * 0.5 - 5.0).max(s * 0.5), cy),
-                        vec2(s, s),
-                    ),
+                    rect,
                     checked,
                     border: color(t.checkbox_border),
                     fill: color(t.checkbox_checked),
                 });
             }
-            MarkerKind::List(Marker::Number(n)) => {
+            MarkerKind::List(Marker::Number(n), _) => {
                 let n = match t.list_styles.numbers.first().map(String::as_str) {
                     Some("none") => String::new(),
                     Some(style) => {
@@ -2452,6 +2462,7 @@ pub fn layout_item(
         prims,
         links,
         toggle,
+        tasks,
         empty_anchor,
         virtual_caret,
         comments,
@@ -2459,7 +2470,8 @@ pub fn layout_item(
 }
 
 enum MarkerKind {
-    List(Marker),
+    /// A list item's marker and the item's ordinal among the leaf's list items.
+    List(Marker, u16),
     Footnote(String),
 }
 

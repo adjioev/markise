@@ -143,6 +143,11 @@ pub struct VaultSettings {
     pub wikilinks: bool,
     pub link_format: LinkFormat,
     pub new_notes: NewNoteLocation,
+    /// Obsidian's "Default location for new attachments" (`attachmentFolderPath`, V14.2) as
+    /// written, when the vault sets it: `/` = vault root, `./` = the note's folder, `./name` =
+    /// a subfolder of the note's folder, anything else = that folder from the vault root
+    /// (interpreted by `crate::attach::image_folder`).
+    pub attachment_folder: Option<String>,
 }
 
 impl Default for VaultSettings {
@@ -160,6 +165,7 @@ impl VaultSettings {
             wikilinks: false,
             link_format: LinkFormat::Relative,
             new_notes: NewNoteLocation::Current,
+            attachment_folder: None,
         }
     }
 
@@ -174,6 +180,7 @@ impl VaultSettings {
             wikilinks: true,
             link_format: LinkFormat::Shortest,
             new_notes: NewNoteLocation::Current,
+            attachment_folder: None,
         };
         let Some(serde_json::Value::Object(m)) = app_json.and_then(|t| serde_json::from_str(t).ok()) else {
             return s;
@@ -187,6 +194,11 @@ impl VaultSettings {
             Some("absolute") => s.link_format = LinkFormat::Absolute,
             _ => {}
         }
+        s.attachment_folder = m
+            .get("attachmentFolderPath")
+            .and_then(serde_json::Value::as_str)
+            .map(|p| nfc(p.trim()))
+            .filter(|p| !p.is_empty());
         match m.get("newFileLocation").and_then(serde_json::Value::as_str) {
             Some("root") => s.new_notes = NewNoteLocation::Root,
             Some("current") => s.new_notes = NewNoteLocation::Current,

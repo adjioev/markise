@@ -14,9 +14,9 @@ use std::time::Instant;
 use egui::{
     Color32, CornerRadius, CursorIcon, Event, EventFilter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
-use markise_doc::{DocPos, DocumentFormat, FormatDoc, Params, Selection};
+use markise_doc::{ContainerKind, DocPos, DocumentFormat, FormatDoc, Params, Selection, planners};
 use markise_engine::editor::keymap::{Chord, Keymap, Platform};
-use markise_engine::editor::{EditorSession, EditorView};
+use markise_engine::editor::{EditorSession, EditorView, TxKind};
 use markise_layout::block::{BlockLayout, Prim, color};
 use markise_layout::text::ParleyBlock;
 use markise_layout::{DocModel, TextShaper, View};
@@ -24,6 +24,9 @@ use markise_theme::Theme;
 
 use crate::images::TextureStore;
 use crate::text_paint::ParleyText;
+
+mod code_tools;
+pub use code_tools::{LangEdit, LangItem, ShownTools, lang_matches};
 
 const SCROLLBAR_W: f32 = 10.0;
 /// Caret blink half-period (seconds).
@@ -135,6 +138,8 @@ pub struct DocViewer {
     /// egui time of the last caret activity (blink phase, blink timeout).
     blink_from: f64,
     drag: Option<Drag>,
+    /// A press on a task checkbox (item, list item ordinal) waiting for its release.
+    task_press: Option<(usize, u16)>,
     /// Last primary press: time, position, click count.
     last_press: Option<(f64, Pos2, u32)>,
     /// Visible items of the last frame (index, top relative to the surface), for hit tests.
@@ -163,6 +168,8 @@ pub struct DocViewer {
     /// Comments of the visible items at the last frame, with their cards.
     comments: Vec<ShownComment>,
     popover: Option<Popover>,
+    /// Copy button and language field of fenced code blocks (issue #76).
+    code: code_tools::CodeTools,
 }
 
 impl DocViewer {
@@ -190,6 +197,7 @@ impl DocViewer {
             platform,
             blink_from: 0.0,
             drag: None,
+            task_press: None,
             last_press: None,
             last_visible: Vec::new(),
             last_left: 0.0,
@@ -204,6 +212,7 @@ impl DocViewer {
             comment_display: Default::default(),
             comments: Vec::new(),
             popover: None,
+            code: Default::default(),
         }
     }
 
@@ -276,6 +285,7 @@ impl DocViewer {
         );
         view.set_model(doc, model);
         self.ed = EditorView::new(session, view, path);
+        self.code = Default::default();
     }
 
     /// Installs `doc`/`model` as one undoable transaction `label` (reload from disk, a
@@ -491,8 +501,31 @@ impl DocViewer {
         // ---- input: pointer (hit tests against the last frame's layout)
         let modifiers = ui.input(|i| i.modifiers);
         let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.hovered();
+        // a click on a task checkbox toggles it (spec 02 §9): the press neither places the caret
+        // nor starts a selection; the toggle happens on release over the same box (a press
+        // dragged off the box does nothing)
+        let task = if pressed {
+            ui.input(|i| i.pointer.interact_pos())
+                .and_then(|p| self.task_box_at(p, rect.top()))
+        } else {
+            None
+        };
+        if task.is_some() {
+            self.task_press = task;
+        }
+        if let Some(t) = self.task_press
+            && ui.input(|i| i.pointer.primary_released())
+        {
+            self.task_press = None;
+            let over = ui
+                .input(|i| i.pointer.interact_pos())
+                .and_then(|p| self.task_box_at(p, rect.top()));
+            if editable && over == Some(t) && self.toggle_task(t.0, t.1) {
+                out.edited = true;
+            }
+        }
         // a press on a comment's bubble or card opens the comment for editing (ADR 0012)
-        let comment_press = if pressed {
+        let comment_press = if pressed && task.is_none() {
             ui.input(|i| i.pointer.interact_pos()).and_then(|p| self.comment_at(p))
         } else {
             None
@@ -503,6 +536,7 @@ impl DocViewer {
             self.blink_from = now;
         }
         if pressed
+            && task.is_none()
             && comment_press.is_none()
             && let Some(p) = ui.input(|i| i.pointer.interact_pos())
             && !self.on_toggle_or_link(p, rect.top(), modifiers)
@@ -630,6 +664,14 @@ impl DocViewer {
         for src in requests {
             images.request(&ctx, &src);
         }
+        // ---- code block tools (copy button, language field)
+        {
+            let imgs: &TextureStore = images;
+            let mut sh = |f: &mut dyn FnMut(&mut dyn TextShaper, &dyn markise_layout::Images)| {
+                with_shaper(&ctx, parley.as_deref_mut(), |s| f(s, imgs))
+            };
+            self.code_tools_ui(ui, &visible, rect, left, theme, focused, editable, &mut out, &mut sh);
+        }
 
         // ---- review comments: margin cards or bubble popovers (visible items only)
         self.comment_cards(ui, &visible, rect, left, col_w, theme);
@@ -699,7 +741,8 @@ impl DocViewer {
         {
             let link = layout.link_at(local).is_some() && (modifiers.command || !focused);
             let on_toggle = layout.toggle.is_some_and(|t| t.contains(local));
-            if link || on_toggle {
+            let on_task = editable && task_box_hit(layout, local).is_some();
+            if link || on_toggle || on_task {
                 ctx.set_cursor_icon(CursorIcon::PointingHand);
             }
         }
@@ -764,6 +807,23 @@ impl DocViewer {
             pos2(self.last_left, self.last_top + y),
             vec2(self.ed.view.width(), l.height),
         ))
+    }
+
+    /// The document offset under screen point `p` (last frame's geometry; `None` outside the
+    /// surface): where dropped files are inserted.
+    pub fn offset_at_screen(
+        &mut self,
+        ctx: &egui::Context,
+        parley: Option<&mut ParleyText>,
+        images: &dyn markise_layout::Images,
+        p: Pos2,
+    ) -> Option<usize> {
+        let (_, r) = self.last_surface?;
+        if !r.contains(p) {
+            return None;
+        }
+        let top = self.last_top;
+        with_shaper(ctx, parley, |sh| self.hit_screen(p, top, sh, images)).map(|d| d.offset)
     }
 
     /// The front-matter toggle or a Cmd/Ctrl-clicked link is under `p` (the press is not a
@@ -984,6 +1044,57 @@ impl DocViewer {
             return l.toggle.is_some_and(|t| t.contains(local)) || (m.command && l.link_at(local).is_some());
         }
         false
+    }
+
+    /// The task checkbox under screen point `p` (last frame's geometry): the visible item and
+    /// the box's list item ordinal ([`BlockLayout::tasks`]).
+    fn task_box_at(&self, p: Pos2, top: f32) -> Option<(usize, u16)> {
+        for &(idx, y) in &self.last_visible {
+            let Some(l) = self.ed.view.cache_peek(idx) else {
+                continue;
+            };
+            let local = pos2(p.x - self.last_left, p.y - top - y);
+            if local.y < 0.0 || local.y >= l.height {
+                continue;
+            }
+            return task_box_hit(l, local).map(|li| (idx, li));
+        }
+        None
+    }
+
+    /// Toggles the task box of list item `li` (ordinal among the enclosing list items, 0 =
+    /// outermost) of visible item `idx` as one undo step ("Toggle Task Status"); the selection
+    /// is kept as it was (the box is not a caret stop, spec 02 §9).
+    fn toggle_task(&mut self, idx: usize, li: u16) -> bool {
+        let leaf = self.ed.view.model().item_span(idx).start;
+        // that list item's own start: inside it but before any nested list, so the planner's
+        // "deepest task item" is exactly this one
+        let Some(start) = self
+            .ed
+            .session
+            .doc()
+            .containers_at(leaf)
+            .into_iter()
+            .filter(|c| matches!(c.kind, ContainerKind::ListItem { .. }))
+            .nth(li as usize)
+            .filter(|c| matches!(c.kind, ContainerKind::ListItem { task: Some(_), .. }))
+            .map(|c| c.span.start)
+        else {
+            return false;
+        };
+        self.ed
+            .edit(|s| {
+                s.transact("Toggle Task Status", TxKind::Structural, |tx| {
+                    let keep = tx.selection().clone();
+                    tx.set_selection(Selection::caret(start));
+                    let plan = tx.plan(planners::TOGGLE_TASK, Params::new())?;
+                    tx.apply_plan(plan)?;
+                    // `[ ]` / `[x]` / `[X]` have the same length: offsets are unchanged
+                    tx.set_selection(keep);
+                    Ok(())
+                })
+            })
+            .is_ok()
     }
 
     /// The document position under screen point `p` (last frame's geometry).
@@ -1427,6 +1538,15 @@ fn key_name(k: egui::Key) -> Option<String> {
         }
         .to_string(),
     )
+}
+
+/// The list item ordinal of the task checkbox of `l` under item-local `local` (with a small
+/// margin: the box is small).
+fn task_box_hit(l: &BlockLayout, local: Pos2) -> Option<u16> {
+    l.tasks
+        .iter()
+        .find(|(r, _)| r.expand(2.0).contains(local))
+        .map(|&(_, li)| li)
 }
 
 fn hit(visible: &[markise_layout::Visible], p: Pos2, left: f32, top: f32) -> Option<(usize, Pos2, &BlockLayout)> {

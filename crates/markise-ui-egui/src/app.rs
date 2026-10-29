@@ -48,6 +48,7 @@ use crate::source::SourceEditor;
 use crate::themes::{ConfigDir, InstallDone, ThemeEvent, ThemeManager};
 use crate::viewer::DocViewer;
 
+mod attach;
 mod files;
 mod menus;
 mod prefs;
@@ -109,6 +110,9 @@ pub struct AppOptions {
     /// dialog ([`crate::confirm::InApp`], no OS window); the desktop app passes
     /// [`crate::confirm::native`]; tests pass [`crate::confirm::Scripted`].
     pub confirm: Arc<dyn crate::confirm::Confirm>,
+    /// Files copied in a file manager, read on paste ([`crate::clipboard`]). Default: none;
+    /// the desktop app passes the system clipboard's file list, tests a scripted one.
+    pub clipboard_files: Arc<dyn crate::clipboard::ClipboardFiles>,
 }
 
 impl Default for AppOptions {
@@ -127,6 +131,7 @@ impl Default for AppOptions {
             text_backend: crate::text_paint::TextBackend::Epaint,
             commit: None,
             confirm: Arc::new(crate::confirm::InApp),
+            clipboard_files: Arc::new(crate::clipboard::NoFiles),
         }
     }
 }
@@ -491,6 +496,8 @@ pub struct MarkiseApp {
     vault: vault::VaultState,
     /// Comments and suggestions: the switch, the panel's list, clean copies (ADR 0012).
     review: review::ReviewState,
+    /// Pasted and dropped images and files being written (spec 04 §7.1).
+    attach: attach::AttachState,
 }
 
 impl MarkiseApp {
@@ -578,6 +585,7 @@ impl MarkiseApp {
             focus_before_question: None,
             vault,
             review,
+            attach: attach::AttachState::new(opts.clipboard_files),
         }
     }
 
@@ -1901,6 +1909,7 @@ impl MarkiseApp {
             t.poll(w);
         }
         self.vault_poll();
+        self.attach_poll();
         self.resolve_theme(ctx);
         // the settings file (read in the background) may switch diagrams
         if self.themes.diagrams() != self.diagrams {
@@ -1962,6 +1971,7 @@ impl MarkiseApp {
         }
         self.rename_blur(ctx);
         self.complete_pre_input(ctx);
+        self.attach_pre_input(ctx);
         self.central(ui);
         self.complete_update();
         self.complete_ui(ctx);

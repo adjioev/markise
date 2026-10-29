@@ -26,8 +26,9 @@ use crate::menu::{
 pub trait MenuHost {
     /// Items chosen since the last call and how (the host wakes the UI when one arrives).
     fn take_actions(&mut self) -> Vec<(MenuAction, Trigger)>;
-    /// Shows `bar`: applies enabled/checked/label changes in place and rebuilds only when
-    /// [`MenuBar::structure`] changed.
+    /// Shows `bar` (called after every frame): applies enabled/checked/label changes in place,
+    /// rebuilds only when [`MenuBar::structure`] changed, makes no native call for an unchanged
+    /// model and none while a menu is open ([`crate::menu_sync::MenuSync`], issue #81).
     fn sync(&mut self, bar: &MenuBar);
 }
 

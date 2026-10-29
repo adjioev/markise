@@ -13,6 +13,7 @@ use markise_engine::editor::keymap::Platform;
 use markise_ui_egui::menu::{
     Check, EGUI_NATIVE_KEYS, Entry, MenuAction, MenuBar, MenuKind, Trigger, app_command, app_shortcuts,
 };
+use markise_ui_egui::menu_sync::{MenuOp, MenuSync};
 use markise_ui_egui::{AppOptions, MarkiseApp, MenuHost, ViewMode};
 
 fn tmpdoc(name: &str, text: &str) -> PathBuf {
@@ -311,6 +312,115 @@ fn idle_with_native_menu_requests_no_repaint_and_no_rebuild() {
         frame(&ctx, &mut app);
     }
     assert_eq!(host.0.lock().unwrap().rebuilds, rebuilds, "no menu rebuild while idle");
+}
+
+/// A native menu host stand-in that plans its native calls with [`MenuSync`] exactly like
+/// the desktop app's muda front end and counts them (issue #81: the native calls cannot be
+/// observed in a headless test, the plan can).
+#[derive(Clone, Default)]
+struct CountingHost(Arc<Mutex<Counted>>);
+
+#[derive(Default)]
+struct Counted {
+    sync: Option<MenuSync>,
+    tracking: bool,
+    rebuilds: usize,
+    in_place: usize,
+}
+
+impl MenuHost for CountingHost {
+    fn take_actions(&mut self) -> Vec<(MenuAction, Trigger)> {
+        Vec::new()
+    }
+
+    fn sync(&mut self, bar: &MenuBar) {
+        let mut s = self.0.lock().unwrap();
+        let tracking = s.tracking;
+        let ops = s
+            .sync
+            .get_or_insert_with(|| MenuSync::new(true))
+            .plan(bar, tracking, |_| None);
+        for op in ops {
+            match op {
+                MenuOp::Rebuild => s.rebuilds += 1,
+                _ => s.in_place += 1,
+            }
+        }
+    }
+}
+
+impl CountingHost {
+    fn mutations(&self) -> usize {
+        let s = self.0.lock().unwrap();
+        s.rebuilds + s.in_place
+    }
+}
+
+/// Issue #81: once settled, N idle frames (also frames that a caret blink or a menu-open
+/// repaint would run) make no native menu change at all; a state change updates items in
+/// place without a rebuild; while a menu is open nothing changes and the change is applied
+/// once it closed.
+#[test]
+fn idle_frames_make_no_native_menu_change() {
+    let doc = tmpdoc("mutations", &"Paragraph with some words.\n\n".repeat(50));
+    let host = CountingHost::default();
+    let ctx = Context::default();
+    let mut app = MarkiseApp::new(AppOptions {
+        open: vec![doc],
+        ..Default::default()
+    });
+    app.set_menu_platform(Platform::Mac);
+    app.set_menu_host(Box::new(host.clone()));
+    let t = Instant::now();
+    while (app.model().is_none() || app.is_loading()) && t.elapsed() < Duration::from_secs(20) {
+        frame(&ctx, &mut app);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(app.model().is_some());
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(10) {
+        if frame(&ctx, &mut app) == Duration::MAX {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    frame(&ctx, &mut app);
+    let settled = host.mutations();
+    assert!(host.0.lock().unwrap().rebuilds >= 1, "menus were built");
+
+    for _ in 0..200 {
+        frame(&ctx, &mut app);
+    }
+    assert_eq!(host.mutations(), settled, "200 idle frames: no native menu change");
+
+    // zoom to its upper limit: View → Zoom In is disabled in place, no rebuild
+    let rebuilds = host.0.lock().unwrap().rebuilds;
+    app.set_zoom(10.0);
+    frame(&ctx, &mut app);
+    frame(&ctx, &mut app);
+    assert_eq!(
+        host.0.lock().unwrap().rebuilds,
+        rebuilds,
+        "no rebuild for a state change"
+    );
+    let after_zoom = host.mutations();
+    assert!(after_zoom > settled, "Zoom In disabled in place");
+    for _ in 0..50 {
+        frame(&ctx, &mut app);
+    }
+    assert_eq!(host.mutations(), after_zoom, "applied once");
+
+    // a menu is open: the zoom change back waits until it closed
+    host.0.lock().unwrap().tracking = true;
+    app.set_zoom(1.0);
+    for _ in 0..50 {
+        frame(&ctx, &mut app);
+    }
+    assert_eq!(host.mutations(), after_zoom, "nothing changes while a menu is open");
+    host.0.lock().unwrap().tracking = false;
+    frame(&ctx, &mut app);
+    assert!(host.mutations() > after_zoom, "applied after the menu closed");
+    assert_eq!(host.0.lock().unwrap().rebuilds, rebuilds, "still no rebuild");
 }
 
 /// Spec 04 §3.3: choosing a View-menu item sets the mode; ⌘/ and ⌃⌘/ toggle (Codex review of
@@ -644,7 +754,11 @@ fn menus_are_simplified_and_moved_commands_still_run() {
         h.state_mut()
             .menu_action(&ctx, &MenuAction::Command("view.themeSettings"))
     );
-    h.run();
+    // a fixed number of frames, not `run()`: the two settings changes above schedule a
+    // debounced settings write, and the opened window asks the theme worker for its preview
+    // cards; their wake-ups land after a variable number of frames (worker timing), so `run()`
+    // failed intermittently on main as well (4/20 locally)
+    h.run_steps(8);
     assert!(h.state().is_preferences_open());
     assert_eq!(
         h.state_mut().preferences().section,

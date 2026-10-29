@@ -2622,6 +2622,7 @@ dependencies = [
 name = "markise"
 version = "0.1.0-beta.1"
 dependencies = [
+ "arboard",
  "eframe",
  "embed-resource",
  "markise-theme",
@@ -2687,6 +2688,7 @@ version = "0.1.0-beta.1"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "chrono",
  "epaint",
  "libc",
  "markise-corpus",
@@ -2699,6 +2701,7 @@ dependencies = [
  "markise-text",
  "markise-theme",
  "notify",
+ "png",
  "proptest",
  "serde_json",
  "similar",

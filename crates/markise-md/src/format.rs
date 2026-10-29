@@ -18,11 +18,11 @@ use std::any::Any;
 use std::ops::Range;
 
 use markise_doc::{
-    CalloutKind, ColumnAlign, CommandDescriptor, ContainerKind, DefaultKey, DocumentFormat, EditBehavior, EditSummary,
-    Effect, FlatContainer, FlatEvent, FlatLeaf, FormatDoc, FormatOptions, HeadingInfo, HintOrigin, HintSet,
-    InlineKind as NK, InlineNode, InlineSource, LeafKind, LeafView, LineEnding, ListMarker, LiteralHint, ParamSchema,
-    PatchSet, Plan, PlanError, PlanRequest, PlanStep, PlannerId, RichInline, Scope, Selection, TableView, TypingPlan,
-    UndoGroup, planners,
+    CalloutKind, CodeFenceView, ColumnAlign, CommandDescriptor, ContainerKind, DefaultKey, DocumentFormat,
+    EditBehavior, EditSummary, Effect, FlatContainer, FlatEvent, FlatLeaf, FormatDoc, FormatOptions, HeadingInfo,
+    HintOrigin, HintSet, InlineKind as NK, InlineNode, InlineSource, LeafKind, LeafView, LineEnding, ListMarker,
+    LiteralHint, ParamSchema, PatchSet, Plan, PlanError, PlanRequest, PlanStep, PlannerId, RichInline, Scope,
+    Selection, TableView, TypingPlan, UndoGroup, planners,
 };
 
 use crate::block::{AlertKind, Align, Block, BlockKind};
@@ -354,6 +354,40 @@ impl FormatDoc for Document {
                 .is_some_and(|(b, _)| !b.is_container())
         })?;
         self.leaf_view_at_path(&path[..depth])
+    }
+    fn code_fence(&self, at: usize) -> Option<CodeFenceView> {
+        let path = self.block_path_at(at);
+        let (b, origin) = (1..=path.len())
+            .filter_map(|d| self.block_at_path_rel(&path[..d]))
+            .find(|(b, _)| !b.is_container())?;
+        let BlockKind::FencedCode {
+            fence_len,
+            info,
+            opener,
+            ..
+        } = &b.kind
+        else {
+            return None;
+        };
+        let abs = |s: &Span| Span::new(s.start + origin, s.end + origin);
+        let opener = abs(opener);
+        let info = if info.is_empty() {
+            let at = opener.start + fence_len;
+            Span::new(at, at)
+        } else {
+            abs(info)
+        };
+        Some(CodeFenceView {
+            opener,
+            info,
+            lines: b.lines.iter().map(abs).collect(),
+        })
+    }
+    fn code_lang_patch(&self, at: usize, lang: &str) -> Option<PatchSet> {
+        let f = self.code_fence(at)?;
+        let fence_char = self.text().as_bytes().get(f.opener.start).copied()?;
+        let (range, insert) = lang_edit(self.text(), &f, fence_char, lang)?;
+        Some(PatchSet::single_verbatim(range, insert))
     }
     fn block_owner(&self, at: usize) -> Option<markise_doc::BlockOwner> {
         self.owner_from_tree(at)
@@ -2122,6 +2156,39 @@ fn next_item_prefix(prefix: &str) -> String {
     } else {
         format!("{head}{mark}{gap}")
     }
+}
+
+/// The edit making `lang` the first info word of fence `f` (spec 02 §7): only the language word
+/// changes; the fence characters and any further info text (attributes) keep their bytes.
+/// Characters a fence line cannot hold are dropped (line breaks; backticks after a backtick
+/// fence, CommonMark §4.5); a language starting with the fence character is kept apart
+/// from the fence by a space. An empty language removes the word together with the space
+/// before it when nothing follows it. `None` when nothing changes.
+pub(crate) fn lang_edit(text: &str, f: &CodeFenceView, fence_char: u8, lang: &str) -> Option<(Range<usize>, String)> {
+    let clean: String = lang
+        .chars()
+        .filter(|&c| c != '\n' && c != '\r' && !(fence_char == b'`' && c == '`'))
+        .collect();
+    let clean = clean.trim();
+    let old = f.lang(text);
+    if old.slice(text) == clean {
+        return None;
+    }
+    let fence_end = f.opener.start + text[f.opener.start..].bytes().take_while(|&b| b == fence_char).count();
+    if clean.is_empty() {
+        let rest = text[old.end..f.info.end].trim_start();
+        return Some(if rest.is_empty() {
+            (fence_end..f.info.end, String::new())
+        } else {
+            (old.start..old.end, String::new())
+        });
+    }
+    // a language right after the fence must not lengthen it (`~~~` + `~foo` would read as a
+    // `~~~~` fence whose old closing line is too short): keep it apart with a space
+    if old.start == fence_end && clean.as_bytes()[0] == fence_char {
+        return Some((old.start..old.end, format!(" {clean}")));
+    }
+    Some((old.start..old.end, clean.to_string()))
 }
 
 #[cfg(test)]

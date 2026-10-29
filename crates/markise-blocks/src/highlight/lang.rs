@@ -210,6 +210,14 @@ pub enum Language {
     Plain,
 }
 
+/// Every fence language the highlighter knows by name (the Appendix A table plus common
+/// spellings, then the special render languages), with the syntax it resolves to (`None`:
+/// shown plain, or rendered for the special ones). Table order; keys lowercase. For language
+/// pickers (spec 02 §7).
+pub fn known_languages() -> impl Iterator<Item = (&'static str, Option<&'static str>)> {
+    ALIASES.iter().copied().chain(SPECIAL.iter().map(|&s| (s, None)))
+}
+
 /// The first word of a fence info string, lowercased (spec 01 R3.5.2).
 pub fn info_language(info: &str) -> String {
     info.split_whitespace().next().unwrap_or("").to_lowercase()

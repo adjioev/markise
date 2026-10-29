@@ -3,6 +3,7 @@
 
 pub mod about;
 pub mod app;
+pub mod clipboard;
 pub mod confirm;
 pub mod diagram;
 pub mod dialog;
@@ -12,6 +13,7 @@ pub mod highlight;
 pub mod icons;
 pub mod images;
 pub mod menu;
+pub mod menu_sync;
 pub mod prefs;
 pub mod side_by_side;
 pub mod sidebar;

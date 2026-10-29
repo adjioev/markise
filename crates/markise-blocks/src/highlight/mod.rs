@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use markise_theme::{TokenKind, TokenRun};
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 
-pub use lang::{Language, info_language, resolve};
+pub use lang::{Language, info_language, known_languages, resolve};
 pub use notice::syntax_license_notice;
 pub use scope::ScopeMapper;
 pub use service::{BlockKey, HighlightService, Lookup, ServiceStats, block_key};
