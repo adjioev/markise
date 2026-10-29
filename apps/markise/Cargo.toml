@@ -21,6 +21,8 @@ eframe.workspace = true
 # Feature unification only (see the workspace manifest): not used from code.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 winit.workspace = true
+# clipboard file list (pasting a file manager copy, issue #51)
+arboard.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true

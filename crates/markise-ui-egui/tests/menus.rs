@@ -754,7 +754,11 @@ fn menus_are_simplified_and_moved_commands_still_run() {
         h.state_mut()
             .menu_action(&ctx, &MenuAction::Command("view.themeSettings"))
     );
-    h.run();
+    // a fixed number of frames, not `run()`: the two settings changes above schedule a
+    // debounced settings write, and the opened window asks the theme worker for its preview
+    // cards; their wake-ups land after a variable number of frames (worker timing), so `run()`
+    // failed intermittently on main as well (4/20 locally)
+    h.run_steps(8);
     assert!(h.state().is_preferences_open());
     assert_eq!(
         h.state_mut().preferences().section,

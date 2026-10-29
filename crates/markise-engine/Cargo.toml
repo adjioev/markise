@@ -26,6 +26,9 @@ markise-text.workspace = true
 markise-theme.workspace = true
 cap-std.workspace = true
 cap-fs-ext.workspace = true
+# pasted images (src/attach.rs)
+png.workspace = true
+chrono.workspace = true
 
 # atomic no-replace rename (src/fsops.rs)
 [target.'cfg(unix)'.dependencies]

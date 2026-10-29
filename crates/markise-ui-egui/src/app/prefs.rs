@@ -99,6 +99,7 @@ impl MarkiseApp {
             theme_folder: t.user_dir().map(Path::to_path_buf),
             has_theme_folder: t.has_user_dir(),
             key_bindings: self.key_bindings_override.clone().unwrap_or_else(|| t.key_bindings()),
+            images: t.image_settings().clone(),
         }
     }
 
@@ -158,6 +159,7 @@ impl MarkiseApp {
             Change::ToolbarPosition(p) => self.set_toolbar_position(p),
             Change::ShowRecent(on) => self.set_show_recent(on),
             Change::Zoom(z) => self.set_zoom(z),
+            Change::Images(s) => self.themes.set_image_settings(s),
             Change::RevealSettingsFile => {
                 let Some(f) = self.themes.settings_file() else { return };
                 if f.exists() {
@@ -202,7 +204,10 @@ impl MarkiseApp {
                     self.set_zoom(1.0);
                 }
             }
-            Section::General | Section::Files | Section::Export => {}
+            Section::Files => self
+                .themes
+                .set_image_settings(markise_engine::settings::ImageSettings::default()),
+            Section::General | Section::Export => {}
         }
         if let Some(c) = &self.ctx {
             c.request_repaint();

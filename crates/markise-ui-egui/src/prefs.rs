@@ -23,7 +23,9 @@ use egui::{
     Align, Align2, Color32, Context, CornerRadius, FontId, Layout, Margin, Rect, Response, RichText, Role, Sense,
     Stroke, StrokeKind, Ui, UiBuilder, WidgetInfo, pos2, vec2,
 };
-use markise_engine::settings::{Appearance, EditingSettings, SourceSettings, ToolbarPosition};
+use markise_engine::settings::{
+    Appearance, EditingSettings, ImageLocation, ImageSettings, SourceSettings, ToolbarPosition,
+};
 use markise_theme::Overrides;
 use markise_theme::catalog::{StyleId, ThemeId};
 
@@ -69,7 +71,7 @@ impl Section {
     pub fn resettable(self) -> bool {
         matches!(
             self,
-            Section::Editor | Section::Markdown | Section::Appearance | Section::Source
+            Section::Editor | Section::Markdown | Section::Appearance | Section::Source | Section::Files
         )
     }
 
@@ -115,6 +117,13 @@ pub enum RowId {
     SoftWrap,
     CurrentLine,
     Whitespace,
+    ImageLocation,
+    ImageFolder,
+    ImageObsidian,
+    ImageRelative,
+    ImageCopy,
+    FileCopy,
+    ImageUrls,
     SettingsFile,
     ThemeFolder,
 }
@@ -292,6 +301,55 @@ pub const ROWS: &[Row] = &[
         "spaces tabs invisibles marks",
     ),
     row(
+        R::ImageLocation,
+        S::Files,
+        "Images",
+        "Save pasted and dropped images to",
+        "image folder location assets attachments paste drop",
+    ),
+    row(
+        R::ImageFolder,
+        S::Files,
+        "Images",
+        "Image folder",
+        "assets attachments name path",
+    ),
+    row(
+        R::ImageObsidian,
+        S::Files,
+        "Images",
+        "Use the Obsidian attachment folder when set",
+        "obsidian vault attachmentfolderpath attachments",
+    ),
+    row(
+        R::ImageRelative,
+        S::Files,
+        "Images",
+        "Use relative paths",
+        "relative absolute image path",
+    ),
+    row(
+        R::ImageCopy,
+        S::Files,
+        "Dropping and pasting",
+        "Copy dropped image files into the image folder",
+        "copy images drop link in place",
+    ),
+    row(
+        R::FileCopy,
+        S::Files,
+        "Dropping and pasting",
+        "Copy other dropped files too",
+        "copy files attachments pdf drop",
+    ),
+    row(
+        R::ImageUrls,
+        S::Files,
+        "Dropping and pasting",
+        "Paste image URLs as images",
+        "url link web image paste",
+    ),
+    row(
         R::SettingsFile,
         S::Files,
         "Locations",
@@ -415,6 +473,8 @@ pub struct Values {
     /// The session has a user theme folder (Import Theme, Open Theme Folder).
     pub has_theme_folder: bool,
     pub key_bindings: Vec<(String, String)>,
+    /// Pasted and dropped images (Files & Images).
+    pub images: ImageSettings,
 }
 
 /// What the user changed in the window this frame.
@@ -434,6 +494,7 @@ pub enum Change {
     ToolbarPosition(ToolbarPosition),
     ShowRecent(bool),
     Zoom(f32),
+    Images(ImageSettings),
     RevealSettingsFile,
     OpenThemeFolder,
     ImportTheme,
@@ -1278,6 +1339,81 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                 }));
             }
         }
+        R::ImageLocation => {
+            let items = [
+                (ImageLocation::NoteFolder, "Folder next to the note".to_string()),
+                (ImageLocation::RootFolder, "Folder in the root".to_string()),
+                (ImageLocation::SameFolder, "Same folder as the note".to_string()),
+            ];
+            if let Some(l) = control_row(ui, p, r.label, |ui| {
+                combo(ui, r.label, Some(&v.images.location), &items)
+            }) {
+                out.push(Change::Images(ImageSettings {
+                    location: l,
+                    ..v.images.clone()
+                }));
+            }
+        }
+        R::ImageFolder => {
+            let enabled = v.images.location != ImageLocation::SameFolder;
+            let mut folder = v.images.folder.clone();
+            let changed = control_row(ui, p, r.label, |ui| {
+                let t = ui.add_enabled(
+                    enabled,
+                    egui::TextEdit::singleline(&mut folder)
+                        .hint_text(markise_engine::settings::DEFAULT_IMAGE_FOLDER)
+                        .desired_width(222.0),
+                );
+                name(&t, Role::TextInput, r.label);
+                t.changed()
+            });
+            if changed {
+                out.push(Change::Images(ImageSettings {
+                    folder,
+                    ..v.images.clone()
+                }));
+            }
+        }
+        R::ImageObsidian => {
+            if let Some(on) = switch(ui, v.images.obsidian) {
+                out.push(Change::Images(ImageSettings {
+                    obsidian: on,
+                    ..v.images.clone()
+                }));
+            }
+        }
+        R::ImageRelative => {
+            if let Some(on) = switch(ui, v.images.relative_paths) {
+                out.push(Change::Images(ImageSettings {
+                    relative_paths: on,
+                    ..v.images.clone()
+                }));
+            }
+        }
+        R::ImageCopy => {
+            if let Some(on) = switch(ui, v.images.copy_images) {
+                out.push(Change::Images(ImageSettings {
+                    copy_images: on,
+                    ..v.images.clone()
+                }));
+            }
+        }
+        R::FileCopy => {
+            if let Some(on) = switch(ui, v.images.copy_files) {
+                out.push(Change::Images(ImageSettings {
+                    copy_files: on,
+                    ..v.images.clone()
+                }));
+            }
+        }
+        R::ImageUrls => {
+            if let Some(on) = switch(ui, v.images.paste_urls) {
+                out.push(Change::Images(ImageSettings {
+                    paste_urls: on,
+                    ..v.images.clone()
+                }));
+            }
+        }
         R::SettingsFile => {
             info_row(ui, p, r.label, |ui| {
                 if v.settings_file.is_some() && card_button(ui, p, crate::sidebar::reveal_label(), true).clicked() {
@@ -1392,7 +1528,6 @@ fn paint_thumbnail(ui: &Ui, p: &Palette, rect: Rect, sw: Option<&Swatch>) {
 /// Explanations shown under a section's cards (not settings; not searched).
 fn section_note(ui: &mut Ui, p: &Palette, s: Section) {
     let (title, note) = match s {
-        Section::Files => ("Images", "Options for pasted and dropped images will appear here."),
         Section::Export => (
             "Export",
             "Export formats use their built-in options. Pandoc is found automatically on the PATH.",
@@ -1500,7 +1635,8 @@ pub fn section_at_defaults(s: Section, v: &Values) -> bool {
                 && v.show_recent
                 && (v.zoom - 1.0).abs() < 1e-3
         }
-        Section::General | Section::Files | Section::Export => true,
+        Section::Files => v.images == ImageSettings::default(),
+        Section::General | Section::Export => true,
     }
 }
 

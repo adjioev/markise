@@ -61,6 +61,25 @@ impl eframe::App for App {
     }
 }
 
+/// The system clipboard's file list (a Finder / Explorer / file manager copy), read on paste.
+struct SystemClipboardFiles;
+
+impl markise_ui_egui::clipboard::ClipboardFiles for SystemClipboardFiles {
+    fn files(&self) -> Vec<PathBuf> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            arboard::Clipboard::new()
+                .and_then(|mut c| c.get().file_list())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|p| p.is_absolute())
+                .collect()
+        }
+        #[cfg(target_arch = "wasm32")]
+        Vec::new()
+    }
+}
+
 fn main() -> eframe::Result {
     let start = Instant::now();
     #[cfg(windows)]
@@ -85,6 +104,8 @@ fn main() -> eframe::Result {
         config: markise_theme::discover::config_dir().map_or(ConfigDir::None, ConfigDir::Dir),
         // yes/no questions as the platform's alerts (issue #35)
         confirm: markise_ui_egui::confirm::native(),
+        // a file manager copy pasted into the document (issue #51)
+        clipboard_files: std::sync::Arc::new(SystemClipboardFiles),
         ..Default::default()
     };
     let mut viewport = eframe::egui::ViewportBuilder::default()

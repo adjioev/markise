@@ -3,6 +3,7 @@
 
 pub mod about;
 pub mod app;
+pub mod clipboard;
 pub mod confirm;
 pub mod diagram;
 pub mod dialog;
