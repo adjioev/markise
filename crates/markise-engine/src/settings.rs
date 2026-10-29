@@ -27,6 +27,7 @@
 //! | `editing` | object: `auto_pair_brackets` (default `true`), `auto_pair_markdown` (`false`), `smart_punctuation` (convert on input, `false`), `smart_dashes_em` (`--` → em dash, `false`) (spec 02 §4, §13, §16; Preferences → Editor) | defaults |
 //! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`) — source editor display (spec 02 §12.1.1; Preferences → Source Mode) | defaults |
 //! | `keyBinding` | object: command label (menu title) or id → accelerator (`"Ctrl+Shift+K"`), `""` unbinds (spec 05 §4.7); read only, kept verbatim | none |
+//! | `images` | object: `location` (`"note_folder"`: a folder next to the note, `"root_folder"`: a folder below the vault / opened folder root, `"same_folder"`: the note's own folder; default `"note_folder"`), `folder` (the folder for the first two, default `"assets"`), `obsidian` (use an Obsidian vault's `attachmentFolderPath` when set, `true`), `relative_paths` (`true`), `copy_images` (copy dropped image files into the image folder, `true`), `copy_files` (also copy other dropped files, `false`), `paste_urls` (a pasted image URL becomes an image, `true`) — pasted and dropped images (spec 04 §7, spec 05 §4.4; Preferences → Files & Images) | defaults |
 //! | `markdown` | object: `wikilinks` (default `true`) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
 //! | `side_by_side_split` | Side by Side divider position: fraction of the editor width given to the source pane, `0.15`–`0.85` (spec 04 §3.3); omitted until the divider is moved | `0.5` |
 //! | `zoom` | whole-window zoom factor, `0.5`–`3.0` (View → Zoom In / Zoom Out / Actual Size, issue #43); omitted until zoomed | `1.0` |
@@ -286,6 +287,112 @@ impl SourceSettings {
     }
 }
 
+/// Where pasted and dropped images go (spec 04 §7.3, spec 05 §4.4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImageLocation {
+    /// A folder next to the note ([`ImageSettings::folder`], default `assets`).
+    #[default]
+    NoteFolder,
+    /// A fixed folder below the vault (opened folder) root.
+    RootFolder,
+    /// The note's own folder.
+    SameFolder,
+}
+
+impl ImageLocation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImageLocation::NoteFolder => "note_folder",
+            ImageLocation::RootFolder => "root_folder",
+            ImageLocation::SameFolder => "same_folder",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ImageLocation> {
+        match s {
+            "note_folder" => Some(ImageLocation::NoteFolder),
+            "root_folder" => Some(ImageLocation::RootFolder),
+            "same_folder" => Some(ImageLocation::SameFolder),
+            _ => None,
+        }
+    }
+}
+
+/// Pasted and dropped images and files (spec 04 §7.1–§7.3, spec 05 §4.4), settings key
+/// `images`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageSettings {
+    pub location: ImageLocation,
+    /// The folder of [`ImageLocation::NoteFolder`] (relative to the note's folder) and
+    /// [`ImageLocation::RootFolder`] (relative to the root); `/`-separated.
+    pub folder: String,
+    /// In an Obsidian vault whose `attachmentFolderPath` is set, use it instead (spec 06 §14).
+    pub obsidian: bool,
+    /// Write paths relative to the note (otherwise absolute).
+    pub relative_paths: bool,
+    /// Copy dropped (or pasted) image files into the image folder (otherwise link them where
+    /// they are).
+    pub copy_images: bool,
+    /// Copy other dropped files too (otherwise link them where they are).
+    pub copy_files: bool,
+    /// A pasted image URL (`https://…/x.png`) is inserted as an image.
+    pub paste_urls: bool,
+}
+
+/// Default image folder name (spec 06 §14: Markise's default in a plain folder).
+pub const DEFAULT_IMAGE_FOLDER: &str = "assets";
+
+impl Default for ImageSettings {
+    fn default() -> Self {
+        ImageSettings {
+            location: ImageLocation::NoteFolder,
+            folder: DEFAULT_IMAGE_FOLDER.into(),
+            obsidian: true,
+            relative_paths: true,
+            copy_images: true,
+            copy_files: false,
+            paste_urls: true,
+        }
+    }
+}
+
+impl ImageSettings {
+    fn to_json(&self) -> Value {
+        let mut m = Map::new();
+        m.insert("location".into(), Value::from(self.location.as_str()));
+        m.insert("folder".into(), Value::from(self.folder.clone()));
+        m.insert("obsidian".into(), Value::from(self.obsidian));
+        m.insert("relative_paths".into(), Value::from(self.relative_paths));
+        m.insert("copy_images".into(), Value::from(self.copy_images));
+        m.insert("copy_files".into(), Value::from(self.copy_files));
+        m.insert("paste_urls".into(), Value::from(self.paste_urls));
+        Value::Object(m)
+    }
+    fn from_json(v: &Value) -> Option<Self> {
+        let Value::Object(m) = v else { return None };
+        let d = ImageSettings::default();
+        let b = |k: &str, def: bool| m.get(k).and_then(Value::as_bool).unwrap_or(def);
+        Some(ImageSettings {
+            location: m
+                .get("location")
+                .and_then(Value::as_str)
+                .and_then(ImageLocation::parse)
+                .unwrap_or(d.location),
+            folder: m
+                .get("folder")
+                .and_then(Value::as_str)
+                .filter(|f| f.len() <= 300)
+                .map(str::to_string)
+                .unwrap_or(d.folder),
+            obsidian: b("obsidian", d.obsidian),
+            relative_paths: b("relative_paths", d.relative_paths),
+            copy_images: b("copy_images", d.copy_images),
+            copy_files: b("copy_files", d.copy_files),
+            paste_urls: b("paste_urls", d.paste_urls),
+        })
+    }
+}
+
 /// Markdown dialect extensions the app persists (spec 01 §5), settings key `markdown`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarkdownSettings {
@@ -336,6 +443,8 @@ pub struct Settings {
     pub source: SourceSettings,
     /// Markdown dialect extensions (key `markdown`).
     pub markdown: MarkdownSettings,
+    /// Pasted and dropped images (key `images`).
+    pub images: ImageSettings,
     pub overrides: FontOverrides,
     /// Members of `overrides` this version does not know, kept verbatim.
     pub overrides_extra: Map<String, Value>,
@@ -384,6 +493,7 @@ impl Default for Settings {
             editing: EditingSettings::default(),
             source: SourceSettings::default(),
             markdown: MarkdownSettings::default(),
+            images: ImageSettings::default(),
             overrides: FontOverrides::default(),
             overrides_extra: Map::new(),
             consumed_pending: Vec::new(),
@@ -469,6 +579,7 @@ pub struct SettingsPatch {
     pub editing: Option<EditingSettings>,
     pub source: Option<SourceSettings>,
     pub markdown: Option<MarkdownSettings>,
+    pub images: Option<ImageSettings>,
     pub overrides: OverridesPatch,
     pub side_by_side_split: Option<f32>,
     pub zoom: Option<f32>,
@@ -538,6 +649,9 @@ impl SettingsPatch {
         if let Some(v) = self.markdown {
             s.markdown = v;
         }
+        if let Some(v) = &self.images {
+            s.images = v.clone();
+        }
         self.overrides.apply(&mut s.overrides);
         if let Some(v) = self.side_by_side_split {
             s.side_by_side_split = Some(v);
@@ -586,6 +700,9 @@ impl SettingsPatch {
         if saved.markdown.is_some() {
             self.markdown = None;
         }
+        if saved.images.is_some() {
+            self.images = None;
+        }
         let (o, so) = (&mut self.overrides, &saved.overrides);
         if so.font_family.is_some() {
             o.font_family = None;
@@ -632,6 +749,9 @@ impl SettingsPatch {
         }
         if later.markdown.is_some() {
             self.markdown = later.markdown;
+        }
+        if later.images.is_some() {
+            self.images = later.images;
         }
         self.overrides.merge(later.overrides);
         if later.side_by_side_split.is_some() {
@@ -681,6 +801,9 @@ impl SettingsPatch {
         if let Some(v) = self.markdown {
             m.insert("markdown".into(), v.to_json());
         }
+        if let Some(v) = &self.images {
+            m.insert("images".into(), v.to_json());
+        }
         let mut o = Map::new();
         let op = &self.overrides;
         if let Some(v) = &op.font_family {
@@ -722,6 +845,7 @@ impl SettingsPatch {
             editing: m.get("editing").and_then(EditingSettings::from_json),
             source: m.get("source").and_then(SourceSettings::from_json),
             markdown: m.get("markdown").and_then(MarkdownSettings::from_json),
+            images: m.get("images").and_then(ImageSettings::from_json),
             ..Default::default()
         };
         if let Some(Value::Object(o)) = m.get("overrides") {
@@ -831,6 +955,9 @@ impl Settings {
         if let Some(e) = map.remove("markdown").as_ref().and_then(MarkdownSettings::from_json) {
             s.markdown = e;
         }
+        if let Some(e) = map.remove("images").as_ref().and_then(ImageSettings::from_json) {
+            s.images = e;
+        }
         s.extra = map;
         Some(s)
     }
@@ -850,6 +977,7 @@ impl Settings {
         map.insert("editing".into(), self.editing.to_json());
         map.insert("source".into(), self.source.to_json());
         map.insert("markdown".into(), self.markdown.to_json());
+        map.insert("images".into(), self.images.to_json());
         if !self.consumed_pending.is_empty() {
             map.insert("consumed_pending".into(), Value::from(self.consumed_pending.clone()));
         }
@@ -1106,6 +1234,39 @@ mod tests {
         let mut s = Settings::default();
         p.apply(&mut s);
         assert!(!s.markdown.wikilinks);
+    }
+
+    #[test]
+    fn image_settings_default_and_round_trip() {
+        let d = Settings::default().images;
+        assert_eq!(d.location, ImageLocation::NoteFolder);
+        assert_eq!(d.folder, "assets");
+        assert!(d.obsidian && d.relative_paths && d.copy_images && !d.copy_files && d.paste_urls);
+        let s = Settings::from_json(
+            r#"{"version": 2, "images": {"location": "root_folder", "folder": "media/img", "relative_paths": false}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.images.location, ImageLocation::RootFolder);
+        assert_eq!(s.images.folder, "media/img");
+        assert!(!s.images.relative_paths && s.images.copy_images);
+        assert_eq!(Settings::from_json(&s.to_json()).unwrap().images, s.images);
+        // unknown values fall back to the defaults
+        let bad = Settings::from_json(r#"{"version": 2, "images": {"location": "elsewhere", "folder": 3}}"#).unwrap();
+        assert_eq!(bad.images, ImageSettings::default());
+        let p = SettingsPatch {
+            images: Some(ImageSettings {
+                location: ImageLocation::SameFolder,
+                copy_files: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(SettingsPatch::from_json(&p.to_json()).unwrap().images, p.images);
+        let mut m = SettingsPatch::default();
+        m.merge(p.clone());
+        assert_eq!(m.images, p.images);
+        m.forget(&p);
+        assert!(m.images.is_none());
     }
 
     #[test]

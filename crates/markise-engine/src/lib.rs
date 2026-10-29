@@ -6,6 +6,7 @@
 //! settings file ([`settings`]) and export jobs ([`export`]).
 //! Nothing here runs on the UI thread except cheap channel polls.
 
+pub mod attach;
 pub mod edit;
 pub mod editor;
 pub mod export;

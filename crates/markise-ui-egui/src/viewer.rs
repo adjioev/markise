@@ -667,6 +667,23 @@ impl DocViewer {
         ))
     }
 
+    /// The document offset under screen point `p` (last frame's geometry; `None` outside the
+    /// surface): where dropped files are inserted.
+    pub fn offset_at_screen(
+        &mut self,
+        ctx: &egui::Context,
+        parley: Option<&mut ParleyText>,
+        images: &dyn markise_layout::Images,
+        p: Pos2,
+    ) -> Option<usize> {
+        let (_, r) = self.last_surface?;
+        if !r.contains(p) {
+            return None;
+        }
+        let top = self.last_top;
+        with_shaper(ctx, parley, |sh| self.hit_screen(p, top, sh, images)).map(|d| d.offset)
+    }
+
     /// The front-matter toggle or a Cmd/Ctrl-clicked link is under `p` (the press is not a
     /// caret placement).
     fn on_toggle_or_link(&self, p: Pos2, top: f32, m: egui::Modifiers) -> bool {

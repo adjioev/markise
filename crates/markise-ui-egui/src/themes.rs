@@ -331,6 +331,7 @@ pub struct ThemeManager {
     chose_toolbar_position: bool,
     chose_editing: bool,
     chose_source: bool,
+    chose_images: bool,
     /// Wikilinks switched (Preferences) before the settings file was read.
     chose_markdown: bool,
     /// Settings changed and not yet handed to the worker (coalesced, debounced).
@@ -410,6 +411,7 @@ impl ThemeManager {
             chose_toolbar_position: false,
             chose_editing: false,
             chose_source: false,
+            chose_images: false,
             chose_markdown: false,
             dirty: SettingsPatch::default(),
             save_at: None,
@@ -661,6 +663,21 @@ impl ThemeManager {
         if p != self.settings.source {
             self.settings.source = p;
             self.dirty.source = Some(p);
+            self.schedule_save();
+        }
+    }
+
+    /// Pasted and dropped images (settings key `images`; Preferences → Files & Images).
+    pub fn image_settings(&self) -> &markise_engine::settings::ImageSettings {
+        &self.settings.images
+    }
+
+    /// Changes the image settings; persisted like the other settings.
+    pub fn set_image_settings(&mut self, s: markise_engine::settings::ImageSettings) {
+        self.chose_images = true;
+        if s != self.settings.images {
+            self.settings.images = s.clone();
+            self.dirty.images = Some(s);
             self.schedule_save();
         }
     }
@@ -1024,6 +1041,9 @@ impl ThemeManager {
                 }
                 if self.chose_source {
                     self.settings.source = chosen.source;
+                }
+                if self.chose_images {
+                    self.settings.images = chosen.images.clone();
                 }
                 if self.chose_markdown {
                     self.settings.markdown = chosen.markdown;
