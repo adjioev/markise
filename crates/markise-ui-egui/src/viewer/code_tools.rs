@@ -54,6 +54,10 @@ pub struct LangEdit {
     /// The list for `text` (shown once the field opened).
     pub items: Vec<LangItem>,
     pub selected: usize,
+    /// Scroll the selected row into view (the list opened, the keyboard moved it).
+    scroll: bool,
+    /// The list's scroll offset at the last frame (tests).
+    pub list_offset: f32,
     /// Focus the field and select its text on the next frame.
     fresh: bool,
 }
@@ -71,6 +75,8 @@ pub(crate) struct CodeTools {
     surface_focused: bool,
     /// The surface accepts edits (otherwise the field only shows the language).
     editable: bool,
+    /// Field events postponed to the next frame (they followed text input; see `lang_keys`).
+    held: Vec<Event>,
     /// Fences read this revision: (item start, revision counter, fence).
     fences: Vec<(usize, u64, Option<Arc<CodeFenceView>>)>,
     /// Screen rectangles of the tools drawn last frame (tests).
@@ -270,6 +276,8 @@ impl DocViewer {
             text: original.clone(),
             original,
             selected: 0,
+            scroll: true,
+            list_offset: 0.0,
             fresh: true,
         });
         self.code.composing = false;
@@ -455,6 +463,7 @@ impl DocViewer {
         if e.text != before {
             e.items = lang_matches(&e.text, LANG_ROWS);
             e.selected = 0;
+            e.scroll = true;
         }
         let picked = self.lang_popup(&ctx, r, theme);
         let finish = match (picked, finish) {
@@ -474,67 +483,101 @@ impl DocViewer {
         r
     }
 
-    /// Takes the field's navigation keys out of this frame's input (none during an IME
-    /// composition) and says what they ask for.
+    /// Takes the field's navigation keys out of this frame's input, in event order, and says
+    /// what they ask for. Keys are left to an IME composition. A navigation key that follows
+    /// text input of the same frame (typing, an IME commit) waits for the next frame together
+    /// with everything after it, so it acts on the list of the text typed before it.
     fn lang_keys(&mut self, ctx: &egui::Context, field_id: egui::Id) -> Option<Finish> {
+        let held = std::mem::take(&mut self.code.held);
         let e = self.code.edit.as_ref()?;
         let n = e.items.len();
         let len = e.text.chars().count();
         let cursor = egui::text_edit::TextEditState::load(ctx, field_id)
             .and_then(|s| s.cursor.char_range())
             .filter(|_| ctx.memory(|m| m.has_focus(field_id)));
+        let caret = cursor.filter(|c| c.is_empty()).map(|c| c.primary.index.0);
         let mut composing = self.code.composing;
-        let (mut down, mut up) = (0usize, 0usize);
+        let mut sel = e.selected;
+        let mut moved = false;
         let mut finish = None;
+        let mut later = Vec::new();
         ctx.input_mut(|i| {
-            i.events.retain(|ev| {
+            let mut events = held;
+            events.append(&mut i.events);
+            // text input seen this frame (left to the text edit)
+            let mut typed = false;
+            let mut iter = events.into_iter();
+            for ev in iter.by_ref() {
                 if finish.is_some() {
-                    return true;
+                    i.events.push(ev);
+                    continue;
                 }
-                match ev {
-                    Event::Ime(ime) => {
-                        composing = ime_step(composing, ime);
-                        true
-                    }
+                let ours = match &ev {
                     Event::Key {
                         key,
                         pressed: true,
                         modifiers,
                         ..
-                    } if !composing && modifiers.is_none() => {
-                        let caret = cursor.filter(|c| c.is_empty()).map(|c| c.primary.index.0);
-                        match key {
-                            Key::ArrowDown => down += 1,
-                            Key::ArrowUp => up += 1,
-                            Key::Enter | Key::Tab => {
-                                // an emptied field clears the language (no row is picked)
-                                let sel = e.selected.min(n.saturating_sub(1));
-                                finish = Some(Finish::Commit(match e.items.get(sel) {
-                                    Some(it) if !e.text.trim().is_empty() => it.word.clone(),
-                                    _ => e.text.clone(),
-                                }));
-                            }
-                            Key::Escape => finish = Some(Finish::Revert),
-                            Key::ArrowLeft if caret == Some(0) => finish = Some(Finish::Exit(e.text.clone(), false)),
-                            Key::ArrowRight if caret == Some(len) => finish = Some(Finish::Exit(e.text.clone(), true)),
-                            _ => return true,
+                    } if !composing && modifiers.is_none() => match key {
+                        Key::ArrowDown | Key::ArrowUp | Key::Enter | Key::Tab | Key::Escape => Some(*key),
+                        Key::ArrowLeft if caret == Some(0) => Some(*key),
+                        Key::ArrowRight if caret == Some(len) => Some(*key),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some(key) = ours else {
+                    match &ev {
+                        Event::Ime(ime) => {
+                            composing = ime_step(composing, ime);
+                            typed = true;
                         }
-                        false
+                        Event::Text(_) | Event::Paste(_) | Event::Cut | Event::Key { pressed: true, .. } => {
+                            typed = true
+                        }
+                        _ => {}
                     }
-                    _ => true,
+                    i.events.push(ev);
+                    continue;
+                };
+                if typed {
+                    later.push(ev);
+                    break;
                 }
-            });
+                match key {
+                    Key::ArrowDown if n > 0 => {
+                        sel = (sel + 1) % n;
+                        moved = true;
+                    }
+                    Key::ArrowUp if n > 0 => {
+                        sel = (sel + n - 1) % n;
+                        moved = true;
+                    }
+                    Key::Enter | Key::Tab => {
+                        // an emptied field clears the language (no row is picked)
+                        finish = Some(Finish::Commit(match e.items.get(sel.min(n.saturating_sub(1))) {
+                            Some(it) if !e.text.trim().is_empty() => it.word.clone(),
+                            _ => e.text.clone(),
+                        }));
+                    }
+                    Key::Escape => finish = Some(Finish::Revert),
+                    Key::ArrowLeft => finish = Some(Finish::Exit(e.text.clone(), false)),
+                    Key::ArrowRight => finish = Some(Finish::Exit(e.text.clone(), true)),
+                    _ => {}
+                }
+            }
+            later.extend(iter);
         });
         self.code.composing = composing;
-        if n > 0
-            && let Some(e) = self.code.edit.as_mut()
+        if !later.is_empty() {
+            self.code.held = later;
+            ctx.request_repaint();
+        }
+        if let Some(e) = self.code.edit.as_mut()
+            && moved
         {
-            for _ in 0..down {
-                e.selected = (e.selected + 1) % n;
-            }
-            for _ in 0..up {
-                e.selected = (e.selected + n - 1) % n;
-            }
+            e.selected = sel;
+            e.scroll = true;
         }
         finish
     }
@@ -560,6 +603,8 @@ impl DocViewer {
         };
         let mut clicked = None;
         let selected = e.selected;
+        let scroll = e.scroll;
+        let mut offset = 0.0;
         egui::Area::new(egui::Id::unique("markise-code-lang-list"))
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
@@ -568,7 +613,7 @@ impl DocViewer {
                 egui::Frame::popup(ui.style()).fill(fill).show(ui, |ui| {
                     ui.set_min_width(180.0);
                     ui.set_max_width(320.0);
-                    egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                    let o = egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
                         for (i, it) in e.items.iter().enumerate() {
                             let mut job = egui::text::LayoutJob::default();
                             job.append(
@@ -595,7 +640,9 @@ impl DocViewer {
                             } else {
                                 Color32::TRANSPARENT
                             }));
-                            if sel {
+                            // only when the list opens or the keyboard moves the selection: a
+                            // mouse scroll of the list is not undone
+                            if sel && scroll {
                                 r.scroll_to_me(None);
                             }
                             if r.clicked() {
@@ -603,8 +650,13 @@ impl DocViewer {
                             }
                         }
                     });
+                    offset = o.state.clamped_offset().y;
                 });
             });
+        if let Some(e) = self.code.edit.as_mut() {
+            e.scroll = false;
+            e.list_offset = offset;
+        }
         clicked
     }
 
@@ -613,6 +665,7 @@ impl DocViewer {
     fn finish_lang(&mut self, ctx: &egui::Context, f: Finish, out: &mut ViewerOutput, sh: &mut WithShaper<'_>) {
         let Some(e) = self.code.edit.take() else { return };
         self.code.composing = false;
+        self.code.held.clear();
         let (lang, exit, refocus) = match f {
             Finish::Commit(l) => (Some(l), None, true),
             Finish::Exit(l, fwd) => (Some(l), Some(fwd), true),

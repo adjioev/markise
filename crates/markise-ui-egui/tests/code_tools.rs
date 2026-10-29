@@ -404,3 +404,88 @@ fn works_in_dark_and_zoomed() {
     press(&mut h, Key::Enter);
     assert_eq!(text(&h), "```c\nfn main() {}\n```\n");
 }
+
+#[test]
+fn ime_commit_and_enter_in_one_frame_commit_the_composed_text() {
+    let src = "```rust\nx\n```\n";
+    let mut h = harness(src, "imeframe");
+    caret_at(&mut h, src.find("x\n").unwrap());
+    press(&mut h, Key::Escape);
+    h.input_mut().events.push(Event::Ime(egui::ImeEvent::Preedit {
+        text: "ご".into(),
+        active_range_chars: None,
+    }));
+    h.step();
+    // commit and Enter arrive together: Enter acts on the committed text's list
+    h.input_mut()
+        .events
+        .push(Event::Ime(egui::ImeEvent::Commit("go".into())));
+    h.input_mut().events.push(key(Key::Enter));
+    h.run_steps(3);
+    assert_eq!(text(&h), "```go\nx\n```\n");
+    assert!(editing(&mut h).is_none());
+}
+
+#[test]
+fn typing_and_keys_in_one_frame_act_in_order() {
+    let src = "```rust\nx\n```\n";
+    let mut h = harness(src, "sameframe");
+    caret_at(&mut h, src.find("x\n").unwrap());
+    press(&mut h, Key::Escape);
+    // "sh", Down, Enter in one frame: the second row of the "sh" list
+    h.input_mut().events.push(Event::Text("sh".into()));
+    h.input_mut().events.push(key(Key::ArrowDown));
+    h.input_mut().events.push(key(Key::Enter));
+    h.run_steps(3);
+    let second = markise_ui_egui::viewer::lang_matches("sh", 50)[1].word.clone();
+    assert_eq!(text(&h), format!("```{second}\nx\n```\n"));
+
+    // Down and Enter alone in one frame: the row after the selected one
+    let t = text(&h);
+    caret_at(&mut h, t.find("x\n").unwrap());
+    press(&mut h, Key::Escape);
+    typ(&mut h, "py");
+    let rows = markise_ui_egui::viewer::lang_matches("py", 50);
+    h.input_mut().events.push(key(Key::ArrowDown));
+    h.input_mut().events.push(key(Key::Enter));
+    h.run_steps(3);
+    assert_eq!(text(&h), format!("```{}\nx\n```\n", rows[1].word));
+}
+
+#[test]
+fn mouse_scrolling_the_list_is_not_undone() {
+    let src = "```\nx\n```\n";
+    let mut h = harness(src, "scroll");
+    let tools = hover_block(&mut h, src.find("x\n").unwrap());
+    click(&mut h, tools.lang.center());
+    // empty language: the whole list
+    let n = h.state_mut().viewer().unwrap().lang_edit().unwrap().items.len();
+    assert!(n > 20);
+    // the list opens below or above the field, right-aligned to it
+    let below = tools.lang.bottom() + 40.0 < 700.0 - 200.0;
+    let over = if below {
+        egui::pos2(tools.lang.right() - 60.0, tools.lang.bottom() + 40.0)
+    } else {
+        egui::pos2(tools.lang.right() - 60.0, tools.lang.top() - 40.0)
+    };
+    h.hover_at(over);
+    h.step();
+    for _ in 0..5 {
+        h.event(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.run_steps(30);
+    let off = h.state_mut().viewer().unwrap().lang_edit().unwrap().list_offset;
+    assert!(off > 100.0, "list scrolled and stays scrolled: {off}");
+    // the keyboard brings the selection back into view
+    press(&mut h, Key::ArrowDown);
+    h.run_steps(30);
+    let off = h.state_mut().viewer().unwrap().lang_edit().unwrap().list_offset;
+    assert!(off < 60.0, "selected row 1 scrolled into view: {off}");
+}
