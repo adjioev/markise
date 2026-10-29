@@ -252,6 +252,13 @@ mod bulk_equals_sequential {
             Just("{~~o~>~~}".to_string()),
             Just("{>>c<<}".to_string()),
             Just("{==h==}".to_string()),
+            // review round 3: multi-byte text next to marks
+            Just("é".to_string()),
+            Just("日本".to_string()),
+            Just("🙂".to_string()),
+            Just("{++é++}".to_string()),
+            Just("{--日--}".to_string()),
+            Just("{~~🙂~>é~~}".to_string()),
         ]
     }
 
@@ -308,6 +315,16 @@ fn enter_inside_a_comment_breaks_the_line_and_keeps_the_paragraph() {
         "A {>>one|  \ntwo<<} b\n",
         "A {>>one\n  |two<<} b\n",
         "A {>>one  |<<} b\n",
+        // review round 3: block syntax after the caret would start a new block
+        "A {>>one|# two<<} b\n",
+        "A {>>one|> two<<} b\n",
+        "A {>>one|- two<<} b\n",
+        "A {>>one|1. two<<} b\n",
+        "A {>>one|```two<<} b\n",
+        // a line of only dashes would turn the first line into a setext heading
+        "A {>>one|---\nmore<<} b\n",
+        "> A {>>one|# two<<}\n",
+        "- A {>>one|- two<<}\n",
     ] {
         let at = src.find('|').unwrap();
         let clean = src.replacen('|', "", 1);

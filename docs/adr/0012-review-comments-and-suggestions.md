@@ -85,7 +85,10 @@ openers, and only leaves holding an opener are parsed. Planner ids `review.addCo
   its spaces, the task box not included); a quote line its markers. In single-line blocks
   (headings, setext headings, table rows) Enter inside a comment is ignored, and so it is when
   either part of the comment's line around the caret would be empty or whitespace only (no
-  blank line inside a mark).
+  blank line inside a mark). Beyond these fast checks one general rule decides: the top-level
+  block is parsed alone with the line break inserted, and the Enter happens only if the same
+  comment still spans both lines (text after the caret that starts block syntax — `# `, `> `,
+  `- `, `1. `, a fence, a setext underline — would end the paragraph, so Enter does nothing).
 - **Accept / Reject** at the caret or at an offset (`at` parameter: the panel and the hover bar):
   insertion accepted → its text, rejected → nothing; deletion the other way round; substitution
   → new / old text. A comment written directly after the suggestion goes with it. The caret

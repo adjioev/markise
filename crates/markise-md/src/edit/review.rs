@@ -323,9 +323,38 @@ impl Document {
                 .collect()
         };
         let insert = format!("{}{prefix}", self.line_ending().as_str());
+        // the general check (review round 3): the block re-parsed with the line break must
+        // still hold the same comment over both lines — text after the caret that starts block
+        // syntax (`# `, `> `, `- `, a fence, a rule…) would end the paragraph
+        if !self.comment_survives_break(at, &insert, &m) {
+            return ignore();
+        }
         let caret = at + insert.len();
         let ps = markise_doc::PatchSet::single_verbatim(at..at, insert);
         Some(Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(caret)))))
+    }
+
+    /// Whether inserting `insert` at `at` keeps comment `m` one comment: the top-level block
+    /// holding `at` (whole lines) is parsed alone with the insertion and must contain a
+    /// comment at the same place, grown by the insertion.
+    fn comment_survives_break(&self, at: usize, insert: &str, m: &ReviewMark) -> bool {
+        let text = self.text();
+        let i = self.top_partition_point(|t| t.end() < at);
+        let Some(top) = self.top(i) else { return false };
+        let a = crate::line_start(text, top.start().min(at));
+        let (b, _) = crate::text::line_end(text, top.end().max(at));
+        if !(a <= m.range.start && m.range.end <= b) {
+            return false;
+        }
+        let mut block = String::with_capacity(b - a + insert.len());
+        block.push_str(&text[a..at]);
+        block.push_str(insert);
+        block.push_str(&text[at..b]);
+        let doc = Document::parse(block, self.options().clone());
+        let (s, e) = (m.range.start - a, m.range.end - a + insert.len());
+        review::all_marks(&doc)
+            .iter()
+            .any(|c| c.kind == CriticKind::Comment && c.range.start == s && c.range.end == e)
     }
 
     // ---------------------------------------------------------------- delete comment

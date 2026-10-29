@@ -166,7 +166,11 @@ pub fn all_marks(doc: &dyn FormatDoc) -> Vec<ReviewMark> {
 /// (only leaves holding an opener after `from` are parsed).
 pub fn first_mark_from(doc: &dyn FormatDoc, from: usize, want: impl Fn(&ReviewMark) -> bool) -> Option<ReviewMark> {
     let text = doc.text();
-    let from = from.min(text.len());
+    // a char boundary at or before `from` (callers may step back over multi-byte text)
+    let mut from = from.min(text.len());
+    while !text.is_char_boundary(from) {
+        from -= 1;
+    }
     let mut done_to = from;
     let mut out = Vec::new();
     for rel in critic_openers(&text[from..]) {
