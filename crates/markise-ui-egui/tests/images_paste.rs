@@ -527,8 +527,8 @@ impl ClipboardFiles for Slow {
     }
 }
 
-fn slow_app(files: Vec<PathBuf>, delay: Duration) -> (H, Arc<Slow>, PathBuf, PathBuf) {
-    let d = tmpdir(&format!("slow-{}", files.len()));
+fn slow_app(name: &str, files: Vec<PathBuf>, delay: Duration) -> (H, Arc<Slow>, PathBuf, PathBuf) {
+    let d = tmpdir(name);
     let note = d.join("note.md");
     std::fs::write(&note, NOTE).unwrap();
     let slow = Arc::new(Slow {
@@ -554,7 +554,7 @@ fn slow_app(files: Vec<PathBuf>, delay: Duration) -> (H, Arc<Slow>, PathBuf, Pat
 fn slow_clipboard_does_not_block_and_applies_once() {
     let src = tmpdir("slow-src");
     std::fs::write(src.join("pic.png"), b"png").unwrap();
-    let (mut h, slow, d, _) = slow_app(vec![src.join("pic.png")], Duration::from_millis(400));
+    let (mut h, slow, d, _) = slow_app("slow-applies", vec![src.join("pic.png")], Duration::from_millis(400));
     let caret = h
         .state_mut()
         .viewer()
@@ -599,7 +599,7 @@ fn slow_clipboard_does_not_block_and_applies_once() {
 /// clipboard is read cancels the paste instead of inserting at a stale position.
 #[test]
 fn slow_clipboard_text_fallback_and_cancel_on_edit() {
-    let (mut h, slow, d, _) = slow_app(Vec::new(), Duration::from_millis(150));
+    let (mut h, slow, d, _) = slow_app("slow-fallback", Vec::new(), Duration::from_millis(150));
     h.event(Event::Paste(" pasted".into()));
     h.step();
     assert_eq!(text(&h), NOTE, "waits for the file list");
@@ -625,7 +625,7 @@ fn slow_clipboard_text_fallback_and_cancel_on_edit() {
 /// (the second is re-based through the first's insertion, not cancelled).
 #[test]
 fn queued_pastes_apply_in_order() {
-    let (mut h, slow, d, _) = slow_app(Vec::new(), Duration::from_millis(150));
+    let (mut h, slow, d, _) = slow_app("slow-queued", Vec::new(), Duration::from_millis(150));
     h.event(Event::Paste(" one".into()));
     h.step();
     h.event(Event::Paste(" two".into()));
@@ -678,6 +678,50 @@ fn absolute_paths_with_a_resource_root() {
         std::fs::canonicalize(got.path).unwrap(),
         std::fs::canonicalize(&png).unwrap(),
         "{dest}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Codex P2 (round 3): one ordered queue for every kind. A text paste whose clipboard lookup
+/// is slow and an image pasted right after it go in in paste order, and the other way round.
+#[test]
+fn mixed_pastes_keep_their_order() {
+    // text, then image data
+    let (mut h, _slow, d, _) = slow_app("slow-mixed1", Vec::new(), Duration::from_millis(200));
+    h.event(Event::Paste(" one".into()));
+    h.step();
+    h.event(Event::PasteImage(image()));
+    h.step();
+    wait_until(&mut h, "both", |a| !a.is_attaching());
+    let want = NOTE.replace(
+        "Second paragraph.",
+        &format!("Second paragraph. one![](assets/{PASTED_ENC})"),
+    );
+    assert_eq!(text(&h), want);
+    assert!(is_png(&d.join("assets").join(PASTED)));
+    let _ = std::fs::remove_dir_all(&d);
+
+    // image data, then text
+    let (mut h, _slow, d, _) = slow_app("slow-mixed2", vec![], Duration::from_millis(200));
+    h.event(Event::PasteImage(image()));
+    h.step();
+    h.event(Event::Paste(" two".into()));
+    h.step();
+    wait_until(&mut h, "both", |a| !a.is_attaching());
+    let want = NOTE.replace(
+        "Second paragraph.",
+        &format!("Second paragraph.![](assets/{PASTED_ENC}) two"),
+    );
+    assert_eq!(text(&h), want);
+    // each is its own undo step: the later one goes first
+    h.key_press_modifiers(cmd(), Key::Z);
+    h.step();
+    assert_eq!(
+        text(&h),
+        NOTE.replace(
+            "Second paragraph.",
+            &format!("Second paragraph.![](assets/{PASTED_ENC})")
+        )
     );
     let _ = std::fs::remove_dir_all(&d);
 }

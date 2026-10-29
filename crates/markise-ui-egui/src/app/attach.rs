@@ -9,14 +9,18 @@
 //!   file list (never on the UI thread; at most [`CLIPBOARD_TIMEOUT`]), then the files go in
 //!   like a drop at the paste position, or else the text is pasted at the selection it was
 //!   made at — one undo step either way, cancelled when the document changed meanwhile;
-//! - a pasted image URL (setting `images.paste_urls`): inserted as `![](url)` at once (no I/O);
+//! - a pasted image URL (setting `images.paste_urls`): inserted as `![](url)` (no I/O);
 //! - dropped files (anywhere in the window while a document is open): inserted at the drop
 //!   point when it is over the rendered document, else at the caret. Without a document, a
 //!   dropped Markdown file is opened.
 //!
-//! The files are written (or copied) by `markise_engine::attach` on a worker thread; when the
-//! result arrives the Markdown is inserted as one undo step — at the remembered position when
-//! the document did not change meanwhile, else at the caret. Undo removes the text, never the
+//! Every paste and drop becomes one entry of a single ordered queue. Entries resolve in parallel
+//! (the clipboard's file list, writing or copying files and encoding images by
+//! `markise_engine::attach`, all on worker threads), but they are inserted strictly in queue
+//! order: an entry waits until every earlier one was inserted or cancelled. Each insertion is
+//! one undo step at the selection captured when the entry was made, re-based through the
+//! insertions of earlier entries; when the user changed the document meanwhile, a text paste is
+//! cancelled and written files are linked at the caret instead. Undo removes the text, never the
 //! file. A never-saved document's pasted images go to the app-data folder for user images
 //! (`<config>/markise/user-images/`) with absolute paths; without a settings folder (tests that
 //! do not set one) the user is asked to save first.
@@ -24,7 +28,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use egui::{Context, Event};
@@ -33,48 +37,35 @@ use markise_engine::attach::{self, Item, Outcome, Request};
 
 use super::{Banner, MarkiseApp};
 
-/// An attachment job waiting for its worker.
-struct Pending {
-    doc_id: u64,
-    /// The session revision counter when the job started.
-    counter: u64,
-    /// Where to insert (drop point) while the document is unchanged; `None`: at the caret.
-    at: Option<usize>,
-    rx: Receiver<Outcome>,
-}
-
 /// How long a paste waits for the clipboard's file list before it goes in as text.
 const CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// A text paste waiting for the clipboard's file list (read on a worker).
-struct PendingPaste {
+/// What an entry still waits for, or what it inserts.
+enum Stage {
+    /// A text paste whose clipboard file list is being read.
+    Clipboard { text: String, rx: Receiver<Vec<PathBuf>> },
+    /// Files or image data being written.
+    Job(Receiver<Outcome>),
+    /// Text to paste (cancelled when the user changed the document meanwhile).
+    Text(String),
+    /// A finished job: its Markdown goes in (at the caret when the document changed).
+    Done(Outcome),
+}
+
+/// One paste or drop, in queue order.
+struct Entry {
     doc_id: u64,
-    /// The session revision counter at paste time: if the document changed meanwhile, the paste
-    /// is cancelled (its selection would no longer be where the user pasted).
+    /// The session revision counter when the entry was made.
     counter: u64,
-    /// The selection at paste time (the source pane's in Source / Side by Side).
+    /// The selection then (the source pane's in Source / Side by Side; a caret at the drop
+    /// point for drops).
     sel: Selection,
     source: bool,
-    text: String,
     started: Instant,
-    rx: Receiver<Vec<PathBuf>>,
+    stage: Stage,
 }
 
-impl PendingPaste {
-    fn new(d: &super::DocState, sel: Selection, source: bool, text: String, rx: Receiver<Vec<PathBuf>>) -> Self {
-        PendingPaste {
-            doc_id: d.id,
-            counter: d.viewer.ed.session.revision().counter,
-            sel,
-            source,
-            text,
-            started: Instant::now(),
-            rx,
-        }
-    }
-}
-
-/// An insertion made by this module (not by the user): queued pastes captured before it are
+/// An insertion made by this module (not by the user): queued entries captured before it are
 /// re-based through it instead of being cancelled.
 #[derive(Clone, Copy, Debug)]
 struct OwnEdit {
@@ -90,7 +81,7 @@ struct OwnEdit {
 
 impl OwnEdit {
     /// `o` after this edit (a position at the insertion point moves past the inserted text, so
-    /// queued pastes stay in order).
+    /// queued entries stay in order).
     fn map(&self, o: usize) -> usize {
         if o < self.pos {
             o
@@ -104,9 +95,8 @@ impl OwnEdit {
 
 pub(crate) struct AttachState {
     clipboard: Arc<dyn crate::clipboard::ClipboardFiles>,
-    pending: Vec<Pending>,
-    pastes: VecDeque<PendingPaste>,
-    /// Our own insertions since the oldest queued paste was captured.
+    queue: VecDeque<Entry>,
+    /// Our own insertions since the oldest queued entry was made.
     own_edits: Vec<OwnEdit>,
     /// Fixed `YYYYMMDDHHMMSS` for pasted image names (tests).
     stamp: Option<String>,
@@ -116,8 +106,7 @@ impl AttachState {
     pub(crate) fn new(clipboard: Arc<dyn crate::clipboard::ClipboardFiles>) -> Self {
         AttachState {
             clipboard,
-            pending: Vec::new(),
-            pastes: VecDeque::new(),
+            queue: VecDeque::new(),
             own_edits: Vec::new(),
             stamp: None,
         }
@@ -130,10 +119,9 @@ impl MarkiseApp {
         self.attach.stamp = stamp;
     }
 
-    /// A paste waits for the clipboard's file list, or pasted or dropped files are still
-    /// being written.
+    /// A paste or drop is still resolving or waiting for its turn.
     pub fn is_attaching(&self) -> bool {
-        !self.attach.pending.is_empty() || !self.attach.pastes.is_empty()
+        !self.attach.queue.is_empty()
     }
 
     /// The app-data folder for images pasted into never-saved documents (`None` without a
@@ -188,70 +176,93 @@ impl MarkiseApp {
         }
         let paste_urls = self.themes.image_settings().paste_urls;
         // a text paste may stand for a file manager copy: its file list is read on a worker
-        // (a slow clipboard owner must not freeze the window), the paste waits for it
+        // (a slow clipboard owner must not freeze the window), the paste waits for it; while
+        // earlier entries are queued, every paste queues behind them (order)
         let ask_files = has_text && self.attach.clipboard.may_have_files();
-        let mut images = Vec::new();
-        let mut urls = Vec::new();
-        let mut texts = Vec::new();
+        let queued = !self.attach.queue.is_empty();
+        // in event order
+        let mut taken: Vec<Event> = Vec::new();
         ctx.input_mut(|i| {
             i.events.retain(|e| match e {
-                Event::PasteImage(img) => {
-                    images.push(Item::Image(img.clone()));
+                Event::PasteImage(_) => {
+                    taken.push(e.clone());
                     false
                 }
-                Event::Paste(t) if ask_files => {
-                    texts.push(t.clone());
-                    false
-                }
-                Event::Paste(t) if paste_urls && attach::is_image_url(t) => {
-                    urls.push(format!("![]({})", t.trim()));
+                Event::Paste(t) if ask_files || queued || (paste_urls && attach::is_image_url(t)) => {
+                    taken.push(e.clone());
                     false
                 }
                 _ => true,
             })
         });
-        for md in urls {
-            self.insert_attachment_text(ctx, &md, None);
+        for e in taken {
+            match e {
+                Event::PasteImage(img) => {
+                    let rx = self.spawn_attach(vec![Item::Image(img)]);
+                    self.enqueue(None, rx.map(Stage::Job));
+                }
+                Event::Paste(t) if ask_files => {
+                    let rx = self.spawn_clipboard();
+                    self.enqueue(None, Some(Stage::Clipboard { text: t, rx }));
+                }
+                Event::Paste(t) => {
+                    let text = self.paste_text(&t);
+                    self.enqueue(None, Some(Stage::Text(text)));
+                }
+                _ => {}
+            }
         }
-        if !images.is_empty() {
-            self.start_attach(images, None);
-        }
-        if !texts.is_empty() {
-            self.start_paste(texts.concat());
+        self.attach_poll();
+    }
+
+    /// The text a paste inserts: an image URL as an image (setting), else the text.
+    fn paste_text(&self, t: &str) -> String {
+        if self.themes.image_settings().paste_urls && attach::is_image_url(t) {
+            format!("![]({})", t.trim())
+        } else {
+            t.to_string()
         }
     }
 
-    /// Starts reading the clipboard's file list for the text paste `text` on a worker; the paste
-    /// is applied by [`Self::attach_poll`] at the selection it had now.
-    fn start_paste(&mut self, text: String) {
-        let source = self.source_visible || self.side_by_side;
-        let Some(d) = &self.doc else { return };
-        let sel = match (&d.viewer.ed.source, source) {
-            (Some(p), true) => p.sel.clone(),
-            _ => d.viewer.ed.session.selection().clone(),
-        };
+    /// Reads the clipboard's file list on a worker.
+    fn spawn_clipboard(&self) -> Receiver<Vec<PathBuf>> {
         let (tx, rx) = std::sync::mpsc::channel();
         let clipboard = self.attach.clipboard.clone();
         let wake = self.wake_handle();
-        let spawned = std::thread::Builder::new()
+        let failed = std::thread::Builder::new()
             .name("markise-clipboard".into())
-            .spawn(move || {
-                let _ = tx.send(clipboard.files());
-                wake();
-            });
-        if spawned.is_err() {
-            // no thread: the paste is plain text (nothing was read)
-            drop(rx);
-            let (tx, rx2) = std::sync::mpsc::channel();
-            let _ = tx.send(Vec::new());
-            return self.queue_paste(PendingPaste::new(d, sel, source, text, rx2));
+            .spawn({
+                let tx = tx.clone();
+                move || {
+                    let _ = tx.send(clipboard.files());
+                    wake();
+                }
+            })
+            .is_err();
+        if failed {
+            let _ = tx.send(Vec::new()); // no thread: the paste is plain text
         }
-        let p = PendingPaste::new(d, sel, source, text, rx);
-        self.queue_paste(p);
+        rx
     }
 
-    fn queue_paste(&mut self, p: PendingPaste) {
-        self.attach.pastes.push_back(p);
+    /// Appends an entry for the open document at `at` (a drop point) or its current selection.
+    fn enqueue(&mut self, at: Option<usize>, stage: Option<Stage>) {
+        let Some(stage) = stage else { return };
+        let source = self.source_visible || self.side_by_side;
+        let Some(d) = &self.doc else { return };
+        let sel = match (at, &d.viewer.ed.source, source) {
+            (Some(o), _, _) => Selection::caret(o),
+            (None, Some(p), true) => p.sel.clone(),
+            _ => d.viewer.ed.session.selection().clone(),
+        };
+        self.attach.queue.push_back(Entry {
+            doc_id: d.id,
+            counter: d.viewer.ed.session.revision().counter,
+            sel,
+            source,
+            started: Instant::now(),
+            stage,
+        });
     }
 
     /// Files dropped on the window: inserted into the open document (at the drop point over the
@@ -277,12 +288,13 @@ impl MarkiseApp {
                 d.viewer.request_refocus();
             }
         }
-        self.start_attach(files.into_iter().map(Item::File).collect(), at);
+        let rx = self.spawn_attach(files.into_iter().map(Item::File).collect());
+        self.enqueue(at, rx.map(Stage::Job));
     }
 
     /// Starts writing `items` for the open document on a worker.
-    fn start_attach(&mut self, items: Vec<Item>, at: Option<usize>) {
-        let Some(d) = &self.doc else { return };
+    fn spawn_attach(&self, items: Vec<Item>) -> Option<Receiver<Outcome>> {
+        let d = self.doc.as_ref()?;
         let note = d.file().map(|p| p.to_path_buf());
         let index = self.vault_index().cloned();
         let vault = match &index {
@@ -303,146 +315,162 @@ impl MarkiseApp {
             stamp: self.attach.stamp.clone().unwrap_or_else(attach::stamp_now),
             resource_root: d.viewer.ed.session.doc().resource_root(),
         };
-        let rx = attach::spawn(req, self.wake_handle());
-        self.attach.pending.push(Pending {
-            doc_id: d.id,
-            counter: d.viewer.ed.session.revision().counter,
-            at,
-            rx,
-        });
+        Some(attach::spawn(req, self.wake_handle()))
     }
 
-    /// Per frame: inserts the Markdown of finished attachment jobs (in start order) and reports
-    /// failures.
+    /// Per frame: advances every queued entry (all may resolve at once), then inserts finished
+    /// entries from the front, strictly in queue order. Cheap when the queue is empty.
     pub(super) fn attach_poll(&mut self) {
-        self.paste_poll();
-        while let Some(p) = self.attach.pending.first() {
-            let out = match p.rx.try_recv() {
-                Ok(o) => o,
-                Err(std::sync::mpsc::TryRecvError::Empty) => return,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => Outcome {
-                    errors: vec!["the worker stopped".into()],
-                    ..Default::default()
-                },
-            };
-            let p = self.attach.pending.remove(0);
-            for f in &out.written {
-                if let Some(dir) = f.parent() {
-                    self.vault_changed(dir);
-                }
-            }
-            let same_doc = self.doc.as_ref().is_some_and(|d| d.id == p.doc_id);
-            if same_doc && !out.inserts.is_empty() {
-                let unchanged = self
-                    .doc
-                    .as_ref()
-                    .is_some_and(|d| d.viewer.ed.session.revision().counter == p.counter);
-                let at = p.at.filter(|_| unchanged);
-                if let Some(ctx) = self.ctx.clone() {
-                    self.insert_attachment_text(&ctx, &out.text(), at);
-                }
-            }
-            if !out.errors.is_empty() {
-                self.banner = Some(Banner::Error(out.errors.join(" ")));
-            }
-        }
-    }
-
-    /// Applies the text pastes whose clipboard file list arrived (in paste order): the files
-    /// go in like a drop at the paste position, otherwise the text is pasted (an image URL as
-    /// an image). Cancelled when the document changed meanwhile; a file list that takes longer
-    /// than [`CLIPBOARD_TIMEOUT`] is not waited for (the text goes in, a late list is ignored).
-    fn paste_poll(&mut self) {
-        if self.attach.pastes.is_empty() {
-            if self.attach.pending.is_empty() {
-                self.attach.own_edits.clear();
-            }
+        if self.attach.queue.is_empty() {
+            self.attach.own_edits.clear();
             return;
         }
-        while let Some(p) = self.attach.pastes.front() {
-            // in order: a paste that became a file job goes in before the next paste
-            if !self.attach.pending.is_empty() {
-                return;
-            }
-            let files = match p.rx.try_recv() {
-                Ok(f) => f,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => Vec::new(),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    let waited = p.started.elapsed();
-                    if waited < CLIPBOARD_TIMEOUT {
-                        if let Some(c) = &self.ctx {
-                            c.request_repaint_after(CLIPBOARD_TIMEOUT - waited);
+        // resolve
+        let mut start_jobs = Vec::new();
+        let mut wait: Option<Duration> = None;
+        for (i, e) in self.attach.queue.iter_mut().enumerate() {
+            match &e.stage {
+                Stage::Clipboard { text, rx } => {
+                    let files = match rx.try_recv() {
+                        Ok(f) => Some(f),
+                        Err(TryRecvError::Disconnected) => Some(Vec::new()),
+                        Err(TryRecvError::Empty) => {
+                            let waited = e.started.elapsed();
+                            if waited >= CLIPBOARD_TIMEOUT {
+                                // a late list is not waited for: the text goes in
+                                Some(Vec::new())
+                            } else {
+                                let left = CLIPBOARD_TIMEOUT - waited;
+                                wait = Some(wait.map_or(left, |w| w.min(left)));
+                                None
+                            }
                         }
-                        return;
+                    };
+                    match files {
+                        Some(f) if f.is_empty() => {
+                            let t = text.clone();
+                            e.stage = Stage::Text(t); // made final below
+                            start_jobs.push((i, None));
+                        }
+                        Some(f) => start_jobs.push((i, Some(f))),
+                        None => {}
                     }
-                    Vec::new()
                 }
-            };
-            let Some(mut p) = self.attach.pastes.pop_front() else {
-                return;
-            };
-            let Some(ctx) = self.ctx.clone() else { return };
-            // re-base through the insertions of earlier pastes (ours); any other change to the
-            // document since the paste cancels it
-            let (mut counter, mut a, mut f) = (p.counter, p.sel.primary().anchor.offset, p.sel.primary().focus.offset);
-            for e in self.attach.own_edits.iter().filter(|e| e.doc_id == p.doc_id) {
-                if e.from == counter {
-                    (counter, a, f) = (e.to, e.map(a), e.map(f));
+                Stage::Job(rx) => match rx.try_recv() {
+                    Ok(o) => e.stage = Stage::Done(o),
+                    Err(TryRecvError::Disconnected) => {
+                        e.stage = Stage::Done(Outcome {
+                            errors: vec!["the worker stopped".into()],
+                            ..Default::default()
+                        })
+                    }
+                    Err(TryRecvError::Empty) => {}
+                },
+                Stage::Text(_) | Stage::Done(_) => {}
+            }
+        }
+        for (i, files) in start_jobs {
+            match files {
+                None => {
+                    if let Stage::Text(t) = &self.attach.queue[i].stage {
+                        let t = self.paste_text(t);
+                        self.attach.queue[i].stage = Stage::Text(t);
+                    }
+                }
+                Some(f) => {
+                    let stage = match self.spawn_attach(f.into_iter().map(Item::File).collect()) {
+                        Some(rx) => Stage::Job(rx),
+                        None => Stage::Done(Outcome::default()),
+                    };
+                    self.attach.queue[i].stage = stage;
                 }
             }
-            p.sel = Selection::range(a, f);
-            let current = self
-                .doc
-                .as_ref()
-                .is_some_and(|d| d.id == p.doc_id && d.viewer.ed.session.revision().counter == counter);
-            if !current {
-                if self.doc.as_ref().is_some_and(|d| d.id == p.doc_id) {
-                    self.banner = Some(Banner::Info(
-                        "The paste was cancelled: the document changed while the clipboard was read.".into(),
-                    ));
-                }
-                continue;
-            }
-            if files.is_empty() {
-                let text = if self.themes.image_settings().paste_urls && attach::is_image_url(&p.text) {
-                    format!("![]({})", p.text.trim())
-                } else {
-                    p.text.clone()
-                };
-                self.restore_paste_selection(&p);
-                self.insert_attachment_text(&ctx, &text, None);
-            } else {
-                let at = p.sel.primary().start().offset;
-                self.restore_paste_selection(&p);
-                self.start_attach(files.into_iter().map(Item::File).collect(), Some(at));
-            }
+        }
+        // insert in order
+        while matches!(
+            self.attach.queue.front().map(|e| &e.stage),
+            Some(Stage::Text(_) | Stage::Done(_))
+        ) {
+            let Some(e) = self.attach.queue.pop_front() else { break };
+            self.insert_entry(e);
+        }
+        if let (Some(w), Some(c)) = (wait, &self.ctx) {
+            c.request_repaint_after(w);
         }
     }
 
-    /// Puts the selection a paste was made at back (it may have moved without an edit).
-    fn restore_paste_selection(&mut self, p: &PendingPaste) {
+    /// Inserts a finished entry at its selection re-based through our earlier insertions, or
+    /// handles a change by the user meanwhile (text: cancelled; files: at the caret).
+    fn insert_entry(&mut self, mut e: Entry) {
+        let Some(ctx) = self.ctx.clone() else { return };
+        let (mut counter, mut a, mut f) = (e.counter, e.sel.primary().anchor.offset, e.sel.primary().focus.offset);
+        for o in self.attach.own_edits.iter().filter(|o| o.doc_id == e.doc_id) {
+            if o.from == counter {
+                (counter, a, f) = (o.to, o.map(a), o.map(f));
+            }
+        }
+        e.sel = Selection::range(a, f);
+        let same_doc = self.doc.as_ref().is_some_and(|d| d.id == e.doc_id);
+        let unchanged = same_doc
+            && self
+                .doc
+                .as_ref()
+                .is_some_and(|d| d.viewer.ed.session.revision().counter == counter);
+        match e.stage {
+            Stage::Text(text) => {
+                if !unchanged {
+                    if same_doc {
+                        self.banner = Some(Banner::Info(
+                            "The paste was cancelled: the document changed while the clipboard was read.".into(),
+                        ));
+                    }
+                    return;
+                }
+                self.restore_selection(&e.sel, e.source);
+                self.insert_attachment_text(&ctx, &text);
+            }
+            Stage::Done(out) => {
+                for f in &out.written {
+                    if let Some(dir) = f.parent() {
+                        self.vault_changed(dir);
+                    }
+                }
+                if same_doc && !out.inserts.is_empty() {
+                    if unchanged {
+                        self.restore_selection(&e.sel, e.source);
+                    }
+                    self.insert_attachment_text(&ctx, &out.text());
+                }
+                if !out.errors.is_empty() {
+                    self.banner = Some(Banner::Error(out.errors.join(" ")));
+                }
+            }
+            Stage::Clipboard { .. } | Stage::Job(_) => {}
+        }
+    }
+
+    /// Puts a captured selection back (it may have moved without an edit).
+    fn restore_selection(&mut self, sel: &Selection, source: bool) {
         let Some(d) = self.doc.as_mut() else { return };
-        if p.source && d.viewer.ed.source.is_some() {
-            d.viewer.ed.source_set_selection(p.sel.clone());
+        let len = d.viewer.ed.session.text().len();
+        let p = sel.primary();
+        let sel = Selection::range(p.anchor.offset.min(len), p.focus.offset.min(len));
+        if source && d.viewer.ed.source.is_some() {
+            d.viewer.ed.source_set_selection(sel);
         } else {
-            d.viewer.ed.session.set_selection(p.sel.clone());
+            d.viewer.ed.session.set_selection(sel);
             d.viewer.ed.refresh_focus();
         }
     }
 
-    /// Inserts `md` as one undo step: in the source editor when it has the focus, else in the
-    /// rendered document at `at` (or the current selection).
-    fn insert_attachment_text(&mut self, ctx: &Context, md: &str, at: Option<usize>) {
-        // the source editor is where edits go in Source and Side by Side (whose rendered pane
-        // is read-only)
+    /// Inserts `md` at the current selection as one undo step (in the source editor in Source and
+    /// Side by Side, whose rendered pane is read-only) and records it as our own edit.
+    fn insert_attachment_text(&mut self, ctx: &Context, md: &str) {
         let source = self.source_visible || self.side_by_side;
         let Some(d) = self.doc.as_mut() else { return };
         let (from, old_len) = (d.viewer.ed.session.revision().counter, d.viewer.ed.session.text().len());
         let range;
         if source && d.viewer.ed.source.is_some() {
-            if let Some(o) = at {
-                d.viewer.ed.source_set_selection(Selection::caret(o.min(old_len)));
-            }
             range = d
                 .viewer
                 .ed
@@ -457,9 +485,6 @@ impl MarkiseApp {
                 .ed
                 .edit(|s| {
                     s.close_typing();
-                    if let Some(o) = at {
-                        s.set_selection(Selection::caret(o.min(s.text().len())));
-                    }
                     r0 = s.selection().primary().range();
                     let r = s.insert_text(md);
                     s.close_typing();
