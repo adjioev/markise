@@ -41,6 +41,10 @@ pub struct ParseOptions {
     /// 2026-10-28: vault features on in every folder). Embeds `![[…]]` stay plain text for now.
     /// With it on, a `[[_TOC_]]` line is a wikilink, not a TOC marker (spec 06 V1.6 f).
     pub wikilinks: bool,
+    /// CriticMarkup review marks `{++ins++}`, `{--del--}`, `{~~old~>new~~}`, `{==mark==}`,
+    /// `{>>comment<<}` (ADR 0012). Default on (owner, 2026-10-29, issue #69). Inline only:
+    /// a mark never spans blocks (an unclosed mark stays text).
+    pub critic_markup: bool,
 }
 
 impl Default for ParseOptions {
@@ -63,6 +67,7 @@ impl Default for ParseOptions {
             emoji: true,
             smart_punctuation_render: false,
             wikilinks: true,
+            critic_markup: true,
         }
     }
 }

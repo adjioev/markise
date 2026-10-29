@@ -441,3 +441,64 @@ fn wikilinks_show_labels_styled_by_resolution() {
     };
     assert_eq!(text.text(), "go [[Here|there]] and Gone › Part");
 }
+
+/// ADR 0012: review marks render without their delimiters — insertions in the insert colour,
+/// deletions in the delete colour, a substitution as both, a comment as a bubble — and the
+/// caret inside a mark reveals its source.
+#[test]
+fn review_marks_render_styled_and_reveal_at_the_caret() {
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let src = "a {++new++} {--old--} {~~x~>y~~}{>>@ai: why<<} b\n";
+    let mut v = view(src, 900.0);
+    let theme = Theme::light();
+    let rc = theme.review_colors();
+    let l = v.layout(0, &mut f, &NoImages);
+    let text = l
+        .prims
+        .iter()
+        .find_map(|p| match p {
+            Prim::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let shown = text.text().to_string();
+    assert_eq!(shown, "a new old xy\u{1F4AC} @ai: why b");
+    let galley = text.galley().unwrap();
+    let color_at = |needle: &str| {
+        let at = shown.find(needle).unwrap();
+        galley
+            .job
+            .sections
+            .iter()
+            .find(|s| s.byte_range.start.0 <= at && at < s.byte_range.end.0)
+            .unwrap()
+            .format
+            .color
+    };
+    let c = markise_layout::block::color;
+    assert_eq!(color_at("new"), c(rc.insert));
+    assert_eq!(color_at("old"), c(rc.delete));
+    assert_eq!(color_at("x"), c(rc.delete));
+    assert_eq!(color_at("y\u{1F4AC}"), c(rc.insert));
+    // strike and underline lines are drawn
+    let lines = l.prims.iter().filter(|p| matches!(p, Prim::Line { .. })).count();
+    assert!(lines >= 4, "{lines} decoration lines");
+    // the caret in the substitution shows its source, separator included
+    let a = src.find("{~~").unwrap() as u32;
+    let focus = markise_layout::ItemFocus {
+        reveal: std::iter::once(a..a + 10).collect(),
+        ..Default::default()
+    };
+    v.set_focus(Some((0, focus)));
+    let l = v.layout(0, &mut f, &NoImages);
+    let shown = l
+        .prims
+        .iter()
+        .find_map(|p| match p {
+            Prim::Text { text, .. } => Some(text.text().to_string()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(shown, "a new old {~~x~>y~~}\u{1F4AC} @ai: why b");
+}

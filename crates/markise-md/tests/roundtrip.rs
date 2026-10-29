@@ -69,6 +69,7 @@ fn all_option_sets() -> Vec<ParseOptions> {
         block_html: false,
         emoji: false,
         wikilinks: false,
+        critic_markup: false,
         ..Default::default()
     };
     vec![ParseOptions::default(), all_on, all_off]

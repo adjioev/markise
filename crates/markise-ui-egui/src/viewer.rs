@@ -46,7 +46,33 @@ pub struct ViewerOutput {
     /// Keystroke processing time this frame (input → laid out and painted), when there was
     /// keyboard input (`MARKISE_TIMING`).
     pub input_ms: Option<f64>,
+    /// A review command chosen in the document's context menu or the hover bar of a
+    /// suggestion (ADR 0012): command id and the source offset it acts at (`None`: at the
+    /// selection).
+    pub review: Option<(&'static str, Option<usize>)>,
 }
+
+/// The suggestion under the pointer and its floating Accept / Reject bar (ADR 0012).
+#[derive(Clone, Debug)]
+struct HoverBar {
+    mark: markise_doc::review::ReviewMark,
+    /// Where the bar sits (screen, top left), fixed while the same mark is hovered.
+    anchor: Pos2,
+    /// The bar's rectangle at the last frame (the pointer may move onto it).
+    rect: Option<Rect>,
+}
+
+/// Commands of the document's context menu (ADR 0012), `None`: separator.
+pub const CONTEXT_COMMANDS: &[Option<&str>] = &[
+    Some("review.addComment"),
+    None,
+    Some("review.accept"),
+    Some("review.reject"),
+    Some("review.deleteComment"),
+    None,
+    Some("review.acceptAll"),
+    Some("review.rejectAll"),
+];
 
 /// Selection granularity of a pointer drag (single, double, triple click).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +116,12 @@ pub struct DocViewer {
     refocus: bool,
     /// Screen rectangle of the caret at the last frame it was drawn (popups anchor to it).
     pub caret_screen: Option<Rect>,
+    /// The hovered suggestion's action bar.
+    hover: Option<HoverBar>,
+    /// Last suggestion lookup under the pointer: (revision counter, offset, result).
+    hover_cache: Option<(u64, usize, Option<markise_doc::review::ReviewMark>)>,
+    /// Pointer position and revision counter of the last hover lookup.
+    hover_key: Option<(Pos2, u64)>,
 }
 
 impl DocViewer {
@@ -125,6 +157,9 @@ impl DocViewer {
             last_surface: None,
             refocus: false,
             caret_screen: None,
+            hover: None,
+            hover_cache: None,
+            hover_key: None,
         }
     }
 
@@ -568,7 +603,7 @@ impl DocViewer {
         if focused {
             let since = now - self.blink_from;
             let on = since >= BLINK_FOR || ((since / BLINK_HALF) as u64).is_multiple_of(2);
-            let caret = with_shaper(&ctx, parley, |sh| self.ed.caret_rect(sh, &*images));
+            let caret = with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.caret_rect(sh, &*images));
             self.caret_screen = None;
             if let Some(c) = caret {
                 let y = c.min.y - self.ed.view.scroll_y() as f32 + rect.top();
@@ -633,6 +668,11 @@ impl DocViewer {
             ctx.request_repaint();
         }
 
+        // ---- review: context menu and the hover bar of suggestions (ADR 0012)
+        if editable {
+            self.review_ui(ui, &resp, rect, parley, images, &mut out);
+        }
+
         // ---- scrollbar
         let total = self.ed.view.total_height().max(1.0);
         if total > vh as f64 + 1.0 {
@@ -684,6 +724,132 @@ impl DocViewer {
     }
 
     /// The document position under screen point `p` (last frame's geometry).
+    /// The document's context menu (Add Comment, Accept / Reject, Delete Comment, Accept /
+    /// Reject All; a right click outside the selection moves the caret there first) and the
+    /// Accept / Reject bar over a hovered suggestion.
+    fn review_ui(
+        &mut self,
+        ui: &mut Ui,
+        resp: &egui::Response,
+        rect: Rect,
+        mut parley: Option<&mut ParleyText>,
+        images: &TextureStore,
+        out: &mut ViewerOutput,
+    ) {
+        let ctx = ui.ctx().clone();
+        if resp.secondary_clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let pos = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
+                self.hit_screen(p, rect.top(), sh, images)
+            });
+            if let Some(pos) = pos {
+                let sel = self.ed.session.selection().primary();
+                let r = sel.range();
+                if sel.is_caret() || pos.offset < r.start || pos.offset > r.end {
+                    self.ed.set_selection(Selection::single(pos, pos));
+                    self.ed.refresh_focus();
+                }
+            }
+            resp.request_focus();
+        }
+        let mut chosen = None;
+        resp.context_menu(|ui| {
+            let enabled = |id: &str| self.ed.registry.enabled(&self.ed.session, id).is_ok();
+            for e in CONTEXT_COMMANDS {
+                match e {
+                    None => {
+                        ui.separator();
+                    }
+                    Some(id) => {
+                        let Some(spec) = self.ed.registry.get(id) else { continue };
+                        let mut b = egui::Button::new(spec.desc.label);
+                        if let Some(c) = self.keymap.shown_chord_of(id) {
+                            b = b.shortcut_text(crate::menu::shortcut_text(c, self.platform));
+                        }
+                        if ui.add_enabled(enabled(id), b).clicked() {
+                            chosen = Some(spec.desc.id);
+                            ui.close();
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(id) = chosen {
+            out.review = Some((id, None));
+        }
+        // hover bar
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let on_bar = self
+            .hover
+            .as_ref()
+            .and_then(|h| h.rect)
+            .zip(pointer)
+            .is_some_and(|(r, p)| r.expand(6.0).contains(p));
+        // looked up again only when the pointer moved or the text changed
+        let key = pointer.map(|p| (p, self.ed.session.revision().counter));
+        let moved = key != self.hover_key;
+        self.hover_key = key;
+        if !on_bar && moved {
+            let idle = self.drag.is_none() && !ui.input(|i| i.pointer.any_down());
+            let found = match pointer {
+                Some(p) if idle && resp.hovered() => {
+                    let pos = with_shaper(&ctx, parley, |sh| self.hit_screen(p, rect.top(), sh, images));
+                    pos.and_then(|pos| self.suggestion_at(pos.offset)).map(|m| (m, p))
+                }
+                _ => None,
+            };
+            match found {
+                Some((m, p)) => {
+                    if self.hover.as_ref().is_none_or(|h| h.mark != m) {
+                        self.hover = Some(HoverBar {
+                            mark: m,
+                            anchor: pos2(p.x - 24.0, p.y - 40.0),
+                            rect: None,
+                        });
+                    }
+                }
+                None => self.hover = None,
+            }
+        }
+        if let Some(h) = self.hover.as_mut() {
+            let at = h.mark.content.start;
+            let area = egui::Area::new(egui::Id::unique("markise-review-hover"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(h.anchor)
+                .show(&ctx, |ui| {
+                    egui::Frame::popup(ui.style()).inner_margin(4.0).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.button("Accept").on_hover_text("Accept this suggestion").clicked() {
+                                out.review = Some(("review.accept", Some(at)));
+                            }
+                            if ui.button("Reject").on_hover_text("Reject this suggestion").clicked() {
+                                out.review = Some(("review.reject", Some(at)));
+                            }
+                        });
+                    });
+                });
+            h.rect = Some(area.response.rect);
+            if out.review.is_some() {
+                self.hover = None;
+            }
+        }
+    }
+
+    /// The suggestion whose source contains `offset` (cached per revision and offset).
+    fn suggestion_at(&mut self, offset: usize) -> Option<markise_doc::review::ReviewMark> {
+        let counter = self.ed.session.revision().counter;
+        if let Some((c, o, m)) = &self.hover_cache
+            && *c == counter
+            && *o == offset
+        {
+            return m.clone();
+        }
+        let m = markise_doc::review::mark_at(self.ed.session.doc(), offset, |k| k.is_suggestion());
+        self.hover_cache = Some((counter, offset, m.clone()));
+        m
+    }
+
     fn hit_screen(
         &mut self,
         p: Pos2,

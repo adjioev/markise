@@ -191,6 +191,25 @@ pub fn theme_css(theme: &Theme) -> String {
         color(t.highlight_bg),
         color(t.inline.mark_text.unwrap_or(t.text))
     );
+    // review marks (ADR 0012)
+    let rc = t.review_colors();
+    let _ = writeln!(
+        c,
+        "#write ins.critic {{ color: {}; text-decoration: underline; }}",
+        color(rc.insert)
+    );
+    let _ = writeln!(
+        c,
+        "#write del.critic {{ color: {}; text-decoration: line-through; }}",
+        color(rc.delete)
+    );
+    let _ = writeln!(c, "#write mark.critic {{ background: {}; }}", color(rc.highlight_bg));
+    let _ = writeln!(
+        c,
+        "#write .critic.comment {{ background: {}; color: {}; font-size: 0.85em; font-style: italic; border-radius: 3px; padding: 0 4px; margin-left: 2px; }}",
+        color(rc.comment_bg),
+        color(rc.comment_text)
+    );
     let ic = &t.inline_code;
     let _ = writeln!(
         c,

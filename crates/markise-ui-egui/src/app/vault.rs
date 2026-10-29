@@ -72,11 +72,14 @@ pub struct Completion {
     index_gen: u64,
 }
 
-/// A re-parse of the open document with new parse options (wikilinks switched).
+/// A re-parse of the open document with new parse options (a dialect extension switched:
+/// wikilinks, CriticMarkup).
 struct Reparse {
     doc_id: u64,
     counter: u64,
     rx: Receiver<(Arc<Document>, Arc<DocModel>)>,
+    /// What switched (the view's label for the install).
+    label: &'static str,
 }
 
 /// Vault state of the application.
@@ -255,6 +258,7 @@ impl MarkiseApp {
         if want != self.parse.wikilinks {
             self.apply_wikilinks(want);
         }
+        self.review_poll_setting();
         self.poll_reparse();
         self.poll_create();
         let root = self.vault_root();
@@ -296,7 +300,9 @@ impl MarkiseApp {
         // the wikilinks switch is part of it: layouts cached with the other parse options of
         // the same source must not be reused
         let base = index.as_ref().map_or(0, |ix| ix.generation().wrapping_add(1));
-        let generation = (base << 2) | ((self.parse.wikilinks as u64) << 1) | 1;
+        // the CriticMarkup switch likewise (ADR 0012)
+        let generation =
+            (base << 3) | ((self.parse.critic_markup as u64) << 2) | ((self.parse.wikilinks as u64) << 1) | 1;
         d.viewer.ed.view.set_links(Arc::new(VaultLinks {
             index,
             from,
@@ -329,9 +335,16 @@ impl MarkiseApp {
 
     fn apply_wikilinks(&mut self, on: bool) {
         self.parse.wikilinks = on;
+        self.vault.complete = None;
+        self.reparse_document("Wikilinks");
+    }
+
+    /// Re-parses the open document with the current parse options in the background (a
+    /// dialect extension was switched); later loads parse with them too. The text is not
+    /// changed.
+    pub(super) fn reparse_document(&mut self, label: &'static str) {
         // later loads parse with the new options
         self.loader = None;
-        self.vault.complete = None;
         let wake = self.wake_handle();
         let Some(d) = self.doc.as_mut() else { return };
         let format: Arc<dyn markise_doc::DocumentFormat> = Arc::new(MarkdownFormat {
@@ -355,6 +368,7 @@ impl MarkiseApp {
                 doc_id: d.id,
                 counter: d.viewer.ed.session.revision().counter,
                 rx,
+                label,
             });
         }
     }
@@ -362,7 +376,7 @@ impl MarkiseApp {
     fn poll_reparse(&mut self) {
         let Some(r) = &self.vault.reparse else { return };
         let Ok((doc, model)) = r.rx.try_recv() else { return };
-        let (doc_id, counter) = (r.doc_id, r.counter);
+        let (doc_id, counter, label) = (r.doc_id, r.counter, r.label);
         self.vault.reparse = None;
         let Some(d) = self.doc.as_mut() else { return };
         if d.id != doc_id {
@@ -370,16 +384,15 @@ impl MarkiseApp {
         }
         if d.viewer.ed.session.revision().counter != counter {
             // edited meanwhile: parse the current text again
-            let on = self.parse.wikilinks;
-            self.apply_wikilinks(on);
+            self.reparse_document(label);
             return;
         }
         let doc: Arc<dyn FormatDoc> = doc;
-        let _ = d.viewer.install(doc, model, "Wikilinks", false);
+        let _ = d.viewer.install(doc, model, label, false);
         self.set_doc_links();
     }
 
-    /// A re-parse after switching wikilinks is still running (tests).
+    /// A re-parse after switching a dialect extension is still running (tests).
     pub fn is_reparsing(&self) -> bool {
         self.vault.reparse.is_some()
     }

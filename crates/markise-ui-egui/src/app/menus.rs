@@ -262,6 +262,7 @@ impl MarkiseApp {
             Entry::Separator,
             self.item(MenuAction::Command("file.save"), "Save", has_doc, Check::None),
             self.item(MenuAction::Command("file.saveAs"), "Save As…", has_doc, Check::None),
+            self.app_item("file.saveCopyClean", has_doc, Check::None),
             Entry::Separator,
             self.app_item("file.rename", has_file, Check::None),
             self.item(
@@ -281,6 +282,8 @@ impl MarkiseApp {
         }
         menus.push(Menu::new("File", file));
         let mut edit = self.registry_menu("Edit", EDIT_ORDER, text_field);
+        edit.entries.push(Entry::Separator);
+        edit.entries.push(Entry::Submenu(self.review_menu(text_field)));
         edit.entries.extend(self.editing_pref_entries());
         menus.push(edit);
         menus.push(self.registry_menu("Paragraph", PARAGRAPH_ORDER, text_field));
@@ -322,6 +325,21 @@ impl MarkiseApp {
         }
     }
 
+    /// Edit → Comments & Suggestions (ADR 0012).
+    fn review_menu(&self, text_field: bool) -> Menu {
+        let ids: [Option<&'static str>; 8] = [
+            Some("review.addComment"),
+            None,
+            Some("review.accept"),
+            Some("review.reject"),
+            Some("review.deleteComment"),
+            None,
+            Some("review.acceptAll"),
+            Some("review.rejectAll"),
+        ];
+        Menu::new("Comments & Suggestions", self.command_entries(&ids, text_field))
+    }
+
     fn export_menu(&self) -> Menu {
         let mut v: Vec<Entry> = [
             ExportKind::Pdf,
@@ -353,6 +371,8 @@ impl MarkiseApp {
             Check::None,
         ));
         v.push(self.app_item("export.overwritePrevious", prev.is_some(), Check::None));
+        v.push(Entry::Separator);
+        v.push(self.app_item("export.comments", true, Check::Toggle(self.export_comments())));
         Menu::new("Export", v).enabled(self.doc.is_some() && !self.export.is_running())
     }
 
@@ -404,6 +424,7 @@ impl MarkiseApp {
                 self.app_item("view.highlightCode", true, Check::Toggle(self.highlight_code)),
                 self.app_item("view.diagrams", true, Check::Toggle(self.diagrams)),
                 self.app_item("view.wikilinks", true, Check::Toggle(self.wikilinks())),
+                self.app_item("view.criticMarkup", true, Check::Toggle(self.critic_markup())),
                 Entry::Submenu(self.source_menu()),
                 Entry::Separator,
                 self.app_item("view.zoomIn", self.zoom() < ZOOM_RANGE.1, Check::None),
@@ -616,6 +637,9 @@ impl MarkiseApp {
             "view.highlightCode" => self.set_highlight_code(!self.highlight_code),
             "view.diagrams" => self.set_diagrams(!self.diagrams),
             "view.wikilinks" => self.set_wikilinks(!self.wikilinks()),
+            "view.criticMarkup" => self.set_critic_markup(!self.critic_markup()),
+            "file.saveCopyClean" if self.doc.is_some() => self.save_copy_without_comments(),
+            "export.comments" => self.set_export_comments(!self.export_comments()),
             "go.back" => self.go_back(),
             "go.forward" => self.go_forward(),
             "view.sourceLineNumbers" | "view.sourceSoftWrap" | "view.sourceCurrentLine" | "view.sourceWhitespace" => {

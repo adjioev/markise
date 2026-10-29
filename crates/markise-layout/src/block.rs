@@ -11,7 +11,8 @@ use std::sync::Arc;
 use epaint::text::{FontData, FontDefinitions, FontFamily};
 use epaint::{Color32, Pos2, Rect, Stroke, emath::Align, pos2, vec2};
 use markise_doc::{
-    CalloutKind, ColumnAlign, FormatDoc, InlineKind, InlineNode, InlineSource, PieceKind, RichInline, SourceMap, Span,
+    CalloutKind, ColumnAlign, CriticKind, FormatDoc, InlineKind, InlineNode, InlineSource, PieceKind, RichInline,
+    SourceMap, Span,
 };
 use markise_theme::{BoxStyle, Rgba, TextAlign, TextTransform, Theme, TokenKind, TokenRun};
 
@@ -371,6 +372,24 @@ pub fn reveal_set(rich: &RichInline, caret: u32) -> Vec<Range<u32>> {
     out
 }
 
+/// The text of a collapsed comment bubble: a speech mark and the comment on one line,
+/// shortened to 60 characters.
+pub fn comment_bubble(text: &str) -> String {
+    let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::from("\u{1F4AC}");
+    if !one.is_empty() {
+        out.push(' ');
+        let n = one.chars().count();
+        if n > 60 {
+            out.extend(one.chars().take(59));
+            out.push('…');
+        } else {
+            out.push_str(&one);
+        }
+    }
+    out
+}
+
 pub fn color(c: Rgba) -> Color32 {
     let [r, g, b, a] = c.0;
     Color32::from_rgba_unmultiplied(r, g, b, a)
@@ -521,6 +540,8 @@ enum Mark {
     /// Strikethrough drawn through the glyphs (epaint's own sits at the line-box centre,
     /// far below the glyphs when the line height is large).
     Strike(Color32),
+    /// Underline just below the baseline (suggested insertions, ADR 0012).
+    Underline(Color32),
     /// A background box hugging the glyphs (inline code, `mark`): padding, corner radius.
     /// The padding is part of the run's advance (neighbours keep their distance).
     /// `stretch`: spaces inside may be widened by justification (not inside code).
@@ -922,6 +943,11 @@ impl<'a> InlineBuilder<'a> {
     }
 
     fn node(&mut self, r: &RichInline, n: &InlineNode, st: &Style, top: bool) {
+        if let InlineKind::Critic(k) = n.kind {
+            let revealed = !self.reveal.is_empty() && !n.markers.is_empty() && self.reveal.contains(&n.source);
+            self.critic(r, n, k, st, revealed);
+            return;
+        }
         if let InlineKind::WikiLink { target, subpath } = &n.kind {
             let revealed = !self.reveal.is_empty() && self.reveal.contains(&n.source);
             self.wikilink(r, n, target, subpath.as_deref(), st, revealed);
@@ -942,6 +968,101 @@ impl<'a> InlineBuilder<'a> {
             self.markers(n, st, true);
         }
         self.node_inner(r, n, st, top);
+        if revealed {
+            self.markers(n, st, false);
+        }
+    }
+
+    /// A review mark (ADR 0012): insertions green and underlined, deletions red and struck
+    /// through, a substitution as both, highlights on the highlight colour, a comment as a
+    /// small bubble with its text (one caret stop); the caret inside shows the raw source
+    /// (spec 02 inline reveal), styled the same.
+    fn critic(&mut self, r: &RichInline, n: &InlineNode, k: CriticKind, st: &Style, revealed: bool) {
+        let rc = self.theme.review_colors();
+        if revealed {
+            self.markers(n, st, true);
+        }
+        match k {
+            CriticKind::Insert | CriticKind::New => {
+                let mut c = st.clone();
+                c.color = color(rc.insert);
+                let start = self.job.text.len();
+                self.nodes(r, &n.children, &c, false);
+                self.links.push((start..self.job.text.len(), Mark::Underline(c.color)));
+            }
+            CriticKind::Delete | CriticKind::Old => {
+                let mut c = st.clone();
+                c.color = color(rc.delete);
+                let start = self.job.text.len();
+                self.nodes(r, &n.children, &c, false);
+                self.links.push((start..self.job.text.len(), Mark::Strike(c.color)));
+            }
+            CriticKind::Substitute => {
+                if let Some(old) = n.children.first() {
+                    self.critic(r, old, CriticKind::Old, st, false);
+                }
+                // the separator `~>` (the middle marker) while revealed
+                if revealed
+                    && let Some(m) = n.markers.get(1).filter(|_| n.markers.len() == 3)
+                    && let Some(text) = self.src.get(m.start as usize..m.end as usize)
+                {
+                    let mut ms = st.clone();
+                    ms.color = color(self.theme.meta_text);
+                    ms.transform = TextTransform::None;
+                    let a = self.job.text.len() as u32;
+                    self.append(text, 0.0, &ms);
+                    let b = self.job.text.len() as u32;
+                    self.map.push(a..b, m.clone(), PieceKind::Marker);
+                }
+                if let Some(new) = n.children.get(1) {
+                    self.critic(r, new, CriticKind::New, st, false);
+                }
+            }
+            CriticKind::Highlight => {
+                let start = self.job.text.len();
+                self.pending_lead += 1.0;
+                self.nodes(r, &n.children, st, false);
+                self.pending_lead += 1.0;
+                self.links.push((
+                    start..self.job.text.len(),
+                    Mark::Box {
+                        fill: color(rc.highlight_bg),
+                        pad: 1.0,
+                        radius: 2.0,
+                        stretch: true,
+                    },
+                ));
+            }
+            CriticKind::Comment => {
+                let mut c = st.clone();
+                c.color = color(rc.comment_text);
+                c.italic = true;
+                c.transform = TextTransform::None;
+                let child = n.children.first();
+                let value = child.map(|ch| r.value(ch)).unwrap_or("");
+                let start = self.job.text.len();
+                if revealed {
+                    // the raw text, byte for byte (caret stops inside)
+                    let src = child.map_or(n.content.clone(), |ch| ch.source.clone());
+                    self.push_src(value, &c, &src, true);
+                } else {
+                    c.size = (st.size * 0.85).round();
+                    self.push_src(&comment_bubble(value), &c, &n.source, false);
+                }
+                let end = self.job.text.len();
+                if end > start {
+                    self.links.push((
+                        start..end,
+                        Mark::Box {
+                            fill: color(rc.comment_bg),
+                            pad: 3.0,
+                            radius: 4.0,
+                            stretch: false,
+                        },
+                    ));
+                }
+            }
+        }
         if revealed {
             self.markers(n, st, false);
         }
@@ -1143,8 +1264,8 @@ impl<'a> InlineBuilder<'a> {
                 self.push_src(&format!("[{label}]"), &c, &n.source, false);
             }
             InlineKind::Underline => self.nodes(r, &n.children, st, false),
-            // handled in `node` (it needs the reveal state)
-            InlineKind::WikiLink { .. } => {}
+            // handled in `node` (they need the reveal state)
+            InlineKind::WikiLink { .. } | InlineKind::Critic(_) => {}
         }
     }
 }
@@ -1184,6 +1305,16 @@ impl Out {
                 Mark::Strike(c) => {
                     for sp in spans {
                         let y = sp.baseline - sp.ascent * 0.32;
+                        after.push(Prim::Line {
+                            a: pos + vec2(sp.x0, y),
+                            b: pos + vec2(sp.x1, y),
+                            stroke: Stroke::new(sp.stroke, *c),
+                        });
+                    }
+                }
+                Mark::Underline(c) => {
+                    for sp in spans {
+                        let y = sp.baseline + (sp.descent * 0.35).max(1.5);
                         after.push(Prim::Line {
                             a: pos + vec2(sp.x0, y),
                             b: pos + vec2(sp.x1, y),

@@ -28,3 +28,7 @@ harness = false
 [[bench]]
 name = "owner"
 harness = false
+
+[[bench]]
+name = "review"
+harness = false

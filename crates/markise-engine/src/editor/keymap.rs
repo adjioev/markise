@@ -83,13 +83,14 @@ impl Chord {
 /// Chords the operating system (or its standard menu roles) owns: `keyBinding` cannot take
 /// them (ADR 0006 §3.3). macOS: Hide ⌘H, Hide Others ⌥⌘H, Minimize ⌘M, Quit ⌘Q,
 /// Preferences ⌘,, app switching ⌘Tab / ⌘`, Spotlight ⌘Space; elsewhere: Alt+F4, Alt+Tab.
+/// ⌥⌘M (Minimize All, only reachable by Option-clicking the Window menu's Minimize; the app
+/// installs no key equivalent for it) is Add Comment (owner, issue #69, ADR 0012).
 pub fn reserved_chords(platform: Platform) -> Vec<Chord> {
     let list: &[&str] = match platform {
         Platform::Mac => &[
             "Cmd+H",
             "Opt+Cmd+H",
             "Cmd+M",
-            "Opt+Cmd+M",
             "Cmd+Q",
             "Cmd+,",
             "Cmd+Tab",

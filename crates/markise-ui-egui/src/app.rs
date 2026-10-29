@@ -50,6 +50,7 @@ use crate::viewer::DocViewer;
 
 mod files;
 mod menus;
+mod review;
 mod vault;
 pub use menus::MenuHost;
 pub use vault::{Completion, NavHistory, Suggestion};
@@ -339,6 +340,8 @@ enum Ask {
     Trash(PathBuf),
     /// Create the note `rel` (vault path) for an unresolved link (spec 06 V2.8).
     CreateNote { rel: String },
+    /// Save Copy Without Comments: accept or reject the pending suggestions in the copy?
+    CleanCopy { suggestions: usize },
 }
 
 enum Banner {
@@ -479,6 +482,8 @@ pub struct MarkiseApp {
     focus_before_question: Option<(egui::Id, u8)>,
     /// Vault file map, link following, Back / Forward, link autocomplete (spec 06).
     vault: vault::VaultState,
+    /// Comments and suggestions: the switch, the panel's list, clean copies (ADR 0012).
+    review: review::ReviewState,
 }
 
 impl MarkiseApp {
@@ -487,6 +492,8 @@ impl MarkiseApp {
         let diagrams = themes.diagrams();
         let vault = vault::VaultState::new(opts.parse.wikilinks);
         opts.parse.wikilinks &= themes.wikilinks();
+        let review = review::ReviewState::new(opts.parse.critic_markup);
+        opts.parse.critic_markup &= themes.critic_markup();
         MarkiseApp {
             host_keymap: markise_engine::editor::keymap::Keymap::new(
                 &markise_engine::editor::command::Registry::for_format(&markise_md::MarkdownFormat::default()),
@@ -561,6 +568,7 @@ impl MarkiseApp {
             question_id: 0,
             focus_before_question: None,
             vault,
+            review,
         }
     }
 
@@ -832,6 +840,16 @@ impl MarkiseApp {
     /// Shows the Files (`true`) or Outline tab of the sidebar.
     pub fn show_files_tab(&mut self, files: bool) {
         self.tab = if files { Tab::Files } else { Tab::Outline };
+    }
+
+    /// The sidebar's view (activity bar).
+    pub fn sidebar_tab(&self) -> Tab {
+        self.tab
+    }
+
+    /// Chooses the sidebar's view (activity bar; tests).
+    pub fn set_sidebar_tab(&mut self, tab: Tab) {
+        self.tab = tab;
     }
 
     /// Expands or collapses a folder of the file tree.
@@ -1981,6 +1999,7 @@ impl MarkiseApp {
                 let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
                 Question::create_note(name, dir)
             }
+            Some(Ask::CleanCopy { suggestions }) => Question::clean_copy(*suggestions),
             None => {
                 let req = self.export.pending_overwrite()?;
                 Question::export_overwrite(&req.output)
@@ -2028,6 +2047,8 @@ impl MarkiseApp {
             }),
             (Choice::MoveToTrash, Some(Ask::Trash(p))) => self.move_to_trash(&p),
             (Choice::Create, Some(Ask::CreateNote { rel })) => self.create_note(rel),
+            (Choice::AcceptAll, Some(Ask::CleanCopy { .. })) => self.write_clean_copy(false),
+            (Choice::RejectAll, Some(Ask::CleanCopy { .. })) => self.write_clean_copy(true),
             (_, Some(_)) => {} // Cancel (or a choice the question does not offer)
             (c, None) => {
                 if let Some(r) = self.export.answer_overwrite(c == Choice::Overwrite) {
@@ -2426,6 +2447,12 @@ impl MarkiseApp {
                             self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
                         }
                     }
+                    Tab::Comments => {
+                        if self.files.rename.is_some() {
+                            self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
+                        }
+                        self.comments_panel(ui, &look);
+                    }
                     Tab::Outline => {
                         // switched away from the Files tab while a name was being edited:
                         // like a click elsewhere
@@ -2545,6 +2572,9 @@ impl MarkiseApp {
                         let opened_shown = self.timing.open_started.as_ref().is_some_and(|o| o.2 == d.path);
                         if let Some(link) = out.link {
                             self.open_link(ctx, &link);
+                        }
+                        if let Some((id, at)) = out.review {
+                            self.run_review(ctx, id, at);
                         }
                         if opened_shown
                             && let Some((start, bytes, _)) = self.timing.open_started.take()

@@ -114,8 +114,49 @@ fn conformance_options(ext: Option<&str>) -> ParseOptions {
         // `[[x]]` the Obsidian way) are not part of it; their divergences from CommonMark
         // (examples 548, 559, 590) are pinned in `markise-md/tests/wikilinks.rs`
         wikilinks: false,
+        // CriticMarkup (ADR 0012) is a Markise extension too; `critic_markup_changes_no_example`
+        // pins that switching it on changes no example
+        critic_markup: false,
         ..ParseOptions::default()
     }
+}
+
+/// ADR 0012 §7: with CriticMarkup on, every CommonMark and GFM example exports exactly as with
+/// it off (no example contains an opener). An example that starts to differ must be pinned
+/// here with its id and documented in the ADR.
+#[test]
+fn critic_markup_changes_no_example() {
+    let (Some(cm), Some(gfm)) = (commonmark_examples(), gfm_examples()) else {
+        assert!(
+            std::env::var("CI").as_deref() != Ok("true"),
+            "CONFORMANCE SKIPPED: .spec-cache/ missing (required when CI=true)"
+        );
+        return;
+    };
+    let pinned: &[&str] = &[];
+    let mut differ = Vec::new();
+    let mut n = 0;
+    for ex in cm.iter().chain(gfm.iter()) {
+        n += 1;
+        let base = conformance_options(ex.extension.as_deref());
+        let on = ParseOptions {
+            critic_markup: true,
+            ..base.clone()
+        };
+        let opts = HtmlOptions {
+            trusted: true,
+            ..Default::default()
+        };
+        let a = render_body(&Document::parse(ex.markdown.as_str(), base), &opts);
+        let doc_on = Document::parse(ex.markdown.as_str(), on);
+        assert_eq!(doc_on.serialize(), ex.markdown, "round-trip {}:{}", ex.suite, ex.number);
+        let b = render_body(&doc_on, &opts);
+        if a != b {
+            differ.push(format!("{}:{}", ex.suite, ex.number));
+        }
+    }
+    assert!(n > 600, "examples loaded: {n}");
+    assert_eq!(differ, pinned, "examples whose export changes with CriticMarkup on");
 }
 
 fn expected_failures() -> BTreeMap<String, String> {

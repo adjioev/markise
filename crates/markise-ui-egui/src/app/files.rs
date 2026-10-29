@@ -32,7 +32,7 @@ pub(crate) struct FileOps {
 
 /// `p` with the default extension when it has none (spec 05: `md`; returns whether it was
 /// added), its folder canonical (the file tree and the watcher use canonical paths).
-fn normalize_target(mut p: PathBuf) -> (PathBuf, bool) {
+pub(super) fn normalize_target(mut p: PathBuf) -> (PathBuf, bool) {
     let added = p.extension().is_none();
     if added {
         p.set_extension(fsops::DEFAULT_EXTENSION);
@@ -171,6 +171,21 @@ impl MarkiseApp {
     /// Test hook: the next save dialog returns `answer` (`None`: Cancel) instead of opening.
     pub fn queue_save_dialog_answer(&mut self, answer: Option<PathBuf>) {
         self.files.save_answers.push_back(answer);
+    }
+
+    /// A save dialog titled `title` proposing `name` in `dir` (Save Copy Without Comments);
+    /// answered by [`Self::queue_save_dialog_answer`] in tests.
+    pub(super) fn pick_save_path_with(&mut self, title: &str, dir: Option<PathBuf>, name: &str) -> Option<PathBuf> {
+        if let Some(a) = self.files.save_answers.pop_front() {
+            return a;
+        }
+        rfd::FileDialog::new()
+            .set_title(title)
+            .set_directory(dir.unwrap_or_else(|| self.untitled_dir()))
+            .set_file_name(name)
+            .add_filter("Markdown", MARKDOWN_EXTENSIONS)
+            .add_filter("Plain text", TEXT_EXTENSIONS)
+            .save_file()
     }
 
     /// The native save dialog (default name `Untitled.md` or the current name; the Markdown

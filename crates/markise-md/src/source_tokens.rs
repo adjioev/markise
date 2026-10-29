@@ -319,6 +319,32 @@ impl Painter<'_> {
             }
             InlineKind::Html | InlineKind::Math { .. } => self.paint(s, e, SourceTok::Meta),
             InlineKind::Escape => self.paint(s, (s + 1).min(e), SourceTok::Marker),
+            // review marks (ADR 0012): dimmed delimiters; inserted text in the link colour,
+            // deleted text struck, highlights marked, comments as metadata
+            InlineKind::Critic { kind, content } => {
+                use crate::inline::CriticKind as K;
+                let (a, b) = (at + content.start, at + content.end);
+                let tok = match kind {
+                    K::Insert | K::New => SourceTok::Link,
+                    K::Delete | K::Old => SourceTok::Strike,
+                    K::Highlight => SourceTok::Mark,
+                    K::Comment => SourceTok::Meta,
+                    K::Substitute => outer,
+                };
+                if tok != SourceTok::Plain {
+                    self.paint(a, b, tok);
+                }
+                for c in &n.children {
+                    self.inline(c, at, tok);
+                }
+                self.paint(s, a, SourceTok::Marker);
+                self.paint(b, e, SourceTok::Marker);
+                if *kind == K::Substitute
+                    && let (Some(old), Some(new)) = (n.children.first(), n.children.get(1))
+                {
+                    self.paint(at + old.span.end, at + new.span.start, SourceTok::Marker);
+                }
+            }
             _ => {
                 for c in &n.children {
                     self.inline(c, at, outer);

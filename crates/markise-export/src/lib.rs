@@ -33,7 +33,9 @@ use std::fmt::Write as _;
 
 use markise_blocks::diagram::{ApproxMeasure, DiagramLang, DiagramPalette, RenderCtx};
 use markise_blocks::math::{self, MathMode};
-use markise_md::inline::{Inline, InlineContext, InlineKind, decode_entity, decode_refs, parse_inlines, plain_text};
+use markise_md::inline::{
+    CriticKind, Inline, InlineContext, InlineKind, decode_entity, decode_refs, parse_inlines, plain_text,
+};
 use markise_md::slug::{SlugTracker, slug};
 use markise_md::{Align, Block, BlockKind, Document, MathDelim, frontmatter};
 use markise_theme::{Theme, TokenKind, TokenLook, TokenRun};
@@ -145,6 +147,20 @@ pub struct HtmlOptions {
     /// Where wikilinks point (spec 06 Q-V11): without a resolver, or for an unresolved target,
     /// a wikilink is written as its label in plain text.
     pub wikilinks: WikiLinkHrefs,
+    /// Review comments (CriticMarkup, ADR 0012): kept (default) or stripped. Suggestions
+    /// are always written as `<ins>` / `<del>`.
+    pub comments: CommentExport,
+}
+
+/// How review comments and highlights are exported ([`HtmlOptions::comments`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommentExport {
+    /// Highlights as `<mark class="critic" title="comment">`, comments as
+    /// `<span class="critic comment">`.
+    #[default]
+    Keep,
+    /// No comments; highlighted text as plain text.
+    Strip,
 }
 
 /// Resolves a wikilink (`target`, `subpath`) to the `href` written for it (a relative path to
@@ -246,6 +262,10 @@ body { margin: 0; background: #fff; color: #222; }
 #write .md-task-list-item > input { margin-left: -1.3em; }
 #write mjx-container[display=true] { display: block; text-align: center; margin: 1em 0; overflow-x: auto; }
 #write .md-math-error { color: #c0392b; }
+#write ins.critic { color: #1a7f37; text-decoration: underline; }
+#write del.critic { color: #cf222e; text-decoration: line-through; }
+#write mark.critic { background: #fbeb9b; }
+#write .critic.comment { background: rgba(251,235,155,0.55); font-size: 0.85em; font-style: italic; border-radius: 3px; padding: 0 4px; margin-left: 2px; }
 .cm-s-inner .cm-keyword, .cm-s-inner .cm-tag, .cm-s-inner .cm-header { color: #8b3fa8; }
 .cm-s-inner .cm-string, .cm-s-inner .cm-string-2 { color: #2d7a3a; }
 .cm-s-inner .cm-comment { color: #8d8a82; }
@@ -268,6 +288,14 @@ pub fn escape_html(s: &str, out: &mut String) {
             _ => out.push(c),
         }
     }
+}
+
+/// A comment as one line (inline elements: line breaks become spaces).
+fn comment_line(s: &str) -> String {
+    s.split(['\n', '\r'])
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn esc(s: &str) -> String {
@@ -748,9 +776,41 @@ impl<'a> Ctx<'a> {
     }
 
     fn inlines(&self, s: &str, nodes: &[Inline], out: &mut String) {
-        for n in nodes {
+        for (i, n) in nodes.iter().enumerate() {
+            if let InlineKind::Critic {
+                kind: CriticKind::Highlight,
+                ..
+            } = n.kind
+            {
+                // the comment written right after a highlight is its title
+                let title = nodes.get(i + 1).and_then(|c| match c.kind {
+                    InlineKind::Critic {
+                        kind: CriticKind::Comment,
+                        content,
+                    } if c.span.start == n.span.end => Some(content.slice(s)),
+                    _ => None,
+                });
+                self.critic_highlight(s, n, title, out);
+                continue;
+            }
             self.inline(s, n, out);
         }
+    }
+
+    /// A review highlight (ADR 0012): `<mark class="critic">` with its comment as the title,
+    /// or its text alone when comments are stripped.
+    fn critic_highlight(&self, s: &str, n: &Inline, title: Option<&str>, out: &mut String) {
+        if self.opts.comments == CommentExport::Strip {
+            self.inlines(s, &n.children, out);
+            return;
+        }
+        out.push_str("<mark class=\"critic\"");
+        if let Some(t) = title {
+            let _ = write!(out, " title=\"{}\"", esc(&comment_line(t)));
+        }
+        out.push('>');
+        self.inlines(s, &n.children, out);
+        out.push_str("</mark>");
     }
 
     fn wrap(&self, tag: &str, s: &str, n: &Inline, out: &mut String) {
@@ -911,6 +971,30 @@ impl<'a> Ctx<'a> {
             InlineKind::Emoji { emoji } => {
                 let _ = write!(out, "<span class='md-emoji'>{emoji}</span>");
             }
+            InlineKind::Critic { kind, content } => match kind {
+                CriticKind::Insert | CriticKind::New => {
+                    out.push_str("<ins class=\"critic\">");
+                    self.inlines(s, &n.children, out);
+                    out.push_str("</ins>");
+                }
+                CriticKind::Delete | CriticKind::Old => {
+                    out.push_str("<del class=\"critic\">");
+                    self.inlines(s, &n.children, out);
+                    out.push_str("</del>");
+                }
+                // a deletion followed by an insertion
+                CriticKind::Substitute => self.inlines(s, &n.children, out),
+                CriticKind::Highlight => self.critic_highlight(s, n, None, out),
+                CriticKind::Comment => {
+                    if self.opts.comments == CommentExport::Keep {
+                        let _ = write!(
+                            out,
+                            "<span class=\"critic comment\">{}</span>",
+                            esc(&comment_line(content.slice(s)))
+                        );
+                    }
+                }
+            },
             InlineKind::WikiLink {
                 target, subpath, inner, ..
             } => {

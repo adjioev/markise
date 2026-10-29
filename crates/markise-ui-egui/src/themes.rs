@@ -652,6 +652,37 @@ impl ThemeManager {
         }
     }
 
+    /// Whether CriticMarkup comments and suggestions are parsed (settings key
+    /// `markdown.criticMarkup`, default on; ADR 0012).
+    pub fn critic_markup(&self) -> bool {
+        self.settings.markdown.critic_markup
+    }
+
+    /// View → Comments & Suggestions; persisted like the other settings.
+    pub fn set_critic_markup(&mut self, on: bool) {
+        self.chose_markdown = true;
+        if on != self.settings.markdown.critic_markup {
+            self.settings.markdown.critic_markup = on;
+            self.dirty.markdown = Some(self.settings.markdown);
+            self.schedule_save();
+        }
+    }
+
+    /// Whether exports keep review comments (settings key `markdown.exportComments`).
+    pub fn export_comments(&self) -> bool {
+        self.settings.markdown.export_comments
+    }
+
+    /// File → Export → Include Comments; persisted like the other settings.
+    pub fn set_export_comments(&mut self, on: bool) {
+        self.chose_markdown = true;
+        if on != self.settings.markdown.export_comments {
+            self.settings.markdown.export_comments = on;
+            self.dirty.markdown = Some(self.settings.markdown);
+            self.schedule_save();
+        }
+    }
+
     /// Whether diagram fences are rendered (settings key `diagrams`, default on).
     pub fn diagrams(&self) -> bool {
         self.settings.diagrams
