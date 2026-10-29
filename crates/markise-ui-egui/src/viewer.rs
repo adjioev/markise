@@ -14,9 +14,9 @@ use std::time::Instant;
 use egui::{
     Color32, CornerRadius, CursorIcon, Event, EventFilter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
-use markise_doc::{DocPos, DocumentFormat, FormatDoc, Params, Selection};
+use markise_doc::{DocPos, DocumentFormat, FormatDoc, Params, Selection, planners};
 use markise_engine::editor::keymap::{Chord, Keymap, Platform};
-use markise_engine::editor::{EditorSession, EditorView};
+use markise_engine::editor::{EditorSession, EditorView, TxKind};
 use markise_layout::block::{BlockLayout, Prim, color};
 use markise_layout::text::ParleyBlock;
 use markise_layout::{DocModel, TextShaper, View};
@@ -412,7 +412,21 @@ impl DocViewer {
         // ---- input: pointer (hit tests against the last frame's layout)
         let modifiers = ui.input(|i| i.modifiers);
         let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.hovered();
+        // a press on a task checkbox toggles it (spec 02 §9) instead of placing the caret
+        let task = if pressed {
+            ui.input(|i| i.pointer.interact_pos())
+                .and_then(|p| self.task_box_at(p, rect.top()))
+        } else {
+            None
+        };
+        if let Some(idx) = task
+            && editable
+            && self.toggle_task(idx)
+        {
+            out.edited = true;
+        }
         if pressed
+            && task.is_none()
             && let Some(p) = ui.input(|i| i.pointer.interact_pos())
             && !self.on_toggle_or_link(p, rect.top(), modifiers)
         {
@@ -605,7 +619,8 @@ impl DocViewer {
         {
             let link = layout.link_at(local).is_some() && (modifiers.command || !focused);
             let on_toggle = layout.toggle.is_some_and(|t| t.contains(local));
-            if link || on_toggle {
+            let on_task = editable && task_box_hit(layout, local);
+            if link || on_toggle || on_task {
                 ctx.set_cursor_icon(CursorIcon::PointingHand);
             }
         }
@@ -681,6 +696,40 @@ impl DocViewer {
             return l.toggle.is_some_and(|t| t.contains(local)) || (m.command && l.link_at(local).is_some());
         }
         false
+    }
+
+    /// The visible item whose task checkbox is under screen point `p` (last frame's geometry).
+    fn task_box_at(&self, p: Pos2, top: f32) -> Option<usize> {
+        for &(idx, y) in &self.last_visible {
+            let Some(l) = self.ed.view.cache_peek(idx) else {
+                continue;
+            };
+            let local = pos2(p.x - self.last_left, p.y - top - y);
+            if local.y < 0.0 || local.y >= l.height {
+                continue;
+            }
+            return task_box_hit(l, local).then_some(idx);
+        }
+        None
+    }
+
+    /// Toggles the task box of item `idx` as one undo step ("Toggle Task Status"); the
+    /// selection is kept as it was (the box is not a caret stop, spec 02 §9).
+    fn toggle_task(&mut self, idx: usize) -> bool {
+        let start = self.ed.view.model().item_span(idx).start;
+        self.ed
+            .edit(|s| {
+                s.transact("Toggle Task Status", TxKind::Structural, |tx| {
+                    let keep = tx.selection().clone();
+                    tx.set_selection(Selection::caret(start));
+                    let plan = tx.plan(planners::TOGGLE_TASK, Params::new())?;
+                    tx.apply_plan(plan)?;
+                    // `[ ]` / `[x]` / `[X]` have the same length: offsets are unchanged
+                    tx.set_selection(keep);
+                    Ok(())
+                })
+            })
+            .is_ok()
     }
 
     /// The document position under screen point `p` (last frame's geometry).
@@ -893,6 +942,13 @@ fn key_name(k: egui::Key) -> Option<String> {
         }
         .to_string(),
     )
+}
+
+/// A task checkbox of `l` is under item-local `local` (with a small margin: the box is small).
+fn task_box_hit(l: &BlockLayout, local: Pos2) -> bool {
+    l.prims
+        .iter()
+        .any(|p| matches!(p, Prim::Checkbox { rect, .. } if rect.expand(2.0).contains(local)))
 }
 
 fn hit(visible: &[markise_layout::Visible], p: Pos2, left: f32, top: f32) -> Option<(usize, Pos2, &BlockLayout)> {
