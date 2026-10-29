@@ -725,3 +725,86 @@ fn mixed_pastes_keep_their_order() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Codex P2 (round 4): a stalled attachment job is given up at its deadline with a message,
+/// the queue moves on, and its late result is ignored.
+#[test]
+fn stalled_job_times_out_and_later_pastes_proceed() {
+    let d = tmpdir("stall");
+    let note = d.join("note.md");
+    std::fs::write(&note, NOTE).unwrap();
+    let mut h = open(vec![note.clone()], &note, AppOptions::default());
+    focus_end(&mut h);
+    // the first job blocks until released; later jobs run normally
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (g, f) = (gate.clone(), first.clone());
+    h.state_mut().set_attach_job_test(
+        Duration::from_millis(300),
+        Some(Arc::new(move || {
+            if f.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                let (m, cv) = &*g;
+                let mut open = m.lock().unwrap();
+                while !*open {
+                    open = cv.wait(open).unwrap();
+                }
+            }
+        })),
+    );
+    h.event(Event::PasteImage(image()));
+    h.step();
+    h.event(Event::Paste("https://example.com/later.png".into()));
+    h.step();
+    assert_eq!(text(&h), NOTE, "the URL paste waits behind the stalled job");
+    let t = Instant::now();
+    wait_until(&mut h, "deadline", |a| !a.is_attaching());
+    assert!(t.elapsed() < Duration::from_secs(5));
+    assert!(text(&h).contains("![](https://example.com/later.png)"), "{}", text(&h));
+    assert!(!text(&h).contains("Pasted"));
+    assert!(
+        h.state().banner_text().is_some_and(|b| b.contains("given up")),
+        "{:?}",
+        h.state().banner_text()
+    );
+    // released: the late result is ignored (no second insertion)
+    let before = text(&h);
+    {
+        let (m, cv) = &*gate;
+        *m.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    for _ in 0..20 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(text(&h), before);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Codex P2 (round 4): a file paste whose clipboard list arrives after the user switched to
+/// another document is cancelled — nothing is copied, neither document changes.
+#[test]
+fn delayed_file_paste_after_switching_documents_copies_nothing() {
+    let src = tmpdir("switch-src");
+    std::fs::write(src.join("pic.png"), b"png").unwrap();
+    let (mut h, _slow, d, _) = slow_app("switch-a", vec![src.join("pic.png")], Duration::from_millis(300));
+    let other = tmpdir("switch-b");
+    let b = other.join("b.md");
+    std::fs::write(&b, NOTE).unwrap();
+    h.event(Event::Paste("pic.png".into()));
+    h.step();
+    h.state_mut().open(b.clone());
+    let bb = b.clone();
+    wait_until(&mut h, "document B", move |a| {
+        a.document_path() == Some(bb.as_path()) && !a.is_busy()
+    });
+    wait_until(&mut h, "paste resolved", |a| !a.is_attaching());
+    std::thread::sleep(Duration::from_millis(400));
+    h.run_steps(3);
+    assert_eq!(text(&h), NOTE, "B unchanged");
+    assert!(!other.join("assets").exists(), "nothing copied next to B");
+    assert!(!d.join("assets").exists(), "nothing copied next to A");
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&other);
+    let _ = std::fs::remove_dir_all(&src);
+}

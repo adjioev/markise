@@ -39,13 +39,19 @@ use super::{Banner, MarkiseApp};
 
 /// How long a paste waits for the clipboard's file list before it goes in as text.
 const CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long an attachment job (copying, encoding) may take before it is given up: the queue
+/// moves on with a message and a late result is ignored.
+const JOB_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Test hook run on the job worker before the job (e.g. to stall it).
+pub type JobHook = Arc<dyn Fn() + Send + Sync>;
 
 /// What an entry still waits for, or what it inserts.
 enum Stage {
     /// A text paste whose clipboard file list is being read.
     Clipboard { text: String, rx: Receiver<Vec<PathBuf>> },
-    /// Files or image data being written.
-    Job(Receiver<Outcome>),
+    /// Files or image data being written (since `Instant`).
+    Job(Receiver<Outcome>, Instant),
     /// Text to paste (cancelled when the user changed the document meanwhile).
     Text(String),
     /// A finished job: its Markdown goes in (at the caret when the document changed).
@@ -63,6 +69,9 @@ struct Entry {
     source: bool,
     started: Instant,
     stage: Stage,
+    /// Where files of this entry go, captured when it was made (a clipboard file list that
+    /// arrives later must not use another document's folder).
+    dest: Option<Request>,
 }
 
 /// An insertion made by this module (not by the user): queued entries captured before it are
@@ -100,6 +109,8 @@ pub(crate) struct AttachState {
     own_edits: Vec<OwnEdit>,
     /// Fixed `YYYYMMDDHHMMSS` for pasted image names (tests).
     stamp: Option<String>,
+    job_timeout: Duration,
+    job_hook: Option<JobHook>,
 }
 
 impl AttachState {
@@ -109,6 +120,8 @@ impl AttachState {
             queue: VecDeque::new(),
             own_edits: Vec::new(),
             stamp: None,
+            job_timeout: JOB_TIMEOUT,
+            job_hook: None,
         }
     }
 }
@@ -117,6 +130,12 @@ impl MarkiseApp {
     /// Uses `stamp` (`YYYYMMDDHHMMSS`) instead of the clock for pasted image names (tests).
     pub fn set_paste_stamp(&mut self, stamp: Option<String>) {
         self.attach.stamp = stamp;
+    }
+
+    /// Test seams: the attachment job deadline and a hook run on the job worker before each job.
+    pub fn set_attach_job_test(&mut self, timeout: Duration, hook: Option<JobHook>) {
+        self.attach.job_timeout = timeout;
+        self.attach.job_hook = hook;
     }
 
     /// A paste or drop is still resolving or waiting for its turn.
@@ -198,8 +217,8 @@ impl MarkiseApp {
         for e in taken {
             match e {
                 Event::PasteImage(img) => {
-                    let rx = self.spawn_attach(vec![Item::Image(img)]);
-                    self.enqueue(None, rx.map(Stage::Job));
+                    let stage = self.attach_request().map(|r| self.job(r, vec![Item::Image(img)]));
+                    self.enqueue(None, stage);
                 }
                 Event::Paste(t) if ask_files => {
                     let rx = self.spawn_clipboard();
@@ -249,6 +268,7 @@ impl MarkiseApp {
     fn enqueue(&mut self, at: Option<usize>, stage: Option<Stage>) {
         let Some(stage) = stage else { return };
         let source = self.source_visible || self.side_by_side;
+        let dest = self.attach_request();
         let Some(d) = &self.doc else { return };
         let sel = match (at, &d.viewer.ed.source, source) {
             (Some(o), _, _) => Selection::caret(o),
@@ -262,6 +282,7 @@ impl MarkiseApp {
             source,
             started: Instant::now(),
             stage,
+            dest,
         });
     }
 
@@ -288,12 +309,15 @@ impl MarkiseApp {
                 d.viewer.request_refocus();
             }
         }
-        let rx = self.spawn_attach(files.into_iter().map(Item::File).collect());
-        self.enqueue(at, rx.map(Stage::Job));
+        let stage = self
+            .attach_request()
+            .map(|r| self.job(r, files.into_iter().map(Item::File).collect()));
+        self.enqueue(at, stage);
     }
 
-    /// Starts writing `items` for the open document on a worker.
-    fn spawn_attach(&self, items: Vec<Item>) -> Option<Receiver<Outcome>> {
+    /// The destination context of the open document (no items yet): note, vault root handle,
+    /// settings, resource root.
+    fn attach_request(&self) -> Option<Request> {
         let d = self.doc.as_ref()?;
         let note = d.file().map(|p| p.to_path_buf());
         let index = self.vault_index().cloned();
@@ -305,8 +329,8 @@ impl MarkiseApp {
             .as_ref()
             .filter(|ix| ix.settings().obsidian)
             .and_then(|ix| ix.settings().attachment_folder.clone());
-        let req = Request {
-            items,
+        Some(Request {
+            items: Vec::new(),
             settings: self.themes.image_settings().clone(),
             note,
             vault,
@@ -314,8 +338,30 @@ impl MarkiseApp {
             user_images: self.user_images_folder(),
             stamp: self.attach.stamp.clone().unwrap_or_else(attach::stamp_now),
             resource_root: d.viewer.ed.session.doc().resource_root(),
-        };
-        Some(attach::spawn(req, self.wake_handle()))
+        })
+    }
+
+    /// Starts writing `items` to the destination `req` on a worker.
+    fn job(&self, mut req: Request, items: Vec<Item>) -> Stage {
+        req.items = items;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (wake, hook) = (self.wake_handle(), self.attach.job_hook.clone());
+        let spawned = std::thread::Builder::new()
+            .name("markise-attach".into())
+            .spawn(move || {
+                if let Some(h) = hook {
+                    h();
+                }
+                let _ = tx.send(attach::run(&req)); // ignored when the entry timed out
+                wake();
+            });
+        match spawned {
+            Ok(_) => Stage::Job(rx, Instant::now()),
+            Err(e) => Stage::Done(Outcome {
+                errors: vec![format!("cannot start a thread: {e}")],
+                ..Default::default()
+            }),
+        }
     }
 
     /// Per frame: advances every queued entry (all may resolve at once), then inserts finished
@@ -325,9 +371,13 @@ impl MarkiseApp {
             self.attach.own_edits.clear();
             return;
         }
+        // entries of a document that is no longer open are cancelled at once (nothing copied)
+        let current = self.doc.as_ref().map(|d| d.id);
+        self.attach.queue.retain(|e| Some(e.doc_id) == current);
         // resolve
         let mut start_jobs = Vec::new();
         let mut wait: Option<Duration> = None;
+        let job_timeout = self.attach.job_timeout;
         for (i, e) in self.attach.queue.iter_mut().enumerate() {
             match &e.stage {
                 Stage::Clipboard { text, rx } => {
@@ -356,7 +406,7 @@ impl MarkiseApp {
                         None => {}
                     }
                 }
-                Stage::Job(rx) => match rx.try_recv() {
+                Stage::Job(rx, since) => match rx.try_recv() {
                     Ok(o) => e.stage = Stage::Done(o),
                     Err(TryRecvError::Disconnected) => {
                         e.stage = Stage::Done(Outcome {
@@ -364,7 +414,23 @@ impl MarkiseApp {
                             ..Default::default()
                         })
                     }
-                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Empty) => {
+                        let waited = since.elapsed();
+                        if waited >= job_timeout {
+                            // given up: the queue moves on, a late result is dropped with the
+                            // receiver
+                            e.stage = Stage::Done(Outcome {
+                                errors: vec![format!(
+                                    "Writing the pasted or dropped files took longer than {} s and was given up (files may still appear in the image folder).",
+                                    job_timeout.as_secs_f32().round()
+                                )],
+                                ..Default::default()
+                            });
+                        } else {
+                            let left = job_timeout - waited;
+                            wait = Some(wait.map_or(left, |w| w.min(left)));
+                        }
+                    }
                 },
                 Stage::Text(_) | Stage::Done(_) => {}
             }
@@ -378,8 +444,10 @@ impl MarkiseApp {
                     }
                 }
                 Some(f) => {
-                    let stage = match self.spawn_attach(f.into_iter().map(Item::File).collect()) {
-                        Some(rx) => Stage::Job(rx),
+                    // the destination captured with the paste (the document is still the same:
+                    // entries of other documents were removed above)
+                    let stage = match self.attach.queue[i].dest.clone() {
+                        Some(req) => self.job(req, f.into_iter().map(Item::File).collect()),
                         None => Stage::Done(Outcome::default()),
                     };
                     self.attach.queue[i].stage = stage;
@@ -445,7 +513,7 @@ impl MarkiseApp {
                     self.banner = Some(Banner::Error(out.errors.join(" ")));
                 }
             }
-            Stage::Clipboard { .. } | Stage::Job(_) => {}
+            Stage::Clipboard { .. } | Stage::Job(..) => {}
         }
     }
 
