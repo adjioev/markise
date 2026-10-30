@@ -429,6 +429,10 @@ impl FormScript {
                 }
                 Some((m, _)) if m == usize::MAX - 1 && all && after(600) => {
                     crate::block_snap::ProtoScript::default().shot(ctx, "forms-proto-after-save");
+                    self.waiting = Some((usize::MAX - 2, 0));
+                    self.since = Some(now);
+                }
+                Some((m, _)) if m == usize::MAX - 2 && after(400) => {
                     let label = viewer
                         .ed
                         .session

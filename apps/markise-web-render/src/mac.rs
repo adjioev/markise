@@ -16,7 +16,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     NSActivityOptions, NSDictionary, NSError, NSNumber, NSObjectNSKeyValueCoding, NSObjectProtocol, NSPoint,
-    NSProcessInfo, NSRect, NSSize, NSString, ns_string,
+    NSProcessInfo, NSRect, NSSize, NSString, NSURL, ns_string,
 };
 use objc2_web_kit::{WKContentWorld, WKSnapshotConfiguration, WKWebView, WKWebViewConfiguration};
 use serde_json::{Value, json};
@@ -27,10 +27,10 @@ use crate::proto;
 /// `#mk-root`. Animations and transitions are off so a snapshot never catches a mid-state.
 const SHELL: &str = r#"<!doctype html><html><head><meta charset="utf-8">
 <style>
-html,body{margin:0;padding:0;background:transparent}
+html,body{margin:0;padding:0;background:transparent;overflow:hidden}
 *,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent}
 #mk-root{display:flow-root}
-</style><style id="mk-css"></style></head><body><div id="mk-root"></div></body></html>"#;
+</style><style id="mk-css"></style><base id="mk-base"></head><body><div id="mk-root"></div></body></html>"#;
 
 /// Runs in the page for every request (body of an async function, argument `req` = JSON).
 /// Waits for the viewport width, installs CSS and HTML, runs the site's `decorate(block)` (the
@@ -46,6 +46,8 @@ const html = document.documentElement;
 if (html.dataset.theme !== r.theme) html.dataset.theme = r.theme;
 const style = (r.vars || '') + ';color-scheme:' + r.theme;
 if (html.getAttribute('style') !== style) html.setAttribute('style', style);
+const base = document.getElementById('mk-base');
+if (r.base && base.getAttribute('href') !== r.base) base.setAttribute('href', r.base);
 const root = document.getElementById('mk-root');
 root.innerHTML = r.html;
 const block = root.firstElementChild;
@@ -60,6 +62,12 @@ if (r.js && block) {
     ]);
   }
 }
+// site assets (pictures) by relative paths: wait until each image loaded or failed
+const imgs = [...root.querySelectorAll('img')].filter(i => !i.complete);
+if (imgs.length) await Promise.race([
+  Promise.all(imgs.map(i => new Promise(res => { i.addEventListener('load', res, { once: true }); i.addEventListener('error', res, { once: true }); }))),
+  sleep(3000),
+]);
 await Promise.race([document.fonts.ready, sleep(1000)]);
 const h = root.getBoundingClientRect().height;
 return JSON.stringify({ height: h, decorated, inner_width: window.innerWidth, ms: performance.now() - t0 });
@@ -149,8 +157,34 @@ pub fn main() {
             window.orderFrontRegardless();
         }
     }
-    unsafe {
-        let _ = web.loadHTMLString_baseURL(&NSString::from_str(SHELL), None);
+    // Site assets: with `MARKISE_WR_ROOT` (a folder: the site root) the shell is loaded from a
+    // temporary file with read access to that folder, so pictures and fonts of the site load;
+    // every request sets `<base href>` to the document's folder so relative picture paths
+    // resolve like in the document.
+    let root = std::env::var("MARKISE_WR_ROOT").ok().filter(|r| !r.is_empty());
+    // WebKit only loads a file page inside its read-access folder, so the shell file lives in
+    // the user's cache folder and read access is the common ancestor of it and the site root
+    // (the home folder for sites under it).
+    let cache = std::env::var_os("HOME")
+        .map(|h| std::path::PathBuf::from(h).join("Library/Caches/markise-web-render"))
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&cache);
+    let shell_file = cache.join(format!("shell-{}.html", std::process::id()));
+    match root {
+        Some(r) if std::fs::write(&shell_file, SHELL).is_ok() => unsafe {
+            let file = NSURL::fileURLWithPath(&NSString::from_str(&shell_file.to_string_lossy()));
+            let common: std::path::PathBuf = std::path::Path::new(&r)
+                .components()
+                .zip(shell_file.components())
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a)
+                .collect();
+            let access = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&common.to_string_lossy()), true);
+            let _ = web.loadFileURL_allowingReadAccessToURL(&file, &access);
+        },
+        _ => unsafe {
+            let _ = web.loadHTMLString_baseURL(&NSString::from_str(SHELL), None);
+        },
     }
 
     // ---- output thread (stdout carries protocol frames only)
@@ -188,7 +222,8 @@ pub fn main() {
         });
     } else {
         // ---- input thread: requests are handed to the main thread
-        std::thread::spawn(|| {
+        let shell_tmp = shell_file.clone();
+        std::thread::spawn(move || {
             let mut input = std::io::stdin().lock();
             loop {
                 match proto::read_frame(&mut input) {
@@ -202,6 +237,7 @@ pub fn main() {
                             "js": v["js"].as_str().unwrap_or(""),
                             "theme": if v["theme"] == "dark" { "dark" } else { "light" },
                             "vars": v["vars"].as_str().unwrap_or(""),
+                            "base": v["base"].as_str().unwrap_or(""),
                         })
                         .to_string();
                         let req = Req {
@@ -214,6 +250,7 @@ pub fn main() {
                     }
                     Err(_) => {
                         // Markise went away (EOF) or sent garbage
+                        let _ = std::fs::remove_file(&shell_tmp);
                         DispatchQueue::main().exec_async(|| std::process::exit(0));
                         return;
                     }

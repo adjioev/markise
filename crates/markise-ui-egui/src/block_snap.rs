@@ -31,9 +31,6 @@ use egui::{ColorImage, TextureHandle, TextureOptions};
 use markise_layout::{DocModel, ItemKind};
 use serde_json::{Value, json};
 
-/// Components rendered through the helper.
-const COMPONENTS: &[&str] = &["goals", "question", "scene"];
-
 /// A `:::name variant` … `:::` block found in the model.
 #[derive(Clone, Debug)]
 pub struct Block {
@@ -44,7 +41,10 @@ pub struct Block {
     /// Source offset of the opening line (click target).
     pub offset: usize,
     pub name: String,
+    /// First argument after the name (`multiple`, `lamps`, a scene preset …).
     pub variant: String,
+    /// Everything after the name.
+    pub args: String,
     pub inner: String,
     /// Content key (name, variant, inner Markdown).
     pub content: u64,
@@ -54,14 +54,15 @@ fn marker_of(line: &str) -> Option<(String, String)> {
     let rest = line.strip_prefix(":::")?;
     let mut words = rest.split_whitespace();
     let name = words.next()?.to_string();
-    let variant = words.next().unwrap_or("").to_string();
-    if words.next().is_some() {
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return None;
     }
-    Some((name, variant))
+    let args = words.collect::<Vec<_>>().join(" ");
+    Some((name, args))
 }
 
-/// Finds the snapshot blocks (goals, question) of the document: an opening paragraph
+/// Finds the `:::name` blocks of the document (any name; blocks without site code fail in
+/// the worker and stay Markdown): an opening paragraph
 /// `:::name [variant]` and the next paragraph that is exactly `:::`.
 pub fn find_blocks(model: &DocModel, text: &str) -> Vec<Block> {
     let mut out = Vec::new();
@@ -78,25 +79,24 @@ pub fn find_blocks(model: &DocModel, text: &str) -> Vec<Block> {
             continue;
         }
         if line == ":::" {
-            if let Some((oi, ostart, oend, name, variant)) = open.take() {
+            if let Some((oi, ostart, oend, name, args)) = open.take() {
                 let inner = text.get(oend..start).unwrap_or("").trim_matches('\n').to_string();
                 let mut h = std::collections::hash_map::DefaultHasher::new();
-                (&name, &variant, &inner).hash(&mut h);
-                if COMPONENTS.contains(&name.as_str()) {
-                    out.push(Block {
-                        open: oi,
-                        close: i,
-                        offset: ostart,
-                        name,
-                        variant,
-                        inner,
-                        content: h.finish(),
-                    });
-                }
+                (&name, &args, &inner).hash(&mut h);
+                out.push(Block {
+                    open: oi,
+                    close: i,
+                    offset: ostart,
+                    variant: args.split_whitespace().next().unwrap_or("").to_string(),
+                    name,
+                    args,
+                    inner,
+                    content: h.finish(),
+                });
             }
-        } else if let Some((name, variant)) = marker_of(line) {
+        } else if let Some((name, args)) = marker_of(line) {
             // a new opener before a closer: the previous one was not a block
-            open = Some((i, start, end, name, variant));
+            open = Some((i, start, end, name, args));
         }
     }
     out
@@ -147,6 +147,7 @@ struct Job {
     key: u64,
     name: String,
     variant: String,
+    args: String,
     inner: String,
     width: f32,
     scale: f32,
@@ -202,6 +203,7 @@ pub struct BlockSnaps {
     pub current: Vec<bool>,
     /// PROTOTYPE (proto/block-forms): the block edit dialog.
     pub form: crate::block_edit::FormState,
+    pending: usize,
 }
 
 /// Where the image of a block is painted this frame.
@@ -263,7 +265,13 @@ impl BlockSnaps {
             all_shown: false,
             current: Vec::new(),
             form,
+            pending: 0,
         })
+    }
+
+    /// Blocks of the last frame still waiting for their current image (not failed).
+    pub fn pending(&self) -> usize {
+        self.pending
     }
 
     fn key_of(b: &Block, width: f32, scale: f32, theme: &ThemeVars) -> u64 {
@@ -382,6 +390,7 @@ impl BlockSnaps {
                     key,
                     name: b.name.clone(),
                     variant: b.variant.clone(),
+                    args: b.args.clone(),
                     inner: b.inner.clone(),
                     width,
                     scale,
@@ -396,6 +405,7 @@ impl BlockSnaps {
         let mut over = HashMap::new();
         let mut placed = Vec::new();
         let mut missing = 0;
+        let mut pending = 0;
         self.current.clear();
         for (i, b) in self.blocks.iter().enumerate() {
             let key = Self::key_of(b, width, scale, theme);
@@ -415,6 +425,9 @@ impl BlockSnaps {
                 Some(cur)
             } else {
                 missing += 1;
+                if !self.failed.contains(&cur) {
+                    pending += 1;
+                }
                 self.current.push(false);
                 // stale image of this block while the new one renders (same width only:
                 // a resize shows Markdown rather than a stretched picture)
@@ -437,6 +450,7 @@ impl BlockSnaps {
                 size: egui::vec2(width, h),
             });
         }
+        self.pending = if self.folder == 0 { self.blocks.len() } else { pending };
         if missing == 0 && !self.blocks.is_empty() && !self.all_shown {
             self.all_shown = true;
             if self.log {
@@ -473,6 +487,8 @@ impl BlockSnaps {
 /// `blocks/<name>/…` layout). The code hash covers the resolved files' contents.
 struct Site {
     root: Option<PathBuf>,
+    /// Folder of the document (relative picture paths resolve against it).
+    doc_dir: Option<PathBuf>,
     fallback: Option<PathBuf>,
     stamp: Vec<(PathBuf, Option<SystemTime>, u64)>,
     /// component → (css, js, folder it came from)
@@ -497,6 +513,7 @@ impl Site {
     fn new(doc: Option<PathBuf>, fallback: Option<PathBuf>) -> Self {
         Site {
             root: doc.as_deref().and_then(site_root),
+            doc_dir: doc.as_deref().and_then(|d| d.parent()).map(|d| d.to_path_buf()),
             fallback,
             stamp: Vec::new(),
             code: HashMap::new(),
@@ -522,7 +539,18 @@ impl Site {
         self.checked = Some(Instant::now());
         let mut stamp = Vec::new();
         let mut dirs = Vec::new();
-        for name in COMPONENTS {
+        // every `blocks/<name>/` folder of the site root and of the fallback
+        let mut names: Vec<String> = [self.root.as_ref(), self.fallback.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|r| std::fs::read_dir(r.join("blocks")).ok())
+            .flat_map(|rd| rd.flatten())
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        names.dedup();
+        for name in &names {
             let Some(d) = self.component_dir(name) else { continue };
             for ext in ["css", "js"] {
                 let f = d.join(format!("{name}.{ext}"));
@@ -541,7 +569,10 @@ impl Site {
         self.code.clear();
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for (name, d) in dirs {
-            let css = std::fs::read_to_string(d.join(format!("{name}.css"))).unwrap_or_default();
+            let css = absolute_css_urls(
+                &std::fs::read_to_string(d.join(format!("{name}.css"))).unwrap_or_default(),
+                &d,
+            );
             let js = std::fs::read_to_string(d.join(format!("{name}.js"))).unwrap_or_default();
             (&name, &css, &js).hash(&mut h);
             self.code.insert(name, (css, js, d));
@@ -690,7 +721,16 @@ impl Worker {
         }
         self.next_spawn = Instant::now() + Duration::from_secs(2);
         let t = Instant::now();
+        // read access for the page: the site root (pictures and fonts of the site), else the
+        // document's folder
+        let root = self
+            .site
+            .root
+            .clone()
+            .or_else(|| self.site.doc_dir.clone())
+            .unwrap_or_default();
         let mut child = Command::new(&self.helper_path)
+            .env("MARKISE_WR_ROOT", &root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -756,10 +796,14 @@ impl Worker {
         let body = markise_export::render_body(&doc, &markise_export::HtmlOptions::default());
         let attr = |s: &str| html_escape::encode_double_quoted_attribute(s).to_string();
         let html = format!(
-            "<section data-component=\"{}\" data-variant=\"{}\">\n{body}</section>",
+            "<section data-component=\"{}\" data-variant=\"{}\" data-args=\"{}\">\n{body}</section>",
             attr(&job.name),
-            attr(&job.variant)
+            attr(&job.variant),
+            attr(&job.args)
         );
+        if let Some(dir) = std::env::var_os("MARKISE_BLOCK_DUMP").map(PathBuf::from) {
+            let _ = std::fs::write(dir.join(format!("{}-{:016x}.html", job.name, job.key)), &html);
+        }
         let ms_html = t.elapsed().as_secs_f64() * 1e3;
         let req = json!({
             "id": job.key,
@@ -770,6 +814,7 @@ impl Worker {
             "js": js,
             "theme": job.theme.mode(),
             "vars": job.theme.vars,
+            "base": self.site.doc_dir.as_deref().map(|d| file_url(d, true)).unwrap_or_default(),
         });
         let mut last = String::new();
         for _attempt in 0..2 {
@@ -809,6 +854,47 @@ impl Worker {
         }
         Err(last)
     }
+}
+
+/// `file://` URL of a path (directories end with `/`).
+fn file_url(p: &std::path::Path, dir: bool) -> String {
+    let mut s = String::from("file://");
+    for b in p.to_string_lossy().bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => s.push(b as char),
+            _ => s.push_str(&format!("%{b:02X}")),
+        }
+    }
+    if dir && !s.ends_with('/') {
+        s.push('/');
+    }
+    s
+}
+
+/// Rewrites relative `url(...)` references of a block's CSS to absolute `file://` URLs of
+/// its folder (the CSS is injected as text, so the page would resolve them against the
+/// document instead).
+fn absolute_css_urls(css: &str, dir: &std::path::Path) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(i) = rest.find("url(") {
+        out.push_str(&rest[..i + 4]);
+        rest = &rest[i + 4..];
+        let Some(end) = rest.find(')') else { break };
+        let raw = rest[..end].trim();
+        let quote = raw.chars().next().filter(|c| *c == '"' || *c == '\'');
+        let inner = raw.trim_matches(|c| c == '"' || c == '\'');
+        let absolute = inner.is_empty() || inner.starts_with('#') || inner.starts_with('/') || inner.contains(':');
+        if absolute {
+            out.push_str(&rest[..end]);
+        } else {
+            let q = quote.map(String::from).unwrap_or_else(|| "\"".into());
+            out.push_str(&format!("{q}{}{q}", file_url(&dir.join(inner), false)));
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn decode_png(bytes: &[u8]) -> Result<ColorImage, String> {
@@ -851,6 +937,8 @@ pub struct ProtoScript {
     frames: Vec<f64>,
     burst_frames: Vec<f64>,
     started: bool,
+    /// Tour mode: index of the next block to screenshot.
+    tour: usize,
 }
 
 const SLOW_STEPS: usize = 8;
@@ -858,7 +946,58 @@ const BURST: usize = 12;
 
 impl ProtoScript {
     pub fn enabled() -> bool {
-        std::env::var_os("MARKISE_PROTO_SCRIPT").is_some_and(|v| v != "0")
+        std::env::var_os("MARKISE_PROTO_SCRIPT").is_some_and(|v| v != "0") || Self::tour_on()
+    }
+
+    /// `MARKISE_PROTO_TOUR=1`: no typing; once every block is shown, scrolls to each block in
+    /// turn, screenshots the window (`MARKISE_PROTO_SHOTS`, `<doc>-<theme>-NN.png`) and exits.
+    fn tour_on() -> bool {
+        std::env::var_os("MARKISE_PROTO_TOUR").is_some_and(|v| v != "0")
+    }
+
+    fn tour_frame(&mut self, ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
+        ctx.request_repaint_after(Duration::from_millis(16));
+        let Some(snaps) = viewer.snaps.as_ref() else { return };
+        let now = Instant::now();
+        // wait for every block that has site code (failed ones stay Markdown)
+        let settled = !snaps.blocks.is_empty() && snaps.pending() == 0;
+        let since = *self.since.get_or_insert(now);
+        if !settled && now - since < Duration::from_secs(20) {
+            return;
+        }
+        if now - since < Duration::from_millis(700) {
+            return;
+        }
+        let n = snaps.blocks.len();
+        if self.tour > n {
+            std::process::exit(0);
+        }
+        if self.tour == n {
+            // last shot was requested in the previous step; give it time, then exit
+            if now - since > Duration::from_millis(800) {
+                std::process::exit(0);
+            }
+            return;
+        }
+        let b = snaps.blocks[self.tour].clone();
+        if !self.started {
+            viewer.ed.view.scroll_to_item(b.open);
+            viewer.ed.view.scroll_by(-40.0);
+            self.started = true;
+            self.since = Some(now);
+            return;
+        }
+        let stem = viewer
+            .ed
+            .path()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "doc".into());
+        let theme = std::env::var("MARKISE_PROTO_THEME").unwrap_or_else(|_| "system".into());
+        self.shot(ctx, &format!("{stem}-{theme}-{:02}-{}", self.tour, b.name));
+        self.tour += 1;
+        self.started = false;
+        self.since = Some(now);
     }
 
     /// Insert position in block `b`: end of the first list item's text (before an answer label).
@@ -901,6 +1040,9 @@ impl ProtoScript {
 
     /// One frame. `frame_ms`: CPU time of the previous Side by Side frame.
     pub fn frame(&mut self, ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer, frame_ms: Option<f64>) {
+        if Self::tour_on() {
+            return self.tour_frame(ctx, viewer);
+        }
         let Some(snaps) = viewer.snaps.as_ref() else { return };
         let all = !snaps.current.is_empty() && snaps.current.iter().all(|&c| c);
         if let Some(ms) = frame_ms

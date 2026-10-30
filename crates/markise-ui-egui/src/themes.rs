@@ -886,6 +886,12 @@ impl ThemeManager {
         }
     }
 
+    /// PROTOTYPE: appearance for this run only (not saved; `MARKISE_PROTO_THEME`).
+    pub fn set_appearance_transient(&mut self, a: Appearance) {
+        self.chose_appearance = true;
+        self.settings.appearance = a;
+    }
+
     /// Whole-window zoom factor (View → Zoom; 1.0 until zoomed).
     pub fn zoom(&self) -> f32 {
         self.settings.zoom.unwrap_or(1.0)
