@@ -283,6 +283,7 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
             known = now;
             out.extend(e);
         }
+        crate::wake_track::publishing();
         let mut sent = false;
         for e in out {
             sent |= events.send(e).is_ok();
@@ -290,6 +291,7 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
         if sent {
             wake();
         }
+        crate::wake_track::woken();
         for tx in acks {
             let _ = tx.send(failure.clone().map_or(Ok(()), Err));
         }
@@ -313,6 +315,7 @@ impl FileWatcher {
                 return;
             }
             let TargetSet { file, folder, themes } = shared.lock().map(|g| g.clone()).unwrap_or_default();
+            crate::wake_track::publishing();
             let mut sent = false;
             for p in &ev.paths {
                 if themes.as_ref().is_some_and(|root| p.starts_with(root)) {
@@ -350,6 +353,7 @@ impl FileWatcher {
             if sent {
                 wake();
             }
+            crate::wake_track::woken();
         })?;
         let (ctl, ctl_rx) = channel();
         // detached: dropping the `FileWatcher` closes `ctl`, the worker then drops the watcher
@@ -411,15 +415,33 @@ impl FileWatcher {
     /// Blocks until every earlier `watch_*` request has been applied (tests, tools; never call
     /// it on the UI thread). `Err` names the watches that are not in effect.
     pub fn sync(&self) -> Result<(), String> {
+        self.sync_within(None).expect("no timeout")
+    }
+
+    /// Test hook: [`Self::sync`] waiting at most `timeout`; `None` when the worker did not
+    /// answer in time (a hang guard for tests: the requests are then not counted as synced).
+    #[doc(hidden)]
+    pub fn sync_within(&self, timeout: Option<std::time::Duration>) -> Option<Result<(), String>> {
         use std::sync::atomic::Ordering;
         let covered = self.requests.load(Ordering::Acquire);
         let (tx, rx) = channel();
-        self.ctl
-            .send(Ctl::Sync(tx))
-            .map_err(|_| "watcher stopped".to_string())?;
-        let r = rx.recv().map_err(|_| "watcher stopped".to_string())?;
+        if self.ctl.send(Ctl::Sync(tx)).is_err() {
+            return Some(Err("watcher stopped".to_string()));
+        }
+        let r = match timeout {
+            None => rx.recv().map_err(|_| "watcher stopped".to_string()),
+            Some(t) => match rx.recv_timeout(t) {
+                Ok(r) => Ok(r),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return None,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("watcher stopped".to_string()),
+            },
+        };
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => return Some(Err(e)),
+        };
         self.synced.fetch_max(covered, Ordering::AcqRel);
-        r
+        Some(r)
     }
 
     /// Test hook: every request posted so far was covered by a completed [`Self::sync`], so

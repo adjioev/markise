@@ -291,7 +291,7 @@ fn idle_with_native_menu_requests_no_repaint_and_no_rebuild() {
     // load, then wait until every background job has finished (issue #42)
     let t = Instant::now();
     loop {
-        let _ = app.sync_background_watches();
+        common::sync_watches(&app, t);
         frame(&ctx, &mut app);
         if app.model().is_some() && !app.is_loading() && app.background_settled() {
             break;
@@ -369,7 +369,7 @@ fn idle_frames_make_no_native_menu_change() {
     // load, then wait until every background job has finished (issue #42)
     let t = Instant::now();
     loop {
-        let _ = app.sync_background_watches();
+        common::sync_watches(&app, t);
         frame(&ctx, &mut app);
         if app.model().is_some() && !app.is_loading() && app.background_settled() {
             break;

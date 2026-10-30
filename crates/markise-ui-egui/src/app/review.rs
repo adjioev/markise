@@ -330,8 +330,11 @@ impl MarkiseApp {
             .spawn(move || {
                 let doc = format.parse(text.to_string(), &markise_doc::FormatOptions::default());
                 let marks = review::all_marks(doc.as_ref());
-                let _ = tx.send(PanelList::build(doc_id, counter, doc.text(), marks));
+                let list = PanelList::build(doc_id, counter, doc.text(), marks);
+                crate::wake_track::publishing();
+                let _ = tx.send(list);
                 wake();
+                crate::wake_track::woken();
             });
         if spawned.is_ok() {
             self.review.pending = Some(PendingList { rx });
@@ -534,8 +537,10 @@ impl MarkiseApp {
             .name("markise-clean-copy".into())
             .spawn(move || {
                 let r = markise_engine::save::save_checked(&target, &text, expect);
+                crate::wake_track::publishing();
                 let _ = tx.send(r);
                 wake();
+                crate::wake_track::woken();
             });
         match spawned {
             Ok(_) => self.review.copy = Some(CopyJob { rx, path: p }),

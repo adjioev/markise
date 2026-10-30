@@ -799,10 +799,17 @@ impl MarkiseApp {
     /// Test hook: blocks until the document/folder watch and the theme folder watch have
     /// applied every request, so their catch-up events are queued for the next frame (never
     /// on a real UI thread). See [`MarkiseApp::background_settled`].
+    /// `None` when a watcher did not answer within `timeout` (a hang guard: the test fails
+    /// instead of blocking); `Err` names a watch that is not in effect.
     #[doc(hidden)]
-    pub fn sync_background_watches(&self) -> Result<(), String> {
-        self.wait_for_watches()?;
-        self.themes.sync_watch()
+    pub fn sync_background_watches(&self, timeout: Duration) -> Option<Result<(), String>> {
+        let t = Instant::now();
+        let doc = match &self.watcher {
+            Some(w) => w.sync_within(Some(timeout))?,
+            None => Ok(()),
+        };
+        let themes = self.themes.sync_watch(timeout.saturating_sub(t.elapsed()))?;
+        Some(doc.and(themes))
     }
 
     /// Test hook ("background settled", issue #42): no background job is outstanding — no
@@ -829,6 +836,11 @@ impl MarkiseApp {
             && !self.highlighter.as_ref().is_some_and(|h| h.busy())
             && !self.diagram_renderer.as_ref().is_some_and(|d| d.busy())
             && !self.export.is_running()
+            // every published result's wake-up has returned (a result can be taken before
+            // the worker's wake runs; that late wake must not land in an idle check)
+            && crate::wake_track::unwoken() == 0
+            && markise_engine::wake_track::unwoken() == 0
+            && markise_blocks::wake_track::unwoken() == 0
     }
 
     /// The open document's file was deleted on disk and not recreated (tests).

@@ -177,6 +177,10 @@ struct Shared {
     state: Mutex<State>,
     generation: AtomicU64,
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// Tests: the worker stops after the step that brings the highlighted bytes to at least
+    /// this many, until it is cleared (proves results are readable before the block ends).
+    #[cfg(test)]
+    hold: (Mutex<Option<u64>>, std::sync::Condvar),
 }
 
 impl Shared {
@@ -229,6 +233,8 @@ impl HighlightService {
             }),
             generation: AtomicU64::new(0),
             wake,
+            #[cfg(test)]
+            hold: Default::default(),
         });
         let (tx, rx) = sync_channel(MAX_QUEUED);
         let s = shared.clone();
@@ -415,8 +421,10 @@ fn worker(shared: Arc<Shared>, rx: Receiver<Job>) {
         }
         while active.len() > MAX_ACTIVE {
             if let Some(a) = active.pop_back() {
+                crate::wake_track::publishing();
                 shared.lock().cancel(a.job.key, a.job.len);
                 (shared.wake)();
+                crate::wake_track::woken();
             }
         }
         let Some(mut a) = active.pop_front() else { continue };
@@ -426,10 +434,12 @@ fn worker(shared: Arc<Shared>, rx: Receiver<Job>) {
             match st.pending.get(&a.job.key) {
                 Some(&g) if g >= generation => {}
                 Some(_) => {
+                    crate::wake_track::publishing();
                     st.cancel(a.job.key, a.job.len);
                     drop(st);
                     // the UI may show a partial result of this block: let it re-check
                     (shared.wake)();
+                    crate::wake_track::woken();
                     continue;
                 }
                 None => continue, // already cancelled
@@ -475,6 +485,9 @@ fn worker(shared: Arc<Shared>, rx: Receiver<Job>) {
             }
         }
         let mut complete = end >= text.len();
+        // a completed block is visible (not busy) from the update below: counted until its
+        // wake returned
+        crate::wake_track::publishing();
         {
             let mut st = shared.lock();
             st.stats.chunks += 1;
@@ -523,6 +536,16 @@ fn worker(shared: Arc<Shared>, rx: Receiver<Job>) {
         if complete || last_wake.elapsed() >= WAKE_INTERVAL {
             last_wake = Instant::now();
             (shared.wake)();
+        }
+        crate::wake_track::woken();
+        #[cfg(test)]
+        {
+            let bytes = shared.lock().stats.bytes;
+            let (m, cv) = &shared.hold;
+            let mut h = m.lock().unwrap_or_else(|e| e.into_inner());
+            while h.is_some_and(|at| bytes >= at) {
+                h = cv.wait(h).unwrap_or_else(|e| e.into_inner());
+            }
         }
         if !complete {
             active.push_back(a);
@@ -647,8 +670,17 @@ mod tests {
         let big = unit.repeat(5_000); // ~215 KB
         let key = block_key("rust", [big.as_str()]);
         let first_seg = unit.len() * 64;
+        // the worker stops once the first segment is highlighted: it must be readable while
+        // the rest of the block is still pending
+        *s.shared.hold.0.lock().unwrap() = Some(first_seg as u64);
         s.request_text(key, "rust", big.clone());
-        wait(&s, key, 0..first_seg);
+        let first = wait(&s, key, 0..first_seg);
+        assert!(!first.is_empty());
+        assert_eq!(s.lookup(key, 0..big.len()), Lookup::Pending, "the rest is not done yet");
+        assert!(s.busy());
+        assert!(s.shared.lock().stats.bytes < big.len() as u64 / 4, "stopped early");
+        *s.shared.hold.0.lock().unwrap() = None;
+        s.shared.hold.1.notify_all();
         let all = wait(&s, key, 0..big.len());
         assert!(!all.is_empty());
         let st = s.shared.lock();

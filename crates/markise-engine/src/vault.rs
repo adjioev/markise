@@ -1027,8 +1027,10 @@ pub fn spawn_create_note(index: Arc<VaultIndex>, rel: String, wake: Wake) -> Rec
                 Some(dir) => create_note(dir, index.root(), &rel),
                 None => Err("the vault folder could not be opened".into()),
             };
+            crate::wake_track::publishing();
             let _ = tx.send(r);
             wake();
+            crate::wake_track::woken();
         }
     });
     if let Err(e) = spawned {
@@ -1393,8 +1395,9 @@ impl VaultScanner {
                     if res_tx.send(st.snapshot()).is_err() {
                         break;
                     }
-                    done();
+                    // processed only once the wake announcing the snapshot returned
                     wake();
+                    done();
                 }
             })
             .map_err(|e| format!("cannot start vault thread: {e}"))?;

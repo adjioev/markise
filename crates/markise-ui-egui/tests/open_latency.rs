@@ -45,13 +45,24 @@ fn clicking_a_small_file_in_the_tree_shows_it_without_delay() {
         std::fs::write(dir.join(n), note(i)).unwrap(); // ~2 KB each
     }
     let gate: Gate = Arc::new((std::sync::Mutex::new(true), std::sync::Condvar::new()));
-    let held = gate.clone();
+    // set when the stall had to be ended by the hang guard: a frame (or the open) waited for
+    // the watcher, so the test fails instead of blocking forever
+    let expired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (held, exp) = (gate.clone(), expired.clone());
     let hooks = Arc::new(JobHooks {
         before_watch: Some(Box::new(move || {
             let (m, cv) = &*held;
+            let t = Instant::now();
             let mut g = m.lock().unwrap();
             while *g {
-                g = cv.wait(g).unwrap();
+                let left = common::HANG_GUARD.saturating_sub(t.elapsed());
+                if left.is_zero() {
+                    *g = false; // released by the guard
+                    exp.store(true, std::sync::atomic::Ordering::SeqCst);
+                    cv.notify_all();
+                    break;
+                }
+                g = cv.wait_timeout(g, left).unwrap().0;
             }
         })),
         ..Default::default()
@@ -96,6 +107,10 @@ fn clicking_a_small_file_in_the_tree_shows_it_without_delay() {
         h.run_steps(2);
     }
     eprintln!("open-latency: worst {:.1} ms", worst.as_secs_f64() * 1e3);
+    assert!(
+        !expired.load(std::sync::atomic::Ordering::SeqCst),
+        "the stalled watcher had to be released by the hang guard: something waited for it"
+    );
     // release the watcher worker before the app (and its watcher) is dropped
     *gate.0.lock().unwrap() = false;
     gate.1.notify_all();

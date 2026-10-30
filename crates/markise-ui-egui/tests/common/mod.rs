@@ -30,13 +30,24 @@ pub fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&
     h.step();
 }
 
+/// Blocks until the app's watchers applied every request (their catch-up events queued for
+/// the next frame), failing — instead of blocking — once [`HANG_GUARD`] since `started` is
+/// spent. A watch that is not in effect is still applied (not an error here).
+pub fn sync_watches(app: &MarkiseApp, started: Instant) {
+    let left = HANG_GUARD.saturating_sub(started.elapsed());
+    assert!(
+        app.sync_background_watches(left).is_some(),
+        "a file watcher did not answer within the hang guard"
+    );
+}
+
 /// Steps until the app's background work has settled ([`MarkiseApp::background_settled`]):
 /// every watch request is applied (its catch-up events queued before the next frame polls
 /// them) and no worker has anything outstanding. After this, nothing wakes the UI on its own.
 pub fn settle(h: &mut Harness<'static, MarkiseApp>) {
     let t = Instant::now();
     loop {
-        let _ = h.state().sync_background_watches();
+        sync_watches(h.state(), t);
         h.step();
         if h.state().background_settled() {
             return;

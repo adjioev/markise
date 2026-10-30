@@ -473,7 +473,7 @@ fn idle_check(name: &str, position: ToolbarPosition) {
     // a scheduled wake-up, not a loop —, watches, vault, images) to finish: issue #42
     let t = Instant::now();
     loop {
-        let _ = app.sync_background_watches();
+        common::sync_watches(&app, t);
         frame(&mut app);
         if app.model().is_some() && !app.is_loading() && app.background_settled() {
             break;

@@ -368,8 +368,10 @@ impl MarkiseApp {
             .spawn(move || {
                 let doc = Document::parse(text, opts);
                 let model = DocModel::build(&doc, path.as_deref());
+                crate::wake_track::publishing();
                 let _ = tx.send((Arc::new(doc), model));
                 wake();
+                crate::wake_track::woken();
             });
         if spawned.is_ok() {
             self.vault.reparse = Some(Reparse {

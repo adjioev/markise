@@ -38,7 +38,7 @@ fn idle_document_requests_no_repaint() {
     // land in the measured frames under load). Waits on the app's signal, not on time.
     let t = Instant::now();
     loop {
-        let _ = app.sync_background_watches();
+        common::sync_watches(&app, t);
         frame(&ctx, &mut app);
         if app.model().is_some() && !app.is_loading() && app.background_settled() {
             break;

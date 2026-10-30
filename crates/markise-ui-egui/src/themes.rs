@@ -159,10 +159,13 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                             let _ = std::fs::create_dir_all(d);
                             user_dir = Some(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
                         }
+                        crate::wake_track::publishing();
                         if dtx.send(Done::Settings(loaded, user_dir.clone())).is_err() {
+                            crate::wake_track::woken();
                             break;
                         }
                         wake();
+                        crate::wake_track::woken();
                         let r = builtin::extract(&builtin_root).map_err(|e| format!("built-in themes: {e}"));
                         match r {
                             Ok(_) => Done::Families(Ok(discover(&user_dir))),
@@ -234,10 +237,14 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                         },
                     ),
                 };
+                // a `Done` may be applied before `wake` runs: counted until it returned (tests)
+                crate::wake_track::publishing();
                 if dtx.send(done).is_err() {
+                    crate::wake_track::woken();
                     break;
                 }
                 wake();
+                crate::wake_track::woken();
             }
         })
         .expect("spawn theme worker");
@@ -485,12 +492,14 @@ impl ThemeManager {
             && self.watcher.as_ref().is_none_or(FileWatcher::is_synced)
     }
 
-    /// Test hook: blocks until the theme folder watch has applied every request, so its
-    /// catch-up event is queued for the next [`ThemeManager::poll`] (never on a real UI
-    /// thread). `Err` names a watch that is not in effect.
+    /// Test hook: blocks (at most `timeout`) until the theme folder watch has applied every
+    /// request, so its catch-up event is queued for the next [`ThemeManager::poll`] (never on
+    /// a real UI thread). `None`: no answer in time; `Err` names a watch that is not in effect.
     #[doc(hidden)]
-    pub fn sync_watch(&self) -> Result<(), String> {
-        self.watcher.as_ref().map_or(Ok(()), FileWatcher::sync)
+    pub fn sync_watch(&self, timeout: Duration) -> Option<Result<(), String>> {
+        self.watcher
+            .as_ref()
+            .map_or(Some(Ok(())), |w| w.sync_within(Some(timeout)))
     }
 
     // ---------------------------------------------------------------- accessors

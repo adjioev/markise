@@ -71,8 +71,10 @@ pub fn spawn_rebuild(
                 };
                 Ok(Rebuilt { rev, doc, model })
             })();
+            crate::wake_track::publishing();
             let _ = tx.send(res);
             wake();
+            crate::wake_track::woken();
         });
     if let Err(e) = r {
         let _ = tx2.send(Err(format!("cannot start worker: {e}")));
@@ -121,12 +123,14 @@ pub fn spawn_save(
             }
         };
         let result = save_checked_with(&path, &out, expect, &hooks.save);
+        crate::wake_track::publishing();
         let _ = tx.send(Saved {
             rev,
             result,
             bytes: out.len(),
         });
         wake();
+        crate::wake_track::woken();
     });
     if let Err(e) = r {
         let _ = tx2.send(Saved {

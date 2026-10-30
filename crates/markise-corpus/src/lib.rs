@@ -411,10 +411,11 @@ pub fn adversarial() -> Vec<(&'static str, AdversarialGen)> {
     ]
 }
 
-/// CPU work done by the calling thread so far, in [`WORK_PER_SEC`] units per second: its
-/// CPU time on Unix (nanoseconds), its CPU cycles on Windows. Unlike wall-clock time it does
-/// not grow while the thread waits for a core, so ratios stay meaningful on a loaded machine
-/// (issue #42). Falls back to wall-clock nanoseconds elsewhere.
+/// CPU work done by the calling thread so far: its CPU time in nanoseconds on Unix, its CPU
+/// **cycle count** on Windows (cycles, not time: [`WORK_PER_SEC`] converts only
+/// approximately). Ratios of two measurements need just a consistent unit, which both give.
+/// Unlike wall-clock time it does not grow while the thread waits for a core, so ratios stay
+/// meaningful on a loaded machine (issue #42). Falls back to wall-clock nanoseconds elsewhere.
 pub fn thread_work() -> u64 {
     #[cfg(unix)]
     {
@@ -444,7 +445,8 @@ pub fn thread_work() -> u64 {
     START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
 }
 
-/// [`thread_work`] units per second (approximate for cycles: only used for floors and caps).
+/// [`thread_work`] units per second: exact on Unix; on Windows an assumed 3 GHz (cycles vary
+/// with the clock speed), so the floors and caps derived from it are approximate there.
 pub const WORK_PER_SEC: u64 = if cfg!(windows) { 3_000_000_000 } else { 1_000_000_000 };
 
 /// Asserts that `run` scales (near) linearly on inputs built by `generate`.
