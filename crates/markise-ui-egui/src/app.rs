@@ -1929,6 +1929,12 @@ impl MarkiseApp {
             {
                 SBS_DONE.store(true, Ordering::Relaxed);
                 self.set_view_mode(ViewMode::SideBySide);
+                // PROTOTYPE: `MARKISE_PROTO_THEME=dark|light` for this run (not saved)
+                match std::env::var("MARKISE_PROTO_THEME").as_deref() {
+                    Ok("dark") => self.themes.set_appearance_transient(Appearance::Dark),
+                    Ok("light") => self.themes.set_appearance_transient(Appearance::Light),
+                    _ => {}
+                }
             }
         }
         if self.ctx.is_none() {
