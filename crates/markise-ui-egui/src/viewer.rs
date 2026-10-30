@@ -415,7 +415,8 @@ impl DocViewer {
         let margin_mode = self.comment_display == markise_engine::settings::CommentDisplay::Margin;
         let has = margin_mode && {
             let review = self.ed.session.review_edits();
-            let (has, more) = self.comment_presence.poll(self.ed.session.doc(), review, now);
+            let text_rev = self.ed.session.revision().counter;
+            let (has, more) = self.comment_presence.poll(self.ed.session.doc(), review, text_rev, now);
             match more {
                 Some(w) if w > 0.0 => ctx.request_repaint_after(std::time::Duration::from_secs_f64(w)),
                 Some(_) => ctx.request_repaint(),

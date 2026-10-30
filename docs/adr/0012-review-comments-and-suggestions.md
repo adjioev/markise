@@ -135,8 +135,12 @@ Show comments, and a switch in the comments panel header):
   holds `{>>`, `<<}`, a line break, a backtick, `~~~`, `$$`, HTML at a line start or `<!--`;
   ordinary typing, even inside a comment, is not). Then the edit's own leaf is checked first
   (inserting a comment turns the answer to yes without a scan), and only otherwise is the
-  chunked scan run again (deleting a comment: was it the last?). Evaluations start at most
-  every 0.4 s, so the layout does not jump per keystroke: the gutter appears shortly after the
+  chunked scan run again (deleting a comment: was it the last?). Any edit drops a running
+  scan, which then starts over. The triggers are only the fast path: once the document has
+  been idle for 2 s and was edited since its last full scan, the chunked scan runs again
+  (this catches what no trigger sees, e.g. unindenting a code line that holds a comment), so
+  the answer is never stale for more than a few seconds. Evaluations start at most every
+  0.4 s, so the layout does not jump per keystroke: the gutter appears shortly after the
   first comment and is released shortly after the last one goes. A gutter change is applied
   only on a frame without pointer presses, releases or a held button, so a click is never
   hit-tested against the geometry of two different column widths.

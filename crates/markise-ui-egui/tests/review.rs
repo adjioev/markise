@@ -1228,6 +1228,20 @@ fn typing_ordinary_text_in_a_10_mb_document_never_scans() {
     assert_eq!(v.ed.session.copies, copies, "no document copy");
     assert!(!v.comment_lookup_pending());
     assert!(v.comment_gutter(), "still reserved");
+    // once idle, the safety net rescans once; it stops at the first comment
+    let t = Instant::now();
+    while h.state_mut().viewer().unwrap().comment_scans().0 == scans {
+        assert!(t.elapsed() < Duration::from_secs(10), "no idle rescan");
+        std::thread::sleep(Duration::from_millis(50));
+        h.step();
+    }
+    h.run_steps(3);
+    let v = h.state_mut().viewer().unwrap();
+    let (s2, b2) = v.comment_scans();
+    assert_eq!(s2, scans + 1);
+    assert!(b2 - bytes < 4096, "read {} bytes", b2 - bytes);
+    assert_eq!(v.ed.session.copies, copies);
+    assert!(v.comment_gutter());
 }
 
 /// Inserting a comment flips "has comments" by a local check (no scan); deleting the last
@@ -1264,4 +1278,37 @@ fn inserting_and_deleting_the_last_comment_flip_the_gutter() {
     let v = h.state_mut().viewer().unwrap();
     assert!(!v.comment_gutter(), "the last comment gone: released");
     assert_eq!(v.comment_scans().0, scans + 1, "a scan confirmed it");
+}
+
+/// Codex round 3: unindenting `    Here is {>>note<<}` (an indented code line) exposes a
+/// comment without any relevance trigger; the idle safety net rescans and the gutter appears.
+#[test]
+fn unindenting_a_code_line_with_a_comment_shows_the_gutter_after_the_idle_rescan() {
+    let src = "    Here is {>>note<<}\n\nText.\n";
+    let mut h = open_phycat("gutter-unindent", src, egui::vec2(1400.0, 760.0));
+    assert!(!h.state_mut().viewer().unwrap().comment_gutter(), "code: no comment");
+    // the indent removed (as an external edit: the code block's indent is not a caret stop)
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| {
+        let ps = markise_doc::PatchSet::new(vec![markise_doc::Patch::verbatim(0..4, String::new())]).unwrap();
+        s.apply_external(&ps, "unindent", false)
+    })
+    .unwrap();
+    h.step();
+    assert_eq!(text(&h), "Here is {>>note<<}\n\nText.\n");
+    assert_eq!(
+        h.state_mut().viewer().unwrap().ed.session.review_edits().relevant,
+        0,
+        "no relevance trigger fired"
+    );
+    let t = Instant::now();
+    while !h.state_mut().viewer().unwrap().comment_gutter() {
+        assert!(t.elapsed() < Duration::from_secs(10), "gutter did not appear");
+        std::thread::sleep(Duration::from_millis(50));
+        h.step();
+    }
+    // found by the idle safety net's scan (the open scan was the first)
+    assert_eq!(h.state_mut().viewer().unwrap().comment_scans().0, 2);
+    h.run_steps(3);
+    assert!(comments(&mut h).iter().all(|c| c.card.is_some()), "margin cards");
 }
