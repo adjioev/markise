@@ -260,10 +260,13 @@ fn blockform(path: &str, rest: &[String]) -> Result<ExitCode, String> {
                 }
                 "question" => {
                     d["prompt"] = serde_json::json!("Новый вопрос?");
-                    if let Some(o) = d["options"].as_object_mut()
-                        && let Some((_, v)) = o.iter_mut().next()
-                    {
-                        v["text"] = serde_json::json!("Новый *ответ*");
+                    if let Some(o) = d["options"].as_array_mut() {
+                        o[0]["text"] = serde_json::json!("Новый *ответ*");
+                        let ok0 = o[0]["correct"].clone();
+                        o[0]["correct"] = o[1]["correct"].clone();
+                        o[1]["correct"] = ok0;
+                        o.swap(0, 1);
+                        o.push(serde_json::json!({"id": "a9", "text": "Добавленный ответ", "correct": false}));
                     }
                     d["explanation"] = serde_json::json!("Строка 1\n\nСтрока 2");
                     d["setup"] = serde_json::json!(if d["setup"] == "" {
@@ -296,13 +299,13 @@ fn blockform(path: &str, rest: &[String]) -> Result<ExitCode, String> {
             // locked parts are rejected
             if b.name == "question" {
                 let mut l = dec.data.clone();
-                if let Some(o) = l["options"].as_object_mut()
-                    && let Some((_, v)) = o.iter_mut().next()
-                {
-                    v["correct"] = serde_json::json!(!v["correct"].as_bool().unwrap_or(false));
+                if let Some(o) = l["options"].as_array_mut() {
+                    for v in o.iter_mut() {
+                        v["correct"] = serde_json::json!(true);
+                    }
                 }
                 println!(
-                    "locked correctness → {:?}",
+                    "every answer correct in a one-answer question → {:?}",
                     bf::edits(&text, &dec, &l, false, "ru").err()
                 );
             }

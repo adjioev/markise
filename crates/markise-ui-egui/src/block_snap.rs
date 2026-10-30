@@ -48,6 +48,8 @@ pub struct Block {
     pub inner: String,
     /// Content key (name, variant, inner Markdown).
     pub content: u64,
+    /// End of the closing `:::` line (source offset).
+    pub end: usize,
 }
 
 fn marker_of(line: &str) -> Option<(String, String)> {
@@ -92,6 +94,7 @@ pub fn find_blocks(model: &DocModel, text: &str) -> Vec<Block> {
                     args,
                     inner,
                     content: h.finish(),
+                    end,
                 });
             }
         } else if let Some((name, args)) = marker_of(line) {
@@ -203,6 +206,8 @@ pub struct BlockSnaps {
     pub current: Vec<bool>,
     /// PROTOTYPE (proto/block-forms): the block edit dialog.
     pub form: crate::block_edit::FormState,
+    /// Width the images are rendered at (frozen while the edit panel is resized).
+    key_width: Option<f32>,
     pending: usize,
 }
 
@@ -211,6 +216,8 @@ pub struct Placed {
     pub open: usize,
     pub close: usize,
     pub offset: usize,
+    /// End of the closing `:::` line.
+    pub end: usize,
     pub tex: egui::TextureId,
     pub size: egui::Vec2,
 }
@@ -265,6 +272,7 @@ impl BlockSnaps {
             all_shown: false,
             current: Vec::new(),
             form,
+            key_width: None,
             pending: 0,
         })
     }
@@ -303,6 +311,15 @@ impl BlockSnaps {
         theme: &ThemeVars,
     ) -> (HashMap<usize, f32>, Vec<Placed>) {
         self.frame += 1;
+        // PROTOTYPE (block forms): while the edit panel is being resized (and shortly after)
+        // images keep their old width (scaled); they re-render once the width settles
+        let kw = if crate::form_panel::resizing() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+            self.key_width.unwrap_or(width)
+        } else {
+            self.key_width = Some(width);
+            width
+        };
         let id = (std::sync::Arc::as_ptr(model) as usize, revision);
         if self.scanned != Some(id) {
             let t = Instant::now();
@@ -373,7 +390,7 @@ impl BlockSnaps {
         let mut keys = Vec::new();
         for &i in &order {
             let b = &self.blocks[i];
-            let key = Self::key_of(b, width, scale, theme);
+            let key = Self::key_of(b, kw, scale, theme);
             if self.folder == 0
                 || (!self.cache.contains_key(&(key, self.folder)) && !self.failed.contains(&(key, self.folder)))
             {
@@ -392,7 +409,7 @@ impl BlockSnaps {
                     variant: b.variant.clone(),
                     args: b.args.clone(),
                     inner: b.inner.clone(),
-                    width,
+                    width: kw,
                     scale,
                 });
             }
@@ -408,7 +425,7 @@ impl BlockSnaps {
         let mut pending = 0;
         self.current.clear();
         for (i, b) in self.blocks.iter().enumerate() {
-            let key = Self::key_of(b, width, scale, theme);
+            let key = Self::key_of(b, kw, scale, theme);
             let cur = (key, self.folder);
             let shown = if self.cache.contains_key(&cur) {
                 if self.log && self.last_shown[i] != Some(cur) {
@@ -446,6 +463,7 @@ impl BlockSnaps {
                 open: b.open,
                 close: b.close,
                 offset: b.offset,
+                end: b.end,
                 tex: snap.tex.id(),
                 size: egui::vec2(width, h),
             });

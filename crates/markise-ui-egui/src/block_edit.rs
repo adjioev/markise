@@ -251,6 +251,7 @@ pub struct FormScript {
     waiting: Option<(usize, usize)>,
     original: String,
     log: Vec<String>,
+    caret_test: Option<(usize, usize)>,
 }
 
 const WARM_OPENS: usize = 12;
@@ -274,6 +275,16 @@ impl FormScript {
 
     pub fn frame(&mut self, ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
         ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        {
+            thread_local!(static LAST: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) });
+            if LAST.with(|l| l.get().is_none_or(|t| t.elapsed().as_secs_f32() > 2.0)) {
+                LAST.with(|l| l.set(Some(Instant::now())));
+                eprintln!(
+                    "[proto-forms] tick: step {} sub {} waiting {:?}",
+                    self.step, self.sub, self.waiting
+                );
+            }
+        }
         let Some(snaps) = viewer.snaps.as_ref() else { return };
         let now = Instant::now();
         let since = *self.since.get_or_insert(now);
@@ -310,6 +321,13 @@ impl FormScript {
             1 => {
                 if after(300) {
                     crate::block_snap::ProtoScript::default().shot(ctx, "forms-proto-hover");
+                    // caret test (live mode): a caret put inside the first block from before it
+                    // must end up after it
+                    if let Some(b) = snaps.blocks.first() {
+                        let off = b.offset + 4;
+                        self.caret_test = Some((b.offset, b.end));
+                        viewer.ed.set_selection(markise_doc::Selection::caret(off));
+                    }
                     next(self);
                 }
             }
@@ -326,6 +344,13 @@ impl FormScript {
                 match self.waiting {
                     None if after(400) => {
                         viewer.force_edit_button = None;
+                        if let Some((start, end)) = self.caret_test.take() {
+                            let f = viewer.ed.session.selection().primary().focus.offset;
+                            let out = f < start || f > end;
+                            self.say(format!(
+                                "caret put inside block {start}..{end} → now at {f}, outside the block = {out}"
+                            ));
+                        }
                         if self.sub > WARM_OPENS {
                             next(self);
                             return;
@@ -459,8 +484,9 @@ impl FormScript {
                 }
                 Some((n, s)) if opens > n && saves == s && after(200) => {
                     let end = viewer.ed.session.text().len();
-                    viewer.ed.source_set_selection(markise_doc::Selection::caret(end));
-                    let _ = viewer.ed.source_insert("\nx", false);
+                    let _ = viewer
+                        .ed
+                        .edit(|s| s.apply_external(&PatchSet::single_verbatim(end..end, "\nx"), "Typing", false));
                     snaps.form.eval(
                         "window.markiseForm.set('prompt', 'Изменённый вопрос?'); setTimeout(() => window.markiseForm.save(), 80);",
                     );
@@ -486,7 +512,7 @@ impl FormScript {
                 }
                 _ => {}
             },
-            // a locked change (correctness) is rejected
+            // answers: add one, move it first, mark it correct (one-answer question), save, undo
             6 => match self.waiting {
                 None if after(400) => {
                     let Some(off) = first_of("question") else {
@@ -498,14 +524,42 @@ impl FormScript {
                 }
                 Some((n, s)) if opens > n && saves == s && after(200) => {
                     snaps.form.eval(
-                        "{ const d = window.markiseForm.data(); const k = Object.keys(d.options)[0]; window.markiseForm.set('options.' + k + '.correct', !d.options[k].correct); setTimeout(() => window.markiseForm.save(), 80); }",
+                        "{ const d = window.markiseForm.data(); const o = d.options.map(x => ({...x, correct: false})); o.unshift({id: 'a9', text: 'Новый **верный** ответ', correct: true}); window.markiseForm.set('options', o); setTimeout(() => window.markiseForm.save(), 80); }",
                     );
                     self.waiting = Some((usize::MAX, s));
                 }
                 Some((usize::MAX, s)) if saves > s => {
                     let r = snaps.form.saves.last().cloned();
-                    self.say(format!("locked change (correctness) → {r:?}"));
-                    viewer.snaps.as_mut().expect("snaps").form.close();
+                    let changed: Vec<String> = similar::TextDiff::from_lines(&self.original, &text)
+                        .iter_all_changes()
+                        .filter(|c| c.tag() != similar::ChangeTag::Equal)
+                        .map(|c| {
+                            format!(
+                                "{}{}",
+                                if c.tag() == similar::ChangeTag::Delete {
+                                    "-"
+                                } else {
+                                    "+"
+                                },
+                                c.value().trim_end()
+                            )
+                        })
+                        .collect();
+                    self.say(format!(
+                        "answers added/reordered/correctness → {r:?}; diff: {changed:?}"
+                    ));
+                    self.waiting = Some((usize::MAX - 1, 0));
+                    self.since = Some(now);
+                }
+                Some((m, _)) if m == usize::MAX - 1 && all && after(600) => {
+                    crate::block_snap::ProtoScript::default().shot(ctx, "forms-proto-answers-saved");
+                    self.waiting = Some((usize::MAX - 2, 0));
+                    self.since = Some(now);
+                }
+                Some((m, _)) if m == usize::MAX - 2 && after(400) => {
+                    viewer.ed.edit(|s| s.undo());
+                    let same = viewer.ed.session.text() == self.original;
+                    self.say(format!("undo → document byte-identical = {same}"));
                     next(self);
                 }
                 _ => {}
@@ -548,4 +602,16 @@ impl FormScript {
             _ => {}
         }
     }
+}
+
+thread_local! {
+    static LIVE_SCRIPT: std::cell::RefCell<Option<FormScript>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs the measurement script in the normal (live) editing mode.
+pub fn live_script(ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
+    if !FormScript::enabled() {
+        return;
+    }
+    LIVE_SCRIPT.with(|s| s.borrow_mut().get_or_insert_with(Default::default).frame(ctx, viewer));
 }

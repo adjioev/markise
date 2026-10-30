@@ -185,6 +185,19 @@ pub struct DocViewer {
     /// PROTOTYPE (block forms): show the Edit button on this block ordinal without hover
     /// (screenshots of the measurement script).
     pub force_edit_button: Option<usize>,
+    /// PROTOTYPE (live mode): block images of the last frame as atomic caret units:
+    /// (block start, block end, caret stop before, caret stop after).
+    atomic: Vec<(usize, usize, usize, usize)>,
+    /// PROTOTYPE (live mode): the block (start offset) selected by a click on its image.
+    focused_block: Option<usize>,
+    /// PROTOTYPE (live mode): caret focus offset at the end of the last frame.
+    last_focus: usize,
+}
+
+/// PROTOTYPE: block images in the normal (live) editing mode (`MARKISE_LIVE_SNAPS=0` turns
+/// them off).
+fn live_snaps() -> bool {
+    std::env::var_os("MARKISE_LIVE_SNAPS").is_none_or(|v| v != "0")
 }
 
 /// PROTOTYPE (block forms): the "✎ Edit" button of a block image.
@@ -241,6 +254,9 @@ impl DocViewer {
             snap_rects: Vec::new(),
             pending_edit: None,
             force_edit_button: None,
+            atomic: Vec::new(),
+            focused_block: None,
+            last_focus: 0,
         }
     }
 
@@ -541,13 +557,39 @@ impl DocViewer {
         // ---- input: keyboard editing
         let mut follow = false;
         if focused {
-            let events = ui.input(|i| i.events.clone());
+            let mut events = ui.input(|i| i.events.clone());
             let mut ran = false;
+            let prev_focus = self.ed.session.selection().primary().focus.offset;
+            // PROTOTYPE (live mode): Enter on a selected block image opens its form; any other
+            // key deselects it
+            if let Some(b) = self.focused_block {
+                let enter = events.iter().any(|e| {
+                    matches!(e, Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. } if !modifiers.any())
+                });
+                if enter {
+                    self.pending_edit = Some(b);
+                    events.retain(|e| {
+                        !matches!(
+                            e,
+                            Event::Key {
+                                key: egui::Key::Enter,
+                                ..
+                            } | Event::Text(_)
+                        )
+                    });
+                } else if events
+                    .iter()
+                    .any(|e| matches!(e, Event::Key { pressed: true, .. } | Event::Text(_)))
+                {
+                    self.focused_block = None;
+                }
+            }
             with_shaper(&ctx, parley.as_deref_mut(), |sh| {
                 for e in events {
                     ran |= self.handle_event(e, sh, &*images, editable, vh);
                 }
             });
+            let _ = prev_focus;
             if let Some(t) = self.pending_copy.take() {
                 ctx.copy_text(t);
             }
@@ -570,9 +612,19 @@ impl DocViewer {
         });
         if on_snap.is_some() && resp.hovered() {
             ctx.set_cursor_icon(CursorIcon::PointingHand);
-            if resp.clicked() {
+            if resp.double_clicked() && editable && !self.snap_blocks {
+                self.pending_edit = on_snap;
+            } else if resp.clicked() {
                 if on_edit.is_some() {
                     self.pending_edit = on_edit;
+                } else if editable && !self.snap_blocks {
+                    // live mode: the click selects the block (caret parked after it, source not
+                    // revealed)
+                    if let Some(&(start, _, _, after)) = self.atomic.iter().find(|a| Some(a.0) == on_snap) {
+                        self.focused_block = Some(start);
+                        self.ed.set_selection(Selection::caret(after));
+                        out.edited = true;
+                    }
                 } else {
                     out.goto_source = on_snap;
                 }
@@ -688,6 +740,11 @@ impl DocViewer {
             }
         }
 
+        // PROTOTYPE (live mode): block images are atomic for the caret
+        if editable && !self.snap_blocks && self.keep_caret_out_of_blocks(self.last_focus) {
+            out.edited = true;
+        }
+        self.last_focus = self.ed.session.selection().primary().focus.offset;
         if out.edited {
             self.ed.refresh_focus();
             self.blink_from = now;
@@ -699,7 +756,7 @@ impl DocViewer {
         }
 
         // ---- PROTOTYPE: block snapshots replace their items' heights
-        let placed = if self.snap_blocks {
+        let placed = if self.snap_blocks || (editable && live_snaps()) {
             if self.snaps.is_none() && !self.snaps_tried {
                 self.snaps_tried = true;
                 self.snaps = crate::block_snap::BlockSnaps::from_env(&ctx, self.ed.path().map(|p| p.to_path_buf()));
@@ -778,6 +835,38 @@ impl DocViewer {
                         Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                         Color32::WHITE,
                     );
+                }
+            }
+            // PROTOTYPE (live mode): atomic caret units and the selected block's outline
+            {
+                let model = self.ed.view.model().clone();
+                let starts: Vec<(usize, usize)> = model.items.iter_with_start().map(|(st, it)| (st, it.len)).collect();
+                let text_len = self.ed.session.text().len();
+                self.atomic = placed
+                    .iter()
+                    .map(|p| {
+                        let before = if p.open > 0 {
+                            starts.get(p.open - 1).map_or(p.offset, |(st, l)| st + l)
+                        } else {
+                            p.offset
+                        };
+                        let after = starts.get(p.close + 1).map_or(text_len, |(st, _)| *st);
+                        (p.offset, p.end, before, after)
+                    })
+                    .collect();
+                let caret = self.ed.session.selection().primary().focus.offset;
+                if let Some(fb) = self.focused_block {
+                    let still = self.atomic.iter().any(|a| a.0 == fb && a.3 == caret);
+                    if !still {
+                        self.focused_block = None;
+                    } else if let Some((r, _)) = self.snap_rects.iter().find(|(_, o)| *o == fb) {
+                        painter.rect_stroke(
+                            r.expand(3.0),
+                            8.0,
+                            Stroke::new(2.0, theme_color(theme.link)),
+                            StrokeKind::Outside,
+                        );
+                    }
                 }
             }
             // PROTOTYPE (block forms): "✎ Edit" on the hovered block image
@@ -2040,4 +2129,32 @@ mod dash_tests {
 fn theme_color(c: markise_theme::Rgba) -> Color32 {
     let [r, g, b, a] = c.0;
     Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+impl DocViewer {
+    /// PROTOTYPE (live mode): a block image is one unit for the caret — when the selection's
+    /// focus lands inside a block (arrows, clicks, edits) it moves to the caret stop after the
+    /// block when it came from before, else to the stop before it. Returns true when moved.
+    fn keep_caret_out_of_blocks(&mut self, prev: usize) -> bool {
+        let sel = self.ed.session.selection().primary();
+        let f = sel.focus.offset;
+        let Some(&(start, end, before, after)) = self.atomic.iter().find(|a| f >= a.0 && f <= a.1) else {
+            return false;
+        };
+        if self.focused_block == Some(start) && f == after {
+            return false;
+        }
+        let to = if prev <= start || prev > end {
+            if prev <= start { after } else { before }
+        } else {
+            after
+        };
+        let new = if sel.anchor == sel.focus {
+            Selection::caret(to)
+        } else {
+            Selection::single(sel.anchor, DocPos::new(to))
+        };
+        self.ed.set_selection(new);
+        true
+    }
 }

@@ -43,6 +43,9 @@ const T = {
     fix: 'Исправьте ошибки в форме',
     hint: 'Esc — отмена, ⌘↩ — сохранить',
     edit: 'правка блока',
+    addAnswer: 'Добавить ответ',
+    correct: 'верный',
+    answerText: 'Текст ответа',
   },
   en: {
     save: 'Save',
@@ -55,6 +58,9 @@ const T = {
     fix: 'Fix the errors in the form',
     hint: 'Esc cancels, ⌘↩ saves',
     edit: 'edit block',
+    addAnswer: 'Add answer',
+    correct: 'correct',
+    answerText: 'Answer text',
   },
 };
 
@@ -86,6 +92,7 @@ function ListControl({ data, handleChange, path, label, schema, enabled, visible
           'button',
           {
             type: 'button',
+            className: 'mk-icon',
             title: tr('up'),
             disabled: !enabled || i === 0,
             onClick: () => {
@@ -100,6 +107,7 @@ function ListControl({ data, handleChange, path, label, schema, enabled, visible
           'button',
           {
             type: 'button',
+            className: 'mk-icon',
             title: tr('down'),
             disabled: !enabled || i === items.length - 1,
             onClick: () => {
@@ -114,6 +122,7 @@ function ListControl({ data, handleChange, path, label, schema, enabled, visible
           'button',
           {
             type: 'button',
+            className: 'mk-icon',
             title: tr('remove'),
             disabled: !enabled || items.length <= min,
             onClick: () => set(items.filter((_, j) => j !== i)),
@@ -136,6 +145,70 @@ function ListControl({ data, handleChange, path, label, schema, enabled, visible
   );
 }
 
+// ---- answers of a question: text, correct (radio for one answer, checkbox otherwise),
+// order, add/remove; each answer keeps its {#id} label, new ones get the next free aN
+function ChoicesControl({ data, handleChange, path, label, schema, uischema, enabled, visible, errors }) {
+  if (!visible) return null;
+  const items = Array.isArray(data) ? data : [];
+  const o = uischema.options || {};
+  const single = !!o.single;
+  const min = schema.minItems ?? 1;
+  const set = (next) => handleChange(path, next);
+  const nextId = () => {
+    const used = new Set([...(o.taken || []), ...items.map((x) => x.id)]);
+    let n = 1;
+    while (used.has('a' + n)) n++;
+    return 'a' + n;
+  };
+  const move = (i, d) => {
+    const n = items.slice();
+    [n[i + d], n[i]] = [n[i], n[i + d]];
+    set(n);
+  };
+  return h(
+    'div',
+    { className: 'control mk-choices' },
+    h('label', null, label),
+    items.map((v, i) =>
+      h(
+        'div',
+        { className: 'mk-answer' + (v.correct ? ' is-correct' : ''), key: v.id },
+        h(
+          'label',
+          { className: 'mk-correct', title: tr('correct') },
+          h('input', {
+            type: single ? 'radio' : 'checkbox',
+            name: path + '-correct',
+            checked: !!v.correct,
+            disabled: !enabled,
+            onChange: (e) =>
+              set(items.map((x, j) => (single ? { ...x, correct: j === i } : j === i ? { ...x, correct: e.target.checked } : x))),
+          }),
+        ),
+        h('input', {
+          className: 'input',
+          value: v.text ?? '',
+          placeholder: tr('answerText'),
+          disabled: !enabled,
+          onChange: (e) => set(items.map((x, j) => (j === i ? { ...x, text: e.target.value } : x))),
+        }),
+        h('span', { className: 'mk-id' }, '{#' + v.id + '}'),
+        h('button', { type: 'button', className: 'mk-icon', title: tr('up'), disabled: !enabled || i === 0, onClick: () => move(i, -1) }, '↑'),
+        h('button', { type: 'button', className: 'mk-icon', title: tr('down'), disabled: !enabled || i === items.length - 1, onClick: () => move(i, 1) }, '↓'),
+        h('button', { type: 'button', className: 'mk-icon', title: tr('remove'), disabled: !enabled || items.length <= min, onClick: () => set(items.filter((_, j) => j !== i)) }, '✕'),
+      ),
+    ),
+    h(
+      'button',
+      { type: 'button', className: 'mk-add', disabled: !enabled, onClick: () => set([...items, { id: nextId(), text: '', correct: false }]) },
+      '+ ' + tr('addAnswer'),
+    ),
+    errors ? h('div', { className: 'validation' }, errors) : null,
+  );
+}
+
+const choicesTester = core.rankWith(30, core.and(core.isControl, core.optionIs('format', 'choices')));
+
 const listTester = core.rankWith(
   10,
   core.and(
@@ -147,6 +220,7 @@ const listTester = core.rankWith(
 const baseRenderers = [
   ...vanillaRenderers,
   { tester: listTester, renderer: withJsonFormsControlProps(ListControl) },
+  { tester: choicesTester, renderer: withJsonFormsControlProps(ChoicesControl) },
 ];
 
 // ---- site renderers
@@ -226,9 +300,16 @@ function App() {
   useEffect(() => {
     if (!req) return;
     document.title = req.title || 'Markise';
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => post({ event: 'shown', id: req.id, ms: performance.now() - req._t })),
-    );
+    // a hidden WKWebView may not run animation frames: the timer is the fallback
+    let done = false;
+    const fire = () => {
+      if (!done) {
+        done = true;
+        post({ event: 'shown', id: req.id, ms: performance.now() - req._t });
+      }
+    };
+    requestAnimationFrame(() => requestAnimationFrame(fire));
+    setTimeout(fire, 400);
     const first = document.querySelector('.mk-body input:not([disabled]), .mk-body textarea:not([disabled])');
     if (first) first.focus();
   }, [req]);

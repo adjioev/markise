@@ -347,6 +347,9 @@ mod mac {
         let Ok(m) = serde_json::from_str::<Value>(s) else {
             return;
         };
+        if std::env::var_os("MARKISE_BLOCK_LOG").is_some() {
+            eprintln!("[blockform] page → {}", m["event"]);
+        }
         match m["event"].as_str().unwrap_or("") {
             "ready" => {
                 let pending = with(|p| {
@@ -397,4 +400,67 @@ mod mac {
         });
         unsafe { web.takeSnapshotWithConfiguration_completionHandler(None, &block) };
     }
+}
+
+// ---------------------------------------------------------------- docking and resizing
+
+thread_local! {
+    /// Panel width in egui points for this session.
+    static W: std::cell::Cell<f32> = const { std::cell::Cell::new(WIDTH) };
+    /// Last moment the panel was being resized.
+    static RESIZED: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Smallest panel width (points); the largest is 60 % of the area.
+pub const MIN_WIDTH: f32 = 320.0;
+
+/// `true` while the panel's edge is dragged and for 250 ms after (block images keep their
+/// width meanwhile and re-render once it settles).
+pub fn resizing() -> bool {
+    RESIZED.with(|r| {
+        r.get()
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(250))
+    })
+}
+
+/// Reserves the panel at the right of `rect` (with a drag handle on its left edge), puts the
+/// native view over it and returns the rest of `rect` for the document.
+pub fn reserve(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Rect {
+    let max = (rect.width() * 0.6).max(MIN_WIDTH.min(rect.width() * 0.6));
+    let w = W.with(|w| w.get()).clamp(MIN_WIDTH.min(max), max);
+    let panel = egui::Rect::from_min_max(egui::pos2(rect.right() - w, rect.top()), rect.max);
+    let handle = egui::Rect::from_min_max(
+        egui::pos2(panel.left() - 5.0, rect.top()),
+        egui::pos2(panel.left() + 1.0, rect.bottom()),
+    );
+    let resp = ui.interact(
+        handle,
+        ui.scope_id().with("markise-form-panel-handle"),
+        egui::Sense::drag(),
+    );
+    if resp.hovered() || resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    if resp.dragged() {
+        let nw = (w - resp.drag_delta().x).clamp(MIN_WIDTH.min(max), max);
+        W.with(|x| x.set(nw));
+        RESIZED.with(|r| r.set(Some(std::time::Instant::now())));
+        ui.ctx().request_repaint();
+    }
+    let stroke_c = if resp.hovered() || resp.dragged() {
+        ui.visuals().selection.bg_fill
+    } else {
+        ui.visuals().widgets.noninteractive.bg_stroke.color
+    };
+    ui.painter().rect_filled(panel, 0.0, ui.visuals().panel_fill);
+    ui.painter().line_segment(
+        [
+            egui::pos2(panel.left() - 0.5, rect.top()),
+            egui::pos2(panel.left() - 0.5, rect.bottom()),
+        ],
+        egui::Stroke::new(if resp.dragged() { 2.0 } else { 1.0 }, stroke_c),
+    );
+    let scale = ui.ctx().pixels_per_point() / ui.ctx().native_pixels_per_point().unwrap_or(1.0);
+    place(panel, scale);
+    egui::Rect::from_min_max(rect.min, egui::pos2(handle.left(), rect.bottom()))
 }

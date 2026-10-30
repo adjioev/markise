@@ -331,12 +331,7 @@ impl SideBySide {
         let mut rect = ui.available_rect_before_wrap();
         // PROTOTYPE (block forms): the edit panel docks at the right; the panes narrow
         if viewer.snaps.as_ref().is_some_and(|s| s.form.is_open()) {
-            let w = crate::form_panel::WIDTH.min(rect.width() * 0.6);
-            let panel = Rect::from_min_max(pos2(rect.right() - w, rect.top()), rect.max);
-            rect.max.x = panel.left();
-            ui.painter().rect_filled(panel, 0.0, ui.visuals().panel_fill);
-            let scale = ui.ctx().pixels_per_point() / ui.ctx().native_pixels_per_point().unwrap_or(1.0);
-            crate::form_panel::place(panel, scale);
+            rect = crate::form_panel::reserve(ui, rect);
         }
         let w = rect.width().max(2.0 * DIVIDER_W + 2.0);
         let left_w = ((w - DIVIDER_W) * f.split).round();

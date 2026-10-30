@@ -210,6 +210,8 @@ pub struct Item {
 
 #[derive(Clone, Debug)]
 pub struct Choice {
+    /// List marker before `[ ]` (e.g. `- `).
+    pub marker: String,
     pub id: String,
     pub checked: bool,
     pub text: Range<usize>,
@@ -376,7 +378,7 @@ pub fn decode(text: &str, block: &BlockSrc, def: &Value) -> Result<Decoded, Stri
             }
             (Some(_), "choices") => {
                 let mut items = Vec::new();
-                let mut obj = Map::new();
+                let mut arr = Vec::new();
                 for c in &taken {
                     for &(s, e) in &c.lines {
                         let Some((m, checked)) = task_marker_len(&text[s..e]) else {
@@ -385,15 +387,16 @@ pub fn decode(text: &str, block: &BlockSrc, def: &Value) -> Result<Decoded, Stri
                         let (span, id) = strip_label(text, s + m, e);
                         let id =
                             id.ok_or_else(|| format!("answer without a {{#id}} label: `{}`", text[s..e].trim()))?;
-                        obj.insert(id.clone(), json!({"text": &text[span.clone()], "correct": checked}));
+                        arr.push(json!({"id": id, "text": &text[span.clone()], "correct": checked}));
                         items.push(Choice {
+                            marker: text[s..s + list_marker_len(&text[s..e]).unwrap_or(2)].to_string(),
                             id,
                             checked,
                             text: span,
                         });
                     }
                 }
-                (Parts::Choices { items }, Value::Object(obj))
+                (Parts::Choices { items }, Value::Array(arr))
             }
             (Some(_), "image") => {
                 let mut items = Vec::new();
@@ -572,33 +575,21 @@ pub fn form(dec: &Decoded, lang: &str, over: Option<&Value>) -> (String, Value, 
                 els.push(json!({"type": "Control", "scope": scope, "label": label, "options": opts_of(f, json!({}))}));
             }
             "choices" => {
-                let mut cp = Map::new();
-                let mut group = vec![json!({"type": "Label", "text": if ru {
-                    "Метки {#…}, состав ответов и правильность закреплены контрактом урока — здесь меняется только текст."
-                } else {
-                    "Labels {#…}, the set of answers and correctness are fixed by the lesson contract; only the text can change."
-                }})];
-                if let Parts::Choices { items } = &f.parts {
-                    for c in items {
-                        cp.insert(
-                            c.id.clone(),
-                            json!({"type": "object", "properties": {
-                            "text": {"type": "string", "minLength": 1}, "correct": {"type": "boolean"}}}),
-                        );
-                        let mark = if c.checked {
-                            if ru { "✓ верный" } else { "✓ correct" }
-                        } else if ru {
-                            "неверный"
-                        } else {
-                            "wrong"
-                        };
-                        group.push(json!({"type": "Control",
-                            "scope": format!("{scope}/properties/{}/properties/text", c.id),
-                            "label": format!("{{#{}}} — {mark}", c.id), "options": opts_of(f, json!({}))}));
-                    }
+                // answers: text, correctness (radio for one answer, checkboxes otherwise),
+                // order, add/remove; labels {#id} travel with their answer
+                let single = correct_rule(&dec.def, &f.def, &dec.block.args) == "exactly-one";
+                let taken: Vec<String> = match &f.parts {
+                    Parts::Choices { items } => items.iter().map(|c| c.id.clone()).collect(),
+                    _ => Vec::new(),
+                };
+                let mut s = json!({"type": "array", "items": {"type": "object", "properties": {
+                    "id": {"type": "string"}, "text": {"type": "string", "minLength": 1}, "correct": {"type": "boolean"}}}});
+                if let Some(n) = f.def.get("minItems").and_then(Value::as_u64) {
+                    s["minItems"] = json!(n);
                 }
-                props.insert(f.name.clone(), json!({"type": "object", "properties": cp}));
-                els.push(json!({"type": "Group", "label": label, "elements": group}));
+                props.insert(f.name.clone(), s);
+                els.push(json!({"type": "Control", "scope": scope, "label": label,
+                    "options": opts_of(f, json!({"format": "choices", "single": single, "taken": taken}))}));
             }
             "image" => {
                 let mut ip = Map::new();
@@ -637,6 +628,18 @@ pub fn form(dec: &Decoded, lang: &str, over: Option<&Value>) -> (String, Value, 
         }
     }
     (title, schema, ui)
+}
+
+/// The correctness rule of a choices field for the block's variant (`exactly-one`,
+/// `at-least-one`, …) from blocks.json; default `at-least-one`.
+fn correct_rule(_block: &Value, field: &Value, args: &str) -> String {
+    let variant = args.split_whitespace().next().unwrap_or("");
+    field
+        .get("correct")
+        .and_then(|c| c.get(variant))
+        .and_then(Value::as_str)
+        .unwrap_or("at-least-one")
+        .to_string()
 }
 
 // ---------------------------------------------------------------- save
@@ -793,34 +796,78 @@ pub fn edits(text: &str, dec: &Decoded, data: &Value, force: bool, lang: &str) -
                 }
             }
             (Parts::Choices { items }, "choices") => {
-                let obj = new.as_object().cloned().unwrap_or_default();
-                if obj.len() != items.len() || items.iter().any(|c| !obj.contains_key(&c.id)) {
+                let arr = new.as_array().cloned().unwrap_or_default();
+                let mut ans: Vec<(String, String, bool)> = Vec::new();
+                for e in &arr {
+                    let id = e.get("id").and_then(Value::as_str).unwrap_or("").trim().to_string();
+                    let t = norm_line(e.get("text").and_then(Value::as_str).unwrap_or(""));
+                    let c = e.get("correct").and_then(Value::as_bool).unwrap_or(false);
+                    if id.is_empty() || id.contains(|ch: char| ch.is_whitespace() || ch == '}') {
+                        return Err(if ru {
+                            format!("Неверная метка ответа «{id}».")
+                        } else {
+                            format!("Bad answer label `{id}`.")
+                        });
+                    }
+                    if ans.iter().any(|a| a.0 == id) {
+                        return Err(if ru {
+                            format!("Метка {{#{id}}} повторяется.")
+                        } else {
+                            format!("Duplicate label {{#{id}}}.")
+                        });
+                    }
+                    if t.is_empty() {
+                        return Err(if ru {
+                            format!("Пустой текст ответа {{#{id}}}.")
+                        } else {
+                            format!("Empty answer {{#{id}}}.")
+                        });
+                    }
+                    ans.push((id, t, c));
+                }
+                let lo = f.def.get("minItems").and_then(Value::as_u64).unwrap_or(1) as usize;
+                if ans.len() < lo {
                     return Err(if ru {
-                        "Состав ответов и их метки менять нельзя (контракт урока).".into()
+                        format!("Нужно не меньше {lo} ответов.")
                     } else {
-                        "The set of answers and their labels are locked (lesson contract).".into()
+                        format!("At least {lo} answers are needed.")
                     });
                 }
-                for c in items {
-                    let e = &obj[&c.id];
-                    if e.get("correct").and_then(Value::as_bool).unwrap_or(c.checked) != c.checked {
+                let n_ok = ans.iter().filter(|a| a.2).count();
+                match correct_rule(&dec.def, &f.def, &dec.block.args).as_str() {
+                    "exactly-one" if n_ok != 1 => {
                         return Err(if ru {
-                            format!("Правильность ответа {{#{}}} менять нельзя (контракт урока).", c.id)
+                            "Отметьте ровно один верный ответ.".into()
                         } else {
-                            format!("Correctness of {{#{}}} is locked (lesson contract).", c.id)
+                            "Mark exactly one correct answer.".into()
                         });
                     }
-                    let v = norm_line(e.get("text").and_then(Value::as_str).unwrap_or(""));
-                    if v.is_empty() {
+                    "at-least-one" if n_ok == 0 => {
                         return Err(if ru {
-                            format!("Пустой текст ответа {{#{}}}.", c.id)
+                            "Отметьте хотя бы один верный ответ.".into()
                         } else {
-                            format!("Empty answer {{#{}}}.", c.id)
+                            "Mark at least one correct answer.".into()
                         });
                     }
-                    if force || v != text[c.text.clone()] {
-                        out.push((c.text.clone(), v));
+                    _ => {}
+                }
+                let same_shape =
+                    ans.len() == items.len() && ans.iter().zip(items).all(|(a, c)| a.0 == c.id && a.2 == c.checked);
+                if same_shape && !force {
+                    // only texts changed: patch the text spans
+                    for (a, c) in ans.iter().zip(items) {
+                        if a.1 != text[c.text.clone()] {
+                            out.push((c.text.clone(), a.1.clone()));
+                        }
                     }
+                } else if let Some(r) = &f.region {
+                    // membership, order or correctness changed: rewrite the answers' region
+                    let marker = items.first().map_or("- ".to_string(), |c| c.marker.clone());
+                    let body: Vec<String> = ans
+                        .iter()
+                        .map(|(id, t, c)| format!("{marker}[{}] {t} {{#{id}}}", if *c { "x" } else { " " }))
+                        .collect();
+                    out.push((r.clone(), body.join("\n")));
                 }
             }
             (Parts::Images { items }, "image") => {
