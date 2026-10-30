@@ -159,10 +159,13 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                             let _ = std::fs::create_dir_all(d);
                             user_dir = Some(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
                         }
+                        let published = crate::wake_track::publishing();
                         if dtx.send(Done::Settings(loaded, user_dir.clone())).is_err() {
+                            drop(published);
                             break;
                         }
                         wake();
+                        drop(published);
                         let r = builtin::extract(&builtin_root).map_err(|e| format!("built-in themes: {e}"));
                         match r {
                             Ok(_) => Done::Families(Ok(discover(&user_dir))),
@@ -234,10 +237,14 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                         },
                     ),
                 };
+                // a `Done` may be applied before `wake` runs: counted until it returned (tests)
+                let published = crate::wake_track::publishing();
                 if dtx.send(done).is_err() {
+                    drop(published);
                     break;
                 }
                 wake();
+                drop(published);
             }
         })
         .expect("spawn theme worker");
@@ -381,6 +388,9 @@ pub struct ThemeManager {
     previews: Vec<(VariantSource, Option<Swatch>)>,
     /// Preview imports handed to the worker and not answered yet.
     previews_pending: Vec<VariantSource>,
+    /// Jobs handed to the worker whose answer was not applied yet (tests: "background
+    /// settled", [`ThemeManager::is_idle`]).
+    jobs_out: std::cell::Cell<usize>,
 }
 
 impl ThemeManager {
@@ -445,6 +455,7 @@ impl ThemeManager {
             want_fallback: false,
             previews: Vec::new(),
             previews_pending: Vec::new(),
+            jobs_out: std::cell::Cell::new(0),
         }
     }
 
@@ -458,15 +469,41 @@ impl ThemeManager {
             ConfigDir::None => (None, None),
         };
         let w = spawn_worker(self.builtin_root.clone(), user_dir, settings, wake);
-        let _ = w.tx.send(Job::Init);
+        if w.tx.send(Job::Init).is_ok() {
+            self.jobs_out.set(self.jobs_out.get() + 1);
+        }
         self.discover_pending = true;
         self.worker = Some(w);
     }
 
     fn send(&self, job: Job) {
-        if let Some(w) = &self.worker {
-            let _ = w.tx.send(job);
+        if let Some(w) = &self.worker
+            && w.tx.send(job).is_ok()
+        {
+            self.jobs_out.set(self.jobs_out.get() + 1);
         }
+    }
+
+    /// Test hook: the worker has no unanswered jobs, no debounced settings write is pending
+    /// and the folder watch (once requested) has been handed back. Nothing changes the theme
+    /// or wakes the UI from here on until something new is asked.
+    #[doc(hidden)]
+    pub fn is_idle(&self) -> bool {
+        let watch_due = !self.watch_requested && self.settings_loaded && self.has_user_dir() && self.worker.is_some();
+        self.jobs_out.get() == 0
+            && self.save_at.is_none()
+            && !watch_due
+            && self.watcher.as_ref().is_none_or(FileWatcher::is_synced)
+    }
+
+    /// Test hook: blocks (at most `timeout`) until the theme folder watch has applied every
+    /// request, so its catch-up event is queued for the next [`ThemeManager::poll`] (never on
+    /// a real UI thread). `None`: no answer in time; `Err` names a watch that is not in effect.
+    #[doc(hidden)]
+    pub fn sync_watch(&self, timeout: Duration) -> Option<Result<(), String>> {
+        self.watcher
+            .as_ref()
+            .map_or(Some(Ok(())), |w| w.sync_within(Some(timeout)))
     }
 
     // ---------------------------------------------------------------- accessors
@@ -1077,6 +1114,10 @@ impl ThemeManager {
     }
 
     fn apply(&mut self, d: Done, out: &mut Vec<ThemeEvent>) {
+        // every job is answered by exactly one `Done`; `Init` also sends `Settings` first
+        if !matches!(d, Done::Settings(..)) {
+            self.jobs_out.set(self.jobs_out.get().saturating_sub(1));
+        }
         match d {
             Done::Watcher(w) => self.watcher = w,
             Done::Settings(loaded, user_dir) => {

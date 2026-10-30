@@ -1,6 +1,8 @@
 //! Side by Side view mode (spec 04 §3.3, interim delivery 2026-10-27): mode transitions,
 //! divider persistence, edit → preview updates and scroll sync, on the real `MarkiseApp`.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -30,7 +32,7 @@ fn harness(open: Vec<PathBuf>, config: ConfigDir) -> Harness<'static, MarkiseApp
 fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(5));
     }

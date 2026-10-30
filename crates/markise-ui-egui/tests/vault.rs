@@ -3,6 +3,8 @@
 //! offers to create the note, `[[` autocomplete inserts a link, Markdown links with encoded
 //! paths open, and View → Wikilinks off shows `[[…]]` as plain text.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -66,7 +68,7 @@ fn harness(dir: &Path, s: Option<&Arc<Scripted>>) -> H {
 fn wait_until(h: &mut H, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -573,6 +575,9 @@ fn obsidian_settings_edited_in_place_take_effect() {
     let mut h = harness(&d, None);
     ready(&mut h, &d.join("Home.md"));
     assert!(h.state().vault_index().unwrap().settings().wikilinks);
+    // the folder watch is registered in the background: edit only once it is in effect (a
+    // change before that is caught by the catch-up rescan, but the test means the live event)
+    common::settle(&mut h);
     {
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new()

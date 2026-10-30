@@ -158,6 +158,12 @@ impl WordCount {
         self.counter.stats()
     }
 
+    /// Test hook ("background settled", issue #42): the counts are up to date — no debounce
+    /// or per-frame counting is pending (as of the last frame).
+    pub fn settled(&self) -> bool {
+        self.synced && self.counter.missing() == 0
+    }
+
     /// Brings the counts up to date as far as this frame's budget allows and returns what to
     /// show. `rev` is the document's text revision, `sel` the selected source range.
     pub fn update(

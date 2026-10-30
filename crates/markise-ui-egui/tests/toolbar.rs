@@ -5,6 +5,8 @@
 //! the bottom, narrow windows collapse groups into More, and an idle window with the bar stays
 //! quiet (NFR-10).
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -35,15 +37,7 @@ fn harness_with(open: Vec<PathBuf>, config: ConfigDir, width: f32) -> Harness<'s
         .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), app)
 }
 
-fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
-    let t = Instant::now();
-    while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
-        h.step();
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    h.step();
-}
+use common::wait_until;
 
 fn cmd() -> Modifiers {
     if cfg!(target_os = "macos") {
@@ -475,17 +469,19 @@ fn idle_check(name: &str, position: ToolbarPosition) {
         out.textures_delta.clear();
         out.viewport_output[&ViewportId::ROOT].repaint_delay
     };
+    // load, then wait for every background job (theme worker, settings write of the toggle —
+    // a scheduled wake-up, not a loop —, watches, vault, images) to finish: issue #42
     let t = Instant::now();
-    while (app.model().is_none() || app.is_loading()) && t.elapsed() < Duration::from_secs(20) {
+    loop {
+        common::sync_watches(&app, t);
         frame(&mut app);
-        std::thread::sleep(Duration::from_millis(5));
+        if app.model().is_some() && !app.is_loading() && app.background_settled() {
+            break;
+        }
+        assert!(t.elapsed() < common::HANG_GUARD, "load / background never settled");
+        std::thread::sleep(Duration::from_millis(2));
     }
     assert!(app.toolbar_state().is_some());
-    // the debounced settings write of the toggle is a scheduled wake-up, not a loop
-    while app.theme_manager().save_deadline().is_some() && t.elapsed() < Duration::from_secs(20) {
-        frame(&mut app);
-        std::thread::sleep(Duration::from_millis(20));
-    }
     let delays: Vec<Duration> = (0..8).map(|_| frame(&mut app)).collect();
     assert_eq!(*delays.last().unwrap(), Duration::MAX, "NFR-10, closed: {delays:?}");
     // an open drop-down is idle too

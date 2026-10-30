@@ -145,6 +145,9 @@ pub(crate) struct ReviewState {
     /// The revision counter seen changing last, and when.
     changed: Option<(u64, u64, Instant)>,
     copy: Option<CopyJob>,
+    /// The shown panel waits for typing to pause before listing again (a frame is scheduled;
+    /// reset every frame, tests: "background settled").
+    debouncing: bool,
 }
 
 impl ReviewState {
@@ -163,6 +166,12 @@ enum PanelAction {
 }
 
 impl MarkiseApp {
+    /// Test hook ([`MarkiseApp::background_settled`]): no panel list or clean copy is being
+    /// built.
+    pub(super) fn review_settled(&self) -> bool {
+        self.review.pending.is_none() && self.review.copy.is_none() && !self.review.debouncing
+    }
+
     // ------------------------------------------------------------------ the switch
 
     /// Whether CriticMarkup comments and suggestions are parsed (View → Comments &
@@ -180,6 +189,7 @@ impl MarkiseApp {
 
     /// Per frame: applies a changed setting.
     pub(super) fn review_poll_setting(&mut self) {
+        self.review.debouncing = false; // set again by this frame's panel, if still waiting
         let want = self.review.allowed && self.themes.critic_markup();
         if want != self.parse.critic_markup {
             self.parse.critic_markup = want;
@@ -312,6 +322,7 @@ impl MarkiseApp {
         let debounce = self.review.debounce.unwrap_or(PANEL_DEBOUNCE);
         if !fresh_doc && since < debounce {
             ctx.request_repaint_after(debounce - since);
+            self.review.debouncing = true;
             return;
         }
         // a snapshot of the text (one copy) parsed and listed off the UI thread
@@ -324,8 +335,11 @@ impl MarkiseApp {
             .spawn(move || {
                 let doc = format.parse(text.to_string(), &markise_doc::FormatOptions::default());
                 let marks = review::all_marks(doc.as_ref());
-                let _ = tx.send(PanelList::build(doc_id, counter, doc.text(), marks));
+                let list = PanelList::build(doc_id, counter, doc.text(), marks);
+                let published = crate::wake_track::publishing();
+                let _ = tx.send(list);
                 wake();
+                drop(published);
             });
         if spawned.is_ok() {
             self.review.pending = Some(PendingList { rx });
@@ -528,8 +542,10 @@ impl MarkiseApp {
             .name("markise-clean-copy".into())
             .spawn(move || {
                 let r = markise_engine::save::save_checked(&target, &text, expect);
+                let published = crate::wake_track::publishing();
                 let _ = tx.send(r);
                 wake();
+                drop(published);
             });
         match spawned {
             Ok(_) => self.review.copy = Some(CopyJob { rx, path: p }),

@@ -536,6 +536,8 @@ fn worker(s: Arc<Shared>) {
         let t = Instant::now();
         let (metrics, bitmap) = render(&job.req, job.pixels);
         let took = t.elapsed();
+        // not busy from the update below: counted until the wake returned (tests)
+        let published = crate::wake_track::publishing();
         {
             let mut st = s.lock();
             st.running.remove(&job.id);
@@ -556,6 +558,7 @@ fn worker(s: Arc<Shared>) {
         }
         guard.job = None;
         (s.wake)();
+        drop(published);
     }
 }
 
@@ -578,7 +581,7 @@ mod tests {
         let t = Instant::now();
         loop {
             match svc.get(r) {
-                MathImageLookup::Pending if t.elapsed() < Duration::from_secs(20) => {
+                MathImageLookup::Pending if t.elapsed() < crate::TEST_HANG_GUARD => {
                     std::thread::sleep(Duration::from_millis(2))
                 }
                 other => return other,
@@ -667,7 +670,7 @@ mod tests {
         }))
         .unwrap();
         let woken = || {
-            rx.recv_timeout(Duration::from_secs(120))
+            rx.recv_timeout(crate::TEST_HANG_GUARD)
                 .expect("the UI is woken after the job ends")
         };
         let kill = req(KILL_WORKER);
@@ -744,7 +747,7 @@ mod tests {
             match svc.measure(&r) {
                 MathMeasure::Ready { width, ascent, .. } => break (width, ascent),
                 MathMeasure::Pending => {
-                    assert!(t.elapsed() < Duration::from_secs(20));
+                    assert!(t.elapsed() < crate::TEST_HANG_GUARD);
                     std::thread::sleep(Duration::from_millis(2));
                 }
                 other => panic!("{other:?}"),
@@ -788,7 +791,7 @@ mod tests {
                 match svc.measure(&r) {
                     MathMeasure::Ready { width, ascent, descent } => break (width, ascent, descent),
                     MathMeasure::Pending => {
-                        assert!(t.elapsed() < Duration::from_secs(20));
+                        assert!(t.elapsed() < crate::TEST_HANG_GUARD);
                         std::thread::sleep(Duration::from_millis(2));
                     }
                     other => panic!("{tex}: {other:?}"),
@@ -826,7 +829,7 @@ mod tests {
             if ready == reqs.len() {
                 break;
             }
-            assert!(t.elapsed() < Duration::from_secs(30), "never settled");
+            assert!(t.elapsed() < crate::TEST_HANG_GUARD, "never settled");
             std::thread::sleep(Duration::from_millis(2));
         }
         let before = svc.stats();

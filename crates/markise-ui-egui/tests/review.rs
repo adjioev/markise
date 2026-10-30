@@ -3,6 +3,8 @@
 //! document's context menu, View → Comments & Suggestions off (plain text, bytes unchanged),
 //! File → Save Copy Without Comments, and the AI review loop end to end.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,7 +54,7 @@ fn open(name: &str, text: &str) -> (H, PathBuf) {
 fn wait_until(h: &mut H, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -162,7 +164,7 @@ fn has_text(h: &mut H, s: &str) -> bool {
         if h.query_all_by(|n| text_is(n, s)).next().is_some() {
             return true;
         }
-        if t.elapsed() > Duration::from_secs(5) {
+        if t.elapsed() > common::HANG_GUARD {
             return false;
         }
         h.step();
@@ -687,7 +689,7 @@ fn bubbles_show_a_popover_on_hover() {
     h.hover_at(glyph.center());
     let t = Instant::now();
     while !h.state_mut().viewer().unwrap().popover_open() {
-        assert!(t.elapsed() < Duration::from_secs(5), "popover did not open");
+        assert!(t.elapsed() < common::HANG_GUARD, "popover did not open");
         h.step();
         std::thread::sleep(Duration::from_millis(20));
     }

@@ -210,6 +210,14 @@ pub fn find_heading(model: &DocModel, segs: &[String]) -> Option<usize> {
 }
 
 impl MarkiseApp {
+    /// Test hook ([`MarkiseApp::background_settled`]): the scanner, the re-parse and note
+    /// creation have nothing outstanding.
+    pub(super) fn vault_settled(&self) -> bool {
+        self.vault.scanner.as_ref().is_none_or(VaultScanner::is_idle)
+            && self.vault.reparse.is_none()
+            && self.vault.creating.is_none()
+    }
+
     // ------------------------------------------------------------------ index
 
     /// The vault root: the sidebar's mounted folder.
@@ -360,8 +368,10 @@ impl MarkiseApp {
             .spawn(move || {
                 let doc = Document::parse(text, opts);
                 let model = DocModel::build(&doc, path.as_deref());
+                let published = crate::wake_track::publishing();
                 let _ = tx.send((Arc::new(doc), model));
                 wake();
+                drop(published);
             });
         if spawned.is_ok() {
             self.vault.reparse = Some(Reparse {

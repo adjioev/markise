@@ -1,6 +1,8 @@
 //! Issue #39: egui's built-in keyboard zoom is off, so ⌘= / ⌘- (Ctrl elsewhere) only step the
 //! heading level and ⌘0 only makes a paragraph — none of them scales the UI.
 
+mod common;
+
 use std::time::{Duration, Instant};
 
 use egui::{Key, Modifiers};
@@ -46,7 +48,7 @@ fn heading_shortcuts_change_the_heading_and_never_zoom() {
         );
     let t = Instant::now();
     while h.state().model().is_none() || h.state().is_busy() {
-        assert!(t.elapsed() < Duration::from_secs(20), "load");
+        assert!(t.elapsed() < common::HANG_GUARD, "load");
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }

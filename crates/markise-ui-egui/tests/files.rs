@@ -2,6 +2,8 @@
 //! extension): File → New, Save As…, Save of an untitled document, and the file tree's New
 //! File / New Folder / Rename. The native save dialog is answered through a test hook.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -41,7 +43,7 @@ fn harness_with(open: Vec<PathBuf>, hooks: JobHooks) -> Harness<'static, Markise
 fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -373,7 +375,7 @@ fn gated_saves() -> (Gate, JobHooks) {
 fn wait_entered(h: &mut Harness<'static, MarkiseApp>, g: &Gate) {
     let t = Instant::now();
     while g.entered.try_recv().is_err() {
-        assert!(t.elapsed() < Duration::from_secs(10), "the save never started");
+        assert!(t.elapsed() < common::HANG_GUARD, "the save never started");
         h.step();
         std::thread::sleep(Duration::from_millis(1));
     }

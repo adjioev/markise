@@ -1,6 +1,8 @@
 //! Review follow-up: no silent loss of edits, conflict-aware saving, watcher races.
 //! Drives the real `MarkiseApp` headlessly (egui_kittest, no window).
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -30,7 +32,7 @@ fn harness(open: Vec<PathBuf>) -> Harness<'static, MarkiseApp> {
 fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -231,7 +233,7 @@ fn edits_made_during_a_save_stay_unsaved() {
     // then edit again before that completion is processed
     let t = Instant::now();
     while !h.state().is_saving() {
-        assert!(t.elapsed() < Duration::from_secs(10));
+        assert!(t.elapsed() < common::HANG_GUARD);
         h.step();
     }
     h.state_mut().edit_source_text(|t| *t = t.replace("two", "three"));
@@ -256,7 +258,8 @@ fn reload_from_disk_after_preview_edits_replaces_the_document() {
     h.state_mut().toggle_source(); // applied to the preview, unsaved
     wait_until(&mut h, "apply", |s| !s.is_busy());
     assert!(h.state().is_dirty());
-    std::thread::sleep(Duration::from_millis(300));
+    // the file watch is registered in the background: write once it is in effect
+    common::settle(&mut h);
     std::fs::write(&a, "from disk\n").unwrap();
     wait_until(&mut h, "conflict", |s| {
         s.banner_text().is_some_and(|b| b.starts_with("conflict"))

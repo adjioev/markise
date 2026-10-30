@@ -3,6 +3,8 @@
 //! `MarkiseApp` is driven headlessly with the watcher worker held inside its registration
 //! change (`JobHooks::before_watch`).
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -52,7 +54,7 @@ fn harness(open: Vec<PathBuf>, hooks: Arc<JobHooks>) -> Harness<'static, Markise
 fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(30), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -72,7 +74,7 @@ fn a_file_created_before_the_folder_watch_takes_effect_appears_in_the_tree() {
         a.file_tree_rows().iter().any(|r| r == "first.md")
     });
     entered
-        .recv_timeout(Duration::from_secs(30))
+        .recv_timeout(common::HANG_GUARD)
         .expect("folder watch registration");
     std::fs::write(dir.join("second.md"), "# Second\n").unwrap();
     release(&held);
@@ -116,9 +118,7 @@ fn an_external_restore_after_our_save_is_noticed_across_a_folder_switch() {
 
     hold(&held, &entered);
     h.state_mut().open(root.join("b")); // mount another folder: the document's watch changes
-    entered
-        .recv_timeout(Duration::from_secs(30))
-        .expect("registration change");
+    entered.recv_timeout(common::HANG_GUARD).expect("registration change");
     std::fs::write(&doc, "version A\n").unwrap();
     release(&held);
     wait_until(&mut h, "restored text", |a| {
@@ -152,9 +152,7 @@ fn recreating_a_deleted_file_with_the_same_content_in_a_gap_is_noticed() {
 
     hold(&held, &entered);
     h.state_mut().open(root.join("b")); // the document's watch changes
-    entered
-        .recv_timeout(Duration::from_secs(30))
-        .expect("registration change");
+    entered.recv_timeout(common::HANG_GUARD).expect("registration change");
     std::fs::write(&doc, "same text\n").unwrap();
     release(&held);
     wait_until(&mut h, "recreated", |a| !a.document_deleted() && !a.is_busy());
@@ -211,16 +209,14 @@ fn a_same_content_reload_is_the_new_baseline() {
     *load_armed.0.lock().unwrap() = true;
     hold(&held, &entered);
     h.state_mut().open(root.join("b"));
-    entered
-        .recv_timeout(Duration::from_secs(30))
-        .expect("registration change 1");
+    entered.recv_timeout(common::HANG_GUARD).expect("registration change 1");
     std::fs::write(&doc, "version B\n").unwrap();
     release(&held);
     h.state().wait_for_watches().unwrap();
     // the UI's reload starts and is held before it reads; meanwhile the disk returns to A
     let t = Instant::now();
     while load_entered.try_recv().is_err() {
-        assert!(t.elapsed() < Duration::from_secs(30), "reload never started");
+        assert!(t.elapsed() < common::HANG_GUARD, "reload never started");
         h.step();
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -235,9 +231,7 @@ fn a_same_content_reload_is_the_new_baseline() {
     // gap 2: the disk becomes B again
     hold(&held, &entered);
     h.state_mut().open(root.join("a"));
-    entered
-        .recv_timeout(Duration::from_secs(30))
-        .expect("registration change 2");
+    entered.recv_timeout(common::HANG_GUARD).expect("registration change 2");
     std::fs::write(&doc, "version B\n").unwrap();
     release(&held);
     wait_until(&mut h, "B shown", |a| {
@@ -271,7 +265,7 @@ fn save_as_moves_the_watch_to_the_new_file() {
     let t = Instant::now();
     while entered.try_recv().is_err() {
         assert!(
-            t.elapsed() < Duration::from_secs(30),
+            t.elapsed() < common::HANG_GUARD,
             "the new file's watch was never registered"
         );
         h.step();

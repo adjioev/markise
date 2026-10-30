@@ -7,6 +7,8 @@
 //!   a click elsewhere, a refused name shown under the row);
 //! - the I-beam cursor only over editable text.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,7 +51,7 @@ fn scripted(open: Vec<PathBuf>, s: &Arc<Scripted>) -> H {
 fn wait_until(h: &mut H, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -307,10 +309,7 @@ fn field_focused(h: &mut H) {
         if h.ctx.memory(|m| m.has_focus(id)) {
             break;
         }
-        assert!(
-            t.elapsed() < Duration::from_secs(10),
-            "the rename field never got the focus"
-        );
+        assert!(t.elapsed() < common::HANG_GUARD, "the rename field never got the focus");
     }
     h.step();
 }

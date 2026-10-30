@@ -122,6 +122,16 @@ impl TextureStore {
         self.math_done.swap(false, Ordering::AcqRel)
     }
 
+    /// Test hook: no image decode is queued or running and the math worker is idle with its
+    /// results taken (nothing will change an image's state until something new is shown).
+    #[doc(hidden)]
+    pub fn is_idle(&self) -> bool {
+        self.retry.is_empty()
+            && !self.entries.values().any(|e| matches!(e, Entry::Loading { .. }))
+            && !self.math.as_ref().is_some_and(MathService::busy)
+            && !self.math_done.load(Ordering::Acquire)
+    }
+
     fn math_request(q: &MathQuery) -> MathRequest {
         MathRequest {
             tex: q.tex.to_string(),

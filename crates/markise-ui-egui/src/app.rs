@@ -503,6 +503,8 @@ pub struct MarkiseApp {
     review: review::ReviewState,
     /// Pasted and dropped images and files being written (spec 04 §7.1).
     attach: attach::AttachState,
+    /// How long the first frame waits for the selected theme ([`FIRST_THEME_WAIT`]; tests).
+    first_theme_wait: Duration,
 }
 
 impl MarkiseApp {
@@ -593,6 +595,7 @@ impl MarkiseApp {
             vault,
             review,
             attach: attach::AttachState::new(opts.clipboard_files),
+            first_theme_wait: FIRST_THEME_WAIT,
         }
     }
 
@@ -790,6 +793,63 @@ impl MarkiseApp {
     /// a real UI thread). `Err` names watches that are not in effect.
     pub fn wait_for_watches(&self) -> Result<(), String> {
         self.watcher.as_ref().map_or(Ok(()), |w| w.sync())
+    }
+
+    /// Test hook: how long the first frame may wait for the settings and the selected theme
+    /// (default [`FIRST_THEME_WAIT`], a startup budget). Tests that check "no flash of the
+    /// default theme" raise it, so a loaded machine cannot exhaust the budget (issue #42).
+    #[doc(hidden)]
+    pub fn set_first_theme_wait(&mut self, wait: Duration) {
+        self.first_theme_wait = wait;
+    }
+
+    /// Test hook: blocks until the document/folder watch and the theme folder watch have
+    /// applied every request, so their catch-up events are queued for the next frame (never
+    /// on a real UI thread). See [`MarkiseApp::background_settled`].
+    /// `None` when a watcher did not answer within `timeout` (a hang guard: the test fails
+    /// instead of blocking); `Err` names a watch that is not in effect.
+    #[doc(hidden)]
+    pub fn sync_background_watches(&self, timeout: Duration) -> Option<Result<(), String>> {
+        let t = Instant::now();
+        let doc = match &self.watcher {
+            Some(w) => w.sync_within(Some(timeout))?,
+            None => Ok(()),
+        };
+        let themes = self.themes.sync_watch(timeout.saturating_sub(t.elapsed()))?;
+        Some(doc.and(themes))
+    }
+
+    /// Test hook ("background settled", issue #42): no background job is outstanding — no
+    /// load or save, the theme worker, vault scanner, file tree lister, image decoders and
+    /// the highlight / diagram / math workers have nothing queued or unapplied, and every
+    /// watch request was covered by [`MarkiseApp::sync_background_watches`]. Once this holds
+    /// after a frame, nothing wakes the UI until new input arrives, so tests wait for it
+    /// instead of sleeping (idle-repaint checks, `Harness::run`). Startup work that is still
+    /// to be *started* (files queued for opening) counts as outstanding.
+    #[doc(hidden)]
+    pub fn background_settled(&self) -> bool {
+        !self.is_busy()
+            && self.queued_save.is_none()
+            && !self.reload_pending
+            && self.pending_open.is_empty()
+            && !self.fonts_pending
+            && self.themes.is_idle()
+            && self.watcher.as_ref().is_none_or(FileWatcher::is_synced)
+            && self.vault_settled()
+            && self.review_settled()
+            && self.attach_settled()
+            && self.images.is_idle()
+            && self.tree.as_ref().is_none_or(FileTree::is_idle)
+            && !self.highlighter.as_ref().is_some_and(|h| h.busy())
+            && !self.diagram_renderer.as_ref().is_some_and(|d| d.busy())
+            && !self.export.is_running()
+            && self.word_count.as_ref().is_none_or(|(_, w)| w.settled())
+            && self.doc.as_ref().is_none_or(|d| d.viewer.comments_settled())
+            // every published result's wake-up has returned (a result can be taken before
+            // the worker's wake runs; that late wake must not land in an idle check)
+            && crate::wake_track::unwoken() == 0
+            && markise_engine::wake_track::unwoken() == 0
+            && markise_blocks::wake_track::unwoken() == 0
     }
 
     /// The open document's file was deleted on disk and not recreated (tests).
@@ -1885,7 +1945,10 @@ impl MarkiseApp {
             // first frame: wait briefly for the settings and the selected theme (no flash of
             // the default theme)
             let c = ctx.clone();
-            for e in self.themes.wait_ready(&|a| appearance_dark(&c, a), FIRST_THEME_WAIT) {
+            for e in self
+                .themes
+                .wait_ready(&|a| appearance_dark(&c, a), self.first_theme_wait)
+            {
                 self.theme_event(ctx, e);
             }
         }

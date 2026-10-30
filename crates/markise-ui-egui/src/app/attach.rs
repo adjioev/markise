@@ -127,6 +127,11 @@ impl AttachState {
 }
 
 impl MarkiseApp {
+    /// Test hook ([`MarkiseApp::background_settled`]): no paste or drop is being resolved.
+    pub(super) fn attach_settled(&self) -> bool {
+        self.attach.queue.is_empty()
+    }
+
     /// Uses `stamp` (`YYYYMMDDHHMMSS`) instead of the clock for pasted image names (tests).
     pub fn set_paste_stamp(&mut self, stamp: Option<String>) {
         self.attach.stamp = stamp;
@@ -253,8 +258,11 @@ impl MarkiseApp {
             .spawn({
                 let tx = tx.clone();
                 move || {
-                    let _ = tx.send(clipboard.files());
+                    let files = clipboard.files();
+                    let published = crate::wake_track::publishing();
+                    let _ = tx.send(files);
                     wake();
+                    drop(published);
                 }
             })
             .is_err();
@@ -352,8 +360,11 @@ impl MarkiseApp {
                 if let Some(h) = hook {
                     h();
                 }
-                let _ = tx.send(attach::run(&req)); // ignored when the entry timed out
+                let out = attach::run(&req);
+                let published = crate::wake_track::publishing();
+                let _ = tx.send(out); // ignored when the entry timed out
                 wake();
+                drop(published);
             });
         match spawned {
             Ok(_) => Stage::Job(rx, Instant::now()),

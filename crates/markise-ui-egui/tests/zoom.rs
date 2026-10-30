@@ -3,6 +3,8 @@
 //! ⌘= / ⌘- stay the heading level commands; the document's caret and hit testing stay right
 //! when zoomed.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -38,7 +40,7 @@ fn harness(open: Vec<PathBuf>, config: Option<&Path>) -> H {
 fn wait_until(h: &mut H, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -191,7 +193,7 @@ fn the_zoom_persists_across_a_restart() {
     let file = cfg.join("markise").join("settings.json");
     let t = Instant::now();
     while !std::fs::read_to_string(&file).is_ok_and(|s| s.contains("\"zoom\": 1.5")) {
-        assert!(t.elapsed() < Duration::from_secs(10), "settings written with the zoom");
+        assert!(t.elapsed() < common::HANG_GUARD, "settings written with the zoom");
         std::thread::sleep(Duration::from_millis(10));
     }
     let mut h = harness(vec![], Some(&cfg));
@@ -205,10 +207,7 @@ fn the_zoom_persists_across_a_restart() {
     h.state_mut().on_exit();
     let t = Instant::now();
     while std::fs::read_to_string(&file).is_ok_and(|s| s.contains("\"zoom\"")) {
-        assert!(
-            t.elapsed() < Duration::from_secs(10),
-            "settings written without the zoom"
-        );
+        assert!(t.elapsed() < common::HANG_GUARD, "settings written without the zoom");
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(std::fs::read_to_string(&file).unwrap().contains("\"version\""));

@@ -713,8 +713,11 @@ pub fn spawn(req: Request, wake: Wake) -> Receiver<Outcome> {
     let spawned = std::thread::Builder::new().name("markise-attach".into()).spawn({
         let tx = tx.clone();
         move || {
-            let _ = tx.send(run(&req));
+            let out = run(&req);
+            let published = crate::wake_track::publishing();
+            let _ = tx.send(out);
             wake();
+            drop(published);
         }
     });
     if let Err(e) = spawned {

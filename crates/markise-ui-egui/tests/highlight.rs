@@ -1,6 +1,8 @@
 //! Code highlighting in the app: lazy worker start, recoloring when results arrive, the
 //! View menu switch.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -31,7 +33,7 @@ fn harness(open: Vec<PathBuf>) -> Harness<'static, MarkiseApp> {
 fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, mut f: impl FnMut(&mut MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state_mut()) {
-        assert!(t.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(10));
     }

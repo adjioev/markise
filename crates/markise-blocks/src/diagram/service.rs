@@ -320,6 +320,8 @@ fn worker(shared: Arc<Shared>, measure: Arc<dyn TextMeasure>, wake: Arc<dyn Fn()
         let text = (job.source)();
         let result = render(job.lang, &text, &ctx);
         let dt = t.elapsed();
+        // the UI may see this job as finished from here on: count it until its wake returned
+        let published = crate::wake_track::publishing();
         let mut st = shared.lock();
         st.running = None;
         // a newer request for the same key (current document) keeps its own pending entry
@@ -334,6 +336,7 @@ fn worker(shared: Arc<Shared>, measure: Arc<dyn TextMeasure>, wake: Arc<dyn Fn()
                 drop(st);
                 // whoever still shows this diagram asks again on the next frame
                 wake();
+                drop(published);
                 continue;
             }
             Ok(_) => st.stats.rendered += 1,
@@ -348,6 +351,7 @@ fn worker(shared: Arc<Shared>, measure: Arc<dyn TextMeasure>, wake: Arc<dyn Fn()
         insert(&mut st, job.key, Arc::new(result), bytes);
         drop(st);
         wake();
+        drop(published);
     }
 }
 
@@ -364,7 +368,7 @@ mod tests {
             if let DiagramLookup::Ready(r) = s.lookup(key) {
                 return r;
             }
-            assert!(t.elapsed() < Duration::from_secs(10), "timed out");
+            assert!(t.elapsed() < crate::TEST_HANG_GUARD, "timed out");
             std::thread::sleep(Duration::from_millis(2));
         }
     }
@@ -436,7 +440,7 @@ mod tests {
         // wait until the worker runs it
         let t = Instant::now();
         while !s.shared.lock().running.is_some() {
-            assert!(t.elapsed() < Duration::from_secs(5));
+            assert!(t.elapsed() < crate::TEST_HANG_GUARD);
             std::thread::sleep(Duration::from_millis(1));
         }
         // document reload: cancel, then the same diagram is requested again
@@ -475,12 +479,12 @@ mod tests {
         let _ = s.request(7, DiagramLang::Mermaid, &src, 14.0);
         let t = Instant::now();
         while !s.shared.lock().running.is_some() {
-            assert!(t.elapsed() < Duration::from_secs(5));
+            assert!(t.elapsed() < crate::TEST_HANG_GUARD);
             std::thread::sleep(Duration::from_millis(1));
         }
         s.set_generation(1);
         while s.busy() {
-            assert!(t.elapsed() < Duration::from_secs(10));
+            assert!(t.elapsed() < crate::TEST_HANG_GUARD);
             std::thread::sleep(Duration::from_millis(1));
         }
         let st = s.stats();
@@ -521,7 +525,7 @@ mod tests {
         s.set_generation(1);
         let t = Instant::now();
         while s.busy() {
-            assert!(t.elapsed() < Duration::from_secs(10));
+            assert!(t.elapsed() < crate::TEST_HANG_GUARD);
             std::thread::sleep(Duration::from_millis(2));
         }
         let st = s.stats();

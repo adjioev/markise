@@ -411,57 +411,122 @@ pub fn adversarial() -> Vec<(&'static str, AdversarialGen)> {
     ]
 }
 
+/// CPU work done by the calling thread so far: its CPU time in nanoseconds on Unix, its CPU
+/// **cycle count** on Windows (cycles, not time: [`WORK_PER_SEC`] converts only
+/// approximately). Ratios of two measurements need just a consistent unit, which both give.
+/// Unlike wall-clock time it does not grow while the thread waits for a core, so ratios stay
+/// meaningful on a loaded machine (issue #42). Falls back to wall-clock nanoseconds elsewhere.
+pub fn thread_work() -> u64 {
+    #[cfg(unix)]
+    {
+        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: `ts` is a valid, writable timespec; the clock id is a constant.
+        if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0 {
+            return ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
+        }
+    }
+    #[cfg(windows)]
+    {
+        let mut cycles = 0u64;
+        // SAFETY: the pseudo handle of the current thread is always valid; `cycles` is
+        // writable.
+        if unsafe {
+            windows_sys::Win32::System::WindowsProgramming::QueryThreadCycleTime(
+                windows_sys::Win32::System::Threading::GetCurrentThread(),
+                &mut cycles,
+            )
+        } != 0
+        {
+            return cycles;
+        }
+    }
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+}
+
+/// [`thread_work`] units per second: exact on Unix; on Windows an assumed 3 GHz (cycles vary
+/// with the clock speed), so the floors and caps derived from it are approximate there.
+pub const WORK_PER_SEC: u64 = if cfg!(windows) { 3_000_000_000 } else { 1_000_000_000 };
+
 /// Asserts that `run` scales (near) linearly on inputs built by `generate`.
 ///
-/// The small input size starts at 4 000 repetitions and doubles until the best-of-5 time is at
-/// least [`MIN_SMALL`] (so a fast quadratic step cannot hide below the timer floor; capped at
-/// 64 000 repetitions), then the large input is 16× that size. Linear ≈ 16×, n^1.5 ≈ 64×,
-/// quadratic ≈ 256×: the ratio must stay below 40×. A busy machine can disturb one measurement,
-/// so up to three attempts are made; a super-linear algorithm fails every attempt. A large
-/// run slower than the wall-clock cap fails at once.
+/// Measured in CPU work of this thread ([`thread_work`]), not wall-clock time, so a busy
+/// machine does not inflate one measurement (issue #42). The small input size starts at 4 000
+/// repetitions and doubles until the best-of-5 work is at least [`MIN_SMALL`] (so a fast
+/// quadratic step cannot hide below the timer floor; capped at 64 000 repetitions), then the
+/// large input is 16× that size. Linear ≈ 16×, n^1.5 ≈ 64×, quadratic ≈ 256×: the ratio must
+/// stay below 40×. Caches and frequency changes can still disturb one measurement, so up to
+/// three attempts are made; a super-linear algorithm fails every attempt. A large run that
+/// needs more CPU time than the cap fails at once.
 pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, run: &dyn Fn(&str)) {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    let secs = |w: u64| Duration::from_secs_f64(w as f64 / WORK_PER_SEC as f64);
     // Debug builds on shared CI runners are slow; release gets the tighter cap.
     let cap = Duration::from_secs(if cfg!(debug_assertions) { 15 } else { 5 });
     let once = |s: &str| {
-        let t = Instant::now();
+        let t = thread_work();
         run(s);
-        t.elapsed()
+        thread_work().saturating_sub(t)
     };
     let best = |s: &str| {
         let first = once(s);
         assert!(
-            first < cap,
-            "{name}: one run of {} bytes took {first:?} (cap {cap:?})",
-            s.len()
+            secs(first) < cap,
+            "{name}: one run of {} bytes took {:?} of CPU time (cap {cap:?})",
+            s.len(),
+            secs(first)
         );
-        (1..5).map(|_| once(s)).fold(first, Duration::min)
+        (1..5).map(|_| once(s)).fold(first, u64::min)
     };
+    let floor = WORK_PER_SEC / 1000; // 1 ms: the ratio's denominator never rounds to zero
+    let min_small = (MIN_SMALL.as_secs_f64() * WORK_PER_SEC as f64) as u64;
     let mut last = String::new();
     for _ in 0..3 {
         let mut n = 4_000;
-        let ts = loop {
-            let t = best(&generate(n));
-            if t >= MIN_SMALL || n >= 64_000 {
-                break t;
+        let ws = loop {
+            let w = best(&generate(n));
+            if w >= min_small || n >= 64_000 {
+                break w;
             }
             n *= 2;
         };
-        let tl = best(&generate(16 * n));
-        let ratio = tl.as_secs_f64() / ts.max(Duration::from_millis(1)).as_secs_f64();
+        let wl = best(&generate(16 * n));
+        let ratio = wl as f64 / ws.max(floor) as f64;
         if ratio < 40.0 {
             return;
         }
-        last = format!("{name}: 16× input (n={n}) took {ratio:.1}× longer ({ts:?} → {tl:?})");
+        last = format!(
+            "{name}: 16× input (n={n}) took {ratio:.1}× more CPU time ({:?} → {:?})",
+            secs(ws),
+            secs(wl)
+        );
     }
     panic!("{last}");
 }
 
-/// Minimum best-of-5 time of the small input in [`assert_scales_linearly`].
+/// Minimum best-of-5 CPU time of the small input in [`assert_scales_linearly`].
 pub const MIN_SMALL: std::time::Duration = std::time::Duration::from_millis(5);
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn thread_work_counts_busy_time_not_sleep() {
+        let t = super::thread_work();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let slept = super::thread_work() - t;
+        let t = super::thread_work();
+        let mut x = 0u64;
+        while super::thread_work() - t < super::WORK_PER_SEC / 20 {
+            x = x.wrapping_add(std::hint::black_box(1));
+        }
+        assert!(x > 0);
+        // on Unix and Windows sleeping costs (almost) no CPU work
+        if cfg!(any(unix, windows)) {
+            assert!(slept < super::WORK_PER_SEC / 50, "sleeping counted {slept}");
+        }
+    }
+
     #[test]
     fn deterministic() {
         assert_eq!(super::generate(5000, 7), super::generate(5000, 7));

@@ -2,6 +2,8 @@
 //! keys routed through the engine keymap (Enter, Backspace, Tab, Shift+Tab, undo), save;
 //! asserts the saved bytes and the caret.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -37,7 +39,7 @@ fn open(name: &str, text: &str) -> (H, PathBuf) {
 fn wait_until(h: &mut H, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(10));
     }

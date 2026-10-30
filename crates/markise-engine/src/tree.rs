@@ -129,10 +129,13 @@ impl Lister {
             .spawn(move || {
                 while let Ok((dir, generation)) = job_rx.recv() {
                     let r = list_dir(&dir).map_err(|e| e.to_string());
+                    let published = crate::wake_track::publishing();
                     if res_tx.send((dir, generation, r)).is_err() {
+                        drop(published);
                         break;
                     }
                     wake();
+                    drop(published);
                 }
             })
             .map_err(|e| format!("cannot start listing thread: {e}"))?;
