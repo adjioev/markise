@@ -7,7 +7,9 @@
 //! Protocol (stdin → requests, stdout → responses; stdout carries nothing else): each frame is
 //! `u32 LE length + JSON` followed by `u32 LE length + binary payload` (empty for requests).
 //!
-//! Request JSON: `{"id": u64, "width": f64, "scale": f64, "html": str, "css": str, "js": str}`.
+//! Request JSON: `{"id": u64, "width": f64, "scale": f64, "html": str, "css": str, "js": str,
+//! "theme": "dark"|"light", "vars": str}` (theme → `<html data-theme>` + `color-scheme`, vars →
+//! `<html style>` custom properties).
 //! Response JSON: `{"id", "ok", "height", "px_w", "px_h", "backing", "decorated",
 //! "ms_queue", "ms_js", "ms_snap", "ms_png", "ms_total", "error"}` + PNG bytes.
 //! The first frame the helper writes is `{"ready": true, "ms_startup": f64}`.

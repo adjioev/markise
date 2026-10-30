@@ -696,6 +696,7 @@ impl DocViewer {
                         ppp,
                         theme.block_spacing,
                         &vis,
+                        &crate::block_snap::ThemeVars::from_theme(theme),
                     );
                     self.ed.view.set_height_overrides(over);
                     placed

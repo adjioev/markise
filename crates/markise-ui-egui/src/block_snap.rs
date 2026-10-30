@@ -102,9 +102,48 @@ pub fn find_blocks(model: &DocModel, text: &str) -> Vec<Block> {
     out
 }
 
+/// Markise's current theme as handed to the site code: `data-theme="dark|light"` and
+/// `color-scheme` on `<html>`, plus CSS custom properties `--markise-bg`, `--markise-fg`,
+/// `--markise-accent`, `--markise-muted`, `--markise-font-size`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThemeVars {
+    pub dark: bool,
+    /// CSS declarations for `<html style>`.
+    pub vars: String,
+}
+
+impl ThemeVars {
+    pub fn from_theme(t: &markise_theme::Theme) -> Self {
+        let hex = |c: markise_theme::Rgba| {
+            let [r, g, b, a] = c.0;
+            if a == 255 {
+                format!("#{r:02x}{g:02x}{b:02x}")
+            } else {
+                format!("rgba({r},{g},{b},{:.3})", a as f32 / 255.0)
+            }
+        };
+        ThemeVars {
+            dark: t.dark,
+            vars: format!(
+                "--markise-bg:{};--markise-fg:{};--markise-accent:{};--markise-muted:{};--markise-font-size:{}px",
+                hex(t.page_bg),
+                hex(t.text),
+                hex(t.link),
+                hex(t.meta_text),
+                t.font_size
+            ),
+        }
+    }
+
+    fn mode(&self) -> &'static str {
+        if self.dark { "dark" } else { "light" }
+    }
+}
+
 /// A request to the worker.
 #[derive(Clone, Debug)]
 struct Job {
+    theme: ThemeVars,
     key: u64,
     name: String,
     variant: String,
@@ -215,9 +254,16 @@ impl BlockSnaps {
         })
     }
 
-    fn key_of(b: &Block, width: f32, scale: f32) -> u64 {
+    fn key_of(b: &Block, width: f32, scale: f32, theme: &ThemeVars) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (b.content, (width * 4.0) as u32, (scale * 100.0) as u32).hash(&mut h);
+        (
+            b.content,
+            (width * 4.0) as u32,
+            (scale * 100.0) as u32,
+            theme.dark,
+            &theme.vars,
+        )
+            .hash(&mut h);
         h.finish()
     }
 
@@ -234,6 +280,7 @@ impl BlockSnaps {
         scale: f32,
         spacing: f32,
         visible: &[usize],
+        theme: &ThemeVars,
     ) -> (HashMap<usize, f32>, Vec<Placed>) {
         self.frame += 1;
         let id = (std::sync::Arc::as_ptr(model) as usize, revision);
@@ -306,7 +353,7 @@ impl BlockSnaps {
         let mut keys = Vec::new();
         for &i in &order {
             let b = &self.blocks[i];
-            let key = Self::key_of(b, width, scale);
+            let key = Self::key_of(b, width, scale, theme);
             if self.folder == 0
                 || (!self.cache.contains_key(&(key, self.folder)) && !self.failed.contains(&(key, self.folder)))
             {
@@ -319,6 +366,7 @@ impl BlockSnaps {
                 self.wanted_at.entry(key).or_insert_with(Instant::now);
                 keys.push(key);
                 jobs.push(Job {
+                    theme: theme.clone(),
                     key,
                     name: b.name.clone(),
                     variant: b.variant.clone(),
@@ -338,7 +386,7 @@ impl BlockSnaps {
         let mut missing = 0;
         self.current.clear();
         for (i, b) in self.blocks.iter().enumerate() {
-            let key = Self::key_of(b, width, scale);
+            let key = Self::key_of(b, width, scale, theme);
             let cur = (key, self.folder);
             let shown = if self.cache.contains_key(&cur) {
                 if self.log && self.last_shown[i] != Some(cur) {
@@ -564,6 +612,9 @@ impl Worker {
         let mut want: Vec<Job> = Vec::new();
         loop {
             if self.site.refresh() {
+                if self.log {
+                    eprintln!("[blocksnap] site code (re)loaded, hash {:x}", self.site.hash);
+                }
                 self.done.clear();
                 self.send(FromWorker::Folder(self.site.hash));
             }
@@ -685,6 +736,8 @@ impl Worker {
             "html": html,
             "css": css,
             "js": js,
+            "theme": job.theme.mode(),
+            "vars": job.theme.vars,
         });
         let mut last = String::new();
         for _attempt in 0..2 {

@@ -42,6 +42,10 @@ const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 for (let i = 0; i < 200 && Math.abs(window.innerWidth - r.width) > 0.5; i++) await sleep(2);
 const css = document.getElementById('mk-css');
 if (css.textContent !== r.css) css.textContent = r.css;
+const html = document.documentElement;
+if (html.dataset.theme !== r.theme) html.dataset.theme = r.theme;
+const style = (r.vars || '') + ';color-scheme:' + r.theme;
+if (html.getAttribute('style') !== style) html.setAttribute('style', style);
 const root = document.getElementById('mk-root');
 root.innerHTML = r.html;
 const block = root.firstElementChild;
@@ -196,6 +200,8 @@ pub fn main() {
                             "html": v["html"].as_str().unwrap_or(""),
                             "css": v["css"].as_str().unwrap_or(""),
                             "js": v["js"].as_str().unwrap_or(""),
+                            "theme": if v["theme"] == "dark" { "dark" } else { "light" },
+                            "vars": v["vars"].as_str().unwrap_or(""),
                         })
                         .to_string();
                         let req = Req {

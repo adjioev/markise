@@ -1,20 +1,27 @@
 /* PROTOTYPE stub "site code" for Markise block snapshots (original work, MIT OR Apache-2.0).
-   Common card rules (repeated in each block file: blocks are self-contained). */
-section[data-component] {
-  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  color: #1d2433;
+   :::goals — a card with the lesson goals.
+   Theme contract: Markise sets <html data-theme="dark|light">, color-scheme and the custom
+   properties --markise-bg / --markise-fg / --markise-accent / --markise-muted /
+   --markise-font-size; the page background is transparent. */
+section[data-component="goals"] {
+  --card-bg: linear-gradient(135deg, #eef4ff 0%, #f7f0ff 100%);
+  --card-border: #d5ddf5;
+  --dot: var(--markise-accent, #5a67d8);
+  font: var(--markise-font-size, 15px)/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: var(--markise-fg, #1d2433);
   box-sizing: border-box;
   margin: 0;
   border-radius: 14px;
   padding: 16px 20px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
 }
-section[data-component] *:first-child { margin-top: 0; }
-section[data-component] *:last-child { margin-bottom: 0; }
-/* PROTOTYPE stub: :::goals — a card with the lesson goals. */
-section[data-component="goals"] {
-  background: linear-gradient(135deg, #eef4ff 0%, #f7f0ff 100%);
-  border: 1px solid #d5ddf5;
+[data-theme="dark"] section[data-component="goals"] {
+  --card-bg: linear-gradient(135deg, #252c45 0%, #2d2640 100%);
+  --card-border: #3a4466;
 }
+section[data-component="goals"] *:first-child { margin-top: 0; }
+section[data-component="goals"] *:last-child { margin-bottom: 0; }
 section[data-component="goals"]::before {
   content: "In this lesson";
   display: block;
@@ -22,7 +29,7 @@ section[data-component="goals"]::before {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #5a67d8;
+  color: var(--dot);
   margin-bottom: 8px;
 }
 section[data-component="goals"] ul {
@@ -35,7 +42,7 @@ section[data-component="goals"] li {
   padding: 6px 0 6px 30px;
   font-weight: 500;
 }
-section[data-component="goals"] li + li { border-top: 1px dashed #d5ddf5; }
+section[data-component="goals"] li + li { border-top: 1px dashed var(--card-border); }
 section[data-component="goals"] li::before {
   content: "";
   position: absolute;
@@ -44,6 +51,6 @@ section[data-component="goals"] li::before {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #5a67d8;
-  box-shadow: inset 0 0 0 4px #c9d2ff;
+  background: var(--dot);
+  box-shadow: inset 0 0 0 4px rgba(255, 255, 255, 0.55);
 }
