@@ -66,6 +66,9 @@ pub struct View {
     refs: std::cell::RefCell<std::collections::HashMap<u64, Box<[u64]>>>,
     /// Editing state of the item holding the caret (ADR 0006 §2.4): part of that item's key.
     focus: Option<(usize, ItemFocus, u64)>,
+    /// PROTOTYPE (block snapshots): items whose layout height is replaced (item → height
+    /// without the column padding); the UI paints them itself.
+    overrides: std::collections::HashMap<usize, f32>,
 }
 
 impl View {
@@ -95,6 +98,7 @@ impl View {
             links: Arc::new(AllResolved),
             refs: Default::default(),
             focus: None,
+            overrides: Default::default(),
         };
         v.reset_heights();
         v
@@ -761,9 +765,44 @@ impl View {
             }
         };
         let (a, b) = self.item_pad(i);
-        self.heights.set(i, (l.height + a + b) as f64);
+        let lh = self.overrides.get(&i).copied().unwrap_or(l.height);
+        self.heights.set(i, (lh + a + b) as f64);
         self.exact[i] = true;
         l
+    }
+
+    /// PROTOTYPE (block snapshots): replaces the layout heights of some items (item → height
+    /// without column padding); items no longer listed get their own heights back. The caller
+    /// passes the full set every frame, with indices of the current model.
+    pub fn set_height_overrides(&mut self, map: std::collections::HashMap<usize, f32>) {
+        if map.is_empty() && self.overrides.is_empty() {
+            return;
+        }
+        let frac = self.anchor_frac();
+        let old = std::mem::replace(&mut self.overrides, map);
+        let n = self.len();
+        let mut changed = false;
+        for (&i, _) in old.iter().filter(|(i, _)| !self.overrides.contains_key(i)) {
+            if i < n {
+                let (v, e) = self.initial_height(i);
+                self.heights.set(i, v);
+                self.exact[i] = e;
+                changed = true;
+            }
+        }
+        for (&i, &h) in &self.overrides {
+            if i < n {
+                let (a, b) = self.item_pad(i);
+                let v = (h + a + b) as f64;
+                if self.heights.get(i) != v {
+                    self.heights.set(i, v);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.anchor_off = frac * self.height(self.anchor);
+        }
     }
 
     /// Whether a laid-out item needed glyphs the fonts lack (since the last font change).

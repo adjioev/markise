@@ -213,6 +213,10 @@ pub struct SideBySide {
     pub sync_source: bool,
     /// Scroll the rendered pane to the source pane on the next frame.
     pub sync_rendered: bool,
+    /// PROTOTYPE measurement driver (`MARKISE_PROTO_SCRIPT=1`).
+    proto: Option<crate::block_snap::ProtoScript>,
+    proto_checked: bool,
+    last_frame_ms: Option<f64>,
 }
 
 /// Inputs of [`SideBySide::show`] besides the panes.
@@ -306,6 +310,16 @@ impl SideBySide {
     /// Lays out and runs both panes in the space left in `ui`.
     pub fn show(&mut self, ui: &mut Ui, src: &mut SourceEditor, viewer: &mut DocViewer, f: Frame<'_>) -> SbsOutput {
         let mut out = SbsOutput::default();
+        let frame_started = std::time::Instant::now();
+        if !self.proto_checked {
+            self.proto_checked = true;
+            if crate::block_snap::ProtoScript::enabled() {
+                self.proto = Some(Default::default());
+            }
+        }
+        if let Some(p) = self.proto.as_mut() {
+            p.frame(ui.ctx(), viewer, self.last_frame_ms.take());
+        }
         let rect = ui.available_rect_before_wrap();
         let w = rect.width().max(2.0 * DIVIDER_W + 2.0);
         let left_w = ((w - DIVIDER_W) * f.split).round();
@@ -365,8 +379,24 @@ impl SideBySide {
         });
         {
             let mut rui = ui.new_child(UiBuilder::new().max_rect(right).id_salt("markise-sbs-right"));
+            viewer.snap_blocks = true;
             let vo = viewer.show(&mut rui, f.images, f.theme, parley, false);
+            viewer.snap_blocks = false;
             out.link = vo.link;
+            // PROTOTYPE (block snapshots): a click on a block image puts the source caret on
+            // the block's `:::` line
+            if let Some(off) = vo.goto_source {
+                if let Some(p) = viewer.ed.source.as_mut() {
+                    p.sel = markise_doc::Selection::caret(off);
+                }
+                viewer.ed.source_store_selection();
+                if let Some(p) = viewer.ed.source.as_ref() {
+                    let line = p.view.line_of(viewer.ed.session.text(), off) as f32;
+                    src.center_line(line);
+                }
+                src.request_focus();
+                ui.ctx().request_repaint();
+            }
             out.right = Some(pane);
         }
         if user_scrolls_rendered || self.sync_source {
@@ -376,6 +406,7 @@ impl SideBySide {
             ui.ctx().request_repaint();
         }
         ui.allocate_rect(rect, Sense::hover());
+        self.last_frame_ms = Some(frame_started.elapsed().as_secs_f64() * 1e3);
         out
     }
 }

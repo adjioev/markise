@@ -47,7 +47,7 @@ Layered workspace (`crates/*`, `apps/*`), lower layers never depend on higher on
 | L4 | `markise-engine` | session, undo, commands, files, autosave, search, file watching |
 | L5 | `markise-mcp` | MCP server |
 | L6 | `markise-ui-egui` | egui front end |
-| apps | `markise`, `markise-cli` | desktop app, command line |
+| apps | `markise`, `markise-cli`, `markise-web-render` | desktop app, command line; block-snapshot helper (prototype branch only) |
 | tests | `markise-corpus` | deterministic corpus for tests and benchmarks (dev-dependency only) |
 | tests | `markise-testfmt` | tiny line-based toy format proving the format seam (dev-dependency only) |
 

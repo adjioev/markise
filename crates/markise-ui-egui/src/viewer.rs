@@ -55,6 +55,8 @@ pub struct ViewerOutput {
     /// suggestion (ADR 0012): command id and the source offset it acts at (`None`: at the
     /// selection).
     pub review: Option<(&'static str, Option<usize>)>,
+    /// PROTOTYPE (block snapshots): a block image was clicked; source offset of its `:::` line.
+    pub goto_source: Option<usize>,
 }
 
 /// The suggestion under the pointer and its floating Accept / Reject bar (ADR 0012).
@@ -171,6 +173,13 @@ pub struct DocViewer {
     gutter: bool,
     /// Copy button and language field of fenced code blocks (issue #76).
     code: code_tools::CodeTools,
+    /// PROTOTYPE (block snapshots): show `:::goals` / `:::question` as helper snapshots
+    /// (set by Side by Side for its rendered pane).
+    pub snap_blocks: bool,
+    pub snaps: Option<crate::block_snap::BlockSnaps>,
+    snaps_tried: bool,
+    /// Screen rectangles of the block images at the last frame, with their source offsets.
+    snap_rects: Vec<(Rect, usize)>,
 }
 
 impl DocViewer {
@@ -216,6 +225,10 @@ impl DocViewer {
             comment_presence: Default::default(),
             gutter: false,
             code: Default::default(),
+            snap_blocks: false,
+            snaps: None,
+            snaps_tried: false,
+            snap_rects: Vec::new(),
         }
     }
 
@@ -534,7 +547,16 @@ impl DocViewer {
 
         // ---- input: pointer (hit tests against the last frame's layout)
         let modifiers = ui.input(|i| i.modifiers);
-        let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.hovered();
+        let on_snap = ui
+            .input(|i| i.pointer.interact_pos())
+            .and_then(|p| self.snap_rects.iter().find(|(r, _)| r.contains(p)).map(|(_, o)| *o));
+        if on_snap.is_some() && resp.hovered() {
+            ctx.set_cursor_icon(CursorIcon::PointingHand);
+            if resp.clicked() {
+                out.goto_source = on_snap;
+            }
+        }
+        let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.hovered() && on_snap.is_none();
         // a click on a task checkbox toggles it (spec 02 §9): the press neither places the caret
         // nor starts a selection; the toggle happens on release over the same box (a press
         // dragged off the box does nothing)
@@ -654,8 +676,39 @@ impl DocViewer {
             });
         }
 
+        // ---- PROTOTYPE: block snapshots replace their items' heights
+        let placed = if self.snap_blocks {
+            if self.snaps.is_none() && !self.snaps_tried {
+                self.snaps_tried = true;
+                self.snaps = crate::block_snap::BlockSnaps::from_env(&ctx, self.ed.path().map(|p| p.to_path_buf()));
+            }
+            match self.snaps.as_mut() {
+                Some(s) => {
+                    let vis: Vec<usize> = self.last_visible.iter().map(|v| v.0).collect();
+                    let model = self.ed.view.model().clone();
+                    let width = self.ed.view.width();
+                    let (over, placed) = s.frame(
+                        &ctx,
+                        &model,
+                        self.ed.session.text(),
+                        self.ed.session.revision().counter,
+                        width,
+                        ppp,
+                        theme.block_spacing,
+                        &vis,
+                    );
+                    self.ed.view.set_height_overrides(over);
+                    placed
+                }
+                None => Vec::new(),
+            }
+        } else {
+            self.ed.view.set_height_overrides(Default::default());
+            Vec::new()
+        };
+
         // ---- layout of the viewport (+ half a screen of margin)
-        let visible = {
+        let mut visible = {
             let view = &mut self.ed.view;
             let imgs: &TextureStore = images;
             match parley.as_deref_mut() {
@@ -679,6 +732,23 @@ impl DocViewer {
         self.last_visible = visible.iter().map(|v| (v.idx, v.y)).collect();
         self.last_left = left;
         self.last_top = rect.top();
+        // block images: their items are not painted as Markdown
+        self.snap_rects.clear();
+        if !placed.is_empty() {
+            for p in &placed {
+                if let Some(v) = visible.iter().find(|v| v.idx == p.open) {
+                    let r = Rect::from_min_size(pos2(left, rect.top() + v.y + theme.block_spacing), p.size);
+                    self.snap_rects.push((r, p.offset));
+                    painter.image(
+                        p.tex,
+                        r,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+            }
+            visible.retain(|v| !placed.iter().any(|p| v.idx >= p.open && v.idx <= p.close));
+        }
 
         // ---- paint
         images.begin_frame();

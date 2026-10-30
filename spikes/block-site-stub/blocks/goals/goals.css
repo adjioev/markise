@@ -1,0 +1,49 @@
+/* PROTOTYPE stub "site code" for Markise block snapshots (original work, MIT OR Apache-2.0).
+   Common card rules (repeated in each block file: blocks are self-contained). */
+section[data-component] {
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: #1d2433;
+  box-sizing: border-box;
+  margin: 0;
+  border-radius: 14px;
+  padding: 16px 20px;
+}
+section[data-component] *:first-child { margin-top: 0; }
+section[data-component] *:last-child { margin-bottom: 0; }
+/* PROTOTYPE stub: :::goals — a card with the lesson goals. */
+section[data-component="goals"] {
+  background: linear-gradient(135deg, #eef4ff 0%, #f7f0ff 100%);
+  border: 1px solid #d5ddf5;
+}
+section[data-component="goals"]::before {
+  content: "In this lesson";
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #5a67d8;
+  margin-bottom: 8px;
+}
+section[data-component="goals"] ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+section[data-component="goals"] li {
+  position: relative;
+  padding: 6px 0 6px 30px;
+  font-weight: 500;
+}
+section[data-component="goals"] li + li { border-top: 1px dashed #d5ddf5; }
+section[data-component="goals"] li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 9px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #5a67d8;
+  box-shadow: inset 0 0 0 4px #c9d2ff;
+}

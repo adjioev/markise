@@ -48,6 +48,8 @@ markise-ui-egui = 6
 [roles]
 markise = "app"
 markise-cli = "app"
+# PROTOTYPE (proto/block-snapshots): WebKit snapshot helper process
+markise-web-render = "app"
 markise-corpus = "testkit"
 markise-testfmt = "testkit"
 xtask = "tool"

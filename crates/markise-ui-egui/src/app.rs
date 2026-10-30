@@ -1918,6 +1918,19 @@ impl MarkiseApp {
     /// Runs one frame in the root `Ui` of a pass (`Context::run_ui`, `eframe::App::ui`).
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
+        // PROTOTYPE (block snapshots): `MARKISE_START_SBS=1` opens the first document in
+        // Side by Side
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static SBS_DONE: AtomicBool = AtomicBool::new(false);
+            if self.doc.is_some()
+                && !SBS_DONE.load(Ordering::Relaxed)
+                && std::env::var_os("MARKISE_START_SBS").is_some_and(|v| v != "0")
+            {
+                SBS_DONE.store(true, Ordering::Relaxed);
+                self.set_view_mode(ViewMode::SideBySide);
+            }
+        }
         if self.ctx.is_none() {
             // chrome text (status bar, sidebar, toolbar, dialogs) is not selectable: no I-beam
             // over it (issue #36); text that is worth copying opts back in locally
