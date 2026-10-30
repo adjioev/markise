@@ -277,8 +277,11 @@ fn blockform(path: &str, rest: &[String]) -> Result<ExitCode, String> {
                 }
                 "scene" => {
                     d["title"] = serde_json::json!("Новое название");
-                    if let Some(p) = d["pictures"].get_mut("1") {
+                    if let Some(p) = d["pictures"].get_mut(0) {
                         p["src"] = serde_json::json!("../new.png");
+                    }
+                    if let Some(a) = d["pictures"].as_array_mut() {
+                        a.push(serde_json::json!({"alt": "Вторая", "src": "second.png"}));
                     }
                 }
                 _ => continue,

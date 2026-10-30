@@ -400,19 +400,16 @@ pub fn decode(text: &str, block: &BlockSrc, def: &Value) -> Result<Decoded, Stri
             }
             (Some(_), "image") => {
                 let mut items = Vec::new();
-                let mut obj = Map::new();
+                let mut arr = Vec::new();
                 for c in &taken {
                     for &(s, e) in &c.lines {
                         if let Some(img) = parse_image(text, s, e) {
-                            obj.insert(
-                                (items.len() + 1).to_string(),
-                                json!({"alt": &text[img.alt.clone()], "src": &text[img.src.clone()]}),
-                            );
+                            arr.push(json!({"alt": &text[img.alt.clone()], "src": &text[img.src.clone()]}));
                             items.push(img);
                         }
                     }
                 }
-                (Parts::Images { items }, Value::Object(obj))
+                (Parts::Images { items }, Value::Array(arr))
             }
             (Some(_), other) => return Err(format!("unsupported field type `{other}`")),
         };
@@ -592,27 +589,18 @@ pub fn form(dec: &Decoded, lang: &str, over: Option<&Value>) -> (String, Value, 
                     "options": opts_of(f, json!({"format": "choices", "single": single, "taken": taken}))}));
             }
             "image" => {
-                let mut ip = Map::new();
-                let mut group = Vec::new();
-                if let Parts::Images { items } = &f.parts {
-                    for i in 1..=items.len() {
-                        ip.insert(
-                            i.to_string(),
-                            json!({"type": "object", "properties": {
-                            "alt": {"type": "string"}, "src": {"type": "string", "minLength": 1}}}),
-                        );
-                        group.push(json!({"type": "Control", "scope": format!("{scope}/properties/{i}/properties/alt"),
-                            "label": format!("{} {i}: {}", if ru { "Картинка" } else { "Picture" }, if ru { "описание (alt)" } else { "description (alt)" }),
-                            "options": {"multi": true}}));
-                        group.push(json!({"type": "Control", "scope": format!("{scope}/properties/{i}/properties/src"),
-                            "label": format!("{} {i}: {}", if ru { "Картинка" } else { "Picture" }, if ru { "путь к файлу" } else { "file path" })}));
-                    }
+                // pictures: one sub-card each (preview, alt, path with a file picker), add/remove
+                let mut sch = json!({"type": "array", "items": {"type": "object", "properties": {
+                    "alt": {"type": "string"}, "src": {"type": "string", "minLength": 1}}}});
+                if let Some(n) = f.def.get("min").and_then(Value::as_u64) {
+                    sch["minItems"] = json!(n);
                 }
-                if group.is_empty() {
-                    group.push(json!({"type": "Label", "text": if ru { "Картинок нет" } else { "No pictures" }}));
+                if let Some(n) = f.def.get("max").and_then(Value::as_u64) {
+                    sch["maxItems"] = json!(n);
                 }
-                props.insert(f.name.clone(), json!({"type": "object", "properties": ip}));
-                els.push(json!({"type": "Group", "label": label, "elements": group}));
+                props.insert(f.name.clone(), sch);
+                els.push(json!({"type": "Control", "scope": scope, "label": label,
+                    "options": opts_of(f, json!({"format": "pictures"}))}));
             }
             _ => {}
         }
@@ -870,12 +858,15 @@ pub fn edits(text: &str, dec: &Decoded, data: &Value, force: bool, lang: &str) -
                     out.push((r.clone(), body.join("\n")));
                 }
             }
-            (Parts::Images { items }, "image") => {
-                let obj = new.as_object().cloned().unwrap_or_default();
-                for (i, img) in items.iter().enumerate() {
-                    let Some(e) = obj.get(&(i + 1).to_string()) else {
-                        continue;
-                    };
+            (Parts::Images { .. } | Parts::Absent, "image") => {
+                let empty = Vec::new();
+                let items = if let Parts::Images { items } = &f.parts {
+                    items
+                } else {
+                    &empty
+                };
+                let mut pics: Vec<(String, String)> = Vec::new();
+                for e in new.as_array().cloned().unwrap_or_default() {
                     let alt = norm_line(e.get("alt").and_then(Value::as_str).unwrap_or(""));
                     let src = norm_line(e.get("src").and_then(Value::as_str).unwrap_or(""));
                     if src.is_empty() {
@@ -885,16 +876,47 @@ pub fn edits(text: &str, dec: &Decoded, data: &Value, force: bool, lang: &str) -
                             "Empty picture path.".into()
                         });
                     }
-                    if force || alt != text[img.alt.clone()] {
-                        out.push((img.alt.clone(), alt));
+                    let src = if src.contains(char::is_whitespace) && !src.starts_with('<') {
+                        format!("<{src}>")
+                    } else {
+                        src
+                    };
+                    pics.push((alt, src));
+                }
+                let lo = f.def.get("min").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let hi = f
+                    .def
+                    .get("max")
+                    .and_then(Value::as_u64)
+                    .map_or(usize::MAX, |n| n as usize);
+                if pics.len() < lo || pics.len() > hi {
+                    return Err(if ru {
+                        format!("Картинок должно быть от {lo} до {hi}.")
+                    } else {
+                        format!("{lo}..{hi} pictures are needed.")
+                    });
+                }
+                if pics.len() == items.len() {
+                    for (p, img) in pics.iter().zip(items) {
+                        if force || p.0 != text[img.alt.clone()] {
+                            out.push((img.alt.clone(), p.0.clone()));
+                        }
+                        if force || p.1 != text[img.src.clone()] {
+                            out.push((img.src.clone(), p.1.clone()));
+                        }
                     }
-                    if force || src != text[img.src.clone()] {
-                        let src = if src.contains(char::is_whitespace) && !src.starts_with('<') {
-                            format!("<{src}>")
-                        } else {
-                            src
-                        };
-                        out.push((img.src.clone(), src));
+                } else {
+                    let body = pics
+                        .iter()
+                        .map(|(a, s)| format!("![{a}]({s})"))
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    match &f.region {
+                        Some(r) if body.is_empty() => {
+                            out.push((blank_before(text, r.start, floor)..r.end, String::new()))
+                        }
+                        Some(r) => out.push((r.clone(), body)),
+                        None => out.push((f.anchor..f.anchor, format!("\n\n{body}"))),
                     }
                 }
             }

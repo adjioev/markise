@@ -131,6 +131,7 @@ impl FormState {
             "theme": if theme.dark { "dark" } else { "light" }, "vars": theme.vars,
             "note": format!("{file}, {} {line} · :::{} {}", if lang == "ru" { "строка" } else { "line" }, block.name, block.args),
             "site_js": read("js").unwrap_or_default(), "site_css": read("css").unwrap_or_default(),
+            "base": doc.parent().map(file_url_dir).unwrap_or_default(),
         });
         let ms_build = t.elapsed().as_secs_f64() * 1e3;
         self.send(&req)?;
@@ -181,6 +182,23 @@ impl FormState {
                                 if cold { "cold" } else { "warm" }
                             );
                         }
+                    }
+                }
+                "pick" if id == current && id.is_some() => {
+                    let dir = self.doc.as_deref().and_then(Path::parent).map(Path::to_path_buf);
+                    let mut dlg =
+                        rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp", "svg"]);
+                    if let Some(d) = &dir {
+                        dlg = dlg.set_directory(d);
+                    }
+                    if let (Some(file), Some(d)) = (dlg.pick_file(), dir) {
+                        let rel = relative_path(&d, &file);
+                        self.eval(&format!(
+                            "window.markiseForm.picked({}, {}, {})",
+                            ev["path"],
+                            ev["index"],
+                            serde_json::to_string(&rel).unwrap_or_default()
+                        ));
                     }
                 }
                 "cancel" => {
@@ -333,7 +351,7 @@ impl FormScript {
             }
             // opens: cold first, then warm, cycling through goals / question / scene
             2 => {
-                let order: Vec<usize> = ["goals", "question", "scene"]
+                let order: Vec<usize> = ["goals", "question", "scene", "note", "takeaway", "comparison"]
                     .iter()
                     .filter_map(|n| first_of(n))
                     .collect();
@@ -365,13 +383,17 @@ impl FormScript {
                         } else if self.sub == 1 {
                             Self::shot_form(&snaps.form, "forms-proto-question");
                             crate::block_snap::ProtoScript::default().shot(ctx, "forms-proto-window");
-                        } else if self.sub == 2 {
-                            Self::shot_form(&snaps.form, "forms-proto-scene");
+                        } else if self.sub < order.len() {
+                            let name = offsets
+                                .iter()
+                                .find(|(_, o)| *o == order[self.sub])
+                                .map_or("x", |x| x.0.as_str());
+                            Self::shot_form(&snaps.form, &format!("forms-proto-{name}"));
                         }
                         self.waiting = Some((usize::MAX, 0));
                         self.since = Some(now);
                     }
-                    Some((usize::MAX, _)) if after(if self.sub < 3 { 700 } else { 150 }) => {
+                    Some((usize::MAX, _)) if after(if self.sub < 6 { 700 } else { 150 }) => {
                         viewer.snaps.as_mut().expect("snaps").form.close();
                         self.sub += 1;
                         self.waiting = None;
@@ -614,4 +636,28 @@ pub fn live_script(ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
         return;
     }
     LIVE_SCRIPT.with(|s| s.borrow_mut().get_or_insert_with(Default::default).frame(ctx, viewer));
+}
+
+/// `file://` URL of a folder (with a trailing slash), percent-encoded.
+fn file_url_dir(dir: &Path) -> String {
+    let mut out = String::from("file://");
+    for b in dir.to_string_lossy().bytes() {
+        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out.push('/');
+    out
+}
+
+/// `to` relative to the folder `from` (`../../styles/a.png`), with `/` separators.
+fn relative_path(from: &Path, to: &Path) -> String {
+    let a: Vec<_> = from.components().collect();
+    let b: Vec<_> = to.components().collect();
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut parts: Vec<String> = std::iter::repeat_n("..".to_string(), a.len() - common).collect();
+    parts.extend(b[common..].iter().map(|c| c.as_os_str().to_string_lossy().to_string()));
+    parts.join("/")
 }

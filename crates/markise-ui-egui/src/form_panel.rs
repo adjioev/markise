@@ -153,8 +153,18 @@ mod mac {
             "<!doctype html><html><head><meta charset=\"utf-8\"><style>{FORM_CSS}\nhtml{{border-left:1px solid var(--line)}}</style></head><body><div id=\"root\"></div><script>{}</script></body></html>",
             FORM_JS.replace("</script", "<\\/script")
         );
-        unsafe {
-            let _ = web.loadHTMLString_baseURL(&NSString::from_str(&html), None);
+        // loaded from a file so the page may show the site's pictures (file:// previews of
+        // `![](path)` relative to the lesson); read access is the whole disk (prototype)
+        let file = std::env::temp_dir().join(format!("markise-block-form-{}.html", std::process::id()));
+        match std::fs::write(&file, &html) {
+            Ok(()) => unsafe {
+                let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
+                let root = objc2_foundation::NSURL::fileURLWithPath(ns_string!("/"));
+                let _ = web.loadFileURL_allowingReadAccessToURL(&url, &root);
+            },
+            Err(_) => unsafe {
+                let _ = web.loadHTMLString_baseURL(&NSString::from_str(&html), None);
+            },
         }
         P.with(|p| {
             *p.borrow_mut() = Some(Panel {
@@ -322,6 +332,14 @@ mod mac {
                     p.ready
                 })
                 .unwrap_or(false);
+                // a warm panel already has its place: show it before the page renders (a hidden
+                // WKWebView does not run animation frames)
+                if let Some((web, window, has_frame)) = with(|p| (p.web.clone(), p.window.clone(), p.frame.is_some()))
+                    && has_frame
+                {
+                    web.setHidden(false);
+                    window.makeFirstResponder(Some(&web));
+                }
                 if ready {
                     eval(&js);
                 }
@@ -373,6 +391,7 @@ mod mac {
                 }
             }
             "save" => emit(json!({"event": "save", "id": m["id"], "data": m["data"]})),
+            "pick" => emit(json!({"event": "pick", "id": m["id"], "path": m["path"], "index": m["index"]})),
             "cancel" => {
                 emit(json!({"event": "cancel", "id": m["id"]}));
                 hide();
@@ -427,6 +446,16 @@ pub fn resizing() -> bool {
 /// native view over it and returns the rest of `rect` for the document.
 pub fn reserve(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Rect {
     let max = (rect.width() * 0.6).max(MIN_WIDTH.min(rect.width() * 0.6));
+    // MARKISE_FORM_PANEL_W: initial width (measurements / screenshots)
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        if let Some(v) = std::env::var("MARKISE_FORM_PANEL_W")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            W.with(|w| w.set(v));
+        }
+    });
     let w = W.with(|w| w.get()).clamp(MIN_WIDTH.min(max), max);
     let panel = egui::Rect::from_min_max(egui::pos2(rect.right() - w, rect.top()), rect.max);
     let handle = egui::Rect::from_min_max(

@@ -46,6 +46,12 @@ const T = {
     addAnswer: 'Добавить ответ',
     correct: 'верный',
     answerText: 'Текст ответа',
+    picture: 'Картинка',
+    alt: 'Описание (alt)',
+    path: 'Путь к файлу',
+    choose: 'Выбрать…',
+    addPicture: 'Добавить картинку',
+    noPreview: 'нет превью',
   },
   en: {
     save: 'Save',
@@ -61,6 +67,12 @@ const T = {
     addAnswer: 'Add answer',
     correct: 'correct',
     answerText: 'Answer text',
+    picture: 'Picture',
+    alt: 'Description (alt)',
+    path: 'File path',
+    choose: 'Choose…',
+    addPicture: 'Add picture',
+    noPreview: 'no preview',
   },
 };
 
@@ -207,6 +219,59 @@ function ChoicesControl({ data, handleChange, path, label, schema, uischema, ena
   );
 }
 
+// ---- pictures: one sub-card each (preview, alt, path + file picker), add/remove
+let currentBase = '';
+function Thumb({ src }) {
+  const [bad, setBad] = useState(false);
+  useEffect(() => setBad(false), [src]);
+  let url = '';
+  try {
+    url = src ? new URL(src.replace(/^<|>$/g, ''), currentBase || undefined).href : '';
+  } catch (e) {
+    url = '';
+  }
+  if (!url || bad) return h('div', { className: 'mk-thumb mk-thumb-empty' }, tr('noPreview'));
+  return h('img', { className: 'mk-thumb', src: url, alt: '', onError: () => setBad(true) });
+}
+function PicturesControl({ data, handleChange, path, label, schema, enabled, visible, errors }) {
+  if (!visible) return null;
+  const items = Array.isArray(data) ? data : [];
+  const min = schema.minItems ?? 0;
+  const max = schema.maxItems ?? Infinity;
+  const set = (next) => handleChange(path, next);
+  const upd = (i, k, v) => set(items.map((x, j) => (j === i ? { ...x, [k]: v } : x)));
+  return h(
+    'div',
+    { className: 'control mk-pictures' },
+    h('label', null, label),
+    items.map((p, i) =>
+      h(
+        'div',
+        { className: 'mk-pic', key: i },
+        h(
+          'div',
+          { className: 'mk-pic-head' },
+          h('span', null, tr('picture') + ' ' + (i + 1)),
+          h('button', { type: 'button', className: 'mk-icon', title: tr('remove'), disabled: !enabled || items.length <= min, onClick: () => set(items.filter((_, j) => j !== i)) }, '✕'),
+        ),
+        h(Thumb, { src: p.src }),
+        h('label', { className: 'mk-sub' }, tr('alt')),
+        h('textarea', { className: 'input', rows: 2, value: p.alt ?? '', disabled: !enabled, onChange: (e) => upd(i, 'alt', e.target.value.replace(/\n/g, ' ')) }),
+        h('label', { className: 'mk-sub' }, tr('path')),
+        h(
+          'div',
+          { className: 'mk-row' },
+          h('input', { className: 'input', value: p.src ?? '', disabled: !enabled, onChange: (e) => upd(i, 'src', e.target.value) }),
+          h('button', { type: 'button', disabled: !enabled, onClick: () => post({ event: 'pick', id: window.__mkFormId, path, index: i }) }, tr('choose')),
+        ),
+      ),
+    ),
+    h('button', { type: 'button', className: 'mk-add', disabled: !enabled || items.length >= max, onClick: () => set([...items, { alt: '', src: '' }]) }, '+ ' + tr('addPicture')),
+    errors ? h('div', { className: 'validation' }, errors) : null,
+  );
+}
+const picturesTester = core.rankWith(30, core.and(core.isControl, core.optionIs('format', 'pictures')));
+
 const choicesTester = core.rankWith(30, core.and(core.isControl, core.optionIs('format', 'choices')));
 
 const listTester = core.rankWith(
@@ -221,6 +286,7 @@ const baseRenderers = [
   ...vanillaRenderers,
   { tester: listTester, renderer: withJsonFormsControlProps(ListControl) },
   { tester: choicesTester, renderer: withJsonFormsControlProps(ChoicesControl) },
+  { tester: picturesTester, renderer: withJsonFormsControlProps(PicturesControl) },
 ];
 
 // ---- site renderers
@@ -266,6 +332,8 @@ function App() {
       open(r) {
         r._t = performance.now();
         currentLang = r.lang === 'en' ? 'en' : 'ru';
+        currentBase = r.base || '';
+        window.__mkFormId = r.id;
         applyTheme(r);
         setReq(r);
         setData(r.data);
@@ -293,6 +361,14 @@ function App() {
         });
       },
       save: () => saveRef.current(),
+      // a file chosen in Markise's open panel for a picture
+      picked(path, index, value) {
+        setData((d) => {
+          const n = JSON.parse(JSON.stringify(d));
+          if (n[path] && n[path][index]) n[path][index].src = value;
+          return n;
+        });
+      },
     };
     post({ event: 'ready' });
   }, []);
