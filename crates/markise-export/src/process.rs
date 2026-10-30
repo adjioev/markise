@@ -573,6 +573,20 @@ pub fn run_template(
 mod tests {
     use super::*;
 
+    /// Shutdown budget for tests that check *what* is killed, not how fast the OS reaps it:
+    /// under heavy load, killed and orphaned descendants likely stay members of the process
+    /// group (zombies) until they are reaped, which took longer than the 10 s
+    /// [`SHUTDOWN_LIMIT`] (issues #42, #97). The limit itself is covered by the stuck-tree tests.
+    /// Also the bound for "promptly": the commands killed here would run for far longer.
+    const HANG_GUARD: Duration = Duration::from_secs(180);
+
+    fn guarded(timeout: Duration) -> RunOptions {
+        RunOptions {
+            shutdown: HANG_GUARD,
+            ..RunOptions::new(timeout)
+        }
+    }
+
     #[test]
     fn splitting() {
         assert_eq!(split_command("a b  c").unwrap(), ["a", "b", "c"]);
@@ -636,30 +650,30 @@ mod tests {
             c2.cancel();
         });
         let t = Instant::now();
-        let e = run(
+        let e = run_opts(
             Path::new("/bin/sh"),
-            &["-c", "sleep 30 & sleep 30"],
+            &["-c", "sleep 600 & sleep 600"],
             None,
             b"",
-            Duration::from_secs(60),
+            &guarded(Duration::from_secs(600)),
             &c,
         )
         .unwrap_err();
         assert_eq!(e, ProcError::Cancelled);
-        assert!(t.elapsed() < Duration::from_secs(5));
+        assert!(t.elapsed() < HANG_GUARD, "not killed: ran {:?}", t.elapsed());
         // the parent exits at once but a descendant holds stdout: bounded by the timeout
         let t = Instant::now();
-        let e = run(
+        let e = run_opts(
             Path::new("/bin/sh"),
-            &["-c", "sleep 30 &"],
+            &["-c", "sleep 600 &"],
             None,
             b"",
-            Duration::from_millis(300),
+            &guarded(Duration::from_millis(300)),
             &JobControl::new(),
         )
         .unwrap_err();
         assert!(matches!(e, ProcError::Timeout(_)), "{e:?}");
-        assert!(t.elapsed() < Duration::from_secs(5));
+        assert!(t.elapsed() < HANG_GUARD, "not killed: ran {:?}", t.elapsed());
     }
 
     fn quick() -> (&'static str, Vec<&'static str>) {
@@ -736,19 +750,13 @@ mod tests {
         std::thread::spawn(move || {
             // cancel once the descendant demonstrably runs (robust under machine load)
             let t = Instant::now();
-            while std::fs::metadata(&hb2).map(|m| m.len()).unwrap_or(0) == 0 && t.elapsed() < Duration::from_secs(180) {
+            while std::fs::metadata(&hb2).map(|m| m.len()).unwrap_or(0) == 0 && t.elapsed() < HANG_GUARD {
                 std::thread::sleep(Duration::from_millis(20));
             }
             c2.cancel();
         });
-        // the termination budget (SHUTDOWN_LIMIT, covered by the stuck-tree tests) is not what
-        // this test checks: on a loaded machine the killed, orphaned descendants can stay
-        // zombies (still members of the process group) until launchd reaps them, which took
-        // longer than 10 s under load (issue #42); a hang guard instead
-        let opts = RunOptions {
-            shutdown: Duration::from_secs(180),
-            ..RunOptions::new(Duration::from_secs(180))
-        };
+        // the termination budget is not what this test checks (see `HANG_GUARD`)
+        let opts = guarded(HANG_GUARD);
         let e = run_opts(Path::new("/bin/sh"), &["-c", &script], None, b"", &opts, &c).unwrap_err();
         assert_eq!(e, ProcError::Cancelled);
         assert!(

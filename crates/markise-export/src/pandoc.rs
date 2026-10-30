@@ -847,14 +847,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300));
             c2.cancel();
         });
-        let e = export(
-            &fake_pandoc(d.path(), "sleep 30"),
-            &doc,
-            &dest,
-            &PandocOptions::new(PandocFormat::Docx),
-            &c,
-        )
-        .unwrap_err();
+        // the shutdown budget is not what this test checks: under heavy load the killed
+        // process tree took longer than the 10 s limit to be reaped (issues #42, #97)
+        let mut guarded = PandocOptions::new(PandocFormat::Docx);
+        guarded.run.shutdown = Duration::from_secs(180);
+        let e = export(&fake_pandoc(d.path(), "sleep 600"), &doc, &dest, &guarded, &c).unwrap_err();
         assert_eq!(e, PandocError::Cancelled);
         let failing = fake_pandoc(d.path(), "exit 3");
         let e = export(
