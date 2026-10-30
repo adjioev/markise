@@ -1140,11 +1140,23 @@ impl MarkiseApp {
         self.themes.set_count_mode(mode);
     }
 
-    /// Word-count statistics of the open document (tests): items counted on the UI thread
-    /// and worker jobs started.
-    pub fn word_count_stats(&self) -> Option<(markise_engine::count::CounterStats, u64)> {
+    /// Word-count statistics of the open document (tests): blocks counted, bytes read, the
+    /// most bytes read in one frame.
+    pub fn word_count_stats(&self) -> Option<markise_engine::count::CounterStats> {
         let (id, w) = self.word_count.as_ref()?;
         (self.doc.as_ref()?.id == *id).then(|| w.stats())
+    }
+
+    /// Overrides the word count's per-frame time budget for the open document (tests; the
+    /// per-frame byte budget still applies).
+    pub fn set_word_count_frame_time(&mut self, t: std::time::Duration) {
+        let Some(d) = &self.doc else { return };
+        if self.word_count.as_ref().is_none_or(|(id, _)| *id != d.id) {
+            self.word_count = Some((d.id, Default::default()));
+        }
+        if let Some((_, w)) = &mut self.word_count {
+            w.set_frame_time(t);
+        }
     }
 
     /// View → Toolbar.
@@ -2411,8 +2423,6 @@ impl MarkiseApp {
         };
         let shown = wc.update(
             ui.ctx(),
-            self.wake.as_ref(),
-            ed.session.format(),
             ed.session.doc(),
             d.viewer.model(),
             ed.session.revision().counter,

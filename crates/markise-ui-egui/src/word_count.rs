@@ -2,34 +2,29 @@
 //! (click to cycle, persisted as `statusBar.count`) and the reading time of the document, or
 //! "12 of 3,456 words" for a non-empty selection. Counting rules: [`markise_engine::count`].
 //!
-//! Cost on the UI thread: a frame only compares the document's revision. After an edit the
-//! counts are brought up to date once the document has been quiet for [`DEBOUNCE`]: the
-//! [`DocCounter`] matches the view model's items by content hash (integer compares, no text)
-//! and counts only the changed items. Counting many items (a newly opened large document, a
-//! big paste) happens on a worker from a text snapshot, re-parsed there; its result is merged
-//! by item key. Small documents are counted at once on the UI thread (bounded by
-//! [`SYNC_BYTES`]), so opening one leaves no background work behind.
+//! Everything runs on the UI thread, reading the session's text in place (no copy), within
+//! [`FRAME_BYTES`] of source and [`FRAME_TIME`] per frame (plus at most one piece of
+//! [`markise_engine::count::PIECE_BYTES`]): a frame without a change only
+//! compares the document's revision. After an edit the counts are brought up to date once the
+//! document has been quiet for [`DEBOUNCE`]: the [`DocCounter`] matches the view model's
+//! items by content hash (integer compares, no text) and counts only the changed blocks. A
+//! newly opened document, a big paste or a huge block is counted across frames, showing the
+//! last value (or "Counting…") until done.
 
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
-use markise_doc::{DocumentFormat, FormatDoc, FormatOptions};
-use markise_engine::Wake;
-use markise_engine::count::{CounterStats, Counts, DocCounter, ItemKey, count_all};
+use markise_doc::FormatDoc;
+use markise_engine::count::{Budget, CounterStats, Counts, DocCounter, FRAME_BYTES};
 use markise_engine::settings::CountMode;
 use markise_layout::DocModel;
 
 /// Quiet time after an edit before the counts are updated.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
-/// Documents up to this size are counted at once on the UI thread.
-pub const SYNC_BYTES: usize = 256 * 1024;
-/// At most this many missing items are counted on the UI thread (in [`FILL_BUDGET`] slices);
-/// more go to a worker.
-const SYNC_ITEMS: usize = 256;
-/// UI-thread time per frame for counting missing items.
-const FILL_BUDGET: Duration = Duration::from_millis(3);
+/// UI-thread time per frame for counting (checked between pieces) in documents larger than
+/// [`FRAME_BYTES`]; a smaller document is counted in its first frame.
+pub const FRAME_TIME: Duration = Duration::from_millis(2);
 
 /// What the status bar shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +35,10 @@ pub enum Shown {
     Selection {
         selection: Counts,
         document: Counts,
+    },
+    /// A selection whose count is not ready yet (it takes a few frames).
+    SelectionPending {
+        document: Option<Counts>,
     },
 }
 
@@ -87,6 +86,13 @@ pub fn label(shown: &Shown, mode: CountMode) -> String {
             }
             s
         }
+        Shown::SelectionPending { document } => match document {
+            Some(d) => {
+                let total = value(d, mode);
+                format!("… of {} {}", thousands(total), unit(mode, total))
+            }
+            None => "Counting…".into(),
+        },
         Shown::Selection { selection, document } => {
             let total = value(document, mode);
             format!(
@@ -110,7 +116,7 @@ pub fn tooltip(shown: &Shown) -> String {
         )
     };
     match shown {
-        Shown::Counting => "Counting words…".into(),
+        Shown::Counting | Shown::SelectionPending { .. } => "Counting words…".into(),
         Shown::Document(c) => format!(
             "{}\nReading time: {} min (at 200 words per minute)\n\nClick to switch between words and characters",
             all(c),
@@ -121,11 +127,6 @@ pub fn tooltip(shown: &Shown) -> String {
             all(selection)
         ),
     }
-}
-
-/// A worker counting a whole document snapshot.
-struct Job {
-    rx: Receiver<Vec<(ItemKey, Counts)>>,
 }
 
 /// The document whose counts are cached: identity of its model, text revision, item count.
@@ -142,28 +143,28 @@ pub struct WordCount {
     changed: Option<Instant>,
     /// Last complete document counts (shown, stale, while an update is pending).
     last: Option<Counts>,
-    /// Selection counts by selection range and the reconcile they were made after.
-    selection: Option<(Range<usize>, u64, Option<Counts>)>,
-    job: Option<Job>,
-    /// Worker jobs started (tests).
-    jobs: u64,
+    /// Per-frame time budget override (tests).
+    frame_time: Option<Duration>,
 }
 
 impl WordCount {
-    /// Counting statistics: UI-thread item counts, worker jobs (tests: typing does not recount
-    /// the document on the UI thread).
-    pub fn stats(&self) -> (CounterStats, u64) {
-        (self.counter.stats(), self.jobs)
+    /// Counting statistics (tests: typing does not recount the document; per-frame reads stay
+    /// within the byte budget).
+    pub fn stats(&self) -> CounterStats {
+        self.counter.stats()
     }
 
-    /// Brings the counts up to date as far as this frame allows and returns what to show.
-    /// `rev` is the document's text revision, `sel` the selected source range.
-    #[allow(clippy::too_many_arguments)]
+    /// Overrides [`FRAME_TIME`] (tests drive many frames of a debug build; the byte budget
+    /// still applies).
+    pub fn set_frame_time(&mut self, t: Duration) {
+        self.frame_time = Some(t);
+    }
+
+    /// Brings the counts up to date as far as this frame's budget allows and returns what to
+    /// show. `rev` is the document's text revision, `sel` the selected source range.
     pub fn update(
         &mut self,
         ctx: &egui::Context,
-        wake: Option<&Wake>,
-        format: &Arc<dyn DocumentFormat>,
         doc: &dyn FormatDoc,
         model: &Arc<DocModel>,
         rev: u64,
@@ -189,81 +190,39 @@ impl WordCount {
                 }
             }
         }
-        if self.synced {
-            self.poll_job();
-            if self.counter.missing() > 0 {
-                let small = doc.text().len() <= SYNC_BYTES;
-                if small {
-                    self.counter.fill(doc, model, Duration::MAX);
-                } else if self.counter.missing() <= SYNC_ITEMS && self.job.is_none() {
-                    if !self.counter.fill(doc, model, FILL_BUDGET) {
-                        ctx.request_repaint();
-                    }
-                } else if self.job.is_none() {
-                    self.spawn(ctx, wake, format.clone(), doc.snapshot());
-                }
-            }
-            if let Some(t) = self.counter.total() {
-                self.last = Some(t);
-            }
-        }
-        let Some(document) = self.last else {
-            return Shown::Counting;
+        let budget = Budget {
+            bytes: FRAME_BYTES,
+            until: (doc.text().len() > FRAME_BYTES).then(|| now + self.frame_time.unwrap_or(FRAME_TIME)),
         };
-        if sel.is_empty() || !self.synced {
-            self.selection = None;
-            return Shown::Document(document);
-        }
-        let epoch = self.counter.stats().reconciles;
-        let cached = self
-            .selection
-            .as_ref()
-            .filter(|(r, e, c)| *r == sel && *e == epoch && c.is_some())
-            .and_then(|(_, _, c)| *c);
-        let selection = cached.or_else(|| {
-            let c = self.counter.selection(doc, model, sel.clone());
-            self.selection = Some((sel.clone(), epoch, c));
-            c
-        });
-        match selection {
-            Some(selection) => Shown::Selection { selection, document },
-            None => Shown::Counting,
-        }
-    }
-
-    fn poll_job(&mut self) {
-        let Some(job) = &self.job else { return };
-        match job.rx.try_recv() {
-            Ok(done) => {
-                self.counter.absorb(&done);
-                self.job = None;
+        if self.synced && self.counter.missing() > 0 {
+            if self.counter.fill(doc, model, budget) {
+                self.last = self.counter.total();
+            } else {
+                ctx.request_repaint();
             }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => self.job = None,
+        } else if self.synced {
+            self.last = self.counter.total();
         }
-    }
-
-    fn spawn(&mut self, ctx: &egui::Context, wake: Option<&Wake>, format: Arc<dyn DocumentFormat>, text: Arc<str>) {
-        let (tx, rx) = channel();
-        let wake: Wake = match wake {
-            Some(w) => w.clone(),
-            None => {
-                let c = ctx.clone();
-                Arc::new(move || c.request_repaint())
+        if sel.is_empty() {
+            return match self.last {
+                Some(d) => Shown::Document(d),
+                None => Shown::Counting,
+            };
+        }
+        // the selection is counted once the document is (in its own frames)
+        let ready = self.synced && self.counter.missing() == 0;
+        let selection = if ready {
+            let s = self.counter.selection(doc, model, sel, budget);
+            if s.is_none() {
+                ctx.request_repaint();
             }
+            s
+        } else {
+            None
         };
-        let r = std::thread::Builder::new()
-            .name("markise-word-count".into())
-            .spawn(move || {
-                let doc = format.parse(text.to_string(), &FormatOptions::default());
-                drop(text);
-                let model = DocModel::build_owned(&*doc, None);
-                let _ = tx.send(count_all(&*doc, &model));
-                wake();
-            });
-        if r.is_ok() {
-            self.jobs += 1;
-            self.job = Some(Job { rx });
+        match (selection, self.last) {
+            (Some(selection), Some(document)) => Shown::Selection { selection, document },
+            (_, document) => Shown::SelectionPending { document },
         }
     }
 }

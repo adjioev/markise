@@ -11,6 +11,7 @@ use egui::{Event, Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use markise_doc::Selection;
+use markise_engine::count::{FRAME_BYTES, PIECE_BYTES};
 use markise_engine::settings::CountMode;
 use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp};
 
@@ -37,7 +38,7 @@ fn harness(open: Vec<PathBuf>, config: Option<&Path>) -> H {
         )
 }
 
-fn wait_for(h: &mut H, what: &str, limit: Duration, f: impl Fn(&mut H) -> bool) {
+fn wait_for(h: &mut H, what: &str, limit: Duration, mut f: impl FnMut(&mut H) -> bool) {
     let t = Instant::now();
     while !f(h) {
         if t.elapsed() >= limit {
@@ -192,24 +193,39 @@ fn cmd() -> Modifiers {
     }
 }
 
-/// Issue #29 goal: typing in a 10 MB document does not recount it on the UI thread. The first
-/// count runs on a worker; after typing, only the edited items are counted (counted through
-/// the counter's statistics seam) and no new worker job starts.
+fn copies(h: &mut H) -> u64 {
+    h.state_mut().viewer().unwrap().ed.session.copies
+}
+
+/// Issue #29 goal: counting a 10 MB document stays within the per-frame byte budget, never
+/// copies the document, and typing in it recounts only the edited block (counted through the
+/// counter's statistics seam).
 #[test]
-fn typing_in_a_ten_megabyte_document_recounts_only_the_edited_items() {
+fn typing_in_a_ten_megabyte_document_recounts_only_the_edited_block() {
     let big = markise_corpus::generate(10 << 20, 7);
     let mut h = open("big", &big, None);
+    // a debug build's frames are slow: a larger time budget, the same byte budget per frame
+    h.state_mut().set_word_count_frame_time(Duration::from_millis(500));
+    let copies_before = copies(&mut h);
     let t = Instant::now();
+    let mut frames = 0;
     wait_for(&mut h, "first count", Duration::from_secs(300), |h| {
+        frames += 1;
         h.query_by_label_contains("min read").is_some()
     });
-    eprintln!("10 MB: first count (worker) shown after {:?}", t.elapsed());
-    let (before, jobs) = h.state().word_count_stats().expect("counting");
-    assert_eq!(jobs, 1, "the first count of a large document runs on a worker");
+    eprintln!("10 MB: first count shown after {:?} ({frames} frames)", t.elapsed());
+    let before = h.state().word_count_stats().expect("counting");
+    let budget = (FRAME_BYTES + PIECE_BYTES) as u64;
     assert!(
-        before.items_counted < 300,
-        "the UI thread counted only a few items: {before:?}"
+        before.max_call_bytes <= budget,
+        "per-frame counting stays within the byte budget: {before:?}"
     );
+    assert!(
+        frames >= big.len() / (FRAME_BYTES + PIECE_BYTES),
+        "counted across frames: {frames}"
+    );
+    assert!(before.bytes_read <= big.len() as u64, "each byte read once: {before:?}");
+    assert_eq!(copies(&mut h), copies_before, "counting never copies the document");
     let label = |h: &H| {
         h.query_by_label_contains("min read")
             .and_then(|n| n.accesskit_node().value().or(n.accesskit_node().label()))
@@ -235,22 +251,20 @@ fn typing_in_a_ten_megabyte_document_recounts_only_the_edited_items() {
         h.step();
     }
     let typing = t.elapsed();
-    let (during, _) = h.state().word_count_stats().unwrap();
-    assert!(
-        during.items_counted - before.items_counted <= 2,
-        "no counting per keystroke: {before:?} → {during:?}"
-    );
-    // after the debounce, only the edited items are counted
+    let during = h.state().word_count_stats().unwrap();
+    assert_eq!(during.bytes_read, before.bytes_read, "no counting per keystroke");
+    // after the debounce, only the edited block is counted
     std::thread::sleep(Duration::from_millis(400));
     wait_for(&mut h, "updated count", Duration::from_secs(20), |h| label(h) != shown);
-    let (after, jobs) = h.state().word_count_stats().unwrap();
-    assert_eq!(jobs, 1, "no worker recount after typing");
+    let after = h.state().word_count_stats().unwrap();
     assert!(
-        after.items_counted - before.items_counted <= 8,
-        "only the edited items were counted: {before:?} → {after:?}"
+        after.blocks_counted - before.blocks_counted <= 3,
+        "only the edited blocks were counted: {before:?} → {after:?}"
     );
+    assert!(after.bytes_read - before.bytes_read < 4096, "{before:?} → {after:?}");
     eprintln!(
-        "10 MB: typed 19 chars in {typing:?}; counted {} items after typing",
-        after.items_counted - before.items_counted
+        "10 MB: typed 19 chars in {typing:?}; then counted {} blocks, {} bytes",
+        after.blocks_counted - before.blocks_counted,
+        after.bytes_read - before.bytes_read
     );
 }
