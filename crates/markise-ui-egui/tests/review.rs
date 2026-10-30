@@ -1122,7 +1122,7 @@ fn narrow_window_falls_back_to_bubbles() {
 }
 
 /// Codex review of #94: a click on exactly the frame where the comment gutter would appear
-/// (the "has comments" answer arrives together with the press) lands on the clicked
+/// (the frame that first sees a new comment also gets the press) lands on the clicked
 /// character; the gutter follows a frame later.
 #[test]
 fn click_on_the_frame_the_gutter_appears_hits_the_clicked_character() {
@@ -1160,7 +1160,11 @@ pi rho sigma tau upsilon phi chi psi omega and some more words to fill the line.
     let (target, r) = found.expect("a character near the end of the first line");
     let p = egui::pos2(r.center().x + 1.0, r.center().y);
     caret_at(&mut h, 0);
-    // a comment appended at the end (the target does not move)
+    // the pointer is over the target first (kittest delivers a press one frame after a move)
+    h.event(Event::PointerMoved(p));
+    h.step();
+    std::thread::sleep(Duration::from_millis(500));
+    // a comment appended at the end (the target does not move); no frame runs before the press
     let end = src.len() - 1;
     let v = h.state_mut().viewer().unwrap();
     v.ed.edit(|s| {
@@ -1170,13 +1174,7 @@ pi rho sigma tau upsilon phi chi psi omega and some more words to fill the line.
     .unwrap();
     v.ed.refresh_focus();
     assert!(text(&h).contains("Tail. {>>note<<}"), "{}", text(&h));
-    // the lookup starts (debounce long past) and answers while no frame runs
-    std::thread::sleep(Duration::from_millis(500));
-    h.event(Event::PointerMoved(p));
-    h.step();
-    assert!(h.state_mut().viewer().unwrap().comment_lookup_pending());
-    std::thread::sleep(Duration::from_millis(800));
-    // the press arrives in the frame that receives the answer
+    // the press arrives in the frame that first sees the comment
     h.event(Event::PointerButton {
         pos: p,
         button: egui::PointerButton::Primary,
@@ -1191,11 +1189,79 @@ pi rho sigma tau upsilon phi chi psi omega and some more words to fill the line.
         modifiers: Modifiers::default(),
     });
     h.step();
+    assert_eq!(caret(&mut h), target, "the caret is where the click was");
     assert!(
         !h.state_mut().viewer().unwrap().comment_gutter(),
         "the gutter waits while the button is used"
     );
     h.run_steps(3);
     assert!(h.state_mut().viewer().unwrap().comment_gutter(), "the gutter follows");
-    assert_eq!(caret(&mut h), target, "the caret is where the click was");
+    assert_eq!(caret(&mut h), target);
+}
+
+/// Coordinator review of #94: "has comments" is tracked incrementally. Typing ordinary text
+/// in a 10 MB document with comments runs no scan, reads no text and copies nothing.
+#[test]
+fn typing_ordinary_text_in_a_10_mb_document_never_scans() {
+    let para = "An ordinary paragraph of the large document, with enough words to wrap a line.\n\n";
+    let mut src = String::from("Intro {>>a comment near the start<<} text.\n\n");
+    src.push_str(&para.repeat(10 * 1024 * 1024 / para.len()));
+    src.push_str("Last {>>and one at the end<<}.\n");
+    let mut h = open_phycat("gutter-10mb", &src, egui::vec2(1400.0, 760.0));
+    assert!(h.state_mut().viewer().unwrap().comment_gutter());
+    let v = h.state_mut().viewer().unwrap();
+    let (scans, bytes) = v.comment_scans();
+    let copies = v.ed.session.copies;
+    assert_eq!(scans, 1, "one initial scan");
+    assert!(bytes < 4096, "it stopped at the first comment: {bytes} bytes");
+    // type in the middle of the document
+    let mid = src.len() / 2;
+    let mid = src[mid..].find("words").unwrap() + mid;
+    caret_at(&mut h, mid);
+    typ(&mut h, "hello there ");
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(200));
+        h.step();
+    }
+    let v = h.state_mut().viewer().unwrap();
+    assert_eq!(v.comment_scans(), (scans, bytes), "no scan, no text read");
+    assert_eq!(v.ed.session.copies, copies, "no document copy");
+    assert!(!v.comment_lookup_pending());
+    assert!(v.comment_gutter(), "still reserved");
+}
+
+/// Inserting a comment flips "has comments" by a local check (no scan); deleting the last
+/// comment releases the gutter (a scan confirms none is left).
+#[test]
+fn inserting_and_deleting_the_last_comment_flip_the_gutter() {
+    let src = "First paragraph with words.\n\nSecond paragraph.\n";
+    let mut h = open_phycat("gutter-flip", src, egui::vec2(1400.0, 760.0));
+    let v = h.state_mut().viewer().unwrap();
+    assert!(!v.comment_gutter());
+    let (scans, _) = v.comment_scans();
+    let at = src.find(" with").unwrap();
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| {
+        s.set_selection(Selection::caret(at));
+        s.insert_text("{>>check<<}")
+    })
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(450));
+    settle(&mut h);
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.comment_gutter(), "a comment: gutter");
+    assert_eq!(v.comment_scans().0, scans, "found by the local check");
+    assert_eq!(comments(&mut h).len(), 1);
+    // delete it
+    let t = text(&h);
+    let (a, b) = (t.find("{>>").unwrap(), t.find("<<}").unwrap() + 3);
+    select(&mut h, a, b);
+    h.key_press(Key::Backspace);
+    h.step();
+    assert_eq!(text(&h), src);
+    std::thread::sleep(Duration::from_millis(450));
+    settle(&mut h);
+    let v = h.state_mut().viewer().unwrap();
+    assert!(!v.comment_gutter(), "the last comment gone: released");
+    assert_eq!(v.comment_scans().0, scans + 1, "a scan confirmed it");
 }

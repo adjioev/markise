@@ -27,6 +27,7 @@ use crate::text_paint::ParleyText;
 
 mod code_tools;
 mod comment_place;
+mod comment_presence;
 pub use code_tools::{LangEdit, LangItem, ShownTools, lang_matches};
 
 const SCROLLBAR_W: f32 = 10.0;
@@ -165,7 +166,7 @@ pub struct DocViewer {
     comments: Vec<ShownComment>,
     popover: Option<Popover>,
     /// Debounced "the document has comments" (the comment gutter, issue #91).
-    comment_presence: comment_place::CommentPresence,
+    comment_presence: comment_presence::CommentPresence,
     /// The comment gutter was reserved at the last frame.
     gutter: bool,
     /// Copy button and language field of fenced code blocks (issue #76).
@@ -407,41 +408,18 @@ impl DocViewer {
         let mut content_w = rect.width() - SCROLLBAR_W;
         // margin mode with comments in the document: a comment gutter is reserved at the right
         // and the column lays out in the rest (owner decision on #91), unless the window is
-        // too narrow for it (then bubbles). "Has comments" is answered by a debounced worker
-        // (no whole-document scan here), and a gutter change waits for a frame without pointer
-        // presses so clicks are hit-tested against one geometry (Codex review of #94).
+        // too narrow for it (then bubbles). "Has comments" is tracked incrementally, reading
+        // the text in place in bounded chunks and only after review-relevant edits
+        // (comment_presence); a gutter change waits for a frame without pointer presses so
+        // clicks are hit-tested against one geometry (Codex review of #94).
         let margin_mode = self.comment_display == markise_engine::settings::CommentDisplay::Margin;
         let has = margin_mode && {
-            let key = (
-                self.ed.session.revision().counter,
-                Arc::as_ptr(self.ed.view.model()) as usize,
-            );
-            let (has, wait) = self.comment_presence.poll(key, now, || {
-                let text = self.ed.session.doc().snapshot();
-                let format = self.ed.session.format().clone();
-                let wake = ctx.clone();
-                let (tx, rx) = std::sync::mpsc::channel();
-                let _ = std::thread::Builder::new()
-                    .name("markise-comment-presence".into())
-                    .spawn(move || {
-                        // no comment opener at all: nothing to parse
-                        if !text.contains("{>>") {
-                            let _ = tx.send(false);
-                            wake.request_repaint();
-                            return;
-                        }
-                        let doc = format.parse(text.to_string(), &markise_doc::FormatOptions::default());
-                        let has = markise_doc::review::first_mark_from(doc.as_ref(), 0, |m| {
-                            m.kind == markise_doc::CriticKind::Comment
-                        })
-                        .is_some();
-                        let _ = tx.send(has);
-                        wake.request_repaint();
-                    });
-                rx
-            });
-            if let Some(w) = wait {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(w.max(0.01)));
+            let review = self.ed.session.review_edits();
+            let (has, more) = self.comment_presence.poll(self.ed.session.doc(), review, now);
+            match more {
+                Some(w) if w > 0.0 => ctx.request_repaint_after(std::time::Duration::from_secs_f64(w)),
+                Some(_) => ctx.request_repaint(),
+                None => {}
             }
             has
         };
@@ -898,9 +876,15 @@ impl DocViewer {
         self.gutter
     }
 
-    /// A "has comments" lookup is running on its worker (tests).
+    /// A "has comments" evaluation is due or running (tests).
     pub fn comment_lookup_pending(&self) -> bool {
         self.comment_presence.pending()
+    }
+
+    /// Full "has comments" scans started and text bytes they read (tests: typing ordinary
+    /// text must not scan).
+    pub fn comment_scans(&self) -> (u64, u64) {
+        (self.comment_presence.scans, self.comment_presence.scanned)
     }
 
     /// The content column's left edge and width at the last frame (screen points; tests).

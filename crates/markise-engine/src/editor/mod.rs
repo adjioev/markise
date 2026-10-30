@@ -191,6 +191,61 @@ pub struct EditorSession {
     prefs: EditPrefs,
     /// Full Source mode's own history (ADR 0006 §4.3), while it is open.
     source: Option<source::SourceSession>,
+    /// Review-relevance of the edits so far (see [`EditorSession::review_edits`]).
+    review: ReviewEdits,
+}
+
+/// Counters for consumers that track review comments incrementally (the comment gutter,
+/// issue #91): an edit is review-relevant when the text it removed or inserted, with a few
+/// bytes of context on each side, contains a CriticMarkup comment delimiter or syntax that
+/// could split a comment or turn it into code or HTML (line breaks, backticks, fences, math
+/// blocks, HTML at a line start or an HTML comment). Typing ordinary text, even inside a comment, is not relevant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReviewEdits {
+    /// Review-relevant edits since the session was opened.
+    pub relevant: u64,
+    /// Where the last relevant edit is (byte offset in the text before it).
+    pub last_at: usize,
+    /// Times the document object was replaced (reload, re-parse): rescan everything.
+    pub replaced: u64,
+}
+
+/// Text whose presence near an edit means review comments may have appeared or gone: the
+/// comment delimiters, and what can change the block or code-span structure around one (a
+/// line break can make a blank line that splits a comment or start a code block; a backtick
+/// can put a comment in a code span; fences, math blocks and HTML can swallow one).
+const REVIEW_TRIGGERS: [&str; 8] = ["{>>", "<<}", "\n", "`", "~~~", "$$", "\n<", "<!--"];
+/// Context bytes looked at on each side of an edit.
+const REVIEW_CONTEXT: usize = 3;
+
+/// Whether applying `ps` to `old` is review-relevant (see [`ReviewEdits`]): the position of
+/// its first relevant patch, in pre-edit coordinates. Reads only the patches' neighbourhoods.
+pub fn review_relevant(old: &str, ps: &PatchSet) -> Option<usize> {
+    let floor = |i: usize| {
+        let mut i = i.min(old.len());
+        while !old.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+    let ceil = |i: usize| {
+        let mut i = i.min(old.len());
+        while !old.is_char_boundary(i) {
+            i += 1;
+        }
+        i
+    };
+    let hit = |t: &str| REVIEW_TRIGGERS.iter().any(|k| t.contains(k));
+    for p in ps.patches() {
+        let (start, end) = (floor(p.range.start), ceil(p.range.end));
+        let lo = floor(start.saturating_sub(REVIEW_CONTEXT));
+        let hi = ceil(end + REVIEW_CONTEXT);
+        let after = format!("{}{}{}", &old[lo..start], p.insert, &old[end..hi]);
+        if hit(&old[lo..hi]) || hit(&after) {
+            return Some(start);
+        }
+    }
+    None
 }
 
 impl fmt::Debug for EditorSession {
@@ -247,6 +302,7 @@ impl EditorSession {
             clock,
             prefs: EditPrefs::default(),
             source: None,
+            review: ReviewEdits::default(),
         }
     }
 
@@ -273,6 +329,10 @@ impl EditorSession {
     pub fn doc_arc(&self) -> &Arc<dyn FormatDoc> {
         &self.doc
     }
+    /// Review-relevance counters of the edits so far (comment gutter, issue #91).
+    pub fn review_edits(&self) -> ReviewEdits {
+        self.review
+    }
     /// Changes since the last call.
     pub fn take_change(&mut self) -> DocChange {
         std::mem::take(&mut self.change)
@@ -286,6 +346,10 @@ impl EditorSession {
         Arc::get_mut(&mut self.doc).expect("unique document")
     }
     fn doc_apply(&mut self, ps: &PatchSet, hints: Option<&HintSet>) {
+        if let Some(at) = review_relevant(self.doc.text(), ps) {
+            self.review.relevant += 1;
+            self.review.last_at = at;
+        }
         let e = self.doc_mut().apply_with_hints(ps, hints);
         self.change.push(e);
     }
@@ -1420,6 +1484,7 @@ impl EditorSession {
         if forward.is_empty() && hints_before.is_empty() {
             self.doc = doc;
             self.change = DocChange::Replaced;
+            self.review.replaced += 1;
             return Ok(());
         }
         let removed = forward.removed_from(old);
@@ -1430,6 +1495,7 @@ impl EditorSession {
             self.doc_mut().set_hints(&HintSet::new());
         }
         self.change = DocChange::Replaced;
+        self.review.replaced += 1;
         self.transform_live(&forward);
         self.rev.counter += 1;
         let step = Step {
@@ -1720,5 +1786,56 @@ impl Tx<'_> {
     /// Number of steps applied so far.
     pub fn applied(&self) -> usize {
         self.steps.len()
+    }
+}
+
+#[cfg(test)]
+mod review_relevance_tests {
+    use super::*;
+
+    fn ps(range: std::ops::Range<usize>, insert: &str) -> PatchSet {
+        PatchSet::new(vec![Patch::verbatim(range, insert.to_string())]).unwrap()
+    }
+
+    /// Issue #91: only edits near comment delimiters or block syntax are review-relevant.
+    #[test]
+    fn review_relevance_reads_only_the_edit_neighbourhood() {
+        let old = "Plain words here. A {>>note<<} b.\n";
+        // ordinary typing far from the comment
+        assert_eq!(review_relevant(old, &ps(5..5, "x")), None);
+        assert_eq!(review_relevant(old, &ps(0..5, "")), None);
+        // inside / next to the comment
+        let c = old.find("{>>").unwrap();
+        assert_eq!(review_relevant(old, &ps(c + 5..c + 5, "x")), None, "letters inside it");
+        assert!(
+            review_relevant(old, &ps(c + 5..c + 5, "\n")).is_some(),
+            "a line break inside it"
+        );
+        assert!(review_relevant(old, &ps(2..2, "`")).is_some(), "a backtick");
+        assert!(review_relevant(old, &ps(c..c + 1, "")).is_some(), "breaking the opener");
+        let e = old.find("<<}").unwrap();
+        assert!(review_relevant(old, &ps(e + 3..e + 3, "x")).is_some(), "right after it");
+        // creating one: inserted whole, or completed by one character
+        assert!(review_relevant(old, &ps(5..5, "{>>new<<}")).is_some());
+        let half = "text {> more";
+        assert!(review_relevant(half, &ps(7..7, ">")).is_some(), "completes an opener");
+        // block syntax that can turn a comment into code
+        assert!(review_relevant(old, &ps(0..0, "```\n")).is_some());
+        assert!(
+            review_relevant("a\nb", &ps(2..2, "<div>")).is_some(),
+            "HTML at a line start"
+        );
+        assert!(review_relevant(old, &ps(2..2, "<!--")).is_some());
+    }
+
+    #[test]
+    fn sessions_count_relevant_edits() {
+        let f: Arc<dyn DocumentFormat> = Arc::new(markise_md::MarkdownFormat::default());
+        let mut s = EditorSession::new(f, "Hello world.\n");
+        s.set_selection(Selection::caret(5));
+        s.insert_text("abc").unwrap();
+        assert_eq!(s.review_edits().relevant, 0, "ordinary typing");
+        s.insert_text("{>>x<<}").unwrap();
+        assert_eq!(s.review_edits().relevant, 1);
     }
 }
