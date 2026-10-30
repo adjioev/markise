@@ -13,7 +13,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use markise_export::{
-    CodeHighlight, HtmlOptions, LARGE_HTML_BYTES, human_bytes, render_document, render_document_limited, toc_count,
+    CodeHighlight, HtmlOptions, LARGE_HTML_BYTES, LimitedError, human_bytes, render_document, render_document_limited,
+    toc_count,
 };
 use markise_md::{Document, ParseOptions};
 
@@ -119,7 +120,8 @@ fn html(
     let html = match max_size {
         Some(max) => match render_document_limited(&doc, &opts, max) {
             Ok((html, _)) => html,
-            Err(size) => {
+            Err(LimitedError::Cancelled) => return Err("cancelled".into()),
+            Err(LimitedError::TooLarge(size)) => {
                 eprintln!(
                     "markise-cli: refusing to export {path}: the HTML would be {} (--max-size {})",
                     why(size.bytes),

@@ -261,7 +261,10 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
             control.check().map_err(|e| e.to_string())?;
             let (html, html_warnings) = match rendered {
                 Ok(r) => r,
-                Err(size) => {
+                Err(markise_export::LimitedError::Cancelled) => {
+                    return Err(markise_export::job::Cancelled.to_string());
+                }
+                Err(markise_export::LimitedError::TooLarge(size)) => {
                     return Ok(ExportDone {
                         outputs: Vec::new(),
                         warnings,
@@ -581,6 +584,32 @@ mod tests {
         img.confirm_html_above = None;
         run_export(&img, &JobControl::new()).unwrap();
         assert_eq!(std::fs::metadata(&img.output).unwrap().len(), size.bytes);
+    }
+
+    /// Codex round 3 on #93: cancelling during the limited HTML render returns a cancelled
+    /// result: nothing published, no size question.
+    #[test]
+    fn cancelled_html_render_publishes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let text = "```rust\nfn f(a: u32) -> u32 { a * 2 + 1 }\n```\n\n[TOC]\n\n# H\n\n".repeat(20_000);
+        let mut r = ExportRequest::new(
+            ExportKind::Html,
+            text,
+            Some(d.path().join("doc.md")),
+            d.path().join("c.html"),
+            Theme::light(),
+        );
+        r.confirm_html_above = Some(1_000_000);
+        let control = JobControl::new();
+        let c2 = control.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            c2.cancel();
+        });
+        let res = run_export(&r, &control);
+        canceller.join().unwrap();
+        assert!(res.is_err(), "cancelled, not {res:?}");
+        assert!(!r.output.exists());
     }
 
     /// Spec 06 Q-V11: resolved wikilinks become relative links to the linked file, unresolved

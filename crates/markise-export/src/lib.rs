@@ -341,6 +341,20 @@ struct Ctx<'a> {
     toc_html: Option<String>,
     /// `[toc]` blocks rendered so far.
     tocs_rendered: usize,
+    /// Size limit of a limited render ([`render_document_limited`]) for `#write`.
+    limit: Option<u64>,
+    /// The output passed `limit`: from now on output is only counted, not kept.
+    counting: bool,
+    /// Bytes counted but not kept.
+    counted: u64,
+    /// Kept bytes before the current top-level block (output + stored footnotes).
+    kept_base: u64,
+    /// `[toc]` bytes written in the current top-level block.
+    block_toc_bytes: u64,
+    /// Bytes of the footnote lines stored in `footnotes`.
+    stored_fn_bytes: u64,
+    /// Footnote definitions rendered (kept or counted).
+    fn_count: usize,
     /// TOC entries formatted so far (work counter for the scaling test).
     #[cfg(test)]
     toc_entries_formatted: usize,
@@ -361,11 +375,20 @@ pub fn render_document(doc: &Document, opts: &HtmlOptions) -> String {
 }
 
 /// [`render_document`] plus warnings (e.g. images too large to embed).
+///
+/// Cancelled through [`HtmlOptions::control`]: an empty page (the caller holding the control
+/// checks it before using the result).
 pub fn render_document_report(doc: &Document, opts: &HtmlOptions) -> (String, Vec<String>) {
-    match render_page(doc, opts, None) {
-        Ok(r) => r,
-        Err(_) => unreachable!("no size limit"),
-    }
+    render_page(doc, opts, None).unwrap_or_default()
+}
+
+/// Why [`render_document_limited`] returned no page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimitedError {
+    /// The page is larger than the limit (exact size).
+    TooLarge(HtmlSize),
+    /// Cancelled through [`HtmlOptions::control`].
+    Cancelled,
 }
 
 /// [`render_document_report`], unless the page is larger than `limit` bytes: then its exact
@@ -378,11 +401,11 @@ pub fn render_document_limited(
     doc: &Document,
     opts: &HtmlOptions,
     limit: u64,
-) -> Result<(String, Vec<String>), HtmlSize> {
+) -> Result<(String, Vec<String>), LimitedError> {
     render_page(doc, opts, Some(limit))
 }
 
-fn render_page(doc: &Document, opts: &HtmlOptions, limit: Option<u64>) -> Result<(String, Vec<String>), HtmlSize> {
+fn render_page(doc: &Document, opts: &HtmlOptions, limit: Option<u64>) -> Result<(String, Vec<String>), LimitedError> {
     let fm = frontmatter::front_matter(doc);
     let mut ctx = Ctx::new(doc, opts);
     let title = frontmatter::get(&fm, "title")
@@ -416,14 +439,16 @@ fn render_page(doc: &Document, opts: &HtmlOptions, limit: Option<u64>) -> Result
     }
     tail.push_str("</body>\n</html>\n");
     let frame = (head.len() + tail.len()) as u64;
-    let (body, dropped) = ctx.render_write_limited(limit.map(|l| l.saturating_sub(frame)));
+    let (body, dropped) = ctx
+        .render_write_limited(limit.map(|l| l.saturating_sub(frame)))
+        .map_err(|_| LimitedError::Cancelled)?;
     let warnings = ctx.warnings.take();
     let bytes = frame + dropped + body.len() as u64;
     if limit.is_some_and(|l| bytes > l) {
-        return Err(HtmlSize {
+        return Err(LimitedError::TooLarge(HtmlSize {
             bytes,
             tocs: ctx.tocs_rendered,
-        });
+        }));
     }
     let mut out = head;
     out.reserve(body.len() + tail.len());
@@ -496,6 +521,13 @@ pub fn render_body(doc: &Document, opts: &HtmlOptions) -> String {
     Ctx::new(doc, opts).render_write()
 }
 
+/// One line of the footnotes area.
+fn footnote_line(n: usize, html: &str) -> String {
+    format!(
+        "<div class='footnote-line'><span class='md-fn-count'>{n}</span> {html}<a class='reversefootnote' name='dfref-footnote-{n}' href='#ref-footnote-{n}'>↩</a></div>\n"
+    )
+}
+
 fn strip_tags(html: &str) -> String {
     let mut out = String::new();
     let mut in_tag = false;
@@ -528,6 +560,13 @@ impl<'a> Ctx<'a> {
             next_heading: 0,
             toc_html: None,
             tocs_rendered: 0,
+            limit: None,
+            counting: false,
+            counted: 0,
+            kept_base: 0,
+            block_toc_bytes: 0,
+            stored_fn_bytes: 0,
+            fn_count: 0,
             #[cfg(test)]
             toc_entries_formatted: 0,
             footnote_numbers: HashMap::new(),
@@ -622,38 +661,57 @@ impl<'a> Ctx<'a> {
     }
 
     fn render_write(&mut self) -> String {
-        self.render_write_limited(None).0
+        self.render_write_limited(None).map(|r| r.0).unwrap_or_default()
     }
 
-    /// The content of `#write`. With a `limit`, once the output passes it every further
-    /// top-level block is only counted: returns the kept output and the bytes dropped.
-    fn render_write_limited(&mut self, limit: Option<u64>) -> (String, u64) {
-        let mut out = String::with_capacity(self.text.len() * 2);
-        let mut dropped = 0u64;
+    fn cancelled(&self) -> bool {
+        self.opts.control.as_ref().is_some_and(job::JobControl::is_cancelled)
+    }
+
+    /// The content of `#write`. With a `limit`, once the output (including stored footnotes)
+    /// passes it, everything further is only counted: returns the kept output and the bytes
+    /// counted but not kept. Checks cancellation between top-level blocks and footnotes.
+    fn render_write_limited(&mut self, limit: Option<u64>) -> Result<(String, u64), job::Cancelled> {
+        self.limit = limit;
+        let mut out = String::with_capacity(self.text.len().min(64 << 20) * 2);
         let blocks = self.doc.blocks();
         for b in blocks {
+            if self.cancelled() {
+                return Err(job::Cancelled);
+            }
+            self.kept_base = out.len() as u64 + self.stored_fn_bytes;
+            self.block_toc_bytes = 0;
             self.block(b, &mut out, false);
             if let Some(l) = limit
-                && dropped + out.len() as u64 > l
+                && (self.counting || self.counted + out.len() as u64 + self.stored_fn_bytes > l)
             {
-                dropped += out.len() as u64;
+                self.counting = true;
+                self.counted += out.len() as u64 + self.stored_fn_bytes;
                 out.clear();
                 out.shrink_to(1 << 20);
+                self.footnotes = Vec::new();
+                self.stored_fn_bytes = 0;
             }
         }
-        if !self.footnotes.is_empty() {
-            out.push_str("<div class='footnotes-area'><hr/>\n");
-            let mut notes = std::mem::take(&mut self.footnotes);
-            notes.sort_by_key(|(n, _)| *n);
-            for (n, html) in notes {
-                let _ = writeln!(
-                    out,
-                    "<div class='footnote-line'><span class='md-fn-count'>{n}</span> {html}<a class='reversefootnote' name='dfref-footnote-{n}' href='#ref-footnote-{n}'>↩</a></div>"
-                );
+        if self.fn_count > 0 {
+            const HEAD: &str = "<div class='footnotes-area'><hr/>\n";
+            const FOOT: &str = "</div>\n";
+            if self.counting {
+                self.counted += (HEAD.len() + FOOT.len()) as u64;
+            } else {
+                out.push_str(HEAD);
+                let mut notes = std::mem::take(&mut self.footnotes);
+                notes.sort_by_key(|(n, _)| *n);
+                for (n, html) in notes {
+                    if self.cancelled() {
+                        return Err(job::Cancelled);
+                    }
+                    out.push_str(&footnote_line(n, &html));
+                }
+                out.push_str(FOOT);
             }
-            out.push_str("</div>\n");
         }
-        (out, dropped)
+        Ok((out, self.counted))
     }
 
     fn inline_html(&mut self, content: &str) -> String {
@@ -794,7 +852,14 @@ impl<'a> Ctx<'a> {
                         self.block(c, &mut html, false);
                     }
                 }
-                self.footnotes.push((n, html));
+                let line = footnote_line(n, &html).len() as u64;
+                self.fn_count += 1;
+                if self.counting {
+                    self.counted += line;
+                } else {
+                    self.stored_fn_bytes += line;
+                    self.footnotes.push((n, html));
+                }
             }
         }
     }
@@ -867,9 +932,23 @@ impl<'a> Ctx<'a> {
         if self.toc_html.is_none() {
             self.toc_html = Some(self.format_toc());
         }
-        if let Some(html) = &self.toc_html {
-            out.push_str(html);
+        let Some(html) = &self.toc_html else { return };
+        let len = html.len() as u64;
+        // a limited render counts TOCs past the limit even inside one block (lists,
+        // footnotes) instead of writing them
+        if self.counting {
+            self.counted += len;
+            return;
         }
+        if let Some(l) = self.limit
+            && self.counted + self.kept_base + self.block_toc_bytes + len > l
+        {
+            self.counting = true;
+            self.counted += len;
+            return;
+        }
+        self.block_toc_bytes += len;
+        out.push_str(html);
     }
 
     fn format_toc(&mut self) -> String {
@@ -1449,7 +1528,9 @@ mod tests {
         let real = render_document(&doc, opts);
         let size = real.len() as u64;
         assert!(size > limit, "the input must pass the limit ({size} bytes)");
-        let over = render_document_limited(&doc, opts, limit).expect_err("over the limit");
+        let Err(LimitedError::TooLarge(over)) = render_document_limited(&doc, opts, limit) else {
+            panic!("over the limit");
+        };
         assert_eq!(over.bytes, size, "exact size");
         assert_eq!(over.tocs, toc_count(&doc));
         let (under, _) = render_document_limited(&doc, opts, size).expect("at the limit");
@@ -1505,7 +1586,7 @@ mod tests {
         assert!(check_limited(&tocs, &plain, limit) > 100 * 400 * 50);
         let doc = parse(&tocs);
         let mut ctx = Ctx::new(&doc, &plain);
-        let (kept, dropped) = ctx.render_write_limited(Some(limit));
+        let (kept, dropped) = ctx.render_write_limited(Some(limit)).unwrap();
         let toc = ctx.toc_html.as_ref().map_or(0, String::len);
         assert!(dropped > 0 && kept.len() <= toc + 4_096, "kept {} bytes", kept.len());
         // a normal document stays under the default limit unchanged
@@ -1514,6 +1595,90 @@ mod tests {
             render_document_limited(&doc, &plain, LARGE_HTML_BYTES).unwrap().0,
             render_document(&doc, &plain)
         );
+    }
+
+    /// Codex round 3 on #93: TOCs inside footnote definitions (stored until the end) and
+    /// inside one big block are counted past the limit, not kept.
+    #[test]
+    fn size_limit_bounds_footnotes_and_nested_tocs() {
+        let plain = HtmlOptions {
+            no_style: true,
+            ..Default::default()
+        };
+        let limit = 20_000;
+        let mut heads: String = (0..200).map(|i| format!("## Heading number {i}\n\n")).collect();
+        let mut md = heads.clone();
+        for i in 0..300 {
+            md.push_str(&format!("Ref[^f{i}].\n\n[^f{i}]: [TOC]\n\n"));
+        }
+        let size = check_limited(&md, &plain, limit);
+        let doc = parse(&md);
+        let mut ctx = Ctx::new(&doc, &plain);
+        let (kept, counted) = ctx.render_write_limited(Some(limit)).unwrap();
+        let toc = ctx.toc_html.as_ref().map_or(0, String::len);
+        assert!(counted > size / 2, "counted {counted} of {size}");
+        assert!(
+            ctx.footnotes.is_empty() && kept.len() <= limit as usize + toc,
+            "kept {}",
+            kept.len()
+        );
+        // TOCs nested in one list block
+        heads.push_str(&(0..300).map(|_| "- [TOC]\n").collect::<String>());
+        let size = check_limited(&heads, &plain, limit);
+        let doc = parse(&heads);
+        let mut ctx = Ctx::new(&doc, &plain);
+        let (kept, _) = ctx.render_write_limited(Some(limit)).unwrap();
+        assert!(kept.len() < size as usize / 10, "kept {} of {size}", kept.len());
+    }
+
+    /// Codex round 3 on #93: a cancelled limited render stops between top-level blocks.
+    #[test]
+    fn limited_render_is_cancellable() {
+        let control = job::JobControl::new();
+        control.cancel();
+        let opts = HtmlOptions {
+            no_style: true,
+            control: Some(control),
+            ..Default::default()
+        };
+        let doc = parse(&toc_doc(2000, 1000));
+        let t = std::time::Instant::now();
+        assert_eq!(
+            render_document_limited(&doc, &opts, 1_000).unwrap_err(),
+            LimitedError::Cancelled
+        );
+        assert_eq!(
+            render_document_limited(&doc, &opts, u64::MAX).unwrap_err(),
+            LimitedError::Cancelled
+        );
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        let mut ctx = Ctx::new(&doc, &opts);
+        assert!(ctx.render_write_limited(Some(1_000)).is_err());
+        assert_eq!(ctx.tocs_rendered, 0, "stopped before the first block");
+
+        // cancelled from another thread while rendering many slow (highlighted) blocks
+        let control = job::JobControl::new();
+        let opts = HtmlOptions {
+            no_style: true,
+            highlight: CodeHighlight::Classes,
+            control: Some(control.clone()),
+            ..Default::default()
+        };
+        let md = "```rust\nfn f(a: u32) -> u32 { a * 2 + 1 } // x\n```\n\n[TOC]\n\n# H\n\n".repeat(20_000);
+        let doc = parse(&md);
+        let c2 = control.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            c2.cancel();
+        });
+        let t = std::time::Instant::now();
+        assert_eq!(
+            render_document_limited(&doc, &opts, 1_000_000).unwrap_err(),
+            LimitedError::Cancelled
+        );
+        canceller.join().unwrap();
+        let after = t.elapsed();
+        assert!(after < std::time::Duration::from_secs(20), "{after:?}");
     }
 
     #[test]
