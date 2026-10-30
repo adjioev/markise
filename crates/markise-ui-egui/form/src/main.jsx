@@ -1,6 +1,6 @@
 // PROTOTYPE (proto/block-forms): the block edit dialog page.
 //
-// Runs inside the visible editor window of `markise-web-render` (WKWebView). Markise generates
+// Runs in the docked edit panel of Markise (one in-process WKWebView, form_panel.rs). Markise generates
 // the JSON Schema + UI Schema + data of one block; this page only renders them with JSON Forms
 // (vanilla renderers) and talks to the helper through `window.webkit.messageHandlers.markise`:
 //

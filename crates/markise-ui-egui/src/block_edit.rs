@@ -4,8 +4,9 @@
 //! "✎ Edit" on a block image → Markise decodes the block with
 //! [`markise_engine::block_form`] against the site's `components/blocks.json`, generates the
 //! JSON Schema / UI Schema / data (plus the site's optional `blocks/<name>/<name>.form.json`,
-//! `.form.js` custom renderers and `.form.css`) and asks the snapshot helper to show its editor
-//! window. On Save the helper sends the data back; Markise checks the document did not change
+//! `.form.js` custom renderers and `.form.css`) and shows them in the right side panel
+//! ([`crate::form_panel`], an in-process WKWebView docked in the Markise window). On Save the
+//! page sends the data back; Markise checks the document did not change
 //! since the dialog opened, turns the data into patches of the changed spans only and applies
 //! them as one undoable transaction ("Edit Block"); the snapshot then re-renders by itself
 //! (the block's content key changed). Cancel / Esc / the close button change nothing.
@@ -19,7 +20,7 @@ use markise_engine::block_form as bf;
 use markise_engine::editor::EditorView;
 use serde_json::{Value, json};
 
-use crate::block_snap::{LiveStdin, ThemeVars, write_frame};
+use crate::block_snap::ThemeVars;
 
 struct Open {
     id: u64,
@@ -31,7 +32,6 @@ struct Open {
 
 /// Edit dialog state of one viewer.
 pub struct FormState {
-    live: LiveStdin,
     events: Receiver<Value>,
     doc: Option<PathBuf>,
     open: Option<Open>,
@@ -75,9 +75,10 @@ fn form_dir(root: Option<&Path>, name: &str) -> Option<PathBuf> {
 }
 
 impl FormState {
-    pub fn new(live: LiveStdin, events: Receiver<Value>, doc: Option<PathBuf>) -> Self {
+    pub fn new(doc: Option<PathBuf>, ctx: &egui::Context) -> Self {
+        let (tx, events) = std::sync::mpsc::channel();
+        crate::form_panel::set_sink(tx, ctx.clone());
         FormState {
-            live,
             events,
             doc,
             open: None,
@@ -94,10 +95,8 @@ impl FormState {
     }
 
     fn send(&self, v: &Value) -> Result<(), String> {
-        let slot = self.live.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let stdin = slot.ok_or("the snapshot helper is not running")?;
-        let mut w = stdin.lock().unwrap_or_else(|e| e.into_inner());
-        write_frame(&mut *w, v).map_err(|e| format!("helper: {e}"))
+        crate::form_panel::handle(v.clone());
+        Ok(())
     }
 
     /// Opens the dialog for the block whose `:::` line starts at `offset`.
@@ -340,6 +339,7 @@ impl FormScript {
                             Self::shot_form(&snaps.form, "forms-proto-goals");
                         } else if self.sub == 1 {
                             Self::shot_form(&snaps.form, "forms-proto-question");
+                            crate::block_snap::ProtoScript::default().shot(ctx, "forms-proto-window");
                         } else if self.sub == 2 {
                             Self::shot_form(&snaps.form, "forms-proto-scene");
                         }

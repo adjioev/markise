@@ -1917,6 +1917,13 @@ impl MarkiseApp {
 
     /// Runs one frame in the root `Ui` of a pass (`Context::run_ui`, `eframe::App::ui`).
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        // PROTOTYPE (block forms): the docked edit panel hides itself when no pane placed it
+        crate::form_panel::frame_start();
+        self.ui_frame(ui);
+        crate::form_panel::frame_end();
+    }
+
+    fn ui_frame(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         // PROTOTYPE (block snapshots): `MARKISE_START_SBS=1` opens the first document in
         // Side by Side

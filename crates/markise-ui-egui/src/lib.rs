@@ -11,6 +11,7 @@ pub mod diagram;
 pub mod dialog;
 pub mod export_ui;
 pub mod fonts;
+pub mod form_panel;
 pub mod highlight;
 pub mod icons;
 pub mod images;

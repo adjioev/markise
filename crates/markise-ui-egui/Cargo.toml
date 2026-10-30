@@ -30,6 +30,15 @@ serde_json.workspace = true
 html-escape.workspace = true
 similar.workspace = true
 
+# PROTOTYPE block edit panel (form_panel.rs): one in-process WKWebView, macOS only
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+block2 = "0.6.2"
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGImage"] }
+objc2-foundation = { version = "0.3.2", features = ["NSString", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSObject", "NSArray"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSWindow", "NSView", "NSResponder", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics", "objc2-core-graphics"] }
+objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKWebViewConfiguration", "WKSnapshotConfiguration", "WKUserContentController", "WKScriptMessage", "WKScriptMessageHandler", "objc2-app-kit", "block2"] }
+
 [dev-dependencies]
 libc.workspace = true
 markise-theme.workspace = true

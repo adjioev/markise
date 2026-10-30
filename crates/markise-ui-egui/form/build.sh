@@ -1,7 +1,7 @@
 #!/bin/sh
 # PROTOTYPE (proto/block-forms): builds dist/form.js (JSON Forms page of the block edit dialog).
 # The bundle is committed so Markise builds without Node; rebuild after changing src/ or deps:
-#   cd apps/markise-web-render/form && sh build.sh
+#   cd crates/markise-ui-egui/form && sh build.sh
 set -e
 cd "$(dirname "$0")"
 [ -d node_modules ] || npm ci --no-audit --no-fund

@@ -233,7 +233,8 @@ impl BlockSnaps {
         let (results, from_worker) = mpsc::channel();
         let (events, events_rx) = mpsc::channel();
         let live: LiveStdin = Default::default();
-        let form = crate::block_edit::FormState::new(live.clone(), events_rx, doc.clone());
+        drop(events_rx);
+        let form = crate::block_edit::FormState::new(doc.clone(), ctx);
         let ctx = ctx.clone();
         let log = log_on();
         std::thread::Builder::new()

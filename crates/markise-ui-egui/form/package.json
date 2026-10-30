@@ -1,7 +1,7 @@
 {
   "name": "markise-block-form",
   "private": true,
-  "description": "PROTOTYPE (proto/block-forms): JSON Forms page of the block edit dialog, bundled into markise-web-render",
+  "description": "PROTOTYPE (proto/block-forms): JSON Forms page of the block edit dialog, bundled into markise-ui-egui (form_panel.rs)",
   "license": "MIT OR Apache-2.0",
   "scripts": { "build": "sh build.sh" },
   "dependencies": {

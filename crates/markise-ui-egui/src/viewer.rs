@@ -710,6 +710,7 @@ impl DocViewer {
                     if let Some(off) = self.pending_edit.take() {
                         let tv = crate::block_snap::ThemeVars::from_theme(theme);
                         let rev = self.ed.session.revision().counter;
+                        ctx.request_repaint();
                         if let Err(e) = s.form.open(self.ed.session.text(), off, rev, &tv) {
                             eprintln!("[blockform] cannot open the dialog: {e}");
                             s.form.error = Some((e, Instant::now()));

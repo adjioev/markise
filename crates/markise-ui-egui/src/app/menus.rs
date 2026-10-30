@@ -478,6 +478,12 @@ impl MarkiseApp {
             // dialog): no command may replace or bypass the action waiting for the answer
             return false;
         }
+        // PROTOTYPE (block forms): edit shortcuts go to the docked form panel when it has focus
+        if let MenuAction::Command(id) = action
+            && crate::form_panel::forward(id)
+        {
+            return true;
+        }
         match action {
             MenuAction::Command(id) => self.menu_command(ctx, id, trigger),
             MenuAction::Style(id) => {

@@ -2837,6 +2837,7 @@ name = "markise-ui-egui"
 version = "0.1.0-beta.1"
 dependencies = [
  "ahash",
+ "block2 0.6.2",
  "egui",
  "egui_kittest",
  "html-escape",
@@ -2853,6 +2854,11 @@ dependencies = [
  "markise-theme",
  "memmap2",
  "memory-stats",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
  "png",
  "rfd",
  "serde_json",
@@ -2869,7 +2875,6 @@ version = "0.1.0-beta.1"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
- "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-graphics",

@@ -328,7 +328,16 @@ impl SideBySide {
         if let Some(p) = self.proto.as_mut() {
             p.frame(ui.ctx(), viewer, self.last_frame_ms.take());
         }
-        let rect = ui.available_rect_before_wrap();
+        let mut rect = ui.available_rect_before_wrap();
+        // PROTOTYPE (block forms): the edit panel docks at the right; the panes narrow
+        if viewer.snaps.as_ref().is_some_and(|s| s.form.is_open()) {
+            let w = crate::form_panel::WIDTH.min(rect.width() * 0.6);
+            let panel = Rect::from_min_max(pos2(rect.right() - w, rect.top()), rect.max);
+            rect.max.x = panel.left();
+            ui.painter().rect_filled(panel, 0.0, ui.visuals().panel_fill);
+            let scale = ui.ctx().pixels_per_point() / ui.ctx().native_pixels_per_point().unwrap_or(1.0);
+            crate::form_panel::place(panel, scale);
+        }
         let w = rect.width().max(2.0 * DIVIDER_W + 2.0);
         let left_w = ((w - DIVIDER_W) * f.split).round();
         let left = Rect::from_min_max(rect.min, pos2(rect.left() + left_w, rect.bottom()));
