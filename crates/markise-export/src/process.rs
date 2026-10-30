@@ -736,20 +736,20 @@ mod tests {
         std::thread::spawn(move || {
             // cancel once the descendant demonstrably runs (robust under machine load)
             let t = Instant::now();
-            while std::fs::metadata(&hb2).map(|m| m.len()).unwrap_or(0) == 0 && t.elapsed() < Duration::from_secs(20) {
+            while std::fs::metadata(&hb2).map(|m| m.len()).unwrap_or(0) == 0 && t.elapsed() < Duration::from_secs(180) {
                 std::thread::sleep(Duration::from_millis(20));
             }
             c2.cancel();
         });
-        let e = run(
-            Path::new("/bin/sh"),
-            &["-c", &script],
-            None,
-            b"",
-            Duration::from_secs(60),
-            &c,
-        )
-        .unwrap_err();
+        // the termination budget (SHUTDOWN_LIMIT, covered by the stuck-tree tests) is not what
+        // this test checks: on a loaded machine the killed, orphaned descendants can stay
+        // zombies (still members of the process group) until launchd reaps them, which took
+        // longer than 10 s under load (issue #42); a hang guard instead
+        let opts = RunOptions {
+            shutdown: Duration::from_secs(180),
+            ..RunOptions::new(Duration::from_secs(180))
+        };
+        let e = run_opts(Path::new("/bin/sh"), &["-c", &script], None, b"", &opts, &c).unwrap_err();
         assert_eq!(e, ProcError::Cancelled);
         assert!(
             std::fs::metadata(&hb).map(|m| m.len()).unwrap_or(0) > 0,

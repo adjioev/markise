@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+mod common;
+
 use std::time::{Duration, Instant};
 
 use egui::accesskit::Toggled;
@@ -60,7 +62,7 @@ fn harness_with(opts: AppOptions) -> H {
 fn wait_until(h: &mut H, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -513,28 +515,55 @@ fn image_settings_in_preferences() {
 }
 
 /// A clipboard seam that blocks (a slow clipboard owner) and counts its calls.
+/// A clipboard owner that answers only when the test lets it ([`Slow::allow`]): what happens
+/// while the file list is pending is checked deterministically, not with a delay that a
+/// loaded machine can outlast (issue #42).
 struct Slow {
     files: Vec<PathBuf>,
-    delay: Duration,
     calls: std::sync::atomic::AtomicUsize,
+    /// Answers allowed and not given yet.
+    permits: std::sync::Mutex<usize>,
+    cv: std::sync::Condvar,
+    answered: std::sync::atomic::AtomicUsize,
+}
+
+impl Slow {
+    /// Lets `n` more file-list requests answer.
+    fn allow(&self, n: usize) {
+        *self.permits.lock().unwrap() += n;
+        self.cv.notify_all();
+    }
+
+    fn answered(&self) -> usize {
+        self.answered.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 impl ClipboardFiles for Slow {
     fn files(&self) -> Vec<PathBuf> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        std::thread::sleep(self.delay);
+        let mut p = self.permits.lock().unwrap();
+        let t = Instant::now();
+        // the hang guard only ends a test whose UI thread waits for this call
+        while *p == 0 && t.elapsed() < common::HANG_GUARD {
+            p = self.cv.wait_timeout(p, Duration::from_secs(1)).unwrap().0;
+        }
+        *p = p.saturating_sub(1);
+        self.answered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.files.clone()
     }
 }
 
-fn slow_app(name: &str, files: Vec<PathBuf>, delay: Duration) -> (H, Arc<Slow>, PathBuf, PathBuf) {
+fn slow_app(name: &str, files: Vec<PathBuf>) -> (H, Arc<Slow>, PathBuf, PathBuf) {
     let d = tmpdir(name);
     let note = d.join("note.md");
     std::fs::write(&note, NOTE).unwrap();
     let slow = Arc::new(Slow {
         files,
-        delay,
         calls: Default::default(),
+        permits: Default::default(),
+        cv: Default::default(),
+        answered: Default::default(),
     });
     let mut h = open(
         vec![note.clone()],
@@ -554,7 +583,7 @@ fn slow_app(name: &str, files: Vec<PathBuf>, delay: Duration) -> (H, Arc<Slow>, 
 fn slow_clipboard_does_not_block_and_applies_once() {
     let src = tmpdir("slow-src");
     std::fs::write(src.join("pic.png"), b"png").unwrap();
-    let (mut h, slow, d, _) = slow_app("slow-applies", vec![src.join("pic.png")], Duration::from_millis(400));
+    let (mut h, slow, d, _) = slow_app("slow-applies", vec![src.join("pic.png")]);
     let caret = h
         .state_mut()
         .viewer()
@@ -566,20 +595,17 @@ fn slow_clipboard_does_not_block_and_applies_once() {
         .focus
         .offset;
     h.event(Event::Paste("pic.png".into()));
-    let t = Instant::now();
     h.step();
-    assert!(
-        t.elapsed() < Duration::from_millis(200),
-        "the paste frame did not wait for the clipboard"
-    );
     assert!(h.state().is_attaching());
-    // the window stays responsive meanwhile (and nothing is inserted yet)
+    // the window stays responsive meanwhile (and nothing is inserted yet): these frames
+    // return while the clipboard has not answered — a frame that waited for it would only
+    // return after the clipboard's hang guard, with the answer given
     for _ in 0..5 {
-        let t = Instant::now();
         h.step();
-        assert!(t.elapsed() < Duration::from_millis(200));
     }
+    assert_eq!(slow.answered(), 0, "a frame waited for the clipboard");
     assert_eq!(text(&h), NOTE);
+    slow.allow(1);
     wait_until(&mut h, "paste applied", |a| !a.is_attaching());
     h.run_steps(3);
     let t = text(&h);
@@ -599,10 +625,11 @@ fn slow_clipboard_does_not_block_and_applies_once() {
 /// clipboard is read cancels the paste instead of inserting at a stale position.
 #[test]
 fn slow_clipboard_text_fallback_and_cancel_on_edit() {
-    let (mut h, slow, d, _) = slow_app("slow-fallback", Vec::new(), Duration::from_millis(150));
+    let (mut h, slow, d, _) = slow_app("slow-fallback", Vec::new());
     h.event(Event::Paste(" pasted".into()));
     h.step();
     assert_eq!(text(&h), NOTE, "waits for the file list");
+    slow.allow(1);
     wait_until(&mut h, "text paste", |a| !a.is_attaching());
     assert_eq!(text(&h), NOTE.replace("Second paragraph.", "Second paragraph. pasted"));
     h.key_press_modifiers(cmd(), Key::Z);
@@ -613,6 +640,7 @@ fn slow_clipboard_text_fallback_and_cancel_on_edit() {
     h.step();
     h.event(Event::Text("X".into()));
     h.step();
+    slow.allow(1);
     wait_until(&mut h, "paste resolved", |a| !a.is_attaching());
     assert!(!text(&h).contains("late"), "{}", text(&h));
     assert!(text(&h).contains("Second paragraph.X"));
@@ -625,12 +653,13 @@ fn slow_clipboard_text_fallback_and_cancel_on_edit() {
 /// (the second is re-based through the first's insertion, not cancelled).
 #[test]
 fn queued_pastes_apply_in_order() {
-    let (mut h, slow, d, _) = slow_app("slow-queued", Vec::new(), Duration::from_millis(150));
+    let (mut h, slow, d, _) = slow_app("slow-queued", Vec::new());
     h.event(Event::Paste(" one".into()));
     h.step();
     h.event(Event::Paste(" two".into()));
     h.step();
     assert_eq!(text(&h), NOTE);
+    slow.allow(2);
     wait_until(&mut h, "both pastes", |a| !a.is_attaching());
     assert_eq!(text(&h), NOTE.replace("Second paragraph.", "Second paragraph. one two"));
     assert!(h.state().banner_text().is_none(), "{:?}", h.state().banner_text());
@@ -687,11 +716,12 @@ fn absolute_paths_with_a_resource_root() {
 #[test]
 fn mixed_pastes_keep_their_order() {
     // text, then image data
-    let (mut h, _slow, d, _) = slow_app("slow-mixed1", Vec::new(), Duration::from_millis(200));
+    let (mut h, slow, d, _) = slow_app("slow-mixed1", Vec::new());
     h.event(Event::Paste(" one".into()));
     h.step();
     h.event(Event::PasteImage(image()));
     h.step();
+    slow.allow(1);
     wait_until(&mut h, "both", |a| !a.is_attaching());
     let want = NOTE.replace(
         "Second paragraph.",
@@ -702,11 +732,12 @@ fn mixed_pastes_keep_their_order() {
     let _ = std::fs::remove_dir_all(&d);
 
     // image data, then text
-    let (mut h, _slow, d, _) = slow_app("slow-mixed2", vec![], Duration::from_millis(200));
+    let (mut h, slow, d, _) = slow_app("slow-mixed2", vec![]);
     h.event(Event::PasteImage(image()));
     h.step();
     h.event(Event::Paste(" two".into()));
     h.step();
+    slow.allow(1);
     wait_until(&mut h, "both", |a| !a.is_attaching());
     let want = NOTE.replace(
         "Second paragraph.",
@@ -787,7 +818,7 @@ fn stalled_job_times_out_and_later_pastes_proceed() {
 fn delayed_file_paste_after_switching_documents_copies_nothing() {
     let src = tmpdir("switch-src");
     std::fs::write(src.join("pic.png"), b"png").unwrap();
-    let (mut h, _slow, d, _) = slow_app("switch-a", vec![src.join("pic.png")], Duration::from_millis(300));
+    let (mut h, slow, d, _) = slow_app("switch-a", vec![src.join("pic.png")]);
     let other = tmpdir("switch-b");
     let b = other.join("b.md");
     std::fs::write(&b, NOTE).unwrap();
@@ -798,6 +829,7 @@ fn delayed_file_paste_after_switching_documents_copies_nothing() {
     wait_until(&mut h, "document B", move |a| {
         a.document_path() == Some(bb.as_path()) && !a.is_busy()
     });
+    slow.allow(1); // the file list arrives only after the switch
     wait_until(&mut h, "paste resolved", |a| !a.is_attaching());
     std::thread::sleep(Duration::from_millis(400));
     h.run_steps(3);
