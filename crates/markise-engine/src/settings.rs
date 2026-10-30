@@ -21,6 +21,8 @@
 //! | `diagrams` | `true` / `false`: render `mermaid`/`sequence`/`flow` fences (spec 01 §4.6; Preferences → Markdown) | `true` |
 //! | `showToolbar` | `true` / `false`: show the formatting toolbar (spec 04 §3.2, spec 05; View → Toolbar, Preferences → Appearance) | `true` |
 //! | `sidebar.showRecent` | `true` / `false`: show the sidebar's Recent section (View → Show Recent Files, Preferences → Appearance; issue #57) | `true` |
+//! | `statusBar.showWordCount` | `true` / `false`: show the word count in the status bar (Preferences → General; issue #53) | `true` |
+//! | `statusBar.count` | `"words"`, `"characters"`, `"charactersNoSpaces"`: the count the status bar shows (click it to cycle; issue #53) | `"words"` |
 //! | `toolbarPosition` | `"top"` / `"bottom"`: where the formatting toolbar sits (Preferences → Appearance) | `"top"` |
 //! | `consumed_pending` | names of recovery files already merged into this file (written with the merge; see [`update_file`]); omitted when empty | none |
 //! | `overrides` | object with optional `font_family` (string), `font_size`, `line_height`, `content_width` (numbers); omitted when empty | none |
@@ -111,6 +113,43 @@ impl ToolbarPosition {
             "top" => Some(ToolbarPosition::Top),
             "bottom" => Some(ToolbarPosition::Bottom),
             _ => None,
+        }
+    }
+}
+
+/// The count the status bar shows (key `statusBar.count`, issue #53).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CountMode {
+    #[default]
+    Words,
+    Characters,
+    CharactersNoSpaces,
+}
+
+impl CountMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CountMode::Words => "words",
+            CountMode::Characters => "characters",
+            CountMode::CharactersNoSpaces => "charactersNoSpaces",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<CountMode> {
+        match s {
+            "words" => Some(CountMode::Words),
+            "characters" => Some(CountMode::Characters),
+            "charactersNoSpaces" => Some(CountMode::CharactersNoSpaces),
+            _ => None,
+        }
+    }
+
+    /// The next mode of the status bar's click cycle.
+    pub fn next(self) -> CountMode {
+        match self {
+            CountMode::Words => CountMode::Characters,
+            CountMode::Characters => CountMode::CharactersNoSpaces,
+            CountMode::CharactersNoSpaces => CountMode::Words,
         }
     }
 }
@@ -488,6 +527,11 @@ pub struct Settings {
     pub show_toolbar: bool,
     /// Show the sidebar's Recent section (key `sidebar.showRecent`, issue #57; default on).
     pub show_recent: bool,
+    /// Show the word count in the status bar (key `statusBar.showWordCount`, issue #53;
+    /// default on).
+    pub show_word_count: bool,
+    /// The count the status bar shows (key `statusBar.count`).
+    pub count_mode: CountMode,
     /// Formatting toolbar placement (key `toolbarPosition`, default top).
     pub toolbar_position: ToolbarPosition,
     /// Editing preferences (key `editing`).
@@ -542,6 +586,8 @@ impl Default for Settings {
             diagrams: true,
             show_toolbar: true,
             show_recent: true,
+            show_word_count: true,
+            count_mode: CountMode::Words,
             toolbar_position: ToolbarPosition::Top,
             editing: EditingSettings::default(),
             source: SourceSettings::default(),
@@ -628,6 +674,8 @@ pub struct SettingsPatch {
     pub diagrams: Option<bool>,
     pub show_toolbar: Option<bool>,
     pub show_recent: Option<bool>,
+    pub show_word_count: Option<bool>,
+    pub count_mode: Option<CountMode>,
     pub toolbar_position: Option<ToolbarPosition>,
     pub editing: Option<EditingSettings>,
     pub source: Option<SourceSettings>,
@@ -690,6 +738,12 @@ impl SettingsPatch {
         if let Some(v) = self.show_recent {
             s.show_recent = v;
         }
+        if let Some(v) = self.show_word_count {
+            s.show_word_count = v;
+        }
+        if let Some(v) = self.count_mode {
+            s.count_mode = v;
+        }
         if let Some(v) = self.toolbar_position {
             s.toolbar_position = v;
         }
@@ -741,6 +795,12 @@ impl SettingsPatch {
         if saved.show_recent.is_some() {
             self.show_recent = None;
         }
+        if saved.show_word_count.is_some() {
+            self.show_word_count = None;
+        }
+        if saved.count_mode.is_some() {
+            self.count_mode = None;
+        }
         if saved.toolbar_position.is_some() {
             self.toolbar_position = None;
         }
@@ -790,6 +850,12 @@ impl SettingsPatch {
         }
         if later.show_recent.is_some() {
             self.show_recent = later.show_recent;
+        }
+        if later.show_word_count.is_some() {
+            self.show_word_count = later.show_word_count;
+        }
+        if later.count_mode.is_some() {
+            self.count_mode = later.count_mode;
         }
         if later.toolbar_position.is_some() {
             self.toolbar_position = later.toolbar_position;
@@ -842,6 +908,12 @@ impl SettingsPatch {
         if let Some(v) = self.show_recent {
             m.insert(SHOW_RECENT_KEY.into(), Value::from(v));
         }
+        if let Some(v) = self.show_word_count {
+            m.insert(SHOW_WORD_COUNT_KEY.into(), Value::from(v));
+        }
+        if let Some(v) = self.count_mode {
+            m.insert(COUNT_MODE_KEY.into(), Value::from(v.as_str()));
+        }
         if let Some(v) = self.toolbar_position {
             m.insert("toolbarPosition".into(), Value::from(v.as_str()));
         }
@@ -891,6 +963,8 @@ impl SettingsPatch {
             diagrams: m.get("diagrams").and_then(Value::as_bool),
             show_toolbar: m.get("showToolbar").and_then(Value::as_bool),
             show_recent: m.get(SHOW_RECENT_KEY).and_then(Value::as_bool),
+            show_word_count: m.get(SHOW_WORD_COUNT_KEY).and_then(Value::as_bool),
+            count_mode: m.get(COUNT_MODE_KEY).and_then(Value::as_str).and_then(CountMode::parse),
             toolbar_position: m
                 .get("toolbarPosition")
                 .and_then(Value::as_str)
@@ -931,6 +1005,10 @@ pub const FILE_NAME: &str = "settings.json";
 
 /// Settings key of [`Settings::show_recent`] (a flat key with a dot, like editor settings).
 pub const SHOW_RECENT_KEY: &str = "sidebar.showRecent";
+/// Settings key of [`Settings::show_word_count`].
+pub const SHOW_WORD_COUNT_KEY: &str = "statusBar.showWordCount";
+/// Settings key of [`Settings::count_mode`].
+pub const COUNT_MODE_KEY: &str = "statusBar.count";
 const MAX_BYTES: u64 = 1 << 20;
 
 impl Settings {
@@ -991,6 +1069,17 @@ impl Settings {
         if let Some(Value::Bool(b)) = map.remove(SHOW_RECENT_KEY) {
             s.show_recent = b;
         }
+        if let Some(Value::Bool(b)) = map.remove(SHOW_WORD_COUNT_KEY) {
+            s.show_word_count = b;
+        }
+        if let Some(m) = map
+            .remove(COUNT_MODE_KEY)
+            .as_ref()
+            .and_then(Value::as_str)
+            .and_then(CountMode::parse)
+        {
+            s.count_mode = m;
+        }
         if let Some(p) = map
             .remove("toolbarPosition")
             .as_ref()
@@ -1026,6 +1115,8 @@ impl Settings {
         map.insert("diagrams".into(), Value::from(self.diagrams));
         map.insert("showToolbar".into(), Value::from(self.show_toolbar));
         map.insert(SHOW_RECENT_KEY.into(), Value::from(self.show_recent));
+        map.insert(SHOW_WORD_COUNT_KEY.into(), Value::from(self.show_word_count));
+        map.insert(COUNT_MODE_KEY.into(), Value::from(self.count_mode.as_str()));
         map.insert("toolbarPosition".into(), Value::from(self.toolbar_position.as_str()));
         map.insert("editing".into(), self.editing.to_json());
         map.insert("source".into(), self.source.to_json());
@@ -1385,6 +1476,46 @@ mod tests {
 
     /// Spec 04 §3.2 / spec 05 (owner, 2026-10-28): `showToolbar` defaults to on for fresh
     /// settings, a saved choice is kept, it round-trips, and patches carry it.
+    /// Issue #53: `statusBar.showWordCount` defaults to on, `statusBar.count` to words; both
+    /// round-trip (file and patch); an unknown count falls back to words.
+    #[test]
+    fn word_count_settings_default_and_round_trip() {
+        let d = Settings::default();
+        assert!(d.show_word_count);
+        assert_eq!(d.count_mode, CountMode::Words);
+        let s = Settings::from_json(
+            r#"{"version": 2, "statusBar.showWordCount": false, "statusBar.count": "charactersNoSpaces"}"#,
+        )
+        .unwrap();
+        assert!(!s.show_word_count);
+        assert_eq!(s.count_mode, CountMode::CharactersNoSpaces);
+        let back = Settings::from_json(&s.to_json()).unwrap();
+        assert_eq!(
+            (back.show_word_count, back.count_mode),
+            (false, CountMode::CharactersNoSpaces)
+        );
+        assert_eq!(
+            Settings::from_json(r#"{"version": 2, "statusBar.count": "bogus"}"#)
+                .unwrap()
+                .count_mode,
+            CountMode::Words
+        );
+        let p = SettingsPatch {
+            show_word_count: Some(false),
+            count_mode: Some(CountMode::Characters),
+            ..Default::default()
+        };
+        let q = SettingsPatch::from_json(&p.to_json()).unwrap();
+        assert_eq!(
+            (q.show_word_count, q.count_mode),
+            (Some(false), Some(CountMode::Characters))
+        );
+        let mut s = Settings::default();
+        q.apply(&mut s);
+        assert_eq!((s.show_word_count, s.count_mode), (false, CountMode::Characters));
+        assert_eq!(CountMode::Words.next().next().next(), CountMode::Words);
+    }
+
     /// Issue #57: `sidebar.showRecent` defaults to on and round-trips (file and patch).
     #[test]
     fn show_recent_setting_defaults_on_and_round_trips() {

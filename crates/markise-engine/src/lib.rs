@@ -7,6 +7,7 @@
 //! Nothing here runs on the UI thread except cheap channel polls.
 
 pub mod attach;
+pub mod count;
 pub mod edit;
 pub mod editor;
 pub mod export;
