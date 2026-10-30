@@ -2,6 +2,8 @@
 //! Markdown extensions hidden in the tree (the inline rename still edits the full name), and
 //! the hover / selection painting in the light and the dark appearance.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -41,7 +43,7 @@ fn harness_cfg(open: Vec<PathBuf>, config: ConfigDir) -> H {
 fn wait_until(h: &mut H, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -117,10 +119,7 @@ fn markdown_extensions_are_hidden_but_rename_edits_the_full_name() {
     let t = Instant::now();
     let id = markise_ui_egui::sidebar::rename_field_id();
     while !h.ctx.memory(|m| m.has_focus(id)) {
-        assert!(
-            t.elapsed() < Duration::from_secs(10),
-            "the rename field never got the focus"
-        );
+        assert!(t.elapsed() < common::HANG_GUARD, "the rename field never got the focus");
         h.step();
     }
     h.step();
@@ -343,10 +342,7 @@ fn keyboard_rename_works_with_the_folder_section_collapsed() {
     let id = markise_ui_egui::sidebar::rename_field_id();
     let t = Instant::now();
     while !h.ctx.memory(|m| m.has_focus(id)) {
-        assert!(
-            t.elapsed() < Duration::from_secs(10),
-            "the rename field never got the focus"
-        );
+        assert!(t.elapsed() < common::HANG_GUARD, "the rename field never got the focus");
         h.step();
     }
     h.step();

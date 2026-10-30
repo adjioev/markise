@@ -3,6 +3,8 @@
 //! soft wrap and line numbers, undo/redo across mode switches, position mapping in and out of
 //! source mode, and a 10 MB document opened, scrolled and edited in source mode.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -40,7 +42,7 @@ fn open(name: &str, text: &str) -> (H, PathBuf) {
 fn wait_until(h: &mut H, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(30), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(5));
     }

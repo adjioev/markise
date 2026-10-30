@@ -2,6 +2,8 @@
 //! keymap, typing, undo, dirty state, save and source-mode round trip in the rich view; a
 //! typing smoke pass with platform-like key events (issue #31).
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -30,7 +32,7 @@ fn harness(open: Vec<PathBuf>) -> Harness<'static, MarkiseApp> {
 fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(10));
     }

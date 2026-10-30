@@ -366,18 +366,20 @@ fn idle_frames_make_no_native_menu_change() {
     });
     app.set_menu_platform(Platform::Mac);
     app.set_menu_host(Box::new(host.clone()));
+    // load, then wait until every background job has finished (issue #42)
     let t = Instant::now();
-    while (app.model().is_none() || app.is_loading()) && t.elapsed() < Duration::from_secs(20) {
+    loop {
+        let _ = app.sync_background_watches();
         frame(&ctx, &mut app);
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    assert!(app.model().is_some());
-    let t = Instant::now();
-    while t.elapsed() < Duration::from_secs(10) {
-        if frame(&ctx, &mut app) == Duration::MAX {
+        if app.model().is_some() && !app.is_loading() && app.background_settled() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        assert!(t.elapsed() < common::HANG_GUARD, "load / background never settled");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // egui's own layout passes
+    for _ in 0..3 {
+        frame(&ctx, &mut app);
     }
     frame(&ctx, &mut app);
     let settled = host.mutations();

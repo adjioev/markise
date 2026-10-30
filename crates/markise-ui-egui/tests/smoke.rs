@@ -1,6 +1,8 @@
 //! UI smoke tests with egui_kittest: the real `MarkiseApp` driven through the accessibility
 //! tree (no window, no GPU).
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -30,7 +32,7 @@ fn harness(open: Vec<PathBuf>) -> Harness<'static, MarkiseApp> {
 fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(10));
     }

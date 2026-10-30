@@ -1,6 +1,8 @@
 //! Second review: document lifecycle races, made deterministic with worker hooks (no sleeps
 //! to "win" a race: the test holds a worker at a hook until it has done its part).
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -51,7 +53,7 @@ fn harness(open: Vec<PathBuf>, hooks: JobHooks) -> Harness<'static, MarkiseApp> 
 fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
     let t = Instant::now();
     while !f(h.state()) {
-        assert!(t.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -65,7 +67,7 @@ fn wait_entered(h: &mut Harness<'static, MarkiseApp>, g: &Gate) {
         if g.entered.try_recv().is_ok() {
             return;
         }
-        assert!(t.elapsed() < Duration::from_secs(10), "worker never reached the hook");
+        assert!(t.elapsed() < common::HANG_GUARD, "worker never reached the hook");
         h.step();
         std::thread::sleep(Duration::from_millis(1));
     }

@@ -2,6 +2,8 @@
 //! block's bottom-right (click or Esc to edit, autocomplete, Enter / Esc / arrows, one undo
 //! step, diagrams) and the copy button at its top-right.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -32,10 +34,12 @@ fn harness(text: &str, name: &str) -> H {
         .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), app);
     let t = Instant::now();
     while !(h.state().model().is_some() && !h.state().is_loading()) {
-        assert!(t.elapsed() < Duration::from_secs(20), "timed out loading");
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out loading");
         h.step();
         std::thread::sleep(Duration::from_millis(5));
     }
+    // late theme fonts re-lay out the document: let the background finish first (issue #42)
+    common::settle(&mut h);
     h.run_steps(3);
     h
 }
@@ -280,6 +284,7 @@ fn mermaid_switches_to_a_diagram() {
     let src = "```text\ngraph TD\n  A --> B\n```\n";
     let mut h = harness(src, "mermaid");
     h.state_mut().set_diagrams(true);
+    common::settle(&mut h);
     h.run_steps(2);
     let tools = hover_block(&mut h, src.find("graph").unwrap());
     click(&mut h, tools.lang.center());
