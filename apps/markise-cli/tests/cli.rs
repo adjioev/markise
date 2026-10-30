@@ -76,10 +76,9 @@ fn theme_import_prints_summary_and_json_report() {
 /// with `--max-size` below the estimate it is refused and nothing is written.
 #[test]
 fn html_size_warning_and_max_size() {
-    let dir = std::env::temp_dir().join(format!("markise-cli-size-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    // 1500 headings (~110 KB of TOC each) and 2000 [TOC] blocks: ~220 MB estimated
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    // 1500 headings (~110 KB of TOC each) and 2000 [TOC] blocks: ~220 MB
     let mut md = String::new();
     for i in 0..2000 {
         md.push_str("[TOC]\n\n");
@@ -129,5 +128,55 @@ fn html_size_warning_and_max_size() {
         .output()
         .unwrap();
     assert!(out.status.success() && out.stderr.is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex round 2 on #93: the size check is exact, so content that grows a lot in HTML is
+/// refused too (a source-length estimate let these through with `--max-size 20K`).
+#[test]
+fn max_size_counts_expanding_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cases = [
+        ("amps.md", "&".repeat(10_000) + "\n"),
+        (
+            "code.md",
+            format!("```rust\n{}```\n", "let a = b + c * d;\n".repeat(200)),
+        ),
+        (
+            "mermaid.md",
+            format!(
+                "```mermaid\nflowchart TD\n{}```\n",
+                (0..40).map(|i| format!("  N{i} --> N{}\n", i + 1)).collect::<String>()
+            ),
+        ),
+    ];
+    for (name, md) in cases {
+        let src = tmp.path().join(name);
+        std::fs::write(&src, &md).unwrap();
+        let out_path = tmp.path().join(format!("{name}.html"));
+        let out = bin()
+            .args([
+                "html",
+                src.to_str().unwrap(),
+                "-o",
+                out_path.to_str().unwrap(),
+                "--max-size",
+                "20K",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out_path.exists(), "{name}");
+        // and without the limit it is written, larger than 20 KB
+        let out = bin()
+            .args(["html", src.to_str().unwrap(), "-o", out_path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(std::fs::metadata(&out_path).unwrap().len() > 20_000, "{name}");
+    }
 }

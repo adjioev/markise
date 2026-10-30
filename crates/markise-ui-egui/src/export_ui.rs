@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use markise_engine::export::{ExportDone, ExportJob, ExportKind, ExportRequest, HtmlSizeEstimate, spawn_export};
+use markise_engine::export::{ExportDone, ExportJob, ExportKind, ExportRequest, HtmlSize, spawn_export};
 
 use crate::app::MarkiseApp;
 
@@ -40,7 +40,7 @@ pub struct ExportUi {
     overwrite_ok_for: Option<(Option<PathBuf>, PathBuf)>,
     /// An HTML export that stopped before writing because it would be very large (issue
     /// #29), waiting for "Export Anyway" / Cancel.
-    pending_large: Option<(ExportRequest, HtmlSizeEstimate)>,
+    pending_large: Option<(ExportRequest, HtmlSize)>,
 }
 
 impl ExportUi {
@@ -76,8 +76,8 @@ impl ExportUi {
         self.pending_large.is_some()
     }
 
-    /// The export waiting for its size confirmation, with the estimate.
-    pub(crate) fn pending_large(&self) -> Option<&(ExportRequest, HtmlSizeEstimate)> {
+    /// The export waiting for its size confirmation, with its size.
+    pub(crate) fn pending_large(&self) -> Option<&(ExportRequest, HtmlSize)> {
         self.pending_large.as_ref()
     }
 

@@ -2666,6 +2666,7 @@ dependencies = [
  "markise-theme",
  "serde_json",
  "similar",
+ "tempfile",
 ]
 
 [[package]]

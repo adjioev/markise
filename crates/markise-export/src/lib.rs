@@ -339,6 +339,8 @@ struct Ctx<'a> {
     /// The `[toc]` block's HTML, formatted on first use and copied for every further `[toc]`
     /// (each lists the same headings; issue #29).
     toc_html: Option<String>,
+    /// `[toc]` blocks rendered so far.
+    tocs_rendered: usize,
     /// TOC entries formatted so far (work counter for the scaling test).
     #[cfg(test)]
     toc_entries_formatted: usize,
@@ -360,69 +362,103 @@ pub fn render_document(doc: &Document, opts: &HtmlOptions) -> String {
 
 /// [`render_document`] plus warnings (e.g. images too large to embed).
 pub fn render_document_report(doc: &Document, opts: &HtmlOptions) -> (String, Vec<String>) {
+    match render_page(doc, opts, None) {
+        Ok(r) => r,
+        Err(_) => unreachable!("no size limit"),
+    }
+}
+
+/// [`render_document_report`], unless the page is larger than `limit` bytes: then its exact
+/// size is returned instead (issue #29: every `[toc]` lists all headings, so a document with
+/// many of them exports very large). The size is exact because the page is really rendered,
+/// but once it passes the limit every further top-level block is only counted and dropped,
+/// so memory stays near `limit` plus the largest block; under the limit the page is kept
+/// and nothing is rendered twice.
+pub fn render_document_limited(
+    doc: &Document,
+    opts: &HtmlOptions,
+    limit: u64,
+) -> Result<(String, Vec<String>), HtmlSize> {
+    render_page(doc, opts, Some(limit))
+}
+
+fn render_page(doc: &Document, opts: &HtmlOptions, limit: Option<u64>) -> Result<(String, Vec<String>), HtmlSize> {
     let fm = frontmatter::front_matter(doc);
     let mut ctx = Ctx::new(doc, opts);
-    let body = ctx.render_write();
-    let warnings = ctx.warnings.take();
     let title = frontmatter::get(&fm, "title")
         .map(str::to_string)
         .or_else(|| ctx.headings.first().map(|h| strip_tags(&h.html)))
         .or_else(|| opts.fallback_title.clone())
         .unwrap_or_default();
-    let mut out = String::with_capacity(body.len() + 2048);
-    out.push_str("<!doctype html>\n<html>\n<head>\n");
-    out.push_str("<meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>\n");
+    let mut head = String::with_capacity(2048);
+    head.push_str("<!doctype html>\n<html>\n<head>\n");
+    head.push_str("<meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>\n");
     if let Some(author) = frontmatter::get(&fm, "author") {
-        let _ = writeln!(out, "<meta name='author' content=\"{}\">", esc(author));
+        let _ = writeln!(head, "<meta name='author' content=\"{}\">", esc(author));
     }
     if !opts.no_style {
-        out.push_str("<style>\n");
-        out.push_str(&style_text(opts.css.as_deref().unwrap_or(DEFAULT_CSS)));
-        out.push_str("\n</style>\n");
+        head.push_str("<style>\n");
+        head.push_str(&style_text(opts.css.as_deref().unwrap_or(DEFAULT_CSS)));
+        head.push_str("\n</style>\n");
     }
-    let _ = writeln!(out, "<title>{}</title>", esc(&title));
+    let _ = writeln!(head, "<title>{}</title>", esc(&title));
     if let Some(h) = &opts.head_extra {
-        out.push_str(&extra_markup(h, opts.trusted));
-        out.push('\n');
+        head.push_str(&extra_markup(h, opts.trusted));
+        head.push('\n');
     }
-    out.push_str(
+    head.push_str(
         "</head>\n<body class='typora-export'>\n<div class='typora-export-content'>\n<div id='write' class=''>",
     );
-    out.push_str(&body);
-    out.push_str("</div>\n</div>\n");
+    let mut tail = String::from("</div>\n</div>\n");
     if let Some(b) = &opts.body_extra {
-        out.push_str(&extra_markup(b, opts.trusted));
-        out.push('\n');
+        tail.push_str(&extra_markup(b, opts.trusted));
+        tail.push('\n');
     }
-    out.push_str("</body>\n</html>\n");
-    (out, warnings)
+    tail.push_str("</body>\n</html>\n");
+    let frame = (head.len() + tail.len()) as u64;
+    let (body, dropped) = ctx.render_write_limited(limit.map(|l| l.saturating_sub(frame)));
+    let warnings = ctx.warnings.take();
+    let bytes = frame + dropped + body.len() as u64;
+    if limit.is_some_and(|l| bytes > l) {
+        return Err(HtmlSize {
+            bytes,
+            tocs: ctx.tocs_rendered,
+        });
+    }
+    let mut out = head;
+    out.reserve(body.len() + tail.len());
+    out.push_str(&body);
+    out.push_str(&tail);
+    Ok((out, warnings))
 }
 
-/// Estimated HTML size above which an export asks before writing (UI) or warns (CLI): every
-/// `[toc]` lists all headings, so documents with many of them export very large (issue #29).
+/// `[toc]` blocks in `doc` (each one lists every heading in the export).
+pub fn toc_count(doc: &Document) -> usize {
+    let mut n = 0;
+    for b in doc.blocks() {
+        b.walk(&mut |b, _| {
+            if matches!(b.kind, BlockKind::Toc) {
+                n += 1;
+            }
+        });
+    }
+    n
+}
+
+/// HTML size above which an export asks before writing (UI) or warns (CLI): every `[toc]`
+/// lists all headings, so documents with many of them export very large (issue #29).
 pub const LARGE_HTML_BYTES: u64 = 200_000_000;
 
-/// Estimated size of an HTML export, computed before the body is rendered.
+/// The exact size of an HTML export that passed its limit ([`render_document_limited`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HtmlSizeEstimate {
-    /// Estimated bytes of the whole page.
+pub struct HtmlSize {
+    /// Bytes of the whole page.
     pub bytes: u64,
     /// `[toc]` blocks in the document.
     pub tocs: usize,
 }
 
-impl HtmlSizeEstimate {
-    /// `tocs` copies of the formatted table of contents (`toc_bytes` each) plus the rest of
-    /// the page (`other_bytes`).
-    pub fn from_parts(toc_bytes: usize, tocs: usize, other_bytes: usize) -> Self {
-        HtmlSizeEstimate {
-            bytes: (toc_bytes as u64)
-                .saturating_mul(tocs as u64)
-                .saturating_add(other_bytes as u64),
-            tocs,
-        }
-    }
-
+impl HtmlSize {
     /// The size for people: "1.3 GB", "250 MB", "12 KB" (decimal units).
     pub fn human(&self) -> String {
         human_bytes(self.bytes)
@@ -437,33 +473,6 @@ pub fn human_bytes(b: u64) -> String {
         b if b >= 1_000 => format!("{} KB", b / 1_000),
         b => format!("{b} bytes"),
     }
-}
-
-/// Estimates the size of [`render_document`]'s output without rendering the body: the table
-/// of contents is formatted once and counted for every `[toc]`; the rest of the page is
-/// taken as the Markdown source plus the stylesheet (HTML markup roughly balances the
-/// syntax it replaces). Costs one pass over the headings.
-pub fn estimate_html_size(doc: &Document, opts: &HtmlOptions) -> HtmlSizeEstimate {
-    let mut tocs = 0;
-    for b in doc.blocks() {
-        b.walk(&mut |b, _| {
-            if matches!(b.kind, BlockKind::Toc) {
-                tocs += 1;
-            }
-        });
-    }
-    let style = if opts.no_style {
-        0
-    } else {
-        opts.css.as_deref().unwrap_or(DEFAULT_CSS).len()
-    };
-    let other = doc.text().len() + style + 1024;
-    if tocs == 0 {
-        return HtmlSizeEstimate::from_parts(0, 0, other);
-    }
-    let mut ctx = Ctx::new(doc, opts);
-    let toc = ctx.format_toc();
-    HtmlSizeEstimate::from_parts(toc.len(), tocs, other)
 }
 
 /// CSS made safe for a `<style>` element: no `<` survives, so no `</style` (inside a CSS
@@ -518,6 +527,7 @@ impl<'a> Ctx<'a> {
             headings: Vec::new(),
             next_heading: 0,
             toc_html: None,
+            tocs_rendered: 0,
             #[cfg(test)]
             toc_entries_formatted: 0,
             footnote_numbers: HashMap::new(),
@@ -612,10 +622,24 @@ impl<'a> Ctx<'a> {
     }
 
     fn render_write(&mut self) -> String {
+        self.render_write_limited(None).0
+    }
+
+    /// The content of `#write`. With a `limit`, once the output passes it every further
+    /// top-level block is only counted: returns the kept output and the bytes dropped.
+    fn render_write_limited(&mut self, limit: Option<u64>) -> (String, u64) {
         let mut out = String::with_capacity(self.text.len() * 2);
+        let mut dropped = 0u64;
         let blocks = self.doc.blocks();
         for b in blocks {
             self.block(b, &mut out, false);
+            if let Some(l) = limit
+                && dropped + out.len() as u64 > l
+            {
+                dropped += out.len() as u64;
+                out.clear();
+                out.shrink_to(1 << 20);
+            }
         }
         if !self.footnotes.is_empty() {
             out.push_str("<div class='footnotes-area'><hr/>\n");
@@ -629,7 +653,7 @@ impl<'a> Ctx<'a> {
             }
             out.push_str("</div>\n");
         }
-        out
+        (out, dropped)
     }
 
     fn inline_html(&mut self, content: &str) -> String {
@@ -839,6 +863,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn toc(&mut self, out: &mut String) {
+        self.tocs_rendered += 1;
         if self.toc_html.is_none() {
             self.toc_html = Some(self.format_toc());
         }
@@ -1409,39 +1434,86 @@ mod tests {
         }
     }
 
-    /// Issue #29: the size estimate is TOC bytes × TOC count + the rest of the page.
     #[test]
-    fn html_size_estimate_math() {
-        let e = HtmlSizeEstimate::from_parts(1_000, 300, 5_000);
-        assert_eq!(e.bytes, 305_000);
-        assert_eq!(e.tocs, 300);
-        assert_eq!(HtmlSizeEstimate::from_parts(usize::MAX, usize::MAX, 1).bytes, u64::MAX);
+    fn human_sizes() {
         assert_eq!(human_bytes(1_340_000_000), "1.3 GB");
         assert_eq!(human_bytes(250_400_000), "250 MB");
         assert_eq!(human_bytes(12_345), "12 KB");
         assert_eq!(human_bytes(512), "512 bytes");
+    }
 
-        // against a real export: the TOC part is exact, the rest is close
-        let doc = parse(&toc_doc(1000, 100));
-        let opts = HtmlOptions {
+    /// `render_document_limited` gives the exact size of `md`'s page when it passes `limit`
+    /// and the identical page otherwise.
+    fn check_limited(md: &str, opts: &HtmlOptions, limit: u64) -> u64 {
+        let doc = parse(md);
+        let real = render_document(&doc, opts);
+        let size = real.len() as u64;
+        assert!(size > limit, "the input must pass the limit ({size} bytes)");
+        let over = render_document_limited(&doc, opts, limit).expect_err("over the limit");
+        assert_eq!(over.bytes, size, "exact size");
+        assert_eq!(over.tocs, toc_count(&doc));
+        let (under, _) = render_document_limited(&doc, opts, size).expect("at the limit");
+        assert_eq!(under, real, "under the limit: the same page");
+        size
+    }
+
+    /// Issue #29 / Codex round 2 on #93: the size check is exact, so HTML escaping, syntax
+    /// highlighting, rendered diagrams and embedded images cannot slip under the limit (a
+    /// source-length estimate let all of these through with a 20 KB limit).
+    #[test]
+    fn size_limit_is_exact_for_expanding_content() {
+        let limit = 20_000;
+        let plain = HtmlOptions {
             no_style: true,
             ..Default::default()
         };
-        let est = estimate_html_size(&doc, &opts);
-        assert_eq!(est.tocs, 100);
-        let real = render_document(&doc, &opts).len() as u64;
-        let toc = Ctx::new(&doc, &opts).format_toc().len() as u64;
-        assert!(
-            est.bytes >= toc * 100 && est.bytes.abs_diff(real) < real / 10,
-            "estimate {} vs real {real}",
-            est.bytes
+        // HTML escaping: 10k `&` → `&amp;`
+        let amps = "&".repeat(10_000) + "\n";
+        assert!(check_limited(&amps, &plain, limit) > 5 * 10_000);
+        // syntax highlighting: token spans around every token
+        let code = format!("```rust\n{}```\n", "let a = b + c * d;\n".repeat(200));
+        let hl = HtmlOptions {
+            highlight: CodeHighlight::Classes,
+            ..plain.clone()
+        };
+        assert!(check_limited(&code, &hl, limit) > 4 * code.len() as u64);
+        // rendered Mermaid SVG
+        let mermaid = format!(
+            "```mermaid\nflowchart TD\n{}```\n",
+            (0..40).map(|i| format!("  N{i} --> N{}\n", i + 1)).collect::<String>()
         );
-
-        // no TOC: just the page
-        let plain = parse("# A\n\ntext\n");
-        let e = estimate_html_size(&plain, &opts);
-        assert_eq!(e.tocs, 0);
-        assert!(e.bytes < 2_000);
+        assert!(check_limited(&mermaid, &plain, limit) > 10 * mermaid.len() as u64);
+        // an embedded local image (base64 in the page)
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("big.png"), vec![7u8; 300_000]).unwrap();
+        let embed = HtmlOptions {
+            images: ImageLinks::Embed {
+                assets: Assets {
+                    doc_dir: d.path().to_path_buf(),
+                    root_url: None,
+                    out_dir: d.path().to_path_buf(),
+                },
+                max_bytes: 1 << 20,
+                budget: 1 << 20,
+            },
+            ..plain.clone()
+        };
+        assert!(render_document(&parse("![x](big.png)\n"), &embed).contains("data:image/png;base64,"));
+        assert!(check_limited("![x](big.png)\n", &embed, limit) > 400_000);
+        // many TOCs; the counted blocks past the limit are dropped, not kept
+        let tocs = toc_doc(400, 100);
+        assert!(check_limited(&tocs, &plain, limit) > 100 * 400 * 50);
+        let doc = parse(&tocs);
+        let mut ctx = Ctx::new(&doc, &plain);
+        let (kept, dropped) = ctx.render_write_limited(Some(limit));
+        let toc = ctx.toc_html.as_ref().map_or(0, String::len);
+        assert!(dropped > 0 && kept.len() <= toc + 4_096, "kept {} bytes", kept.len());
+        // a normal document stays under the default limit unchanged
+        let doc = parse("[TOC]\n\n# A\n\ntext & more\n");
+        assert_eq!(
+            render_document_limited(&doc, &plain, LARGE_HTML_BYTES).unwrap().0,
+            render_document(&doc, &plain)
+        );
     }
 
     #[test]

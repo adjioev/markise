@@ -12,7 +12,9 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
-use markise_export::{CodeHighlight, HtmlOptions, LARGE_HTML_BYTES, estimate_html_size, human_bytes, render_document};
+use markise_export::{
+    CodeHighlight, HtmlOptions, LARGE_HTML_BYTES, human_bytes, render_document, render_document_limited, toc_count,
+};
 use markise_md::{Document, ParseOptions};
 
 const USAGE: &str = "usage:
@@ -25,9 +27,9 @@ const USAGE: &str = "usage:
   --no-highlight    plain code blocks (default: token spans with cm-* classes)
   --inline-colors   token spans also carry inline colors (default Markise light scheme)
   --no-diagrams     keep mermaid/sequence/flow fences as code (default: rendered as inline SVG)
-  --max-size <size> refuse (exit 1, nothing written) when the estimated HTML is larger than
-                    <size>: bytes, or with a K/M/G suffix (decimal), e.g. 500M. Without it an
-                    estimate above 200M only prints a warning to stderr (every [TOC] lists
+  --max-size <size> refuse (exit 1, nothing written) when the HTML would be larger than
+                    <size>: bytes, or with a K/M/G suffix (decimal), e.g. 500M. Without it,
+                    HTML above 200M is written with a warning on stderr (every [TOC] lists
                     all headings, so many [TOC] blocks make very large files)";
 
 fn read_markdown(path: &str) -> Result<String, String> {
@@ -104,33 +106,36 @@ fn html(
         highlight,
         ..Default::default()
     };
-    // issue #29: every [TOC] lists all headings; warn (or refuse) before writing gigabytes
-    let est = estimate_html_size(&doc, &opts);
-    let why = match est.tocs {
-        0 => format!("about {}", human_bytes(est.bytes)),
-        1 => format!(
-            "about {} (the document has 1 table of contents)",
-            human_bytes(est.bytes)
-        ),
-        n => format!(
-            "about {} because the document has {n} tables of contents",
-            human_bytes(est.bytes)
-        ),
+    // issue #29: every [TOC] lists all headings, so the page can be gigabytes: refuse above
+    // --max-size (the size is exact, counted without keeping the page), else warn
+    let why = |bytes: u64| {
+        let size = human_bytes(bytes);
+        match toc_count(&doc) {
+            0 => size,
+            1 => format!("{size} (the document has 1 table of contents)"),
+            n => format!("{size} because the document has {n} tables of contents"),
+        }
     };
-    match max_size {
-        Some(max) if est.bytes > max => {
-            eprintln!(
-                "markise-cli: refusing to export {path}: the HTML would be {why} (--max-size {})",
-                human_bytes(max)
-            );
-            return Ok(ExitCode::from(1));
-        }
-        _ if est.bytes > LARGE_HTML_BYTES => {
-            eprintln!("markise-cli: warning: the HTML export of {path} will be {why}");
-        }
-        _ => {}
+    let html = match max_size {
+        Some(max) => match render_document_limited(&doc, &opts, max) {
+            Ok((html, _)) => html,
+            Err(size) => {
+                eprintln!(
+                    "markise-cli: refusing to export {path}: the HTML would be {} (--max-size {})",
+                    why(size.bytes),
+                    human_bytes(max)
+                );
+                return Ok(ExitCode::from(1));
+            }
+        },
+        None => render_document(&doc, &opts),
+    };
+    if html.len() as u64 > LARGE_HTML_BYTES {
+        eprintln!(
+            "markise-cli: warning: the HTML export of {path} is {}",
+            why(html.len() as u64)
+        );
     }
-    let html = render_document(&doc, &opts);
     match out {
         Some(o) => std::fs::write(o, html).map_err(|e| format!("{o}: {e}"))?,
         None => {

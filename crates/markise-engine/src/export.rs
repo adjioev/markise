@@ -15,7 +15,7 @@ use markise_export::model::{ExDoc, ModelOptions};
 use markise_export::pandoc::{self, PandocFormat, PandocOptions};
 use markise_export::vars::{self, Vars};
 use markise_export::{CodeHighlight, HtmlOptions, css};
-pub use markise_export::{CommentExport, HtmlSizeEstimate, LARGE_HTML_BYTES};
+pub use markise_export::{CommentExport, HtmlSize, LARGE_HTML_BYTES};
 use markise_md::{Document, ParseOptions};
 use markise_pdf::{PdfOptions, PngOptions};
 use markise_text::TextEngine;
@@ -97,7 +97,7 @@ pub struct ExportRequest {
     /// Keep or strip review comments in the output (setting `export.comments`, ADR 0012).
     pub comments: CommentExport,
     /// HTML export: stop before writing, reporting [`ExportDone::too_large`], when the
-    /// estimated page is larger than this (many `[toc]` blocks, issue #29). `None` once the
+    /// page is larger than this (many `[toc]` blocks, issue #29). `None` once the
     /// user chose to export anyway.
     pub confirm_html_above: Option<u64>,
 }
@@ -146,7 +146,7 @@ pub struct ExportDone {
     pub command_output: Option<String>,
     /// The HTML would be larger than [`ExportRequest::confirm_html_above`]: nothing was
     /// written (`outputs` is empty); the UI asks and runs the request again without the limit.
-    pub too_large: Option<HtmlSizeEstimate>,
+    pub too_large: Option<HtmlSize>,
 }
 
 /// A running export.
@@ -253,20 +253,24 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
                 comments: req.comments,
                 ..Default::default()
             };
-            if let Some(limit) = req.confirm_html_above {
-                let est = markise_export::estimate_html_size(&doc, &opts);
-                if est.bytes > limit {
+            control.set_progress(0.3);
+            let rendered = match req.confirm_html_above {
+                Some(limit) => markise_export::render_document_limited(&doc, &opts, limit),
+                None => Ok(markise_export::render_document_report(&doc, &opts)),
+            };
+            control.check().map_err(|e| e.to_string())?;
+            let (html, html_warnings) = match rendered {
+                Ok(r) => r,
+                Err(size) => {
                     return Ok(ExportDone {
                         outputs: Vec::new(),
                         warnings,
                         elapsed: t0.elapsed(),
                         command_output: None,
-                        too_large: Some(est),
+                        too_large: Some(size),
                     });
                 }
-            }
-            control.set_progress(0.3);
-            let (html, html_warnings) = markise_export::render_document_report(&doc, &opts);
+            };
             warnings.extend(html_warnings);
             control.check().map_err(|e| e.to_string())?;
             publish(&req.output, html.as_bytes(), control)?;
@@ -524,8 +528,7 @@ mod tests {
         )
     }
 
-    /// Issue #29: an HTML export estimated above the limit writes nothing and reports the
-    /// estimate; without the limit it writes; "Export with Previous" asks again.
+    /// Issue #29: an HTML export above the limit writes nothing and reports its exact size; without the limit it writes; "Export with Previous" asks again.
     #[test]
     fn large_html_stops_before_writing() {
         let d = tempfile::tempdir().unwrap();
@@ -561,6 +564,23 @@ mod tests {
         p.output = d.path().join("big.pdf");
         let done = run_export(&p, &JobControl::new()).unwrap();
         assert!(done.too_large.is_none() && p.output.exists());
+        // Codex round 2 on #93: the size is exact, so an embedded image counts in full
+        std::fs::write(d.path().join("big.png"), vec![7u8; 300_000]).unwrap();
+        let mut img = ExportRequest::new(
+            ExportKind::Html,
+            "![x](big.png)\n".into(),
+            Some(d.path().join("doc.md")),
+            d.path().join("img.html"),
+            Theme::light(),
+        );
+        img.confirm_html_above = Some(20_000);
+        let done = run_export(&img, &JobControl::new()).unwrap();
+        let size = done.too_large.expect("asks");
+        assert!(size.bytes > 400_000 && size.tocs == 0, "{size:?}");
+        assert!(!img.output.exists());
+        img.confirm_html_above = None;
+        run_export(&img, &JobControl::new()).unwrap();
+        assert_eq!(std::fs::metadata(&img.output).unwrap().len(), size.bytes);
     }
 
     /// Spec 06 Q-V11: resolved wikilinks become relative links to the linked file, unresolved
