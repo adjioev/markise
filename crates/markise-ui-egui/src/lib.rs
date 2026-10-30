@@ -4,6 +4,8 @@
 pub mod about;
 pub mod app;
 pub mod block_edit;
+pub mod block_lib;
+pub mod block_palette;
 pub mod block_snap;
 pub mod clipboard;
 pub mod confirm;

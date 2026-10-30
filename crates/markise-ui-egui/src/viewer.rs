@@ -14,7 +14,7 @@ use std::time::Instant;
 use egui::{
     Color32, CornerRadius, CursorIcon, Event, EventFilter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
-use markise_doc::{ContainerKind, DocPos, DocumentFormat, FormatDoc, Params, Selection, planners};
+use markise_doc::{ContainerKind, DocPos, DocumentFormat, FormatDoc, Params, PatchSet, Selection, planners};
 use markise_engine::editor::keymap::{Chord, Keymap, Platform};
 use markise_engine::editor::{EditorSession, EditorView, TxKind};
 use markise_layout::block::{BlockLayout, Prim, color};
@@ -187,11 +187,22 @@ pub struct DocViewer {
     pub force_edit_button: Option<usize>,
     /// PROTOTYPE (live mode): block images of the last frame as atomic caret units:
     /// (block start, block end, caret stop before, caret stop after).
-    atomic: Vec<(usize, usize, usize, usize)>,
+    pub atomic: Vec<(usize, usize, usize, usize)>,
     /// PROTOTYPE (live mode): the block (start offset) selected by a click on its image.
-    focused_block: Option<usize>,
+    pub focused_block: Option<usize>,
     /// PROTOTYPE (live mode): caret focus offset at the end of the last frame.
     last_focus: usize,
+    /// PROTOTYPE (block packages): the document's block library (resolved once).
+    lib: Option<crate::block_lib::Lib>,
+    /// PROTOTYPE (block packages): valid insertion points of the last frame (offset, screen y).
+    pub gaps: Vec<(usize, f32)>,
+    /// Column left edge and width of the last frame (insertion affordances).
+    gap_col: (f32, f32),
+}
+
+/// PROTOTYPE (block packages): the "+ Добавить блок" pill at an insertion point.
+fn plus_rect(left: f32, y: f32) -> Rect {
+    Rect::from_min_size(pos2(left - 2.0, y - 11.0), vec2(136.0, 22.0))
 }
 
 /// PROTOTYPE: block images in the normal (live) editing mode (`MARKISE_LIVE_SNAPS=0` turns
@@ -257,6 +268,9 @@ impl DocViewer {
             atomic: Vec::new(),
             focused_block: None,
             last_focus: 0,
+            lib: None,
+            gaps: Vec::new(),
+            gap_col: (0.0, 0.0),
         }
     }
 
@@ -560,8 +574,58 @@ impl DocViewer {
             let mut events = ui.input(|i| i.events.clone());
             let mut ran = false;
             let prev_focus = self.ed.session.selection().primary().focus.offset;
-            // PROTOTYPE (live mode): Enter on a selected block image opens its form; any other
-            // key deselects it
+            // PROTOTYPE (live mode): Backspace after a block / Delete before it selects the
+            // block; Backspace/Delete on a selected block deletes it whole (one undo step) —
+            // never merges text into its `:::` lines
+            if editable && !self.snap_blocks && !self.atomic.is_empty() {
+                let sel = self.ed.session.selection().primary();
+                let caret = (sel.anchor == sel.focus).then_some(sel.focus.offset);
+                let mut consumed = false;
+                for e in &events {
+                    let Event::Key { key, pressed: true, .. } = e else {
+                        continue;
+                    };
+                    if !matches!(key, egui::Key::Backspace | egui::Key::Delete) || consumed {
+                        continue;
+                    }
+                    if let Some(fb) = self.focused_block
+                        && let Some(&(start, _, _, after)) = self.atomic.iter().find(|a| a.0 == fb)
+                    {
+                        let ps = PatchSet::new(vec![markise_doc::Patch::verbatim(start..after, "")]);
+                        if let Ok(ps) = ps {
+                            let _ = self.ed.edit(|s| s.apply_external(&ps, "Delete Block", false));
+                            self.ed
+                                .set_selection(Selection::caret(start.min(self.ed.session.text().len())));
+                        }
+                        self.focused_block = None;
+                        consumed = true;
+                    } else if let Some(c) = caret {
+                        let t = self.ed.session.text();
+                        let hit = if *key == egui::Key::Backspace {
+                            self.atomic.iter().find(|a| near_start(t, a.3, c))
+                        } else {
+                            self.atomic.iter().find(|a| a.2 == c)
+                        };
+                        if let Some(&(start, _, _, after)) = hit {
+                            self.focused_block = Some(start);
+                            self.ed.set_selection(Selection::caret(after));
+                            consumed = true;
+                        }
+                    }
+                }
+                if consumed {
+                    events.retain(|e| {
+                        !matches!(
+                            e,
+                            Event::Key {
+                                key: egui::Key::Backspace | egui::Key::Delete,
+                                ..
+                            }
+                        )
+                    });
+                    ran = true;
+                }
+            }
             if let Some(b) = self.focused_block {
                 let enter = events.iter().any(|e| {
                     matches!(e, Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. } if !modifiers.any())
@@ -577,10 +641,10 @@ impl DocViewer {
                             } | Event::Text(_)
                         )
                     });
-                } else if events
-                    .iter()
-                    .any(|e| matches!(e, Event::Key { pressed: true, .. } | Event::Text(_)))
-                {
+                } else if events.iter().any(|e| {
+                    matches!(e, Event::Key { pressed: true, key, .. } if !matches!(key, egui::Key::Backspace | egui::Key::Delete))
+                        || matches!(e, Event::Text(_))
+                }) {
                     self.focused_block = None;
                 }
             }
@@ -590,6 +654,17 @@ impl DocViewer {
                 }
             });
             let _ = prev_focus;
+            // PROTOTYPE (block packages): `/` on an empty line opens the block palette
+            if ran && editable && !self.snap_blocks && self.snaps.is_some() {
+                let c = self.ed.session.selection().primary().focus.offset;
+                let text = self.ed.session.text();
+                let ls = text[..c].rfind('\n').map_or(0, |i| i + 1);
+                let le = text[c..].find('\n').map_or(text.len(), |i| c + i);
+                if &text[ls..le] == "/" && c == le && !in_block(text, ls) {
+                    let rev = self.ed.session.revision().counter;
+                    crate::block_palette::open_for(Some(crate::block_edit::InsertTarget::new(text, ls, le, rev)));
+                }
+            }
             if let Some(t) = self.pending_copy.take() {
                 ctx.copy_text(t);
             }
@@ -601,6 +676,26 @@ impl DocViewer {
 
         // ---- input: pointer (hit tests against the last frame's layout)
         let modifiers = ui.input(|i| i.modifiers);
+        let on_plus = if editable && !self.snap_blocks && self.snaps.is_some() {
+            ui.input(|i| i.pointer.interact_pos()).and_then(|p| {
+                self.gaps
+                    .iter()
+                    .find(|g| plus_rect(self.gap_col.0, g.1).contains(p))
+                    .map(|g| g.0)
+            })
+        } else {
+            None
+        };
+        if let Some(off) = on_plus
+            && resp.hovered()
+        {
+            ctx.set_cursor_icon(CursorIcon::PointingHand);
+            if resp.clicked() {
+                let text = self.ed.session.text();
+                let rev = self.ed.session.revision().counter;
+                crate::block_palette::open_for(Some(crate::block_edit::InsertTarget::new(text, off, off, rev)));
+            }
+        }
         let on_snap = ui
             .input(|i| i.pointer.interact_pos())
             .and_then(|p| self.snap_rects.iter().find(|(r, _)| r.contains(p)).map(|(_, o)| *o));
@@ -630,7 +725,8 @@ impl DocViewer {
                 }
             }
         }
-        let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.hovered() && on_snap.is_none();
+        let pressed =
+            ui.input(|i| i.pointer.primary_pressed()) && resp.hovered() && on_snap.is_none() && on_plus.is_none();
         // a click on a task checkbox toggles it (spec 02 §9): the press neither places the caret
         // nor starts a selection; the toggle happens on release over the same box (a press
         // dragged off the box does nothing)
@@ -758,12 +854,90 @@ impl DocViewer {
         // ---- PROTOTYPE: block snapshots replace their items' heights
         let placed = if self.snap_blocks || (editable && live_snaps()) {
             if self.snaps.is_none() && !self.snaps_tried {
-                self.snaps_tried = true;
-                self.snaps = crate::block_snap::BlockSnaps::from_env(&ctx, self.ed.path().map(|p| p.to_path_buf()));
+                use crate::block_lib::Lib;
+                let path = self.ed.path().map(|p| p.to_path_buf());
+                if self.lib.is_none() {
+                    let lib = path
+                        .as_deref()
+                        .map(|p| crate::block_lib::resolve(p, self.ed.session.text()))
+                        .unwrap_or(Lib::None);
+                    if std::env::var_os("MARKISE_BLOCK_LOG").is_some() {
+                        eprintln!("[blocklib] {lib:?}");
+                    }
+                    self.lib = Some(lib);
+                }
+                match self.lib.clone() {
+                    Some(Lib::Ready { root, .. }) => {
+                        self.snaps_tried = true;
+                        self.snaps = crate::block_snap::BlockSnaps::from_env(&ctx, path, Some(root));
+                    }
+                    Some(Lib::Pending(b)) => {
+                        // MARKISE_BLOCK_TRUST=1: accept without asking (scripted runs only)
+                        let auto = std::env::var_os("MARKISE_BLOCK_TRUST").is_some_and(|v| v == "1");
+                        if let Some(yes) = if auto { Some(true) } else { consent_dialog(&ctx, &b) } {
+                            self.lib = Some(if yes {
+                                match crate::block_lib::install(&b) {
+                                    Ok(root) => {
+                                        eprintln!(
+                                            "[blocklib] installed {} {} → {}",
+                                            b.library,
+                                            b.version,
+                                            root.display()
+                                        );
+                                        Lib::Ready {
+                                            root,
+                                            label: b.library.clone(),
+                                            package: !b.is_folder(),
+                                        }
+                                    }
+                                    Err(e) => Lib::Broken(e),
+                                }
+                            } else {
+                                Lib::Broken(String::new())
+                            });
+                            ctx.request_repaint();
+                        }
+                    }
+                    Some(Lib::Broken(e)) => {
+                        self.snaps_tried = true;
+                        self.snaps = crate::block_snap::BlockSnaps::from_env(&ctx, path, None);
+                        if !e.is_empty()
+                            && let Some(s) = self.snaps.as_mut()
+                        {
+                            s.form.error = Some((format!("Библиотека блоков: {e}"), Instant::now()));
+                        }
+                    }
+                    _ => {
+                        self.snaps_tried = true;
+                        self.snaps = crate::block_snap::BlockSnaps::from_env(&ctx, path, None);
+                    }
+                }
             }
             match self.snaps.as_mut() {
                 Some(s) => {
                     s.form.poll(&mut self.ed);
+                    // PROTOTYPE (block packages): a block chosen in the palette → draft form
+                    if editable
+                        && !self.snap_blocks
+                        && !s.form.is_open()
+                        && let Some((preset, target)) = crate::block_palette::take_choice()
+                    {
+                        let text = self.ed.session.text();
+                        let rev = self.ed.session.revision().counter;
+                        let target = target.unwrap_or_else(|| {
+                            caret_target(text, self.ed.session.selection().primary().focus.offset, rev)
+                        });
+                        let tv = crate::block_snap::ThemeVars::from_theme(theme);
+                        let res = if in_block(text, target.start) {
+                            Err("Внутри блока вставлять блоки нельзя (вложенные блоки не поддерживаются).".to_string())
+                        } else {
+                            s.form.open_draft(text, &preset.markdown, target, &tv)
+                        };
+                        if let Err(e) = res {
+                            s.form.error = Some((e, Instant::now()));
+                        }
+                        ctx.request_repaint();
+                    }
                     if let Some(off) = self.pending_edit.take() {
                         let tv = crate::block_snap::ThemeVars::from_theme(theme);
                         let rev = self.ed.session.revision().counter;
@@ -822,6 +996,86 @@ impl DocViewer {
         self.last_visible = visible.iter().map(|v| (v.idx, v.y)).collect();
         self.last_left = left;
         self.last_top = rect.top();
+        // PROTOTYPE (block packages): insertion points between top-level items (never inside a
+        // block), the "+ Добавить блок" pill on hover and the drop line while dragging a preset
+        self.gaps.clear();
+        self.gap_col = (left, col_w);
+        if editable && !self.snap_blocks && self.snaps.is_some() {
+            let text = self.ed.session.text();
+            let ranges: Vec<std::ops::Range<usize>> = markise_engine::block_form::all_blocks(text)
+                .into_iter()
+                .map(|b| b.range)
+                .collect();
+            let model = self.ed.view.model().clone();
+            let starts: Vec<(usize, usize)> = model.items.iter_with_start().map(|(st, it)| (st, it.len)).collect();
+            let outer: Vec<(usize, usize, f32)> = visible
+                .iter()
+                .filter_map(|v| {
+                    let (st, len) = *starts.get(v.idx)?;
+                    if ranges.iter().any(|r| st > r.start && st <= r.end) {
+                        return None;
+                    }
+                    let end = ranges.iter().find(|r| r.start == st).map_or(st + len, |r| r.end);
+                    Some((v.idx, end, rect.top() + v.y))
+                })
+                .collect();
+            for k in 0..outer.len() {
+                let y = match outer.get(k + 1) {
+                    Some(n) => n.2 - theme.block_spacing * 0.5,
+                    None => continue,
+                };
+                if y > rect.top() && y < rect.bottom() {
+                    self.gaps.push((outer[k].1, y));
+                }
+            }
+            let hover = ctx.input(|i| i.pointer.hover_pos());
+            let dragging = egui::DragAndDrop::payload::<crate::block_palette::DragPreset>(&ctx);
+            let accent = theme_color(theme.link);
+            if let Some(d) = dragging {
+                if let Some(h) = hover.filter(|h| rect.contains(*h))
+                    && let Some(&(off, y)) = self
+                        .gaps
+                        .iter()
+                        .min_by(|a, b| (a.1 - h.y).abs().total_cmp(&(b.1 - h.y).abs()))
+                {
+                    painter.line_segment(
+                        [pos2(left - 8.0, y), pos2(left + col_w + 8.0, y)],
+                        Stroke::new(3.0, accent),
+                    );
+                    painter.circle_filled(pos2(left - 8.0, y), 5.0, accent);
+                    if ctx.input(|i| i.pointer.any_released()) {
+                        let _ = egui::DragAndDrop::take_payload::<crate::block_palette::DragPreset>(&ctx);
+                        let rev = self.ed.session.revision().counter;
+                        crate::block_palette::choose(
+                            d.0.clone(),
+                            Some(crate::block_edit::InsertTarget::new(text, off, off, rev)),
+                        );
+                        ctx.request_repaint();
+                    }
+                }
+            } else if let Some(h) = hover.filter(|h| h.x > left - 30.0 && h.x < left + col_w && rect.contains(*h))
+                && let Some(&(_, y)) = self.gaps.iter().find(|g| (g.1 - h.y).abs() < 9.0)
+            {
+                let r = plus_rect(left, y);
+                let hot = r.contains(h);
+                painter.line_segment(
+                    [pos2(r.right() + 4.0, y), pos2(left + col_w, y)],
+                    Stroke::new(1.0, accent.gamma_multiply(0.5)),
+                );
+                painter.rect_filled(r, 11.0, if hot { accent } else { accent.gamma_multiply(0.75) });
+                painter.text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    if crate::block_edit::lang() == "ru" {
+                        "+ Добавить блок"
+                    } else {
+                        "+ Add block"
+                    },
+                    egui::FontId::proportional(12.0),
+                    Color32::WHITE,
+                );
+            }
+        }
         // block images: their items are not painted as Markdown
         self.snap_rects.clear();
         if !placed.is_empty() {
@@ -856,7 +1110,8 @@ impl DocViewer {
                     .collect();
                 let caret = self.ed.session.selection().primary().focus.offset;
                 if let Some(fb) = self.focused_block {
-                    let still = self.atomic.iter().any(|a| a.0 == fb && a.3 == caret);
+                    let t = self.ed.session.text();
+                    let still = self.atomic.iter().any(|a| a.0 == fb && near_start(t, a.3, caret));
                     if !still {
                         self.focused_block = None;
                     } else if let Some((r, _)) = self.snap_rects.iter().find(|(_, o)| *o == fb) {
@@ -2141,7 +2396,7 @@ impl DocViewer {
         let Some(&(start, end, before, after)) = self.atomic.iter().find(|a| f >= a.0 && f <= a.1) else {
             return false;
         };
-        if self.focused_block == Some(start) && f == after {
+        if self.focused_block == Some(start) && near_start(self.ed.session.text(), after, f) {
             return false;
         }
         let to = if prev <= start || prev > end {
@@ -2157,4 +2412,73 @@ impl DocViewer {
         self.ed.set_selection(new);
         true
     }
+}
+
+/// PROTOTYPE (block packages): whether `off` lies strictly inside a `:::` block.
+fn in_block(text: &str, off: usize) -> bool {
+    markise_engine::block_form::all_blocks(text)
+        .iter()
+        .any(|b| off > b.range.start && off < b.range.end)
+}
+
+/// PROTOTYPE (block packages): the insertion point for the caret: its line when it is empty
+/// (replaced), else after the caret's paragraph.
+fn caret_target(text: &str, c: usize, rev: u64) -> crate::block_edit::InsertTarget {
+    let c = c.min(text.len());
+    let ls = text[..c].rfind('\n').map_or(0, |i| i + 1);
+    let le = text[c..].find('\n').map_or(text.len(), |i| c + i);
+    if text[ls..le].trim().is_empty() || text[ls..le].trim() == "/" {
+        return crate::block_edit::InsertTarget::new(text, ls, le, rev);
+    }
+    // end of the paragraph: the first blank line after the caret
+    let end = text[c..].find("\n\n").map_or(text.len(), |i| c + i);
+    crate::block_edit::InsertTarget::new(text, end, end, rev)
+}
+
+/// PROTOTYPE (block packages): "use this block library?" — Some(true/false) once answered.
+fn consent_dialog(ctx: &egui::Context, b: &crate::block_lib::Binding) -> Option<bool> {
+    let mut answer = None;
+    egui::Modal::new(egui::Id::unique("markise-block-lib-consent")).show(ctx, |ui| {
+        ui.set_max_width(460.0);
+        ui.heading("Библиотека блоков");
+        ui.add_space(6.0);
+        let src = b
+            .local_source()
+            .map(|p| p.display().to_string())
+            .unwrap_or(b.source.clone());
+        ui.label(format!(
+            "Папка использует библиотеку блоков «{}» v{} из {}. Подключить?",
+            b.library, b.version, src
+        ));
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(if b.is_folder() {
+                "Папка разработки: код блоков будет выполняться при показе. Обновления — вручную."
+            } else {
+                "Архив будет проверен (sha256) и распакован в кеш; дальше работает без сети. Автообновлений нет."
+            })
+            .small()
+            .weak(),
+        );
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Подключить").clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Не сейчас").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    answer
+}
+
+/// PROTOTYPE (live mode): `c` is the first caret stop of the item starting at `start` (only
+/// hidden markup such as `## `, `> `, `- ` lies between them).
+fn near_start(text: &str, start: usize, c: usize) -> bool {
+    c >= start
+        && c - start <= 8
+        && text
+            .get(start..c)
+            .is_some_and(|m| m.chars().all(|ch| "#>-*+ 0123456789.[]xX".contains(ch)))
 }

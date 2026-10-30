@@ -868,6 +868,41 @@ fn section_ui(ui: &mut Ui, p: &Palette, s: Section, query: &str, v: &Values, out
         });
         i += n;
     }
+    // PROTOTYPE (block packages): installed block libraries
+    if s == Section::Files && query.is_empty() {
+        ui.add_space(12.0);
+        card(ui, p, "Block libraries / Библиотеки блоков", |ui| {
+            let libs = crate::block_lib::installed();
+            if libs.is_empty() {
+                ui.label(RichText::new("Нет установленных библиотек").color(p.look.weak));
+            }
+            for l in libs {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{} {}", l.library, l.version))
+                            .strong()
+                            .color(p.look.text),
+                    );
+                    ui.label(
+                        RichText::new(format!("sha256 {}…", &l.sha256[..l.sha256.len().min(12)]))
+                            .small()
+                            .color(p.look.weak),
+                    );
+                    let _ = ui
+                        .add_enabled(false, egui::Button::new("Проверить обновления"))
+                        .on_disabled_hover_text("Обновления — позже (прототип)");
+                });
+                ui.label(RichText::new(&l.source).small().color(p.look.weak));
+            }
+            for f in crate::block_lib::trusted_folders() {
+                ui.label(
+                    RichText::new(format!("папка разработки: {}", f.display()))
+                        .small()
+                        .color(p.look.weak),
+                );
+            }
+        });
+    }
 }
 
 /// A group: small muted title, then a rounded card.

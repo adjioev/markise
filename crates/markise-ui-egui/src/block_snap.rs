@@ -228,9 +228,10 @@ fn log_on() -> bool {
 
 impl BlockSnaps {
     /// Starts the worker when the site folder is configured (`MARKISE_BLOCK_SITE`).
-    pub fn from_env(ctx: &egui::Context, doc: Option<PathBuf>) -> Option<Self> {
+    /// `root`: the block library (package cache / dev folder / site), see [`crate::block_lib`].
+    pub fn from_env(ctx: &egui::Context, doc: Option<PathBuf>, root: Option<PathBuf>) -> Option<Self> {
         let fallback = std::env::var_os("MARKISE_BLOCK_SITE").map(PathBuf::from);
-        let site = Site::new(doc.clone(), fallback);
+        let site = Site::new(doc.clone(), fallback, root.clone());
         if log_on() {
             eprintln!("[blocksnap] site root: {:?}; fallback: {:?}", site.root, site.fallback);
         }
@@ -243,7 +244,7 @@ impl BlockSnaps {
         let (events, events_rx) = mpsc::channel();
         let live: LiveStdin = Default::default();
         drop(events_rx);
-        let form = crate::block_edit::FormState::new(doc.clone(), ctx);
+        let form = crate::block_edit::FormState::new(doc.clone(), root, ctx);
         let ctx = ctx.clone();
         let log = log_on();
         std::thread::Builder::new()
@@ -528,9 +529,9 @@ pub fn site_root(doc: &std::path::Path) -> Option<PathBuf> {
 }
 
 impl Site {
-    fn new(doc: Option<PathBuf>, fallback: Option<PathBuf>) -> Self {
+    fn new(doc: Option<PathBuf>, fallback: Option<PathBuf>, root: Option<PathBuf>) -> Self {
         Site {
-            root: doc.as_deref().and_then(site_root),
+            root,
             doc_dir: doc.as_deref().and_then(|d| d.parent()).map(|d| d.to_path_buf()),
             fallback,
             stamp: Vec::new(),
@@ -741,12 +742,17 @@ impl Worker {
         let t = Instant::now();
         // read access for the page: the site root (pictures and fonts of the site), else the
         // document's folder
-        let root = self
-            .site
-            .root
-            .clone()
-            .or_else(|| self.site.doc_dir.clone())
-            .unwrap_or_default();
+        // (block packages: the library lives in the cache, the pictures next to the document, so
+        // the read-access folder is their common ancestor)
+        let root = match (self.site.root.clone(), self.site.doc_dir.clone()) {
+            (Some(r), Some(d)) => r
+                .components()
+                .zip(d.components())
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a)
+                .collect(),
+            (r, d) => r.or(d).unwrap_or_default(),
+        };
         let mut child = Command::new(&self.helper_path)
             .env("MARKISE_WR_ROOT", &root)
             .stdin(Stdio::piped())

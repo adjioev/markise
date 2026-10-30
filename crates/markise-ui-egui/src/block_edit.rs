@@ -28,12 +28,64 @@ struct Open {
     revision: u64,
     sent: Instant,
     lang: String,
+    /// A new block not written yet (inserted on Save).
+    draft: Option<Draft>,
+}
+
+/// Where a new block goes: `start..end` of the document is replaced (an empty range inserts;
+/// a `/query` paragraph is replaced), checked again on Save.
+#[derive(Clone, Debug)]
+pub struct InsertTarget {
+    pub start: usize,
+    pub end: usize,
+    pub revision: u64,
+    /// Up to 40 bytes before `start` (finds the point again after other edits).
+    pub before: String,
+    pub replaced: String,
+}
+
+impl InsertTarget {
+    pub fn new(text: &str, start: usize, end: usize, revision: u64) -> Self {
+        let mut b = start.saturating_sub(40);
+        while !text.is_char_boundary(b) {
+            b += 1;
+        }
+        InsertTarget {
+            start,
+            end,
+            revision,
+            before: text[b..start].to_string(),
+            replaced: text[start..end].to_string(),
+        }
+    }
+
+    /// The range in the current `text`, or None when the point cannot be found again.
+    fn locate(&self, text: &str, revision: u64) -> Option<(usize, usize)> {
+        if revision == self.revision {
+            return Some((self.start, self.end));
+        }
+        let needle = format!("{}{}", self.before, self.replaced);
+        let mut hits = text.match_indices(&needle);
+        let first = hits.next()?;
+        if hits.next().is_some() {
+            return None;
+        }
+        let s = first.0 + self.before.len();
+        Some((s, s + self.replaced.len()))
+    }
+}
+
+struct Draft {
+    markdown: String,
+    target: InsertTarget,
 }
 
 /// Edit dialog state of one viewer.
 pub struct FormState {
     events: Receiver<Value>,
     doc: Option<PathBuf>,
+    /// The block library's root (package cache, dev folder or site).
+    root: Option<PathBuf>,
     open: Option<Open>,
     seq: u64,
     log: bool,
@@ -75,12 +127,13 @@ fn form_dir(root: Option<&Path>, name: &str) -> Option<PathBuf> {
 }
 
 impl FormState {
-    pub fn new(doc: Option<PathBuf>, ctx: &egui::Context) -> Self {
+    pub fn new(doc: Option<PathBuf>, root: Option<PathBuf>, ctx: &egui::Context) -> Self {
         let (tx, events) = std::sync::mpsc::channel();
         crate::form_panel::set_sink(tx, ctx.clone());
         FormState {
             events,
             doc,
+            root,
             open: None,
             seq: 0,
             log: std::env::var_os("MARKISE_BLOCK_LOG").is_some_and(|v| v != "0"),
@@ -99,11 +152,56 @@ impl FormState {
         Ok(())
     }
 
+    /// The library root this viewer uses.
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
     /// Opens the dialog for the block whose `:::` line starts at `offset`.
     pub fn open(&mut self, text: &str, offset: usize, revision: u64, theme: &ThemeVars) -> Result<(), String> {
+        let line = text[..offset].matches('\n').count() + 1;
+        self.open_src(text, offset, revision, theme, None, line, text)
+    }
+
+    /// Opens a draft of a new block (`markdown`: a preset) to be inserted at `target` on Save.
+    pub fn open_draft(
+        &mut self,
+        doc_text: &str,
+        markdown: &str,
+        target: InsertTarget,
+        theme: &ThemeVars,
+    ) -> Result<(), String> {
+        let line = doc_text[..target.start.min(doc_text.len())].matches('\n').count() + 1;
+        let revision = target.revision;
+        let md = markdown.trim_end().to_string() + "\n";
+        self.open_src(
+            &md.clone(),
+            0,
+            revision,
+            theme,
+            Some(Draft { markdown: md, target }),
+            line,
+            doc_text,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_src(
+        &mut self,
+        text: &str,
+        offset: usize,
+        revision: u64,
+        theme: &ThemeVars,
+        draft: Option<Draft>,
+        line: usize,
+        doc_text: &str,
+    ) -> Result<(), String> {
         let t = Instant::now();
         let doc = self.doc.as_deref().ok_or("the document has no path (no site)")?;
-        let root = bf::site_root(doc).ok_or("no components/blocks.json above the document")?;
+        let root = self
+            .root
+            .clone()
+            .ok_or("для этого документа не подключена библиотека блоков")?;
         let manifest = bf::load_manifest(&root)?;
         let block = bf::block_at(text, offset).ok_or("no :::block at this position")?;
         let def = manifest
@@ -111,6 +209,8 @@ impl FormState {
             .ok_or_else(|| format!("`{}` is not in blocks.json", block.name))?;
         let dec = bf::decode(text, &block, def)?;
         let lang = lang();
+        let ru = lang == "ru";
+        let package = crate::block_lib::is_package(&root);
         let dir = form_dir(Some(&root), &block.name);
         let read = |ext: &str| {
             dir.as_ref()
@@ -118,27 +218,66 @@ impl FormState {
         };
         let over: Option<Value> = read("json").and_then(|s| serde_json::from_str(&s).ok());
         let (title, schema, uischema) = bf::form(&dec, &lang, over.as_ref());
-        let line = text[..offset].matches('\n').count() + 1;
         let file = doc
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default();
+        // a lesson contract nearby may reject changed answers at build time (not rewritten here)
+        let warning = if block.name == "question" {
+            contract_of(doc, doc_text).map(|c| {
+                if ru {
+                    format!("Контракт урока {c} может отклонить изменения ответов (состав, верность) при сборке сайта.")
+                } else {
+                    format!("The lesson contract {c} may reject changed answers when the site is built.")
+                }
+            })
+        } else {
+            None
+        };
         self.seq += 1;
         let id = self.seq;
+        let note = if draft.is_some() {
+            format!(
+                "{file}, {} {line} · {}",
+                if ru {
+                    "вставка перед строкой"
+                } else {
+                    "insert at line"
+                },
+                if ru {
+                    "новый блок, ещё не записан"
+                } else {
+                    "new block, not written yet"
+                }
+            )
+        } else {
+            format!(
+                "{file}, {} {line} · :::{} {}",
+                if ru { "строка" } else { "line" },
+                block.name,
+                block.args
+            )
+        };
         let req = json!({
-            "op": "form_open", "id": id, "title": title, "block": block.name,
+            "op": "form_open", "id": id,
+            "title": if draft.is_some() { format!("{} {title}", if ru { "Новый блок:" } else { "New block:" }) } else { title },
+            "block": block.name, "draft": draft.is_some(), "warning": warning,
             "schema": schema, "uischema": uischema, "data": dec.data, "lang": lang,
             "theme": if theme.dark { "dark" } else { "light" }, "vars": theme.vars,
-            "note": format!("{file}, {} {line} · :::{} {}", if lang == "ru" { "строка" } else { "line" }, block.name, block.args),
-            "site_js": read("js").unwrap_or_default(), "site_css": read("css").unwrap_or_default(),
+            "note": note,
+            // packages: declarative forms only (no site form JS)
+            "site_js": if package { String::new() } else { read("js").unwrap_or_default() },
+            "site_css": read("css").unwrap_or_default(),
             "base": doc.parent().map(file_url_dir).unwrap_or_default(),
         });
         let ms_build = t.elapsed().as_secs_f64() * 1e3;
         self.send(&req)?;
         if self.log {
             eprintln!(
-                "[blockform] open #{id} :::{} at {offset}: form built in {ms_build:.2} ms (site files: {:?})",
-                block.name, dir
+                "[blockform] open #{id} :::{} at {offset}{}: form built in {ms_build:.2} ms (site files: {:?})",
+                block.name,
+                if draft.is_some() { " (draft)" } else { "" },
+                dir
             );
         }
         self.open = Some(Open {
@@ -147,6 +286,7 @@ impl FormState {
             revision,
             sent: t,
             lang,
+            draft,
         });
         Ok(())
     }
@@ -230,6 +370,40 @@ impl FormState {
         let o = self.open.as_ref().ok_or("no open dialog")?;
         let ru = o.lang == "ru";
         let text = ed.session.text();
+        if let Some(d) = &o.draft {
+            // a new block: build it from the preset, then insert it in one transaction
+            let edits = bf::edits(&d.markdown, &o.dec, data, false, &o.lang)?;
+            let block = bf::apply(&d.markdown, &edits).trim_end().to_string();
+            let (s, e) = d.target.locate(text, ed.session.revision().counter).ok_or_else(|| {
+                if ru {
+                    "Место вставки изменилось и не найдено — блок не вставлен. Нажмите «Отмена» и вставьте заново."
+                        .to_string()
+                } else {
+                    "The insertion point changed and was not found; nothing was inserted.".to_string()
+                }
+            })?;
+            let before = &text[..s];
+            let after = &text[e..];
+            let pre = if before.is_empty() || before.ends_with("\n\n") {
+                ""
+            } else if before.ends_with('\n') {
+                "\n"
+            } else {
+                "\n\n"
+            };
+            let post = if after.starts_with("\n\n") {
+                ""
+            } else if after.starts_with('\n') || after.is_empty() {
+                "\n"
+            } else {
+                "\n\n"
+            };
+            let ps = PatchSet::new(vec![Patch::verbatim(s..e, format!("{pre}{block}{post}"))])
+                .map_err(|e| format!("patches: {e:?}"))?;
+            ed.edit(|s| s.apply_external(&ps, "Insert Block", false))
+                .map_err(|e| format!("edit: {e:?}"))?;
+            return Ok(1);
+        }
         if ed.session.revision().counter != o.revision
             || text.get(o.dec.block.range.clone()) != Some(o.dec.source.as_str())
         {
@@ -660,4 +834,256 @@ fn relative_path(from: &Path, to: &Path) -> String {
     let mut parts: Vec<String> = std::iter::repeat_n("..".to_string(), a.len() - common).collect();
     parts.extend(b[common..].iter().map(|c| c.as_os_str().to_string_lossy().to_string()));
     parts.join("/")
+}
+
+/// `contracts/<lesson>.json` above the document (lesson id from a `Lesson ID:` line or the
+/// file name), shown relative to the document's folder.
+fn contract_of(doc: &Path, text: &str) -> Option<String> {
+    let id = text
+        .lines()
+        .take(40)
+        .find_map(|l| l.strip_prefix("Lesson ID:").map(|v| v.trim().to_string()))
+        .or_else(|| doc.file_stem().map(|s| s.to_string_lossy().to_string()))?;
+    let mut dir = doc.parent();
+    while let Some(d) = dir {
+        let c = d.join("contracts").join(format!("{id}.json"));
+        if c.is_file() {
+            return Some(relative_path(doc.parent()?, &c));
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+// ---------------------------------------------------------------- block packages script
+
+/// PROTOTYPE scripted check of the block-package round (`MARKISE_PROTO_INSERT=1`, live mode):
+/// palette, draft insertion with validation, undo, Backspace on a block, `/` on an empty line.
+#[derive(Default)]
+pub struct InsertScript {
+    step: usize,
+    since: Option<Instant>,
+    original: String,
+    saves: usize,
+    mark: usize,
+}
+
+thread_local! {
+    static INSERT_SCRIPT: std::cell::RefCell<Option<InsertScript>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn insert_script(ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
+    if !std::env::var_os("MARKISE_PROTO_INSERT").is_some_and(|v| v != "0") {
+        return;
+    }
+    INSERT_SCRIPT.with(|s| s.borrow_mut().get_or_insert_with(Default::default).frame(ctx, viewer));
+}
+
+impl InsertScript {
+    fn say(s: String) {
+        eprintln!("[proto-insert] {s}");
+    }
+
+    fn key(ctx: &egui::Context, key: egui::Key) {
+        ctx.input_mut(|i| {
+            i.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            })
+        });
+    }
+
+    fn frame(&mut self, ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        let now = Instant::now();
+        let since = *self.since.get_or_insert(now);
+        let after = |ms: u64| now - since >= std::time::Duration::from_millis(ms);
+        let Some(snaps) = viewer.snaps.as_ref() else { return };
+        let all = !snaps.current.is_empty() && snaps.current.iter().all(|&c| c);
+        let shot = |name: &str| crate::block_snap::ProtoScript::default().shot(ctx, name);
+        let panel_shot = |name: &str| {
+            if let Some(dir) = std::env::var_os("MARKISE_PROTO_SHOTS") {
+                crate::form_panel::handle(
+                    json!({"op": "form_shot", "path": PathBuf::from(dir).join(format!("{name}.png"))}),
+                );
+            }
+        };
+        let text = viewer.ed.session.text().to_string();
+        let next = |me: &mut Self| {
+            me.step += 1;
+            me.since = Some(Instant::now());
+        };
+        match self.step {
+            0 => {
+                if all && after(1200) && !viewer.gaps.is_empty() {
+                    self.original = text;
+                    shot("pkg-01-lesson");
+                    crate::block_palette::toggle();
+                    next(self);
+                } else if !all {
+                    self.since = Some(now);
+                }
+            }
+            1 if after(700) => {
+                shot("pkg-02-palette");
+                next(self);
+            }
+            2 if after(400) => {
+                // "drop" the three-answer question after the first block image
+                let root = snaps.form.root().map(Path::to_path_buf);
+                let presets = root.map(|r| crate::block_lib::presets(&r, &lang())).unwrap_or_default();
+                let p = presets.iter().find(|p| p.block == "question").cloned();
+                let gap = viewer.atomic.first().map(|a| a.1).unwrap_or(0);
+                let rev = viewer.ed.session.revision().counter;
+                if let Some(p) = p {
+                    Self::say(format!("dropping preset «{}» at offset {gap}", p.label));
+                    crate::block_palette::choose(p, Some(InsertTarget::new(&text, gap, gap, rev)));
+                }
+                self.saves = snaps.form.saves.len();
+                next(self);
+            }
+            3 if after(900) && snaps.form.is_open() => {
+                panel_shot("pkg-03-draft");
+                snaps.form.eval("window.markiseForm.save()");
+                next(self);
+            }
+            4 if snaps.form.saves.len() > self.saves => {
+                Self::say(format!("save without a correct answer → {:?}", snaps.form.saves.last()));
+                self.saves = snaps.form.saves.len();
+                next(self);
+            }
+            5 if after(500) => {
+                panel_shot("pkg-04-validation");
+                snaps.form.eval("{ const d = window.markiseForm.data(); const o = d.options.map((x, i) => ({...x, correct: i === 1})); window.markiseForm.set('options', o); window.markiseForm.set('prompt', 'Новый вопрос из палитры?'); setTimeout(() => window.markiseForm.save(), 80); }");
+                next(self);
+            }
+            6 if snaps.form.saves.len() > self.saves => {
+                let added: Vec<String> = similar::TextDiff::from_lines(&self.original, &text)
+                    .iter_all_changes()
+                    .filter(|c| c.tag() == similar::ChangeTag::Insert)
+                    .map(|c| c.value().trim_end().to_string())
+                    .collect();
+                Self::say(format!(
+                    "insert → {:?}; inserted lines: {added:?}",
+                    snaps.form.saves.last()
+                ));
+                next(self);
+            }
+            7 if all && after(900) => {
+                shot("pkg-05-inserted");
+                next(self);
+            }
+            8 if after(500) => {
+                let label = viewer
+                    .ed
+                    .session
+                    .history()
+                    .undo_stack()
+                    .last()
+                    .map(|t| t.label.to_string());
+                viewer.ed.edit(|s| s.undo());
+                Self::say(format!(
+                    "undo {label:?} → document byte-identical = {}",
+                    viewer.ed.session.text() == self.original
+                ));
+                crate::block_palette::close();
+                next(self);
+            }
+            // Backspace right after a block image: first selects it, the second deletes it
+            9 if after(500) => {
+                let pick = viewer
+                    .atomic
+                    .iter()
+                    .find(|a| !viewer.atomic.iter().any(|b| b.0 == a.3))
+                    .copied();
+                if let Some((start, _, _, after_off)) = pick {
+                    viewer.ed.set_selection(markise_doc::Selection::caret(after_off));
+                    viewer.request_refocus();
+                    self.mark = start;
+                }
+                next(self);
+            }
+            10 if after(300) => {
+                Self::key(ctx, egui::Key::Backspace);
+                next(self);
+            }
+            11 if after(300) => {
+                Self::say(format!(
+                    "Backspace after the block → block selected = {}",
+                    viewer.focused_block == Some(self.mark)
+                ));
+                shot("pkg-06-block-selected");
+                next(self);
+            }
+            12 if after(400) => {
+                Self::key(ctx, egui::Key::Backspace);
+                next(self);
+            }
+            13 if after(400) => {
+                let before = bf::all_blocks(&self.original).len();
+                let now_blocks = bf::all_blocks(&text);
+                Self::say(format!(
+                    "second Backspace → one whole block deleted = {}; all remaining `:::` lines paired = {}",
+                    now_blocks.len() + 1 == before,
+                    text.lines().filter(|l| l.starts_with(":::")).count() == now_blocks.len() * 2
+                ));
+                let label = viewer
+                    .ed
+                    .session
+                    .history()
+                    .undo_stack()
+                    .last()
+                    .map(|t| t.label.to_string());
+                viewer.ed.edit(|s| s.undo());
+                Self::say(format!(
+                    "undo {label:?} → byte-identical = {}",
+                    viewer.ed.session.text() == self.original
+                ));
+                next(self);
+            }
+            // `/` on an empty line opens the palette for that line
+            14 if after(500) => {
+                let end = self.original.find("\n\n## ").unwrap_or(0);
+                viewer.ed.set_selection(markise_doc::Selection::caret(end));
+                viewer.request_refocus();
+                next(self);
+            }
+            15 if after(300) => {
+                Self::key(ctx, egui::Key::Enter);
+                next(self);
+            }
+            16 if after(300) => {
+                ctx.input_mut(|i| i.events.push(egui::Event::Text("/".into())));
+                next(self);
+            }
+            17 if after(500) => {
+                let t = crate::block_palette::target();
+                Self::say(format!(
+                    "`/` on an empty line → palette open = {}, target replaces the `/` line = {}",
+                    crate::block_palette::is_open(),
+                    t.as_ref().is_some_and(|t| t.replaced == "/")
+                ));
+                shot("pkg-07-slash");
+                next(self);
+            }
+            18 if after(500) => {
+                crate::block_palette::close();
+                while viewer.ed.session.text() != self.original && viewer.ed.edit(|s| s.undo()) {}
+                Self::say(format!(
+                    "typing undone → byte-identical = {}",
+                    viewer.ed.session.text() == self.original
+                ));
+                next(self);
+            }
+            19 if after(800) => {
+                if std::env::var_os("MARKISE_PROTO_EXIT").is_some_and(|v| v != "0") {
+                    std::process::exit(0);
+                }
+            }
+            _ => {}
+        }
+    }
 }

@@ -2694,9 +2694,21 @@ impl MarkiseApp {
                         d.viewer.set_font_generation(self.font_gen);
                         // PROTOTYPE (block forms): the edit panel docks at the right in live mode
                         crate::block_edit::live_script(ctx, &mut d.viewer);
+                        crate::block_edit::insert_script(ctx, &mut d.viewer);
                         let mut vrect = ui.available_rect_before_wrap();
                         if d.viewer.snaps.as_ref().is_some_and(|s| s.form.is_open()) {
                             vrect = crate::form_panel::reserve(ui, vrect);
+                        } else if crate::block_palette::is_open() {
+                            // PROTOTYPE (block packages): the native block palette in the panel
+                            let (panel, rest) = crate::form_panel::reserve_rect(ui, vrect);
+                            let [r, g, b, _] = t.link.0;
+                            crate::block_palette::show(
+                                ui,
+                                panel,
+                                d.viewer.snaps.as_ref().and_then(|s| s.form.root()),
+                                egui::Color32::from_rgb(r, g, b),
+                            );
+                            vrect = rest;
                         }
                         let mut vui = ui.new_child(egui::UiBuilder::new().max_rect(vrect).id_salt("markise-live-doc"));
                         let out = d.viewer.show(&mut vui, &mut self.images, &t, self.parley.as_mut(), true);

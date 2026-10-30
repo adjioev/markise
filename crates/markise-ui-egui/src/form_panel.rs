@@ -445,6 +445,15 @@ pub fn resizing() -> bool {
 /// Reserves the panel at the right of `rect` (with a drag handle on its left edge), puts the
 /// native view over it and returns the rest of `rect` for the document.
 pub fn reserve(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Rect {
+    let (panel, rest) = reserve_rect(ui, rect);
+    let scale = ui.ctx().pixels_per_point() / ui.ctx().native_pixels_per_point().unwrap_or(1.0);
+    place(panel, scale);
+    rest
+}
+
+/// The panel rectangle at the right of `rect` (resizable, drag handle on its left edge) and the
+/// rest of `rect`; nothing native is placed (the block palette draws in egui).
+pub fn reserve_rect(ui: &mut egui::Ui, rect: egui::Rect) -> (egui::Rect, egui::Rect) {
     let max = (rect.width() * 0.6).max(MIN_WIDTH.min(rect.width() * 0.6));
     // MARKISE_FORM_PANEL_W: initial width (measurements / screenshots)
     static INIT: std::sync::Once = std::sync::Once::new();
@@ -489,7 +498,8 @@ pub fn reserve(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Rect {
         ],
         egui::Stroke::new(if resp.dragged() { 2.0 } else { 1.0 }, stroke_c),
     );
-    let scale = ui.ctx().pixels_per_point() / ui.ctx().native_pixels_per_point().unwrap_or(1.0);
-    place(panel, scale);
-    egui::Rect::from_min_max(rect.min, egui::pos2(handle.left(), rect.bottom()))
+    (
+        panel,
+        egui::Rect::from_min_max(rect.min, egui::pos2(handle.left(), rect.bottom())),
+    )
 }

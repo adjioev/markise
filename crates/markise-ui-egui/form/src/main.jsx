@@ -429,6 +429,7 @@ function App() {
       null,
       h('div', { className: 'mk-title' }, req.title, h('span', null, ' — ' + tr('edit'))),
       req.note ? h('div', { className: 'mk-note' }, req.note) : null,
+      req.warning ? h('div', { className: 'mk-warn' }, '⚠ ' + req.warning) : null,
     ),
     h(
       'main',

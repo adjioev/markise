@@ -310,6 +310,13 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("view.sideBySide", "Side by Side", &[both("Ctrl+Cmd+/", "Ctrl+Alt+/")]),
     app("view.showRecent", "Show Recent Files", &[]),
     app("view.toolbar", "Toolbar", &[]),
+    // PROTOTYPE (block packages)
+    app(
+        "view.blockPalette",
+        "Block Palette",
+        &[both("Ctrl+Cmd+B", "Ctrl+Alt+B")],
+    ),
+    app("insert.block", "Insert Block…", &[]),
     // toolbar position (spec 04 §3.2): Preferences → Appearance since issue #50; no menu item
     app("view.toolbarTop", "Toolbar at Top", &[]),
     app("view.toolbarBottom", "Toolbar at Bottom", &[]),
