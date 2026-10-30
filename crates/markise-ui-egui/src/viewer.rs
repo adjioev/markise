@@ -407,22 +407,54 @@ impl DocViewer {
         let mut content_w = rect.width() - SCROLLBAR_W;
         // margin mode with comments in the document: a comment gutter is reserved at the right
         // and the column lays out in the rest (owner decision on #91), unless the window is
-        // too narrow for it (then bubbles); the "has comments" answer is debounced
+        // too narrow for it (then bubbles). "Has comments" is answered by a debounced worker
+        // (no whole-document scan here), and a gutter change waits for a frame without pointer
+        // presses so clicks are hit-tested against one geometry (Codex review of #94).
         let margin_mode = self.comment_display == markise_engine::settings::CommentDisplay::Margin;
-        self.gutter = margin_mode && {
+        let has = margin_mode && {
             let key = (
                 self.ed.session.revision().counter,
                 Arc::as_ptr(self.ed.view.model()) as usize,
             );
-            let doc = self.ed.session.doc();
-            let (has, wait) = self.comment_presence.get(key, now, || {
-                markise_doc::review::first_mark_from(doc, 0, |m| m.kind == markise_doc::CriticKind::Comment).is_some()
+            let (has, wait) = self.comment_presence.poll(key, now, || {
+                let text = self.ed.session.doc().snapshot();
+                let format = self.ed.session.format().clone();
+                let wake = ctx.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let _ = std::thread::Builder::new()
+                    .name("markise-comment-presence".into())
+                    .spawn(move || {
+                        // no comment opener at all: nothing to parse
+                        if !text.contains("{>>") {
+                            let _ = tx.send(false);
+                            wake.request_repaint();
+                            return;
+                        }
+                        let doc = format.parse(text.to_string(), &markise_doc::FormatOptions::default());
+                        let has = markise_doc::review::first_mark_from(doc.as_ref(), 0, |m| {
+                            m.kind == markise_doc::CriticKind::Comment
+                        })
+                        .is_some();
+                        let _ = tx.send(has);
+                        wake.request_repaint();
+                    });
+                rx
             });
             if let Some(w) = wait {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(w.max(0.01)));
             }
-            comment_place::reserve_gutter(true, has, content_w)
+            has
         };
+        let want = comment_place::reserve_gutter(margin_mode, has, content_w);
+        if want != self.gutter {
+            let busy = self.drag.is_some()
+                || ui.input(|i| i.pointer.any_pressed() || i.pointer.any_released() || i.pointer.any_down());
+            if comment_place::gutter_change_allowed(busy) {
+                self.gutter = want;
+            } else {
+                ctx.request_repaint();
+            }
+        }
         if self.gutter {
             content_w -= comment_place::GUTTER_W;
         }
@@ -864,6 +896,11 @@ impl DocViewer {
     /// The comment gutter was reserved at the last frame (tests).
     pub fn comment_gutter(&self) -> bool {
         self.gutter
+    }
+
+    /// A "has comments" lookup is running on its worker (tests).
+    pub fn comment_lookup_pending(&self) -> bool {
+        self.comment_presence.pending()
     }
 
     /// The content column's left edge and width at the last frame (screen points; tests).

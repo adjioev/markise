@@ -128,9 +128,12 @@ Show comments, and a switch in the comments panel header):
   with the zoom) is reserved at the right of the document surface, and the content column
   lays out and centres in the remaining width (as word processors do with their comments
   pane). Without comments the gutter is not reserved and the layout is unchanged. Whether the
-  document has comments is looked up again at most every 0.4 s while it changes, so the
-  layout does not jump per keystroke: the gutter appears shortly after the first comment and
-  is released shortly after the last one goes. When the window is too narrow (the surface
+  document has comments is answered by a worker from a text snapshot (never a whole-document
+  scan on the UI thread), one lookup at a time and at most every 0.4 s while the document
+  changes, so the layout does not jump per keystroke: the gutter appears shortly after the
+  first comment and is released shortly after the last one goes. A gutter change is applied
+  only on a frame without pointer presses, releases or a held button, so a click is never
+  hit-tested against the geometry of two different column widths. When the window is too narrow (the surface
   without its scrollbar, i.e. window minus sidebar, would leave under 420 pt beside the
   gutter) no gutter is reserved and the bubbles behaviour applies. Cards are only placed in
   the part of the surface that is actually visible (window and clip edge, scrollbar

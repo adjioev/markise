@@ -35,22 +35,45 @@ pub fn reserve_gutter(margin_mode: bool, has_comments: bool, content_w: f32) -> 
     margin_mode && has_comments && content_w - GUTTER_W >= MIN_READABLE
 }
 
-/// Debounced "the document has at least one comment": looked up when the document changes
-/// (`key`: its revision and model), but at most every [`GUTTER_RECHECK`] seconds; between
-/// lookups the last answer stands, so the gutter is reserved while comments exist and released
-/// shortly after the last one goes, without a layout jump per keystroke.
+/// Debounced "the document has at least one comment", answered off the UI thread: when the
+/// document changes (`key`: its revision and model), at most every [`GUTTER_RECHECK`] seconds
+/// and one at a time, a worker looks the answer up in a text snapshot (`spawn` starts it and
+/// returns its channel); between answers the last one stands. So the gutter is reserved while
+/// comments exist and released shortly after the last one goes, without a layout jump per
+/// keystroke and without a whole-document scan on the UI thread (Codex review of #94).
 #[derive(Debug, Default)]
 pub struct CommentPresence {
+    /// The document the current answer is for.
     key: Option<(u64, usize)>,
+    /// When the last lookup started (egui time).
     at: f64,
     has: bool,
+    pending: Option<((u64, usize), std::sync::mpsc::Receiver<bool>)>,
 }
 
 impl CommentPresence {
-    /// The current answer at time `now` for document `key`; `lookup` runs only when the key
-    /// changed and the last lookup is old enough. Returns the answer and, when a lookup is
-    /// still due, the seconds until it.
-    pub fn get(&mut self, key: (u64, usize), now: f64, lookup: impl FnOnce() -> bool) -> (bool, Option<f64>) {
+    /// The current answer at time `now` for document `key`. Starts a lookup (`spawn`) when
+    /// the key changed, none is running and the last one started long enough ago. Returns the
+    /// answer and, when a lookup is due later, the seconds until then.
+    pub fn poll(
+        &mut self,
+        key: (u64, usize),
+        now: f64,
+        spawn: impl FnOnce() -> std::sync::mpsc::Receiver<bool>,
+    ) -> (bool, Option<f64>) {
+        use std::sync::mpsc::TryRecvError;
+        if let Some((k, rx)) = &self.pending {
+            match rx.try_recv() {
+                Ok(has) => {
+                    self.has = has;
+                    self.key = Some(*k);
+                    self.pending = None;
+                }
+                // the worker wakes the UI when it is done
+                Err(TryRecvError::Empty) => return (self.has, None),
+                Err(TryRecvError::Disconnected) => self.pending = None,
+            }
+        }
         if self.key == Some(key) {
             return (self.has, None);
         }
@@ -58,11 +81,22 @@ impl CommentPresence {
         if self.key.is_some() && wait > 0.0 {
             return (self.has, Some(wait));
         }
-        self.has = lookup();
-        self.key = Some(key);
+        self.pending = Some((key, spawn()));
         self.at = now;
         (self.has, None)
     }
+
+    /// A lookup is running (tests).
+    pub fn pending(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
+/// Whether a gutter change may be applied this frame: only on a frame without pointer presses,
+/// releases or a held button, so a click is never hit-tested against geometry of another width
+/// (the previous frame's column with this frame's layout); otherwise it waits a frame.
+pub fn gutter_change_allowed(pointer_busy: bool) -> bool {
+    !pointer_busy
 }
 
 /// The part of the document surface that is actually on screen: the surface rectangle (`rect`)
@@ -146,17 +180,40 @@ mod tests {
     }
 
     #[test]
-    fn comment_presence_is_debounced() {
+    fn comment_presence_is_debounced_and_off_thread() {
+        use std::sync::mpsc::channel;
+        let answer = |v: bool| {
+            let (tx, rx) = channel();
+            tx.send(v).unwrap();
+            rx
+        };
         let mut p = CommentPresence::default();
-        assert_eq!(p.get((1, 7), 0.0, || true), (true, None), "first lookup at once");
-        assert_eq!(p.get((1, 7), 5.0, || unreachable!()), (true, None), "same document");
-        // an edit soon after: the old answer stands until the recheck time
-        let (has, wait) = p.get((2, 7), 0.1, || unreachable!());
+        // the first lookup starts at once; until it answers: no comments (no gutter)
+        let (tx, rx) = channel();
+        assert_eq!(p.poll((1, 7), 0.0, || rx), (false, None));
+        assert!(p.pending());
+        assert_eq!(p.poll((1, 7), 0.05, || unreachable!()), (false, None), "still running");
+        tx.send(true).unwrap();
+        assert_eq!(p.poll((1, 7), 0.06, || unreachable!()), (true, None));
+        assert_eq!(p.poll((1, 7), 5.0, || unreachable!()), (true, None), "same document");
+        // an edit soon after a lookup: the old answer stands until the recheck time
+        let mut p = CommentPresence::default();
+        p.poll((1, 7), 0.0, || answer(true));
+        let (has, wait) = p.poll((2, 7), 0.1, || unreachable!());
         assert!(has && (wait.unwrap() - 0.3).abs() < 1e-9);
-        // later: looked up (the last comment is gone: released)
-        assert_eq!(p.get((3, 7), 0.5, || false), (false, None));
+        // later: looked up again (the last comment is gone: released once it answers)
+        assert_eq!(p.poll((3, 7), 0.5, || answer(false)), (true, None));
+        assert_eq!(p.poll((3, 7), 0.6, || unreachable!()), (false, None));
         // another model (reparse) counts as a change
-        assert_eq!(p.get((3, 8), 1.0, || true), (true, None));
+        assert_eq!(p.poll((3, 8), 1.0, || answer(true)), (false, None));
+        assert_eq!(p.poll((3, 8), 1.1, || unreachable!()), (true, None));
+        // a worker that died: forgotten, looked up again later
+        let (tx, rx) = channel::<bool>();
+        drop(tx);
+        p.poll((4, 8), 2.0, || rx);
+        let wait = p.poll((4, 8), 2.1, || unreachable!()).1.unwrap();
+        assert!((wait - 0.3).abs() < 1e-9, "{wait}");
+        assert!(!p.pending());
     }
 
     #[test]

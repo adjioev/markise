@@ -587,6 +587,7 @@ fn open_roomy(name: &str, text: &str) -> (H, PathBuf) {
         ..Default::default()
     });
     h.run_steps(4);
+    settle(&mut h);
     (h, p)
 }
 
@@ -605,6 +606,19 @@ fn visible_text(h: &mut H) -> String {
 
 fn comments(h: &mut H) -> Vec<markise_ui_egui::viewer::ShownComment> {
     h.state_mut().viewer().unwrap().shown_comments().to_vec()
+}
+
+/// Waits until the viewer's "has comments" lookup (a worker) has answered and the answer is
+/// applied (the comment gutter, #91).
+fn settle(h: &mut H) {
+    let t = Instant::now();
+    h.run_steps(2);
+    while h.state_mut().viewer().is_some_and(|v| v.comment_lookup_pending()) {
+        assert!(t.elapsed() < Duration::from_secs(10), "comment lookup did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+        h.step();
+    }
+    h.run_steps(3);
 }
 
 fn caret_at(h: &mut H, at: usize) {
@@ -726,6 +740,7 @@ fn panel_switch_changes_the_setting() {
         ..Default::default()
     });
     h.run_steps(4);
+    settle(&mut h);
     assert!(comments(&mut h)[0].card.is_some(), "margin card");
     h.get_by_label("Show comments as bubbles").click();
     h.run_steps(3);
@@ -946,6 +961,7 @@ fn cards_stay_visible_when_the_surface_is_wider_than_the_window() {
             }),
         );
     wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    settle(&mut h);
     let ctx = h.ctx.clone();
     h.state_mut()
         .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
@@ -1030,6 +1046,7 @@ fn open_phycat(name: &str, src: &str, size: egui::Vec2) -> H {
         .select_theme(markise_theme::catalog::ThemeId::Builtin("phycat".into()));
     wait_until(&mut h, "Phycat", |a| a.theme().name != before);
     h.run_steps(4);
+    settle(&mut h);
     h
 }
 
@@ -1102,4 +1119,83 @@ fn narrow_window_falls_back_to_bubbles() {
     let bad = check_popovers_on_screen(&mut h, "narrow");
     assert!(bad.is_empty(), "{}", bad.join("\n"));
     assert!(screen.width() <= 900.0);
+}
+
+/// Codex review of #94: a click on exactly the frame where the comment gutter would appear
+/// (the "has comments" answer arrives together with the press) lands on the clicked
+/// character; the gutter follows a frame later.
+#[test]
+fn click_on_the_frame_the_gutter_appears_hits_the_clicked_character() {
+    let src = "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron \
+pi rho sigma tau upsilon phi chi psi omega and some more words to fill the line.\n\nTail.\n";
+    let mut h = open_phycat("gutter-click", src, egui::vec2(1400.0, 760.0));
+    assert!(
+        !h.state_mut().viewer().unwrap().comment_gutter(),
+        "no comments: no gutter"
+    );
+    // a character near the right end of the first line: with the narrower column (gutter)
+    // the same column-relative x is past the end of that line
+    let (col_left, col_w) = h.state_mut().viewer().unwrap().column();
+    caret_at(&mut h, 0);
+    let y0 = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .caret_screen
+        .expect("caret drawn")
+        .center()
+        .y;
+    let mut found = None;
+    for at in (40..src.find("\n").unwrap()).step_by(3) {
+        caret_at(&mut h, at);
+        let r = h.state_mut().viewer().unwrap().caret_screen.expect("caret drawn");
+        if (r.center().y - y0).abs() > 2.0 {
+            break;
+        }
+        if r.left() - col_left > col_w - 120.0 {
+            found = Some((at, r));
+            break;
+        }
+    }
+    let (target, r) = found.expect("a character near the end of the first line");
+    let p = egui::pos2(r.center().x + 1.0, r.center().y);
+    caret_at(&mut h, 0);
+    // a comment appended at the end (the target does not move)
+    let end = src.len() - 1;
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| {
+        s.set_selection(Selection::caret(end));
+        s.insert_text(" {>>note<<}")
+    })
+    .unwrap();
+    v.ed.refresh_focus();
+    assert!(text(&h).contains("Tail. {>>note<<}"), "{}", text(&h));
+    // the lookup starts (debounce long past) and answers while no frame runs
+    std::thread::sleep(Duration::from_millis(500));
+    h.event(Event::PointerMoved(p));
+    h.step();
+    assert!(h.state_mut().viewer().unwrap().comment_lookup_pending());
+    std::thread::sleep(Duration::from_millis(800));
+    // the press arrives in the frame that receives the answer
+    h.event(Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::default(),
+    });
+    h.step();
+    h.event(Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::default(),
+    });
+    h.step();
+    assert!(
+        !h.state_mut().viewer().unwrap().comment_gutter(),
+        "the gutter waits while the button is used"
+    );
+    h.run_steps(3);
+    assert!(h.state_mut().viewer().unwrap().comment_gutter(), "the gutter follows");
+    assert_eq!(caret(&mut h), target, "the caret is where the click was");
 }
