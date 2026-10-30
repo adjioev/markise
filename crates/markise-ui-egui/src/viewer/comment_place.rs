@@ -20,6 +20,50 @@ const POPOVER_MAX_W: f32 = 240.0;
 const POPOVER_MIN_W: f32 = 120.0;
 /// Distance a popover keeps from the visible area's edges.
 const EDGE: f32 = 4.0;
+/// Width of the comment gutter reserved at the right of the document surface in margin mode
+/// while the document has comments (owner decision on #91; points, so it scales with zoom).
+pub const GUTTER_W: f32 = 260.0;
+/// Narrowest content area left of the gutter: a narrower window shows bubbles instead.
+pub const MIN_READABLE: f32 = 420.0;
+/// A document's "has comments" answer is looked up again at most this often while it is
+/// being edited (seconds), so the layout does not jump on every keystroke.
+pub const GUTTER_RECHECK: f64 = 0.4;
+
+/// Whether to reserve the comment gutter for a content area `content_w` wide (the surface
+/// without its scrollbar) when the document `has_comments`, in margin mode (`margin_mode`).
+pub fn reserve_gutter(margin_mode: bool, has_comments: bool, content_w: f32) -> bool {
+    margin_mode && has_comments && content_w - GUTTER_W >= MIN_READABLE
+}
+
+/// Debounced "the document has at least one comment": looked up when the document changes
+/// (`key`: its revision and model), but at most every [`GUTTER_RECHECK`] seconds; between
+/// lookups the last answer stands, so the gutter is reserved while comments exist and released
+/// shortly after the last one goes, without a layout jump per keystroke.
+#[derive(Debug, Default)]
+pub struct CommentPresence {
+    key: Option<(u64, usize)>,
+    at: f64,
+    has: bool,
+}
+
+impl CommentPresence {
+    /// The current answer at time `now` for document `key`; `lookup` runs only when the key
+    /// changed and the last lookup is old enough. Returns the answer and, when a lookup is
+    /// still due, the seconds until it.
+    pub fn get(&mut self, key: (u64, usize), now: f64, lookup: impl FnOnce() -> bool) -> (bool, Option<f64>) {
+        if self.key == Some(key) {
+            return (self.has, None);
+        }
+        let wait = GUTTER_RECHECK - (now - self.at);
+        if self.key.is_some() && wait > 0.0 {
+            return (self.has, Some(wait));
+        }
+        self.has = lookup();
+        self.key = Some(key);
+        self.at = now;
+        (self.has, None)
+    }
+}
 
 /// The part of the document surface that is actually on screen: the surface rectangle (`rect`)
 /// without its scrollbar strip (`scrollbar_w`), cut to the UI's clip rectangle and to the
@@ -87,6 +131,32 @@ mod tests {
 
     fn r(x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
         Rect::from_min_max(pos2(x0, y0), pos2(x1, y1))
+    }
+
+    #[test]
+    fn gutter_is_reserved_only_with_comments_in_margin_mode_and_room() {
+        assert!(reserve_gutter(true, true, 1200.0));
+        assert!(!reserve_gutter(false, true, 1200.0), "bubbles mode");
+        assert!(!reserve_gutter(true, false, 1200.0), "no comments");
+        assert!(reserve_gutter(true, true, GUTTER_W + MIN_READABLE));
+        assert!(
+            !reserve_gutter(true, true, GUTTER_W + MIN_READABLE - 1.0),
+            "narrow window"
+        );
+    }
+
+    #[test]
+    fn comment_presence_is_debounced() {
+        let mut p = CommentPresence::default();
+        assert_eq!(p.get((1, 7), 0.0, || true), (true, None), "first lookup at once");
+        assert_eq!(p.get((1, 7), 5.0, || unreachable!()), (true, None), "same document");
+        // an edit soon after: the old answer stands until the recheck time
+        let (has, wait) = p.get((2, 7), 0.1, || unreachable!());
+        assert!(has && (wait.unwrap() - 0.3).abs() < 1e-9);
+        // later: looked up (the last comment is gone: released)
+        assert_eq!(p.get((3, 7), 0.5, || false), (false, None));
+        // another model (reparse) counts as a change
+        assert_eq!(p.get((3, 8), 1.0, || true), (true, None));
     }
 
     #[test]

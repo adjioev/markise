@@ -122,12 +122,19 @@ Show comments, and a switch in the comments panel header):
 - `margin` (default): its body is a rounded card in the right margin, aligned with its line
   (cards stack downwards when they would overlap): bubble icon, `@author` (from the `@name:`
   prefix) in bold, then the text in the normal-weight UI font, wrapped at about 240 pt, line
-  breaks kept. A thin connector in the margin and the comment tint link it to its line. The
-  margin is the room actually visible between the content column's right edge (after the
-  theme's max-width, padding and centring) and the visible right edge of the document surface
-  (window and clip edge, scrollbar excluded); when it is too narrow for a card of at least
-  154 pt (margin under 190 pt, e.g. a full-width column) the bubbles behaviour applies (issue
-  #91).
+  breaks kept. A thin connector in the margin and the comment tint link it to its line.
+  Cards do not depend on the theme's column width (owner decision, issue #91): while the
+  document contains at least one comment, a **comment gutter** of 260 pt (points, so it scales
+  with the zoom) is reserved at the right of the document surface, and the content column
+  lays out and centres in the remaining width (as word processors do with their comments
+  pane). Without comments the gutter is not reserved and the layout is unchanged. Whether the
+  document has comments is looked up again at most every 0.4 s while it changes, so the
+  layout does not jump per keystroke: the gutter appears shortly after the first comment and
+  is released shortly after the last one goes. When the window is too narrow (the surface
+  without its scrollbar, i.e. window minus sidebar, would leave under 420 pt beside the
+  gutter) no gutter is reserved and the bubbles behaviour applies. Cards are only placed in
+  the part of the surface that is actually visible (window and clip edge, scrollbar
+  excluded); if the visible room right of the column is under 190 pt, bubbles apply too.
 - `bubbles`: only the glyph; resting the pointer on it for 150 ms opens a non-modal popover card
   (same look) that stays while the pointer is on the glyph or the card and closes when it
   leaves. The popover opens below the glyph and flips left or up near the visible area's

@@ -1005,3 +1005,101 @@ fn cards_stay_visible_when_the_surface_is_wider_than_the_window() {
         "margin cards in the visible margin"
     );
 }
+
+// ------------------------------------------------------------------ the comment gutter (#91)
+
+/// Opens `src` at `size` (points) with the built-in Phycat theme (a wide 950 pt column), the
+/// sidebar shown.
+fn open_phycat(name: &str, src: &str, size: egui::Vec2) -> H {
+    let dir = tmpdir(name);
+    let doc = dir.join("draft.md");
+    std::fs::write(&doc, src).unwrap();
+    let mut h = Harness::builder()
+        .with_size(size)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| app.ui(ui),
+            MarkiseApp::new(AppOptions {
+                open: vec![doc],
+                ..Default::default()
+            }),
+        );
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    let before = h.state().theme().name.clone();
+    h.state_mut()
+        .select_theme(markise_theme::catalog::ThemeId::Builtin("phycat".into()));
+    wait_until(&mut h, "Phycat", |a| a.theme().name != before);
+    h.run_steps(4);
+    h
+}
+
+/// Owner decision on #91: in margin mode a document with comments gets a comment gutter at
+/// the right; the (wide) column lays out in the rest, and the cards are shown inside the
+/// window. Removing the last comment releases the gutter (after a short debounce, not on every
+/// keystroke) and the column widens again.
+#[test]
+fn comment_gutter_is_reserved_while_comments_exist() {
+    let mut h = open_phycat("gutter", WIDE, egui::vec2(1400.0, 760.0));
+    assert_eq!(h.state().comment_display(), CommentDisplay::Margin);
+    let screen = h.ctx.content_rect();
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.comment_gutter(), "gutter reserved");
+    let (left, with_gutter) = v.column();
+    let cs = comments(&mut h);
+    assert_eq!(cs.len(), 2);
+    for c in &cs {
+        let card = c.card.expect("margin card");
+        assert!(screen.contains_rect(card), "card {card:?} inside the window {screen:?}");
+        assert!(card.left() >= left + with_gutter, "beside the column");
+    }
+    // edit the comments away: all text replaced by plain text
+    let len = text(&h).len();
+    select(&mut h, 0, len);
+    typ(&mut h, "plain");
+    assert_eq!(text(&h), "plain");
+    // right after the edit the layout has not jumped yet (debounced); shortly after, released
+    let t = Instant::now();
+    while h.state_mut().viewer().unwrap().comment_gutter() {
+        assert!(t.elapsed() < Duration::from_secs(5), "gutter not released");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    h.run_steps(2);
+    let (_, without) = h.state_mut().viewer().unwrap().column();
+    assert!(
+        without > with_gutter + 100.0,
+        "the column widens again: {with_gutter} -> {without}"
+    );
+    assert!(comments(&mut h).is_empty());
+}
+
+/// Typing inside a document with comments keeps the gutter (no layout jump per keystroke).
+#[test]
+fn comment_gutter_stays_while_typing() {
+    let mut h = open_phycat("gutter-typing", WIDE, egui::vec2(1400.0, 760.0));
+    let (_, w0) = h.state_mut().viewer().unwrap().column();
+    let end = text(&h).len();
+    caret_at(&mut h, end);
+    for _ in 0..3 {
+        typ(&mut h, "abc ");
+        std::thread::sleep(Duration::from_millis(150));
+        h.step();
+        let v = h.state_mut().viewer().unwrap();
+        assert!(v.comment_gutter());
+        assert_eq!(v.column().1, w0, "the column keeps its width");
+    }
+}
+
+/// A window too narrow for the gutter and a readable column: bubbles, popovers on screen.
+#[test]
+fn narrow_window_falls_back_to_bubbles() {
+    let mut h = open_phycat("gutter-narrow", WIDE, egui::vec2(900.0, 760.0));
+    let screen = h.ctx.content_rect();
+    assert!(!h.state_mut().viewer().unwrap().comment_gutter(), "no gutter");
+    let cs = comments(&mut h);
+    assert_eq!(cs.len(), 2);
+    assert!(cs.iter().all(|c| c.card.is_none()), "bubbles");
+    let bad = check_popovers_on_screen(&mut h, "narrow");
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    assert!(screen.width() <= 900.0);
+}

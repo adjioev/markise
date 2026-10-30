@@ -164,6 +164,10 @@ pub struct DocViewer {
     /// Comments of the visible items at the last frame, with their cards.
     comments: Vec<ShownComment>,
     popover: Option<Popover>,
+    /// Debounced "the document has comments" (the comment gutter, issue #91).
+    comment_presence: comment_place::CommentPresence,
+    /// The comment gutter was reserved at the last frame.
+    gutter: bool,
     /// Copy button and language field of fenced code blocks (issue #76).
     code: code_tools::CodeTools,
 }
@@ -208,6 +212,8 @@ impl DocViewer {
             comment_display: Default::default(),
             comments: Vec::new(),
             popover: None,
+            comment_presence: Default::default(),
+            gutter: false,
             code: Default::default(),
         }
     }
@@ -398,7 +404,28 @@ impl DocViewer {
         let started = Instant::now();
 
         let ppp = ctx.pixels_per_point();
-        let content_w = rect.width() - SCROLLBAR_W;
+        let mut content_w = rect.width() - SCROLLBAR_W;
+        // margin mode with comments in the document: a comment gutter is reserved at the right
+        // and the column lays out in the rest (owner decision on #91), unless the window is
+        // too narrow for it (then bubbles); the "has comments" answer is debounced
+        let margin_mode = self.comment_display == markise_engine::settings::CommentDisplay::Margin;
+        self.gutter = margin_mode && {
+            let key = (
+                self.ed.session.revision().counter,
+                Arc::as_ptr(self.ed.view.model()) as usize,
+            );
+            let doc = self.ed.session.doc();
+            let (has, wait) = self.comment_presence.get(key, now, || {
+                markise_doc::review::first_mark_from(doc, 0, |m| m.kind == markise_doc::CriticKind::Comment).is_some()
+            });
+            if let Some(w) = wait {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(w.max(0.01)));
+            }
+            comment_place::reserve_gutter(true, has, content_w)
+        };
+        if self.gutter {
+            content_w -= comment_place::GUTTER_W;
+        }
         let col_w = (content_w - 2.0 * theme.column_padding_x)
             .min(theme.column_max_width)
             .max(120.0);
@@ -834,6 +861,16 @@ impl DocViewer {
         &self.comments
     }
 
+    /// The comment gutter was reserved at the last frame (tests).
+    pub fn comment_gutter(&self) -> bool {
+        self.gutter
+    }
+
+    /// The content column's left edge and width at the last frame (screen points; tests).
+    pub fn column(&self) -> (f32, f32) {
+        (self.last_left, self.ed.view.width())
+    }
+
     /// The suggestion hover bar's rectangle at the last frame, when shown (tests).
     pub fn hover_bar_rect(&self) -> Option<Rect> {
         self.hover.as_ref().and_then(|h| h.rect)
@@ -914,11 +951,13 @@ impl DocViewer {
         let now = ctx.input(|i| i.time);
         // issue #91: cards and popovers go only where the surface is actually on screen (not
         // past the window's or the parent's clip edge, not over the scrollbar), and margin
-        // cards only into the real room right of the content column (after its max-width,
-        // padding and centring; a glyph further right, e.g. in a wide table, counts too)
+        // cards only into the real room right of the content column (the reserved gutter plus
+        // any centring slack; a glyph further right, e.g. in a wide table, counts too)
         let vis = comment_place::visible_area(rect, SCROLLBAR_W, ui.clip_rect(), ctx.content_rect());
         let col_right = shown.iter().map(|c| c.glyph.right()).fold(left + col_w, f32::max);
-        let slot = (self.comment_display == markise_engine::settings::CommentDisplay::Margin)
+        // cards only beside a reserved gutter (and only if it is on screen); else bubbles
+        let slot = self
+            .gutter
             .then(|| comment_place::margin_column(vis, col_right))
             .flatten();
         let use_margin = slot.is_some();
