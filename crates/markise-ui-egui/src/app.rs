@@ -1893,7 +1893,9 @@ impl MarkiseApp {
         self.poll_save();
         self.poll_watcher();
         self.poll_themes(ctx);
-        self.export.poll();
+        if self.export.poll() && self.export.is_asking_large() {
+            self.opened_export_question();
+        }
         if self.images.poll(ctx)
             && let Some(d) = &mut self.doc
         {
@@ -2021,10 +2023,13 @@ impl MarkiseApp {
             }
             Some(Ask::CleanCopy { suggestions }) => Question::clean_copy(*suggestions),
             Some(Ask::ResetPrefs(s)) => Question::reset_settings(s.label()),
-            None => {
-                let req = self.export.pending_overwrite()?;
-                Question::export_overwrite(&req.output)
-            }
+            None => match self.export.pending_large() {
+                Some((_, est)) => Question::large_export(&est.human(), est.tocs),
+                None => {
+                    let req = self.export.pending_overwrite()?;
+                    Question::export_overwrite(&req.output)
+                }
+            },
         };
         Some(q.with_id(self.question_id))
     }
@@ -2072,6 +2077,11 @@ impl MarkiseApp {
             (Choice::RejectAll, Some(Ask::CleanCopy { .. })) => self.write_clean_copy(true),
             (Choice::Reset, Some(Ask::ResetPrefs(s))) => self.reset_preferences(s),
             (_, Some(_)) => {} // Cancel (or a choice the question does not offer)
+            (c, None) if self.export.is_asking_large() => {
+                if let Some(r) = self.export.answer_large(c == Choice::ExportAnyway) {
+                    self.start_export(r);
+                }
+            }
             (c, None) => {
                 if let Some(r) = self.export.answer_overwrite(c == Choice::Overwrite) {
                     self.start_export(r);

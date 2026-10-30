@@ -17,3 +17,6 @@ markise-export.workspace = true
 similar.workspace = true
 markise-theme.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -2042,11 +2042,13 @@ impl Flow<'_> {
 
     fn toc(&mut self, ctx: Ctx) {
         let t = self.t;
-        let headings = self.doc.headings.clone();
+        // the model's heading list is built once per export (`ExDoc::build`); borrow it
+        // rather than copying it for every `[toc]` (issue #29)
+        let doc = self.doc;
         let saved = self.node;
         self.node = self.tree.add(saved, SKind::Toc);
         let (ox0, ox1) = (self.x0, self.x1);
-        for h in &headings {
+        for h in &doc.headings {
             self.x0 = ox0 + self.u(18.0) * (h.level.saturating_sub(1)) as f32;
             let idx = self.link_targets.len();
             self.link_targets.push(LinkTarget::Anchor(h.id.clone()));
