@@ -770,26 +770,28 @@ fn stalled_job_times_out_and_later_pastes_proceed() {
     let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let (g, f) = (gate.clone(), first.clone());
-    h.state_mut().set_attach_job_test(
-        Duration::from_millis(300),
-        Some(Arc::new(move || {
-            if f.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                let (m, cv) = &*g;
-                let mut open = m.lock().unwrap();
-                while !*open {
-                    open = cv.wait(open).unwrap();
-                }
+    let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        if f.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let (m, cv) = &*g;
+            let mut open = m.lock().unwrap();
+            while !*open {
+                open = cv.wait(open).unwrap();
             }
-        })),
-    );
+        }
+    });
+    // no deadline while the queue order is checked (a short one could pass between two
+    // frames on a loaded machine: issue #42) …
+    h.state_mut()
+        .set_attach_job_test(common::HANG_GUARD, Some(hook.clone()));
     h.event(Event::PasteImage(image()));
     h.step();
     h.event(Event::Paste("https://example.com/later.png".into()));
     h.step();
     assert_eq!(text(&h), NOTE, "the URL paste waits behind the stalled job");
-    let t = Instant::now();
+    // … then a short one: the stalled job is given up
+    h.state_mut()
+        .set_attach_job_test(Duration::from_millis(300), Some(hook));
     wait_until(&mut h, "deadline", |a| !a.is_attaching());
-    assert!(t.elapsed() < Duration::from_secs(5));
     assert!(text(&h).contains("![](https://example.com/later.png)"), "{}", text(&h));
     assert!(!text(&h).contains("Pasted"));
     assert!(
@@ -855,7 +857,7 @@ fn save_as_during_a_pending_job_links_the_written_file() {
     let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let g = gate.clone();
     h.state_mut().set_attach_job_test(
-        Duration::from_secs(20),
+        common::HANG_GUARD, // the job is released by the test, never given up
         Some(Arc::new(move || {
             let (m, cv) = &*g;
             let mut open = m.lock().unwrap();
