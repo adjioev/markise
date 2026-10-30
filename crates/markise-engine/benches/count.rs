@@ -1,5 +1,6 @@
-//! `count-1mb` / `count-10mb` (issue #53): word counting on the UI thread in per-frame budgets
-//! ([`FRAME_BYTES`] and 2 ms, as the status bar uses them) — the first count of the corpus
+//! `count-1mb` / `count-10mb` (issue #53): word counting on the UI thread in per-frame byte
+//! budgets ([`FRAME_BYTES`], as the status bar uses them for documents over 256 KB) — the first
+//! count of the corpus
 //! (calls, longest call) and the work after a keystroke ([`DocCounter::reconcile`] against
 //! the edited model + counting the changed block).
 //!
@@ -8,7 +9,7 @@
 use std::time::{Duration, Instant};
 
 use markise_corpus::generate;
-use markise_engine::count::{Budget, DocCounter, FRAME_BYTES};
+use markise_engine::count::{DocCounter, FRAME_BYTES};
 use markise_layout::DocModel;
 use markise_md::{Document, ParseOptions};
 
@@ -32,11 +33,7 @@ fn main() {
             (0, Duration::ZERO, Duration::ZERO, Duration::ZERO);
         loop {
             let (t, cpu) = (Instant::now(), thread_cpu());
-            let budget = Budget {
-                bytes: FRAME_BYTES,
-                until: Some(t + Duration::from_millis(2)),
-            };
-            let done = c.fill(&doc, &model, budget);
+            let done = c.fill(&doc, &model, FRAME_BYTES);
             let (e, ec) = (t.elapsed(), thread_cpu() - cpu);
             calls += 1;
             longest = longest.max(e);
@@ -65,13 +62,14 @@ fn main() {
         println!(
             "count-{mb}mb: {} items, {words} words; first count: {calls} frames, CPU {cpu_total:?} in all, \
              longest frame {longest:?} (CPU {longest_cpu:?}); after a keystroke: reconcile {:?} (CPU {:?}), \
-             {} block(s) {:?} (CPU {:?})",
+             {} block(s) {:?} (CPU {:?}); approximate: {}",
             model.items.len(),
             reconciled.0,
             reconciled.1,
             c.stats().blocks_counted - before.blocks_counted,
             filled.0,
             filled.1,
+            c.total().unwrap().is_approx(),
         );
     }
 }

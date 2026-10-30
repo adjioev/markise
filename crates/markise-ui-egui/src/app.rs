@@ -1147,18 +1147,6 @@ impl MarkiseApp {
         (self.doc.as_ref()?.id == *id).then(|| w.stats())
     }
 
-    /// Overrides the word count's per-frame time budget for the open document (tests; the
-    /// per-frame byte budget still applies).
-    pub fn set_word_count_frame_time(&mut self, t: std::time::Duration) {
-        let Some(d) = &self.doc else { return };
-        if self.word_count.as_ref().is_none_or(|(id, _)| *id != d.id) {
-            self.word_count = Some((d.id, Default::default()));
-        }
-        if let Some((_, w)) = &mut self.word_count {
-            w.set_frame_time(t);
-        }
-    }
-
     /// View → Toolbar.
     pub fn set_show_toolbar(&mut self, on: bool) {
         self.themes.set_show_toolbar(on);

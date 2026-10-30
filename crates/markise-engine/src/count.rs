@@ -22,57 +22,44 @@
 //! (those scripts do not separate words with spaces), while Hangul words are space separated
 //! and count normally. Emoji and punctuation are not words.
 //!
+//! **Estimates (documented approximation).** A block whose source is larger than
+//! [`BIG_BLOCK`] (a pathological single paragraph, table or code block) is not parsed: its
+//! counts are estimated from its byte length (characters ≈ bytes, words ≈ bytes / 6;
+//! [`estimate`]) and marked with [`Counts::approx`], which the status bar shows as `~`. A
+//! selection whose fully selected middle spans more than [`EXACT_ITEMS`] items on both sides
+//! (it is neither small nor almost the whole document) is estimated from the document's
+//! counts in proportion to its bytes, also marked. Documents of normal-sized blocks are
+//! counted exactly.
+//!
 //! **Incremental, bounded counting.** [`DocCounter`] keeps one [`Counts`] per *block* (a leaf
 //! block of the document; the view model may split a large block into several items, which
 //! share the block's count) and matches blocks to the view model by the items'
 //! offset-independent content hashes. [`DocCounter::reconcile`] compares the current model
-//! with the last one (common prefix and suffix of keys, integer compares only) and forgets
-//! only the blocks in between; [`DocCounter::fill`] counts forgotten blocks reading the
-//! document's text in place, within a [`Budget`] of source bytes and time per call, and resumes
-//! inside a block that is larger than that. A block up to [`PIECE_BYTES`] is parsed as a
-//! whole (exact inline context); a larger one is parsed in pieces of about that size, cut at
-//! line breaks or whitespace runs (the cut whitespace is added back), so inline markup that
-//! spans a cut of a huge block can be counted approximately. Selections are counted the same
-//! way ([`DocCounter::selection`]): whole blocks from the cache, the partly selected blocks
-//! at both ends within the byte budget.
+//! with the last one (common prefix and suffix of keys: integer compares, no text read) and
+//! forgets only the blocks in between; [`DocCounter::fill`] counts forgotten blocks reading the
+//! document's text in place, about a byte budget per call (each block is at most
+//! [`BIG_BLOCK`]). [`DocCounter::selection`] reads at most the two partly selected blocks.
 //!
 //! Reference definitions are a document-level input: when one is added, removed or changed,
 //! every block that may use a reference (its source has a `[`) is counted again.
 
 use std::ops::{Add, AddAssign, Range, Sub, SubAssign};
-use std::time::Instant;
 
 use markise_doc::{CriticKind, FormatDoc, InlineKind, InlineNode, InlineSource, RichInline, Span};
 use markise_layout::DocModel;
 use markise_layout::model::ItemKind;
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Source bytes [`DocCounter::fill`] / [`DocCounter::selection`] read at most per call (a
-/// frame), plus at most one piece.
-pub const FRAME_BYTES: usize = 256 * 1024;
-/// Blocks up to this size are parsed whole; larger ones in pieces of about this size.
-pub const PIECE_BYTES: usize = 32 * 1024;
-
-/// How much one [`DocCounter::fill`] / [`DocCounter::selection`] call may read: source bytes
-/// and, optionally, a deadline (checked between pieces). The first piece is always read, so
-/// every call makes progress.
-#[derive(Clone, Copy, Debug)]
-pub struct Budget {
-    pub bytes: usize,
-    pub until: Option<Instant>,
-}
-
-impl From<usize> for Budget {
-    fn from(bytes: usize) -> Budget {
-        Budget { bytes, until: None }
-    }
-}
-
-impl Budget {
-    fn spent(&self, bytes: usize) -> bool {
-        bytes >= self.bytes || self.until.is_some_and(|t| Instant::now() >= t)
-    }
-}
+/// Blocks with a larger source are estimated, not parsed.
+pub const BIG_BLOCK: usize = 64 * 1024;
+/// Source bytes [`DocCounter::fill`] reads per call of the status bar (a frame), plus at most
+/// one block.
+pub const FRAME_BYTES: usize = 32 * 1024;
+/// A selection's fully selected middle is summed exactly when it, or the rest of the
+/// document, spans at most this many items; otherwise it is estimated.
+pub const EXACT_ITEMS: usize = 4096;
+/// Average bytes per word of the estimate.
+const BYTES_PER_WORD: u64 = 6;
 
 /// Reading speed used for the reading time.
 pub const WORDS_PER_MINUTE: u64 = 200;
@@ -85,12 +72,20 @@ pub struct Counts {
     pub chars: u64,
     /// Grapheme clusters that are not whitespace.
     pub chars_no_spaces: u64,
+    /// Number of estimated parts included (blocks larger than [`BIG_BLOCK`], very large
+    /// selections); the UI marks such counts with `~`.
+    pub approx: u64,
 }
 
 impl Counts {
     /// Reading time in whole minutes at [`WORDS_PER_MINUTE`] (rounded up; 0 without words).
     pub fn reading_minutes(&self) -> u64 {
         self.words.div_ceil(WORDS_PER_MINUTE)
+    }
+
+    /// Whether an estimate is included.
+    pub fn is_approx(&self) -> bool {
+        self.approx > 0
     }
 
     /// Counts of rendered prose (words and characters).
@@ -100,6 +95,7 @@ impl Counts {
             words: count_words(text),
             chars,
             chars_no_spaces,
+            approx: 0,
         }
     }
 
@@ -110,6 +106,7 @@ impl Counts {
             words: 0,
             chars,
             chars_no_spaces,
+            approx: 0,
         }
     }
 }
@@ -127,6 +124,7 @@ impl AddAssign for Counts {
         self.words += o.words;
         self.chars += o.chars;
         self.chars_no_spaces += o.chars_no_spaces;
+        self.approx += o.approx;
     }
 }
 
@@ -143,6 +141,7 @@ impl SubAssign for Counts {
         self.words = self.words.saturating_sub(o.words);
         self.chars = self.chars.saturating_sub(o.chars);
         self.chars_no_spaces = self.chars_no_spaces.saturating_sub(o.chars_no_spaces);
+        self.approx = self.approx.saturating_sub(o.approx);
     }
 }
 
@@ -262,7 +261,7 @@ fn rendered(r: &RichInline, nodes: &[InlineNode], base: usize, clip: Option<&Ran
     }
 }
 
-/// Where a raw HTML block's text scan is (it continues across pieces).
+/// Where the scan of a raw HTML block is (it continues across the block's lines).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Strip {
     #[default]
@@ -271,34 +270,39 @@ enum Strip {
     Comment,
 }
 
-/// Appends the text of raw HTML `src` without its tags and comments (`st` carries the scan
-/// state between calls).
-fn strip_tags(src: &str, st: &mut Strip, out: &mut String) {
-    let mut i = 0;
+/// Appends the text of one line of a raw HTML block (`src`, starting at absolute offset
+/// `base`) without tags and comments; `st` carries the scan state from the block's start.
+/// With `clip`, only text whose source lies inside it is emitted (tags are always skipped,
+/// so a clip starting inside a tag emits nothing of it).
+fn strip_tags(src: &str, base: usize, st: &mut Strip, clip: Option<&Range<usize>>, out: &mut String) {
     let b = src.as_bytes();
+    let keep = |at: usize| clip.is_none_or(|c| c.contains(&(base + at)));
+    let mut i = 0;
     while i < b.len() {
         match *st {
             Strip::Text => {
-                let Some(k) = src[i..].find('<') else {
-                    out.push_str(&src[i..]);
-                    return;
-                };
-                out.push_str(&src[i..i + k]);
-                i += k;
-                let next = b.get(i + 1).copied();
-                if src[i..].starts_with("<!--") {
-                    *st = Strip::Comment;
-                    // a tag separates words like a space would (`<br>`, `</p><p>`)
-                    out.push('\n');
-                    i += 4;
-                } else if next.is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, b'/' | b'!' | b'?')) {
-                    *st = Strip::Tag;
-                    out.push('\n');
-                    i += 1;
-                } else {
-                    out.push('<');
-                    i += 1;
+                if b[i] == b'<' {
+                    if src[i..].starts_with("<!--") {
+                        *st = Strip::Comment;
+                        // a tag separates words like a space would (`<br>`, `</p><p>`)
+                        out.push('\n');
+                        i += 4;
+                        continue;
+                    }
+                    if b.get(i + 1)
+                        .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, b'/' | b'!' | b'?'))
+                    {
+                        *st = Strip::Tag;
+                        out.push('\n');
+                        i += 1;
+                        continue;
+                    }
                 }
+                let ch = src[i..].chars().next().unwrap_or(' ');
+                if keep(i) {
+                    out.push(ch);
+                }
+                i += ch.len_utf8();
             }
             Strip::Tag => match src[i..].find('>') {
                 Some(k) => {
@@ -359,228 +363,146 @@ enum Kind {
     Nothing,
 }
 
-/// Counting one block, resumable between calls: its units (content lines, or table rows) are
-/// read in pieces of at most about [`PIECE_BYTES`].
-#[derive(Debug)]
-struct BlockWork {
-    /// Items `first..end` of the model show the block.
-    first: usize,
-    end: usize,
-    kind: Kind,
-    units: Vec<Span>,
-    /// A prose block small enough to parse as a whole.
-    whole: bool,
-    next: usize,
-    /// Bytes of `units[next]` already read (a unit longer than a piece).
-    offset: usize,
-    acc: Counts,
-    clip: Option<Range<usize>>,
-    strip: Strip,
-    /// The block's source has a `[` (it may use a reference definition).
+fn kind_of(k: &ItemKind) -> Kind {
+    match k {
+        ItemKind::Paragraph | ItemKind::Heading { .. } => Kind::Prose,
+        ItemKind::Code { .. } => Kind::Code,
+        ItemKind::Html => Kind::Html,
+        ItemKind::Table => Kind::Table,
+        _ => Kind::Nothing,
+    }
+}
+
+/// The estimate for `bytes` of source of a block of `kind` (see the module docs).
+fn estimate_kind(kind: Kind, bytes: usize) -> Counts {
+    let b = bytes as u64;
+    match kind {
+        Kind::Nothing => Counts::default(),
+        Kind::Code => Counts {
+            words: 0,
+            chars: b,
+            chars_no_spaces: b - b / BYTES_PER_WORD,
+            approx: 1,
+        },
+        _ => Counts {
+            words: b / BYTES_PER_WORD,
+            chars: b,
+            chars_no_spaces: b - b / BYTES_PER_WORD,
+            approx: 1,
+        },
+    }
+}
+
+/// The estimate for a prose block of `bytes` bytes (characters ≈ bytes, words ≈ bytes / 6).
+pub fn estimate(bytes: usize) -> Counts {
+    estimate_kind(Kind::Prose, bytes)
+}
+
+/// A counted block: its counts, whether it may use reference definitions, source bytes read.
+struct Counted {
+    counts: Counts,
     refs: bool,
+    read: usize,
 }
 
-/// One piece of a block: the spans to read and the source bytes it covers.
-struct Piece {
-    spans: Vec<Span>,
-    bytes: usize,
-}
-
-impl BlockWork {
-    fn new(doc: &dyn FormatDoc, model: &DocModel, first: usize, end: usize, clip: Option<Range<usize>>) -> Self {
-        let start = model.item_start(first);
-        let lines = || doc.leaf(start).map(|l| l.lines).unwrap_or_default();
-        let (kind, units) = match model.items.get(first).map(|it| &it.kind) {
-            Some(ItemKind::Paragraph | ItemKind::Heading { .. }) => (Kind::Prose, lines()),
-            Some(ItemKind::Code { .. }) => (Kind::Code, lines()),
-            Some(ItemKind::Html) => (Kind::Html, lines()),
-            Some(ItemKind::Table) => match doc.table(start) {
-                // rows: 0 = header, 1 = delimiter row, 2.. = body (as the layout draws them)
-                Some(t) => (
-                    Kind::Table,
-                    t.rows
-                        .first()
-                        .into_iter()
-                        .chain(t.rows.iter().skip(2))
-                        .copied()
-                        .collect(),
-                ),
-                None => (Kind::Nothing, Vec::new()),
-            },
-            _ => (Kind::Nothing, Vec::new()),
+/// Counts the block whose first item is `first` (with `clip`, only the part inside it).
+/// Reads at most [`BIG_BLOCK`] bytes: a larger block is estimated from its span length
+/// without looking at its text or structure.
+fn count_block_at(doc: &dyn FormatDoc, model: &DocModel, first: usize, clip: Option<&Range<usize>>) -> Counted {
+    let span = model.item_span(first);
+    let kind = model.items.get(first).map_or(Kind::Nothing, |it| kind_of(&it.kind));
+    let none = Counted {
+        counts: Counts::default(),
+        refs: false,
+        read: 0,
+    };
+    if kind == Kind::Nothing {
+        return none;
+    }
+    let part = match clip {
+        Some(c) => c.end.min(span.end).saturating_sub(c.start.max(span.start)),
+        None => span.len(),
+    };
+    if span.len() > BIG_BLOCK {
+        return Counted {
+            counts: estimate_kind(kind, part),
+            ..none
         };
-        let bytes: usize = units.iter().map(|u| u.len()).sum();
-        BlockWork {
-            first,
-            end,
-            whole: kind == Kind::Prose && bytes <= PIECE_BYTES,
-            kind,
-            units,
-            next: 0,
-            offset: 0,
-            acc: Counts::default(),
-            clip,
-            strip: Strip::default(),
-            refs: false,
+    }
+    let text = doc.text();
+    let overlaps = |sp: &Span| {
+        clip.is_none_or(|c| (sp.start < c.end && sp.end > c.start) || (sp.is_empty() && c.contains(&sp.start)))
+    };
+    let trim = |sp: &Span| match clip {
+        Some(c) => text
+            .get(c.start.max(sp.start)..c.end.min(sp.end).max(c.start.max(sp.start)))
+            .unwrap_or(""),
+        None => sp.slice(text),
+    };
+    let mut out = String::new();
+    let mut refs = false;
+    let counts = match kind {
+        Kind::Prose => {
+            let lines = doc.leaf(span.start).map(|l| l.lines).unwrap_or_default();
+            if lines.is_empty() || !lines.iter().any(overlaps) {
+                return none;
+            }
+            refs = lines.iter().any(|l| l.slice(text).contains('['));
+            let base = lines[0].start;
+            let r = doc.inline(InlineSource::Lines(&lines), base);
+            rendered(&r, &r.nodes, base, clip, &mut out);
+            Counts::of_text(&out)
         }
-    }
-
-    fn in_clip(&self, at: usize) -> bool {
-        self.clip.as_ref().is_none_or(|c| c.contains(&at))
-    }
-
-    fn overlaps_clip(&self, sp: Span) -> bool {
-        self.clip
-            .as_ref()
-            .is_none_or(|c| (sp.start < c.end && sp.end > c.start) || (sp.is_empty() && c.contains(&sp.start)))
-    }
-
-    /// The next piece, or `None` when the block is done. Cut whitespace is added to the
-    /// characters here (it is lost when the pieces are parsed separately).
-    fn next_piece(&mut self, text: &str) -> Option<Piece> {
-        if self.whole {
-            self.whole = false;
-            self.next = self.units.len();
-            let bytes = self.units.iter().map(|u| u.len()).sum();
-            return (!self.units.is_empty()).then(|| Piece {
-                spans: self.units.clone(),
-                bytes,
-            });
-        }
-        let mut spans = Vec::new();
-        let mut bytes = 0;
-        while self.next < self.units.len() {
-            let u = self.units[self.next];
-            let rest = Span::new(u.start + self.offset, u.end);
-            if !self.overlaps_clip(rest) {
-                self.next += 1;
-                self.offset = 0;
-                continue;
-            }
-            if bytes + rest.len() <= PIECE_BYTES || (spans.is_empty() && self.kind == Kind::Table) {
-                spans.push(rest);
-                bytes += rest.len();
-                self.next += 1;
-                self.offset = 0;
-                continue;
-            }
-            if !spans.is_empty() {
-                break;
-            }
-            // one unit longer than a piece: cut it, at a whitespace run where possible
-            let s = rest.slice(text);
-            let max = floor_boundary(s, PIECE_BYTES).max(s.chars().next().map_or(1, char::len_utf8));
-            let ws = |c: char| c == ' ' || c == '\t';
-            let mut cut = (max, max);
-            if self.kind != Kind::Code
-                && let Some(k) = s[..max].rfind(ws).filter(|&k| k >= max / 2)
+        Kind::Code => {
+            for l in doc
+                .leaf(span.start)
+                .map(|l| l.lines)
+                .unwrap_or_default()
+                .iter()
+                .filter(|l| overlaps(l))
             {
-                let a = s[..k].trim_end_matches(ws).len();
-                let b = k + s[k..].len() - s[k..].trim_start_matches(ws).len();
-                if a > 0 {
-                    cut = (a, b);
-                }
+                out.push_str(trim(l));
+                out.push('\n');
             }
-            spans.push(Span::new(rest.start, rest.start + cut.0));
-            bytes += cut.1;
-            self.offset += cut.1;
-            if cut.1 > cut.0 && self.in_clip(rest.start + cut.0) {
-                let n = s[cut.0..cut.1].chars().count() as u64;
-                self.acc.chars += n;
-            }
-            break;
+            Counts::of_code(&out)
         }
-        if spans.is_empty() {
-            return None;
+        Kind::Html => {
+            // scanned from the block's start so tags and comments are known at the clip
+            let mut st = Strip::default();
+            for l in doc.leaf(span.start).map(|l| l.lines).unwrap_or_default() {
+                strip_tags(l.slice(text), l.start, &mut st, clip, &mut out);
+                out.push('\n');
+            }
+            Counts::of_text(&decode_entities(&out))
         }
-        // a prose piece ending at a line end with more lines to come: the soft break between
-        // them shows as a space
-        if self.kind == Kind::Prose
-            && self.offset == 0
-            && self.next < self.units.len()
-            && let Some(last) = spans.last()
-            && self.in_clip(last.end)
-        {
-            self.acc.chars += 1;
-        }
-        Some(Piece { spans, bytes })
-    }
-
-    fn count_piece(&mut self, doc: &dyn FormatDoc, p: &Piece) {
-        let text = doc.text();
-        let clip = self.clip.as_ref();
-        let trim = |sp: &Span| match clip {
-            Some(c) => text
-                .get(c.start.max(sp.start)..c.end.min(sp.end).max(c.start.max(sp.start)))
-                .unwrap_or(""),
-            None => sp.slice(text),
-        };
-        let mut out = String::new();
-        match self.kind {
-            Kind::Prose => {
-                self.refs |= p.spans.iter().any(|sp| sp.slice(text).contains('['));
-                let base = p.spans[0].start;
-                let r = doc.inline(InlineSource::Lines(&p.spans), base);
-                rendered(&r, &r.nodes, base, clip, &mut out);
-                self.acc += Counts::of_text(&out);
-            }
-            Kind::Code => {
-                for sp in &p.spans {
-                    out.push_str(trim(sp));
-                    out.push('\n');
-                }
-                self.acc += Counts::of_code(&out);
-            }
-            Kind::Html => {
-                let mut st = self.strip;
-                for sp in &p.spans {
-                    strip_tags(trim(sp), &mut st, &mut out);
-                    out.push('\n');
-                }
-                self.strip = st;
-                self.acc += Counts::of_text(&decode_entities(&out));
-            }
-            Kind::Table => {
-                for row in &p.spans {
-                    self.refs |= row.slice(text).contains('[');
-                    for cell in doc.table_row_cells(*row) {
-                        if !self.overlaps_clip(cell) {
-                            continue;
-                        }
-                        let r = doc.inline(
-                            InlineSource::Cell {
-                                span: cell,
-                                cap: usize::MAX,
-                            },
-                            cell.start,
-                        );
-                        rendered(&r, &r.nodes, cell.start, clip, &mut out);
-                        out.push('\n');
+        Kind::Table => {
+            let Some(t) = doc.table(span.start) else { return none };
+            // rows: 0 = header, 1 = delimiter row, 2.. = body (as the layout draws them)
+            for row in t.rows.first().into_iter().chain(t.rows.iter().skip(2)) {
+                refs |= row.slice(text).contains('[');
+                for cell in doc.table_row_cells(*row) {
+                    if !overlaps(&cell) {
+                        continue;
                     }
+                    let r = doc.inline(
+                        InlineSource::Cell {
+                            span: cell,
+                            cap: usize::MAX,
+                        },
+                        cell.start,
+                    );
+                    rendered(&r, &r.nodes, cell.start, clip, &mut out);
+                    out.push('\n');
                 }
-                self.acc += Counts::of_text(&out);
             }
-            Kind::Nothing => {}
+            Counts::of_text(&out)
         }
-    }
-
-    /// Reads pieces until `*spent` reaches `budget` (always at least one piece); `true` when
-    /// the block is done.
-    fn step(&mut self, doc: &dyn FormatDoc, budget: Budget, spent: &mut usize, first_piece: &mut bool) -> bool {
-        loop {
-            if !self.whole && self.next >= self.units.len() {
-                return true;
-            }
-            if !*first_piece && budget.spent(*spent) {
-                return false;
-            }
-            let Some(p) = self.next_piece(doc.text()) else {
-                return true;
-            };
-            *first_piece = false;
-            *spent += p.bytes;
-            self.count_piece(doc, &p);
-        }
+        Kind::Nothing => Counts::default(),
+    };
+    Counted {
+        counts,
+        refs,
+        read: span.len(),
     }
 }
 
@@ -615,12 +537,9 @@ fn block_bounds(model: &DocModel, i: usize) -> (usize, usize) {
     (f, e)
 }
 
-/// Counts of the block that item `i` of `model` (built for `doc`) belongs to, read at once.
+/// Counts of the block that item `i` of `model` (built for `doc`) belongs to.
 pub fn count_block(doc: &dyn FormatDoc, model: &DocModel, i: usize) -> Counts {
-    let (f, e) = block_bounds(model, i);
-    let mut w = BlockWork::new(doc, model, f, e, None);
-    w.step(doc, usize::MAX.into(), &mut 0, &mut true);
-    w.acc
+    count_block_at(doc, model, block_bounds(model, i).0, None).counts
 }
 
 /// Counts of the whole document at once (tests and tools).
@@ -628,8 +547,8 @@ pub fn count_document(doc: &dyn FormatDoc, model: &DocModel) -> Counts {
     let mut acc = Counts::default();
     let mut i = 0;
     while i < model.items.len() {
-        let (_, e) = block_bounds(model, i);
-        acc += count_block(doc, model, i);
+        let (f, e) = block_bounds(model, i);
+        acc += count_block_at(doc, model, f, None).counts;
         i = e;
     }
     acc
@@ -654,18 +573,6 @@ const DEF: u8 = 1;
 /// Item flag: its block may use a reference definition.
 const REFS: u8 = 2;
 
-/// A selection being counted: whole blocks from the cache, the partly selected blocks at both
-/// ends counted with a clip.
-#[derive(Debug)]
-struct SelWork {
-    range: Range<usize>,
-    /// Counts known so far (cached whole blocks, finished partial blocks).
-    acc: Counts,
-    /// Items `a..b` lie fully inside; added from prefix sums once the document is counted.
-    middle: Option<(usize, usize)>,
-    jobs: Vec<BlockWork>,
-}
-
 /// Incremental document counts (see the module docs): one cached [`Counts`] per block, kept on
 /// the block's first view-model item (its other items hold zero), matched to the model by
 /// content hash.
@@ -681,11 +588,8 @@ pub struct DocCounter {
     missing: usize,
     /// Every item before it is counted.
     cursor: usize,
-    /// The block being counted.
-    work: Option<BlockWork>,
-    sel: Option<SelWork>,
-    /// Prefix sums of `counts` (selection counts), built when complete and needed.
-    prefix: Option<Vec<Counts>>,
+    /// The last selection's counts.
+    sel: Option<(Range<usize>, Counts)>,
     stats: CounterStats,
 }
 
@@ -718,7 +622,7 @@ impl DocCounter {
     /// Matches `model` against the model of the last call: blocks whose items are all in the
     /// common prefix and suffix (same content hash and length) keep their counts, the others
     /// are forgotten (and, when a reference definition changed, every block that may use
-    /// one). O(items) comparisons of two integers; no text is read.
+    /// one). Comparisons of two integers per unchanged item; no text is read.
     pub fn reconcile(&mut self, model: &DocModel) {
         let items = &model.items;
         let n = items.len();
@@ -780,136 +684,119 @@ impl DocCounter {
             }
         }
         self.cursor = self.cursor.min(lo);
-        self.work = None;
         self.sel = None;
-        self.prefix = None;
         debug_assert_eq!(self.keys.len(), n);
         debug_assert_eq!(self.counts.len(), n);
     }
 
-    fn record(&mut self, spent: usize) {
-        self.stats.bytes_read += spent as u64;
-        self.stats.max_call_bytes = self.stats.max_call_bytes.max(spent as u64);
+    fn record(&mut self, read: usize) {
+        self.stats.bytes_read += read as u64;
+        self.stats.max_call_bytes = self.stats.max_call_bytes.max(read as u64);
     }
 
-    /// Counts forgotten blocks of `model` (reconciled, built for `doc`) within `budget` (plus
-    /// one piece); `true` when every block is counted.
-    pub fn fill(&mut self, doc: &dyn FormatDoc, model: &DocModel, budget: impl Into<Budget>) -> bool {
-        let budget = budget.into();
+    /// Counts forgotten blocks of `model` (reconciled, built for `doc`) until about `budget`
+    /// source bytes are read (at least one block, each at most [`BIG_BLOCK`]); `true` when
+    /// every block is counted.
+    pub fn fill(&mut self, doc: &dyn FormatDoc, model: &DocModel, budget: usize) -> bool {
         let n = model.items.len();
         if self.counts.len() != n {
             return false;
         }
-        let mut spent = 0;
-        let mut first_piece = true;
-        while self.missing > 0 {
-            if self.work.is_none() {
-                while self.cursor < n && self.counts[self.cursor].is_some() {
-                    self.cursor += 1;
-                }
-                if self.cursor >= n {
-                    break;
-                }
-                let (f, e) = block_bounds(model, self.cursor);
-                self.work = Some(BlockWork::new(doc, model, f, e, None));
+        let mut read = 0;
+        let mut first = true;
+        while self.missing > 0 && (first || read < budget) {
+            while self.cursor < n && self.counts[self.cursor].is_some() {
+                self.cursor += 1;
             }
-            let Some(w) = self.work.as_mut() else { break };
-            if !w.step(doc, budget, &mut spent, &mut first_piece) {
+            if self.cursor >= n {
                 break;
             }
-            let Some(w) = self.work.take() else { break };
-            for i in w.first..w.end {
-                let c = if i == w.first { w.acc } else { Counts::default() };
-                if self.counts[i].replace(c).is_none() {
+            let (f, e) = block_bounds(model, self.cursor);
+            let c = count_block_at(doc, model, f, None);
+            for i in f..e {
+                let v = if i == f { c.counts } else { Counts::default() };
+                if self.counts[i].replace(v).is_none() {
                     self.missing -= 1;
                 }
-                self.flags[i] = (self.flags[i] & !REFS) | if w.refs { REFS } else { 0 };
+                self.flags[i] = (self.flags[i] & !REFS) | if c.refs { REFS } else { 0 };
             }
-            self.known += w.acc;
+            self.known += c.counts;
             self.stats.blocks_counted += 1;
-            self.cursor = w.end;
+            read += c.read;
+            first = false;
+            self.cursor = e;
         }
-        self.record(spent);
+        self.record(read);
         self.missing == 0
     }
 
     /// Counts of the source byte range `sel` of the document (reconciled `model` built for
-    /// `doc`) within `budget` per call: whole blocks from the cache, the partly selected blocks
-    /// at both ends with a clip. `None` until done (call again next frame; a large selection
-    /// also needs the document's counts complete).
-    pub fn selection(
-        &mut self,
-        doc: &dyn FormatDoc,
-        model: &DocModel,
-        sel: Range<usize>,
-        budget: impl Into<Budget>,
-    ) -> Option<Counts> {
-        let budget = budget.into();
-        if model.items.is_empty() || sel.is_empty() {
+    /// `doc`, all blocks counted — else `None`): whole blocks from the cache, the partly
+    /// selected blocks at both ends with a clip (at most [`BIG_BLOCK`] each). A fully selected
+    /// middle of more than [`EXACT_ITEMS`] items, when the rest of the document is that large
+    /// too, is estimated in proportion to its bytes (marked approximate). The result is kept
+    /// until the selection or the document changes.
+    pub fn selection(&mut self, doc: &dyn FormatDoc, model: &DocModel, sel: Range<usize>) -> Option<Counts> {
+        let n = model.items.len();
+        if n == 0 || sel.is_empty() {
             return Some(Counts::default());
         }
-        if self.counts.len() != model.items.len() {
+        let total = self.total()?;
+        if self.counts.len() != n {
             return None;
         }
-        if self.sel.as_ref().is_none_or(|s| s.range != sel) {
-            let a = model.item_at_offset(sel.start);
-            let b = model.item_at_offset(sel.end.saturating_sub(1).max(sel.start));
-            let ends = [block_bounds(model, a), block_bounds(model, b)];
-            let mut w = SelWork {
-                range: sel.clone(),
-                acc: Counts::default(),
-                middle: (ends[1].0 > ends[0].1).then_some((ends[0].1, ends[1].0)),
-                jobs: Vec::new(),
-            };
-            for (k, &(f, e)) in ends.iter().enumerate() {
-                if k == 1 && ends[1] == ends[0] {
-                    break;
-                }
-                let span = model.item_span(f);
-                match self.counts[f] {
-                    Some(c) if sel.start <= span.start && span.end <= sel.end => w.acc += c,
-                    _ => w.jobs.push(BlockWork::new(doc, model, f, e, Some(sel.clone()))),
-                }
-            }
-            self.sel = Some(w);
+        if let Some((r, c)) = &self.sel
+            && *r == sel
+        {
+            return Some(*c);
         }
-        let mut spent = 0;
-        let mut first_piece = true;
-        let missing = self.missing;
-        let w = self.sel.as_mut()?;
-        while let Some(j) = w.jobs.last_mut() {
-            if !j.step(doc, budget, &mut spent, &mut first_piece) {
+        let a = model.item_at_offset(sel.start);
+        let b = model.item_at_offset(sel.end.saturating_sub(1).max(sel.start));
+        let ends = [block_bounds(model, a), block_bounds(model, b)];
+        let mut acc = Counts::default();
+        let mut read = 0;
+        for (k, &(f, _)) in ends.iter().enumerate() {
+            if k == 1 && ends[1] == ends[0] {
                 break;
             }
-            w.acc += j.acc;
-            w.jobs.pop();
-            self.stats.blocks_counted += 1;
-        }
-        let done = w.jobs.is_empty();
-        let acc = w.acc;
-        let middle = w.middle;
-        self.record(spent);
-        if !done {
-            return None;
-        }
-        let Some((a, b)) = middle else {
-            return Some(acc);
-        };
-        if missing > 0 {
-            return None;
-        }
-        let counts = &self.counts;
-        let prefix = self.prefix.get_or_insert_with(|| {
-            let mut p = Vec::with_capacity(counts.len() + 1);
-            let mut s = Counts::default();
-            p.push(s);
-            for c in counts {
-                s += c.unwrap_or_default();
-                p.push(s);
+            let span = model.item_span(f);
+            match self.counts[f] {
+                Some(c) if sel.start <= span.start && span.end <= sel.end => acc += c,
+                _ => {
+                    let c = count_block_at(doc, model, f, Some(&sel));
+                    acc += c.counts;
+                    read += c.read;
+                    self.stats.blocks_counted += 1;
+                }
             }
-            p
-        });
-        Some(acc + (prefix[b] - prefix[a]))
+        }
+        let (ma, mb) = (ends[0].1, ends[1].0);
+        if mb > ma {
+            let sum = |r: Range<usize>, counts: &[Option<Counts>]| {
+                counts[r]
+                    .iter()
+                    .fold(Counts::default(), |s, c| s + c.unwrap_or_default())
+            };
+            if mb - ma <= EXACT_ITEMS {
+                acc += sum(ma..mb, &self.counts);
+            } else if ma + (n - mb) <= EXACT_ITEMS {
+                acc += total - sum(0..ma, &self.counts) - sum(mb..n, &self.counts);
+            } else {
+                // proportional to the middle's share of the document's bytes
+                let bytes = (model.item_start(mb) - model.item_start(ma)) as u128;
+                let len = doc.text().len().max(1) as u128;
+                let part = |v: u64| (v as u128 * bytes / len) as u64;
+                acc += Counts {
+                    words: part(total.words),
+                    chars: part(total.chars),
+                    chars_no_spaces: part(total.chars_no_spaces),
+                    approx: 1,
+                };
+            }
+        }
+        self.record(read);
+        self.sel = Some((sel, acc));
+        Some(acc)
     }
 }
 
@@ -1073,7 +960,7 @@ mod tests {
 
     fn sel(src: &str, a: usize, b: usize) -> Counts {
         let (doc, model, mut c) = counted(src);
-        c.selection(&doc, &model, a..b, usize::MAX).unwrap()
+        c.selection(&doc, &model, a..b).unwrap()
     }
 
     #[test]
@@ -1089,6 +976,7 @@ mod tests {
         assert!(c.fill(&doc, &model, usize::MAX));
         assert_eq!(c.total(), Some(count_document(&doc, &model)));
         assert_eq!(c.total().unwrap().words, 300 * 6);
+        assert!(!c.total().unwrap().is_approx(), "normal documents are exact");
         let before = c.stats().blocks_counted;
         assert_eq!(before, 300);
 
@@ -1120,85 +1008,68 @@ mod tests {
     }
 
     #[test]
-    fn fill_reads_at_most_its_byte_budget_per_call_and_resumes() {
+    fn fill_reads_about_its_byte_budget_per_call_and_resumes() {
         let src = "Some words here.\n\n".repeat(20_000);
         let (doc, model) = md(&src);
         let mut c = DocCounter::new();
         c.reconcile(&model);
-        let mut calls = 0;
+        let mut calls = 1;
         while !c.fill(&doc, &model, 4096) {
             calls += 1;
             assert!(calls < 100_000);
         }
         assert!(calls > 10, "a small budget takes several calls: {calls}");
-        assert!(c.stats().max_call_bytes <= 4096 + PIECE_BYTES as u64);
+        assert!(c.stats().max_call_bytes <= 4096 + BIG_BLOCK as u64);
         assert_eq!(c.total().unwrap().words, 20_000 * 3);
-    }
-
-    #[test]
-    fn a_passed_deadline_still_reads_one_piece_per_call() {
-        let src = "Some words here.\n\n".repeat(20_000);
-        let (doc, model) = md(&src);
+        // a zero budget still counts one block per call
+        let (doc, model) = md("One.\n\nTwo.\n");
         let mut c = DocCounter::new();
         c.reconcile(&model);
-        let past = Budget {
-            bytes: usize::MAX,
-            until: Some(Instant::now()),
-        };
-        assert!(!c.fill(&doc, &model, past));
-        assert_eq!(c.stats().blocks_counted, 1, "one piece (one small block)");
-        assert!(c.fill(&doc, &model, usize::MAX));
-        assert_eq!(c.total().unwrap().words, 20_000 * 3);
+        assert!(!c.fill(&doc, &model, 0));
+        assert!(c.fill(&doc, &model, 0));
     }
 
-    /// Review P1-1: one huge block (a heading of hundreds of KB) is counted in pieces across calls, never
-    /// in one go, and the result matches a whole count of the same text.
+    /// Review round 2: a block larger than [`BIG_BLOCK`] (a huge heading, table or code block)
+    /// is estimated from its length, not parsed, and marked approximate; so are selections in
+    /// it. Normal blocks next to it stay exact.
     #[test]
-    fn a_huge_single_block_is_counted_in_pieces() {
-        let body = "lorem ipsum dolor sit amet ".repeat(16_000); // ~430 KB, one line
-        let src = format!("# {body}\n");
-        let (doc, model) = md(&src);
-        assert_eq!(model.items.len(), 1);
-        let mut c = DocCounter::new();
-        c.reconcile(&model);
-        let mut calls = 1;
-        while !c.fill(&doc, &model, FRAME_BYTES) {
-            calls += 1;
+    fn huge_blocks_are_estimated_and_marked() {
+        let body = "lorem ipsum dolor sit amet ".repeat(4_000); // ~108 KB, one line
+        let src = format!("# {body}\n\nTwo words.\n");
+        let (doc, model, mut c) = counted(&src);
+        let t = c.total().unwrap();
+        assert!(t.is_approx());
+        let span = model.item_span(0).len();
+        assert_eq!(t.words, estimate(span).words + 2);
+        assert_eq!(t.chars, span as u64 + "Two words.".len() as u64);
+        assert_eq!(
+            c.stats().bytes_read,
+            "Two words.".len() as u64,
+            "the huge block is not read"
+        );
+        // a selection inside it: estimated from the selected bytes
+        let s = c.selection(&doc, &model, 2..2 + 600).unwrap();
+        assert!(s.is_approx());
+        assert_eq!(s.words, 100);
+        // the exact paragraph alone
+        let a = src.find("Two").unwrap();
+        let s = c.selection(&doc, &model, a..a + 3).unwrap();
+        assert!(!s.is_approx());
+        assert_eq!(s.words, 1);
+        // a huge table and a huge code block: estimated without being parsed
+        let mut table = String::from("| a | b |\n|---|---|\n");
+        while table.len() <= BIG_BLOCK {
+            table.push_str("| cell text | more text here |\n");
         }
-        assert!(calls >= 2, "430 KB at 256 KB per call: {calls} calls");
-        assert!(c.stats().max_call_bytes <= (FRAME_BYTES + PIECE_BYTES) as u64);
-        let t = c.total().unwrap();
-        assert_eq!(t.words, 80_000);
-        let trimmed = body.trim_end();
-        assert_eq!(t.chars, trimmed.len() as u64, "cut whitespace is added back");
-        assert_eq!(t.chars_no_spaces, trimmed.replace(' ', "").len() as u64);
-        // a huge paragraph of many lines: the soft breaks between pieces count as spaces
-        let lines = "word word\n".repeat(10_000);
-        let (doc, model) = md(&lines);
-        let mut c = DocCounter::new();
-        c.reconcile(&model);
-        while !c.fill(&doc, &model, FRAME_BYTES) {}
-        let t = c.total().unwrap();
-        assert_eq!(t.words, 20_000);
-        assert_eq!(t.chars, (lines.len() - 1) as u64);
-        // selections inside the huge block are bounded too
-        let src2 = format!("# {body}\n");
-        let (doc, model) = md(&src2);
-        let mut c = DocCounter::new();
-        c.reconcile(&model);
-        while !c.fill(&doc, &model, FRAME_BYTES) {}
-        let (a, b) = (2 + 6, src2.len() - 1 - 6); // "ipsum … sit"
-        let before = c.stats().max_call_bytes;
-        let mut calls = 1;
-        let s = loop {
-            if let Some(s) = c.selection(&doc, &model, a..b, FRAME_BYTES) {
-                break s;
-            }
-            calls += 1;
-        };
-        assert!(calls >= 2, "{calls}");
-        assert!(c.stats().max_call_bytes.max(before) <= (FRAME_BYTES + PIECE_BYTES) as u64);
-        assert_eq!(s.words, 80_000 - 2, "all but the first and the last word");
+        let c = count(&table);
+        assert!(c.is_approx());
+        let code = format!("```\n{}```\n", "let x = 1;\n".repeat(8_000));
+        let c = count(&code);
+        assert!(c.is_approx());
+        assert_eq!(c.words, 0, "code has no words");
+        // math is never text, however large
+        let math = format!("$$\n{}$$\n", "x^2 + y^2\n".repeat(8_000));
+        assert_eq!(count(&math), Counts::default());
     }
 
     /// Review P2-3: a block split into layout segments is counted as one block (inline context
@@ -1241,23 +1112,30 @@ mod tests {
         let a = src.find("| row350 |").unwrap() + 2;
         let s = sel(&src, a, a + "row350".len());
         assert_eq!((s.words, s.chars), (1, 6));
-        // across rows of different segments
         let b = src.find("cell360").unwrap() + "cell360".len();
-        let s = sel(&src, a, b);
-        assert_eq!(s.words, 11 * 2);
+        assert_eq!(sel(&src, a, b).words, 11 * 2);
     }
 
-    /// Review P2-5: partial selections cut inline code and HTML lines to the selection.
+    /// Review P2-5 / round 2 P2-7: partial selections cut inline code, code lines and the
+    /// text of raw HTML (after its tags are removed, scanned from the block's start).
     #[test]
     fn partial_selections_cut_code_spans_and_html() {
         let src = "x `abcdef` y\n";
         let a = src.find("bcd").unwrap();
-        let s = sel(src, a, a + 3);
-        assert_eq!(s.chars, 3);
+        assert_eq!(sel(src, a, a + 3).chars, 3);
         let src = "<div>\nalpha beta gamma\n</div>\n";
         let a = src.find("beta").unwrap();
         let s = sel(src, a, a + 4);
         assert_eq!((s.words, s.chars), (1, 4));
+        // a clip starting inside a tag counts none of the tag
+        let src = "<p class=\"note\">hello world</p>\n";
+        let a = src.find("note").unwrap();
+        let b = src.find("world").unwrap();
+        assert_eq!(sel(src, a, b).chars_no_spaces, "hello".len() as u64);
+        // a comment spanning lines, clip inside it
+        let src = "<!-- one\ntwo -->\n<p>three four</p>\n";
+        let a = src.find("two").unwrap();
+        assert_eq!(sel(src, a, src.len()).words, 2);
         let src = "```\nlet value = 1;\n```\n";
         let a = src.find("value").unwrap();
         assert_eq!(sel(src, a, a + 5).chars, 5);
@@ -1284,9 +1162,7 @@ mod tests {
     /// Review P2-8: entities in raw HTML count as the characters they show.
     #[test]
     fn html_entities_are_decoded() {
-        let c = count("<p>a &amp; b &#233; &lt;</p>\n");
-        assert_eq!(c.chars, "a & b é <".len() as u64 - 1, "é is one character");
-        assert_eq!(c.chars, 9);
+        assert_eq!(count("<p>a &amp; b &#233; &lt;</p>\n").chars, 9, "a & b é <");
         assert_eq!(
             count("<p>AT&T &unknown; x</p>\n").chars,
             "AT&T &unknown; x".len() as u64
@@ -1301,7 +1177,7 @@ mod tests {
         let b = src.find("eta theta").unwrap() + 3;
         assert_eq!(sel(src, a, b).words, 2 + 2 + 2);
         let (doc, model, mut c) = counted(src);
-        assert_eq!(c.selection(&doc, &model, 0..src.len(), usize::MAX), c.total());
+        assert_eq!(c.selection(&doc, &model, 0..src.len()), c.total());
         let s = sel(src, a, a + 2);
         assert_eq!((s.words, s.chars), (1, 2));
         // markers inside the selection are not counted
@@ -1309,21 +1185,38 @@ mod tests {
         assert_eq!(sel(src, 0, src.len() - 1).chars, "Some bold text.".len() as u64);
     }
 
+    /// Review round 2 P2-3: selection sums are bounded: a middle of up to [`EXACT_ITEMS`]
+    /// items (or one whose complement is that small, like Select All) is exact; a middle and
+    /// complement both larger are estimated from the byte share and marked.
     #[test]
-    fn large_selection_uses_prefix_sums() {
-        let src = "One two three.\n\n".repeat(500);
+    fn large_selections_are_exact_or_marked_estimates() {
+        let n = 4 * EXACT_ITEMS;
+        let src = "One two three.\n\n".repeat(n);
         let (doc, model) = md(&src);
         let mut c = DocCounter::new();
         c.reconcile(&model);
-        assert_eq!(
-            c.selection(&doc, &model, 0..src.len() - 2, usize::MAX),
-            None,
-            "the middle needs the document counted"
-        );
-        c.fill(&doc, &model, usize::MAX);
+        assert_eq!(c.selection(&doc, &model, 0..10), None, "needs the document counted");
+        assert!(c.fill(&doc, &model, usize::MAX));
         let before = c.stats().blocks_counted;
-        let s = c.selection(&doc, &model, 4..src.len() - 9, usize::MAX).unwrap();
-        assert_eq!(s.words, 500 * 3 - 2);
-        assert_eq!(c.stats().blocks_counted - before, 2, "only the two partial blocks");
+        // almost everything: exact through the complement
+        let s = c.selection(&doc, &model, 4..src.len() - 9).unwrap();
+        assert!(!s.is_approx());
+        assert_eq!(s.words, n as u64 * 3 - 2);
+        assert_eq!(
+            c.stats().blocks_counted - before,
+            2,
+            "only the two partial blocks are read"
+        );
+        // a small middle: exact
+        let p = 16;
+        let s = c.selection(&doc, &model, 0..p * 100).unwrap();
+        assert!(!s.is_approx());
+        assert_eq!(s.words, 300);
+        // the middle half: estimated, close to the truth
+        let q = src.len() / 4;
+        let s = c.selection(&doc, &model, q..3 * q).unwrap();
+        assert!(s.is_approx());
+        let truth = 2 * EXACT_ITEMS as u64 * 3;
+        assert!(s.words.abs_diff(truth) <= 6, "{} vs {truth}", s.words);
     }
 }

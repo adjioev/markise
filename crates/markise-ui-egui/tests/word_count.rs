@@ -11,7 +11,7 @@ use egui::{Event, Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use markise_doc::Selection;
-use markise_engine::count::{FRAME_BYTES, PIECE_BYTES};
+use markise_engine::count::{BIG_BLOCK, FRAME_BYTES};
 use markise_engine::settings::CountMode;
 use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp};
 
@@ -204,8 +204,6 @@ fn copies(h: &mut H) -> u64 {
 fn typing_in_a_ten_megabyte_document_recounts_only_the_edited_block() {
     let big = markise_corpus::generate(10 << 20, 7);
     let mut h = open("big", &big, None);
-    // a debug build's frames are slow: a larger time budget, the same byte budget per frame
-    h.state_mut().set_word_count_frame_time(Duration::from_millis(500));
     let copies_before = copies(&mut h);
     let t = Instant::now();
     let mut frames = 0;
@@ -215,13 +213,13 @@ fn typing_in_a_ten_megabyte_document_recounts_only_the_edited_block() {
     });
     eprintln!("10 MB: first count shown after {:?} ({frames} frames)", t.elapsed());
     let before = h.state().word_count_stats().expect("counting");
-    let budget = (FRAME_BYTES + PIECE_BYTES) as u64;
+    let budget = (FRAME_BYTES + BIG_BLOCK) as u64;
     assert!(
         before.max_call_bytes <= budget,
         "per-frame counting stays within the byte budget: {before:?}"
     );
     assert!(
-        frames >= big.len() / (FRAME_BYTES + PIECE_BYTES),
+        frames >= big.len() / (FRAME_BYTES + BIG_BLOCK),
         "counted across frames: {frames}"
     );
     assert!(before.bytes_read <= big.len() as u64, "each byte read once: {before:?}");
