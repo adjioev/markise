@@ -122,11 +122,37 @@ Show comments, and a switch in the comments panel header):
 - `margin` (default): its body is a rounded card in the right margin, aligned with its line
   (cards stack downwards when they would overlap): bubble icon, `@author` (from the `@name:`
   prefix) in bold, then the text in the normal-weight UI font, wrapped at about 240 pt, line
-  breaks kept. A thin connector in the margin and the comment tint link it to its line. When the
-  margin is too narrow (under ~190 pt) the bubbles behaviour applies.
+  breaks kept. A thin connector in the margin and the comment tint link it to its line.
+  Cards do not depend on the theme's column width (owner decision, issue #91): while the
+  document contains at least one comment, a **comment gutter** of 260 pt (points, so it scales
+  with the zoom) is reserved at the right of the document surface, and the content column
+  lays out and centres in the remaining width (as word processors do with their comments
+  pane). Without comments the gutter is not reserved and the layout is unchanged. Whether the
+  document has comments is tracked incrementally, never copying the text: a new document
+  (open, reload, re-parse) is scanned in place from the start until the first comment, in
+  chunks of at most 256 KB or 2 ms per frame; after an edit nothing is looked at unless the
+  edit is review-relevant (the removed or inserted text, with 3 bytes of context on each side,
+  holds `{>>`, `<<}`, a line break, a backtick, `~~~`, `$$`, HTML at a line start or `<!--`;
+  ordinary typing, even inside a comment, is not). Then the edit's own leaf is checked first
+  (inserting a comment turns the answer to yes without a scan), and only otherwise is the
+  chunked scan run again (deleting a comment: was it the last?). Any edit drops a running
+  scan, which then starts over. The triggers are only the fast path: once the document has
+  been idle for 2 s and was edited since its last full scan, the chunked scan runs again
+  (this catches what no trigger sees, e.g. unindenting a code line that holds a comment), so
+  the answer is never stale for more than a few seconds. Evaluations start at most every
+  0.4 s, so the layout does not jump per keystroke: the gutter appears shortly after the
+  first comment and is released shortly after the last one goes. A gutter change is applied
+  only on a frame without pointer presses, releases or a held button, so a click is never
+  hit-tested against the geometry of two different column widths.
+  When the window is too narrow (the surface
+  without its scrollbar, i.e. window minus sidebar, would leave under 420 pt beside the
+  gutter) no gutter is reserved and the bubbles behaviour applies. Cards are only placed in
+  the part of the surface that is actually visible (window and clip edge, scrollbar
+  excluded); if the visible room right of the column is under 190 pt, bubbles apply too.
 - `bubbles`: only the glyph; resting the pointer on it for 150 ms opens a non-modal popover card
   (same look) that stays while the pointer is on the glyph or the card and closes when it
-  leaves.
+  leaves. The popover opens below the glyph and flips left or up near the visible area's
+  edges, so it always stays on screen.
 - A click on the glyph or the card puts the caret at the end of the comment's text (its source
   is revealed for editing); in bubbles mode the popover stays pinned until Esc.
 - Only the visible items' comments are looked at and only shown cards are shaped (layout

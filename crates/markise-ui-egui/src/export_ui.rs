@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use markise_engine::export::{ExportDone, ExportJob, ExportKind, ExportRequest, spawn_export};
+use markise_engine::export::{ExportDone, ExportJob, ExportKind, ExportRequest, HtmlSize, spawn_export};
 
 use crate::app::MarkiseApp;
 
@@ -38,6 +38,9 @@ pub struct ExportUi {
     /// The (document, destination) pair for which overwriting without the dialog was
     /// confirmed; any other document or destination asks again (spec 04: warns once).
     overwrite_ok_for: Option<(Option<PathBuf>, PathBuf)>,
+    /// An HTML export that stopped before writing because it would be very large (issue
+    /// #29), waiting for "Export Anyway" / Cancel.
+    pending_large: Option<(ExportRequest, HtmlSize)>,
 }
 
 impl ExportUi {
@@ -68,6 +71,27 @@ impl ExportUi {
         Some(req)
     }
 
+    /// A size confirmation is waiting (issue #29).
+    pub fn is_asking_large(&self) -> bool {
+        self.pending_large.is_some()
+    }
+
+    /// The export waiting for its size confirmation, with its size.
+    pub(crate) fn pending_large(&self) -> Option<&(ExportRequest, HtmlSize)> {
+        self.pending_large.as_ref()
+    }
+
+    /// "Export Anyway" returns the request to run again without the size limit; Cancel
+    /// drops it (nothing was written).
+    pub(crate) fn answer_large(&mut self, export: bool) -> Option<ExportRequest> {
+        let (mut req, _) = self.pending_large.take()?;
+        if !export {
+            return None;
+        }
+        req.confirm_html_above = None;
+        Some(req)
+    }
+
     /// Format label of the previous export, if any ("Export with Previous (PDF)").
     pub fn previous_label(&self) -> Option<String> {
         self.last.as_ref().map(|r| r.kind.label())
@@ -87,6 +111,17 @@ impl ExportUi {
         };
         let label = job.label.clone();
         self.job = None;
+        if let Ok(ExportDone {
+            too_large: Some(est), ..
+        }) = &res
+        {
+            // nothing written yet: ask (the app shows the question), then run it again
+            if let Some(req) = self.last.clone() {
+                self.pending_large = Some((req, *est));
+            }
+            self.message = None;
+            return true;
+        }
         self.message = Some(match res {
             Ok(done) => ExportMessage::Done {
                 text: done_text(&label, &done),

@@ -1,0 +1,1247 @@
+//! Word and character counts of a document's rendered text (status bar, issue #53).
+//!
+//! **What counts.** The text a reader sees, not the source:
+//!
+//! - Markup is never counted: emphasis/heading/list/quote markers, backticks, link targets
+//!   and titles, image syntax (images count nothing, not even their alt text), footnote
+//!   references, inline and block HTML tags, CriticMarkup delimiters.
+//! - Front matter, link reference definitions, `[toc]`, thematic breaks, diagrams and math
+//!   (inline and display; its TeX source is not visible text) count nothing.
+//! - **Fenced and indented code blocks count toward characters but not words** (their text is
+//!   visible, but it is not prose); inline code counts like other text.
+//! - CriticMarkup is counted *as if accepted*: insertions, the new side of substitutions and
+//!   highlights count; deletions, the old side of substitutions and comments do not.
+//! - Table cells count like paragraphs (the delimiter row does not).
+//! - Raw HTML blocks count the text between their tags, entities decoded (`&amp;` is `&`).
+//!
+//! **Units.** *Characters* are extended grapheme clusters (an emoji with modifiers is one
+//! character), line breaks excluded; a soft line break inside a paragraph shows as a space
+//! and counts as one. *Characters without spaces* also drop whitespace. *Words* follow
+//! Unicode word segmentation (UAX #29, `unicode-segmentation`): a word is a segment with a
+//! letter or digit; each Han, Hiragana, Katakana or Bopomofo character counts as one word
+//! (those scripts do not separate words with spaces), while Hangul words are space separated
+//! and count normally. Emoji and punctuation are not words.
+//!
+//! **Estimates (documented approximation).** A block whose source is larger than
+//! [`BIG_BLOCK`] (a pathological single paragraph, table or code block) is not parsed: its
+//! counts are estimated from its byte length (characters ≈ bytes, words ≈ bytes / 6;
+//! [`estimate`]) and marked with [`Counts::approx`], which the status bar shows as `~`. A
+//! selection whose fully selected middle spans more than [`EXACT_ITEMS`] items on both sides
+//! (it is neither small nor almost the whole document) is estimated from the document's
+//! counts in proportion to its bytes, also marked. Documents of normal-sized blocks are
+//! counted exactly.
+//!
+//! **Incremental, bounded counting.** [`DocCounter`] keeps one [`Counts`] per *block* (a leaf
+//! block of the document; the view model may split a large block into several items, which
+//! share the block's count) and matches blocks to the view model by the items'
+//! offset-independent content hashes. [`DocCounter::reconcile`] compares the current model
+//! with the last one (common prefix and suffix of keys: integer compares, no text read) and
+//! forgets only the blocks in between; [`DocCounter::fill`] counts forgotten blocks reading the
+//! document's text in place, about a byte budget per call (each block is at most
+//! [`BIG_BLOCK`]). [`DocCounter::selection`] reads at most the two partly selected blocks.
+//!
+//! Reference definitions are a document-level input: when one is added, removed or changed,
+//! every block that may use a reference (its source has a `[`) is counted again.
+
+use std::ops::{Add, AddAssign, Range, Sub, SubAssign};
+
+use markise_doc::{CriticKind, FormatDoc, InlineKind, InlineNode, InlineSource, RichInline, Span};
+use markise_layout::DocModel;
+use markise_layout::model::ItemKind;
+use unicode_segmentation::UnicodeSegmentation;
+
+/// Blocks with a larger source are estimated, not parsed.
+pub const BIG_BLOCK: usize = 64 * 1024;
+/// Source bytes [`DocCounter::fill`] reads per call of the status bar (a frame), plus at most
+/// one block.
+pub const FRAME_BYTES: usize = 32 * 1024;
+/// A selection's fully selected middle is summed exactly when it, or the rest of the
+/// document, spans at most this many items; otherwise it is estimated.
+pub const EXACT_ITEMS: usize = 4096;
+/// Average bytes per word of the estimate.
+const BYTES_PER_WORD: u64 = 6;
+
+/// Reading speed used for the reading time.
+pub const WORDS_PER_MINUTE: u64 = 200;
+
+/// Counts of a piece of rendered text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub words: u64,
+    /// Grapheme clusters, line breaks excluded.
+    pub chars: u64,
+    /// Grapheme clusters that are not whitespace.
+    pub chars_no_spaces: u64,
+    /// Number of estimated parts included (blocks larger than [`BIG_BLOCK`], very large
+    /// selections); the UI marks such counts with `~`.
+    pub approx: u64,
+}
+
+impl Counts {
+    /// Reading time in whole minutes at [`WORDS_PER_MINUTE`] (rounded up; 0 without words).
+    pub fn reading_minutes(&self) -> u64 {
+        self.words.div_ceil(WORDS_PER_MINUTE)
+    }
+
+    /// Whether an estimate is included.
+    pub fn is_approx(&self) -> bool {
+        self.approx > 0
+    }
+
+    /// Counts of rendered prose (words and characters).
+    pub fn of_text(text: &str) -> Counts {
+        let (chars, chars_no_spaces) = count_chars(text);
+        Counts {
+            words: count_words(text),
+            chars,
+            chars_no_spaces,
+            approx: 0,
+        }
+    }
+
+    /// Counts of visible text that is not prose (code): characters only.
+    pub fn of_code(text: &str) -> Counts {
+        let (chars, chars_no_spaces) = count_chars(text);
+        Counts {
+            words: 0,
+            chars,
+            chars_no_spaces,
+            approx: 0,
+        }
+    }
+}
+
+impl Add for Counts {
+    type Output = Counts;
+    fn add(mut self, o: Counts) -> Counts {
+        self += o;
+        self
+    }
+}
+
+impl AddAssign for Counts {
+    fn add_assign(&mut self, o: Counts) {
+        self.words += o.words;
+        self.chars += o.chars;
+        self.chars_no_spaces += o.chars_no_spaces;
+        self.approx += o.approx;
+    }
+}
+
+impl Sub for Counts {
+    type Output = Counts;
+    fn sub(mut self, o: Counts) -> Counts {
+        self -= o;
+        self
+    }
+}
+
+impl SubAssign for Counts {
+    fn sub_assign(&mut self, o: Counts) {
+        self.words = self.words.saturating_sub(o.words);
+        self.chars = self.chars.saturating_sub(o.chars);
+        self.chars_no_spaces = self.chars_no_spaces.saturating_sub(o.chars_no_spaces);
+        self.approx = self.approx.saturating_sub(o.approx);
+    }
+}
+
+/// Han, Hiragana, Katakana and Bopomofo: scripts written without spaces between words, where
+/// each character counts as a word.
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x2E80..=0x2FDF      // CJK radicals, Kangxi radicals
+        | 0x3005..=0x3007    // 々 〆 〇
+        | 0x3021..=0x3029    // Hangzhou numerals
+        | 0x3038..=0x303B
+        | 0x3040..=0x30FF    // Hiragana, Katakana
+        | 0x3100..=0x312F    // Bopomofo
+        | 0x31A0..=0x31FF    // Bopomofo extended, CJK strokes, Katakana phonetic extensions
+        | 0x3400..=0x4DBF    // CJK extension A
+        | 0x4E00..=0x9FFF    // CJK unified ideographs
+        | 0xF900..=0xFAFF    // CJK compatibility ideographs
+        | 0xFF66..=0xFF9F    // halfwidth Katakana
+        | 0x20000..=0x3FFFF  // CJK extensions B and later, compatibility supplement
+    )
+}
+
+/// Words of `text` (see the module docs).
+pub fn count_words(text: &str) -> u64 {
+    let mut n = 0;
+    for w in text.unicode_words() {
+        // a segment mixing scripts: every CJK character is a word, every other run of
+        // letters/digits (with the punctuation UAX #29 keeps inside words) is one
+        let mut in_run = false;
+        for c in w.chars() {
+            if is_cjk(c) {
+                n += 1;
+                in_run = false;
+            } else if c.is_alphanumeric() && !in_run {
+                n += 1;
+                in_run = true;
+            }
+        }
+    }
+    n
+}
+
+/// `(characters, characters without whitespace)` of `text`, line breaks excluded.
+pub fn count_chars(text: &str) -> (u64, u64) {
+    let (mut all, mut solid) = (0, 0);
+    for g in text.graphemes(true) {
+        if g.chars().all(char::is_whitespace) {
+            if !g.chars().all(|c| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')) {
+                all += 1;
+            }
+        } else {
+            all += 1;
+            solid += 1;
+        }
+    }
+    (all, solid)
+}
+
+/// The largest char boundary of `s` at or below `i`.
+fn floor_boundary(s: &str, mut i: usize) -> usize {
+    i = i.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// The part of the rendered value `v` of a leaf whose source content is `cs..ce` (absolute)
+/// that lies inside `clip`: exact when the value maps byte for byte onto the content
+/// (plain text, most inline code), else proportional (entities, normalised code spans).
+fn clip_value<'a>(v: &'a str, cs: usize, ce: usize, clip: &Range<usize>) -> &'a str {
+    if clip.start <= cs && ce <= clip.end {
+        return v;
+    }
+    let (a, b) = (clip.start.max(cs) - cs, clip.end.min(ce).max(clip.start.max(cs)) - cs);
+    let len = ce - cs;
+    let (a, b) = if v.len() == len || len == 0 {
+        (a, b)
+    } else {
+        (a * v.len() / len, (b * v.len()).div_ceil(len))
+    };
+    let (a, b) = (floor_boundary(v, a), floor_boundary(v, b));
+    v.get(a..b.max(a)).unwrap_or("")
+}
+
+/// Appends the rendered text of `nodes` (offsets relative to `base`) to `out`; with `clip`
+/// (absolute), only the parts inside it.
+fn rendered(r: &RichInline, nodes: &[InlineNode], base: usize, clip: Option<&Range<usize>>, out: &mut String) {
+    for n in nodes {
+        let (s, e) = (base + n.source.start as usize, base + n.source.end as usize);
+        if let Some(c) = clip
+            && (e <= c.start || s >= c.end)
+            && !(s == e && s >= c.start && s < c.end)
+        {
+            continue;
+        }
+        match &n.kind {
+            InlineKind::Math { .. }
+            | InlineKind::Image { .. }
+            | InlineKind::FootnoteRef { .. }
+            | InlineKind::RawInline
+            | InlineKind::Critic(CriticKind::Delete | CriticKind::Old | CriticKind::Comment) => {}
+            InlineKind::Break { hard: false } => out.push(' '),
+            InlineKind::Break { hard: true } => out.push('\n'),
+            _ if !n.children.is_empty() => rendered(r, &n.children, base, clip, out),
+            _ => {
+                let v = r.value(n);
+                match clip {
+                    Some(c) => {
+                        let (cs, ce) = (base + n.content.start as usize, base + n.content.end as usize);
+                        out.push_str(clip_value(v, cs, ce, c));
+                    }
+                    None => out.push_str(v),
+                }
+            }
+        }
+    }
+}
+
+/// Where the scan of a raw HTML block is (it continues across the block's lines).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Strip {
+    #[default]
+    Text,
+    Tag,
+    Comment,
+}
+
+/// Appends the text of one line of a raw HTML block (`src`, starting at absolute offset
+/// `base`) without tags and comments; `st` carries the scan state from the block's start.
+/// With `clip`, only text whose source lies inside it is emitted (tags are always skipped,
+/// so a clip starting inside a tag emits nothing of it).
+fn strip_tags(src: &str, base: usize, st: &mut Strip, clip: Option<&Range<usize>>, out: &mut String) {
+    let b = src.as_bytes();
+    let keep = |at: usize| clip.is_none_or(|c| c.contains(&(base + at)));
+    let mut i = 0;
+    while i < b.len() {
+        match *st {
+            Strip::Text => {
+                if b[i] == b'<' {
+                    if src[i..].starts_with("<!--") {
+                        *st = Strip::Comment;
+                        // a tag separates words like a space would (`<br>`, `</p><p>`)
+                        out.push('\n');
+                        i += 4;
+                        continue;
+                    }
+                    if b.get(i + 1)
+                        .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, b'/' | b'!' | b'?'))
+                    {
+                        *st = Strip::Tag;
+                        out.push('\n');
+                        i += 1;
+                        continue;
+                    }
+                }
+                let ch = src[i..].chars().next().unwrap_or(' ');
+                if keep(i) {
+                    out.push(ch);
+                }
+                i += ch.len_utf8();
+            }
+            Strip::Tag => match src[i..].find('>') {
+                Some(k) => {
+                    *st = Strip::Text;
+                    i += k + 1;
+                }
+                None => return,
+            },
+            Strip::Comment => match src[i..].find("-->") {
+                Some(k) => {
+                    *st = Strip::Text;
+                    i += k + 3;
+                }
+                None => return,
+            },
+        }
+    }
+}
+
+/// `text` with HTML character references decoded (`&amp;` → `&`, `&#233;` → `é`).
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let end = rest
+            .char_indices()
+            .skip(1)
+            .take(33)
+            .find(|&(_, c)| !(c.is_ascii_alphanumeric() || c == '#'))
+            .filter(|&(k, c)| c == ';' && k > 1);
+        match end {
+            Some((k, _)) => {
+                out.push_str(&markise_md::inline::decode_entity(&rest[..=k]));
+                rest = &rest[k + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// What a block contributes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// Paragraphs and headings: inline-parsed text.
+    Prose,
+    /// Code blocks: characters only.
+    Code,
+    Html,
+    Table,
+    /// Nothing visible as text (math, diagrams, rules, front matter, definitions, `[toc]`).
+    Nothing,
+}
+
+fn kind_of(k: &ItemKind) -> Kind {
+    match k {
+        ItemKind::Paragraph | ItemKind::Heading { .. } => Kind::Prose,
+        ItemKind::Code { .. } => Kind::Code,
+        ItemKind::Html => Kind::Html,
+        ItemKind::Table => Kind::Table,
+        _ => Kind::Nothing,
+    }
+}
+
+/// The estimate for `bytes` of source of a block of `kind` (see the module docs).
+fn estimate_kind(kind: Kind, bytes: usize) -> Counts {
+    let b = bytes as u64;
+    match kind {
+        Kind::Nothing => Counts::default(),
+        Kind::Code => Counts {
+            words: 0,
+            chars: b,
+            chars_no_spaces: b - b / BYTES_PER_WORD,
+            approx: 1,
+        },
+        _ => Counts {
+            words: b / BYTES_PER_WORD,
+            chars: b,
+            chars_no_spaces: b - b / BYTES_PER_WORD,
+            approx: 1,
+        },
+    }
+}
+
+/// The estimate for a prose block of `bytes` bytes (characters ≈ bytes, words ≈ bytes / 6).
+pub fn estimate(bytes: usize) -> Counts {
+    estimate_kind(Kind::Prose, bytes)
+}
+
+/// A counted block: its counts, whether it may use reference definitions, source bytes read.
+struct Counted {
+    counts: Counts,
+    refs: bool,
+    read: usize,
+}
+
+/// Counts the block whose first item is `first` (with `clip`, only the part inside it).
+/// Reads at most [`BIG_BLOCK`] bytes: a larger block is estimated from its span length
+/// without looking at its text or structure.
+fn count_block_at(doc: &dyn FormatDoc, model: &DocModel, first: usize, clip: Option<&Range<usize>>) -> Counted {
+    let span = model.item_span(first);
+    let kind = model.items.get(first).map_or(Kind::Nothing, |it| kind_of(&it.kind));
+    let none = Counted {
+        counts: Counts::default(),
+        refs: false,
+        read: 0,
+    };
+    if kind == Kind::Nothing {
+        return none;
+    }
+    let part = match clip {
+        Some(c) => c.end.min(span.end).saturating_sub(c.start.max(span.start)),
+        None => span.len(),
+    };
+    if span.len() > BIG_BLOCK {
+        return Counted {
+            counts: estimate_kind(kind, part),
+            ..none
+        };
+    }
+    let text = doc.text();
+    let overlaps = |sp: &Span| {
+        clip.is_none_or(|c| (sp.start < c.end && sp.end > c.start) || (sp.is_empty() && c.contains(&sp.start)))
+    };
+    let trim = |sp: &Span| match clip {
+        Some(c) => text
+            .get(c.start.max(sp.start)..c.end.min(sp.end).max(c.start.max(sp.start)))
+            .unwrap_or(""),
+        None => sp.slice(text),
+    };
+    let mut out = String::new();
+    let mut refs = false;
+    let counts = match kind {
+        Kind::Prose => {
+            let lines = doc.leaf(span.start).map(|l| l.lines).unwrap_or_default();
+            if lines.is_empty() || !lines.iter().any(overlaps) {
+                return none;
+            }
+            refs = lines.iter().any(|l| l.slice(text).contains('['));
+            let base = lines[0].start;
+            let r = doc.inline(InlineSource::Lines(&lines), base);
+            rendered(&r, &r.nodes, base, clip, &mut out);
+            Counts::of_text(&out)
+        }
+        Kind::Code => {
+            for l in doc
+                .leaf(span.start)
+                .map(|l| l.lines)
+                .unwrap_or_default()
+                .iter()
+                .filter(|l| overlaps(l))
+            {
+                out.push_str(trim(l));
+                out.push('\n');
+            }
+            Counts::of_code(&out)
+        }
+        Kind::Html => {
+            // scanned from the block's start so tags and comments are known at the clip
+            let mut st = Strip::default();
+            for l in doc.leaf(span.start).map(|l| l.lines).unwrap_or_default() {
+                strip_tags(l.slice(text), l.start, &mut st, clip, &mut out);
+                out.push('\n');
+            }
+            Counts::of_text(&decode_entities(&out))
+        }
+        Kind::Table => {
+            let Some(t) = doc.table(span.start) else { return none };
+            // rows: 0 = header, 1 = delimiter row, 2.. = body (as the layout draws them)
+            for row in t.rows.first().into_iter().chain(t.rows.iter().skip(2)) {
+                refs |= row.slice(text).contains('[');
+                for cell in doc.table_row_cells(*row) {
+                    if !overlaps(&cell) {
+                        continue;
+                    }
+                    let r = doc.inline(
+                        InlineSource::Cell {
+                            span: cell,
+                            cap: usize::MAX,
+                        },
+                        cell.start,
+                    );
+                    rendered(&r, &r.nodes, cell.start, clip, &mut out);
+                    out.push('\n');
+                }
+            }
+            Counts::of_text(&out)
+        }
+        Kind::Nothing => Counts::default(),
+    };
+    Counted {
+        counts,
+        refs,
+        read: span.len(),
+    }
+}
+
+/// Item key: offset-independent content hash and length.
+pub type ItemKey = (u64, usize);
+
+fn item_key(it: &markise_layout::model::Item) -> ItemKey {
+    (it.content_hash, it.len)
+}
+
+/// Items `a` and `b` show the same block (segments of one large block).
+fn same_block(model: &DocModel, a: usize, b: usize) -> bool {
+    match (model.items.get(a), model.items.get(b)) {
+        (Some(x), Some(y)) => {
+            x.segment.is_some() && y.segment.is_some() && x.len == y.len && model.item_start(a) == model.item_start(b)
+        }
+        _ => false,
+    }
+}
+
+/// Items `first..end` of the block that item `i` belongs to.
+fn block_bounds(model: &DocModel, i: usize) -> (usize, usize) {
+    let n = model.items.len();
+    let mut f = i;
+    while f > 0 && same_block(model, f - 1, f) {
+        f -= 1;
+    }
+    let mut e = i + 1;
+    while e < n && same_block(model, e - 1, e) {
+        e += 1;
+    }
+    (f, e)
+}
+
+/// Counts of the block that item `i` of `model` (built for `doc`) belongs to.
+pub fn count_block(doc: &dyn FormatDoc, model: &DocModel, i: usize) -> Counts {
+    count_block_at(doc, model, block_bounds(model, i).0, None).counts
+}
+
+/// Counts of the whole document at once (tests and tools).
+pub fn count_document(doc: &dyn FormatDoc, model: &DocModel) -> Counts {
+    let mut acc = Counts::default();
+    let mut i = 0;
+    while i < model.items.len() {
+        let (f, e) = block_bounds(model, i);
+        acc += count_block_at(doc, model, f, None).counts;
+        i = e;
+    }
+    acc
+}
+
+/// Statistics of a [`DocCounter`] (tests prove that typing does not recount everything and
+/// that every call stays within its byte budget).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CounterStats {
+    /// Blocks counted (the document's and selections' partly selected blocks).
+    pub blocks_counted: u64,
+    /// Source bytes read.
+    pub bytes_read: u64,
+    /// The most source bytes one [`DocCounter::fill`] or [`DocCounter::selection`] call read.
+    pub max_call_bytes: u64,
+    /// [`DocCounter::reconcile`] calls that found a change.
+    pub reconciles: u64,
+}
+
+/// Item flag: a reference definition.
+const DEF: u8 = 1;
+/// Item flag: its block may use a reference definition.
+const REFS: u8 = 2;
+
+/// Incremental document counts (see the module docs): one cached [`Counts`] per block, kept on
+/// the block's first view-model item (its other items hold zero), matched to the model by
+/// content hash.
+#[derive(Debug, Default)]
+pub struct DocCounter {
+    /// Key of each item of the last reconciled model.
+    keys: Vec<ItemKey>,
+    counts: Vec<Option<Counts>>,
+    flags: Vec<u8>,
+    /// Sum of the known counts.
+    known: Counts,
+    /// Items not counted yet (a block's items are all counted or all not).
+    missing: usize,
+    /// Every item before it is counted.
+    cursor: usize,
+    /// The last selection's counts.
+    sel: Option<(Range<usize>, Counts)>,
+    stats: CounterStats,
+}
+
+impl DocCounter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn stats(&self) -> CounterStats {
+        self.stats
+    }
+
+    /// Items not counted yet.
+    pub fn missing(&self) -> usize {
+        self.missing
+    }
+
+    /// The document's counts once every block is counted.
+    pub fn total(&self) -> Option<Counts> {
+        (self.missing == 0).then_some(self.known)
+    }
+
+    fn forget(&mut self, i: usize) {
+        if let Some(c) = self.counts[i].take() {
+            self.known -= c;
+            self.missing += 1;
+        }
+    }
+
+    /// Call for every new revision of the document. Matches `model` against the model of the
+    /// last call: blocks whose items are all in the
+    /// common prefix and suffix (same content hash and length) keep their counts, the others
+    /// are forgotten (and, when a reference definition changed, every block that may use
+    /// one). Comparisons of two integers per unchanged item; no text is read.
+    pub fn reconcile(&mut self, model: &DocModel) {
+        // a new revision may move text between blocks without changing any block (blank
+        // lines): selection counts are by byte range, so they are always recomputed
+        self.sel = None;
+        let items = &model.items;
+        let n = items.len();
+        let old = self.keys.len();
+        let mut pre = 0;
+        for (it, k) in items.iter().zip(&self.keys) {
+            if item_key(it) != *k {
+                break;
+            }
+            pre += 1;
+        }
+        if pre == n && pre == old {
+            return;
+        }
+        let mut suf = 0;
+        let max_suf = n.min(old) - pre;
+        for (it, k) in items.iter().rev().zip(self.keys.iter().rev()) {
+            if suf >= max_suf || item_key(it) != *k {
+                break;
+            }
+            suf += 1;
+        }
+        self.stats.reconciles += 1;
+        let mut defs = false;
+        for (c, f) in self.counts.drain(pre..old - suf).zip(self.flags.drain(pre..old - suf)) {
+            defs |= f & DEF != 0;
+            match c {
+                Some(c) => self.known -= c,
+                None => self.missing -= 1,
+            }
+        }
+        let fresh = n - suf - pre;
+        let new: Vec<&markise_layout::model::Item> = items.iter().skip(pre).take(fresh).collect();
+        let new_flags: Vec<u8> = new
+            .iter()
+            .map(|it| if it.kind == ItemKind::Hidden { DEF } else { 0 })
+            .collect();
+        defs |= new_flags.iter().any(|f| f & DEF != 0);
+        self.keys.splice(pre..old - suf, new.iter().map(|it| item_key(it)));
+        self.counts.splice(pre..pre, std::iter::repeat_n(None, fresh));
+        self.flags.splice(pre..pre, new_flags);
+        self.missing += fresh;
+        // a block is counted as a whole: forget the rest of the blocks around the change
+        let (mut lo, mut hi) = (pre, pre + fresh);
+        while lo > 0 && lo < n && same_block(model, lo - 1, lo) {
+            lo -= 1;
+            self.forget(lo);
+        }
+        while hi > 0 && hi < n && same_block(model, hi - 1, hi) {
+            self.forget(hi);
+            hi += 1;
+        }
+        if defs {
+            for i in 0..n {
+                if self.flags[i] & REFS != 0 {
+                    self.forget(i);
+                    lo = lo.min(i);
+                }
+            }
+        }
+        self.cursor = self.cursor.min(lo);
+        self.sel = None;
+        debug_assert_eq!(self.keys.len(), n);
+        debug_assert_eq!(self.counts.len(), n);
+    }
+
+    fn record(&mut self, read: usize) {
+        self.stats.bytes_read += read as u64;
+        self.stats.max_call_bytes = self.stats.max_call_bytes.max(read as u64);
+    }
+
+    /// Counts forgotten blocks of `model` (reconciled, built for `doc`) until about `budget`
+    /// source bytes are read (at least one block, each at most [`BIG_BLOCK`]); `true` when
+    /// every block is counted.
+    pub fn fill(&mut self, doc: &dyn FormatDoc, model: &DocModel, budget: usize) -> bool {
+        let n = model.items.len();
+        if self.counts.len() != n {
+            return false;
+        }
+        let mut read = 0;
+        let mut first = true;
+        while self.missing > 0 && (first || read < budget) {
+            while self.cursor < n && self.counts[self.cursor].is_some() {
+                self.cursor += 1;
+            }
+            if self.cursor >= n {
+                break;
+            }
+            let (f, e) = block_bounds(model, self.cursor);
+            let c = count_block_at(doc, model, f, None);
+            for i in f..e {
+                let v = if i == f { c.counts } else { Counts::default() };
+                if self.counts[i].replace(v).is_none() {
+                    self.missing -= 1;
+                }
+                self.flags[i] = (self.flags[i] & !REFS) | if c.refs { REFS } else { 0 };
+            }
+            self.known += c.counts;
+            self.stats.blocks_counted += 1;
+            read += c.read;
+            first = false;
+            self.cursor = e;
+        }
+        self.record(read);
+        self.missing == 0
+    }
+
+    /// Counts of the source byte range `sel` of the document (reconciled `model` built for
+    /// `doc`, all blocks counted — else `None`): whole blocks from the cache, the partly
+    /// selected blocks at both ends with a clip (at most [`BIG_BLOCK`] each). A fully selected
+    /// middle of more than [`EXACT_ITEMS`] items, when the rest of the document is that large
+    /// too, is estimated in proportion to its bytes (marked approximate). The result is kept
+    /// until the selection or the document changes.
+    pub fn selection(&mut self, doc: &dyn FormatDoc, model: &DocModel, sel: Range<usize>) -> Option<Counts> {
+        let n = model.items.len();
+        if n == 0 || sel.is_empty() {
+            return Some(Counts::default());
+        }
+        let total = self.total()?;
+        if self.counts.len() != n {
+            return None;
+        }
+        if let Some((r, c)) = &self.sel
+            && *r == sel
+        {
+            return Some(*c);
+        }
+        let a = model.item_at_offset(sel.start);
+        let b = model.item_at_offset(sel.end.saturating_sub(1).max(sel.start));
+        let ends = [block_bounds(model, a), block_bounds(model, b)];
+        let mut acc = Counts::default();
+        let mut read = 0;
+        for (k, &(f, _)) in ends.iter().enumerate() {
+            if k == 1 && ends[1] == ends[0] {
+                break;
+            }
+            let span = model.item_span(f);
+            match self.counts[f] {
+                Some(c) if sel.start <= span.start && span.end <= sel.end => acc += c,
+                _ => {
+                    let c = count_block_at(doc, model, f, Some(&sel));
+                    acc += c.counts;
+                    read += c.read;
+                    self.stats.blocks_counted += 1;
+                }
+            }
+        }
+        let (ma, mb) = (ends[0].1, ends[1].0);
+        if mb > ma {
+            let sum = |r: Range<usize>, counts: &[Option<Counts>]| {
+                counts[r]
+                    .iter()
+                    .fold(Counts::default(), |s, c| s + c.unwrap_or_default())
+            };
+            if mb - ma <= EXACT_ITEMS {
+                acc += sum(ma..mb, &self.counts);
+            } else if ma + (n - mb) <= EXACT_ITEMS {
+                acc += total - sum(0..ma, &self.counts) - sum(mb..n, &self.counts);
+            } else {
+                // proportional to the middle's share of the document's bytes
+                let bytes = (model.item_start(mb) - model.item_start(ma)) as u128;
+                let len = doc.text().len().max(1) as u128;
+                let part = |v: u64| (v as u128 * bytes / len) as u64;
+                acc += Counts {
+                    words: part(total.words),
+                    chars: part(total.chars),
+                    chars_no_spaces: part(total.chars_no_spaces),
+                    approx: 1,
+                };
+            }
+        }
+        self.record(read);
+        self.sel = Some((sel, acc));
+        Some(acc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use markise_md::{Document, ParseOptions};
+
+    fn md(src: &str) -> (Document, std::sync::Arc<DocModel>) {
+        let doc = Document::parse(src, ParseOptions::default());
+        let model = DocModel::build(&doc, None);
+        (doc, model)
+    }
+
+    fn count(src: &str) -> Counts {
+        let (doc, model) = md(src);
+        count_document(&doc, &model)
+    }
+
+    fn words(src: &str) -> u64 {
+        count(src).words
+    }
+
+    #[test]
+    fn plain_words_and_characters() {
+        let c = count("Hello, world! It's 3.14 o'clock.\n");
+        assert_eq!(c.words, 5);
+        assert_eq!(c.chars, "Hello, world! It's 3.14 o'clock.".len() as u64);
+        assert_eq!(c.chars_no_spaces, "Hello,world!It's3.14o'clock.".len() as u64);
+        assert_eq!(count(""), Counts::default());
+    }
+
+    #[test]
+    fn markdown_syntax_is_not_counted() {
+        assert_eq!(count("# Title\n").chars, 5);
+        assert_eq!(count("## Title ##\n").chars, 5);
+        assert_eq!(words("**bold** and *em* and `code` and ~~gone~~\n"), 7);
+        assert_eq!(count("**bold**\n").chars, 4);
+        assert_eq!(count("`code`\n").chars, 4);
+        // link text counts, its target does not
+        assert_eq!(count("[the site](https://example.com/a/b \"Title\")\n").chars, 8);
+        assert_eq!(
+            words("see <https://example.com> now\n"),
+            4,
+            "an autolink's text is visible"
+        );
+        // images count nothing
+        assert_eq!(count("![alt text](pic.png)\n"), Counts::default());
+        // lists, quotes, task markers
+        assert_eq!(count("- one\n- two\n\n> three\n\n1. four\n- [ ] five\n").words, 5);
+        assert_eq!(count("- one\n- two\n").chars, 6);
+        // footnote references and definitions' labels
+        assert_eq!(words("Text[^1].\n\n[^1]: Note here.\n"), 3);
+        // a reference definition is hidden
+        assert_eq!(words("[a]: https://example.com\n"), 0);
+        // inline HTML tags are not text
+        assert_eq!(count("a <span class=\"x\">b</span> c\n").chars, 5);
+        // emphasis inside a word keeps the word whole
+        assert_eq!(words("un**believ**able\n"), 1);
+        // escapes and entities count as what they show
+        assert_eq!(count("\\*a\\* &amp;\n").chars, 5);
+        // thematic breaks and [toc]
+        assert_eq!(count("---\n\n[toc]\n\n# H\n").words, 1);
+    }
+
+    #[test]
+    fn soft_breaks_are_spaces_and_blocks_are_separate() {
+        let c = count("one\ntwo\n\nthree\n");
+        assert_eq!(c.words, 3);
+        // "one two" + "three": the soft break shows as a space; paragraph breaks do not count
+        assert_eq!(c.chars, 12);
+        assert_eq!(c.chars_no_spaces, 11);
+    }
+
+    #[test]
+    fn code_and_math_count_characters_but_not_words() {
+        let c = count("```rust\nlet x = 1;\n```\n");
+        assert_eq!(c.words, 0, "fenced code is not prose");
+        assert_eq!(c.chars, "let x = 1;".len() as u64);
+        assert_eq!(count("    indented code\n").words, 0);
+        assert_eq!(count("    indented code\n").chars, 13);
+        // math (display and inline) counts nothing
+        assert_eq!(count("$$\nx^2 + y^2\n$$\n"), Counts::default());
+        assert_eq!(words("area $\\pi r^2$ here\n"), 2);
+        // a diagram fence counts nothing
+        assert_eq!(count("```mermaid\ngraph TD; A-->B\n```\n"), Counts::default());
+    }
+
+    #[test]
+    fn front_matter_is_not_counted() {
+        assert_eq!(
+            words("---\ntitle: A long title here\ntags: [x, y]\n---\n\nBody text.\n"),
+            2
+        );
+    }
+
+    #[test]
+    fn criticmarkup_counts_as_if_accepted() {
+        assert_eq!(count("a {++new++} b\n").words, 3);
+        assert_eq!(count("a {--old--} b\n").words, 2);
+        assert_eq!(count("a {~~old~>new~~} b\n").words, 3);
+        assert_eq!(count("a {~~old~>new~~} b\n").chars, 7, "a new b");
+        assert_eq!(count("{==marked==}{>>a remark here<<}\n").words, 1);
+        assert_eq!(count("x {>>comment<<}\n").chars, 2, "x + space");
+    }
+
+    #[test]
+    fn tables_count_cells_not_pipes_or_delimiters() {
+        let c = count("| Name | Value |\n|---|:---:|\n| a b | c |\n");
+        assert_eq!(c.words, 5);
+        assert_eq!(c.chars_no_spaces, "NameValueabc".len() as u64);
+    }
+
+    #[test]
+    fn html_blocks_count_their_text() {
+        assert_eq!(words("<div class=\"note\">\n<p>Hello there</p>\n</div>\n"), 2);
+        assert_eq!(words("<!-- a hidden comment -->\n"), 0);
+    }
+
+    #[test]
+    fn cjk_characters_are_words() {
+        assert_eq!(words("日本語の文章\n"), 6);
+        assert_eq!(words("カタカナ\n"), 4);
+        assert_eq!(words("中文 English mix\n"), 4);
+        assert_eq!(words("我爱Rust语言\n"), 5);
+        // Hangul is written with spaces between words
+        assert_eq!(words("안녕하세요 세계\n"), 2);
+        let c = count("日本語\n");
+        assert_eq!((c.chars, c.chars_no_spaces), (3, 3));
+    }
+
+    #[test]
+    fn emoji_are_one_character_and_no_word() {
+        let c = count("I ❤️ Rust 👨‍👩‍👧‍👦\n");
+        assert_eq!(c.words, 2);
+        // I, space, heart, space, R-u-s-t, space, the family
+        assert_eq!(c.chars, 10);
+        let c = count("👍🏽\n");
+        assert_eq!((c.words, c.chars), (0, 1));
+    }
+
+    #[test]
+    fn reading_time_rounds_up() {
+        let c = |w| Counts {
+            words: w,
+            ..Default::default()
+        };
+        assert_eq!(c(0).reading_minutes(), 0);
+        assert_eq!(c(1).reading_minutes(), 1);
+        assert_eq!(c(200).reading_minutes(), 1);
+        assert_eq!(c(201).reading_minutes(), 2);
+    }
+
+    fn counted(src: &str) -> (Document, std::sync::Arc<DocModel>, DocCounter) {
+        let (doc, model) = md(src);
+        let mut c = DocCounter::new();
+        c.reconcile(&model);
+        assert!(c.fill(&doc, &model, usize::MAX));
+        (doc, model, c)
+    }
+
+    fn sel(src: &str, a: usize, b: usize) -> Counts {
+        let (doc, model, mut c) = counted(src);
+        c.selection(&doc, &model, a..b).unwrap()
+    }
+
+    #[test]
+    fn counter_matches_full_count_and_recounts_only_changed_blocks() {
+        let mut src = String::new();
+        for k in 0..300 {
+            src.push_str(&format!("Paragraph number {k} with *five* words.\n\n"));
+        }
+        let (doc, model) = md(&src);
+        let mut c = DocCounter::new();
+        c.reconcile(&model);
+        assert!(c.total().is_none());
+        assert!(c.fill(&doc, &model, usize::MAX));
+        assert_eq!(c.total(), Some(count_document(&doc, &model)));
+        assert_eq!(c.total().unwrap().words, 300 * 6);
+        assert!(!c.total().unwrap().is_approx(), "normal documents are exact");
+        let before = c.stats().blocks_counted;
+        assert_eq!(before, 300);
+
+        // an edit in the middle (and the model's offsets shifting below it)
+        let edited = src.replacen("Paragraph number 150 with", "Paragraph number 150 and more with", 1);
+        let (doc2, model2) = md(&edited);
+        c.reconcile(&model2);
+        assert!(c.fill(&doc2, &model2, usize::MAX));
+        assert_eq!(c.stats().blocks_counted - before, 1, "only the edited paragraph");
+        assert_eq!(c.total(), Some(count_document(&doc2, &model2)));
+
+        // inserting and deleting paragraphs
+        let edited = edited.replacen("Paragraph number 10 ", "New one.\n\nParagraph number 10 ", 1);
+        let edited = edited.replacen("Paragraph number 200 with *five* words.\n\n", "", 1);
+        let (doc3, model3) = md(&edited);
+        let before = c.stats().blocks_counted;
+        c.reconcile(&model3);
+        assert!(c.fill(&doc3, &model3, usize::MAX));
+        assert!(
+            c.stats().blocks_counted - before <= 200,
+            "only the blocks between the two edits"
+        );
+        assert_eq!(c.total(), Some(count_document(&doc3, &model3)));
+
+        // unchanged model: nothing to do
+        let r = c.stats().reconciles;
+        c.reconcile(&model3);
+        assert_eq!(c.stats().reconciles, r);
+    }
+
+    #[test]
+    fn fill_reads_about_its_byte_budget_per_call_and_resumes() {
+        let src = "Some words here.\n\n".repeat(20_000);
+        let (doc, model) = md(&src);
+        let mut c = DocCounter::new();
+        c.reconcile(&model);
+        let mut calls = 1;
+        while !c.fill(&doc, &model, 4096) {
+            calls += 1;
+            assert!(calls < 100_000);
+        }
+        assert!(calls > 10, "a small budget takes several calls: {calls}");
+        assert!(c.stats().max_call_bytes <= 4096 + BIG_BLOCK as u64);
+        assert_eq!(c.total().unwrap().words, 20_000 * 3);
+        // a zero budget still counts one block per call
+        let (doc, model) = md("One.\n\nTwo.\n");
+        let mut c = DocCounter::new();
+        c.reconcile(&model);
+        assert!(!c.fill(&doc, &model, 0));
+        assert!(c.fill(&doc, &model, 0));
+    }
+
+    /// Review round 2: a block larger than [`BIG_BLOCK`] (a huge heading, table or code block)
+    /// is estimated from its length, not parsed, and marked approximate; so are selections in
+    /// it. Normal blocks next to it stay exact.
+    #[test]
+    fn huge_blocks_are_estimated_and_marked() {
+        let body = "lorem ipsum dolor sit amet ".repeat(4_000); // ~108 KB, one line
+        let src = format!("# {body}\n\nTwo words.\n");
+        let (doc, model, mut c) = counted(&src);
+        let t = c.total().unwrap();
+        assert!(t.is_approx());
+        let span = model.item_span(0).len();
+        assert_eq!(t.words, estimate(span).words + 2);
+        assert_eq!(t.chars, span as u64 + "Two words.".len() as u64);
+        assert_eq!(
+            c.stats().bytes_read,
+            "Two words.".len() as u64,
+            "the huge block is not read"
+        );
+        // a selection inside it: estimated from the selected bytes
+        let s = c.selection(&doc, &model, 2..2 + 600).unwrap();
+        assert!(s.is_approx());
+        assert_eq!(s.words, 100);
+        // the exact paragraph alone
+        let a = src.find("Two").unwrap();
+        let s = c.selection(&doc, &model, a..a + 3).unwrap();
+        assert!(!s.is_approx());
+        assert_eq!(s.words, 1);
+        // a huge table and a huge code block: estimated without being parsed
+        let mut table = String::from("| a | b |\n|---|---|\n");
+        while table.len() <= BIG_BLOCK {
+            table.push_str("| cell text | more text here |\n");
+        }
+        let c = count(&table);
+        assert!(c.is_approx());
+        let code = format!("```\n{}```\n", "let x = 1;\n".repeat(8_000));
+        let c = count(&code);
+        assert!(c.is_approx());
+        assert_eq!(c.words, 0, "code has no words");
+        // math is never text, however large
+        let math = format!("$$\n{}$$\n", "x^2 + y^2\n".repeat(8_000));
+        assert_eq!(count(&math), Counts::default());
+    }
+
+    /// Review P2-3: a block split into layout segments is counted as one block (inline context
+    /// and soft breaks across segment boundaries are kept).
+    #[test]
+    fn segmented_blocks_count_as_one_block() {
+        let src = "a\n".repeat(130);
+        let (doc, model) = md(&src);
+        assert!(model.items.len() > 1, "segmented");
+        let c = count_document(&doc, &model);
+        assert_eq!((c.words, c.chars), (130, 259));
+        let (_, _, k) = counted(&src);
+        assert_eq!(k.total().unwrap().chars, 259);
+        // strong emphasis spanning the segments: its delimiters are not counted
+        let src = format!("**{}**\n", "word\n".repeat(200).trim_end());
+        let (doc, model) = md(&src);
+        assert!(model.items.len() > 1, "segmented");
+        let c = count_document(&doc, &model);
+        assert_eq!(c.words, 200);
+        assert_eq!(c.chars, (200 * 4 + 199) as u64);
+        // an edit in one segment recounts the whole block
+        let (_, _, mut k) = counted(&src);
+        let edited = src.replacen("word\nword", "word\nwords", 1);
+        let (doc2, model2) = md(&edited);
+        k.reconcile(&model2);
+        assert!(k.fill(&doc2, &model2, usize::MAX));
+        assert_eq!(k.total(), Some(count_document(&doc2, &model2)));
+        assert_eq!(k.total().unwrap().chars, (200 * 4 + 199 + 1) as u64);
+    }
+
+    /// Review P2-4: a selection inside a later segment of a large table is counted.
+    #[test]
+    fn selections_in_later_table_segments_are_counted() {
+        let mut src = String::from("| Name | Value |\n|---|---|\n");
+        for k in 0..400 {
+            src.push_str(&format!("| row{k} | cell{k} |\n"));
+        }
+        let (_, model) = md(&src);
+        assert!(model.items.len() > 2, "segmented table");
+        let a = src.find("| row350 |").unwrap() + 2;
+        let s = sel(&src, a, a + "row350".len());
+        assert_eq!((s.words, s.chars), (1, 6));
+        let b = src.find("cell360").unwrap() + "cell360".len();
+        assert_eq!(sel(&src, a, b).words, 11 * 2);
+    }
+
+    /// Review P2-5 / round 2 P2-7: partial selections cut inline code, code lines and the
+    /// text of raw HTML (after its tags are removed, scanned from the block's start).
+    #[test]
+    fn partial_selections_cut_code_spans_and_html() {
+        let src = "x `abcdef` y\n";
+        let a = src.find("bcd").unwrap();
+        assert_eq!(sel(src, a, a + 3).chars, 3);
+        let src = "<div>\nalpha beta gamma\n</div>\n";
+        let a = src.find("beta").unwrap();
+        let s = sel(src, a, a + 4);
+        assert_eq!((s.words, s.chars), (1, 4));
+        // a clip starting inside a tag counts none of the tag
+        let src = "<p class=\"note\">hello world</p>\n";
+        let a = src.find("note").unwrap();
+        let b = src.find("world").unwrap();
+        assert_eq!(sel(src, a, b).chars_no_spaces, "hello".len() as u64);
+        // a comment spanning lines, clip inside it
+        let src = "<!-- one\ntwo -->\n<p>three four</p>\n";
+        let a = src.find("two").unwrap();
+        assert_eq!(sel(src, a, src.len()).words, 2);
+        let src = "```\nlet value = 1;\n```\n";
+        let a = src.find("value").unwrap();
+        assert_eq!(sel(src, a, a + 5).chars, 5);
+    }
+
+    /// Review round 3: an edit that only moves blocks (blank lines inserted, no block key
+    /// changes) still recomputes a selection of the same byte range.
+    #[test]
+    fn selection_is_recomputed_after_an_offset_only_edit() {
+        let src = "One two.\n\nThree four five.\n";
+        let (_, _, mut c) = counted(src);
+        let (doc, model) = md(src);
+        let s = c.selection(&doc, &model, 0..8).unwrap();
+        assert_eq!(s.words, 2);
+        let moved = format!("\n\n\n\n\n\n\n\n\n\n{src}");
+        let (doc2, model2) = md(&moved);
+        let r = c.stats().reconciles;
+        c.reconcile(&model2);
+        assert_eq!(c.stats().reconciles, r, "no block changed");
+        assert!(c.fill(&doc2, &model2, usize::MAX));
+        let s = c.selection(&doc2, &model2, 0..18).unwrap();
+        assert_eq!(s.words, 2, "\\n×10 + \"One two.\"");
+        let s = c.selection(&doc2, &model2, 0..8).unwrap();
+        assert_eq!(s.words, 0, "only blank lines now");
+    }
+
+    /// Review P2-6: adding or removing a reference definition recounts the blocks using it.
+    #[test]
+    fn reference_definition_edits_recount_their_users() {
+        let with = "See [the site][r] now.\n\n[r]: https://example.com\n";
+        let without = "See [the site][r] now.\n";
+        let (_, _, mut c) = counted(with);
+        assert_eq!(c.total().unwrap().chars, "See the site now.".len() as u64);
+        let (doc, model) = md(without);
+        c.reconcile(&model);
+        assert!(c.fill(&doc, &model, usize::MAX));
+        assert_eq!(c.total(), Some(count_document(&doc, &model)));
+        assert_eq!(c.total().unwrap().chars, "See [the site][r] now.".len() as u64);
+        let (doc, model) = md(with);
+        c.reconcile(&model);
+        assert!(c.fill(&doc, &model, usize::MAX));
+        assert_eq!(c.total().unwrap().chars, "See the site now.".len() as u64);
+    }
+
+    /// Review P2-8: entities in raw HTML count as the characters they show.
+    #[test]
+    fn html_entities_are_decoded() {
+        assert_eq!(count("<p>a &amp; b &#233; &lt;</p>\n").chars, 9, "a & b é <");
+        assert_eq!(
+            count("<p>AT&T &unknown; x</p>\n").chars,
+            "AT&T &unknown; x".len() as u64
+        );
+        assert_eq!(decode_entities("&amp;&#x41;&;"), "&A&;");
+    }
+
+    #[test]
+    fn selection_counts() {
+        let src = "Alpha beta gamma.\n\nDelta epsilon.\n\n```\ncode here\n```\n\nZeta eta theta iota.\n";
+        let a = src.find("beta").unwrap();
+        let b = src.find("eta theta").unwrap() + 3;
+        assert_eq!(sel(src, a, b).words, 2 + 2 + 2);
+        let (doc, model, mut c) = counted(src);
+        assert_eq!(c.selection(&doc, &model, 0..src.len()), c.total());
+        let s = sel(src, a, a + 2);
+        assert_eq!((s.words, s.chars), (1, 2));
+        // markers inside the selection are not counted
+        let src = "Some **bold** text.\n";
+        assert_eq!(sel(src, 0, src.len() - 1).chars, "Some bold text.".len() as u64);
+    }
+
+    /// Review round 2 P2-3: selection sums are bounded: a middle of up to [`EXACT_ITEMS`]
+    /// items (or one whose complement is that small, like Select All) is exact; a middle and
+    /// complement both larger are estimated from the byte share and marked.
+    #[test]
+    fn large_selections_are_exact_or_marked_estimates() {
+        let n = 4 * EXACT_ITEMS;
+        let src = "One two three.\n\n".repeat(n);
+        let (doc, model) = md(&src);
+        let mut c = DocCounter::new();
+        c.reconcile(&model);
+        assert_eq!(c.selection(&doc, &model, 0..10), None, "needs the document counted");
+        assert!(c.fill(&doc, &model, usize::MAX));
+        let before = c.stats().blocks_counted;
+        // almost everything: exact through the complement
+        let s = c.selection(&doc, &model, 4..src.len() - 9).unwrap();
+        assert!(!s.is_approx());
+        assert_eq!(s.words, n as u64 * 3 - 2);
+        assert_eq!(
+            c.stats().blocks_counted - before,
+            2,
+            "only the two partial blocks are read"
+        );
+        // a small middle: exact
+        let p = 16;
+        let s = c.selection(&doc, &model, 0..p * 100).unwrap();
+        assert!(!s.is_approx());
+        assert_eq!(s.words, 300);
+        // the middle half: estimated, close to the truth
+        let q = src.len() / 4;
+        let s = c.selection(&doc, &model, q..3 * q).unwrap();
+        assert!(s.is_approx());
+        let truth = 2 * EXACT_ITEMS as u64 * 3;
+        assert!(s.words.abs_diff(truth) <= 6, "{} vs {truth}", s.words);
+    }
+}

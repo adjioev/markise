@@ -34,6 +34,24 @@ fn check(name: &str, got: &str) {
     }
 }
 
+/// A normal document with tables of contents (issue #29: the TOC is formatted once and reused;
+/// the output must not change). Headings with inline markup, duplicates and an HTML anchor.
+const TOC_DOC: &str = "[TOC]\n\n# Intro\n\nText.\n\n## Details *with* `code`\n\n<a name=\"usage\"></a>\n\n\
+## Usage\n\n### Intro\n\n[toc]\n\n# Intro\n\n- item\n";
+
+#[test]
+fn toc_html_snapshot() {
+    let doc = markise_md::parse(TOC_DOC);
+    let html = render_document(
+        &doc,
+        &HtmlOptions {
+            no_style: true,
+            ..Default::default()
+        },
+    );
+    check("toc.html", &html);
+}
+
 #[test]
 fn styled_html_snapshot() {
     let doc = markise_md::parse(DOC);

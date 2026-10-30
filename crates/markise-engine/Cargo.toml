@@ -58,3 +58,7 @@ harness = false
 [[bench]]
 name = "vault"
 harness = false
+
+[[bench]]
+name = "count"
+harness = false

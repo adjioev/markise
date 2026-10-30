@@ -471,6 +471,11 @@ pub struct MarkiseApp {
     theme: Theme,
     /// File → Export state (running job, previous export, result message).
     pub(crate) export: crate::export_ui::ExportUi,
+    /// Status bar word count of the open document (by document id; issue #53).
+    word_count: Option<(u64, crate::word_count::WordCount)>,
+    /// Side by Side: the word count follows the source pane's selection (`true`) or the
+    /// rendered pane's: the pane that has, or last had, the keyboard focus.
+    word_count_source_pane: bool,
     /// Number of frames run (for tests and the idle-repaint measurement).
     pub frames: u64,
     /// Native menu bar (macOS, Windows); `None`: the egui menu bar is shown.
@@ -575,6 +580,8 @@ impl MarkiseApp {
             font_gen: 0,
             theme: Theme::light(),
             export: Default::default(),
+            word_count: None,
+            word_count_source_pane: true,
             frames: 0,
             menu_host: None,
             menu_platform: markise_engine::editor::keymap::Platform::current(),
@@ -1171,6 +1178,35 @@ impl MarkiseApp {
     /// View → Show Recent Files, and Hide Recent in the section's context menu.
     pub fn set_show_recent(&mut self, on: bool) {
         self.themes.set_show_recent(on);
+    }
+
+    /// Whether the status bar shows the word count (Preferences → General, persisted as
+    /// `statusBar.showWordCount`; issue #53).
+    pub fn show_word_count(&self) -> bool {
+        self.themes.show_word_count()
+    }
+
+    pub fn set_show_word_count(&mut self, on: bool) {
+        self.themes.set_show_word_count(on);
+        if !on {
+            self.word_count = None;
+        }
+    }
+
+    /// The count the status bar shows (click it to cycle; persisted as `statusBar.count`).
+    pub fn count_mode(&self) -> markise_engine::settings::CountMode {
+        self.themes.count_mode()
+    }
+
+    pub fn set_count_mode(&mut self, mode: markise_engine::settings::CountMode) {
+        self.themes.set_count_mode(mode);
+    }
+
+    /// Word-count statistics of the open document (tests): blocks counted, bytes read, the
+    /// most bytes read in one frame.
+    pub fn word_count_stats(&self) -> Option<markise_engine::count::CounterStats> {
+        let (id, w) = self.word_count.as_ref()?;
+        (self.doc.as_ref()?.id == *id).then(|| w.stats())
     }
 
     /// View → Toolbar.
@@ -1954,7 +1990,9 @@ impl MarkiseApp {
         self.poll_save();
         self.poll_watcher();
         self.poll_themes(ctx);
-        self.export.poll();
+        if self.export.poll() && self.export.is_asking_large() {
+            self.opened_export_question();
+        }
         if self.images.poll(ctx)
             && let Some(d) = &mut self.doc
         {
@@ -2082,10 +2120,13 @@ impl MarkiseApp {
             }
             Some(Ask::CleanCopy { suggestions }) => Question::clean_copy(*suggestions),
             Some(Ask::ResetPrefs(s)) => Question::reset_settings(s.label()),
-            None => {
-                let req = self.export.pending_overwrite()?;
-                Question::export_overwrite(&req.output)
-            }
+            None => match self.export.pending_large() {
+                Some((_, est)) => Question::large_export(&est.human(), est.tocs),
+                None => {
+                    let req = self.export.pending_overwrite()?;
+                    Question::export_overwrite(&req.output)
+                }
+            },
         };
         Some(q.with_id(self.question_id))
     }
@@ -2133,6 +2174,11 @@ impl MarkiseApp {
             (Choice::RejectAll, Some(Ask::CleanCopy { .. })) => self.write_clean_copy(true),
             (Choice::Reset, Some(Ask::ResetPrefs(s))) => self.reset_preferences(s),
             (_, Some(_)) => {} // Cancel (or a choice the question does not offer)
+            (c, None) if self.export.is_asking_large() => {
+                if let Some(r) = self.export.answer_large(c == Choice::ExportAnyway) {
+                    self.start_export(r);
+                }
+            }
             (c, None) => {
                 if let Some(r) = self.export.answer_overwrite(c == Choice::Overwrite) {
                     self.start_export(r);
@@ -2415,8 +2461,55 @@ impl MarkiseApp {
                         m.items.len()
                     ));
                 }
+                self.word_count_label(ui);
             });
         });
+    }
+
+    /// The status bar's word count (issue #53): click cycles words / characters / characters
+    /// without spaces.
+    fn word_count_label(&mut self, ui: &mut egui::Ui) {
+        let Some(d) = self.doc.as_ref().filter(|_| self.themes.show_word_count()) else {
+            self.word_count = None;
+            return;
+        };
+        if self.word_count.as_ref().is_none_or(|(id, _)| *id != d.id) {
+            self.word_count = Some((d.id, Default::default()));
+        }
+        let Some((_, wc)) = self.word_count.as_mut() else {
+            return;
+        };
+        let ed = &d.viewer.ed;
+        if self.side_by_side {
+            let ctx = ui.ctx();
+            if d.source_ui.has_focus(ctx) {
+                self.word_count_source_pane = true;
+            } else if d.viewer.surface_id().is_some_and(|id| ctx.memory(|m| m.has_focus(id))) {
+                self.word_count_source_pane = false;
+            }
+        }
+        let source_pane = self.source_visible || (self.side_by_side && self.word_count_source_pane);
+        let sel = match ed.source.as_ref() {
+            Some(p) if source_pane => p.sel.primary().range(),
+            _ => ed.session.selection().primary().range(),
+        };
+        let shown = wc.update(
+            ui.ctx(),
+            ed.session.doc(),
+            d.viewer.model(),
+            ed.session.revision().counter,
+            sel,
+        );
+        let mode = self.themes.count_mode();
+        let r = ui
+            .add(
+                egui::Label::new(egui::RichText::new(crate::word_count::label(&shown, mode)).weak())
+                    .sense(egui::Sense::click()),
+            )
+            .on_hover_text(crate::word_count::tooltip(&shown));
+        if r.clicked() {
+            self.themes.set_count_mode(mode.next());
+        }
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {

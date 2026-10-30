@@ -24,6 +24,7 @@ pub mod toolbar;
 pub mod viewer;
 #[doc(hidden)]
 pub mod wake_track;
+pub mod word_count;
 
 pub use app::{AppOptions, MarkiseApp, MenuHost, ThemeChoice, ViewMode, rss_mb};
 pub use markise_engine::settings::Appearance;

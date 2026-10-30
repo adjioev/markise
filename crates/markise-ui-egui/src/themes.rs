@@ -335,6 +335,8 @@ pub struct ThemeManager {
     /// View → Toolbar toggled before the settings file was read.
     chose_toolbar: bool,
     chose_recent: bool,
+    chose_word_count: bool,
+    chose_count_mode: bool,
     chose_toolbar_position: bool,
     chose_editing: bool,
     chose_source: bool,
@@ -418,6 +420,8 @@ impl ThemeManager {
             chose_diagrams: false,
             chose_toolbar: false,
             chose_recent: false,
+            chose_word_count: false,
+            chose_count_mode: false,
             chose_toolbar_position: false,
             chose_editing: false,
             chose_source: false,
@@ -827,6 +831,37 @@ impl ThemeManager {
         }
     }
 
+    /// Whether the status bar shows the word count (settings key `statusBar.showWordCount`,
+    /// default on; issue #53).
+    pub fn show_word_count(&self) -> bool {
+        self.settings.show_word_count
+    }
+
+    /// Preferences → General → Show word count; persisted like the other settings.
+    pub fn set_show_word_count(&mut self, on: bool) {
+        self.chose_word_count = true;
+        if on != self.settings.show_word_count {
+            self.settings.show_word_count = on;
+            self.dirty.show_word_count = Some(on);
+            self.schedule_save();
+        }
+    }
+
+    /// The count the status bar shows (settings key `statusBar.count`, default words).
+    pub fn count_mode(&self) -> markise_engine::settings::CountMode {
+        self.settings.count_mode
+    }
+
+    /// A click on the status bar's count cycles it; persisted like the other settings.
+    pub fn set_count_mode(&mut self, mode: markise_engine::settings::CountMode) {
+        self.chose_count_mode = true;
+        if mode != self.settings.count_mode {
+            self.settings.count_mode = mode;
+            self.dirty.count_mode = Some(mode);
+            self.schedule_save();
+        }
+    }
+
     /// Formatting toolbar placement (settings key `toolbarPosition`, default top).
     pub fn toolbar_position(&self) -> markise_engine::settings::ToolbarPosition {
         self.settings.toolbar_position
@@ -1119,6 +1154,12 @@ impl ThemeManager {
                 }
                 if self.chose_recent {
                     self.settings.show_recent = chosen.show_recent;
+                }
+                if self.chose_word_count {
+                    self.settings.show_word_count = chosen.show_word_count;
+                }
+                if self.chose_count_mode {
+                    self.settings.count_mode = chosen.count_mode;
                 }
                 if self.chose_toolbar_position {
                     self.settings.toolbar_position = chosen.toolbar_position;
