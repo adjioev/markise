@@ -877,6 +877,13 @@ impl DocViewer {
         self.gutter
     }
 
+    /// Test hook ("background settled", issue #42): the margin's "has comments" tracking has
+    /// nothing due (it runs only in margin mode).
+    #[doc(hidden)]
+    pub fn comments_settled(&self) -> bool {
+        self.comment_display != markise_engine::settings::CommentDisplay::Margin || self.comment_presence.settled()
+    }
+
     /// A "has comments" evaluation is due or running (tests).
     pub fn comment_lookup_pending(&self) -> bool {
         self.comment_presence.pending()

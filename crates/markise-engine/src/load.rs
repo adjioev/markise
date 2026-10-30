@@ -140,13 +140,13 @@ impl Loader {
                         Ok(None) => {} // cancelled
                         r => {
                             let r = r.map(|o| o.expect("not cancelled"));
-                            crate::wake_track::publishing();
+                            let published = crate::wake_track::publishing();
                             if tx.send((generation, r)).is_err() {
-                                crate::wake_track::woken();
+                                drop(published);
                                 break;
                             }
                             wake();
-                            crate::wake_track::woken();
+                            drop(published);
                         }
                     }
                 }

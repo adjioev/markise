@@ -219,7 +219,7 @@ impl ImageLoader {
                             continue; // cancelled: belongs to a closed document
                         }
                         let result = decode_with(&src, MAX_TEXTURE_SIDE, DecodeLimits::default(), &budget);
-                        crate::wake_track::publishing();
+                        let published = crate::wake_track::publishing();
                         if res_tx
                             .send(Decoded {
                                 src,
@@ -228,11 +228,11 @@ impl ImageLoader {
                             })
                             .is_err()
                         {
-                            crate::wake_track::woken();
+                            drop(published);
                             break;
                         }
                         wake();
-                        crate::wake_track::woken();
+                        drop(published);
                     }
                 });
             if r.is_ok() {

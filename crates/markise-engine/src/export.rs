@@ -178,10 +178,10 @@ pub fn spawn_export(req: ExportRequest, wake: Wake) -> ExportJob {
         .name("markise-export".into())
         .spawn(move || {
             let res = run_export(&req, &c2);
-            crate::wake_track::publishing();
+            let published = crate::wake_track::publishing();
             let _ = tx.send(res);
             wake();
-            crate::wake_track::woken();
+            drop(published);
         });
     if let Err(e) = r {
         let _ = tx2.send(Err(format!("cannot start export worker: {e}")));

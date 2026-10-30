@@ -259,10 +259,10 @@ impl MarkiseApp {
                 let tx = tx.clone();
                 move || {
                     let files = clipboard.files();
-                    crate::wake_track::publishing();
+                    let published = crate::wake_track::publishing();
                     let _ = tx.send(files);
                     wake();
-                    crate::wake_track::woken();
+                    drop(published);
                 }
             })
             .is_err();
@@ -361,10 +361,10 @@ impl MarkiseApp {
                     h();
                 }
                 let out = attach::run(&req);
-                crate::wake_track::publishing();
+                let published = crate::wake_track::publishing();
                 let _ = tx.send(out); // ignored when the entry timed out
                 wake();
-                crate::wake_track::woken();
+                drop(published);
             });
         match spawned {
             Ok(_) => Stage::Job(rx, Instant::now()),

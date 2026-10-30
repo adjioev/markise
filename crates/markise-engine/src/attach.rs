@@ -714,10 +714,10 @@ pub fn spawn(req: Request, wake: Wake) -> Receiver<Outcome> {
         let tx = tx.clone();
         move || {
             let out = run(&req);
-            crate::wake_track::publishing();
+            let published = crate::wake_track::publishing();
             let _ = tx.send(out);
             wake();
-            crate::wake_track::woken();
+            drop(published);
         }
     });
     if let Err(e) = spawned {

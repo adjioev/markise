@@ -159,13 +159,13 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                             let _ = std::fs::create_dir_all(d);
                             user_dir = Some(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
                         }
-                        crate::wake_track::publishing();
+                        let published = crate::wake_track::publishing();
                         if dtx.send(Done::Settings(loaded, user_dir.clone())).is_err() {
-                            crate::wake_track::woken();
+                            drop(published);
                             break;
                         }
                         wake();
-                        crate::wake_track::woken();
+                        drop(published);
                         let r = builtin::extract(&builtin_root).map_err(|e| format!("built-in themes: {e}"));
                         match r {
                             Ok(_) => Done::Families(Ok(discover(&user_dir))),
@@ -238,13 +238,13 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                     ),
                 };
                 // a `Done` may be applied before `wake` runs: counted until it returned (tests)
-                crate::wake_track::publishing();
+                let published = crate::wake_track::publishing();
                 if dtx.send(done).is_err() {
-                    crate::wake_track::woken();
+                    drop(published);
                     break;
                 }
                 wake();
-                crate::wake_track::woken();
+                drop(published);
             }
         })
         .expect("spawn theme worker");

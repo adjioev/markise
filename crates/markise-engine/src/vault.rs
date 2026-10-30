@@ -1027,10 +1027,10 @@ pub fn spawn_create_note(index: Arc<VaultIndex>, rel: String, wake: Wake) -> Rec
                 Some(dir) => create_note(dir, index.root(), &rel),
                 None => Err("the vault folder could not be opened".into()),
             };
-            crate::wake_track::publishing();
+            let published = crate::wake_track::publishing();
             let _ = tx.send(r);
             wake();
-            crate::wake_track::woken();
+            drop(published);
         }
     });
     if let Err(e) = spawned {

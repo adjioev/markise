@@ -137,6 +137,13 @@ impl CommentPresence {
         self.scan.is_some() || self.wanted != self.seen
     }
 
+    /// Test hook ("background settled", issue #42): nothing is due any more, the idle safety
+    /// net's rescan of an edited document included (it fires [`IDLE_RESCAN`] after the last
+    /// edit and asks for a frame then).
+    pub fn settled(&self) -> bool {
+        !self.pending() && self.scanned_rev == self.rev
+    }
+
     fn step(&mut self, doc: &dyn FormatDoc, s: Scan) -> (bool, Option<f64>) {
         match scan_chunk(doc, s.pos, &mut self.scanned) {
             Step::Found => self.finish(s, true),

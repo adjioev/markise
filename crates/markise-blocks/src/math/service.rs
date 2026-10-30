@@ -537,7 +537,7 @@ fn worker(s: Arc<Shared>) {
         let (metrics, bitmap) = render(&job.req, job.pixels);
         let took = t.elapsed();
         // not busy from the update below: counted until the wake returned (tests)
-        crate::wake_track::publishing();
+        let published = crate::wake_track::publishing();
         {
             let mut st = s.lock();
             st.running.remove(&job.id);
@@ -558,7 +558,7 @@ fn worker(s: Arc<Shared>) {
         }
         guard.job = None;
         (s.wake)();
-        crate::wake_track::woken();
+        drop(published);
     }
 }
 

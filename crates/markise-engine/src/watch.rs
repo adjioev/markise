@@ -283,7 +283,7 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
             known = now;
             out.extend(e);
         }
-        crate::wake_track::publishing();
+        let published = crate::wake_track::publishing();
         let mut sent = false;
         for e in out {
             sent |= events.send(e).is_ok();
@@ -291,7 +291,7 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
         if sent {
             wake();
         }
-        crate::wake_track::woken();
+        drop(published);
         for tx in acks {
             let _ = tx.send(failure.clone().map_or(Ok(()), Err));
         }
@@ -315,7 +315,7 @@ impl FileWatcher {
                 return;
             }
             let TargetSet { file, folder, themes } = shared.lock().map(|g| g.clone()).unwrap_or_default();
-            crate::wake_track::publishing();
+            let published = crate::wake_track::publishing();
             let mut sent = false;
             for p in &ev.paths {
                 if themes.as_ref().is_some_and(|root| p.starts_with(root)) {
@@ -353,7 +353,7 @@ impl FileWatcher {
             if sent {
                 wake();
             }
-            crate::wake_track::woken();
+            drop(published);
         })?;
         let (ctl, ctl_rx) = channel();
         // detached: dropping the `FileWatcher` closes `ctl`, the worker then drops the watcher

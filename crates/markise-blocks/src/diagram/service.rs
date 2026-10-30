@@ -321,7 +321,7 @@ fn worker(shared: Arc<Shared>, measure: Arc<dyn TextMeasure>, wake: Arc<dyn Fn()
         let result = render(job.lang, &text, &ctx);
         let dt = t.elapsed();
         // the UI may see this job as finished from here on: count it until its wake returned
-        crate::wake_track::publishing();
+        let published = crate::wake_track::publishing();
         let mut st = shared.lock();
         st.running = None;
         // a newer request for the same key (current document) keeps its own pending entry
@@ -336,7 +336,7 @@ fn worker(shared: Arc<Shared>, measure: Arc<dyn TextMeasure>, wake: Arc<dyn Fn()
                 drop(st);
                 // whoever still shows this diagram asks again on the next frame
                 wake();
-                crate::wake_track::woken();
+                drop(published);
                 continue;
             }
             Ok(_) => st.stats.rendered += 1,
@@ -351,7 +351,7 @@ fn worker(shared: Arc<Shared>, measure: Arc<dyn TextMeasure>, wake: Arc<dyn Fn()
         insert(&mut st, job.key, Arc::new(result), bytes);
         drop(st);
         wake();
-        crate::wake_track::woken();
+        drop(published);
     }
 }
 

@@ -843,6 +843,8 @@ impl MarkiseApp {
             && !self.highlighter.as_ref().is_some_and(|h| h.busy())
             && !self.diagram_renderer.as_ref().is_some_and(|d| d.busy())
             && !self.export.is_running()
+            && self.word_count.as_ref().is_none_or(|(_, w)| w.settled())
+            && self.doc.as_ref().is_none_or(|d| d.viewer.comments_settled())
             // every published result's wake-up has returned (a result can be taken before
             // the worker's wake runs; that late wake must not land in an idle check)
             && crate::wake_track::unwoken() == 0

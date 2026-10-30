@@ -421,10 +421,10 @@ fn worker(shared: Arc<Shared>, rx: Receiver<Job>) {
         }
         while active.len() > MAX_ACTIVE {
             if let Some(a) = active.pop_back() {
-                crate::wake_track::publishing();
+                let published = crate::wake_track::publishing();
                 shared.lock().cancel(a.job.key, a.job.len);
                 (shared.wake)();
-                crate::wake_track::woken();
+                drop(published);
             }
         }
         let Some(mut a) = active.pop_front() else { continue };
@@ -434,12 +434,12 @@ fn worker(shared: Arc<Shared>, rx: Receiver<Job>) {
             match st.pending.get(&a.job.key) {
                 Some(&g) if g >= generation => {}
                 Some(_) => {
-                    crate::wake_track::publishing();
+                    let published = crate::wake_track::publishing();
                     st.cancel(a.job.key, a.job.len);
                     drop(st);
                     // the UI may show a partial result of this block: let it re-check
                     (shared.wake)();
-                    crate::wake_track::woken();
+                    drop(published);
                     continue;
                 }
                 None => continue, // already cancelled
@@ -487,7 +487,7 @@ fn worker(shared: Arc<Shared>, rx: Receiver<Job>) {
         let mut complete = end >= text.len();
         // a completed block is visible (not busy) from the update below: counted until its
         // wake returned
-        crate::wake_track::publishing();
+        let published = crate::wake_track::publishing();
         {
             let mut st = shared.lock();
             st.stats.chunks += 1;
@@ -537,7 +537,7 @@ fn worker(shared: Arc<Shared>, rx: Receiver<Job>) {
             last_wake = Instant::now();
             (shared.wake)();
         }
-        crate::wake_track::woken();
+        drop(published);
         #[cfg(test)]
         {
             let bytes = shared.lock().stats.bytes;
