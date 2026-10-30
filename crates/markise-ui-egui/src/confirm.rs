@@ -41,6 +41,8 @@ pub enum Choice {
     AcceptAll,
     RejectAll,
     Reset,
+    /// Export a very large file anyway (issue #29).
+    ExportAnyway,
 }
 
 /// How a button is drawn: the accented primary action, a red destructive one, or plain.
@@ -69,6 +71,7 @@ pub enum Kind {
     CreateNote,
     CleanCopy,
     ResetSettings,
+    LargeExport,
 }
 
 /// A question with its buttons.
@@ -191,6 +194,24 @@ impl Question {
                 target.display()
             ),
             buttons: vec![button(Choice::Overwrite, "Overwrite", Role::Destructive), cancel()],
+            default: Choice::Cancel,
+        }
+    }
+
+    /// An HTML export would be very large because every `[toc]` lists all headings (issue
+    /// #29). Writing gigabytes is rarely intended, so Cancel is the default.
+    pub fn large_export(size: &str, tocs: usize) -> Question {
+        let because = match tocs {
+            0 => String::new(),
+            1 => " because the document has 1 table of contents".to_string(),
+            n => format!(" because the document has {n} tables of contents"),
+        };
+        Question {
+            id: 0,
+            kind: Kind::LargeExport,
+            message: format!("This export will be about {size}{because}. Export anyway?"),
+            detail: "Every table of contents lists all headings of the document.".into(),
+            buttons: vec![button(Choice::ExportAnyway, "Export Anyway", Role::Primary), cancel()],
             default: Choice::Cancel,
         }
     }

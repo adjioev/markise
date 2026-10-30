@@ -398,6 +398,74 @@ pub fn render_document_report(doc: &Document, opts: &HtmlOptions) -> (String, Ve
     (out, warnings)
 }
 
+/// Estimated HTML size above which an export asks before writing (UI) or warns (CLI): every
+/// `[toc]` lists all headings, so documents with many of them export very large (issue #29).
+pub const LARGE_HTML_BYTES: u64 = 200_000_000;
+
+/// Estimated size of an HTML export, computed before the body is rendered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HtmlSizeEstimate {
+    /// Estimated bytes of the whole page.
+    pub bytes: u64,
+    /// `[toc]` blocks in the document.
+    pub tocs: usize,
+}
+
+impl HtmlSizeEstimate {
+    /// `tocs` copies of the formatted table of contents (`toc_bytes` each) plus the rest of
+    /// the page (`other_bytes`).
+    pub fn from_parts(toc_bytes: usize, tocs: usize, other_bytes: usize) -> Self {
+        HtmlSizeEstimate {
+            bytes: (toc_bytes as u64)
+                .saturating_mul(tocs as u64)
+                .saturating_add(other_bytes as u64),
+            tocs,
+        }
+    }
+
+    /// The size for people: "1.3 GB", "250 MB", "12 KB" (decimal units).
+    pub fn human(&self) -> String {
+        human_bytes(self.bytes)
+    }
+}
+
+/// Decimal size for messages: "1.3 GB", "250 MB", "12 KB", "512 bytes".
+pub fn human_bytes(b: u64) -> String {
+    match b {
+        b if b >= 1_000_000_000 => format!("{:.1} GB", b as f64 / 1e9),
+        b if b >= 1_000_000 => format!("{} MB", b / 1_000_000),
+        b if b >= 1_000 => format!("{} KB", b / 1_000),
+        b => format!("{b} bytes"),
+    }
+}
+
+/// Estimates the size of [`render_document`]'s output without rendering the body: the table
+/// of contents is formatted once and counted for every `[toc]`; the rest of the page is
+/// taken as the Markdown source plus the stylesheet (HTML markup roughly balances the
+/// syntax it replaces). Costs one pass over the headings.
+pub fn estimate_html_size(doc: &Document, opts: &HtmlOptions) -> HtmlSizeEstimate {
+    let mut tocs = 0;
+    for b in doc.blocks() {
+        b.walk(&mut |b, _| {
+            if matches!(b.kind, BlockKind::Toc) {
+                tocs += 1;
+            }
+        });
+    }
+    let style = if opts.no_style {
+        0
+    } else {
+        opts.css.as_deref().unwrap_or(DEFAULT_CSS).len()
+    };
+    let other = doc.text().len() + style + 1024;
+    if tocs == 0 {
+        return HtmlSizeEstimate::from_parts(0, 0, other);
+    }
+    let mut ctx = Ctx::new(doc, opts);
+    let toc = ctx.format_toc();
+    HtmlSizeEstimate::from_parts(toc.len(), tocs, other)
+}
+
 /// CSS made safe for a `<style>` element: no `<` survives, so no `</style` (inside a CSS
 /// string or comment) can end the raw-text element. `\3c ` is the CSS escape of `<`: the same
 /// character inside strings, harmless in comments; `<` has no other use in CSS.
@@ -1339,6 +1407,41 @@ mod tests {
                 .collect();
             assert!(tocs.windows(2).all(|w| w[0] == w[1]), "all TOCs identical");
         }
+    }
+
+    /// Issue #29: the size estimate is TOC bytes × TOC count + the rest of the page.
+    #[test]
+    fn html_size_estimate_math() {
+        let e = HtmlSizeEstimate::from_parts(1_000, 300, 5_000);
+        assert_eq!(e.bytes, 305_000);
+        assert_eq!(e.tocs, 300);
+        assert_eq!(HtmlSizeEstimate::from_parts(usize::MAX, usize::MAX, 1).bytes, u64::MAX);
+        assert_eq!(human_bytes(1_340_000_000), "1.3 GB");
+        assert_eq!(human_bytes(250_400_000), "250 MB");
+        assert_eq!(human_bytes(12_345), "12 KB");
+        assert_eq!(human_bytes(512), "512 bytes");
+
+        // against a real export: the TOC part is exact, the rest is close
+        let doc = parse(&toc_doc(1000, 100));
+        let opts = HtmlOptions {
+            no_style: true,
+            ..Default::default()
+        };
+        let est = estimate_html_size(&doc, &opts);
+        assert_eq!(est.tocs, 100);
+        let real = render_document(&doc, &opts).len() as u64;
+        let toc = Ctx::new(&doc, &opts).format_toc().len() as u64;
+        assert!(
+            est.bytes >= toc * 100 && est.bytes.abs_diff(real) < real / 10,
+            "estimate {} vs real {real}",
+            est.bytes
+        );
+
+        // no TOC: just the page
+        let plain = parse("# A\n\ntext\n");
+        let e = estimate_html_size(&plain, &opts);
+        assert_eq!(e.tocs, 0);
+        assert!(e.bytes < 2_000);
     }
 
     #[test]

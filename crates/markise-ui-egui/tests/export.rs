@@ -129,3 +129,76 @@ fn export_menu_runs_jobs_and_previous() {
         Some(ExportMessage::Failed(_))
     ));
 }
+
+/// Issue #29: an HTML export estimated above the limit asks through the confirm seam before
+/// writing (Cancel is the default and writes nothing); "Export Anyway" writes it.
+#[test]
+fn large_html_export_asks_first() {
+    use std::sync::Arc;
+
+    use markise_ui_egui::confirm::{Choice, Confirm, Kind, Scripted};
+
+    let dir = tmpdir("large");
+    let doc = dir.join("tocs.md");
+    let mut text = String::new();
+    for i in 0..40 {
+        text.push_str(&format!("[TOC]\n\n# Heading {i}\n\n"));
+    }
+    std::fs::write(&doc, &text).unwrap();
+    let s = Scripted::new();
+    let app = MarkiseApp::new(AppOptions {
+        open: vec![doc.clone()],
+        confirm: s.clone() as Arc<dyn Confirm>,
+        ..Default::default()
+    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), app);
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_busy());
+
+    let out = dir.join("tocs.html");
+    let mut req = ExportRequest::new(
+        ExportKind::Html,
+        h.state().document_text().unwrap(),
+        Some(doc.clone()),
+        out.clone(),
+        Theme::light(),
+    );
+    // a small limit stands in for the 200 MB default
+    req.confirm_html_above = Some(10_000);
+    h.state_mut().start_export(req.clone());
+    wait_until(&mut h, "estimate", |a| a.export_state().is_asking_large());
+    h.step();
+    let q = s.last().expect("asked");
+    assert_eq!(q.kind, Kind::LargeExport);
+    assert_eq!(q.default, Choice::Cancel);
+    assert!(q.message.contains("40 tables of contents"), "{}", q.message);
+    assert!(q.message.starts_with("This export will be about "), "{}", q.message);
+    assert!(!out.exists(), "nothing is written before the answer");
+    s.answer(Choice::Cancel);
+    h.step();
+    h.step();
+    assert!(!h.state().export_state().is_asking_large());
+    assert!(!h.state().export_state().is_running());
+    assert!(!out.exists(), "Cancel writes nothing");
+
+    h.state_mut().start_export(req);
+    wait_until(&mut h, "estimate again", |a| a.export_state().is_asking_large());
+    h.step();
+    s.answer(Choice::ExportAnyway);
+    h.step();
+    wait_until(&mut h, "export anyway", |a| {
+        !a.export_state().is_running() && !a.export_state().is_asking_large()
+    });
+    assert!(out.exists());
+    assert_eq!(
+        std::fs::read_to_string(&out)
+            .unwrap()
+            .matches("<div class='md-toc'")
+            .count(),
+        40
+    );
+    assert_eq!(s.asked().len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

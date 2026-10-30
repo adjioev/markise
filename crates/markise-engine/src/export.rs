@@ -10,12 +10,12 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-pub use markise_export::CommentExport;
 use markise_export::job::JobControl;
 use markise_export::model::{ExDoc, ModelOptions};
 use markise_export::pandoc::{self, PandocFormat, PandocOptions};
 use markise_export::vars::{self, Vars};
 use markise_export::{CodeHighlight, HtmlOptions, css};
+pub use markise_export::{CommentExport, HtmlSizeEstimate, LARGE_HTML_BYTES};
 use markise_md::{Document, ParseOptions};
 use markise_pdf::{PdfOptions, PngOptions};
 use markise_text::TextEngine;
@@ -96,6 +96,10 @@ pub struct ExportRequest {
     pub critic_markup: bool,
     /// Keep or strip review comments in the output (setting `export.comments`, ADR 0012).
     pub comments: CommentExport,
+    /// HTML export: stop before writing, reporting [`ExportDone::too_large`], when the
+    /// estimated page is larger than this (many `[toc]` blocks, issue #29). `None` once the
+    /// user chose to export anyway.
+    pub confirm_html_above: Option<u64>,
 }
 
 impl ExportRequest {
@@ -115,6 +119,7 @@ impl ExportRequest {
             vault: None,
             critic_markup: true,
             comments: CommentExport::Keep,
+            confirm_html_above: Some(LARGE_HTML_BYTES),
         }
     }
 
@@ -124,6 +129,8 @@ impl ExportRequest {
             text,
             doc_path,
             theme,
+            // a size confirmation was for that snapshot only
+            confirm_html_above: Some(LARGE_HTML_BYTES),
             ..self.clone()
         }
     }
@@ -137,6 +144,9 @@ pub struct ExportDone {
     pub elapsed: Duration,
     /// Output of the custom/after-export command, if any.
     pub command_output: Option<String>,
+    /// The HTML would be larger than [`ExportRequest::confirm_html_above`]: nothing was
+    /// written (`outputs` is empty); the UI asks and runs the request again without the limit.
+    pub too_large: Option<HtmlSizeEstimate>,
 }
 
 /// A running export.
@@ -243,6 +253,18 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
                 comments: req.comments,
                 ..Default::default()
             };
+            if let Some(limit) = req.confirm_html_above {
+                let est = markise_export::estimate_html_size(&doc, &opts);
+                if est.bytes > limit {
+                    return Ok(ExportDone {
+                        outputs: Vec::new(),
+                        warnings,
+                        elapsed: t0.elapsed(),
+                        command_output: None,
+                        too_large: Some(est),
+                    });
+                }
+            }
             control.set_progress(0.3);
             let (html, html_warnings) = markise_export::render_document_report(&doc, &opts);
             warnings.extend(html_warnings);
@@ -378,6 +400,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
         warnings,
         elapsed: t0.elapsed(),
         command_output,
+        too_large: None,
     })
 }
 
@@ -499,6 +522,45 @@ mod tests {
             dir.join(name),
             Theme::light(),
         )
+    }
+
+    /// Issue #29: an HTML export estimated above the limit writes nothing and reports the
+    /// estimate; without the limit it writes; "Export with Previous" asks again.
+    #[test]
+    fn large_html_stops_before_writing() {
+        let d = tempfile::tempdir().unwrap();
+        let mut text = String::new();
+        for i in 0..50 {
+            text.push_str(&format!("[TOC]\n\n# Heading {i}\n\n"));
+        }
+        let mut r = ExportRequest::new(
+            ExportKind::Html,
+            text,
+            Some(d.path().join("doc.md")),
+            d.path().join("big.html"),
+            Theme::light(),
+        );
+        r.confirm_html_above = Some(10_000);
+        let done = run_export(&r, &JobControl::new()).unwrap();
+        let est = done.too_large.expect("asks");
+        assert_eq!(est.tocs, 50);
+        assert!(est.bytes > 10_000);
+        assert!(done.outputs.is_empty() && !r.output.exists());
+        // the same request below the limit (or without one) is written
+        r.confirm_html_above = None;
+        let done = run_export(&r, &JobControl::new()).unwrap();
+        assert!(done.too_large.is_none() && r.output.exists());
+        assert_eq!(
+            r.again(String::new(), None, Theme::light()).confirm_html_above,
+            Some(LARGE_HTML_BYTES)
+        );
+        // PDF never stops on the HTML estimate
+        let mut p = r.clone();
+        p.kind = ExportKind::Pdf;
+        p.confirm_html_above = Some(1);
+        p.output = d.path().join("big.pdf");
+        let done = run_export(&p, &JobControl::new()).unwrap();
+        assert!(done.too_large.is_none() && p.output.exists());
     }
 
     /// Spec 06 Q-V11: resolved wikilinks become relative links to the linked file, unresolved
