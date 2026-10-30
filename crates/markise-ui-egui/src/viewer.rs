@@ -26,6 +26,8 @@ use crate::images::TextureStore;
 use crate::text_paint::ParleyText;
 
 mod code_tools;
+mod comment_place;
+mod comment_presence;
 pub use code_tools::{LangEdit, LangItem, ShownTools, lang_matches};
 
 const SCROLLBAR_W: f32 = 10.0;
@@ -95,8 +97,6 @@ struct Popover {
 
 /// The pointer must rest on a bubble this long before its popover opens.
 pub const POPOVER_DELAY: f64 = 0.15;
-/// Narrowest right margin that still holds comment cards.
-const MIN_MARGIN: f32 = 190.0;
 
 /// Commands of the document's context menu (ADR 0012), `None`: separator.
 pub const CONTEXT_COMMANDS: &[Option<&str>] = &[
@@ -165,6 +165,10 @@ pub struct DocViewer {
     /// Comments of the visible items at the last frame, with their cards.
     comments: Vec<ShownComment>,
     popover: Option<Popover>,
+    /// Debounced "the document has comments" (the comment gutter, issue #91).
+    comment_presence: comment_presence::CommentPresence,
+    /// The comment gutter was reserved at the last frame.
+    gutter: bool,
     /// Copy button and language field of fenced code blocks (issue #76).
     code: code_tools::CodeTools,
 }
@@ -209,6 +213,8 @@ impl DocViewer {
             comment_display: Default::default(),
             comments: Vec::new(),
             popover: None,
+            comment_presence: Default::default(),
+            gutter: false,
             code: Default::default(),
         }
     }
@@ -399,7 +405,38 @@ impl DocViewer {
         let started = Instant::now();
 
         let ppp = ctx.pixels_per_point();
-        let content_w = rect.width() - SCROLLBAR_W;
+        let mut content_w = rect.width() - SCROLLBAR_W;
+        // margin mode with comments in the document: a comment gutter is reserved at the right
+        // and the column lays out in the rest (owner decision on #91), unless the window is
+        // too narrow for it (then bubbles). "Has comments" is tracked incrementally, reading
+        // the text in place in bounded chunks and only after review-relevant edits
+        // (comment_presence); a gutter change waits for a frame without pointer presses so
+        // clicks are hit-tested against one geometry (Codex review of #94).
+        let margin_mode = self.comment_display == markise_engine::settings::CommentDisplay::Margin;
+        let has = margin_mode && {
+            let review = self.ed.session.review_edits();
+            let text_rev = self.ed.session.revision().counter;
+            let (has, more) = self.comment_presence.poll(self.ed.session.doc(), review, text_rev, now);
+            match more {
+                Some(w) if w > 0.0 => ctx.request_repaint_after(std::time::Duration::from_secs_f64(w)),
+                Some(_) => ctx.request_repaint(),
+                None => {}
+            }
+            has
+        };
+        let want = comment_place::reserve_gutter(margin_mode, has, content_w);
+        if want != self.gutter {
+            let busy = self.drag.is_some()
+                || ui.input(|i| i.pointer.any_pressed() || i.pointer.any_released() || i.pointer.any_down());
+            if comment_place::gutter_change_allowed(busy) {
+                self.gutter = want;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if self.gutter {
+            content_w -= comment_place::GUTTER_W;
+        }
         let col_w = (content_w - 2.0 * theme.column_padding_x)
             .min(theme.column_max_width)
             .max(120.0);
@@ -835,6 +872,27 @@ impl DocViewer {
         &self.comments
     }
 
+    /// The comment gutter was reserved at the last frame (tests).
+    pub fn comment_gutter(&self) -> bool {
+        self.gutter
+    }
+
+    /// A "has comments" evaluation is due or running (tests).
+    pub fn comment_lookup_pending(&self) -> bool {
+        self.comment_presence.pending()
+    }
+
+    /// Full "has comments" scans started and text bytes they read (tests: typing ordinary
+    /// text must not scan).
+    pub fn comment_scans(&self) -> (u64, u64) {
+        (self.comment_presence.scans, self.comment_presence.scanned)
+    }
+
+    /// The content column's left edge and width at the last frame (screen points; tests).
+    pub fn column(&self) -> (f32, f32) {
+        (self.last_left, self.ed.view.width())
+    }
+
     /// The suggestion hover bar's rectangle at the last frame, when shown (tests).
     pub fn hover_bar_rect(&self) -> Option<Rect> {
         self.hover.as_ref().and_then(|h| h.rect)
@@ -913,22 +971,29 @@ impl DocViewer {
         }
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
-        let margin = rect.right() - SCROLLBAR_W - (left + col_w);
-        let use_margin =
-            self.comment_display == markise_engine::settings::CommentDisplay::Margin && margin >= MIN_MARGIN;
+        // issue #91: cards and popovers go only where the surface is actually on screen (not
+        // past the window's or the parent's clip edge, not over the scrollbar), and margin
+        // cards only into the real room right of the content column (the reserved gutter plus
+        // any centring slack; a glyph further right, e.g. in a wide table, counts too)
+        let vis = comment_place::visible_area(rect, SCROLLBAR_W, ui.clip_rect(), ctx.content_rect());
+        let col_right = shown.iter().map(|c| c.glyph.right()).fold(left + col_w, f32::max);
+        // cards only beside a reserved gutter (and only if it is on screen); else bubbles
+        let slot = self
+            .gutter
+            .then(|| comment_place::margin_column(vis, col_right))
+            .flatten();
+        let use_margin = slot.is_some();
         let look = CardLook::new(theme, &ctx);
-        let painter = ui.painter_at(rect);
+        let painter = ui.painter_at(vis);
         let mut clicked = None;
-        if use_margin {
+        if let Some((x, w)) = slot {
             self.popover = None;
-            let x = left + col_w + 20.0;
-            let w = (margin - 36.0).min(240.0);
             let mut next_y = rect.top();
             for (i, c) in shown.iter_mut().enumerate() {
                 // nothing is shaped for a card that would start below the viewport; the stack
                 // only grows downwards, so the rest would too
                 let y = (c.glyph.top() - 4.0).max(next_y);
-                if y > rect.bottom() {
+                if y > vis.bottom() {
                     break;
                 }
                 let galley = look.galley(&ctx, &c.text, w);
@@ -936,7 +1001,7 @@ impl DocViewer {
                 next_y = card.bottom() + 6.0;
                 // the connector from the bubble's line to its card, in the margin only (it never
                 // crosses text), starting with a dot at the column edge
-                let from = pos2(left + col_w + 6.0, c.glyph.center().y);
+                let from = pos2(col_right + 6.0, c.glyph.center().y);
                 let to = pos2(card.left(), card.top() + 12.0);
                 let line = Stroke::new(1.0, look.accent.gamma_multiply(0.5));
                 painter.circle_filled(from, 2.0, look.accent.gamma_multiply(0.7));
@@ -995,18 +1060,14 @@ impl DocViewer {
                 let wait = POPOVER_DELAY - (now - pop.since);
                 if pop.pinned || wait <= 0.0 {
                     let c = &shown[i];
-                    let w = 240.0f32.min(rect.width() - 24.0).max(120.0);
+                    let w = comment_place::popover_width(vis);
                     let galley = look.galley(&ctx, &c.text, w);
                     let size = look.size(&galley, w);
-                    let mut at = pos2(c.glyph.left() - 8.0, c.glyph.bottom() + 4.0);
-                    at.x =
-                        at.x.min(rect.right() - SCROLLBAR_W - size.x - 4.0)
-                            .max(rect.left() + 4.0);
-                    if at.y + size.y > rect.bottom() {
-                        at.y = (c.glyph.top() - 4.0 - size.y).max(rect.top());
-                    }
+                    // below the bubble, flipped left / up near the visible area's edges
+                    let at = comment_place::popover_pos(c.glyph, size, vis);
                     let area = egui::Area::new(egui::Id::unique(("markise-comment-popover", pop.key)))
                         .order(egui::Order::Foreground)
+                        .constrain_to(vis)
                         .fixed_pos(at)
                         .show(&ctx, |ui| {
                             let (r, resp) = ui.allocate_exact_size(size, Sense::click());
@@ -1444,7 +1505,11 @@ impl CardLook {
 
     fn size(&self, galley: &egui::Galley, w: f32) -> Vec2 {
         let gw = galley.size().x + 2.0 * CARD_PAD + CARD_ICON;
-        vec2(gw.clamp(80.0, w), galley.size().y.max(CARD_ICON) + 2.0 * CARD_PAD)
+        // at least 80 wide, unless the room itself is narrower (a tiny visible area)
+        vec2(
+            gw.min(w).max(80.0f32.min(w)),
+            galley.size().y.max(CARD_ICON) + 2.0 * CARD_PAD,
+        )
     }
 
     fn paint(&self, p: &egui::Painter, r: Rect, galley: Arc<egui::Galley>) {
