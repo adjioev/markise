@@ -180,6 +180,16 @@ pub struct DocViewer {
     snaps_tried: bool,
     /// Screen rectangles of the block images at the last frame, with their source offsets.
     snap_rects: Vec<(Rect, usize)>,
+    /// PROTOTYPE (block forms): "✎ Edit" was clicked on the block at this offset.
+    pub pending_edit: Option<usize>,
+    /// PROTOTYPE (block forms): show the Edit button on this block ordinal without hover
+    /// (screenshots of the measurement script).
+    pub force_edit_button: Option<usize>,
+}
+
+/// PROTOTYPE (block forms): the "✎ Edit" button of a block image.
+fn edit_button_rect(r: Rect) -> Rect {
+    Rect::from_min_size(pos2(r.right() - 84.0, r.top() + 6.0), vec2(78.0, 22.0))
 }
 
 impl DocViewer {
@@ -229,6 +239,8 @@ impl DocViewer {
             snaps: None,
             snaps_tried: false,
             snap_rects: Vec::new(),
+            pending_edit: None,
+            force_edit_button: None,
         }
     }
 
@@ -550,10 +562,20 @@ impl DocViewer {
         let on_snap = ui
             .input(|i| i.pointer.interact_pos())
             .and_then(|p| self.snap_rects.iter().find(|(r, _)| r.contains(p)).map(|(_, o)| *o));
+        let on_edit = ui.input(|i| i.pointer.interact_pos()).and_then(|p| {
+            self.snap_rects
+                .iter()
+                .find(|(r, _)| edit_button_rect(*r).contains(p))
+                .map(|(_, o)| *o)
+        });
         if on_snap.is_some() && resp.hovered() {
             ctx.set_cursor_icon(CursorIcon::PointingHand);
             if resp.clicked() {
-                out.goto_source = on_snap;
+                if on_edit.is_some() {
+                    self.pending_edit = on_edit;
+                } else {
+                    out.goto_source = on_snap;
+                }
             }
         }
         let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.hovered() && on_snap.is_none();
@@ -684,6 +706,15 @@ impl DocViewer {
             }
             match self.snaps.as_mut() {
                 Some(s) => {
+                    s.form.poll(&mut self.ed);
+                    if let Some(off) = self.pending_edit.take() {
+                        let tv = crate::block_snap::ThemeVars::from_theme(theme);
+                        let rev = self.ed.session.revision().counter;
+                        if let Err(e) = s.form.open(self.ed.session.text(), off, rev, &tv) {
+                            eprintln!("[blockform] cannot open the dialog: {e}");
+                            s.form.error = Some((e, Instant::now()));
+                        }
+                    }
                     let vis: Vec<usize> = self.last_visible.iter().map(|v| v.0).collect();
                     let model = self.ed.view.model().clone();
                     let width = self.ed.view.width();
@@ -747,6 +778,54 @@ impl DocViewer {
                         Color32::WHITE,
                     );
                 }
+            }
+            // PROTOTYPE (block forms): "✎ Edit" on the hovered block image
+            let hover = ctx.input(|i| i.pointer.hover_pos());
+            let ru = crate::block_edit::lang() == "ru";
+            for (i, (r, _)) in self.snap_rects.iter().enumerate() {
+                let forced = self.force_edit_button == Some(i);
+                if !forced && !hover.is_some_and(|h| r.contains(h) && rect.contains(h)) {
+                    continue;
+                }
+                let b = edit_button_rect(*r);
+                let hot = hover.is_some_and(|h| b.contains(h));
+                let fill = if hot {
+                    theme_color(theme.link)
+                } else {
+                    Color32::from_black_alpha(170)
+                };
+                painter.rect_filled(b, 6.0, fill);
+                // a small pencil (the UI font has no ✎ glyph)
+                let o = b.left_center() + vec2(10.0, 0.0);
+                painter.line_segment(
+                    [o + vec2(0.0, 5.0), o + vec2(8.0, -3.0)],
+                    Stroke::new(2.2, Color32::WHITE),
+                );
+                painter.line_segment(
+                    [o + vec2(-1.0, 6.5), o + vec2(0.6, 4.4)],
+                    Stroke::new(1.4, Color32::WHITE),
+                );
+                painter.text(
+                    b.center() + vec2(8.0, 0.0),
+                    egui::Align2::CENTER_CENTER,
+                    if ru { "Правка" } else { "Edit" },
+                    egui::FontId::proportional(12.5),
+                    Color32::WHITE,
+                );
+            }
+            if let Some((e, at)) = self.snaps.as_ref().and_then(|s| s.form.error.clone())
+                && at.elapsed().as_secs_f32() < 5.0
+            {
+                let r = Rect::from_min_size(pos2(left, rect.top() + 4.0), vec2(rect.width().min(600.0), 22.0));
+                painter.rect_filled(r, 4.0, Color32::from_rgb(180, 40, 40));
+                painter.text(
+                    r.left_center() + vec2(8.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    e,
+                    egui::FontId::proportional(12.5),
+                    Color32::WHITE,
+                );
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
             }
             visible.retain(|v| !placed.iter().any(|p| v.idx >= p.open && v.idx <= p.close));
         }
@@ -1954,4 +2033,10 @@ mod dash_tests {
         assert_eq!(dashed_segments(&pts, 1.0, 1.0, clip, &mut budget).len(), 50);
         assert_eq!(budget, 0);
     }
+}
+
+/// PROTOTYPE (block forms): a theme color as an egui color.
+fn theme_color(c: markise_theme::Rgba) -> Color32 {
+    let [r, g, b, a] = c.0;
+    Color32::from_rgba_unmultiplied(r, g, b, a)
 }

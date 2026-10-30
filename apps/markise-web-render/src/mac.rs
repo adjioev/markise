@@ -193,6 +193,13 @@ pub fn main() {
             loop {
                 match proto::read_frame(&mut input) {
                     Ok((v, _)) => {
+                        if v.get("op")
+                            .and_then(Value::as_str)
+                            .is_some_and(|o| o.starts_with("form_"))
+                        {
+                            DispatchQueue::main().exec_async(move || crate::editor::handle(v));
+                            continue;
+                        }
                         let id = v["id"].as_u64().unwrap_or(0);
                         let width = v["width"].as_f64().unwrap_or(600.0).clamp(50.0, 4000.0);
                         let payload = json!({
@@ -222,6 +229,7 @@ pub fn main() {
         });
     }
 
+    crate::editor::install_menu(mtm);
     poll_ready(started);
     app.run();
 }
@@ -256,6 +264,13 @@ fn poll_ready(started: Instant) {
             Some(&block),
         )
     };
+}
+
+/// An unsolicited event frame for Markise (block edit dialog).
+pub fn send_event(v: Value) {
+    with_state(|s| {
+        let _ = s.out.send((v, Vec::new()));
+    });
 }
 
 fn enqueue(req: Req) {

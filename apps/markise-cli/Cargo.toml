@@ -17,6 +17,8 @@ markise-export.workspace = true
 similar.workspace = true
 markise-theme.workspace = true
 serde_json.workspace = true
+# PROTOTYPE (proto/block-forms): `blockform` check
+markise-engine.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,0 +1,30 @@
+/* PROTOTYPE (proto/block-forms): block edit dialog styles (original work). */
+:root { --bg: var(--markise-bg, #ffffff); --fg: var(--markise-fg, #1d2433); --accent: var(--markise-accent, #2f6fdd); --muted: var(--markise-muted, #6b7280); --line: color-mix(in srgb, var(--fg) 18%, transparent); --field: color-mix(in srgb, var(--fg) 4%, var(--bg)); }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; }
+#root, .mk-form { height: 100%; }
+.mk-form { display: flex; flex-direction: column; }
+header { padding: 12px 16px 8px; border-bottom: 1px solid var(--line); }
+.mk-title { font-weight: 600; font-size: 15px; }
+.mk-title span { font-weight: 400; color: var(--muted); }
+.mk-note { color: var(--muted); font-size: 12px; margin-top: 4px; }
+main.mk-body { flex: 1; overflow: auto; padding: 8px 16px 16px; }
+footer { display: flex; gap: 8px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); }
+footer > div { flex: 1; font-size: 12px; color: var(--muted); }
+footer .mk-msg { color: #d33; font-weight: 500; }
+button { font: inherit; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--field); color: var(--fg); cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+button.mk-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.control { margin: 10px 0; display: flex; flex-direction: column; gap: 4px; }
+.control > label, .group-layout > legend, .mk-list > label { font-weight: 600; font-size: 12px; color: var(--muted); }
+input.input, textarea, .control input, .control textarea { font: inherit; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; box-sizing: border-box; width: 100%; }
+textarea { min-height: 4.5em; resize: vertical; }
+input:disabled, textarea:disabled { opacity: .7; }
+input:focus, textarea:focus { outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent); outline-offset: 0; }
+.group-layout { border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px 8px; margin: 10px 0; }
+.group-layout > legend { padding: 0 4px; }
+.validation, .validation_error { color: #d33; font-size: 11px; }
+.input-description { display: none; }
+.mk-row { display: flex; gap: 4px; margin-bottom: 4px; }
+.mk-row button { padding: 2px 8px; }
+.mk-add { align-self: flex-start; }
+.vertical-layout-item, .horizontal-layout-item { min-width: 0; }

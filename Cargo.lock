@@ -2661,6 +2661,7 @@ dependencies = [
 name = "markise-cli"
 version = "0.1.0-beta.1"
 dependencies = [
+ "markise-engine",
  "markise-export",
  "markise-md",
  "markise-theme",
@@ -2855,6 +2856,7 @@ dependencies = [
  "png",
  "rfd",
  "serde_json",
+ "similar",
  "skrifa 0.44.0",
  "tempfile",
  "ttf-parser",
@@ -2867,6 +2869,7 @@ version = "0.1.0-beta.1"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
+ "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-graphics",

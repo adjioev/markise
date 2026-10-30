@@ -32,7 +32,7 @@ use markise_layout::{DocModel, ItemKind};
 use serde_json::{Value, json};
 
 /// Components rendered through the helper.
-const COMPONENTS: &[&str] = &["goals", "question"];
+const COMPONENTS: &[&str] = &["goals", "question", "scene"];
 
 /// A `:::name variant` … `:::` block found in the model.
 #[derive(Clone, Debug)]
@@ -135,7 +135,7 @@ impl ThemeVars {
         }
     }
 
-    fn mode(&self) -> &'static str {
+    pub fn mode(&self) -> &'static str {
         if self.dark { "dark" } else { "light" }
     }
 }
@@ -200,6 +200,8 @@ pub struct BlockSnaps {
     all_shown: bool,
     /// Per block of the last frame: its current content's image is shown.
     pub current: Vec<bool>,
+    /// PROTOTYPE (proto/block-forms): the block edit dialog.
+    pub form: crate::block_edit::FormState,
 }
 
 /// Where the image of a block is painted this frame.
@@ -219,7 +221,7 @@ impl BlockSnaps {
     /// Starts the worker when the site folder is configured (`MARKISE_BLOCK_SITE`).
     pub fn from_env(ctx: &egui::Context, doc: Option<PathBuf>) -> Option<Self> {
         let fallback = std::env::var_os("MARKISE_BLOCK_SITE").map(PathBuf::from);
-        let site = Site::new(doc, fallback);
+        let site = Site::new(doc.clone(), fallback);
         if log_on() {
             eprintln!("[blocksnap] site root: {:?}; fallback: {:?}", site.root, site.fallback);
         }
@@ -229,11 +231,19 @@ impl BlockSnaps {
         })?;
         let (to_worker, jobs) = mpsc::channel();
         let (results, from_worker) = mpsc::channel();
+        let (events, events_rx) = mpsc::channel();
+        let live: LiveStdin = Default::default();
+        let form = crate::block_edit::FormState::new(live.clone(), events_rx, doc.clone());
         let ctx = ctx.clone();
         let log = log_on();
         std::thread::Builder::new()
             .name("markise-block-snap".into())
-            .spawn(move || Worker::new(site, helper, ctx, results, log).run(jobs))
+            .spawn(move || {
+                let mut w = Worker::new(site, helper, ctx, results, log);
+                w.live = live;
+                w.events = Some(events);
+                w.run(jobs)
+            })
             .ok()?;
         Some(BlockSnaps {
             to_worker,
@@ -251,6 +261,7 @@ impl BlockSnaps {
             wanted_at: HashMap::new(),
             all_shown: false,
             current: Vec::new(),
+            form,
         })
     }
 
@@ -544,9 +555,13 @@ impl Site {
     }
 }
 
+/// The running helper's stdin, shared with the edit dialog (frames are written whole under
+/// the lock).
+pub type LiveStdin = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<std::sync::Mutex<ChildStdin>>>>>;
+
 struct Helper {
     child: Child,
-    stdin: ChildStdin,
+    stdin: std::sync::Arc<std::sync::Mutex<ChildStdin>>,
     frames: Receiver<std::io::Result<(Value, Vec<u8>)>>,
 }
 
@@ -569,7 +584,7 @@ fn read_part(r: &mut impl Read) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn write_frame(w: &mut impl Write, json: &Value) -> std::io::Result<()> {
+pub fn write_frame(w: &mut impl Write, json: &Value) -> std::io::Result<()> {
     let j = serde_json::to_vec(json)?;
     w.write_all(&(j.len() as u32).to_le_bytes())?;
     w.write_all(&j)?;
@@ -587,6 +602,9 @@ struct Worker {
     out: Sender<FromWorker>,
     done: HashSet<(u64, u64)>,
     log: bool,
+    live: LiveStdin,
+    /// Unsolicited helper frames (`event`: the edit dialog) go here.
+    events: Option<Sender<Value>>,
 }
 
 impl Worker {
@@ -600,6 +618,8 @@ impl Worker {
             out,
             done: HashSet::new(),
             log,
+            live: Default::default(),
+            events: None,
         }
     }
 
@@ -678,6 +698,8 @@ impl Worker {
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let (tx, frames) = mpsc::channel();
+        let events = self.events.clone();
+        let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let mut r = BufReader::new(stdout);
             loop {
@@ -686,12 +708,21 @@ impl Worker {
                     let v: Value = serde_json::from_slice(&j).map_err(std::io::Error::other)?;
                     Ok((v, b))
                 });
+                if let (Ok((v, _)), Some(ev)) = (&f, &events)
+                    && v.get("event").is_some()
+                {
+                    let _ = ev.send(v.clone());
+                    ctx.request_repaint();
+                    continue;
+                }
                 let end = f.is_err();
                 if tx.send(f).is_err() || end {
                     return;
                 }
             }
         });
+        let stdin = std::sync::Arc::new(std::sync::Mutex::new(stdin));
+        *self.live.lock().unwrap_or_else(|e| e.into_inner()) = Some(stdin.clone());
         let h = Helper { child, stdin, frames };
         match h.frames.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok((v, _))) if v["ready"] == true => {
@@ -744,7 +775,8 @@ impl Worker {
             self.spawn()?;
             let h = self.helper.as_mut().expect("helper");
             let t_ipc = Instant::now();
-            if let Err(e) = write_frame(&mut h.stdin, &req) {
+            let wrote = write_frame(&mut *h.stdin.lock().unwrap_or_else(|e| e.into_inner()), &req);
+            if let Err(e) = wrote {
                 last = format!("write: {e}");
                 self.helper = None;
                 continue;
@@ -846,7 +878,7 @@ impl ProtoScript {
         None
     }
 
-    fn shot(&mut self, ctx: &egui::Context, name: &str) {
+    pub fn shot(&mut self, ctx: &egui::Context, name: &str) {
         let Some(dir) = std::env::var_os("MARKISE_PROTO_SHOTS").map(PathBuf::from) else {
             return;
         };

@@ -187,12 +187,128 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             }
             theme::import(file.ok_or(USAGE)?, json)
         }
+        [cmd, file, rest @ ..] if cmd == "blockform" => blockform(file, rest),
         [flag] if flag == "-h" || flag == "--help" => {
             println!("{USAGE}");
             Ok(ExitCode::SUCCESS)
         }
         _ => Err(USAGE.to_string()),
     }
+}
+
+/// PROTOTYPE (proto/block-forms): `markise-cli blockform <file> [--json] [--demo]` — decodes
+/// every `:::` block known to the site's `components/blocks.json` and checks the form codec:
+/// an unchanged save gives no edit (byte-identical) and re-rendering every field from its
+/// value reproduces the source. `--json` prints each form, `--demo` shows sample edits.
+fn blockform(path: &str, rest: &[String]) -> Result<ExitCode, String> {
+    use markise_engine::block_form as bf;
+    let text = read_markdown(path)?;
+    let abs = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let root = bf::site_root(&abs).ok_or("no components/blocks.json above the document")?;
+    let manifest = bf::load_manifest(&root)?;
+    let json_out = rest.iter().any(|a| a == "--json");
+    let demo = rest.iter().any(|a| a == "--demo");
+    let mut bad = 0;
+    for b in bf::all_blocks(&text) {
+        let Some(def) = manifest.get(&b.name) else {
+            println!("skip :::{} at {} (not in blocks.json)", b.name, b.range.start);
+            continue;
+        };
+        let t = std::time::Instant::now();
+        let dec = match bf::decode(&text, &b, def) {
+            Ok(d) => d,
+            Err(e) => {
+                bad += 1;
+                println!("FAIL :::{} at {}: {e}", b.name, b.range.start);
+                continue;
+            }
+        };
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        let same = bf::edits(&text, &dec, &dec.data, false, "en")?;
+        let forced = bf::edits(&text, &dec, &dec.data, true, "en")?;
+        let re = bf::apply(&text, &forced);
+        let ok = same.is_empty() && re == text;
+        if !ok {
+            bad += 1;
+        }
+        println!(
+            "{} :::{} {} at {}: {} fields, unchanged save → {} edits, re-render of {} spans identical: {} ({ms:.3} ms)",
+            if ok { "OK  " } else { "FAIL" },
+            b.name,
+            b.args,
+            b.range.start,
+            dec.fields.len(),
+            same.len(),
+            forced.len(),
+            re == text
+        );
+        if json_out {
+            let (title, schema, ui) = bf::form(&dec, "ru", None);
+            println!(
+                "{}",
+                serde_json::json!({"title": title, "schema": schema, "uischema": ui, "data": dec.data})
+            );
+        }
+        if demo {
+            let mut d = dec.data.clone();
+            match b.name.as_str() {
+                "goals" => {
+                    let items = d["items"].as_array_mut().ok_or("items")?;
+                    items[0] = serde_json::json!(format!("{} (**ред.**)", items[0].as_str().unwrap_or("")));
+                    items.remove(1);
+                    items.push(serde_json::json!("Новая цель"));
+                }
+                "question" => {
+                    d["prompt"] = serde_json::json!("Новый вопрос?");
+                    if let Some(o) = d["options"].as_object_mut()
+                        && let Some((_, v)) = o.iter_mut().next()
+                    {
+                        v["text"] = serde_json::json!("Новый *ответ*");
+                    }
+                    d["explanation"] = serde_json::json!("Строка 1\n\nСтрока 2");
+                    d["setup"] = serde_json::json!(if d["setup"] == "" {
+                        "Новая ситуация."
+                    } else {
+                        ""
+                    });
+                }
+                "scene" => {
+                    d["title"] = serde_json::json!("Новое название");
+                    if let Some(p) = d["pictures"].get_mut("1") {
+                        p["src"] = serde_json::json!("../new.png");
+                    }
+                }
+                _ => continue,
+            }
+            let e = bf::edits(&text, &dec, &d, false, "ru")?;
+            let new = bf::apply(&text, &e);
+            println!("--- demo edit ({} edits):", e.len());
+            let diff = similar::TextDiff::from_lines(&text, &new);
+            for op in diff.ops() {
+                for c in diff.iter_changes(op) {
+                    match c.tag() {
+                        similar::ChangeTag::Delete => print!("-{c}"),
+                        similar::ChangeTag::Insert => print!("+{c}"),
+                        similar::ChangeTag::Equal => {}
+                    }
+                }
+            }
+            // locked parts are rejected
+            if b.name == "question" {
+                let mut l = dec.data.clone();
+                if let Some(o) = l["options"].as_object_mut()
+                    && let Some((_, v)) = o.iter_mut().next()
+                {
+                    v["correct"] = serde_json::json!(!v["correct"].as_bool().unwrap_or(false));
+                }
+                println!(
+                    "locked correctness → {:?}",
+                    bf::edits(&text, &dec, &l, false, "ru").err()
+                );
+            }
+        }
+    }
+    Ok(if bad == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) })
 }
 
 fn main() -> ExitCode {

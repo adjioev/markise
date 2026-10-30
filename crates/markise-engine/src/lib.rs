@@ -7,6 +7,8 @@
 //! Nothing here runs on the UI thread except cheap channel polls.
 
 pub mod attach;
+// PROTOTYPE (proto/block-forms): block edit form codec
+pub mod block_form;
 pub mod count;
 pub mod edit;
 pub mod editor;

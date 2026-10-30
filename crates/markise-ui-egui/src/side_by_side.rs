@@ -215,6 +215,8 @@ pub struct SideBySide {
     pub sync_rendered: bool,
     /// PROTOTYPE measurement driver (`MARKISE_PROTO_SCRIPT=1`).
     proto: Option<crate::block_snap::ProtoScript>,
+    /// PROTOTYPE block-forms measurement driver (`MARKISE_PROTO_FORMS=1`).
+    proto_forms: Option<crate::block_edit::FormScript>,
     proto_checked: bool,
     last_frame_ms: Option<f64>,
 }
@@ -316,6 +318,12 @@ impl SideBySide {
             if crate::block_snap::ProtoScript::enabled() {
                 self.proto = Some(Default::default());
             }
+            if crate::block_edit::FormScript::enabled() {
+                self.proto_forms = Some(Default::default());
+            }
+        }
+        if let Some(p) = self.proto_forms.as_mut() {
+            p.frame(ui.ctx(), viewer);
         }
         if let Some(p) = self.proto.as_mut() {
             p.frame(ui.ctx(), viewer, self.last_frame_ms.take());

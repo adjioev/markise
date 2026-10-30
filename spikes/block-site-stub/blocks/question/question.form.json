@@ -1,0 +1,8 @@
+{
+  "labels": {
+    "prompt": { "ru": "Вопрос", "en": "Question" },
+    "setup": { "ru": "Ситуация (необязательно)", "en": "Situation (optional)" },
+    "explanation": { "ru": "Пояснение", "en": "Explanation" }
+  },
+  "options": { "prompt": { "format": "counted", "maxLength": 140 } }
+}

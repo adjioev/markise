@@ -1,0 +1,28 @@
+/* PROTOTYPE stub "site code" for Markise block snapshots (original work, MIT OR Apache-2.0).
+   :::scene — a framed illustration card (pictures do not load in snapshots yet: no baseURL). */
+section[data-component="scene"] {
+  font: var(--markise-font-size, 15px)/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  color: var(--markise-fg, #1d2433);
+  border: 1px dashed color-mix(in srgb, var(--markise-fg, #1d2433) 30%, transparent);
+  border-radius: 12px;
+  padding: 12px 16px;
+}
+section[data-component="scene"]::before {
+  content: "Сцена · " attr(data-variant);
+  display: block;
+  font-size: 11px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--markise-muted, #6b7280);
+}
+section[data-component="scene"] h3 { margin: 4px 0 8px; font-size: 1.05em; }
+section[data-component="scene"] p { margin: 6px 0; }
+section[data-component="scene"] img {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--markise-accent, #5a67d8) 12%, transparent);
+  font-size: 12px;
+  color: var(--markise-muted, #6b7280);
+}
