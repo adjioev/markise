@@ -93,6 +93,7 @@ impl Section {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RowId {
     KeyBindings,
+    WordCount,
     AutoPairBrackets,
     AutoPairMarkdown,
     SmartPunctuation,
@@ -164,6 +165,13 @@ pub const ROWS: &[Row] = &[
         "Keyboard",
         "Custom key bindings",
         "shortcuts keyboard keybinding accelerator",
+    ),
+    row(
+        R::WordCount,
+        S::General,
+        "Status bar",
+        "Show word count",
+        "words characters statistics reading time status bar",
     ),
     row(
         R::AutoPairBrackets,
@@ -493,6 +501,8 @@ pub struct Values {
     pub show_toolbar: bool,
     pub toolbar_position: ToolbarPosition,
     pub show_recent: bool,
+    /// Status bar word count (issue #53).
+    pub show_word_count: bool,
     pub zoom: f32,
     pub zoom_range: (f32, f32),
     pub settings_file: Option<PathBuf>,
@@ -523,6 +533,7 @@ pub enum Change {
     ShowToolbar(bool),
     ToolbarPosition(ToolbarPosition),
     ShowRecent(bool),
+    ShowWordCount(bool),
     Zoom(f32),
     Images(ImageSettings),
     RevealSettingsFile,
@@ -1345,6 +1356,11 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
         R::ShowRecent => {
             if let Some(on) = switch(ui, v.show_recent) {
                 out.push(Change::ShowRecent(on));
+            }
+        }
+        R::WordCount => {
+            if let Some(on) = switch(ui, v.show_word_count) {
+                out.push(Change::ShowWordCount(on));
             }
         }
         R::Zoom => {
