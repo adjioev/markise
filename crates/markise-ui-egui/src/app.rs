@@ -473,6 +473,9 @@ pub struct MarkiseApp {
     pub(crate) export: crate::export_ui::ExportUi,
     /// Status bar word count of the open document (by document id; issue #53).
     word_count: Option<(u64, crate::word_count::WordCount)>,
+    /// Side by Side: the word count follows the source pane's selection (`true`) or the
+    /// rendered pane's: the pane that has, or last had, the keyboard focus.
+    word_count_source_pane: bool,
     /// Number of frames run (for tests and the idle-repaint measurement).
     pub frames: u64,
     /// Native menu bar (macOS, Windows); `None`: the egui menu bar is shown.
@@ -576,6 +579,7 @@ impl MarkiseApp {
             theme: Theme::light(),
             export: Default::default(),
             word_count: None,
+            word_count_source_pane: true,
             frames: 0,
             menu_host: None,
             menu_platform: markise_engine::editor::keymap::Platform::current(),
@@ -2405,8 +2409,17 @@ impl MarkiseApp {
             return;
         };
         let ed = &d.viewer.ed;
+        if self.side_by_side {
+            let ctx = ui.ctx();
+            if d.source_ui.has_focus(ctx) {
+                self.word_count_source_pane = true;
+            } else if d.viewer.surface_id().is_some_and(|id| ctx.memory(|m| m.has_focus(id))) {
+                self.word_count_source_pane = false;
+            }
+        }
+        let source_pane = self.source_visible || (self.side_by_side && self.word_count_source_pane);
         let sel = match ed.source.as_ref() {
-            Some(p) if self.source_visible || self.side_by_side => p.sel.primary().range(),
+            Some(p) if source_pane => p.sel.primary().range(),
             _ => ed.session.selection().primary().range(),
         };
         let shown = wc.update(

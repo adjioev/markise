@@ -619,11 +619,15 @@ impl DocCounter {
         }
     }
 
-    /// Matches `model` against the model of the last call: blocks whose items are all in the
+    /// Call for every new revision of the document. Matches `model` against the model of the
+    /// last call: blocks whose items are all in the
     /// common prefix and suffix (same content hash and length) keep their counts, the others
     /// are forgotten (and, when a reference definition changed, every block that may use
     /// one). Comparisons of two integers per unchanged item; no text is read.
     pub fn reconcile(&mut self, model: &DocModel) {
+        // a new revision may move text between blocks without changing any block (blank
+        // lines): selection counts are by byte range, so they are always recomputed
+        self.sel = None;
         let items = &model.items;
         let n = items.len();
         let old = self.keys.len();
@@ -1139,6 +1143,27 @@ mod tests {
         let src = "```\nlet value = 1;\n```\n";
         let a = src.find("value").unwrap();
         assert_eq!(sel(src, a, a + 5).chars, 5);
+    }
+
+    /// Review round 3: an edit that only moves blocks (blank lines inserted, no block key
+    /// changes) still recomputes a selection of the same byte range.
+    #[test]
+    fn selection_is_recomputed_after_an_offset_only_edit() {
+        let src = "One two.\n\nThree four five.\n";
+        let (_, _, mut c) = counted(src);
+        let (doc, model) = md(src);
+        let s = c.selection(&doc, &model, 0..8).unwrap();
+        assert_eq!(s.words, 2);
+        let moved = format!("\n\n\n\n\n\n\n\n\n\n{src}");
+        let (doc2, model2) = md(&moved);
+        let r = c.stats().reconciles;
+        c.reconcile(&model2);
+        assert_eq!(c.stats().reconciles, r, "no block changed");
+        assert!(c.fill(&doc2, &model2, usize::MAX));
+        let s = c.selection(&doc2, &model2, 0..18).unwrap();
+        assert_eq!(s.words, 2, "\\n×10 + \"One two.\"");
+        let s = c.selection(&doc2, &model2, 0..8).unwrap();
+        assert_eq!(s.words, 0, "only blank lines now");
     }
 
     /// Review P2-6: adding or removing a reference definition recounts the blocks using it.

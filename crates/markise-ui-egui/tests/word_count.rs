@@ -13,7 +13,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use markise_doc::Selection;
 use markise_engine::count::{BIG_BLOCK, FRAME_BYTES};
 use markise_engine::settings::CountMode;
-use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp};
+use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp, ViewMode};
 
 type H = Harness<'static, MarkiseApp>;
 
@@ -99,6 +99,51 @@ fn status_bar_shows_document_and_selection_counts() {
     // a caret again: the document count
     select(&mut h, 3, 3);
     wait_label(&mut h, "6 words · 1 min read");
+}
+
+fn click(h: &mut H, p: egui::Pos2) {
+    h.hover_at(p);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    h.run_steps(2);
+}
+
+/// Review round 3: in Side by Side the count follows the selection of the pane that has (or
+/// last had) the focus.
+#[test]
+fn side_by_side_counts_the_focused_panes_selection() {
+    let src = "Alpha beta gamma.\n\nDelta epsilon zeta eta.\n";
+    let mut h = open("sbs", src, None);
+    h.state_mut().set_view_mode(ViewMode::SideBySide);
+    h.run_steps(3);
+    wait_label(&mut h, "7 words · 1 min read");
+    let set_source = |h: &mut H, a: usize, b: usize| {
+        h.state_mut().viewer().unwrap().ed.source.as_mut().unwrap().sel = Selection::range(a, b);
+        h.run_steps(2);
+    };
+    let alpha = (0, "Alpha beta".len());
+    let delta = src.find("Delta").unwrap();
+    // the source pane (left) focused: its selection
+    click(&mut h, egui::pos2(420.0, 60.0));
+    set_source(&mut h, alpha.0, alpha.1);
+    wait_label(&mut h, "2 of 7 words");
+    // the rendered pane (right) focused: the session's selection
+    click(&mut h, egui::pos2(900.0, 120.0));
+    select(&mut h, delta, delta + "Delta epsilon zeta".len());
+    wait_label(&mut h, "3 of 7 words");
+    // further frames keep the last focused pane
+    h.run_steps(2);
+    assert!(shows(&h, "3 of 7 words"));
+    // back to the source pane
+    click(&mut h, egui::pos2(420.0, 60.0));
+    set_source(&mut h, alpha.0, alpha.1);
+    wait_label(&mut h, "2 of 7 words");
 }
 
 #[test]
