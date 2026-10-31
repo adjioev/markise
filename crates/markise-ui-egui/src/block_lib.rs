@@ -340,6 +340,9 @@ pub struct Preset {
     pub group_rank: usize,
     /// Icon name (site-provided, e.g. `list-check`), else derived from the block name.
     pub icon: String,
+    /// A built-in form widget the preset asks for (`{"widget": "direction-picker",
+    /// "answers": [...]}`), declared by the site; None for ordinary presets.
+    pub widget: Option<Value>,
 }
 
 /// The insertion palette of a library: `presets.json` presets, plus a generated skeleton for
@@ -391,6 +394,9 @@ pub fn presets(root: &Path, lang: &str) -> Vec<Preset> {
                 markdown: x["markdown"].as_str().unwrap_or("").into(),
                 block_label: tr(&manifest[&block]["label"]),
                 keywords: x["keywords"].as_str().unwrap_or("").into(),
+                widget: x.get("widget").and_then(Value::as_str).map(|w| {
+                    json!({"widget": w, "variant": x["variant"], "answers": x.get("answers").cloned().unwrap_or(json!([]))})
+                }),
                 icon: icon(&block),
                 group,
                 group_rank,
@@ -412,6 +418,7 @@ pub fn presets(root: &Path, lang: &str) -> Vec<Preset> {
                 description: desc(name),
                 markdown: skeleton(name, def, lang),
                 keywords: String::new(),
+                widget: None,
                 icon: icon(name),
                 group,
                 group_rank,
@@ -462,4 +469,13 @@ fn skeleton(name: &str, def: &Value, lang: &str) -> String {
     }
     parts.push(":::".into());
     parts.join("\n\n") + "\n"
+}
+
+/// The built-in form widget a site preset declares for this block variant (e.g.
+/// `:::question directions` → `direction-picker`), chosen by the variant alone.
+pub fn widget_for(root: &Path, lang: &str, block: &str, variant: &str) -> Option<Value> {
+    presets(root, lang)
+        .into_iter()
+        .filter(|p| p.block == block)
+        .find_map(|p| p.widget.filter(|w| w["variant"].as_str() == Some(variant)))
 }

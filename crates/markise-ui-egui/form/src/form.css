@@ -105,3 +105,18 @@ button.mk-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--ac
 
 .mk-warn { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-size: 12.5px;
   background: color-mix(in srgb, #e0a100 16%, transparent); border: 1px solid color-mix(in srgb, #e0a100 45%, transparent); }
+
+/* direction picker */
+.mk-cross { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; max-width: 320px; margin: 4px auto 0;
+  grid-template-areas: ". up ." "left mid right" "uturn car ."; }
+.mk-road { border-radius: 10px; min-height: 64px; background:
+  linear-gradient(90deg, transparent 36%, color-mix(in srgb, var(--fg) 14%, transparent) 36% 64%, transparent 64%),
+  linear-gradient(0deg, transparent 36%, color-mix(in srgb, var(--fg) 14%, transparent) 36% 64%, transparent 64%); }
+.mk-car { display: grid; place-items: center; color: var(--muted); }
+.mk-dir { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 8px 4px;
+  min-height: 64px; border-radius: 10px; color: var(--muted); font-size: 12.5px; }
+.mk-dir.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--field)); color: var(--fg); }
+.mk-dir.on svg { color: var(--accent); }
+.mk-stop { width: 100%; margin-top: 10px; padding: 9px; border-radius: 10px; }
+.mk-stop.on { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, var(--field)); color: var(--fg); }
+.mk-dir-hint { font-size: 12px; color: var(--muted); margin-top: 4px; }

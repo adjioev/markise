@@ -621,13 +621,27 @@ pub fn show(
                             painter.rect_stroke(r, 8.0, Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
                         }
                         if *sub {
-                            painter.text(
+                            let lr = painter.text(
                                 r.left_center() + vec2(48.0, 0.0),
                                 egui::Align2::LEFT_CENTER,
                                 &p.label,
                                 egui::FontId::proportional(13.5),
                                 t.fg,
                             );
+                            if p.widget.is_some() {
+                                // ↔ glyph: this preset has its own form
+                                let c = egui::pos2(lr.right() + 16.0, r.center().y);
+                                let st = Stroke::new(1.5, t.accent);
+                                painter.line_segment([c + vec2(-7.0, 0.0), c + vec2(7.0, 0.0)], st);
+                                painter.add(egui::Shape::line(
+                                    vec![c + vec2(-3.5, -3.5), c + vec2(-7.0, 0.0), c + vec2(-3.5, 3.5)],
+                                    st,
+                                ));
+                                painter.add(egui::Shape::line(
+                                    vec![c + vec2(3.5, -3.5), c + vec2(7.0, 0.0), c + vec2(3.5, 3.5)],
+                                    st,
+                                ));
+                            }
                         } else if *ctx {
                             let ir =
                                 Rect::from_center_size(egui::pos2(r.left() + 23.0, r.center().y), vec2(30.0, 30.0));

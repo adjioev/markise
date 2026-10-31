@@ -230,7 +230,30 @@ impl FormState {
                 .and_then(|d| std::fs::read_to_string(d.join(format!("{}.form.{ext}", block.name))).ok())
         };
         let over: Option<Value> = read("json").and_then(|s| serde_json::from_str(&s).ok());
-        let (title, schema, uischema) = bf::form(&dec, &lang, over.as_ref());
+        let (title, schema, mut uischema) = bf::form(&dec, &lang, over.as_ref());
+        // a variant with a site-declared built-in widget (`:::question directions` → the direction
+        // picker): the answers are picked with that widget
+        if block.name == "question"
+            && let Some(w) = crate::block_lib::widget_for(
+                &root,
+                &lang,
+                &block.name,
+                block.args.split_whitespace().next().unwrap_or(""),
+            )
+            && let Some(els) = uischema["elements"].as_array_mut()
+        {
+            for e in els.iter_mut() {
+                if e["scope"] == "#/properties/options" {
+                    e["options"]["format"] = json!(w["widget"]);
+                    e["options"]["answers"] = w["answers"].clone();
+                    e["label"] = json!(if ru {
+                        "Разрешённые направления"
+                    } else {
+                        "Allowed directions"
+                    });
+                }
+            }
+        }
         let file = doc
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
@@ -1329,6 +1352,147 @@ impl InsertScript {
                 next(self);
             }
             34 if after(800) => {
+                if std::env::var_os("MARKISE_PROTO_EXIT").is_some_and(|v| v != "0") {
+                    std::process::exit(0);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------- directions script
+
+/// PROTOTYPE scripted check of the «О направлениях» preset (`MARKISE_PROTO_DIRECTIONS=1`).
+#[derive(Default)]
+pub struct DirScript {
+    step: usize,
+    since: Option<Instant>,
+    original: String,
+    saves: usize,
+}
+
+thread_local! {
+    static DIR_SCRIPT: std::cell::RefCell<Option<DirScript>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn dir_script(ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
+    if !std::env::var_os("MARKISE_PROTO_DIRECTIONS").is_some_and(|v| v != "0") {
+        return;
+    }
+    DIR_SCRIPT.with(|s| s.borrow_mut().get_or_insert_with(Default::default).frame(ctx, viewer));
+}
+
+impl DirScript {
+    fn frame(&mut self, ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        let now = Instant::now();
+        let since = *self.since.get_or_insert(now);
+        let after = |ms: u64| now - since >= std::time::Duration::from_millis(ms);
+        let Some(snaps) = viewer.snaps.as_ref() else { return };
+        let all = !snaps.current.is_empty() && snaps.current.iter().all(|&c| c);
+        let shot = |name: &str| crate::block_snap::ProtoScript::default().shot(ctx, name);
+        let panel_shot = |name: &str| {
+            if let Some(dir) = std::env::var_os("MARKISE_PROTO_SHOTS") {
+                crate::form_panel::handle(
+                    json!({"op": "form_shot", "path": PathBuf::from(dir).join(format!("{name}.png"))}),
+                );
+            }
+        };
+        let say = |s: String| eprintln!("[proto-dir] {s}");
+        let text = viewer.ed.session.text().to_string();
+        let next = |me: &mut Self| {
+            me.step += 1;
+            me.since = Some(Instant::now());
+        };
+        match self.step {
+            0 => {
+                if all && after(1200) && !viewer.gaps.is_empty() {
+                    self.original = text;
+                    crate::block_palette::open_for(None);
+                    next(self);
+                } else if !all {
+                    self.since = Some(now);
+                }
+            }
+            1 if after(2500) => {
+                shot("dir-palette");
+                self.step = 100;
+                self.since = Some(now);
+            }
+            100 if after(600) => {
+                self.step = 1;
+                let root = snaps.form.root().map(Path::to_path_buf);
+                let p = root
+                    .map(|r| crate::block_lib::presets(&r, &lang()))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|p| p.widget.is_some());
+                let gap = viewer.gaps.first().map(|g| g.0).unwrap_or(0);
+                let rev = viewer.ed.session.revision().counter;
+                if let Some(p) = p {
+                    say(format!("inserting «{}» at {gap}", p.label));
+                    crate::block_palette::choose(p, Some(InsertTarget::new(&text, gap, gap, rev)));
+                }
+                self.saves = snaps.form.saves.len();
+                next(self);
+            }
+            2 if after(1200) && snaps.form.is_open() => {
+                panel_shot("dir-form-draft");
+                snaps.form.eval("window.markiseForm.save()");
+                next(self);
+            }
+            3 if snaps.form.saves.len() > self.saves => {
+                say(format!("save with no direction → {:?}", snaps.form.saves.last()));
+                self.saves = snaps.form.saves.len();
+                // pick «Прямо» and «Направо» like the widget does (and «Ехать нельзя» stays off)
+                snaps.form.eval("{ const d = window.markiseForm.data(); window.markiseForm.set('options', d.options.map((x, i) => ({...x, correct: i === 1 || i === 2}))); }");
+                next(self);
+            }
+            4 if after(1200) => {
+                panel_shot("dir-form-selected");
+                shot("dir-preview");
+                snaps.form.eval("window.markiseForm.save()");
+                next(self);
+            }
+            5 if snaps.form.saves.len() > self.saves => {
+                let added: Vec<String> = similar::TextDiff::from_lines(&self.original, &text)
+                    .iter_all_changes()
+                    .filter(|c| c.tag() == similar::ChangeTag::Insert)
+                    .map(|c| c.value().trim_end().to_string())
+                    .collect();
+                say(format!("insert → {:?}; lines {added:?}", snaps.form.saves.last()));
+                viewer.ed.edit(|s| s.undo());
+                say(format!(
+                    "undo → byte-identical = {}",
+                    viewer.ed.session.text() == self.original
+                ));
+                next(self);
+            }
+            // an existing `:::question directions` opens the direction form
+            6 if after(800) => {
+                if let Some(b) = snaps
+                    .blocks
+                    .iter()
+                    .find(|b| b.name == "question" && b.variant == "directions")
+                {
+                    viewer.pending_edit = Some(b.offset);
+                    say(format!("editing the directions question at {}", b.offset));
+                }
+                next(self);
+            }
+            7 if after(1500) && snaps.form.is_open() => {
+                panel_shot("dir-form-edit");
+                snaps
+                    .form
+                    .eval("window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))");
+                next(self);
+            }
+            8 if after(800) => {
+                say(format!(
+                    "cancel → document unchanged = {}",
+                    viewer.ed.session.text() == self.original
+                ));
                 if std::env::var_os("MARKISE_PROTO_EXIT").is_some_and(|v| v != "0") {
                     std::process::exit(0);
                 }

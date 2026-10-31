@@ -270,6 +270,92 @@ function PicturesControl({ data, handleChange, path, label, schema, enabled, vis
     errors ? h('div', { className: 'validation' }, errors) : null,
   );
 }
+// ---- direction picker (built-in widget a site preset declares for `:::question directions`):
+// the fixed answers as arrows on a crossroads; an exclusive answer («Ехать нельзя») clears the
+// arrows and vice versa
+const ARROWS = {
+  left: 'M19 12H5M11 6l-6 6 6 6',
+  straight: 'M12 19V5M6 11l6-6 6 6',
+  right: 'M5 12h14M13 6l6 6-6 6',
+  'u-turn': 'M15 20V9a5 5 0 0 0-10 0v3M1 9l4 4 4-4',
+};
+function Arrow({ icon }) {
+  return h(
+    'svg',
+    { width: 26, height: 26, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+    h('path', { d: ARROWS[icon] || '' }),
+  );
+}
+function DirectionsControl({ data, handleChange, path, label, uischema, enabled, visible, errors }) {
+  if (!visible) return null;
+  const items = Array.isArray(data) ? data : [];
+  const meta = (uischema.options && uischema.options.answers) || [];
+  const set = (i) => {
+    const ex = !!(meta[i] && meta[i].exclusive);
+    const on = !items[i].correct;
+    handleChange(
+      path,
+      items.map((x, j) => {
+        if (j === i) return { ...x, correct: on };
+        if (on && (ex || (meta[j] && meta[j].exclusive))) return { ...x, correct: false };
+        return x;
+      }),
+    );
+  };
+  const idx = (icon) => meta.findIndex((m) => m.icon === icon);
+  const btn = (icon, area) => {
+    const i = idx(icon);
+    if (i < 0 || !items[i]) return h('div', { key: icon, style: { gridArea: area } });
+    return h(
+      'button',
+      {
+        type: 'button',
+        key: icon,
+        title: items[i].text,
+        disabled: !enabled,
+        className: 'mk-dir' + (items[i].correct ? ' on' : ''),
+        style: { gridArea: area },
+        onClick: () => set(i),
+      },
+      h(Arrow, { icon }),
+      h('span', null, items[i].text),
+    );
+  };
+  const stop = idx('stop');
+  const none = !items.some((x) => x.correct);
+  return h(
+    'div',
+    { className: 'control mk-dirs' },
+    h('label', null, label),
+    h(
+      'div',
+      { className: 'mk-cross' },
+      btn('straight', 'up'),
+      btn('left', 'left'),
+      h('div', { className: 'mk-road', style: { gridArea: 'mid' } }),
+      btn('right', 'right'),
+      btn('u-turn', 'uturn'),
+      h(
+        'div',
+        { className: 'mk-car', style: { gridArea: 'car' } },
+        h('svg', { width: 22, height: 30, viewBox: '0 0 22 30' }, h('rect', { x: 2, y: 2, width: 18, height: 26, rx: 5, fill: 'currentColor', opacity: 0.8 })),
+      ),
+    ),
+    stop >= 0 && items[stop]
+      ? h(
+          'button',
+          { type: 'button', disabled: !enabled, className: 'mk-stop' + (items[stop].correct ? ' on' : ''), onClick: () => set(stop) },
+          items[stop].text,
+        )
+      : null,
+    none
+      ? h('div', { className: 'mk-dir-hint' }, currentLang === 'ru' ? 'Отметьте хотя бы одно направление или «Ехать нельзя».' : 'Pick at least one direction.')
+      : null,
+    errors ? h('div', { className: 'validation' }, errors) : null,
+  );
+}
+const directionsTester = core.rankWith(40, core.and(core.isControl, core.optionIs('format', 'direction-picker')));
+
 const picturesTester = core.rankWith(30, core.and(core.isControl, core.optionIs('format', 'pictures')));
 
 const choicesTester = core.rankWith(30, core.and(core.isControl, core.optionIs('format', 'choices')));
@@ -287,6 +373,7 @@ const baseRenderers = [
   { tester: listTester, renderer: withJsonFormsControlProps(ListControl) },
   { tester: choicesTester, renderer: withJsonFormsControlProps(ChoicesControl) },
   { tester: picturesTester, renderer: withJsonFormsControlProps(PicturesControl) },
+  { tester: directionsTester, renderer: withJsonFormsControlProps(DirectionsControl) },
 ];
 
 // ---- site renderers
@@ -449,6 +536,7 @@ function App() {
         cells: vanillaCells,
         validationMode: 'ValidateAndShow',
         onChange: ({ data: d, errors: e }) => {
+          if (d !== data) setMsg(null);
           setData(d);
           setErrors(e || []);
         },
