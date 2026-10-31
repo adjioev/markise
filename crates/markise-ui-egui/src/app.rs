@@ -2715,6 +2715,14 @@ impl MarkiseApp {
                             );
                             vrect = rest;
                         }
+                        if crate::block_palette::take_refocus() {
+                            ctx.memory_mut(|m| {
+                                if let Some(f) = m.focused() {
+                                    m.surrender_focus(f);
+                                }
+                            });
+                            d.viewer.request_refocus();
+                        }
                         let mut vui = ui.new_child(egui::UiBuilder::new().max_rect(vrect).id_salt("markise-live-doc"));
                         let out = d.viewer.show(&mut vui, &mut self.images, &t, self.parley.as_mut(), true);
                         if out.edited {

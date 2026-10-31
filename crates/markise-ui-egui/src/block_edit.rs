@@ -1206,7 +1206,129 @@ impl InsertScript {
                 ));
                 next(self);
             }
-            24 if after(800) => {
+            // the palette (list, then a keyboard-highlighted row with its preview)
+            24 if after(500) => {
+                crate::block_palette::open_for(None);
+                next(self);
+            }
+            25 if after(2500) => {
+                shot("pal-list");
+                crate::block_palette::script_highlight(Some(0));
+                next(self);
+            }
+            26 if after(1500) => {
+                shot("pal-preview");
+                next(self);
+            }
+            27 if after(400) => {
+                crate::block_palette::close();
+                // ⌥⌘↓ on a selected block moves it below the next item
+                let pick = viewer
+                    .atomic
+                    .iter()
+                    .find(|a| !viewer.atomic.iter().any(|b| b.0 == a.3))
+                    .copied();
+                if let Some((start, _, _, after_off)) = pick {
+                    viewer.focused_block = Some(start);
+                    viewer.ed.set_selection(markise_doc::Selection::caret(after_off));
+                    viewer.request_refocus();
+                    self.mark = start;
+                }
+                next(self);
+            }
+            28 if after(300) => {
+                ctx.input_mut(|i| {
+                    i.events.push(egui::Event::Key {
+                        key: egui::Key::ArrowDown,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers {
+                            alt: true,
+                            command: true,
+                            mac_cmd: true,
+                            ..Default::default()
+                        },
+                    })
+                });
+                next(self);
+            }
+            29 if after(400) => {
+                let moved = text != self.original;
+                let label = viewer
+                    .ed
+                    .session
+                    .history()
+                    .undo_stack()
+                    .last()
+                    .map(|t| t.label.to_string());
+                let blocks_ok = bf::all_blocks(&text).len() == bf::all_blocks(&self.original).len();
+                Self::say(format!(
+                    "⌥⌘↓ on a selected block → moved = {moved}, undo label {label:?}, blocks intact = {blocks_ok}"
+                ));
+                viewer.ed.edit(|s| s.undo());
+                Self::say(format!(
+                    "undo → byte-identical = {}",
+                    viewer.ed.session.text() == self.original
+                ));
+                next(self);
+            }
+            // drag a block by its handle: the line at a valid point, then the drop
+            30 if after(500) => {
+                self.saves = 0;
+                let pair = viewer.atomic.iter().copied().find_map(|a| {
+                    viewer
+                        .gaps
+                        .iter()
+                        .copied()
+                        .find(|g| g.0 != a.1 && g.0 != a.2 && g.1 > 120.0)
+                        .map(|g| (a, g))
+                });
+                if let Some((a, g)) = pair {
+                    egui::DragAndDrop::set_payload(ctx, crate::viewer::MoveBlock(a.0));
+                    viewer.debug_drag_y = Some(g.1 - 40.0 + 2.0);
+                    self.mark = a.0;
+                    self.saves = g.0;
+                    Self::say(format!("dragging block at {} towards the point {}", a.0, g.0));
+                }
+                next(self);
+            }
+            31 if after(600) => {
+                shot("move-drag-line");
+                next(self);
+            }
+            32 if after(400) => {
+                egui::DragAndDrop::clear_payload(ctx);
+                viewer.debug_drag_y = None;
+                let r = if self.saves > 10 {
+                    viewer.move_block(self.mark, self.saves)
+                } else {
+                    None
+                };
+                let t2 = viewer.ed.session.text().to_string();
+                Self::say(format!(
+                    "drop → moved to {r:?}; blocks intact = {}; undo label {:?}",
+                    bf::all_blocks(&t2).len() == bf::all_blocks(&self.original).len(),
+                    viewer
+                        .ed
+                        .session
+                        .history()
+                        .undo_stack()
+                        .last()
+                        .map(|t| t.label.to_string())
+                ));
+                next(self);
+            }
+            33 if all && after(900) => {
+                shot("move-dropped");
+                viewer.ed.edit(|s| s.undo());
+                Self::say(format!(
+                    "undo the move → byte-identical = {}",
+                    viewer.ed.session.text() == self.original
+                ));
+                next(self);
+            }
+            34 if after(800) => {
                 if std::env::var_os("MARKISE_PROTO_EXIT").is_some_and(|v| v != "0") {
                     std::process::exit(0);
                 }

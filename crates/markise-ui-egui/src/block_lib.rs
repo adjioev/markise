@@ -333,6 +333,13 @@ pub struct Preset {
     pub label: String,
     pub description: String,
     pub markdown: String,
+    /// Extra search words of the preset (site-provided).
+    pub keywords: String,
+    /// Palette group label and its order (site `presets.json` groups; fallback "Блоки").
+    pub group: String,
+    pub group_rank: usize,
+    /// Icon name (site-provided, e.g. `list-check`), else derived from the block name.
+    pub icon: String,
 }
 
 /// The insertion palette of a library: `presets.json` presets, plus a generated skeleton for
@@ -350,6 +357,26 @@ pub fn presets(root: &Path, lang: &str) -> Vec<Preset> {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(Value::Null);
     let desc = |b: &str| tr(&p["blocks"][b]["description"]);
+    let icon = |b: &str| p["blocks"][b]["icon"].as_str().unwrap_or(b).to_string();
+    let groups = p["groups"].as_array().cloned().unwrap_or_default();
+    let group = |b: &str| -> (String, usize) {
+        groups
+            .iter()
+            .enumerate()
+            .find(|(_, g)| g["blocks"].as_array().is_some_and(|a| a.iter().any(|x| x == b)))
+            .map(|(i, g)| (tr(&g["label"]), i))
+            .unwrap_or_else(|| {
+                (
+                    if lang == "ru" {
+                        "Другие блоки"
+                    } else {
+                        "Other blocks"
+                    }
+                    .into(),
+                    groups.len(),
+                )
+            })
+    };
     let mut out: Vec<Preset> = p["presets"]
         .as_array()
         .cloned()
@@ -357,11 +384,16 @@ pub fn presets(root: &Path, lang: &str) -> Vec<Preset> {
         .iter()
         .map(|x| {
             let block = x["block"].as_str().unwrap_or("").to_string();
+            let (group, group_rank) = group(&block);
             Preset {
                 label: tr(&x["label"]),
                 description: desc(&block),
                 markdown: x["markdown"].as_str().unwrap_or("").into(),
                 block_label: tr(&manifest[&block]["label"]),
+                keywords: x["keywords"].as_str().unwrap_or("").into(),
+                icon: icon(&block),
+                group,
+                group_rank,
                 block,
             }
         })
@@ -372,15 +404,32 @@ pub fn presets(root: &Path, lang: &str) -> Vec<Preset> {
             if out.iter().any(|x| &x.block == name) {
                 continue;
             }
+            let (group, group_rank) = group(name);
             out.push(Preset {
                 block: name.clone(),
                 block_label: tr(&def["label"]),
                 label: tr(&def["label"]),
                 description: desc(name),
                 markdown: skeleton(name, def, lang),
+                keywords: String::new(),
+                icon: icon(name),
+                group,
+                group_rank,
             });
         }
     }
+    // stable palette order: groups, then the site's order of blocks inside a group
+    let block_order: Vec<String> = groups
+        .iter()
+        .flat_map(|g| g["blocks"].as_array().cloned().unwrap_or_default())
+        .filter_map(|b| b.as_str().map(str::to_string))
+        .collect();
+    out.sort_by_key(|x| {
+        (
+            x.group_rank,
+            block_order.iter().position(|b| *b == x.block).unwrap_or(usize::MAX),
+        )
+    });
     out
 }
 

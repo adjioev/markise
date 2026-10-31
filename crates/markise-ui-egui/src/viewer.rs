@@ -203,6 +203,17 @@ pub struct DocViewer {
     /// PROTOTYPE (live preview): new-block preview this frame: (item, y offset in it, texture,
     /// size, replaces the item).
     draft_paint: Option<(usize, f32, egui::TextureId, Vec2, bool)>,
+    /// PROTOTYPE (block move): scripted drag position (y in the pane) instead of the pointer.
+    pub debug_drag_y: Option<f32>,
+}
+
+/// PROTOTYPE (block move): drag payload — the block starting at this offset.
+#[derive(Clone, Copy, Debug)]
+pub struct MoveBlock(pub usize);
+
+/// PROTOTYPE (block move): the ⠿ handle left of a block image.
+fn handle_rect(r: Rect) -> Rect {
+    Rect::from_min_size(pos2(r.left() - 24.0, r.top() + 6.0), vec2(18.0, 24.0))
 }
 
 /// PROTOTYPE (block packages): the "+ Добавить блок" pill at an insertion point.
@@ -278,6 +289,7 @@ impl DocViewer {
             gap_col: (0.0, 0.0),
             natural: Default::default(),
             draft_paint: None,
+            debug_drag_y: None,
         }
     }
 
@@ -633,6 +645,40 @@ impl DocViewer {
                     ran = true;
                 }
             }
+            // PROTOTYPE (block move): ⌥⌘↑ / ⌥⌘↓ move the selected block past its neighbour
+            if editable
+                && !self.snap_blocks
+                && let Some(fb) = self.focused_block
+            {
+                let mv = events.iter().find_map(|e| match e {
+                    Event::Key {
+                        key: egui::Key::ArrowUp,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.alt && modifiers.command => Some(true),
+                    Event::Key {
+                        key: egui::Key::ArrowDown,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.alt && modifiers.command => Some(false),
+                    _ => None,
+                });
+                if let Some(up) = mv {
+                    events.retain(|e| {
+                        !matches!(
+                            e,
+                            Event::Key {
+                                key: egui::Key::ArrowUp | egui::Key::ArrowDown,
+                                ..
+                            }
+                        )
+                    });
+                    self.move_block_step(fb, up);
+                    ran = true;
+                }
+            }
             if let Some(b) = self.focused_block {
                 let enter = events.iter().any(|e| {
                     matches!(e, Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. } if !modifiers.any())
@@ -703,6 +749,23 @@ impl DocViewer {
                 crate::block_palette::open_for(Some(crate::block_edit::InsertTarget::new(text, off, off, rev)));
             }
         }
+        let on_handle = if editable && !self.snap_blocks {
+            ui.input(|i| i.pointer.press_origin().or(i.pointer.interact_pos()))
+                .and_then(|p| {
+                    self.snap_rects
+                        .iter()
+                        .find(|(r, _)| handle_rect(*r).contains(p))
+                        .map(|(_, o)| *o)
+                })
+        } else {
+            None
+        };
+        if let Some(off) = on_handle {
+            ctx.set_cursor_icon(CursorIcon::Grab);
+            if resp.drag_started() {
+                egui::DragAndDrop::set_payload(&ctx, MoveBlock(off));
+            }
+        }
         let on_snap = ui
             .input(|i| i.pointer.interact_pos())
             .and_then(|p| self.snap_rects.iter().find(|(r, _)| r.contains(p)).map(|(_, o)| *o));
@@ -732,8 +795,11 @@ impl DocViewer {
                 }
             }
         }
-        let pressed =
-            ui.input(|i| i.pointer.primary_pressed()) && resp.hovered() && on_snap.is_none() && on_plus.is_none();
+        let pressed = ui.input(|i| i.pointer.primary_pressed())
+            && resp.hovered()
+            && on_snap.is_none()
+            && on_plus.is_none()
+            && on_handle.is_none();
         // a click on a task checkbox toggles it (spec 02 §9): the press neither places the caret
         // nor starts a selection; the toggle happens on release over the same box (a press
         // dragged off the box does nothing)
@@ -1046,6 +1112,7 @@ impl DocViewer {
         // block), the "+ Добавить блок" pill on hover and the drop line while dragging a preset
         self.gaps.clear();
         self.gap_col = (left, col_w);
+        let mut do_move: Option<(usize, usize)> = None;
         if editable && !self.snap_blocks && self.snaps.is_some() {
             let text = self.ed.session.text();
             let ranges: Vec<std::ops::Range<usize>> = markise_engine::block_form::all_blocks(text)
@@ -1076,28 +1143,89 @@ impl DocViewer {
             }
             let hover = ctx.input(|i| i.pointer.hover_pos());
             let dragging = egui::DragAndDrop::payload::<crate::block_palette::DragPreset>(&ctx);
+            let moving = egui::DragAndDrop::payload::<MoveBlock>(&ctx);
             let accent = theme_color(theme.link);
-            if let Some(d) = dragging {
-                if let Some(h) = hover.filter(|h| rect.contains(*h))
-                    && let Some(&(off, y)) = self
-                        .gaps
+            if dragging.is_some() || moving.is_some() {
+                // Esc cancels; autoscroll near the edges; the line shows the nearest valid point
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    egui::DragAndDrop::clear_payload(&ctx);
+                }
+                let hy = hover.map(|h| h.y).or(self.debug_drag_y.map(|y| rect.top() + y));
+                if let Some(y) = hy {
+                    if y < rect.top() + 36.0 && y >= rect.top() - 40.0 {
+                        self.ed.view.scroll_by(-14.0);
+                        ctx.request_repaint();
+                    } else if y > rect.bottom() - 36.0 && y <= rect.bottom() + 40.0 {
+                        self.ed.view.scroll_by(14.0);
+                        ctx.request_repaint();
+                    }
+                }
+                // a moved block: not at its own position
+                let own = moving
+                    .as_ref()
+                    .and_then(|m| self.atomic.iter().find(|a| a.0 == m.0).copied());
+                let valid: Vec<(usize, f32)> = self
+                    .gaps
+                    .iter()
+                    .copied()
+                    .filter(|g| own.is_none_or(|a| g.0 != a.1 && g.0 != a.2))
+                    .collect();
+                if let Some(hy) = hy.filter(|y| *y >= rect.top() && *y <= rect.bottom())
+                    && hover.is_none_or(|h| rect.contains(h))
+                    && let Some(&(off, y)) = valid
                         .iter()
-                        .min_by(|a, b| (a.1 - h.y).abs().total_cmp(&(b.1 - h.y).abs()))
+                        .min_by(|a, b| (a.1 - hy).abs().total_cmp(&(b.1 - hy).abs()))
                 {
-                    painter.line_segment(
+                    // above the block images (painted later in this frame)
+                    let lp = ctx
+                        .layer_painter(egui::LayerId::new(
+                            egui::Order::Foreground,
+                            egui::Id::unique("markise-drop-line"),
+                        ))
+                        .with_clip_rect(rect);
+                    lp.line_segment(
                         [pos2(left - 8.0, y), pos2(left + col_w + 8.0, y)],
                         Stroke::new(3.0, accent),
                     );
-                    painter.circle_filled(pos2(left - 8.0, y), 5.0, accent);
+                    lp.circle_filled(pos2(left - 8.0, y), 5.0, accent);
                     if ctx.input(|i| i.pointer.any_released()) {
-                        let _ = egui::DragAndDrop::take_payload::<crate::block_palette::DragPreset>(&ctx);
                         let rev = self.ed.session.revision().counter;
-                        crate::block_palette::choose(
-                            d.0.clone(),
-                            Some(crate::block_edit::InsertTarget::new(text, off, off, rev)),
-                        );
+                        if let Some(d) = &dragging {
+                            let _ = egui::DragAndDrop::take_payload::<crate::block_palette::DragPreset>(&ctx);
+                            crate::block_palette::choose(
+                                d.0.clone(),
+                                Some(crate::block_edit::InsertTarget::new(text, off, off, rev)),
+                            );
+                        } else if let Some(m) = &moving {
+                            let _ = egui::DragAndDrop::take_payload::<MoveBlock>(&ctx);
+                            do_move = Some((m.0, off));
+                        }
                         ctx.request_repaint();
                     }
+                }
+                if let Some(m) = &moving
+                    && let Some(pos) = hover
+                {
+                    // ghost: the block's name
+                    let name = text
+                        .get(m.0..)
+                        .and_then(|t| t.lines().next())
+                        .unwrap_or(":::")
+                        .trim_start_matches(':')
+                        .trim()
+                        .to_string();
+                    let label = if crate::block_edit::lang() == "ru" {
+                        format!("Переместить: {name}")
+                    } else {
+                        format!("Move: {name}")
+                    };
+                    let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("markise-block-move"));
+                    let lp = ctx.layer_painter(layer);
+                    let g = lp.layout_no_wrap(label, egui::FontId::proportional(13.0), Color32::WHITE);
+                    let r = Rect::from_min_size(pos + vec2(14.0, 6.0), vec2(g.size().x + 20.0, 26.0));
+                    lp.rect_filled(r, 13.0, accent);
+                    lp.galley(r.min + vec2(10.0, (26.0 - g.size().y) / 2.0), g, Color32::WHITE);
+                    ctx.set_cursor_icon(CursorIcon::Grabbing);
                 }
             } else if let Some(h) = hover.filter(|h| h.x > left - 30.0 && h.x < left + col_w && rect.contains(*h))
                 && let Some(&(_, y)) = self.gaps.iter().find(|g| (g.1 - h.y).abs() < 9.0)
@@ -1121,6 +1249,9 @@ impl DocViewer {
                     Color32::WHITE,
                 );
             }
+        }
+        if let Some((start, dest)) = do_move {
+            self.move_block(start, dest);
         }
         // block images: their items are not painted as Markdown
         self.snap_rects.clear();
@@ -1174,6 +1305,32 @@ impl DocViewer {
             let hover = ctx.input(|i| i.pointer.hover_pos());
             let ru = crate::block_edit::lang() == "ru";
             for (i, (r, _)) in self.snap_rects.iter().enumerate() {
+                // ⠿ move handle (live mode)
+                if editable
+                    && !self.snap_blocks
+                    && (hover.is_some_and(|h| r.expand2(vec2(28.0, 0.0)).contains(h))
+                        || self.force_edit_button == Some(i))
+                {
+                    let hr = handle_rect(*r);
+                    let hot = hover.is_some_and(|h| hr.contains(h));
+                    if hot {
+                        painter.rect_filled(hr, 5.0, theme_color(theme.link).gamma_multiply(0.18));
+                    }
+                    let c = if hot {
+                        theme_color(theme.link)
+                    } else {
+                        theme_color(theme.meta_text)
+                    };
+                    for row in 0..3 {
+                        for col in 0..2 {
+                            painter.circle_filled(
+                                hr.min + vec2(6.0 + 6.0 * col as f32, 6.0 + 6.0 * row as f32),
+                                1.6,
+                                c,
+                            );
+                        }
+                    }
+                }
                 let forced = self.force_edit_button == Some(i);
                 if !forced && !hover.is_some_and(|h| r.contains(h) && rect.contains(h)) {
                     continue;
@@ -2548,4 +2705,95 @@ fn near_start(text: &str, start: usize, c: usize) -> bool {
         && text
             .get(start..c)
             .is_some_and(|m| m.chars().all(|ch| "#>-*+ 0123456789.[]xX".contains(ch)))
+}
+
+impl DocViewer {
+    /// PROTOTYPE (block move): top-level units of the document: items outside blocks and whole
+    /// `:::` blocks, as (start, end).
+    fn top_units(&self) -> Vec<(usize, usize)> {
+        let text = self.ed.session.text();
+        let blocks = markise_engine::block_form::all_blocks(text);
+        let model = self.ed.view.model().clone();
+        let mut out = Vec::new();
+        for (st, it) in model.items.iter_with_start() {
+            if it.len == 0 || blocks.iter().any(|b| st > b.range.start && st < b.range.end) {
+                continue;
+            }
+            match blocks.iter().find(|b| b.range.start == st) {
+                Some(b) => out.push((b.range.start, b.range.end)),
+                None => out.push((st, st + it.len)),
+            }
+        }
+        out
+    }
+
+    /// PROTOTYPE (block move): moves the block at `start` to the insertion point `dest` (the end
+    /// of a top-level item) as one undo step «Переместить блок». Returns the new start.
+    pub fn move_block(&mut self, start: usize, dest: usize) -> Option<usize> {
+        let text = self.ed.session.text();
+        let b = markise_engine::block_form::block_at(text, start)?;
+        let end = b.range.end;
+        // the block and the blank lines after it, up to the next text
+        let after = end + text[end..].len() - text[end..].trim_start_matches(['\n', '\r']).len();
+        if (start..=after).contains(&dest) || !self.top_units().iter().any(|u| u.1 == dest) {
+            return None;
+        }
+        let block = text[start..end].to_string();
+        let ps = PatchSet::new(vec![
+            markise_doc::Patch::verbatim(start..after, ""),
+            markise_doc::Patch::verbatim(dest..dest, format!("\n\n{block}")),
+        ])
+        .ok()?;
+        self.ed
+            .edit(|s| s.apply_external(&ps, "Переместить блок", false))
+            .ok()?;
+        let new_start = if dest > start {
+            dest - (after - start) + 2
+        } else {
+            dest + 2
+        };
+        let t = self.ed.session.text();
+        let next = t[new_start + block.len()..]
+            .find(|c: char| c != '\n' && c != '\r')
+            .map_or(t.len(), |i| new_start + block.len() + i);
+        self.ed.set_selection(Selection::caret(next));
+        self.focused_block = Some(new_start);
+        self.last_focus = next;
+        Some(new_start)
+    }
+
+    /// PROTOTYPE (block move): ⌥⌘↑ / ⌥⌘↓ — past the neighbouring top-level item.
+    pub fn move_block_step(&mut self, start: usize, up: bool) -> Option<usize> {
+        let units = self.top_units();
+        let u = units.iter().position(|x| x.0 == start)?;
+        if up {
+            let prev = *units.get(u.checked_sub(1)?)?;
+            // insert before the previous unit = after the unit before it (or at the top)
+            let text = self.ed.session.text();
+            let b = markise_engine::block_form::block_at(text, start)?;
+            let end = b.range.end;
+            let after = end + text[end..].len() - text[end..].trim_start_matches(['\n', '\r']).len();
+            let block = text[start..end].to_string();
+            let ps = PatchSet::new(vec![
+                markise_doc::Patch::verbatim(prev.0..prev.0, format!("{block}\n\n")),
+                markise_doc::Patch::verbatim(start..after, ""),
+            ])
+            .ok()?;
+            self.ed
+                .edit(|s| s.apply_external(&ps, "Переместить блок", false))
+                .ok()?;
+            let new_start = prev.0;
+            let t = self.ed.session.text();
+            let next = t[new_start + block.len()..]
+                .find(|c: char| c != '\n' && c != '\r')
+                .map_or(t.len(), |i| new_start + block.len() + i);
+            self.ed.set_selection(Selection::caret(next));
+            self.focused_block = Some(new_start);
+            self.last_focus = next;
+            Some(new_start)
+        } else {
+            let next = *units.get(u + 1)?;
+            self.move_block(start, next.1)
+        }
+    }
 }
