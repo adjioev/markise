@@ -1936,7 +1936,10 @@ impl MarkiseApp {
             {
                 SBS_DONE.store(true, Ordering::Relaxed);
                 self.set_view_mode(ViewMode::SideBySide);
-                // PROTOTYPE: `MARKISE_PROTO_THEME=dark|light` for this run (not saved)
+            }
+            // PROTOTYPE: `MARKISE_PROTO_THEME=dark|light` for this run (not saved)
+            static THEME_DONE: AtomicBool = AtomicBool::new(false);
+            if self.doc.is_some() && !THEME_DONE.swap(true, Ordering::Relaxed) {
                 match std::env::var("MARKISE_PROTO_THEME").as_deref() {
                     Ok("dark") => self.themes.set_appearance_transient(Appearance::Dark),
                     Ok("light") => self.themes.set_appearance_transient(Appearance::Light),
@@ -2702,11 +2705,13 @@ impl MarkiseApp {
                             // PROTOTYPE (block packages): the native block palette in the panel
                             let (panel, rest) = crate::form_panel::reserve_rect(ui, vrect);
                             let [r, g, b, _] = t.link.0;
+                            let root = d.viewer.snaps.as_ref().and_then(|s| s.form.root().map(|p| p.to_path_buf()));
                             crate::block_palette::show(
                                 ui,
                                 panel,
-                                d.viewer.snaps.as_ref().and_then(|s| s.form.root()),
+                                root.as_deref(),
                                 egui::Color32::from_rgb(r, g, b),
+                                d.viewer.snaps.as_mut(),
                             );
                             vrect = rest;
                         }

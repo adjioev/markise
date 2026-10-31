@@ -328,6 +328,8 @@ pub fn is_package(root: &Path) -> bool {
 #[derive(Clone, Debug)]
 pub struct Preset {
     pub block: String,
+    /// The block's label from blocks.json (UI language).
+    pub block_label: String,
     pub label: String,
     pub description: String,
     pub markdown: String,
@@ -359,6 +361,7 @@ pub fn presets(root: &Path, lang: &str) -> Vec<Preset> {
                 label: tr(&x["label"]),
                 description: desc(&block),
                 markdown: x["markdown"].as_str().unwrap_or("").into(),
+                block_label: tr(&manifest[&block]["label"]),
                 block,
             }
         })
@@ -371,6 +374,7 @@ pub fn presets(root: &Path, lang: &str) -> Vec<Preset> {
             }
             out.push(Preset {
                 block: name.clone(),
+                block_label: tr(&def["label"]),
                 label: tr(&def["label"]),
                 description: desc(name),
                 markdown: skeleton(name, def, lang),

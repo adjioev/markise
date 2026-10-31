@@ -198,6 +198,11 @@ pub struct DocViewer {
     pub gaps: Vec<(usize, f32)>,
     /// Column left edge and width of the last frame (insertion affordances).
     gap_col: (f32, f32),
+    /// PROTOTYPE (live preview): natural layout heights of the last frame's visible items.
+    natural: std::collections::HashMap<usize, f32>,
+    /// PROTOTYPE (live preview): new-block preview this frame: (item, y offset in it, texture,
+    /// size, replaces the item).
+    draft_paint: Option<(usize, f32, egui::TextureId, Vec2, bool)>,
 }
 
 /// PROTOTYPE (block packages): the "+ Добавить блок" pill at an insertion point.
@@ -271,6 +276,8 @@ impl DocViewer {
             lib: None,
             gaps: Vec::new(),
             gap_col: (0.0, 0.0),
+            natural: Default::default(),
+            draft_paint: None,
         }
     }
 
@@ -950,7 +957,7 @@ impl DocViewer {
                     let vis: Vec<usize> = self.last_visible.iter().map(|v| v.0).collect();
                     let model = self.ed.view.model().clone();
                     let width = self.ed.view.width();
-                    let (over, placed) = s.frame(
+                    let (mut over, placed) = s.frame(
                         &ctx,
                         &model,
                         self.ed.session.text(),
@@ -961,6 +968,41 @@ impl DocViewer {
                         &vis,
                         &crate::block_snap::ThemeVars::from_theme(theme),
                     );
+                    // live preview of a new block: extra height under the item before the point
+                    // (or in place of the `/` line), painted after the layout
+                    self.draft_paint = None;
+                    if let (
+                        Some((tex, size)),
+                        Some(crate::block_edit::Preview {
+                            at: crate::block_edit::PreviewAt::Insert(st, en),
+                            ..
+                        }),
+                    ) = (s.draft_image, s.form.preview.as_ref())
+                    {
+                        let (st, en) = (*st, *en);
+                        let items: Vec<(usize, usize)> =
+                            model.items.iter_with_start().map(|(a, it)| (a, it.len)).collect();
+                        let spacing = theme.block_spacing;
+                        if en > st {
+                            if let Some(k) = items.iter().position(|&(a, l)| a <= st && st < a + l.max(1)) {
+                                over.insert(k, spacing + size.y);
+                                self.draft_paint = Some((k, spacing, tex, size, true));
+                            }
+                        } else {
+                            let k = placed
+                                .iter()
+                                .find(|p| p.end == st)
+                                .map(|p| p.open)
+                                .or_else(|| items.iter().rposition(|&(a, l)| a + l <= st && l > 0));
+                            if let Some(k) = k {
+                                let base = over.get(&k).copied().or_else(|| self.natural.get(&k).copied());
+                                if let Some(base) = base {
+                                    over.insert(k, base + spacing + size.y);
+                                    self.draft_paint = Some((k, base + spacing, tex, size, false));
+                                }
+                            }
+                        }
+                    }
                     self.ed.view.set_height_overrides(over);
                     placed
                 }
@@ -994,6 +1036,10 @@ impl DocViewer {
         out.painted = visible.len();
         out.laid_out = self.ed.view.laid_out.len();
         self.last_visible = visible.iter().map(|v| (v.idx, v.y)).collect();
+        self.natural = visible.iter().map(|v| (v.idx, v.layout.height)).collect();
+        let draft_y = self
+            .draft_paint
+            .and_then(|(k, ..)| visible.iter().find(|v| v.idx == k).map(|v| v.y));
         self.last_left = left;
         self.last_top = rect.top();
         // PROTOTYPE (block packages): insertion points between top-level items (never inside a
@@ -1173,6 +1219,27 @@ impl DocViewer {
                 ctx.request_repaint_after(std::time::Duration::from_millis(500));
             }
             visible.retain(|v| !placed.iter().any(|p| v.idx >= p.open && v.idx <= p.close));
+        }
+        // PROTOTYPE (live preview): the new block's image at its insertion point
+        if let Some((k, off, tex, size, replace)) = self.draft_paint
+            && let Some(vy) = draft_y
+        {
+            let r = Rect::from_min_size(pos2(left, rect.top() + vy + off), size);
+            painter.image(
+                tex,
+                r,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            painter.rect_stroke(
+                r.expand(3.0),
+                8.0,
+                Stroke::new(1.5, theme_color(theme.link).gamma_multiply(0.7)),
+                StrokeKind::Outside,
+            );
+            if replace {
+                visible.retain(|v| v.idx != k);
+            }
         }
 
         // ---- paint

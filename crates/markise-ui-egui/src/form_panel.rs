@@ -391,6 +391,7 @@ mod mac {
                 }
             }
             "save" => emit(json!({"event": "save", "id": m["id"], "data": m["data"]})),
+            "draft" => emit(json!({"event": "draft", "id": m["id"], "data": m["data"]})),
             "pick" => emit(json!({"event": "pick", "id": m["id"], "path": m["path"], "index": m["index"]})),
             "cancel" => {
                 emit(json!({"event": "cancel", "id": m["id"]}));

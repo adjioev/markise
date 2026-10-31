@@ -390,6 +390,13 @@ function App() {
     if (first) first.focus();
   }, [req]);
 
+  // live preview: the current values go to Markise (debounced), which renders the block
+  useEffect(() => {
+    if (!req || data === req.data) return;
+    const t = setTimeout(() => post({ event: 'draft', id: req.id, data }), 150);
+    return () => clearTimeout(t);
+  }, [data]);
+
   const save = () => {
     if (!req || busy) return;
     if (errors.length) {

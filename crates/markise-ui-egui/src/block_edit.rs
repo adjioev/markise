@@ -80,6 +80,22 @@ struct Draft {
     target: InsertTarget,
 }
 
+/// Live preview of the values in the form (nothing is written to the document).
+#[derive(Clone, Debug, PartialEq)]
+pub enum PreviewAt {
+    /// The existing block whose `:::` line starts here.
+    Edit(usize),
+    /// A new block at this insertion range.
+    Insert(usize, usize),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Preview {
+    pub at: PreviewAt,
+    /// The block's Markdown as the form would write it.
+    pub markdown: String,
+}
+
 /// Edit dialog state of one viewer.
 pub struct FormState {
     events: Receiver<Value>,
@@ -95,20 +111,16 @@ pub struct FormState {
     pub saves: Vec<Result<usize, String>>,
     /// Why the dialog could not open (shown over the pane for a few seconds).
     pub error: Option<(String, Instant)>,
+    /// Live preview of the open form (latest values; replaced by every change).
+    pub preview: Option<Preview>,
 }
 
 pub fn lang() -> String {
     if let Ok(l) = std::env::var("MARKISE_LANG") {
         return if l.starts_with("en") { "en".into() } else { "ru".into() };
     }
-    let sys = std::env::var("LC_ALL")
-        .or_else(|_| std::env::var("LANG"))
-        .unwrap_or_default();
-    if sys.starts_with("en") {
-        "en".into()
-    } else {
-        "ru".into()
-    }
+    // PROTOTYPE: the owner's authoring language (Russian) unless MARKISE_LANG=en
+    "ru".into()
 }
 
 /// Folder of a block's site files: `<root>/blocks/<name>/` if it has `<name>.form.json`,
@@ -140,6 +152,7 @@ impl FormState {
             opens: Vec::new(),
             saves: Vec::new(),
             error: None,
+            preview: None,
         }
     }
 
@@ -280,6 +293,11 @@ impl FormState {
                 dir
             );
         }
+        // a new block is previewed at its point right away (the preset as it is)
+        self.preview = draft.as_ref().map(|d| Preview {
+            at: PreviewAt::Insert(d.target.start, d.target.end),
+            markdown: d.markdown.clone(),
+        });
         self.open = Some(Open {
             id,
             dec,
@@ -294,6 +312,7 @@ impl FormState {
     /// Hides the dialog without saving (measurement script).
     pub fn close(&mut self) {
         self.open = None;
+        self.preview = None;
         let _ = self.send(&json!({"op": "form_close"}));
     }
 
@@ -344,6 +363,26 @@ impl FormState {
                 "cancel" => {
                     if id == current {
                         self.open = None;
+                        self.preview = None;
+                    }
+                }
+                "draft" if id == current && id.is_some() => {
+                    // live preview: render the values without writing (latest wins)
+                    if let Some(o) = self.open.as_ref() {
+                        let text = ed.session.text();
+                        self.preview = match &o.draft {
+                            Some(d) => Some(Preview {
+                                at: PreviewAt::Insert(d.target.start, d.target.end),
+                                markdown: bf::preview(&d.markdown, &o.dec, &ev["data"], &o.lang),
+                            }),
+                            None if text.get(o.dec.block.range.clone()) == Some(o.dec.source.as_str()) => {
+                                Some(Preview {
+                                    at: PreviewAt::Edit(o.dec.block.range.start),
+                                    markdown: bf::preview(text, &o.dec, &ev["data"], &o.lang),
+                                })
+                            }
+                            None => None,
+                        };
                     }
                 }
                 "save" if id == current && id.is_some() => {
@@ -357,6 +396,7 @@ impl FormState {
                     };
                     if res.is_ok() {
                         self.open = None;
+                        self.preview = None;
                     }
                     self.saves.push(res);
                     let _ = self.send(&reply);
@@ -927,7 +967,7 @@ impl InsertScript {
                     self.since = Some(now);
                 }
             }
-            1 if after(700) => {
+            1 if after(2500) => {
                 shot("pkg-02-palette");
                 next(self);
             }
@@ -957,8 +997,43 @@ impl InsertScript {
             }
             5 if after(500) => {
                 panel_shot("pkg-04-validation");
-                snaps.form.eval("{ const d = window.markiseForm.data(); const o = d.options.map((x, i) => ({...x, correct: i === 1})); window.markiseForm.set('options', o); window.markiseForm.set('prompt', 'Новый вопрос из палитры?'); setTimeout(() => window.markiseForm.save(), 80); }");
-                next(self);
+                snaps.form.eval("{ const d = window.markiseForm.data(); const o = d.options.map((x, i) => ({...x, correct: i === 1})); window.markiseForm.set('options', o); window.markiseForm.set('prompt', 'Новый вопрос из палитры?'); }");
+                self.mark = 0;
+                self.since = Some(now);
+                self.step = 50;
+            }
+            // live preview of the draft at its insertion point (nothing written yet)
+            50 if self.mark == 0 => {
+                if let Some(a) = viewer.atomic.first() {
+                    let open = viewer
+                        .ed
+                        .view
+                        .model()
+                        .items
+                        .iter_with_start()
+                        .position(|(st, _)| st == a.0)
+                        .unwrap_or(0);
+                    viewer.ed.view.scroll_to_item(open);
+                    viewer.ed.view.scroll_by(200.0);
+                }
+                self.mark = 1;
+            }
+            50 if after(1200) => {
+                let p = snaps.form.preview.clone();
+                Self::say(format!(
+                    "live preview of the draft: shown = {}, document unchanged = {}, preview has the new prompt = {}",
+                    snaps.draft_image.is_some(),
+                    text == self.original,
+                    p.is_some_and(|p| p.markdown.contains("Новый вопрос из палитры?"))
+                ));
+                shot("pkg-08-live-preview");
+                self.step = 51;
+                self.since = Some(now);
+            }
+            51 if after(500) => {
+                snaps.form.eval("window.markiseForm.save()");
+                self.step = 6;
+                self.since = Some(now);
             }
             6 if snaps.form.saves.len() > self.saves => {
                 let added: Vec<String> = similar::TextDiff::from_lines(&self.original, &text)
@@ -1078,7 +1153,60 @@ impl InsertScript {
                 ));
                 next(self);
             }
-            19 if after(800) => {
+            // live preview while editing an existing block; Cancel restores it
+            19 if after(500) => {
+                if let Some(b) = snaps.blocks.iter().find(|b| b.name == "goals") {
+                    viewer.pending_edit = Some(b.offset);
+                    self.mark = b.offset;
+                }
+                next(self);
+            }
+            20 if after(900) && snaps.form.is_open() => {
+                snaps.form.eval("{ const d = window.markiseForm.data(); window.markiseForm.set('items.0', 'Живой предпросмотр: ' + d.items[0]); }");
+                next(self);
+            }
+            21 if after(1200) => {
+                let shown = snaps
+                    .blocks
+                    .iter()
+                    .find(|b| b.offset == self.mark)
+                    .is_some_and(|b| b.inner.contains("Живой предпросмотр"));
+                Self::say(format!(
+                    "edit preview: block image shows the form values = {shown} (current = {:?}), document unchanged = {}, undo stack unchanged = {}",
+                    snaps.current.iter().all(|c| *c),
+                    text == self.original,
+                    viewer
+                        .ed
+                        .session
+                        .history()
+                        .undo_stack()
+                        .last()
+                        .map(|t| t.label.to_string())
+                        != Some("Edit Block".into())
+                ));
+                shot("pkg-09-edit-preview");
+                next(self);
+            }
+            22 if after(500) => {
+                crate::form_panel::handle(
+                    json!({"op": "form_eval", "js": "window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}))"}),
+                );
+                next(self);
+            }
+            23 if after(800) => {
+                let back = snaps
+                    .blocks
+                    .iter()
+                    .find(|b| b.offset == self.mark)
+                    .is_some_and(|b| !b.inner.contains("Живой предпросмотр"));
+                Self::say(format!(
+                    "cancel → original block restored = {back}, form closed = {}, document unchanged = {}",
+                    !snaps.form.is_open(),
+                    text == self.original
+                ));
+                next(self);
+            }
+            24 if after(800) => {
                 if std::env::var_os("MARKISE_PROTO_EXIT").is_some_and(|v| v != "0") {
                     std::process::exit(0);
                 }

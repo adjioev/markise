@@ -654,11 +654,43 @@ fn blank_before(text: &str, pos: usize, floor: usize) -> usize {
 /// `force` every field is re-rendered from its value (fidelity check of the renderers).
 /// Locked parts (answer ids, set, correctness, variant/argument) and limits are validated.
 pub fn edits(text: &str, dec: &Decoded, data: &Value, force: bool, lang: &str) -> Result<Vec<Edit>, String> {
+    edits_opts(text, dec, data, force, lang, false)
+}
+
+/// The Markdown of the block as `data` would make it, without validation (live preview of
+/// intermediate states, e.g. no correct answer chosen yet). Nothing is written anywhere.
+pub fn preview(text: &str, dec: &Decoded, data: &Value, lang: &str) -> String {
+    let e = edits_opts(text, dec, data, false, lang, true).unwrap_or_default();
+    let r = dec.block.range.clone();
+    let shifted: Vec<Edit> = e
+        .into_iter()
+        .filter(|(x, _)| x.start >= r.start && x.end <= r.end)
+        .map(|(x, s)| (x.start - r.start..x.end - r.start, s))
+        .collect();
+    apply(&text[r], &shifted)
+}
+
+/// [`edits`]; `lenient` skips validation (errors are ignored and the data rendered as is).
+pub fn edits_opts(
+    text: &str,
+    dec: &Decoded,
+    data: &Value,
+    force: bool,
+    lang: &str,
+    lenient: bool,
+) -> Result<Vec<Edit>, String> {
+    macro_rules! bail {
+        ($e:expr) => {
+            if !lenient {
+                return Err($e);
+            }
+        };
+    }
     let ru = lang == "ru";
     let mut out: Vec<Edit> = Vec::new();
     for k in ["_variant", "_argument"] {
         if data.get(k).is_some() && data.get(k) != dec.data.get(k) {
-            return Err(if ru {
+            bail!(if ru {
                 "Вариант блока менять нельзя.".into()
             } else {
                 "The variant is locked.".into()
@@ -684,7 +716,7 @@ pub fn edits(text: &str, dec: &Decoded, data: &Value, force: bool, lang: &str) -
                     continue;
                 }
                 if v.is_empty() && min > 0 {
-                    return Err(if ru {
+                    bail!(if ru {
                         format!("Поле «{label}» не может быть пустым.")
                     } else {
                         format!("Field `{label}` must not be empty.")
@@ -744,14 +776,14 @@ pub fn edits(text: &str, dec: &Decoded, data: &Value, force: bool, lang: &str) -
                     .and_then(Value::as_u64)
                     .map_or(usize::MAX, |n| n as usize);
                 if vals.len() < lo || vals.len() > hi {
-                    return Err(if ru {
+                    bail!(if ru {
                         format!("В списке «{label}» должно быть от {lo} до {hi} пунктов.")
                     } else {
                         format!("List `{label}` needs {lo}..{hi} items.")
                     });
                 }
                 if vals.iter().any(String::is_empty) {
-                    return Err(if ru {
+                    bail!(if ru {
                         format!("Пустой пункт в списке «{label}».")
                     } else {
                         format!("Empty item in `{label}`.")
@@ -791,21 +823,21 @@ pub fn edits(text: &str, dec: &Decoded, data: &Value, force: bool, lang: &str) -
                     let t = norm_line(e.get("text").and_then(Value::as_str).unwrap_or(""));
                     let c = e.get("correct").and_then(Value::as_bool).unwrap_or(false);
                     if id.is_empty() || id.contains(|ch: char| ch.is_whitespace() || ch == '}') {
-                        return Err(if ru {
+                        bail!(if ru {
                             format!("Неверная метка ответа «{id}».")
                         } else {
                             format!("Bad answer label `{id}`.")
                         });
                     }
                     if ans.iter().any(|a| a.0 == id) {
-                        return Err(if ru {
+                        bail!(if ru {
                             format!("Метка {{#{id}}} повторяется.")
                         } else {
                             format!("Duplicate label {{#{id}}}.")
                         });
                     }
                     if t.is_empty() {
-                        return Err(if ru {
+                        bail!(if ru {
                             format!("Пустой текст ответа {{#{id}}}.")
                         } else {
                             format!("Empty answer {{#{id}}}.")
@@ -815,7 +847,7 @@ pub fn edits(text: &str, dec: &Decoded, data: &Value, force: bool, lang: &str) -
                 }
                 let lo = f.def.get("minItems").and_then(Value::as_u64).unwrap_or(1) as usize;
                 if ans.len() < lo {
-                    return Err(if ru {
+                    bail!(if ru {
                         format!("Нужно не меньше {lo} ответов.")
                     } else {
                         format!("At least {lo} answers are needed.")
@@ -824,14 +856,14 @@ pub fn edits(text: &str, dec: &Decoded, data: &Value, force: bool, lang: &str) -
                 let n_ok = ans.iter().filter(|a| a.2).count();
                 match correct_rule(&dec.def, &f.def, &dec.block.args).as_str() {
                     "exactly-one" if n_ok != 1 => {
-                        return Err(if ru {
+                        bail!(if ru {
                             "Отметьте ровно один верный ответ.".into()
                         } else {
                             "Mark exactly one correct answer.".into()
                         });
                     }
                     "at-least-one" if n_ok == 0 => {
-                        return Err(if ru {
+                        bail!(if ru {
                             "Отметьте хотя бы один верный ответ.".into()
                         } else {
                             "Mark at least one correct answer.".into()
@@ -870,7 +902,7 @@ pub fn edits(text: &str, dec: &Decoded, data: &Value, force: bool, lang: &str) -
                     let alt = norm_line(e.get("alt").and_then(Value::as_str).unwrap_or(""));
                     let src = norm_line(e.get("src").and_then(Value::as_str).unwrap_or(""));
                     if src.is_empty() {
-                        return Err(if ru {
+                        bail!(if ru {
                             "Путь к картинке не может быть пустым.".into()
                         } else {
                             "Empty picture path.".into()
@@ -890,7 +922,7 @@ pub fn edits(text: &str, dec: &Decoded, data: &Value, force: bool, lang: &str) -
                     .and_then(Value::as_u64)
                     .map_or(usize::MAX, |n| n as usize);
                 if pics.len() < lo || pics.len() > hi {
-                    return Err(if ru {
+                    bail!(if ru {
                         format!("Картинок должно быть от {lo} до {hi}.")
                     } else {
                         format!("{lo}..{hi} pictures are needed.")

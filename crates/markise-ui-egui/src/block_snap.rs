@@ -208,6 +208,17 @@ pub struct BlockSnaps {
     pub form: crate::block_edit::FormState,
     /// Width the images are rendered at (frozen while the edit panel is resized).
     key_width: Option<f32>,
+    /// Live preview applied to the block list (from the form), and the new-block preview.
+    preview_applied: Option<crate::block_edit::Preview>,
+    draft_block: Option<Block>,
+    last_draft: Option<(u64, u64)>,
+    /// The new block's preview image this frame (texture, size in points).
+    pub draft_image: Option<(egui::TextureId, egui::Vec2)>,
+    /// Palette thumbnails wanted this frame (key, block, width) and the theme/scale of the
+    /// last frame they render with.
+    thumb_wants: Vec<(u64, Block, f32)>,
+    last_theme: Option<ThemeVars>,
+    last_scale: f32,
     pending: usize,
 }
 
@@ -274,6 +285,13 @@ impl BlockSnaps {
             current: Vec::new(),
             form,
             key_width: None,
+            preview_applied: None,
+            draft_block: None,
+            last_draft: None,
+            draft_image: None,
+            thumb_wants: Vec::new(),
+            last_theme: None,
+            last_scale: 2.0,
             pending: 0,
         })
     }
@@ -322,9 +340,32 @@ impl BlockSnaps {
             width
         };
         let id = (std::sync::Arc::as_ptr(model) as usize, revision);
+        if self.form.preview != self.preview_applied {
+            self.scanned = None;
+        }
         if self.scanned != Some(id) {
             let t = Instant::now();
             self.blocks = find_blocks(model, text);
+            // live preview of the form: the edited block shows the form's values; a new block
+            // gets a synthetic entry (rendered first, placed by the viewer)
+            self.preview_applied = self.form.preview.clone();
+            self.draft_block = None;
+            if let Some(p) = &self.preview_applied
+                && let Some(pb) = preview_block(&p.markdown)
+            {
+                match p.at {
+                    crate::block_edit::PreviewAt::Edit(off) => {
+                        if let Some(b) = self.blocks.iter_mut().find(|b| b.offset == off) {
+                            b.name = pb.name;
+                            b.args = pb.args;
+                            b.variant = pb.variant;
+                            b.inner = pb.inner;
+                            b.content = pb.content;
+                        }
+                    }
+                    crate::block_edit::PreviewAt::Insert(..) => self.draft_block = Some(pb),
+                }
+            }
             self.scanned = Some(id);
             self.last_shown.resize(self.blocks.len(), None);
             if self.log {
@@ -389,6 +430,25 @@ impl BlockSnaps {
         order.sort_by_key(|&i| !is_vis(&self.blocks[i]));
         let mut jobs = Vec::new();
         let mut keys = Vec::new();
+        if let Some(b) = &self.draft_block {
+            let key = Self::key_of(b, kw, scale, theme);
+            if self.folder != 0
+                && !self.cache.contains_key(&(key, self.folder))
+                && !self.failed.contains(&(key, self.folder))
+            {
+                keys.push(key);
+                jobs.push(Job {
+                    theme: theme.clone(),
+                    key,
+                    name: b.name.clone(),
+                    variant: b.variant.clone(),
+                    args: b.args.clone(),
+                    inner: b.inner.clone(),
+                    width: kw,
+                    scale,
+                });
+            }
+        }
         for &i in &order {
             let b = &self.blocks[i];
             let key = Self::key_of(b, kw, scale, theme);
@@ -415,6 +475,27 @@ impl BlockSnaps {
                 });
             }
         }
+        // palette thumbnails (after the document's blocks)
+        for (key, b, w) in std::mem::take(&mut self.thumb_wants) {
+            if self.folder != 0
+                && !self.cache.contains_key(&(key, self.folder))
+                && !self.failed.contains(&(key, self.folder))
+            {
+                keys.push(key);
+                jobs.push(Job {
+                    theme: theme.clone(),
+                    key,
+                    name: b.name.clone(),
+                    variant: b.variant.clone(),
+                    args: b.args.clone(),
+                    inner: b.inner.clone(),
+                    width: w,
+                    scale,
+                });
+            }
+        }
+        self.last_theme = Some(theme.clone());
+        self.last_scale = scale;
         if keys != self.sent {
             self.sent = keys;
             let _ = self.to_worker.send(jobs);
@@ -470,6 +551,23 @@ impl BlockSnaps {
             });
         }
         self.pending = if self.folder == 0 { self.blocks.len() } else { pending };
+        // the new block's preview (its last image while the next one renders)
+        self.draft_image = None;
+        if let Some(b) = &self.draft_block {
+            let cur = (Self::key_of(b, kw, scale, theme), self.folder);
+            if self.cache.contains_key(&cur) {
+                self.last_draft = Some(cur);
+            }
+            if let Some(k) = self.last_draft.filter(|k| self.cache.contains_key(k))
+                && let Some(snap) = self.cache.get_mut(&k)
+            {
+                snap.last_used = self.frame;
+                let h = snap.height * width / snap.width.max(1.0);
+                self.draft_image = Some((snap.tex.id(), egui::vec2(width, h)));
+            }
+        } else {
+            self.last_draft = None;
+        }
         if missing == 0 && !self.blocks.is_empty() && !self.all_shown {
             self.all_shown = true;
             if self.log {
@@ -1216,4 +1314,41 @@ impl ProtoScript {
             stats(&mut self.burst_frames.clone())
         );
     }
+}
+
+impl BlockSnaps {
+    /// PROTOTYPE (block palette): the rendered thumbnail of a preset at `width` (CSS px), or
+    /// None while it renders (it is wished for with the next frame's jobs).
+    pub fn thumb(&mut self, md: &str, width: f32) -> Option<(egui::TextureId, egui::Vec2)> {
+        let theme = self.last_theme.clone()?;
+        let b = preview_block(md)?;
+        let key = Self::key_of(&b, width, self.last_scale, &theme);
+        if let Some(snap) = self.cache.get_mut(&(key, self.folder)) {
+            snap.last_used = self.frame;
+            return Some((snap.tex.id(), egui::vec2(snap.width, snap.height)));
+        }
+        if !self.thumb_wants.iter().any(|(k, _, _)| *k == key) {
+            self.thumb_wants.push((key, b, width));
+        }
+        None
+    }
+}
+
+/// A block entry for a preview's Markdown (`:::name args` … `:::`).
+fn preview_block(md: &str) -> Option<Block> {
+    let b = markise_engine::block_form::block_at(md, 0)?;
+    let inner = md.get(b.inner.clone()).unwrap_or("").trim_matches('\n').to_string();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (&b.name, &b.args, &inner).hash(&mut h);
+    Some(Block {
+        open: usize::MAX,
+        close: usize::MAX,
+        offset: usize::MAX,
+        variant: b.args.split_whitespace().next().unwrap_or("").to_string(),
+        name: b.name,
+        args: b.args,
+        inner,
+        content: h.finish(),
+        end: usize::MAX,
+    })
 }
