@@ -118,7 +118,7 @@ pub fn installed() -> Vec<Installed> {
             source: l["source"].as_str().unwrap_or("").into(),
             root: PathBuf::from(l["root"].as_str().unwrap_or("")),
         })
-        .filter(|l| l.root.join("components/blocks.json").is_file())
+        .filter(|l| markise_engine::block_form::is_library_root(&l.root))
         .collect()
 }
 
@@ -305,7 +305,7 @@ pub fn install(b: &Binding) -> Result<PathBuf, String> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .ok_or("в пакете нет manifest.json")?;
-    if man["format"] != "markise-block-package/1" {
+    if man["format"] != "markise-block-package/1" && man["format"] != "markise-block-package/2" {
         return Err(format!("неизвестный формат пакета {:?}", man["format"]));
     }
     if let Some(a) = idx["libraries"].as_array_mut() {
@@ -355,7 +355,13 @@ pub fn presets(root: &Path, lang: &str) -> Vec<Preset> {
             .unwrap_or_default()
     };
     let manifest = markise_engine::block_form::load_manifest(root).unwrap_or(Value::Null);
-    let p: Value = std::fs::read_to_string(root.join("presets.json"))
+    // palette: `editor/palette.json` (format /2, the site layout), else `presets.json` (/1)
+    let palette = if root.join("editor/palette.json").is_file() {
+        root.join("editor/palette.json")
+    } else {
+        root.join("presets.json")
+    };
+    let p: Value = std::fs::read_to_string(palette)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(Value::Null);

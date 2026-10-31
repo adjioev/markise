@@ -984,13 +984,137 @@ pub fn site_root(doc: &std::path::Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Reads `<root>/components/blocks.json` (schema `foliwake-blocks/1`) → its `blocks` object.
+/// Reads the block definitions of a library root → `{ name: definition }`:
+/// - `markise-block-package/2` (= the site layout): every `components/<name>/<name>.json`;
+/// - format 1 / older sites: `components/blocks.json` (schema `foliwake-blocks/1`).
 pub fn load_manifest(root: &std::path::Path) -> Result<Value, String> {
     let p = root.join("components").join("blocks.json");
+    if !p.is_file() {
+        let dir = root.join("components");
+        let mut blocks = serde_json::Map::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            let mut names: Vec<String> = rd
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect();
+            names.sort();
+            for n in names {
+                let f = dir.join(&n).join(format!("{n}.json"));
+                if let Ok(s) = std::fs::read_to_string(&f) {
+                    let v: Value = serde_json::from_str(&s).map_err(|e| format!("{}: {e}", f.display()))?;
+                    blocks.insert(n, v);
+                }
+            }
+        }
+        if blocks.is_empty() {
+            return Err(format!("{}: no block definitions", dir.display()));
+        }
+        return Ok(Value::Object(blocks));
+    }
     let s = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
     let v: Value = serde_json::from_str(&s).map_err(|e| format!("{}: {e}", p.display()))?;
     if v.get("schema").and_then(Value::as_str) != Some("foliwake-blocks/1") {
         return Err(format!("{}: unknown schema {:?}", p.display(), v.get("schema")));
     }
     Ok(v.get("blocks").cloned().unwrap_or(Value::Null))
+}
+
+/// Whether `dir` holds a block library (either layout).
+pub fn is_library_root(dir: &std::path::Path) -> bool {
+    dir.join("components").join("blocks.json").is_file()
+        || std::fs::read_to_string(dir.join("manifest.json")).is_ok_and(|m| m.contains("markise-block-package/2"))
+}
+
+/// The Foliwake block HTML of a decoded block (site loader contract, HTML contract 1):
+/// `<section data-component="<name>" class="<name>" [data-variant|data-argument]>` with one
+/// element per field carrying `data-field` (headings `<hN>`, text `<div>`, lists `<ul>` with
+/// `<li data-item>`, choices with `data-select`, `data-option-id`, `data-correct`, quotes
+/// `<blockquote>`, pictures `<div>` of `<img>`). `md` renders a Markdown fragment to HTML.
+pub fn site_html(dec: &Decoded, md: &dyn Fn(&str) -> String) -> String {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
+    // inline Markdown (a heading, a list item): the paragraph wrapper of `md` removed
+    let inline = |s: &str| {
+        let h = md(s);
+        let t = h.trim();
+        t.strip_prefix("<p>")
+            .and_then(|x| x.strip_suffix("</p>"))
+            .unwrap_or(t)
+            .to_string()
+    };
+    let name = &dec.block.name;
+    let mut attrs = format!("data-component=\"{}\" class=\"{}\"", esc(name), esc(name));
+    let variant = dec.block.args.split_whitespace().next().unwrap_or("");
+    if dec.def.get("variants").is_some() {
+        if !variant.is_empty() {
+            attrs.push_str(&format!(" data-variant=\"{}\"", esc(variant)));
+        }
+    } else if dec.def.get("argument").is_some() && !dec.block.args.is_empty() {
+        attrs.push_str(&format!(" data-argument=\"{}\"", esc(&dec.block.args)));
+    }
+    let mut out = format!("<section {attrs}>\n");
+    for f in &dec.fields {
+        if f.region.is_none() {
+            continue;
+        }
+        let v = &dec.data[&f.name];
+        let n = esc(&f.name);
+        match f.ty.as_str() {
+            "heading" => {
+                let l = f.def.get("level").and_then(Value::as_u64).unwrap_or(2);
+                out.push_str(&format!(
+                    "<h{l} data-field=\"{n}\">{}</h{l}>\n",
+                    inline(v.as_str().unwrap_or(""))
+                ));
+            }
+            "text" => out.push_str(&format!(
+                "<div data-field=\"{n}\">\n{}</div>\n",
+                md(v.as_str().unwrap_or(""))
+            )),
+            "quote" => out.push_str(&format!(
+                "<blockquote data-field=\"{n}\">\n{}</blockquote>\n",
+                md(v.as_str().unwrap_or(""))
+            )),
+            "list" => {
+                out.push_str(&format!("<ul data-field=\"{n}\">\n"));
+                for it in v.as_array().cloned().unwrap_or_default() {
+                    out.push_str(&format!("<li data-item>{}</li>\n", inline(it.as_str().unwrap_or(""))));
+                }
+                out.push_str("</ul>\n");
+            }
+            "choices" => {
+                let rule = f
+                    .def
+                    .get("correct")
+                    .and_then(|c| c.get(variant))
+                    .and_then(Value::as_str)
+                    .unwrap_or("at-least-one");
+                let select = if rule == "exactly-one" { "single" } else { "multiple" };
+                out.push_str(&format!("<ul data-field=\"{n}\" data-select=\"{select}\">\n"));
+                for o in v.as_array().cloned().unwrap_or_default() {
+                    out.push_str(&format!(
+                        "<li data-item data-option-id=\"{}\" data-correct=\"{}\">{}</li>\n",
+                        esc(o["id"].as_str().unwrap_or("")),
+                        o["correct"].as_bool().unwrap_or(false),
+                        inline(o["text"].as_str().unwrap_or(""))
+                    ));
+                }
+                out.push_str("</ul>\n");
+            }
+            "image" => {
+                out.push_str(&format!("<div data-field=\"{n}\">\n"));
+                for p in v.as_array().cloned().unwrap_or_default() {
+                    out.push_str(&format!(
+                        "<img src=\"{}\" alt=\"{}\">\n",
+                        esc(p["src"].as_str().unwrap_or("").trim_matches(|c| c == '<' || c == '>')),
+                        esc(p["alt"].as_str().unwrap_or(""))
+                    ));
+                }
+                out.push_str("</div>\n");
+            }
+            _ => {}
+        }
+    }
+    out.push_str("</section>");
+    out
 }

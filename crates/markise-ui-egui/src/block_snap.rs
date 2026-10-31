@@ -612,6 +612,56 @@ struct Site {
     code: HashMap<String, (String, String, PathBuf)>,
     hash: u64,
     checked: Option<Instant>,
+    /// Library in the site layout (`markise-block-package/2`): shared `styles/styles.css`,
+    /// ES-module block JS, Foliwake block HTML built from the block definitions.
+    v2: bool,
+    defs: Value,
+    /// `<html lang>` of the snapshot page (the lesson's language).
+    lang: String,
+}
+
+/// The lesson language: front matter `lang:` or a `Language:` line, else `ru`.
+fn doc_lang(doc: Option<&std::path::Path>) -> String {
+    let text = doc.and_then(|d| std::fs::read_to_string(d).ok()).unwrap_or_default();
+    text.lines()
+        .take(60)
+        .find_map(|l| {
+            l.strip_prefix("lang:")
+                .or_else(|| l.strip_prefix("Language:"))
+                .map(|v| v.trim().trim_matches('"').to_string())
+        })
+        .filter(|v| !v.is_empty() && v.len() <= 12)
+        .unwrap_or_else(|| "ru".into())
+}
+
+/// `styles/styles.css` of a site-layout library with its `@import url("…")` of local files
+/// inlined (so the page needs no extra loads) and `url()`s made absolute.
+fn site_styles(root: &std::path::Path) -> String {
+    let dir = root.join("styles");
+    let Ok(css) = std::fs::read_to_string(dir.join("styles.css")) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for line in css.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("@import url(") {
+            let f = rest
+                .split(')')
+                .next()
+                .unwrap_or("")
+                .trim_matches(|c| c == '"' || c == '\'');
+            if !f.contains(':')
+                && let Ok(inner) = std::fs::read_to_string(dir.join(f))
+            {
+                out.push_str(&absolute_css_urls(&inner, &dir));
+                out.push('\n');
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    absolute_css_urls(&out, &dir)
 }
 
 /// The site root of a document: the nearest ancestor folder with `components/blocks.json`.
@@ -626,6 +676,10 @@ pub fn site_root(doc: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
+fn root_v2(root: Option<&std::path::Path>) -> bool {
+    root.is_some_and(|r| !r.join("components/blocks.json").is_file() && markise_engine::block_form::is_library_root(r))
+}
+
 impl Site {
     fn new(doc: Option<PathBuf>, fallback: Option<PathBuf>, root: Option<PathBuf>) -> Self {
         Site {
@@ -636,7 +690,21 @@ impl Site {
             code: HashMap::new(),
             hash: 0,
             checked: None,
+            v2: root_v2(None),
+            defs: Value::Null,
+            lang: doc_lang(doc.as_deref()),
         }
+        .with_root_kind()
+    }
+
+    fn with_root_kind(mut self) -> Self {
+        self.v2 = root_v2(self.root.as_deref());
+        if self.v2
+            && let Some(r) = &self.root
+        {
+            self.defs = markise_engine::block_form::load_manifest(r).unwrap_or(Value::Null);
+        }
+        self
     }
 
     /// The folder holding a component's code: the site root's if it has any file for it.
@@ -644,7 +712,7 @@ impl Site {
         [self.root.as_ref(), self.fallback.as_ref()]
             .into_iter()
             .flatten()
-            .map(|r| r.join("blocks").join(name))
+            .flat_map(|r| [r.join("components").join(name), r.join("blocks").join(name)])
             .find(|d| d.join(format!("{name}.css")).is_file() || d.join(format!("{name}.js")).is_file())
     }
 
@@ -660,7 +728,8 @@ impl Site {
         let mut names: Vec<String> = [self.root.as_ref(), self.fallback.as_ref()]
             .into_iter()
             .flatten()
-            .filter_map(|r| std::fs::read_dir(r.join("blocks")).ok())
+            .flat_map(|r| [r.join("blocks"), r.join("components")])
+            .filter_map(|d| std::fs::read_dir(d).ok())
             .flat_map(|rd| rd.flatten())
             .filter(|e| e.path().is_dir())
             .filter_map(|e| e.file_name().into_string().ok())
@@ -680,16 +749,32 @@ impl Site {
             }
             dirs.push((name.to_string(), d));
         }
+        // site layout: the shared styles (tokens, fonts, the block frame) come before each block
+        let base_css = match (&self.root, self.v2) {
+            (Some(r), true) => {
+                for f in ["styles/styles.css", "styles/tokens.css"] {
+                    let md = std::fs::metadata(r.join(f)).ok();
+                    stamp.push((
+                        r.join(f),
+                        md.as_ref().and_then(|m| m.modified().ok()),
+                        md.map_or(0, |m| m.len()),
+                    ));
+                }
+                site_styles(r)
+            }
+            _ => String::new(),
+        };
         if stamp == self.stamp && self.hash != 0 {
             return false;
         }
         self.code.clear();
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for (name, d) in dirs {
-            let css = absolute_css_urls(
-                &std::fs::read_to_string(d.join(format!("{name}.css"))).unwrap_or_default(),
-                &d,
-            );
+            let css = base_css.clone()
+                + &absolute_css_urls(
+                    &std::fs::read_to_string(d.join(format!("{name}.css"))).unwrap_or_default(),
+                    &d,
+                );
             let js = std::fs::read_to_string(d.join(format!("{name}.js"))).unwrap_or_default();
             (&name, &css, &js).hash(&mut h);
             self.code.insert(name, (css, js, d));
@@ -914,15 +999,28 @@ impl Worker {
             eprintln!("[blocksnap] {} code from {}", job.name, dir.display());
         }
         let t = Instant::now();
-        let doc = markise_md::parse(&job.inner);
-        let body = markise_export::render_body(&doc, &markise_export::HtmlOptions::default());
+        let md = |s: &str| markise_export::render_body(&markise_md::parse(s), &markise_export::HtmlOptions::default());
         let attr = |s: &str| html_escape::encode_double_quoted_attribute(s).to_string();
-        let html = format!(
-            "<section data-component=\"{}\" data-variant=\"{}\" data-args=\"{}\">\n{body}</section>",
-            attr(&job.name),
-            attr(&job.variant),
-            attr(&job.args)
-        );
+        // site layout: the Foliwake block HTML (named fields) built from the block definition
+        let site_html = if self.site.v2
+            && let Some(def) = self.site.defs.get(&job.name)
+        {
+            let src = format!(":::{} {}\n\n{}\n\n:::\n", job.name, job.args, job.inner);
+            markise_engine::block_form::block_at(&src, 0)
+                .and_then(|b| markise_engine::block_form::decode(&src, &b, def).ok())
+                .map(|dec| markise_engine::block_form::site_html(&dec, &md))
+        } else {
+            None
+        };
+        let html = site_html.unwrap_or_else(|| {
+            format!(
+                "<section data-component=\"{}\" data-variant=\"{}\" data-args=\"{}\">\n{}</section>",
+                attr(&job.name),
+                attr(&job.variant),
+                attr(&job.args),
+                md(&job.inner)
+            )
+        });
         if let Some(dir) = std::env::var_os("MARKISE_BLOCK_DUMP").map(PathBuf::from) {
             let _ = std::fs::write(dir.join(format!("{}-{:016x}.html", job.name, job.key)), &html);
         }
@@ -934,6 +1032,8 @@ impl Worker {
             "html": html,
             "css": css,
             "js": js,
+            "module": self.site.v2,
+            "lang": self.site.lang,
             "theme": job.theme.mode(),
             "vars": job.theme.vars,
             "base": self.site.doc_dir.as_deref().map(|d| file_url(d, true)).unwrap_or_default(),

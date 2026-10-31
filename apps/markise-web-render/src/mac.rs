@@ -27,7 +27,7 @@ use crate::proto;
 /// `#mk-root`. Animations and transitions are off so a snapshot never catches a mid-state.
 const SHELL: &str = r#"<!doctype html><html><head><meta charset="utf-8">
 <style>
-html,body{margin:0;padding:0;background:transparent;overflow:hidden}
+html,body{margin:0;padding:0;background:transparent;overflow:hidden;max-width:none}
 *,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent}
 #mk-root{display:flow-root}
 </style><style id="mk-css"></style><base id="mk-base"></head><body><div id="mk-root"></div></body></html>"#;
@@ -43,16 +43,38 @@ for (let i = 0; i < 200 && Math.abs(window.innerWidth - r.width) > 0.5; i++) awa
 const css = document.getElementById('mk-css');
 if (css.textContent !== r.css) css.textContent = r.css;
 const html = document.documentElement;
+if (r.lang && html.lang !== r.lang) html.lang = r.lang;
 if (html.dataset.theme !== r.theme) html.dataset.theme = r.theme;
 const style = (r.vars || '') + ';color-scheme:' + r.theme;
 if (html.getAttribute('style') !== style) html.setAttribute('style', style);
 const base = document.getElementById('mk-base');
 if (r.base && base.getAttribute('href') !== r.base) base.setAttribute('href', r.base);
 const root = document.getElementById('mk-root');
+// site-layout libraries have no dark theme: their blocks sit on the site's white page
+root.style.background = r.module && r.theme === 'dark' ? '#fff' : '';
+root.style.borderRadius = r.module && r.theme === 'dark' ? '10px' : '';
 root.innerHTML = r.html;
 const block = root.firstElementChild;
 let decorated = null;
-if (r.js && block) {
+if (r.js && block && r.module) {
+  // site layout: the block JS is an ES module (Foliwake loader contract): import it and call
+  // its default `init(root)`; a returned promise resolving means "ready". Imported from a blob
+  // (file:// modules are refused by WebKit), cached per source.
+  window.__mkMods = window.__mkMods || new Map();
+  let mod = window.__mkMods.get(r.js);
+  if (!mod) {
+    mod = import(URL.createObjectURL(new Blob([r.js], { type: 'text/javascript' })));
+    window.__mkMods.set(r.js, mod);
+  }
+  decorated = await Promise.race([
+    mod.then((m) => {
+      if (typeof m.default !== 'function') return 'error: no default init';
+      return Promise.resolve().then(() => m.default(block)).then(() => true);
+    }).catch((e) => 'error: ' + e),
+    sleep(2000).then(() => false),
+  ]);
+  block.setAttribute('data-component-status', decorated === true ? 'ready' : 'error');
+} else if (r.js && block) {
   if (window.__mkJs !== r.js) { (0, eval)(r.js); window.__mkJs = r.js; }
   const fn = window.markiseBlocks && window.markiseBlocks[block.dataset.component];
   if (fn) {
@@ -238,6 +260,8 @@ pub fn main() {
                             "theme": if v["theme"] == "dark" { "dark" } else { "light" },
                             "vars": v["vars"].as_str().unwrap_or(""),
                             "base": v["base"].as_str().unwrap_or(""),
+                            "module": v["module"] == true,
+                            "lang": v["lang"].as_str().unwrap_or(""),
                         })
                         .to_string();
                         let req = Req {
