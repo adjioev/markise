@@ -277,8 +277,18 @@ fn position_mapping_in_and_out_of_source_mode() {
 /// A 10 MB document: source mode opens (no size limit, no read-only fallback), jumps to the
 /// end, takes a keystroke there, and the text saved is exactly the edited text.
 #[test]
-fn ten_megabyte_document_opens_scrolls_and_edits() {
-    let big = markise_corpus::generate(10 << 20, 7);
+fn source_document_opens_scrolls_and_edits() {
+    check_ten_megabyte_document_opens_scrolls_and_edits(128 << 10);
+}
+
+#[test]
+#[ignore = "heavy: large input or exhaustive matrix; cargo xtask heavy"]
+fn heavy_suite_ten_megabyte_document_opens_scrolls_and_edits() {
+    check_ten_megabyte_document_opens_scrolls_and_edits(10 << 20);
+}
+
+fn check_ten_megabyte_document_opens_scrolls_and_edits(size: usize) {
+    let big = markise_corpus::generate(size, 7);
     let (mut h, f) = open("big", &big);
     let t = Instant::now();
     source_mode(&mut h);
@@ -290,7 +300,7 @@ fn ten_megabyte_document_opens_scrolls_and_edits() {
     typ(&mut h, "Z");
     let typed = t.elapsed();
     assert!(text(&h).ends_with('Z'));
-    eprintln!("10 MB: source mode entered in {opened:?}, keystroke frame {typed:?} (debug build)");
+    eprintln!("document: source mode entered in {opened:?}, keystroke frame {typed:?} (debug build)");
     save(&mut h);
     let mut want = big.clone();
     want.push('Z');

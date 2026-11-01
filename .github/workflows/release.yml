@@ -114,9 +114,15 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "version $version, label $label, commit $sha, dry run: $dry_run, prerelease: $prerelease"
 
+  heavy:
+    needs: prepare
+    uses: ./.github/workflows/heavy.yml
+    with:
+      sha: ${{ needs.prepare.outputs.sha }}
+
   build:
     name: build (${{ matrix.name }})
-    needs: prepare
+    needs: [prepare, heavy]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:

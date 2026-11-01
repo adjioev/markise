@@ -6,18 +6,18 @@ every PR update and the macOS + Windows matrix only on demand and after merge.
 
 ## What runs when
 
-| Trigger | Linux: `fmt + clippy (Linux)`, `test + build (linux-x86_64)` | macOS + Windows `test + build`, release binaries, artifacts |
-|---|---|---|
-| PR opened / pushed / reopened / marked ready for review | yes | no |
-| Any of the PR events above while the PR carries the `full-ci` label | yes | yes |
-| Push to `main` (after a merge) | yes | yes |
-| `workflow_dispatch` (manual, main or any branch; not shown in PR checks) | yes | yes |
-| Docs-only change (Markdown under `docs/`, `README.md`, `CLAUDE.md`, `site/*.html`, `site/*.css`) | not triggered | not triggered |
+| Trigger | Linux fast checks | macOS + Windows, release binaries | Heavy (Linux) |
+|---|---|---|---|
+| PR opened / pushed / reopened / marked ready for review | yes | no | no |
+| Any PR event above with the `full-ci` label | yes | yes | yes |
+| Push to `main` (after a merge) | yes | yes | no |
+| `workflow_dispatch` (manual; not shown in PR checks) | yes | yes | yes |
+| Nightly main | yes | no | yes |
+| Docs-only change (Markdown under `docs/`, `README.md`, `CLAUDE.md`, `site/*.html`, `site/*.css`) | not triggered | not triggered | not triggered |
 
 The Linux jobs are: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
 `cargo xtask layers` and `cargo xtask assets` (job `fmt + clippy (Linux)`), and the workspace
-tests plus the release-mode incremental property tests with 3000 cases (job
-`test + build (linux-x86_64)`). The full matrix also runs the tests on macOS (Apple Silicon) and
+fast correctness tests (job `test + build (linux-x86_64)`). The full matrix also runs the tests on macOS (Apple Silicon) and
 Windows and builds and packages release binaries on all three OSes. The packaged binaries are
 uploaded as artifacts (`markise-<os>`, kept 3 days) **only from pushes to `main`**; `full-ci` PR
 runs and manual runs build and package but upload nothing.
@@ -73,3 +73,90 @@ to a PR and does not report into PR checks; look at it under Actions.
 - **Artifacts**: only pushes to `main` upload the CI binaries (3-day retention); release
   workflow artifacts are kept 7 days.
 - Test binaries use line-tables-only debug info (keeps the Linux runner's disk from filling up).
+
+
+## Fast and heavy coverage (#98)
+
+`cargo test --workspace` and `cargo xtask ci` run the fast suite. The target is a few minutes
+of warm test execution on CI, separately from compilation; this is a target, not a claim based
+on local timings. Normal property case counts, spec conformance, theme importer inputs and
+small regressions remain in this suite. Keep both text backends and representative styling,
+width and zoom boundaries in small regressions; expand the combinations in heavy coverage.
+
+`cargo xtask heavy` runs release-profile ignored tests **filtered by `heavy_suite_`**, then the
+incremental parse/layout properties with `PROPTEST_CASES=3000`. Heavy tests carry both the
+`heavy_suite_` prefix and `#[ignore = "heavy: reason"]`. Do not use `cargo test -- --ignored`:
+`qa_sweep` has intentionally ignored known bugs, which this command would also execute.
+Heavy tests retain the original large inputs, scaling checks and full matrices. Smaller tests
+use the same assertion helpers where possible. Preserve generous asynchronous hang guards;
+wall-clock speed belongs in benchmarks, not correctness assertions.
+
+The heavy job is separate from the OS matrix flag. It runs on nightly main, manual CI and
+PR runs labeled `full-ci`, **not** ordinary main pushes. Nightly uses Linux only; ordinary
+main pushes retain the three-OS matrix. `CI result` requires heavy success when requested and
+accepts its skipped status otherwise; a heavy failure or cancellation fails the gate.
+The release workflow calls the same reusable heavy workflow at `prepare.outputs.sha` and
+requires success before any release build/artifact upload or draft creation. This prevents a
+nightly success for a different commit from being used as a release gate. Spec/theme fetching,
+pinned actions, existing cache keys and artifact retention policies are preserved.
+
+For local per-test observations (stdlib Python, no new dependencies):
+
+```sh
+python3 scripts/test-times.py --match adversarial --output /tmp/test-times.json
+python3 scripts/test-times.py --release --heavy --output /tmp/heavy-times.json
+```
+
+The script first measures `cargo test --no-run`, then runs matching tests individually from
+already built executables. Its JSON separates build time and per-test process wall time
+(including startup), records failures and exits nonzero on a test failure. These isolated local
+measurements are not parallel suite totals or CI timings. Omit `--match` to inventory all fast
+tests. Reports stay outside the repository; compare before/after on the same machine/profile.
+See `benches/README.md` for performance measurements and budgets.
+
+### Local observations (2026-11-01)
+
+On the implementation machine (macOS, debug profile), an initial workspace `--no-run` build
+finished in **2m 27s**. Repeating the build before the isolated baseline measurements took
+**3.15s** wall time; the rebuild after test edits took **5.90s** according to Cargo. These are
+compilation observations, separate from the already-built test processes below:
+
+| Coverage | Original heavy input/loop | Fast regression |
+| --- | ---: | ---: |
+| Parser adversarial families | 14.394s | 0.016s |
+| Sanitizer/export adversarial families | 30.819s | 0.267s |
+| Heading caret, styles/themes/backends/levels | 19.250s | 1.858s |
+| CLI 220 MB export warning / small size-limit checks | 2.010s | 1.518s |
+
+These tests intentionally perform different amounts of work: the original coverage remains
+in heavy, while fast keeps small inputs and representative combinations. They are process
+wall times from `scripts/test-times.py`, including startup, not a before/after CI suite total.
+The remaining large-input baseline was stopped rather than repeatedly running huge tests.
+The small source-editor, incremental word-count and comment-scan regressions took 0.466s,
+1.265s and 1.385s respectively. Inexpensive standalone layout width sweeps remain complete in
+the fast suite: a coarse sample did not meet their justified-row coverage guard, so the full
+sweeps were restored rather than weakening the guard. No CI runtime claim is made until the
+new workflow actually runs; compilation and execution have separate CI steps for comparison.
+
+
+The local default workspace run passed **1,565 tests**, with **22 ignored** (11 heavy,
+11 pre-existing known bugs). Cargo reported **13.79s** compilation, while the sum of libtest's
+per-binary execution durations was **144.93s**. This sum excludes process startup and is not
+end-to-end wall time; release compilation was running concurrently. The macOS watcher tests
+required running outside the sandbox (FSEvents could not start inside it). Local downloaded
+spec/theme caches were absent, so CI must still validate those inputs after its fetch steps.
+
+
+The final timing-assertion audit removed the wikilink test's 2s speed assertion (link-count
+assertions and all adversarial inputs remain) and the diagram fuzz helper's 8s process-time
+assertion. The diagram renderer retains its 5s production budget and outcome/limit checks;
+PDF and event-wait termination guards remain unchanged. Wikilink speed now has explicit
+Criterion cases in `markise-md/benches/parse.rs`; diagram benchmarks already exist.
+
+
+`cargo xtask heavy` also passed locally: all **11 retained heavy tests**, then **42 tests**
+in the incremental targets with `PROPTEST_CASES=3000`. Initial release compilation took
+**3m 38s**; the narrower property-target build took **40.48s** (different Cargo feature
+unification). Final targeted wikilink/diagram tests passed **18 tests**, and all-target Clippy,
+formatting, layering, assets, workflow lint and the merge-gate status truth table passed.
+No paid workflow was dispatched; the owner still needs to review the change before committing.

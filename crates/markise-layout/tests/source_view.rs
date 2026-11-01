@@ -147,20 +147,30 @@ proptest! {
     }
 }
 
-/// A 10 MB document: built, edited at the start, middle and end, scrolled to the end — all
+/// Built, edited at the start, middle and end, scrolled to the end (128 KiB fast, 10 MiB heavy) — all
 /// without touching more than a few items (the edits stay local).
 #[test]
 fn large_document_edits_stay_local() {
-    let mut src = String::with_capacity(10 << 20);
+    check_large_document_edits_stay_local(128 << 10);
+}
+
+#[test]
+#[ignore = "heavy: large input or exhaustive matrix; cargo xtask heavy"]
+fn heavy_suite_large_document_edits_stay_local() {
+    check_large_document_edits_stay_local(10 << 20);
+}
+
+fn check_large_document_edits_stay_local(size: usize) {
+    let mut src = String::with_capacity(size);
     let mut n = 0;
-    while src.len() < 10 << 20 {
+    while src.len() < size {
         n += 1;
         src.push_str(&format!("Line {n} of a long *document* with `code` and words.\n"));
     }
     let mut doc = markise_md::parse(&src);
     let t = std::time::Instant::now();
     let mut v = SourceView::new(&src, SourceParams::default(), &Theme::light(), 700.0, 1.0);
-    eprintln!("build 10 MB: {:?} ({} items)", t.elapsed(), v.len());
+    eprintln!("build {size} bytes: {:?} ({} items)", t.elapsed(), v.len());
     let items = v.len();
     for at in [0, src.len() / 2, src.len()] {
         let e = doc.apply(&PatchSet::single_verbatim(at..at, "x\ny"));

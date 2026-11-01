@@ -859,6 +859,16 @@ fn check_popovers_on_screen(h: &mut H, what: &str) -> Vec<String> {
 /// style and CSS theme, several window widths and zoom levels, with the sidebar shown.
 #[test]
 fn margin_cards_stay_inside_the_window_in_every_style_and_theme() {
+    check_margin_cards_stay_inside_the_window_in_every_style_and_theme(false);
+}
+
+#[test]
+#[ignore = "heavy: large input or exhaustive matrix; cargo xtask heavy"]
+fn heavy_suite_margin_cards_stay_inside_the_window_in_every_style_and_theme() {
+    check_margin_cards_stay_inside_the_window_in_every_style_and_theme(true);
+}
+
+fn check_margin_cards_stay_inside_the_window_in_every_style_and_theme(exhaustive: bool) {
     // a Retina display (2 px per point), like the owner's
     let dir = tmpdir("on-screen");
     let doc = dir.join("draft.md");
@@ -894,7 +904,10 @@ fn margin_cards_stay_inside_the_window_in_every_style_and_theme() {
     let mut bad = Vec::new();
     let mut margin_seen = 0;
     let mut bubbles_seen = 0;
-    for (name, apply) in &looks {
+    for (name, apply) in looks
+        .iter()
+        .filter(|(name, _)| exhaustive || name == "style classic" || name == "theme phycat")
+    {
         let before = h.state().theme().clone();
         apply(h.state_mut());
         let t = Instant::now();
@@ -904,7 +917,10 @@ fn margin_cards_stay_inside_the_window_in_every_style_and_theme() {
         }
         for sidebar in [true, false] {
             for zoom in [1.0, 1.5] {
-                for width in [900.0, 1100.0, 1400.0, 1900.0] {
+                for width in [900.0, 1100.0, 1400.0, 1900.0]
+                    .into_iter()
+                    .filter(|w| exhaustive || *w == 900.0 || *w == 1900.0)
+                {
                     // the zoom first (egui applies it at the next pass), then the window size in
                     // points (kittest's size is in points; a zoomed window has fewer)
                     h.state_mut().set_zoom(zoom);
@@ -1204,10 +1220,20 @@ pi rho sigma tau upsilon phi chi psi omega and some more words to fill the line.
 /// Coordinator review of #94: "has comments" is tracked incrementally. Typing ordinary text
 /// in a 10 MB document with comments runs no scan, reads no text and copies nothing.
 #[test]
-fn typing_ordinary_text_in_a_10_mb_document_never_scans() {
+fn typing_ordinary_text_never_scans() {
+    check_typing_ordinary_text_in_a_10_mb_document_never_scans(128 << 10);
+}
+
+#[test]
+#[ignore = "heavy: large input or exhaustive matrix; cargo xtask heavy"]
+fn heavy_suite_typing_ordinary_text_in_a_10_mb_document_never_scans() {
+    check_typing_ordinary_text_in_a_10_mb_document_never_scans(10 << 20);
+}
+
+fn check_typing_ordinary_text_in_a_10_mb_document_never_scans(size: usize) {
     let para = "An ordinary paragraph of the large document, with enough words to wrap a line.\n\n";
     let mut src = String::from("Intro {>>a comment near the start<<} text.\n\n");
-    src.push_str(&para.repeat(10 * 1024 * 1024 / para.len()));
+    src.push_str(&para.repeat(size / para.len()));
     src.push_str("Last {>>and one at the end<<}.\n");
     let mut h = open_phycat("gutter-10mb", &src, egui::vec2(1400.0, 760.0));
     assert!(h.state_mut().viewer().unwrap().comment_gutter());

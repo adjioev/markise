@@ -25,10 +25,18 @@ fn run(text: &str) -> Duration {
 }
 
 #[test]
-fn adversarial_inputs_scale_linearly() {
+#[ignore = "heavy: adversarial scaling loops; cargo xtask heavy"]
+fn heavy_suite_adversarial_inputs_scale_linearly() {
     for (name, f) in markise_corpus::adversarial() {
         markise_corpus::assert_scales_linearly(name, f, &|t| {
             run(t);
         });
+    }
+}
+
+#[test]
+fn adversarial_inputs_roundtrip_without_panicking() {
+    for (_, generate) in markise_corpus::adversarial() {
+        run(&generate(64));
     }
 }

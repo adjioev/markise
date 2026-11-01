@@ -246,8 +246,18 @@ fn copies(h: &mut H) -> u64 {
 /// copies the document, and typing in it recounts only the edited block (counted through the
 /// counter's statistics seam).
 #[test]
-fn typing_in_a_ten_megabyte_document_recounts_only_the_edited_block() {
-    let big = markise_corpus::generate(10 << 20, 7);
+fn typing_recounts_only_the_edited_block() {
+    check_typing_in_a_ten_megabyte_document_recounts_only_the_edited_block(256 << 10);
+}
+
+#[test]
+#[ignore = "heavy: large input or exhaustive matrix; cargo xtask heavy"]
+fn heavy_suite_typing_in_a_ten_megabyte_document_recounts_only_the_edited_block() {
+    check_typing_in_a_ten_megabyte_document_recounts_only_the_edited_block(10 << 20);
+}
+
+fn check_typing_in_a_ten_megabyte_document_recounts_only_the_edited_block(size: usize) {
+    let big = markise_corpus::generate(size, 7);
     let mut h = open("big", &big, None);
     let copies_before = copies(&mut h);
     let t = Instant::now();
@@ -256,7 +266,7 @@ fn typing_in_a_ten_megabyte_document_recounts_only_the_edited_block() {
         frames += 1;
         h.query_by_label_contains("min read").is_some()
     });
-    eprintln!("10 MB: first count shown after {:?} ({frames} frames)", t.elapsed());
+    eprintln!("document: first count shown after {:?} ({frames} frames)", t.elapsed());
     let before = h.state().word_count_stats().expect("counting");
     let budget = (FRAME_BYTES + BIG_BLOCK) as u64;
     assert!(
@@ -306,7 +316,7 @@ fn typing_in_a_ten_megabyte_document_recounts_only_the_edited_block() {
     );
     assert!(after.bytes_read - before.bytes_read < 4096, "{before:?} → {after:?}");
     eprintln!(
-        "10 MB: typed 19 chars in {typing:?}; then counted {} blocks, {} bytes",
+        "document: typed 19 chars in {typing:?}; then counted {} blocks, {} bytes",
         after.blocks_counted - before.blocks_counted,
         after.bytes_read - before.bytes_read
     );

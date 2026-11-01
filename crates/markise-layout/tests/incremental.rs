@@ -231,12 +231,22 @@ proptest! {
 
 #[test]
 fn apply_equals_full_on_a_large_document_with_many_chunks() {
+    check_apply_equals_full_on_a_large_document_with_many_chunks(6);
+}
+
+#[test]
+#[ignore = "heavy: large input or exhaustive matrix; cargo xtask heavy"]
+fn heavy_suite_apply_equals_full_on_a_large_document_with_many_chunks() {
+    check_apply_equals_full_on_a_large_document_with_many_chunks(60);
+}
+
+fn check_apply_equals_full_on_a_large_document_with_many_chunks(edits: usize) {
     // > 256 top-level blocks and items: edits cross chunk boundaries of both relative lists
     let text = markise_corpus::generate(300 << 10, 7);
     let mut doc = md(&text);
     let mut m = DocModel::build_owned(&doc, None);
     let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-    for k in 0..60 {
+    for k in 0..edits {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let t = doc.text();
         let a = char_floor(t, (seed >> 20) as usize % t.len());
@@ -359,6 +369,16 @@ fn text_inserted_above_keeps_cached_layouts_of_unchanged_blocks() {
 
 #[test]
 fn view_apply_matches_a_fresh_view() {
+    check_view_apply_matches_a_fresh_view(3);
+}
+
+#[test]
+#[ignore = "heavy: large input or exhaustive matrix; cargo xtask heavy"]
+fn heavy_suite_view_apply_matches_a_fresh_view() {
+    check_view_apply_matches_a_fresh_view(30);
+}
+
+fn check_view_apply_matches_a_fresh_view(edits: usize) {
     let text = markise_corpus::generate(64 << 10, 3);
     let mut doc = md(&text);
     let mut m = DocModel::build_owned(&doc, None);
@@ -368,7 +388,7 @@ fn view_apply_matches_a_fresh_view() {
     v.scroll_to_item(m.items.len() / 2);
     v.frame(800.0, 200.0, &mut f, &NoImages);
     let mut seed = 0x1234_5678u64;
-    for k in 0..30 {
+    for k in 0..edits {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let t = doc.text();
         let a = char_floor(t, (seed >> 20) as usize % t.len());

@@ -22,7 +22,8 @@ fn sanitizer_cases() -> Vec<(&'static str, Gen)> {
 
 /// One test (not two) so the timings are not disturbed by a parallel test thread.
 #[test]
-fn sanitizer_and_export_scale_linearly() {
+#[ignore = "heavy: adversarial scaling loops; cargo xtask heavy"]
+fn heavy_suite_sanitizer_and_export_scale_linearly() {
     for (name, f) in sanitizer_cases() {
         markise_corpus::assert_scales_linearly(name, f, &|s| {
             sanitize(s);
@@ -33,5 +34,14 @@ fn sanitizer_and_export_scale_linearly() {
     };
     for (name, f) in markise_corpus::adversarial().into_iter().chain(sanitizer_cases()) {
         markise_corpus::assert_scales_linearly(name, f, &export);
+    }
+}
+
+#[test]
+fn adversarial_inputs_export_and_sanitize_without_panicking() {
+    for (_, generate) in markise_corpus::adversarial().into_iter().chain(sanitizer_cases()) {
+        let text = generate(32);
+        sanitize(&text);
+        render_document(&markise_md::parse(&text), &HtmlOptions::default());
     }
 }

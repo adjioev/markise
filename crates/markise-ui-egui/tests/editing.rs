@@ -1339,6 +1339,16 @@ fn untitled_with(backend: markise_ui_egui::TextBackend, style: &str, src: &str) 
 
 #[test]
 fn spaces_after_a_heading_move_the_caret_in_every_style_and_level() {
+    check_spaces_after_a_heading_move_the_caret_in_every_style_and_level(false);
+}
+
+#[test]
+#[ignore = "heavy: large input or exhaustive matrix; cargo xtask heavy"]
+fn heavy_suite_spaces_after_a_heading_move_the_caret_in_every_style_and_level() {
+    check_spaces_after_a_heading_move_the_caret_in_every_style_and_level(true);
+}
+
+fn check_spaces_after_a_heading_move_the_caret_in_every_style_and_level(exhaustive: bool) {
     // owner reports: Space at the end of an H1 changed the text but not the screen.
     // - Classic centres H1: epaint aligned the centred row without its trailing whitespace and
     //   put the caret at the text end;
@@ -1353,8 +1363,8 @@ fn spaces_after_a_heading_move_the_caret_in_every_style_and_level() {
     assert!(styles.len() >= 5, "{styles:?}");
     let mut fails = Vec::new();
     for backend in [Epaint, Parley] {
-        for style in &styles {
-            for level in 1..=6 {
+        for style in styles.iter().filter(|s| exhaustive || **s == "classic") {
+            for level in (1..=6).filter(|level| exhaustive || [1, 3].contains(level)) {
                 let hashes = "#".repeat(level);
                 let what = format!("{backend:?} {style} h{level}");
                 // a saved file (heading, an empty line, a paragraph)
@@ -1383,8 +1393,12 @@ fn spaces_after_a_heading_move_the_caret_in_every_style_and_level() {
     // the built-in CSS themes (complete themes: their own heading alignment — Drake centres
     // H1, the owner's case), dark, opened from a file
     for backend in [Epaint, Parley] {
-        for theme in markise_theme::builtin::BUILTIN_THEMES.iter().map(|t| t.id) {
-            for level in 1..=6 {
+        for theme in markise_theme::builtin::BUILTIN_THEMES
+            .iter()
+            .map(|t| t.id)
+            .filter(|t| exhaustive || *t == "drake")
+        {
+            for level in (1..=6).filter(|level| exhaustive || [1, 3].contains(level)) {
                 let hashes = "#".repeat(level);
                 let what = format!("{backend:?} builtin:{theme} h{level}");
                 let src = format!("{hashes} Title\n\nPara\n");

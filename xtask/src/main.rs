@@ -17,6 +17,7 @@ commands:
   layers   enforce the crate layering (layers.toml, which must match the AGENTS.md table)
   assets   check that every committed asset has an attribution record (SOURCE.md or NOTICE)
   ci       fmt --check, clippy -D warnings, test, assets, layers (stops at the first failure)
+  heavy    heavy tests (release) and 3000-case incremental properties; excludes known bugs
   dist     build and package release artifacts: `cargo xtask dist --help`
   version  print the workspace version (the release tag is `v` + this)
 ";
@@ -27,6 +28,7 @@ fn main() -> ExitCode {
         Some("layers") => cmd_layers(),
         Some("assets") => assets::run(&root()),
         Some("ci") => cmd_ci(),
+        Some("heavy") => cmd_heavy(),
         Some("dist") => dist::run(&root(), &args[1..]),
         Some("version") => dist::workspace_version(&root()).map(|v| println!("{v}")),
         Some("-h" | "--help" | "help") | None => {
@@ -94,4 +96,46 @@ fn cmd_ci() -> Result<(), String> {
     assets::run(&root())?;
     println!("==> layers");
     cmd_layers()
+}
+
+/// The name filter is mandatory: bare `--ignored` also runs known-bug tests.
+fn cmd_heavy() -> Result<(), String> {
+    run_step(
+        "heavy",
+        &[
+            "test",
+            "--release",
+            "--workspace",
+            "--locked",
+            "heavy_suite_",
+            "--",
+            "--ignored",
+        ],
+    )?;
+    let status = cargo()
+        .env("PROPTEST_CASES", "3000")
+        .args([
+            "test",
+            "--release",
+            "--locked",
+            "-p",
+            "markise-md",
+            "--test",
+            "nested",
+            "--test",
+            "fastpath",
+            "--test",
+            "hints",
+            "-p",
+            "markise-layout",
+            "--test",
+            "incremental",
+        ])
+        .status()
+        .map_err(|e| format!("stress properties: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("stress properties failed ({status})"))
+    }
 }

@@ -1,8 +1,7 @@
 # Continuous integration. Policy (what runs when, how to request the full matrix): docs/ci.md.
 #
 # Default (every PR push, cheap): Linux only -- fmt + clippy + layering/asset checks (`lint`),
-# workspace tests + release-mode incremental property tests (`test`, linux-x86_64), and the
-# `CI result` gate. Full matrix (adds macOS Apple Silicon + Windows test + build and release
+# fast workspace tests (`test`, linux-x86_64), and the `CI result` gate. Full matrix (adds macOS Apple Silicon + Windows test + build and release
 # binaries on every OS): pushes to main, workflow_dispatch (manual; not reported into PR
 # checks), and PR runs while the PR carries the `full-ci` label. The binaries are uploaded as
 # artifacts (3 days) only from pushes to main, to keep Actions storage small.
@@ -45,6 +44,8 @@ on:
     paths: *paths
   # Manual full-matrix run on main or any branch. It does not report into PR checks.
   workflow_dispatch:
+  schedule:
+    - cron: "23 16 * * *" # nightly on the default branch (main), UTC
 
 # PR runs are keyed by PR number (a new push cancels the superseded run, pending or in
 # progress); every push to main gets its own group (run id), so no main run is ever cancelled
@@ -61,7 +62,7 @@ env:
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
   # 'true' for the full matrix (main, workflow_dispatch, PRs labeled `full-ci`).
-  FULL_CI: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+  FULL_CI: ${{ (github.event_name != 'pull_request' && github.event_name != 'schedule') || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
 
 jobs:
   lint:
@@ -93,7 +94,7 @@ jobs:
       # `env` context is not available here, so the condition is repeated). Entries left out
       # produce no check at all rather than a "skipped" one.
       matrix:
-        include: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '[{"name":"linux-x86_64","os":"ubuntu-latest"},{"name":"macos-aarch64","os":"macos-latest"},{"name":"windows-x86_64","os":"windows-latest"}]' || '[{"name":"linux-x86_64","os":"ubuntu-latest"}]') }}
+        include: ${{ fromJSON(((github.event_name != 'pull_request' && github.event_name != 'schedule') || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '[{"name":"linux-x86_64","os":"ubuntu-latest"},{"name":"macos-aarch64","os":"macos-latest"},{"name":"windows-x86_64","os":"windows-latest"}]' || '[{"name":"linux-x86_64","os":"ubuntu-latest"}]') }}
     defaults:
       run:
         shell: bash
@@ -132,20 +133,16 @@ jobs:
             ./scripts/fetch-spec-tests.sh
           fi
           ./scripts/fetch-theme-corpus.sh
-      - name: Test
+      # Separate step durations distinguish compilation from warm execution.
+      - name: Build test binaries
+        run: cargo test --workspace --locked --no-run
+      - name: Test (warm)
         run: cargo test --workspace --locked
-      # Release binaries, packages and artifacts: full matrix only (the default PR run checks
-      # release-mode codegen through the property tests below).
+      # Release binaries, packages and artifacts: full matrix only. Release-profile stress
+      # property coverage runs on the separate heavy path.
       - name: Build release binaries
         if: env.FULL_CI == 'true'
         run: cargo build --release --locked -p markise -p markise-cli
-      # Incremental parse/model == fresh, with more cases than the debug-mode defaults
-      # (ADR 0006 §7.2, §14): nested restarts, fast path, layout model.
-      - name: Incremental property tests (release, 3000 cases)
-        if: runner.os == 'Linux'
-        env:
-          PROPTEST_CASES: "3000"
-        run: cargo test --release --locked -p markise-md --test nested --test fastpath --test hints -p markise-layout --test incremental
       - name: Package
         if: env.FULL_CI == 'true'
         env:
@@ -168,6 +165,12 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+  heavy:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    uses: ./.github/workflows/heavy.yml
+    with:
+      sha: ${{ github.sha }}
+
   # Single merge gate: green only when every job of this run succeeded (any failure or
   # cancellation, including one matrix entry, fails it). On a PR run without `full-ci` the
   # matrix is Linux only, so the gate then certifies Linux only.
@@ -176,7 +179,7 @@ jobs:
   result:
     name: CI result
     if: always()
-    needs: [lint, test]
+    needs: [lint, test, heavy]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -184,10 +187,19 @@ jobs:
         env:
           LINT: ${{ needs.lint.result }}
           TEST: ${{ needs.test.result }}
+          HEAVY: ${{ needs.heavy.result }}
+          EXPECT_HEAVY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
           FULL: ${{ env.FULL_CI }}
         run: |
-          echo "lint=$LINT test=$TEST full-matrix=$FULL"
-          [ "$LINT" = success ] && [ "$TEST" = success ]
+          echo "lint=$LINT test=$TEST heavy=$HEAVY full-matrix=$FULL"
+          if [ "$LINT" != success ] || [ "$TEST" != success ]; then
+            exit 1
+          fi
+          if [ "$EXPECT_HEAVY" = true ]; then
+            [ "$HEAVY" = success ]
+          else
+            [ "$HEAVY" = skipped ]
+          fi
 
   # Cargo caches are saved only from main (.github/actions/setup-rust), but rust-cache puts the
   # toolchain/env hash and the Cargo.lock/Cargo.toml hash into the key, so every dependency or

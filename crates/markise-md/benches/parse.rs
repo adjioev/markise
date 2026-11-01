@@ -131,11 +131,29 @@ fn bench_adversarial(c: &mut Criterion) {
     g.finish();
 }
 
+/// Wikilink close-search regressions: measure speed here, assert link counts in tests.
+fn bench_wikilinks(c: &mut Criterion) {
+    let mut g = c.benchmark_group("md-wikilinks-adversarial");
+    for (name, text) in [
+        ("openers", "[[".repeat(50_000)),
+        ("one-close", format!("{}]]", "[[a".repeat(30_000))),
+        ("nested", format!("{}{}", "[".repeat(40_000), "]".repeat(40_000))),
+        ("many-links", "[[a]] ".repeat(20_000)),
+    ] {
+        g.throughput(Throughput::Bytes(text.len() as u64));
+        g.bench_function(name, |b| {
+            b.iter(|| parse_inlines(black_box(&text), &ParseOptions::default(), &InlineContext::default()))
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_serialize,
     bench_keystroke,
     bench_inline,
-    bench_adversarial
+    bench_adversarial,
+    bench_wikilinks
 );
 criterion_main!(benches);

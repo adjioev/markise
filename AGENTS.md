@@ -103,6 +103,16 @@ keystroke latency p99 < 16 ms, idle CPU ~0%.
 - Checks before every commit: `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`,
   `cargo test --workspace`, `cargo xtask layers`, `cargo xtask assets` (or all of them:
   `cargo xtask ci`).
+- Default `cargo test --workspace` and `cargo xtask ci` are the fast correctness suite
+  (target: a few minutes warm on CI; build time is reported separately). Keep one small,
+  meaningful regression for each bug, representative matrix cases and ordinary property tests.
+  Multi-MB UI scenarios, exhaustive matrices, adversarial scaling and stress loops belong in
+  the heavy suite: `#[ignore = "heavy: …"]`, test name prefixed `heavy_suite_`, run with
+  `cargo xtask heavy` (release). Never use bare `--ignored`: known-bug ignores are separate.
+  Heavy coverage runs nightly on main, on `full-ci` PRs and before release artifacts are built.
+  Performance budgets belong in `benches/`; preserve event/deadlock hang guards in tests.
+  Measure per-test runtime before adding costly coverage (`scripts/test-times.py`), avoid
+  duplicate cases, and distinguish warm execution from compilation and local from CI timings.
 - Spec test cases become tests; reference the spec ID in the test name or comment (e.g. `T26`).
 - Work on task branches; commit honest checkpoints (`WIP:` when unfinished, list checks run and
   known failures). Merges to `main`, releases and pushes to new remotes need owner approval.
