@@ -196,6 +196,10 @@ pub trait DocumentFormat: Send + Sync {
 /// A parsed document. Text is the source of truth; every mutation is a patch set or a hint
 /// change. `Sync` so that a parsed snapshot can be shared with workers (`Arc<dyn FormatDoc>`).
 pub trait FormatDoc: EditBehavior + Send + Sync {
+    /// Display hint for a raw-markup leaf. Other formats need not implement this.
+    fn raw_presentation(&self, _span: crate::Span) -> Option<crate::RawPresentation> {
+        None
+    }
     fn format_id(&self) -> &'static str;
     fn text(&self) -> &str;
     fn line_ending(&self) -> LineEnding;

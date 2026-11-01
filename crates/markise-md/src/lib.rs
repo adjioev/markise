@@ -16,6 +16,7 @@ pub mod block;
 mod edit;
 pub mod format;
 pub mod frontmatter;
+mod html_view;
 pub mod inline;
 mod nested;
 pub mod ops;

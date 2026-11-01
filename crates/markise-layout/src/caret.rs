@@ -558,6 +558,7 @@ pub fn focus_for(view: &View, pos: DocPos, reveal: bool) -> Option<(usize, ItemF
     let it = model.items.get(i)?;
     let mut f = ItemFocus {
         reveal: Vec::new(),
+        raw_source: reveal && !p.virt && it.raw.is_some(),
         virtual_after: p.virt,
         virtual_exit: pos.virt.saturating_sub(1),
         trailing_ws: None,
@@ -662,16 +663,15 @@ impl Geometry<'_> {
     }
 
     fn nearest_stop(&mut self, i: usize, x: f32, below: bool) -> Option<DocPos> {
-        let n = self.view.len();
-        let order: Vec<usize> = if below {
-            (i + 1..n).chain((0..i).rev()).collect()
-        } else {
-            (0..i).rev().chain(i + 1..n).collect()
-        };
-        for j in order.into_iter().take(64) {
-            let l = self.layout(j);
-            if let Some(p) = edge_row(&l, x, j > i) {
-                return Some(self.doc_pos(j, p));
+        for direction in [below, !below] {
+            let mut next = self.view.adjacent_visible(i, direction);
+            for _ in 0..64 {
+                let Some(j) = next else { break };
+                let l = self.layout(j);
+                if let Some(p) = edge_row(&l, x, j > i) {
+                    return Some(self.doc_pos(j, p));
+                }
+                next = self.view.adjacent_visible(j, direction);
             }
         }
         None
@@ -715,21 +715,16 @@ impl Geometry<'_> {
         if let Some(q) = step(&l, p, forward, word) {
             return self.doc_pos(i, q);
         }
-        let n = self.view.len();
         let mut j = i;
         loop {
-            if forward {
-                j += 1;
-                if j >= n {
-                    // C53: past the very end of the last block, its virtual paragraph
-                    return self.past_last_block().unwrap_or(pos);
-                }
-            } else {
-                if j == 0 {
-                    return pos;
-                }
-                j -= 1;
-            }
+            let Some(next) = self.view.adjacent_visible(j, forward) else {
+                return if forward {
+                    self.past_last_block().unwrap_or(pos)
+                } else {
+                    pos
+                };
+            };
+            j = next;
             if let Some(d) = self.edge_of(j, !forward) {
                 return d;
             }
@@ -770,10 +765,16 @@ impl Geometry<'_> {
     /// First or last caret stop of the document.
     pub fn doc_edge(&mut self, end: bool) -> DocPos {
         let n = self.view.len();
-        let order: Vec<usize> = if end { (0..n).rev().collect() } else { (0..n).collect() };
-        for j in order {
-            if let Some(d) = self.edge_of(j, end) {
-                return d;
+        if n > 0 {
+            let mut j = if end { n - 1 } else { 0 };
+            loop {
+                if let Some(d) = self.edge_of(j, end) {
+                    return d;
+                }
+                let Some(next) = self.view.adjacent_visible(j, !end) else {
+                    break;
+                };
+                j = next;
             }
         }
         DocPos::new(0)
@@ -793,23 +794,17 @@ impl Geometry<'_> {
         if let Some(q) = adjacent_row(&l, caret, x, down) {
             return (self.doc_pos(i, q), x);
         }
-        let n = self.view.len();
         let mut j = i;
         loop {
-            if down {
-                j += 1;
-                if j >= n {
-                    // C53: from the last visual row of the document, the virtual paragraph
-                    // after the last block (else the last stop)
-                    let d = self.past_last_block().or_else(|| self.edge_of(i, true));
-                    return (d.unwrap_or(pos), x);
-                }
-            } else {
-                if j == 0 {
-                    return (self.edge_of(0, false).unwrap_or(pos), x);
-                }
-                j -= 1;
-            }
+            let Some(next) = self.view.adjacent_visible(j, down) else {
+                let d = if down {
+                    self.past_last_block().or_else(|| self.edge_of(i, true))
+                } else {
+                    self.edge_of(i, false)
+                };
+                return (d.unwrap_or(pos), x);
+            };
+            j = next;
             let lj = self.layout(j);
             if let Some(q) = edge_row(&lj, x, down) {
                 return (self.doc_pos(j, q), x);

@@ -36,6 +36,24 @@ fn bench(c: &mut Criterion) {
             })
         });
     }
+    // Issue #103: collapsed contents must cost no shaping work per frame.
+    for count in [1_000, 10_000] {
+        let src = format!(
+            "<details>\n<summary>Hidden</summary>\n\n{}\n</details>\n\nAfter\n",
+            "Body <kbd>Enter</kbd>.\n\n".repeat(count)
+        );
+        let shown = testing::Shown::new(std::sync::Arc::new(markise_md::parse(&src)));
+        let mut v = shown.view(Theme::light(), 700.0, 1.0);
+        let mut fonts = testing::fonts();
+        let mut sh = fonts.with_pixels_per_point(1.0);
+        v.frame(800.0, 400.0, &mut sh, &NoImages);
+        g.bench_function(format!("collapsed-html-frame-{count}"), |b| {
+            b.iter(|| v.frame(800.0, 400.0, &mut sh, &NoImages).len())
+        });
+        g.bench_function(format!("disclosure-toggle-{count}"), |b| {
+            b.iter(|| v.toggle_expanded(0))
+        });
+    }
     math_first_screen(&mut g);
     // diagram label metrics (ADR 0009 §4): measured on the UI thread once per theme/font change
     let mut fonts = testing::fonts();

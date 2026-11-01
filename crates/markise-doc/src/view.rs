@@ -36,6 +36,16 @@ pub enum ContainerKind {
     Footnote,
 }
 
+/// Optional display semantics supplied by a format for otherwise raw markup.
+/// These describe presentation, not a parser change; source spans remain authoritative.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RawPresentation {
+    DisclosureStart { title: String, open: bool },
+    DisclosureSummary { title: String },
+    DisclosureEnd { count: usize },
+    Comment,
+}
+
 /// Kind of a leaf block.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LeafKind {
@@ -151,6 +161,10 @@ pub enum InlineKind {
         subpath: Option<Box<str>>,
     },
     RawInline,
+    /// A keyboard key name, with source markers and rich children.
+    Keyboard,
+    /// Non-rendered annotation, shown as muted source while editing.
+    Comment,
     Break {
         hard: bool,
     },
