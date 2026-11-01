@@ -46,6 +46,37 @@ type Setup = fn(&mut MarkiseApp, &Context, &Path);
 
 fn scenes() -> Vec<(&'static str, Setup)> {
     vec![
+        ("find", |app, _, _| {
+            app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
+            app.open_find(false);
+            app.set_find_query(markise_engine::search::Query {
+                text: "log".into(),
+                ..Default::default()
+            });
+        }),
+        ("find-replace", |app, _, _| {
+            app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
+            app.open_find(true);
+            app.set_find_query(markise_engine::search::Query {
+                text: "log".into(),
+                ..Default::default()
+            });
+        }),
+        ("find-no-matches", |app, _, _| {
+            app.open_find(false);
+            app.set_find_query(markise_engine::search::Query {
+                text: "compass".into(),
+                ..Default::default()
+            });
+        }),
+        ("find-invalid-regex", |app, _, _| {
+            app.open_find(false);
+            app.set_find_query(markise_engine::search::Query {
+                text: "[".into(),
+                regex: true,
+                ..Default::default()
+            });
+        }),
         ("unsaved-changes", |app, _, _| {
             app.edit_source_text(|t| t.push_str("\nAn unsaved line.\n"));
             app.request_close();
@@ -178,7 +209,11 @@ fn scenes() -> Vec<(&'static str, Setup)> {
 }
 
 fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
-    let (w_pt, h_pt, ppp) = (900.0f32, 600.0f32, 1.0f32);
+    let w_pt = std::env::var("MARKISE_SHOT_WIDTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(900.0f32);
+    let (h_pt, ppp) = (600.0f32, 1.0f32);
     let work = std::env::temp_dir().join(format!("markise-dialog-shots-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     let dir = work.join("harbour");

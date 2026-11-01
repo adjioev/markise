@@ -125,7 +125,12 @@ struct Drag {
     unit: Unit,
 }
 
+pub(crate) type FindMatches = (u64, Arc<Vec<std::ops::Range<usize>>>, Option<usize>);
+
 pub struct DocViewer {
+    pub(crate) find_rects: Vec<Rect>,
+    pub(crate) find_matches: Option<FindMatches>,
+    pub(crate) find_reveal: bool,
     /// The editing session and its view.
     pub ed: EditorView,
     /// Font generation the view was last told about.
@@ -201,6 +206,9 @@ impl DocViewer {
             task_press: None,
             last_press: None,
             last_visible: Vec::new(),
+            find_rects: Vec::new(),
+            find_matches: None,
+            find_reveal: false,
             last_left: 0.0,
             last_top: 0.0,
             pending_copy: None,
@@ -217,6 +225,11 @@ impl DocViewer {
             gutter: false,
             code: Default::default(),
         }
+    }
+
+    /// Search highlight rectangles painted by the last rendered frame (screen coordinates).
+    pub fn search_highlights(&self) -> &[Rect] {
+        &self.find_rects
     }
 
     /// A viewer of a parsed Markdown document (tests, tools).
@@ -648,7 +661,7 @@ impl DocViewer {
             self.ed.refresh_focus();
             self.blink_from = now;
         }
-        if follow {
+        if follow || std::mem::take(&mut self.find_reveal) {
             with_shaper(&ctx, parley.as_deref_mut(), |sh| {
                 self.ed.scroll_to_caret(vh, sh, &*images)
             });
@@ -670,7 +683,16 @@ impl DocViewer {
         // formula became rendered, front matter collapsed): move it to the nearest stop
         // (not on a read-only surface without the focus: in Side by Side the session's selection
         // may be the source pane's, which need not sit on a rendered caret stop)
-        if (focused || editable) && with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.fix_selection(sh, &*images)) {
+        let searching_selection = self.find_matches.as_ref().is_some_and(|(rev, matches, active)| {
+            *rev == self.ed.session.revision().counter
+                && active
+                    .and_then(|i| matches.get(i))
+                    .is_some_and(|r| *r == self.ed.session.selection().primary().range())
+        });
+        if !searching_selection
+            && (focused || editable)
+            && with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.fix_selection(sh, &*images))
+        {
             self.ed.refresh_focus();
             ctx.request_repaint();
         }
@@ -710,6 +732,46 @@ impl DocViewer {
         // ---- review comments: margin cards or bubble popovers (visible items only)
         self.comment_cards(ui, &visible, rect, left, col_w, theme);
 
+        self.find_rects.clear();
+        // Search rectangles use the same source-to-rendered mapping as selections and
+        // touch only visible items. Hidden syntax has no invented rendered rectangle.
+        if let Some((rev, matches, active)) = self.find_matches.clone()
+            && rev == self.ed.session.revision().counter
+        {
+            let rects = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
+                let model = self.ed.view.model().clone();
+                let mut out = Vec::new();
+                for v in &visible {
+                    let span = model.item_span(v.idx);
+                    let begin = matches.partition_point(|r| r.end < span.start);
+                    for (i, range) in matches
+                        .iter()
+                        .enumerate()
+                        .skip(begin)
+                        .take_while(|(_, r)| r.start <= span.end)
+                    {
+                        let mut g = self.ed.geometry(sh, &*images);
+                        for r in g.selection_rects(v.idx, range.clone()) {
+                            out.push((r.translate(vec2(left, rect.top() + v.y)), Some(i) == active));
+                        }
+                    }
+                }
+                out
+            });
+            for (r, active) in rects {
+                self.find_rects.push(r);
+                painter.rect_filled(
+                    r,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(
+                        255,
+                        if active { 145 } else { 220 },
+                        40,
+                        if active { 130 } else { 65 },
+                    ),
+                );
+            }
+        }
         // ---- selection and caret
         let sel = self.ed.session.selection().primary();
         if !sel.is_caret() {

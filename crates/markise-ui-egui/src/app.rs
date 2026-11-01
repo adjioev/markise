@@ -50,6 +50,7 @@ use crate::viewer::DocViewer;
 
 mod attach;
 mod files;
+mod find;
 mod menus;
 mod prefs;
 mod review;
@@ -425,6 +426,7 @@ pub struct MarkiseApp {
     sidebar_visible: bool,
     /// Formatting toolbar state (spec 04 §3.2; shown per the `showToolbar` setting).
     toolbar: crate::toolbar::Toolbar,
+    find: find::FindState,
     tab: Tab,
     /// Recent files of the session and the sidebar's collapsed sections.
     side: crate::sidebar::SideState,
@@ -542,6 +544,7 @@ impl MarkiseApp {
             source_input_ms: Vec::new(),
             sidebar_visible: true,
             toolbar: Default::default(),
+            find: Default::default(),
             tab: Tab::Outline,
             side: Default::default(),
             tree: None,
@@ -2060,7 +2063,9 @@ impl MarkiseApp {
             }
         }
 
+        self.find_update(ctx);
         self.menus_ui(ui);
+        self.find_ui(ui);
         self.status_bar(ui);
         if let Some(r) = self.files.rename.as_mut() {
             r.drawn = false;
