@@ -82,7 +82,7 @@ enum InstallFail {
 
 enum Done {
     /// Settings file contents and the canonical user theme folder.
-    Settings(Settings, Option<PathBuf>),
+    Settings(Box<Settings>, Option<PathBuf>),
     /// A watcher registered on the user theme folder (created on the worker).
     Watcher(Option<FileWatcher>),
     Families(Result<Vec<ThemeFamily>, String>),
@@ -160,7 +160,7 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                             user_dir = Some(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
                         }
                         let published = crate::wake_track::publishing();
-                        if dtx.send(Done::Settings(loaded, user_dir.clone())).is_err() {
+                        if dtx.send(Done::Settings(Box::new(loaded), user_dir.clone())).is_err() {
                             drop(published);
                             break;
                         }
@@ -270,6 +270,9 @@ struct Composed {
 pub fn overrides_from_settings(o: &FontOverrides) -> Overrides {
     Overrides {
         body_font: o.font_family.clone(),
+        cyrillic_font: o.cyrillic_font.clone(),
+        greek_font: o.greek_font.clone(),
+        cjk_font: o.cjk_font.clone(),
         font_size: o.font_size,
         line_height: o.line_height,
         content_width: o.content_width,
@@ -279,6 +282,9 @@ pub fn overrides_from_settings(o: &FontOverrides) -> Overrides {
 pub fn overrides_to_settings(o: &Overrides) -> FontOverrides {
     FontOverrides {
         font_family: o.body_font.clone(),
+        cyrillic_font: o.cyrillic_font.clone(),
+        greek_font: o.greek_font.clone(),
+        cjk_font: o.cjk_font.clone(),
         font_size: o.font_size,
         line_height: o.line_height,
         content_width: o.content_width,
@@ -1126,7 +1132,7 @@ impl ThemeManager {
                 // each part chosen before the file arrived wins; the others come from the file
                 // (the chosen parts are already pending as a patch: only they are written)
                 let chosen = self.settings.clone();
-                self.settings = loaded;
+                self.settings = *loaded;
                 if self.chose_style {
                     self.settings.style = chosen.style;
                 } else {
@@ -1418,7 +1424,16 @@ impl ThemeManager {
         }
         // fonts of the active theme
         if self.system_fonts {
-            let req = FontRequest::of(&self.current);
+            let mut req = FontRequest::of(&self.current);
+            for (script, font) in [
+                ("cyrillic", &self.overrides.cyrillic_font),
+                ("greek", &self.overrides.greek_font),
+                ("cjk", &self.overrides.cjk_font),
+            ] {
+                if let Some(font) = font.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    req.scripts.insert(script.into(), font.into());
+                }
+            }
             let key = req.key() ^ u64::from(self.want_fallback);
             if self.font_key != Some(key) && self.worker.is_some() {
                 self.font_key = Some(key);
@@ -1662,7 +1677,7 @@ mod tests {
         // only the style is changed before the file arrives
         let mut m = ThemeManager::new(ConfigDir::None, false);
         m.select_style(StyleId::Builtin("classic".into()));
-        m.apply(Done::Settings(file.clone(), None), &mut Vec::new());
+        m.apply(Done::Settings(Box::new(file.clone()), None), &mut Vec::new());
         assert_eq!(
             m.selection(),
             &Selection {
@@ -1681,13 +1696,13 @@ mod tests {
         // only the colors
         let mut m = ThemeManager::new(ConfigDir::None, false);
         m.select_colors(ThemeId::Palette("dracula".into()));
-        m.apply(Done::Settings(file.clone(), None), &mut Vec::new());
+        m.apply(Done::Settings(Box::new(file.clone()), None), &mut Vec::new());
         assert_eq!(m.selection().style, StyleId::Builtin("compact".into()));
         assert_eq!(m.selection().colors, ThemeId::Palette("dracula".into()));
         // a complete theme sets both, even the part that equals the current one
         let mut m = ThemeManager::new(ConfigDir::None, false);
         m.select(ThemeId::Palette("rose-pine".into()));
-        m.apply(Done::Settings(file, None), &mut Vec::new());
+        m.apply(Done::Settings(Box::new(file), None), &mut Vec::new());
         assert_eq!(
             m.selection(),
             &Selection::complete(ThemeId::Palette("rose-pine".into()))
@@ -1827,7 +1842,7 @@ mod tests {
             },
             ..Default::default()
         };
-        m.apply(Done::Settings(loaded, None), &mut out);
+        m.apply(Done::Settings(Box::new(loaded), None), &mut out);
         assert_eq!(m.selection(), &Selection::complete(ThemeId::Palette("nord".into())));
         assert_eq!(
             m.overrides().line_height,
@@ -1847,7 +1862,7 @@ mod tests {
             },
             ..Default::default()
         };
-        m2.apply(Done::Settings(loaded, None), &mut Vec::new());
+        m2.apply(Done::Settings(Box::new(loaded), None), &mut Vec::new());
         assert_eq!(
             (m2.overrides().font_size, m2.overrides().line_height),
             (Some(18.0), Some(2.0))

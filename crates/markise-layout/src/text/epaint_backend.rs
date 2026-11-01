@@ -1,7 +1,7 @@
 //! epaint galleys behind the seam ([`EpaintShaper`] = egui's `FontsView`).
 //!
-//! [`to_layout_job`] reproduces exactly the `LayoutJob`s the M1 layout code built, so galleys,
-//! egui's galley cache and painting are unchanged (ADR 0005 T2: no visible change).
+//! [`to_layout_job`] builds the base job. Shaping resolves mixed-script runs to compatible
+//! faces (ADR 0015) before handing the job to epaint's galley cache and painter.
 
 use std::any::Any;
 use std::ops::Range;
@@ -76,8 +76,26 @@ pub fn to_layout_job(text: &StyledText, width: Option<f32>) -> LayoutJob {
 
 impl TextShaper for FontsView<'_> {
     fn shape(&mut self, text: &StyledText, width: Option<f32>) -> Arc<dyn TextBlock> {
+        let mut job = to_layout_job(text, width);
+        job.sections.clear();
+        let mut resolver = super::fallback::Resolver::new(self.definitions(), text);
+        for r in &text.runs {
+            for (i, resolved) in resolver.runs(r.style.role, r.range.clone()).into_iter().enumerate() {
+                let mut format = text_format(&r.style);
+                if let Some(choice) = resolved.choice {
+                    format.font_id.family = FontFamily::Name(choice.family.into());
+                    format.font_id.size *= choice.scale;
+                }
+                job.sections.push(epaint::text::LayoutSection {
+                    leading_space: if i == 0 { r.lead } else { 0.0 },
+                    byte_range: epaint::text::ByteIndex(resolved.range.start)
+                        ..epaint::text::ByteIndex(resolved.range.end),
+                    format,
+                });
+            }
+        }
         Arc::new(EpaintBlock {
-            galley: self.layout_job(to_layout_job(text, width)),
+            galley: self.layout_job(job),
             map: text.source_map.clone(),
         })
     }

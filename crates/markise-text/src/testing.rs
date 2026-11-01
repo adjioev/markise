@@ -26,6 +26,8 @@ pub struct TestFont {
     pub units_per_em: u16,
     pub ascent: i16,
     pub descent: i16,
+    pub x_height: u16,
+    pub serif: Option<bool>,
     /// (character, advance in font units); advance 0 makes a zero-width (mark-like) glyph.
     pub chars: Vec<(char, u16)>,
     /// Non-default variation sequences (base, selector, advance): each gets its own glyph.
@@ -56,6 +58,8 @@ impl TestFont {
             units_per_em: 1000,
             ascent: 800,
             descent: -200,
+            x_height: 500,
+            serif: None,
             chars: Vec::new(),
             variation_sequences: Vec::new(),
             default_sequences: Vec::new(),
@@ -269,7 +273,14 @@ impl TestFont {
         for v in [650i16, 600, 0, 75, 650, 600, 0, 350, 50, 250] {
             be16(&mut os2, v as u16);
         }
-        be16(&mut os2, 0);
+        be16(
+            &mut os2,
+            match self.serif {
+                Some(true) => 1 << 8,
+                Some(false) => 8 << 8,
+                None => 0,
+            },
+        );
         os2.extend([0u8; 10]);
         for _ in 0..4 {
             be32(&mut os2, 0);
@@ -291,7 +302,7 @@ impl TestFont {
         be16(&mut os2, (-self.descent) as u16);
         be32(&mut os2, 1);
         be32(&mut os2, 0);
-        for v in [500u16, 700, 0, 0x20, 2] {
+        for v in [self.x_height, 700, 0, 0x20, 2] {
             be16(&mut os2, v);
         }
 

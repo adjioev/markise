@@ -25,7 +25,7 @@
 //! | `statusBar.count` | `"words"`, `"characters"`, `"charactersNoSpaces"`: the count the status bar shows (click it to cycle; issue #53) | `"words"` |
 //! | `toolbarPosition` | `"top"` / `"bottom"`: where the formatting toolbar sits (Preferences → Appearance) | `"top"` |
 //! | `consumed_pending` | names of recovery files already merged into this file (written with the merge; see [`update_file`]); omitted when empty | none |
-//! | `overrides` | object with optional `font_family` (string), `font_size`, `line_height`, `content_width` (numbers); omitted when empty | none |
+//! | `overrides` | object with optional `font_family`, `cyrillic_font`, `greek_font`, `cjk_font` (strings), `font_size`, `line_height`, `content_width` (numbers); omitted when empty | none |
 //! | `editing` | object: `auto_pair_brackets` (default `true`), `auto_pair_markdown` (`false`), `smart_punctuation` (convert on input, `false`), `smart_dashes_em` (`--` → em dash, `false`) (spec 02 §4, §13, §16; Preferences → Editor) | defaults |
 //! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`) — source editor display (spec 02 §12.1.1; Preferences → Source Mode) | defaults |
 //! | `keyBinding` | object: command label (menu title) or id → accelerator (`"Ctrl+Shift+K"`), `""` unbinds (spec 05 §4.7); read only, kept verbatim | none |
@@ -158,6 +158,9 @@ impl CountMode {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FontOverrides {
     pub font_family: Option<String>,
+    pub cyrillic_font: Option<String>,
+    pub greek_font: Option<String>,
+    pub cjk_font: Option<String>,
     pub font_size: Option<f32>,
     pub line_height: Option<f32>,
     pub content_width: Option<f32>,
@@ -180,7 +183,15 @@ impl FontOverrides {
         (o, m)
     }
 
-    const KEYS: [&'static str; 4] = ["font_family", "font_size", "line_height", "content_width"];
+    const KEYS: [&'static str; 7] = [
+        "font_family",
+        "font_size",
+        "line_height",
+        "content_width",
+        "cyrillic_font",
+        "greek_font",
+        "cjk_font",
+    ];
 
     fn from_json(v: &Value) -> FontOverrides {
         let num = |k: &str| {
@@ -189,7 +200,17 @@ impl FontOverrides {
                 .map(|n| n as f32)
                 .filter(|n| n.is_finite() && *n > 0.0)
         };
+        let font = |key: &str| {
+            v.get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && s.len() <= 200)
+                .map(str::to_string)
+        };
         FontOverrides {
+            cyrillic_font: font("cyrillic_font"),
+            greek_font: font("greek_font"),
+            cjk_font: font("cjk_font"),
             font_family: v
                 .get("font_family")
                 .and_then(Value::as_str)
@@ -204,6 +225,15 @@ impl FontOverrides {
 
     fn to_json(&self, extra: &Map<String, Value>) -> Value {
         let mut m = extra.clone();
+        for (key, font) in [
+            ("cyrillic_font", &self.cyrillic_font),
+            ("greek_font", &self.greek_font),
+            ("cjk_font", &self.cjk_font),
+        ] {
+            if let Some(font) = font {
+                m.insert(key.into(), Value::from(font.clone()));
+            }
+        }
         if let Some(f) = &self.font_family {
             m.insert("font_family".into(), Value::from(f.clone()));
         }
@@ -610,6 +640,9 @@ impl Default for Settings {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OverridesPatch {
     pub font_family: Option<Option<String>>,
+    pub cyrillic_font: Option<Option<String>>,
+    pub greek_font: Option<Option<String>>,
+    pub cjk_font: Option<Option<String>>,
     pub font_size: Option<Option<f32>>,
     pub line_height: Option<Option<f32>>,
     pub content_width: Option<Option<f32>>,
@@ -623,6 +656,9 @@ impl OverridesPatch {
         }
         OverridesPatch {
             font_family: d(&old.font_family, &new.font_family),
+            cyrillic_font: d(&old.cyrillic_font, &new.cyrillic_font),
+            greek_font: d(&old.greek_font, &new.greek_font),
+            cjk_font: d(&old.cjk_font, &new.cjk_font),
             font_size: d(&old.font_size, &new.font_size),
             line_height: d(&old.line_height, &new.line_height),
             content_width: d(&old.content_width, &new.content_width),
@@ -635,6 +671,15 @@ impl OverridesPatch {
 
     /// `later` wins member by member.
     pub fn merge(&mut self, later: OverridesPatch) {
+        if later.cyrillic_font.is_some() {
+            self.cyrillic_font = later.cyrillic_font;
+        }
+        if later.greek_font.is_some() {
+            self.greek_font = later.greek_font;
+        }
+        if later.cjk_font.is_some() {
+            self.cjk_font = later.cjk_font;
+        }
         if later.font_family.is_some() {
             self.font_family = later.font_family;
         }
@@ -650,6 +695,15 @@ impl OverridesPatch {
     }
 
     pub fn apply(&self, o: &mut FontOverrides) {
+        if let Some(v) = &self.cyrillic_font {
+            o.cyrillic_font = v.clone();
+        }
+        if let Some(v) = &self.greek_font {
+            o.greek_font = v.clone();
+        }
+        if let Some(v) = &self.cjk_font {
+            o.cjk_font = v.clone();
+        }
         if let Some(v) = &self.font_family {
             o.font_family = v.clone();
         }
@@ -817,6 +871,15 @@ impl SettingsPatch {
             self.images = None;
         }
         let (o, so) = (&mut self.overrides, &saved.overrides);
+        if so.cyrillic_font.is_some() {
+            o.cyrillic_font = None;
+        }
+        if so.greek_font.is_some() {
+            o.greek_font = None;
+        }
+        if so.cjk_font.is_some() {
+            o.cjk_font = None;
+        }
         if so.font_family.is_some() {
             o.font_family = None;
         }
@@ -931,6 +994,15 @@ impl SettingsPatch {
         }
         let mut o = Map::new();
         let op = &self.overrides;
+        for (key, value) in [
+            ("cyrillic_font", &op.cyrillic_font),
+            ("greek_font", &op.greek_font),
+            ("cjk_font", &op.cjk_font),
+        ] {
+            if let Some(v) = value {
+                o.insert(key.into(), v.clone().map_or(Value::Null, Value::from));
+            }
+        }
         if let Some(v) = &op.font_family {
             o.insert("font_family".into(), v.clone().map_or(Value::Null, Value::from));
         }
@@ -982,6 +1054,9 @@ impl SettingsPatch {
             };
             p.overrides = OverridesPatch {
                 font_family: o.get("font_family").map(|v| v.as_str().map(str::to_string)),
+                cyrillic_font: o.get("cyrillic_font").map(|v| v.as_str().map(str::to_string)),
+                greek_font: o.get("greek_font").map(|v| v.as_str().map(str::to_string)),
+                cjk_font: o.get("cjk_font").map(|v| v.as_str().map(str::to_string)),
                 font_size: num("font_size"),
                 line_height: num("line_height"),
                 content_width: num("content_width"),
@@ -1695,6 +1770,42 @@ mod tests {
     }
 
     #[test]
+    fn script_font_patches_merge_recover_and_clear_independently() {
+        let before = FontOverrides::default();
+        let cyrillic = FontOverrides {
+            cyrillic_font: Some("Arial".into()),
+            ..Default::default()
+        };
+        let mut patch = SettingsPatch {
+            overrides: OverridesPatch::diff(&before, &cyrillic),
+            ..Default::default()
+        };
+        let greek = FontOverrides {
+            greek_font: Some("Georgia".into()),
+            ..Default::default()
+        };
+        patch.overrides.merge(OverridesPatch::diff(&before, &greek));
+        assert_eq!(SettingsPatch::from_json(&patch.to_json()).unwrap(), patch);
+        let mut settings = Settings::default();
+        patch.apply(&mut settings);
+        assert_eq!(settings.overrides.cyrillic_font.as_deref(), Some("Arial"));
+        assert_eq!(settings.overrides.greek_font.as_deref(), Some("Georgia"));
+        let cleared = FontOverrides {
+            cyrillic_font: None,
+            ..settings.overrides.clone()
+        };
+        let reset = SettingsPatch {
+            overrides: OverridesPatch::diff(&settings.overrides, &cleared),
+            ..Default::default()
+        };
+        let reset = SettingsPatch::from_json(&reset.to_json()).unwrap();
+        reset.apply(&mut settings);
+        assert_eq!(settings.overrides, cleared);
+        patch.forget(&patch.clone());
+        assert!(patch.is_empty());
+    }
+
+    #[test]
     fn round_trip_preserves_unknown_keys() {
         let dir = std::env::temp_dir().join(format!("markise-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1707,6 +1818,9 @@ mod tests {
             appearance: Appearance::Dark,
             overrides: FontOverrides {
                 font_family: Some("Georgia".into()),
+                cyrillic_font: Some("Arial".into()),
+                greek_font: Some("Georgia".into()),
+                cjk_font: Some("Noto Sans CJK".into()),
                 font_size: Some(17.5),
                 line_height: None,
                 content_width: Some(900.0),

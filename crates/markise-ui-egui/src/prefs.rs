@@ -110,6 +110,9 @@ pub enum RowId {
     Appearance,
     ThemeFiles,
     BodyFont,
+    CyrillicFont,
+    GreekFont,
+    CjkFont,
     FontSize,
     LineHeight,
     ContentWidth,
@@ -272,6 +275,27 @@ pub const ROWS: &[Row] = &[
         "Font & size",
         "Body font",
         "typography family",
+    ),
+    row(
+        R::CyrillicFont,
+        S::Appearance,
+        "Font & size",
+        "Cyrillic font",
+        "russian ukrainian script fallback typography",
+    ),
+    row(
+        R::GreekFont,
+        S::Appearance,
+        "Font & size",
+        "Greek font",
+        "greek script fallback typography",
+    ),
+    row(
+        R::CjkFont,
+        S::Appearance,
+        "Font & size",
+        "CJK font",
+        "chinese japanese korean script fallback typography",
     ),
     row(
         R::FontSize,
@@ -1278,22 +1302,31 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                 }
             });
         }
-        R::BodyFont => {
+        R::BodyFont | R::CyrillicFont | R::GreekFont | R::CjkFont => {
             let mut o = v.overrides.clone();
+            let selected = match r.id {
+                R::CyrillicFont => &mut o.cyrillic_font,
+                R::GreekFont => &mut o.greek_font,
+                R::CjkFont => &mut o.cjk_font,
+                _ => &mut o.body_font,
+            };
             control_row(ui, p, r.label, |ui| {
-                if o.body_font.is_some() {
+                if selected.is_some() {
                     if reset_icon(ui, p, r.label) {
-                        o.body_font = None;
+                        *selected = None;
                     }
                 } else {
                     ui.add_space(20.0);
                 }
-                let mut font = o.body_font.clone().unwrap_or_default();
-                let hint = v
-                    .font_defaults
-                    .body_font
-                    .clone()
-                    .unwrap_or_else(|| "Style default".into());
+                let mut font = selected.clone().unwrap_or_default();
+                let hint = if r.id == R::BodyFont {
+                    v.font_defaults
+                        .body_font
+                        .clone()
+                        .unwrap_or_else(|| "Style default".into())
+                } else {
+                    "Automatic fallback".into()
+                };
                 let t = ui.add(
                     egui::TextEdit::singleline(&mut font)
                         .hint_text(hint)
@@ -1301,7 +1334,7 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                 );
                 name(&t, Role::TextInput, r.label);
                 if t.changed() {
-                    o.body_font = (!font.trim().is_empty()).then_some(font);
+                    *selected = (!font.trim().is_empty()).then(|| font.trim().to_owned());
                 }
             });
             if o != v.overrides {
@@ -1634,7 +1667,7 @@ pub fn font_controls(ui: &mut Ui, o: &mut Overrides, d: &FontDefaults) {
             name(&r, Role::TextInput, "Body font");
             let r = r.labelled_by(l.id);
             if r.changed() {
-                o.body_font = (!font.trim().is_empty()).then_some(font);
+                o.body_font = (!font.trim().is_empty()).then(|| font.trim().to_owned());
             }
             ui.end_row();
             let row = |ui: &mut Ui, label: &str, v: &mut Option<f32>, current: f32, (lo, hi): (f32, f32), step: f64| {

@@ -143,6 +143,10 @@ fn scenes() -> Vec<(&'static str, Setup)> {
         ("preferences-appearance", |app, _, _| {
             app.open_preferences_at(Section::Appearance)
         }),
+        ("preferences-script-fonts", |app, _, _| {
+            app.open_preferences_at(Section::Appearance);
+            app.preferences().query = "script".into();
+        }),
         ("preferences-source", |app, _, _| {
             app.open_preferences_at(Section::Source)
         }),
