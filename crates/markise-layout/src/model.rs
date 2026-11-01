@@ -177,6 +177,7 @@ pub struct CodeRef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     pub kind: ItemKind,
+    pub raw: Option<markise_doc::RawPresentation>,
     /// Byte length of the leaf block's span (all segments of a block share it).
     pub len: usize,
     pub containers: Box<[Container]>,
@@ -1388,7 +1389,13 @@ impl Flattener<'_> {
         // item-relative segment spans: offset-independent (C-18)
         segment.hash(&mut h);
         let content_hash = h.finish();
+        let raw = if matches!(kind, ItemKind::Html | ItemKind::Paragraph) {
+            self.doc.raw_presentation(span)
+        } else {
+            None
+        };
         self.items.push(Item {
+            raw,
             kind,
             len: span.len(),
             containers: containers.into_boxed_slice(),

@@ -113,3 +113,5 @@ pub mod testing {
         crate::ParleyShaper::from_font_definitions(&font_definitions())
     }
 }
+
+mod disclosure;

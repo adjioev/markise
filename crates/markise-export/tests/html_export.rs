@@ -85,3 +85,28 @@ fn plain_html_snapshot() {
 fn dark_theme_css_differs() {
     assert_ne!(css::theme_css(&Theme::light()), css::theme_css(&Theme::dark()));
 }
+
+#[test]
+fn common_html_export_keeps_native_elements_and_existing_comment_policy() {
+    let src = "<details open>\n<summary>Hint</summary>\n\nPress <kbd>Enter</kbd>.\n\n</details>\n\n<!-- private -->\n";
+    let doc = markise_md::parse(src);
+    let html = render_document(&doc, &HtmlOptions::default());
+    for raw in [
+        "<details open>",
+        "<summary>Hint</summary>",
+        "<kbd>Enter</kbd>",
+        "</details>",
+    ] {
+        assert!(html.contains(raw), "{raw}");
+    }
+    assert!(!html.contains("<!-- private -->"));
+    let trusted = render_document(
+        &doc,
+        &HtmlOptions {
+            trusted: true,
+            ..Default::default()
+        },
+    );
+    assert!(trusted.contains("<!-- private -->"));
+    assert_eq!(doc.text(), src);
+}

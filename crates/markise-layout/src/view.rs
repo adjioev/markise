@@ -42,6 +42,7 @@ pub struct View {
     anchor: usize,
     anchor_off: f32,
     expanded: HashSet<usize>,
+    disclosures: crate::disclosure::Disclosures,
     image_epoch: u64,
     /// Bumped when rendered math arrives ([`View::math_changed`]).
     math_epoch: u64,
@@ -66,11 +67,13 @@ pub struct View {
     refs: std::cell::RefCell<std::collections::HashMap<u64, Box<[u64]>>>,
     /// Editing state of the item holding the caret (ADR 0006 §2.4): part of that item's key.
     focus: Option<(usize, ItemFocus, u64)>,
+    caret_item: Option<usize>,
 }
 
 impl View {
     pub fn new(doc: Arc<dyn FormatDoc>, model: Arc<DocModel>, theme: Theme, width: f32, ppp: f32) -> View {
         let theme_fp = theme.fingerprint();
+        let disclosures = crate::disclosure::Disclosures::new(&model, &*doc);
         let mut v = View {
             doc,
             model,
@@ -83,6 +86,7 @@ impl View {
             anchor: 0,
             anchor_off: 0.0,
             expanded: HashSet::new(),
+            disclosures,
             image_epoch: 0,
             math_epoch: 0,
             font_gen: 0,
@@ -95,6 +99,7 @@ impl View {
             links: Arc::new(AllResolved),
             refs: Default::default(),
             focus: None,
+            caret_item: None,
         };
         v.reset_heights();
         v
@@ -130,9 +135,11 @@ impl View {
     /// item-relative, so items below a change keep them).
     pub fn set_model(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>) {
         self.focus = None;
+        self.caret_item = None;
         let anchor_pos = self.model.items.start(self.anchor).unwrap_or(0);
         self.doc = doc;
         self.model = model;
+        self.disclosures = crate::disclosure::Disclosures::new(&self.model, &*self.doc);
         self.prune_refs();
         self.expanded.clear();
         self.anchor = if self.model.items.is_empty() {
@@ -183,6 +190,7 @@ impl View {
     pub fn apply_change(&mut self, doc: Arc<dyn FormatDoc>, change: &ModelChange) {
         self.doc = doc;
         let old_focus = self.focus.take().map(|f| f.0);
+        self.caret_item = None;
         if change.full {
             let m = self.model.clone();
             self.set_model(self.doc.clone(), m);
@@ -195,6 +203,7 @@ impl View {
             self.set_model(self.doc.clone(), m);
             return;
         }
+        let disclosure_changed = self.disclosures.update(&self.model, &*self.doc, change);
         // anchor
         if self.anchor >= r.end {
             self.anchor = (self.anchor as isize + shift).max(0) as usize;
@@ -259,10 +268,55 @@ impl View {
             }
         }
         self.anchor = self.anchor.min(n.saturating_sub(1));
+        if disclosure_changed {
+            self.reset_heights();
+        }
     }
 
-    /// Height of item `i` before this frame's layout: cached layout or estimate.
+    /// Adjacent visible item, jumping whole collapsed ranges for caret navigation.
+    pub fn adjacent_visible(&self, from: usize, forward: bool) -> Option<usize> {
+        let mut i = if forward {
+            from.checked_add(1)?
+        } else {
+            from.checked_sub(1)?
+        };
+        loop {
+            if i >= self.len() {
+                return None;
+            }
+            if let Some(range) = self.disclosures.closed_range(i) {
+                i = if forward {
+                    range.end
+                } else {
+                    range.start.checked_sub(1)?
+                };
+                continue;
+            }
+            if !self.disclosure_hidden(i) {
+                return Some(i);
+            }
+            i = if forward { i.checked_add(1)? } else { i.checked_sub(1)? };
+        }
+    }
+
+    fn disclosure_hidden(&self, i: usize) -> bool {
+        let focused = self.focus.as_ref().is_some_and(|(idx, _, _)| *idx == i);
+        if focused {
+            return false;
+        }
+        self.disclosures.hidden(i)
+            || self
+                .model
+                .items
+                .get(i)
+                .is_some_and(|it| it.raw == Some(markise_doc::RawPresentation::Comment))
+    }
+
+    /// Height before this frame: cached layout or estimate.
     fn initial_height(&self, i: usize) -> (f64, bool) {
+        if self.disclosure_hidden(i) {
+            return (0.0, true);
+        }
         match self.cache.peek(&self.key(i)) {
             Some(l) => {
                 let (a, b) = self.item_pad(i);
@@ -402,8 +456,17 @@ impl View {
         })
     }
 
-    /// Toggles a collapsible block (front matter).
+    /// Toggles a collapsible block (front matter or disclosure).
     pub fn toggle_expanded(&mut self, idx: usize) {
+        if let Some(group) = self.disclosures.groups.get_mut(&idx) {
+            group.open = !group.open;
+            if !group.open && self.focus.as_ref().is_some_and(|(i, _, _)| idx < *i && *i <= group.end) {
+                self.focus = None;
+            }
+            self.disclosures.refresh();
+            self.reset_heights();
+            return;
+        }
         if !self.expanded.remove(&idx) {
             self.expanded.insert(idx);
         }
@@ -445,6 +508,11 @@ impl View {
         // a fresh view has no cached layouts: skip the key computation
         let peek = !self.cache.is_empty();
         for (i, (start, it)) in model.items.iter_with_start().enumerate() {
+            if self.disclosure_hidden(i) {
+                values.push(0.0);
+                exact.push(true);
+                continue;
+            }
             // layouts of unchanged items survive reloads and parameter round-trips
             let cached = if peek {
                 let ready = self.code_query_of(i, it, || start).map(|q| self.highlights.ready(&q));
@@ -473,6 +541,9 @@ impl View {
     /// Sets the editing state of item `i` (marker reveal, virtual paragraph; ADR 0006 §2.4) or
     /// clears it. Only that item's cache key changes; returns `true` when the focus changed.
     pub fn set_focus(&mut self, focus: Option<(usize, ItemFocus)>) -> bool {
+        let caret_item = focus.as_ref().map(|(i, _)| *i);
+        let opened = caret_item != self.caret_item && caret_item.is_some_and(|i| self.disclosures.reveal(i));
+        self.caret_item = caret_item;
         let focus = focus.filter(|(i, f)| *i < self.len() && !f.is_empty());
         let same = match (&self.focus, &focus) {
             (None, None) => true,
@@ -480,7 +551,10 @@ impl View {
             _ => false,
         };
         if same {
-            return false;
+            if opened {
+                self.reset_heights();
+            }
+            return opened;
         }
         let old = self.focus.take().map(|f| f.0);
         self.focus = focus.map(|(i, f)| {
@@ -494,6 +568,9 @@ impl View {
                 self.heights.set(i, v);
                 self.exact[i] = e;
             }
+        }
+        if opened {
+            self.reset_heights();
         }
         true
     }
@@ -529,6 +606,9 @@ impl View {
     }
 
     fn estimate_item(&self, i: usize, it: &Item) -> f32 {
+        if self.disclosure_hidden(i) {
+            return 0.0;
+        }
         let t = &self.theme;
         let (pa, pb) = self.item_pad(i);
         let line = t.line_px();
@@ -600,6 +680,14 @@ impl View {
                 .wrapping_mul(0x5851_f42d_4c95_7f2d)
                 .rotate_left(29);
         }
+        if let Some(group) = self.disclosures.groups.get(&i) {
+            use std::hash::{Hash, Hasher};
+            let mut h = crate::model::hasher();
+            group.title.hash(&mut h);
+            group.open.hash(&mut h);
+            extra ^= h.finish().rotate_left(13);
+        }
+        extra ^= (self.disclosures.depth(i) as u64).wrapping_mul(0x71d8_1e65_9a13_451d);
         // code: highlighter generation and whether this item's range is highlighted yet
         let mut code_ident = 0;
         if let Some(ready) = ready {
@@ -694,6 +782,11 @@ impl View {
 
     /// Layout of item `i` (cached or computed now).
     pub fn layout(&mut self, i: usize, shaper: &mut dyn TextShaper, images: &dyn Images) -> Arc<BlockLayout> {
+        if self.disclosure_hidden(i) {
+            self.heights.set(i, 0.0);
+            self.exact[i] = true;
+            return Arc::new(BlockLayout::default());
+        }
         let ready = self.code_query(i).map(|q| {
             let r = self.highlights.ready(&q);
             if !r {
@@ -742,6 +835,8 @@ impl View {
                 let params = LayoutParams {
                     theme: &self.theme,
                     width: self.width,
+                    disclosure: self.disclosures.groups.get(&i).map(|g| (g.title.as_str(), g.open)),
+                    disclosure_depth: self.disclosures.depth(i),
                     expanded: self.expanded.contains(&i),
                     code_runs: runs.as_deref(),
                     focus: self.focus.as_ref().filter(|f| f.0 == i).map(|f| &f.1),
@@ -798,6 +893,9 @@ impl View {
     /// Puts item `i` at the top of the viewport (outline click).
     pub fn scroll_to_item(&mut self, i: usize) {
         if i < self.len() {
+            if self.disclosures.reveal(i) {
+                self.reset_heights();
+            }
             self.anchor = i;
             self.anchor_off = 0.0;
         }
@@ -844,6 +942,9 @@ impl View {
             out.clear();
             // the anchor offset may exceed the anchor's height once it is laid out
             loop {
+                if let Some(end) = self.disclosures.closed_end(self.anchor) {
+                    self.anchor = (end + 1).min(n - 1);
+                }
                 self.layout(self.anchor, shaper, images);
                 let h = self.height(self.anchor);
                 if self.anchor_off >= h && self.anchor + 1 < n {
@@ -856,6 +957,10 @@ impl View {
             let mut y = -self.anchor_off;
             let mut i = self.anchor;
             while i < n && y < viewport_h + margin {
+                if let Some(end) = self.disclosures.closed_end(i) {
+                    i = end + 1;
+                    continue;
+                }
                 let l = self.layout(i, shaper, images);
                 let h = self.height(i);
                 if y + h > 0.0 && y < viewport_h {
@@ -881,6 +986,14 @@ impl View {
         let mut i = self.anchor;
         while i > 0 && y > -margin {
             i -= 1;
+            if let Some((&start, _)) = self
+                .disclosures
+                .groups
+                .range(..=i)
+                .find(|(start, g)| !g.open && **start < i && i <= g.end)
+            {
+                i = start;
+            }
             self.layout(i, shaper, images);
             y -= self.height(i);
         }

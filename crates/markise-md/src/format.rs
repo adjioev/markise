@@ -318,6 +318,28 @@ fn summary(r: EditResult, changed: std::ops::Range<usize>, delta: isize) -> Edit
 }
 
 impl FormatDoc for Document {
+    fn raw_presentation(&self, span: Span) -> Option<markise_doc::RawPresentation> {
+        let source = span.slice(self.text());
+        if !source.trim_start().starts_with('<') {
+            return None;
+        }
+        if let Some(leaf) = self.leaf(span.start)
+            && !leaf.containers.is_empty()
+        {
+            if source.len() > 32 * 1024 {
+                return None;
+            }
+            let content = leaf
+                .lines
+                .iter()
+                .map(|line| line.slice(self.text()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            crate::html_view::presentation(&content)
+        } else {
+            crate::html_view::presentation(source)
+        }
+    }
     fn format_id(&self) -> &'static str {
         "markdown"
     }
@@ -667,11 +689,60 @@ fn cap_str(s: &str, cap: usize) -> (&str, bool) {
 /// base-relative source offsets.
 fn neutral_tree(content: &str, nodes: &[Inline], map: &dyn Fn(usize) -> u32) -> RichInline {
     let mut text = String::new();
-    let nodes = nodes
-        .iter()
-        .map(|n| neutral_inline(content, n, map, &mut text))
-        .collect();
+    let nodes = neutral_nodes(content, nodes, map, &mut text);
     RichInline { nodes, text }
+}
+
+// Pair keyboard tags in one sibling sequence. Unpaired tags retain raw display.
+fn neutral_nodes(s: &str, nodes: &[Inline], map: &dyn Fn(usize) -> u32, pool: &mut String) -> Vec<InlineNode> {
+    neutral_nodes_depth(s, nodes, map, pool, 0)
+}
+fn neutral_nodes_depth(
+    s: &str,
+    nodes: &[Inline],
+    map: &dyn Fn(usize) -> u32,
+    pool: &mut String,
+    depth: usize,
+) -> Vec<InlineNode> {
+    if depth >= 32 {
+        return nodes.iter().map(|n| neutral_inline(s, n, map, pool)).collect();
+    }
+    let mut stack = Vec::new();
+    let mut pairs = std::collections::HashMap::new();
+    for (i, n) in nodes.iter().enumerate() {
+        if n.kind == InlineKind::Html {
+            match crate::html_view::keyboard_tag(n.span.slice(s)) {
+                Some(false) => stack.push(i),
+                Some(true) => {
+                    if let Some(a) = stack.pop() {
+                        pairs.insert(a, i);
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < nodes.len() {
+        if let Some(&end) = pairs.get(&i) {
+            let a = &nodes[i];
+            let z = &nodes[end];
+            out.push(InlineNode {
+                kind: NK::Keyboard,
+                source: map(a.span.start)..map(z.span.end),
+                content: map(a.span.end)..map(z.span.start),
+                markers: vec![map(a.span.start)..map(a.span.end), map(z.span.start)..map(z.span.end)],
+                children: neutral_nodes_depth(s, &nodes[i + 1..end], map, pool, depth + 1),
+                text: 0..0,
+            });
+            i = end + 1;
+        } else {
+            out.push(neutral_inline(s, &nodes[i], map, pool));
+            i += 1;
+        }
+    }
+    out
 }
 
 fn push_value(pool: &mut String, v: &str) -> Range<u32> {
@@ -833,6 +904,15 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
             let raw = n.span.slice(s);
             if matches!(raw.to_ascii_lowercase().as_str(), "<br>" | "<br/>" | "<br />") {
                 (NK::Break { hard: true }, None)
+            } else if raw.starts_with("<!--") && raw.ends_with("-->") {
+                return InlineNode {
+                    kind: NK::Comment,
+                    source: map(n.span.start)..map(n.span.end),
+                    content: map(n.span.start)..map(n.span.end),
+                    markers: std::iter::once(map(n.span.start)..map(n.span.end)).collect(),
+                    children: Vec::new(),
+                    text: push_value(pool, raw),
+                };
             } else {
                 (NK::RawInline, Some(raw.to_string()))
             }
@@ -878,7 +958,7 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
         source: map(n.span.start)..map(n.span.end),
         content: map(inner.start)..map(inner.end),
         markers,
-        children: n.children.iter().map(|c| neutral_inline(s, c, map, pool)).collect(),
+        children: neutral_nodes(s, &n.children, map, pool),
         text,
     }
 }
