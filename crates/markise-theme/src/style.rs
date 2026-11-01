@@ -186,6 +186,10 @@ pub struct ColorScheme {
 pub struct Overrides {
     /// Body font family, tried before the style's body stack.
     pub body_font: Option<String>,
+    /// Editor prose fallback choices; applied by the font worker, not exported as CSS.
+    pub cyrillic_font: Option<String>,
+    pub greek_font: Option<String>,
+    pub cjk_font: Option<String>,
     /// Base font size in points; heading sizes scale with it.
     pub font_size: Option<f32>,
     /// Unitless line height.
@@ -1232,6 +1236,7 @@ mod tests {
             font_size: Some(20.0),
             line_height: Some(9.0),
             content_width: Some(f32::NAN),
+            ..Default::default()
         }
         .apply(&mut s);
         assert_eq!(s.fonts.body.first().map(String::as_str), Some("Georgia"));

@@ -347,6 +347,17 @@ pub fn definitions_with(defaults: &DefaultFaces, themed: &FontSet) -> FontDefini
             bold: defaults.bold.clone().into_iter().collect(),
         };
     }
+    // Keep system fallbacks even when a theme supplied a partial-coverage face. A regular
+    // fallback must not replace a bold role merely because it happens to cover the script.
+    for role in std::iter::once(&mut set.body).chain(set.heading.iter_mut()) {
+        for (list, face) in [(&mut role.regular, &defaults.body), (&mut role.bold, &defaults.bold)] {
+            if let Some(face) = face
+                && !list.iter().any(|(name, _)| name == &face.0)
+            {
+                list.push(face.clone());
+            }
+        }
+    }
     register_families(&mut defs, &set);
     defs
 }
@@ -552,6 +563,7 @@ pub struct FontRequest {
     pub mono: Vec<String>,
     pub sidebar: Vec<String>,
     pub locals: Vec<(String, String)>,
+    pub scripts: std::collections::BTreeMap<String, String>,
 }
 
 impl FontRequest {
@@ -572,11 +584,16 @@ impl FontRequest {
             mono: theme.fonts.mono.clone(),
             sidebar: theme.sidebar.fonts.clone(),
             locals,
+            scripts: Default::default(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.body.is_empty() && self.heading.is_empty() && self.mono.is_empty() && self.sidebar.is_empty()
+        self.body.is_empty()
+            && self.heading.is_empty()
+            && self.mono.is_empty()
+            && self.sidebar.is_empty()
+            && self.scripts.is_empty()
     }
 
     pub fn key(&self) -> u64 {
@@ -729,8 +746,15 @@ pub fn resolve_with(req: &FontRequest, idx: &SystemFonts) -> ResolvedFonts {
     } else {
         resolve_role(&req.sidebar, req, idx, "sidebar", &mut out)
     };
+    let mut scripts = std::collections::BTreeMap::new();
+    for (script, name) in &req.scripts {
+        if let Some(faces) = resolve_role(std::slice::from_ref(name), req, idx, "script override", &mut out) {
+            scripts.insert(script.clone(), faces);
+        }
+    }
     // a heading stack with no installed font uses the body faces
     out.set = FontSet {
+        scripts,
         body: body.unwrap_or_default(),
         heading,
         mono: mono.unwrap_or_default(),

@@ -428,6 +428,8 @@ pub struct RoleFaces {
 /// bundled fonts; a missing bold face falls back to the regular face (no synthetic bold).
 #[derive(Clone, Default)]
 pub struct FontSet {
+    /// Optional prose faces selected for a script in Preferences.
+    pub scripts: std::collections::BTreeMap<String, RoleFaces>,
     pub body: RoleFaces,
     /// Headings; `None` = same as `body`.
     pub heading: Option<RoleFaces>,
@@ -495,6 +497,39 @@ pub fn register_families(defs: &mut FontDefinitions, set: &FontSet) {
     ] {
         defs.families.insert(FontFamily::Name(fam.into()), list);
     }
+    for (script, faces) in &set.scripts {
+        for role in [FontRole::Body, FontRole::Bold, FontRole::Heading, FontRole::HeadingBold] {
+            let bold = matches!(role, FontRole::Bold | FontRole::HeadingBold);
+            let selected = if bold && !faces.bold.is_empty() {
+                &faces.bold
+            } else {
+                &faces.regular
+            };
+            let base = role.family_name();
+            let mut names = Vec::new();
+            for (name, data) in selected {
+                defs.font_data.entry(name.clone()).or_insert_with(|| data.clone());
+                names.push(name.clone());
+            }
+            if !names.is_empty() {
+                let tail = defs
+                    .families
+                    .get(&FontFamily::Name(base.into()))
+                    .cloned()
+                    .unwrap_or_default();
+                for name in tail {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                defs.families.insert(
+                    FontFamily::Name(crate::text::fallback::script_family(base, script).into()),
+                    names,
+                );
+            }
+        }
+    }
+    crate::text::fallback::register_variants(defs);
 }
 
 #[derive(Clone)]

@@ -599,3 +599,34 @@ fn theme_previews_do_not_keep_full_imports() {
     assert!(pages.len() >= 2);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn script_font_override_is_searchable_saved_and_resettable() {
+    let d = tmpdir("script-font");
+    let mut h = harness(&d);
+    open_at(&mut h, Section::Appearance);
+    h.get_by_label("Search settings").focus();
+    h.run_steps(1);
+    h.get_by_label("Search settings").type_text("Cyrillic");
+    h.run_steps(2);
+    h.get_by_label("Cyrillic font").focus();
+    h.run_steps(1);
+    h.get_by_label("Cyrillic font").type_text("Arial");
+    h.run_steps(2);
+    assert_eq!(
+        h.state().theme_manager().overrides().cyrillic_font.as_deref(),
+        Some("Arial")
+    );
+    wait_for_file(&mut h, &settings_file(&d), "script font saved", |s| {
+        s.contains("\"cyrillic_font\": \"Arial\"")
+    });
+    h.get_by_label("Cyrillic font").focus();
+    h.key_press_modifiers(cmd(), Key::A);
+    h.key_press(Key::Backspace);
+    h.run_steps(2);
+    assert!(h.state().theme_manager().overrides().cyrillic_font.is_none());
+    wait_for_file(&mut h, &settings_file(&d), "script font reset", |s| {
+        !s.contains("cyrillic_font")
+    });
+    let _ = std::fs::remove_dir_all(&d);
+}

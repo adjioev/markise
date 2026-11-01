@@ -54,6 +54,50 @@ fn bench(c: &mut Criterion) {
             b.iter(|| v.toggle_expanded(0))
         });
     }
+    {
+        use epaint::text::{FontData, FontDefinitions, Fonts};
+        use markise_layout::block::{FontSet, RoleFaces, register_families};
+        use markise_layout::{FontRole, StyledText, TextShaper, TextStyle};
+        use markise_text::testing::TestFont;
+        let primary = TestFont::new("Latin").with_range(' ', '~', 300);
+        let fallback = TestFont::new("Bilingual")
+            .with_range(' ', '~', 600)
+            .with_range('\u{0400}', '\u{04ff}', 600);
+        let mut defs = FontDefinitions::default();
+        register_families(
+            &mut defs,
+            &FontSet {
+                body: RoleFaces {
+                    regular: vec![
+                        (
+                            "primary".into(),
+                            std::sync::Arc::new(FontData::from_owned(primary.build())),
+                        ),
+                        (
+                            "fallback".into(),
+                            std::sync::Arc::new(FontData::from_owned(fallback.build())),
+                        ),
+                    ],
+                    bold: vec![],
+                },
+                ..Default::default()
+            },
+        );
+        let mut fonts = Fonts::new(testing::text_options(), defs);
+        let sample = "React получает props и обновляет DOM после commit. ".repeat(20);
+        let mut sequence = 0u32;
+        g.bench_function("mixed-script-edit-shape", |b| {
+            b.iter(|| {
+                sequence = sequence.wrapping_add(1);
+                fonts.begin_pass(testing::text_options(), Default::default());
+                let job = StyledText::single(
+                    format!("{sample}{sequence}"),
+                    TextStyle::new(16.0, 24.0, FontRole::Body, epaint::Color32::BLACK),
+                );
+                fonts.with_pixels_per_point(1.0).shape(&job, Some(700.0)).size()
+            })
+        });
+    }
     math_first_screen(&mut g);
     // diagram label metrics (ADR 0009 §4): measured on the UI thread once per theme/font change
     let mut fonts = testing::fonts();

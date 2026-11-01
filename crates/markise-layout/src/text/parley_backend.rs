@@ -50,31 +50,17 @@ impl RoleFamilies {
     /// both backends use the same fonts.
     pub fn from_font_definitions(defs: &FontDefinitions, store: &mut FontStore) -> Self {
         let mut registered: ahash::AHashMap<String, Family> = Default::default();
+        // Includes script override faces, which need not occur in a base role's chain.
+        for (name, data) in &defs.font_data {
+            let alias = format!("mk-egui-{name}");
+            if store.register_system_family_shared(&alias, data.font.clone(), data.index, 100.0, 400.0) {
+                registered.insert(name.clone(), Family::named(&alias));
+            }
+        }
         let mut roles: [Vec<Family>; 6] = Default::default();
         for role in FontRole::ALL {
-            let names = defs
-                .families
-                .get(&FontFamily::Name(role.family_name().into()))
-                .cloned()
-                .unwrap_or_default();
-            for n in names {
-                let fam = match registered.get(&n) {
-                    Some(f) => f.clone(),
-                    None => {
-                        let Some(data) = defs.font_data.get(&n) else { continue };
-                        let fam_name = format!("mk-egui-{n}");
-                        // the selected face only (a collection's other faces must not
-                        // answer for this alias)
-                        if !store.register_system_family_shared(&fam_name, data.font.clone(), data.index, 100.0, 400.0)
-                        {
-                            continue;
-                        }
-                        let f = Family::named(&fam_name);
-                        registered.insert(n.clone(), f.clone());
-                        f
-                    }
-                };
-                roles[role.index()].push(fam);
+            if let Some(names) = defs.families.get(&FontFamily::Name(role.family_name().into())) {
+                roles[role.index()].extend(names.iter().filter_map(|name| registered.get(name).cloned()));
             }
             let generic = if matches!(role, FontRole::Mono | FontRole::MonoBold) {
                 Generic::Monospace
@@ -94,6 +80,7 @@ const PARLEY_SALT: u64 = 0x7061_726c_6579_0000;
 pub struct ParleyShaper {
     engine: TextEngine,
     roles: RoleFamilies,
+    font_defs: Option<FontDefinitions>,
     /// Display scale (pixels per point): glyphs are positioned and rasterised in pixels.
     scale: f32,
     /// Bumped when the font store is replaced (its own generation restarts).
@@ -105,6 +92,7 @@ impl ParleyShaper {
         ParleyShaper {
             engine,
             roles,
+            font_defs: None,
             scale: 1.0,
             epoch: 0,
         }
@@ -115,7 +103,9 @@ impl ParleyShaper {
     pub fn from_font_definitions(defs: &FontDefinitions) -> Self {
         let mut store = FontStore::new();
         let roles = RoleFamilies::from_font_definitions(defs, &mut store);
-        Self::new(TextEngine::new(store), roles)
+        let mut this = Self::new(TextEngine::new(store), roles);
+        this.font_defs = Some(defs.clone());
+        this
     }
 
     /// Replaces the fonts (theme change): a new store, so the generation changes.
@@ -125,6 +115,7 @@ impl ParleyShaper {
         self.engine = TextEngine::new(store);
         self.epoch += 1;
         self.roles = roles;
+        self.font_defs = Some(defs.clone());
     }
 
     /// Sets pixels per point (part of layout cache keys already).
@@ -163,10 +154,35 @@ impl ParleyShaper {
         let mut runs = Vec::with_capacity(text.runs.len());
         let mut colors = Vec::with_capacity(text.runs.len());
         let mut boxes = Vec::new();
+        let mut resolver = self
+            .font_defs
+            .as_ref()
+            .map(|defs| super::fallback::Resolver::new(defs, text));
         for (i, r) in text.runs.iter().enumerate() {
-            styles.push(self.mt_style(&r.style));
-            colors.push(r.style.color);
-            runs.push((r.range.clone(), i as u16));
+            let resolved = resolver
+                .as_mut()
+                .map(|resolver| resolver.runs(r.style.role, r.range.clone()))
+                .unwrap_or_else(|| {
+                    vec![super::fallback::Run {
+                        range: r.range.clone(),
+                        choice: None,
+                    }]
+                });
+            for run in resolved {
+                let mut style = self.mt_style(&r.style);
+                if let Some(choice) = run.choice
+                    && let Some(defs) = &self.font_defs
+                {
+                    if let Some(names) = defs.families.get(&FontFamily::Name(choice.family.into())) {
+                        style.families = names.iter().map(|n| Family::named(&format!("mk-egui-{n}"))).collect();
+                    }
+                    style.size *= choice.scale;
+                    style.line_height = (style.size > 0.0).then(|| r.style.line_height / style.size);
+                }
+                runs.push((run.range, styles.len() as u16));
+                styles.push(style);
+                colors.push(r.style.color);
+            }
             if r.lead > 0.0 {
                 boxes.push(InlineObject {
                     id: i as u64,
