@@ -2708,6 +2708,7 @@ dependencies = [
  "notify",
  "png",
  "proptest",
+ "regex",
  "serde_json",
  "similar",
  "tempfile",

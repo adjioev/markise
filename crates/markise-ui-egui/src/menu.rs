@@ -428,6 +428,7 @@ pub const EDIT_ORDER: &[Option<&str>] = &[
     Some("find.next"),
     Some("find.prev"),
     Some("find.replace"),
+    Some("find.replaceNext"),
 ];
 
 /// Preferred order of the Paragraph menu.

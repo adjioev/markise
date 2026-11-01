@@ -143,7 +143,7 @@ const fn nav(id: &'static str, label: &'static str, keys: &'static [DefaultKey])
 /// The engine's own commands (spec 02 §5.4, §15; ADR 0006 §3.2 table) with how they run.
 /// Caret and selection commands need the caret geometry of a laid-out view ([`Run::Caret`]);
 /// `file.*` / `view.*` commands are performed by the host (I/O, UI state).
-pub static ENGINE_COMMANDS: [(CommandDescriptor, Run); 43] = [
+pub static ENGINE_COMMANDS: [(CommandDescriptor, Run); 48] = [
     (
         engine(
             "edit.undo",
@@ -477,6 +477,61 @@ pub static ENGINE_COMMANDS: [(CommandDescriptor, Run); 43] = [
             "view.toggleSidebar",
             "Toggle Sidebar",
             &[key("Shift+Cmd+L", "Ctrl+Shift+L")],
+            Scope::Global,
+            VIEW,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
+    (
+        engine(
+            "find.open",
+            "Find…",
+            &[key("Cmd+F", "Ctrl+F")],
+            Scope::Global,
+            VIEW,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
+    (
+        engine(
+            "find.next",
+            "Find Next",
+            &[key("Cmd+G", "F3")],
+            Scope::Global,
+            VIEW,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
+    (
+        engine(
+            "find.prev",
+            "Find Previous",
+            &[key("Shift+Cmd+G", "Shift+F3")],
+            Scope::Global,
+            VIEW,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
+    (
+        engine(
+            "find.replace",
+            "Find and Replace…",
+            &[key("Opt+Cmd+F", "Ctrl+H")],
+            Scope::Global,
+            VIEW,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
+    (
+        engine(
+            "find.replaceNext",
+            "Replace Next",
+            &[key("Opt+Cmd+E", "Alt+Ctrl+E")],
             Scope::Global,
             VIEW,
             ParamSchema::NONE,

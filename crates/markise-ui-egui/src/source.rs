@@ -66,6 +66,7 @@ enum Unit {
 
 /// Per-document UI state of the source editor.
 pub struct SourceEditor {
+    pub(crate) find_reveal: bool,
     blink_from: f64,
     drag: Option<(Range<usize>, Unit)>,
     last_press: Option<(f64, Pos2, u32)>,
@@ -104,6 +105,7 @@ impl SourceEditor {
             pending_copy: None,
             center_line: None,
             scroll_px: None,
+            find_reveal: false,
             focus_next: false,
             hscroll: 0.0,
             widget: None,
@@ -378,7 +380,7 @@ impl SourceEditor {
             }
         }
 
-        if follow {
+        if follow || std::mem::take(&mut self.find_reveal) {
             with_shaper(&ctx, parley.as_deref_mut(), |sh| {
                 viewer.ed.source_scroll_to_caret(vh, sh)
             });
@@ -422,6 +424,28 @@ impl SourceEditor {
                 pos2(text_clip.right(), lr.max.y - scroll_y + rect.top()),
             );
             painter.rect_filled(r, 0.0, color(theme.meta_text).gamma_multiply(0.08));
+        }
+        if let Some((rev, matches, active)) = &viewer.find_matches
+            && *rev == viewer.ed.session.revision().counter
+            && let Some(p) = viewer.ed.source.as_ref()
+        {
+            let start = visible.first().map_or(0, |v| v.start);
+            let end = visible.last().map_or(0, |v| p.view.item_range(v.idx).end);
+            let begin = matches.partition_point(|r| r.end < start);
+            for (i, range) in matches
+                .iter()
+                .enumerate()
+                .skip(begin)
+                .take_while(|(_, r)| r.start <= end)
+            {
+                for r in p.view.selection_rects(&visible, range.clone()) {
+                    tp.rect_filled(
+                        r.translate(vec2(text_left, rect.top())),
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(255, if Some(i) == *active { 145 } else { 220 }, 40, 90),
+                    );
+                }
+            }
         }
         let sel = viewer.ed.source.as_ref().map(|p| p.sel.primary());
         if let (Some(sel), Some(p)) = (sel, viewer.ed.source.as_ref())

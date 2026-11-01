@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+regex = "1.12"
 markise-doc.workspace = true
 markise-md.workspace = true
 markise-layout.workspace = true
@@ -61,4 +62,8 @@ harness = false
 
 [[bench]]
 name = "count"
+harness = false
+
+[[bench]]
+name = "search"
 harness = false

@@ -15,6 +15,7 @@ pub mod fsops;
 pub mod jobs;
 pub mod load;
 pub mod save;
+pub mod search;
 pub mod settings;
 pub mod tree;
 pub mod vault;

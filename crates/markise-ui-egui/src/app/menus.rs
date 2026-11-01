@@ -87,7 +87,10 @@ impl MarkiseApp {
     fn command_enabled(&self, id: &str, text_field: bool) -> bool {
         let Some(d) = &self.doc else { return false };
         match id {
-            "edit.cut" | "edit.copy" | "edit.paste" => return true,
+            "edit.cut" | "edit.copy" | "edit.paste" | "find.open" | "find.next" | "find.prev" | "find.replace"
+            | "find.replaceNext" => {
+                return true;
+            }
             _ => {}
         }
         if text_field && TEXT_FIELD_KEYS.iter().any(|(k, ..)| *k == id) {
@@ -519,6 +522,11 @@ impl MarkiseApp {
 
     pub(super) fn menu_command(&mut self, ctx: &Context, id: &str, trigger: Trigger) -> bool {
         match id {
+            "find.open" => self.open_find(false),
+            "find.replace" => self.open_find(true),
+            "find.next" => self.find_next(false),
+            "find.prev" => self.find_next(true),
+            "find.replaceNext" => self.replace_find_next(),
             "file.open" => self.open_dialog(),
             "file.openFolder" => self.open_folder_dialog(),
             "file.save" => self.save(),
