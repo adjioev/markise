@@ -64,22 +64,59 @@ pub fn text_identity(text: &str) -> TextIdentity {
 /// it). aHash with fixed keys: about 10× faster than SipHash on large inputs (a 100 MiB file
 /// is hashed in ~8 ms), which matters because loads, saves and the file watcher hash whole
 /// files (issue #29). File contents are not adversarial input to this comparison.
+///
+/// The bytes are fed in [`HASH_CHUNK`] pieces, so [`disk_version`] can hash a file while
+/// streaming it through a small buffer with the same result (issue #29, part 4: no
+/// whole-file copy on the watcher or save threads).
 pub fn content_hash(bytes: &[u8]) -> u64 {
     let mut h = ahash::AHasher::default();
-    h.write(bytes);
+    for c in bytes.chunks(HASH_CHUNK) {
+        h.write(c);
+    }
     h.finish()
 }
 
-/// Current version of `path`, `Ok(None)` if it does not exist.
+/// Piece size of [`content_hash`].
+const HASH_CHUNK: usize = 1 << 20;
+
+/// Current version of `path`, `Ok(None)` if it does not exist. Streams the file (one
+/// [`HASH_CHUNK`] buffer), never holding all of it.
 pub fn disk_version(path: &Path) -> std::io::Result<Option<DiskVersion>> {
-    match std::fs::read(path) {
-        Ok(b) => {
-            let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-            Ok(Some(DiskVersion::of_bytes(&b, mtime)))
+    use std::io::Read;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut h = ahash::AHasher::default();
+    let mut buf = vec![0u8; HASH_CHUNK];
+    let mut len = 0u64;
+    loop {
+        // fill a whole piece (short reads are allowed) so the pieces match `content_hash`
+        let mut n = 0;
+        while n < HASH_CHUNK {
+            match f.read(&mut buf[n..]) {
+                Ok(0) => break,
+                Ok(k) => n += k,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+        if n == 0 {
+            break;
+        }
+        h.write(&buf[..n]);
+        len += n as u64;
+        if n < HASH_CHUNK {
+            break;
+        }
     }
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    Ok(Some(DiskVersion {
+        len,
+        mtime,
+        hash: h.finish(),
+    }))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -241,6 +278,21 @@ pub fn save_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_disk_version_matches_the_hash_of_the_bytes() {
+        // issue #29, part 4: the file is hashed through a buffer, piece boundaries included
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("f.md");
+        for n in [0, 1, HASH_CHUNK - 1, HASH_CHUNK, HASH_CHUNK + 1, 2 * HASH_CHUNK + 5] {
+            let bytes: Vec<u8> = (0..n).map(|i| (i * 7 % 251) as u8).collect();
+            std::fs::write(&p, &bytes).unwrap();
+            let v = disk_version(&p).unwrap().unwrap();
+            assert!(v.same_content(&DiskVersion::of_bytes(&bytes, None)), "{n} bytes");
+            assert_eq!(v.len, n as u64);
+        }
+        assert_eq!(disk_version(&d.path().join("missing")).unwrap(), None);
+    }
 
     fn dir(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("markise-engine-save-{name}-{}", std::process::id()));
