@@ -18,6 +18,19 @@ use markise_doc::{
 use super::{Edits, is_sp};
 use crate::Document;
 
+/// The largest selection (bytes) the format toggles and Clear Format act on (issue #133).
+/// Planning and applying them is linear in the selection (about 45 ms per MiB measured with the
+/// corpus, release build), so this bounds the work of one command to a fraction of a second on
+/// the UI thread; a larger selection is refused (`NotApplicable`) and the commands are disabled.
+pub const FORMAT_SELECTION_LIMIT: usize = 4 << 20;
+
+/// Up to this selection size (bytes) command enablement and check marks of the format
+/// commands are answered exactly, with a dry run of the plan; above it they are decided
+/// without planning (issue #133): a format toggle is enabled when the selection has text to
+/// format, Clear Format when it has text at all (running it may then find nothing to clear),
+/// and the toggles show unchecked.
+pub const EXACT_QUERY_LIMIT: usize = 16 << 10;
+
 /// An inline style a format command toggles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Style {
@@ -105,74 +118,92 @@ impl Document {
 
     /// The trimmed, normalised selected parts of the text leaves in `a..b`.
     fn format_parts(&self, a: usize, b: usize, st: Option<Style>) -> Vec<Part> {
-        let text = self.text().as_bytes();
+        self.first_format_parts(a, b, st, usize::MAX)
+    }
+
+    /// The first `max` parts of [`Document::format_parts`]: the leaves after them are not
+    /// visited, so asking for one part of a huge selection costs one block (issue #133).
+    fn first_format_parts(&self, a: usize, b: usize, st: Option<Style>, max: usize) -> Vec<Part> {
         let mut parts = Vec::new();
-        for leaf in self.leaves_in(a, b) {
-            if !Self::text_leaf_kind(&leaf.kind) || leaf.lines.is_empty() {
-                continue;
-            }
-            let (first, last) = (leaf.lines[0], *leaf.lines.last().unwrap());
-            let mut s = a.max(first.start);
-            let mut e = b.min(last.end);
-            if s > e {
-                continue;
-            }
-            // trim whitespace, soft breaks and container prefixes (C49)
-            loop {
-                if s < e && is_sp(text[s]) {
-                    s += 1;
-                    continue;
-                }
-                if let Some(i) = leaf.lines.iter().position(|l| l.end == s)
-                    && i + 1 < leaf.lines.len()
-                    && s < e
-                {
-                    s = leaf.lines[i + 1].start.min(e);
-                    continue;
-                }
-                if !leaf.lines.iter().any(|l| l.start <= s && s <= l.end) {
-                    // inside a prefix between lines
-                    match leaf.lines.iter().find(|l| l.start > s) {
-                        Some(l) if l.start <= e => {
-                            s = l.start;
-                            continue;
-                        }
-                        _ => s = e,
-                    }
-                }
-                break;
-            }
-            loop {
-                if e > s && is_sp(text[e - 1]) {
-                    e -= 1;
-                    continue;
-                }
-                if let Some(i) = leaf.lines.iter().position(|l| l.start == e)
-                    && i > 0
-                    && e > s
-                {
-                    e = leaf.lines[i - 1].end.max(s);
-                    continue;
-                }
-                if !leaf.lines.iter().any(|l| l.start <= e && e <= l.end) {
-                    match leaf.lines.iter().rev().find(|l| l.end < e) {
-                        Some(l) if l.end >= s => {
-                            e = l.end;
-                            continue;
-                        }
-                        _ => e = s,
-                    }
-                }
-                break;
-            }
-            if s >= e {
-                continue;
-            }
-            let rich = self.inline(InlineSource::Lines(&leaf.lines), 0);
-            let (s, e) = normalize(&rich, s, e, st);
-            parts.push(Part { s, e, rich });
+        if max == 0 {
+            return parts;
         }
+        self.walk_leaves_in(a, b, &mut |leaf| {
+            if let Some(p) = self.leaf_part(&leaf, a, b, st) {
+                parts.push(p);
+            }
+            parts.len() < max
+        });
         parts
+    }
+
+    /// The trimmed, normalised part of `leaf` inside `a..b` (`None`: nothing but whitespace,
+    /// or not a text leaf).
+    fn leaf_part(&self, leaf: &super::Leaf, a: usize, b: usize, st: Option<Style>) -> Option<Part> {
+        let text = self.text().as_bytes();
+        if !Self::text_leaf_kind(&leaf.kind) || leaf.lines.is_empty() {
+            return None;
+        }
+        let (first, last) = (leaf.lines[0], *leaf.lines.last().unwrap());
+        let mut s = a.max(first.start);
+        let mut e = b.min(last.end);
+        if s > e {
+            return None;
+        }
+        // trim whitespace, soft breaks and container prefixes (C49)
+        loop {
+            if s < e && is_sp(text[s]) {
+                s += 1;
+                continue;
+            }
+            if let Some(i) = leaf.lines.iter().position(|l| l.end == s)
+                && i + 1 < leaf.lines.len()
+                && s < e
+            {
+                s = leaf.lines[i + 1].start.min(e);
+                continue;
+            }
+            if !leaf.lines.iter().any(|l| l.start <= s && s <= l.end) {
+                // inside a prefix between lines
+                match leaf.lines.iter().find(|l| l.start > s) {
+                    Some(l) if l.start <= e => {
+                        s = l.start;
+                        continue;
+                    }
+                    _ => s = e,
+                }
+            }
+            break;
+        }
+        loop {
+            if e > s && is_sp(text[e - 1]) {
+                e -= 1;
+                continue;
+            }
+            if let Some(i) = leaf.lines.iter().position(|l| l.start == e)
+                && i > 0
+                && e > s
+            {
+                e = leaf.lines[i - 1].end.max(s);
+                continue;
+            }
+            if !leaf.lines.iter().any(|l| l.start <= e && e <= l.end) {
+                match leaf.lines.iter().rev().find(|l| l.end < e) {
+                    Some(l) if l.end >= s => {
+                        e = l.end;
+                        continue;
+                    }
+                    _ => e = s,
+                }
+            }
+            break;
+        }
+        if s >= e {
+            return None;
+        }
+        let rich = self.inline(InlineSource::Lines(&leaf.lines), 0);
+        let (s, e) = normalize(&rich, s, e, st);
+        Some(Part { s, e, rich })
     }
 
     /// The node of style `st` containing part `p` (innermost), if any.
@@ -231,6 +262,9 @@ impl Document {
             ));
         }
         let r0 = sel.range();
+        if r0.len() > FORMAT_SELECTION_LIMIT {
+            return Err(PlanError::NotApplicable("selection too large to format"));
+        }
         let parts = self.format_parts(r0.start, r0.end, Some(st));
         if parts.is_empty() {
             // only whitespace selected: act as with no selection at its start (C49)
@@ -345,8 +379,40 @@ impl Document {
                 st.kind_matches(&n.kind) && n.content.start as usize <= a && a <= n.content.end as usize
             });
         }
+        if r0.len() > EXACT_QUERY_LIMIT {
+            return false; // not computed for large selections (issue #133)
+        }
         let parts = self.format_parts(r0.start, r0.end, Some(st));
         !parts.is_empty() && parts.iter().all(|p| self.styled_node(p, st).is_some())
+    }
+
+    /// `can_plan` of format toggle `st` (issue #133): exact up to [`EXACT_QUERY_LIMIT`];
+    /// above it, whether [`Document::plan_format`] would find something to act on — a part
+    /// with text (only the first one is looked for) or, failing that, a text block at the
+    /// selection start — without planning. Never above [`FORMAT_SELECTION_LIMIT`].
+    pub(crate) fn can_format(&self, st: Style, req: &PlanRequest) -> bool {
+        let sel = req.selection.primary();
+        let r0 = sel.range();
+        if sel.is_caret() || r0.len() <= EXACT_QUERY_LIMIT {
+            return self.plan_format(st, req).is_ok();
+        }
+        if r0.len() > FORMAT_SELECTION_LIMIT {
+            return false;
+        }
+        !self.first_format_parts(r0.start, r0.end, Some(st), 1).is_empty()
+            || self.leaf(r0.start).is_some_and(|l| Self::text_leaf_kind(&l.kind))
+    }
+
+    /// `can_plan` of Clear Format (issue #133): exact up to [`EXACT_QUERY_LIMIT`]; above it,
+    /// whether the selection has text (the first part is looked for, not the formatting to
+    /// clear). Never above [`FORMAT_SELECTION_LIMIT`].
+    pub(crate) fn can_clear_format(&self, req: &PlanRequest) -> bool {
+        let sel = req.selection.primary();
+        let r0 = sel.range();
+        if sel.is_caret() || r0.len() <= EXACT_QUERY_LIMIT {
+            return self.plan_clear_format(req).is_ok();
+        }
+        r0.len() <= FORMAT_SELECTION_LIMIT && !self.first_format_parts(r0.start, r0.end, None, 1).is_empty()
     }
 
     /// Hyperlink / image (spec 02 §3.3): wraps the selection as `[sel](url)` / `![sel](url)`
@@ -373,7 +439,8 @@ impl Document {
             ));
         }
         let r0 = sel.range();
-        let parts = self.format_parts(r0.start, r0.end, None);
+        // only the first part is used: the rest of a (huge) selection is never visited
+        let parts = self.first_format_parts(r0.start, r0.end, None, 1);
         let p = parts.first().ok_or(PlanError::NotApplicable("nothing selected"))?;
         if !image {
             let mut v = Vec::new();
@@ -412,6 +479,9 @@ impl Document {
         }
         let text = self.text();
         let r0 = sel.range();
+        if r0.len() > FORMAT_SELECTION_LIMIT {
+            return Err(PlanError::NotApplicable("selection too large to format"));
+        }
         let parts = self.format_parts(r0.start, r0.end, None);
         let mut ed = Edits::new();
         for p in &parts {

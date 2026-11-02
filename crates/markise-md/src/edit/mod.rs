@@ -79,21 +79,40 @@ pub(crate) struct Leaf {
 impl Document {
     /// The leaves overlapping `a..=b` (absolute), in document order.
     pub(crate) fn leaves_in(&self, a: usize, b: usize) -> Vec<Leaf> {
-        let lo = self.top_partition_point(|t| t.end() < a);
-        let hi = self.top_partition_point(|t| t.start() <= b).max(lo);
         let mut out = Vec::new();
-        self.flatten(lo..hi, &mut |e| {
-            if let FlatEvent::Leaf(l) = e {
-                let s = l.abs_span();
-                if s.end >= a && s.start <= b {
-                    out.push(Leaf {
-                        kind: l.kind.clone(),
-                        lines: l.abs_lines().collect(),
-                    });
-                }
-            }
+        self.walk_leaves_in(a, b, &mut |l| {
+            out.push(l);
+            true
         });
         out
+    }
+
+    /// Calls `f` with the leaves overlapping `a..=b` in document order until it returns
+    /// `false`: a query that needs only the first few leaves of a huge range stops there
+    /// (top-level block by top-level block) instead of collecting them all (issue #133).
+    pub(crate) fn walk_leaves_in(&self, a: usize, b: usize, f: &mut dyn FnMut(Leaf) -> bool) {
+        let lo = self.top_partition_point(|t| t.end() < a);
+        let hi = self.top_partition_point(|t| t.start() <= b).max(lo);
+        let mut go = true;
+        for top in lo..hi {
+            self.flatten(top..top + 1, &mut |e| {
+                if !go {
+                    return;
+                }
+                if let FlatEvent::Leaf(l) = e {
+                    let s = l.abs_span();
+                    if s.end >= a && s.start <= b {
+                        go = f(Leaf {
+                            kind: l.kind.clone(),
+                            lines: l.abs_lines().collect(),
+                        });
+                    }
+                }
+            });
+            if !go {
+                break;
+            }
+        }
     }
 }
 

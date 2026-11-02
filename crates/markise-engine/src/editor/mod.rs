@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use markise_doc::{
     Affinity, DocPos, DocumentFormat, EditPrefs, EditSummary, FormatDoc, FormatOptions, HintSet, LeafKind, Params,
-    Patch, PatchError, PatchSet, Plan, PlanError, PlanRequest, PlanStep, Selection, planners,
+    Patch, PatchError, PatchSet, Plan, PlanError, PlanRequest, PlanStep, PlannerId, Selection, planners,
 };
 
 pub use history::{History, HistoryLimits, StateId, Step, Transaction, TxKind, TypingDir};
@@ -165,6 +165,19 @@ impl DocChange {
     }
 }
 
+/// Memoised planner queries (issue #133): command enablement (`can_plan`) and check state
+/// (`plan_checked`) at the current selection, asked by the menus, the toolbar, the context
+/// menu and shortcut dispatch every frame. Answers hold for one (document, selection,
+/// preferences) state: any change to the document object clears them (`doc_mut`,
+/// `replace_doc`), and a different selection or preferences replaces them.
+#[derive(Default)]
+struct PlanQueries {
+    at: Option<(Selection, EditPrefs)>,
+    answers: std::collections::HashMap<(PlannerId, bool), bool>,
+    /// Queries that ran the planner (not answered from memory): diagnostics, tests.
+    asked: u64,
+}
+
 /// One open document being edited.
 pub struct EditorSession {
     format: Arc<dyn DocumentFormat>,
@@ -193,6 +206,8 @@ pub struct EditorSession {
     source: Option<source::SourceSession>,
     /// Review-relevance of the edits so far (see [`EditorSession::review_edits`]).
     review: ReviewEdits,
+    /// Memoised `can_plan` / `plan_checked` answers (see [`EditorSession::can_plan`]).
+    plan_queries: Mutex<PlanQueries>,
 }
 
 /// Counters for consumers that track review comments incrementally (the comment gutter,
@@ -303,6 +318,7 @@ impl EditorSession {
             prefs: EditPrefs::default(),
             source: None,
             review: ReviewEdits::default(),
+            plan_queries: Mutex::new(PlanQueries::default()),
         }
     }
 
@@ -339,12 +355,63 @@ impl EditorSession {
     }
     /// The document for an in-place edit: copied first when it is shared.
     fn doc_mut(&mut self) -> &mut dyn FormatDoc {
+        self.forget_plan_queries();
         if Arc::get_mut(&mut self.doc).is_none() {
             self.copies += 1;
             self.doc = Arc::from(self.doc.clone_box());
         }
         Arc::get_mut(&mut self.doc).expect("unique document")
     }
+    fn forget_plan_queries(&mut self) {
+        self.plan_queries.get_mut().unwrap_or_else(|e| e.into_inner()).at = None;
+    }
+
+    /// Whether planner `id` applies at the current selection (command enablement), memoised
+    /// per (document, selection, preferences) state: asking every frame costs a lookup, the
+    /// planner runs once per state (issue #133).
+    pub fn can_plan(&self, id: PlannerId) -> bool {
+        self.plan_query(id, false, || self.doc.can_plan(id, &self.request(Params::new())))
+    }
+
+    /// Whether toggle planner `id` is active at the current selection (check marks, toolbar
+    /// state), memoised like [`EditorSession::can_plan`].
+    pub fn plan_checked(&self, id: PlannerId) -> bool {
+        self.plan_query(id, true, || self.doc.plan_checked(id, &self.request(Params::new())))
+    }
+
+    /// How many `can_plan` / `plan_checked` queries ran their planner rather than being
+    /// answered from memory (diagnostics, tests).
+    pub fn plan_queries_run(&self) -> u64 {
+        self.plan_queries.lock().unwrap_or_else(|e| e.into_inner()).asked
+    }
+
+    fn plan_query(&self, id: PlannerId, checked: bool, ask: impl FnOnce() -> bool) -> bool {
+        let lock = || self.plan_queries.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let mut q = lock();
+            let here =
+                q.at.as_ref()
+                    .is_some_and(|(sel, prefs)| *sel == self.sel && *prefs == self.prefs);
+            if !here {
+                q.at = Some((self.sel.clone(), self.prefs));
+                q.answers.clear();
+            } else if let Some(&v) = q.answers.get(&(id, checked)) {
+                return v;
+            }
+        }
+        let v = ask();
+        let mut q = lock();
+        q.asked += 1;
+        // still the same state (another thread may have moved on: then just answer)
+        if q.at
+            .as_ref()
+            .is_some_and(|(sel, prefs)| *sel == self.sel && *prefs == self.prefs)
+        {
+            q.answers.insert((id, checked), v);
+        }
+        v
+    }
+
     fn doc_apply(&mut self, ps: &PatchSet, hints: Option<&HintSet>) {
         if let Some(at) = review_relevant(self.doc.text(), ps) {
             self.review.relevant += 1;
@@ -1474,6 +1541,7 @@ impl EditorSession {
         join: bool,
     ) -> Result<(), EditError> {
         self.close_typing();
+        self.forget_plan_queries();
         let old = self.doc.text();
         let patches: Vec<Patch> = crate::edit::patches(old, doc.text())
             .into_iter()
