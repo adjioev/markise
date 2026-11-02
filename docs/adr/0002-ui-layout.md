@@ -48,7 +48,8 @@ therefore not the bottleneck for M1's budgets; window/GPU start-up is (see "Meas
 - Bold comes from a system bold face (memory-mapped at run time; nothing bundled), italics are
   epaint's skew, CJK via a memory-mapped system fallback font.
 - Galleys are cached inside per-block layouts (key: block content hash, document context
-  hash, width, theme fingerprint, pixels-per-point, font generation, image epoch). Because an
+  hash, width, theme fingerprint, pixels-per-point, font generation; *2026-11-02, issue #29:*
+  no image epoch any more — layouts that showed a pending image are dropped when it loads). Because an
   egui font-atlas rebuild invalidates glyph UVs, the painter re-requests each visible galley
   from egui's galley cache every frame (a hash lookup on a hit), so a cached layout can never
   paint stale glyphs.

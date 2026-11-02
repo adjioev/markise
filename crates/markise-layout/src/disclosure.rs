@@ -104,45 +104,45 @@ impl Disclosures {
     }
     /// Returns whether structural visibility changed (ordinary prose edits do no pairing).
     pub fn update(&mut self, model: &DocModel, doc: &dyn FormatDoc, change: &ModelChange) -> bool {
-        let shift = change.inserted.len() as isize - change.replaced.len() as isize;
-        let affected = self.markers.range(change.replaced.clone()).next().is_some()
-            || change.inserted.clone().any(|i| model.items[i].raw.is_some());
-        if shift == 0 && !affected {
+        let splices = change.splices();
+        let moved = splices.iter().any(|(o, i)| o.len() != i.len());
+        let affected = splices.iter().any(|(o, i)| {
+            self.markers.range(o.clone()).next().is_some() || i.clone().any(|i| model.items[i].raw.is_some())
+        });
+        if !moved && !affected {
             return false;
         }
+        let map = |i: usize| ModelChange::map_index(&splices, i);
         let mut next = BTreeMap::new();
         for (&i, raw) in &self.markers {
-            if i < change.replaced.start {
-                next.insert(i, raw.clone());
-            } else if i >= change.replaced.end {
-                next.insert((i as isize + shift) as usize, raw.clone());
+            if let Some(j) = map(i) {
+                next.insert(j, raw.clone());
             }
         }
-        for i in change.inserted.clone() {
-            if let Some(raw) = &model.items[i].raw {
-                next.insert(i, raw.clone());
-            }
-        }
-        if next == self.markers && !affected {
-            return false;
-        }
+        // (a replaced end or summary marker makes the change `affected`: paired again below)
         self.groups = std::mem::take(&mut self.groups)
             .into_iter()
             .filter_map(|(i, mut group)| {
-                if i >= change.replaced.start && i < change.replaced.end {
-                    return None;
-                }
-                let i = if i >= change.replaced.end {
-                    (i as isize + shift) as usize
-                } else {
-                    i
-                };
-                if group.end >= change.replaced.end {
-                    group.end = (group.end as isize + shift) as usize;
-                }
+                let i = map(i)?;
+                group.end = map(group.end).unwrap_or(group.end);
+                group.summary = group.summary.and_then(map);
                 Some((i, group))
             })
             .collect();
+        if !affected {
+            // the markers only moved with their items: the groups move along and every item
+            // keeps its visibility (its height moves with it), so no height is reset
+            self.markers = next;
+            self.refresh();
+            return false;
+        }
+        for (_, ins) in &splices {
+            for i in ins.clone() {
+                if let Some(raw) = &model.items[i].raw {
+                    next.insert(i, raw.clone());
+                }
+            }
+        }
         self.markers = next;
         self.pair(model, doc);
         true

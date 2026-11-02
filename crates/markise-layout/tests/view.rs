@@ -129,7 +129,40 @@ impl Images for Sized {
 }
 
 #[test]
-fn image_epoch_relayouts_only_image_items() {
+fn arriving_images_relayout_only_the_items_that_showed_them_pending() {
+    // issue #29: a decoded image used to re-key every item that mentions an image
+    struct Some1;
+    impl Images for Some1 {
+        fn state(&self, src: &str) -> ImageState {
+            if src.contains("ready") {
+                ImageState::Ready { size: [200, 100] }
+            } else {
+                ImageState::Pending
+            }
+        }
+    }
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut v = view("![a](ready.png)\n\n![b](later.png)\n\ntext\n", 700.0);
+    v.frame(600.0, 0.0, &mut f, &Some1);
+    assert_eq!(v.laid_out, vec![0, 1, 2]);
+    v.images_changed();
+    let vis = v.frame(600.0, 0.0, &mut f, &Sized);
+    assert_eq!(v.laid_out, vec![1], "only the item whose image was pending");
+    assert!(
+        vis[1]
+            .layout
+            .prims
+            .iter()
+            .any(|p| matches!(p, Prim::Image { rect, .. } if rect.width() == 200.0))
+    );
+    v.images_changed();
+    v.frame(600.0, 0.0, &mut f, &Sized);
+    assert!(v.laid_out.is_empty());
+}
+
+#[test]
+fn images_changed_relayouts_only_image_items() {
     let mut fonts = testing::fonts();
     let mut f = fonts.with_pixels_per_point(1.0);
     let mut v = view("text\n\n![alt](pic.png)\n\nmore\n", 700.0);

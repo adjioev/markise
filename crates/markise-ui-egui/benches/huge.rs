@@ -454,6 +454,19 @@ fn child(src: &Path) {
             "wheel scroll in the middle (300 frames, {at:.4} → {:.4})",
             scrolled(&mut app)
         ));
+        // a region not shown before: its formulas render and its images resolve while scrolling
+        // (each completion used to walk every item)
+        {
+            let v = &mut app.viewer().unwrap().ed.view;
+            let i = v.len() / 4 + 1234;
+            v.scroll_to_item(i);
+        }
+        frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
+        let mut s = Series::default();
+        for _ in 0..300 {
+            s.push(frame(&ctx, &mut app, vec![wheel(-60.0)]));
+        }
+        s.report("wheel scroll in a fresh region (300 frames)");
         let mut seed = 12345u64;
         for _ in 0..100 {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -578,12 +591,16 @@ fn child(src: &Path) {
         );
     }
 
-    // ---- large paste and its undo
-    for (label, size) in [("1 MiB", 1usize << 20), ("10 MiB", 10 << 20)] {
+    // ---- large paste, its undo and redo, Enter right after it (issue #29)
+    for (label, size, profile) in [
+        ("1 MiB prose", 1usize << 20, Profile::Prose),
+        ("1 MiB mixed", 1 << 20, Profile::Mixed),
+        ("10 MiB prose", 10 << 20, Profile::Prose),
+    ] {
         if !phase("paste") {
             break;
         }
-        let paste = generate_profile(size, 7, Profile::Prose, false);
+        let paste = generate_profile(size, 7, profile, false);
         let at = {
             let v = app.viewer().unwrap();
             caret_near(v.ed.session.text(), 0.5)
@@ -594,9 +611,36 @@ fn child(src: &Path) {
         let pasted = text_len(&mut app) - len0;
         let u = frame(&ctx, &mut app, vec![key(Key::Z, cmd())]);
         let back = text_len(&mut app) == len0;
+        let r = frame(&ctx, &mut app, vec![key(Key::Z, cmd() | Modifiers::SHIFT)]);
+        let again = text_len(&mut app) == len0 + pasted;
+        // Enter splits the block at the end of the paste, Backspace joins it back (Redo selects
+        // the re-inserted text: collapse the selection first)
+        app.viewer().unwrap().ed.set_caret(DocPos::new(at + pasted), false);
+        frame(&ctx, &mut app, vec![]);
+        let mut enter = Series::default();
+        let mut split = 0;
+        for i in 0..20 {
+            let k = if i % 2 == 0 { Key::Enter } else { Key::Backspace };
+            let l0 = text_len(&mut app);
+            enter.push(frame(&ctx, &mut app, vec![key(k, Modifiers::default())]));
+            split += usize::from(i % 2 == 0 && text_len(&mut app) > l0);
+        }
+        // back to the original text (Enter/Backspace steps, then the paste)
+        for _ in 0..30 {
+            if text_len(&mut app) == len0 {
+                break;
+            }
+            frame(&ctx, &mut app, vec![key(Key::Z, cmd())]);
+        }
         println!(
-            "  paste {label} (+{pasted} B): frame {:.1} ms wall / {:.1} ms cpu; undo frame {:.1} ms wall / {:.1} ms cpu (restored: {back})",
-            p.0, p.1, u.0, u.1
+            "  paste {label} (+{pasted} B): paste {:.1} ms wall / {:.1} ms cpu; undo {:.1} / {:.1} (restored: {back}); redo {:.1} / {:.1} (re-applied: {again})",
+            p.0, p.1, u.0, u.1, r.0, r.1
+        );
+        enter.report(&format!("Enter / Backspace after the {label} paste ({split}/10 split)"));
+        assert_eq!(
+            text_len(&mut app),
+            len0,
+            "undo restores the text after the {label} paste"
         );
     }
 

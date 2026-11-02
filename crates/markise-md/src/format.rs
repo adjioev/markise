@@ -649,6 +649,12 @@ impl FormatDoc for Document {
     fn reference_candidates(&self, lines: &[crate::Span], out: &mut Vec<u64>) {
         reference_labels(self.text(), lines, out)
     }
+    fn may_reference(&self, span: crate::Span) -> bool {
+        // the first check of `reference_labels`, over a superset of the lines
+        let text = self.text().as_bytes();
+        let whole = &text[span.start.min(text.len())..span.end.min(text.len())];
+        memchr::memchr(b'[', whole).is_some() || (memchr::memchr(0xE3, whole).is_some() && has_wide_bracket(whole))
+    }
     fn reference_fingerprint(&self, key: u64) -> Option<u64> {
         self.ref_context().fingerprints.get(&key).copied()
     }

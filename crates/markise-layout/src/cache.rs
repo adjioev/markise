@@ -3,8 +3,9 @@
 //! The key holds everything a [`BlockLayout`](crate::BlockLayout) depends on: the item's own
 //! content hash (kind + source + containers + gap), the document context hash (link
 //! definitions, footnotes, outline for `[toc]`), the column width, the theme fingerprint, the
-//! pixels-per-point and an `extra` word (expanded state, image epoch). A change of any input
-//! produces a different key, so stale layouts are never returned ("invalidated on change");
+//! pixels-per-point and an `extra` word (expanded state, focus). A change of any input
+//! produces a different key, so stale layouts are never returned ("invalidated on change"; a
+//! layout that showed a formula or image still pending is removed when it arrives instead);
 //! unused entries are evicted least-recently-used once the cache exceeds its capacity.
 //! Identical blocks (same key) share one layout.
 
@@ -40,6 +41,9 @@ struct Entry {
 
 pub struct LayoutCache {
     map: HashMap<CacheKey, Entry>,
+    /// Number of entries per [`CacheKey::item_hash`]: an item without any can be estimated
+    /// without computing its key ([`LayoutCache::has_item`]).
+    by_item: HashMap<u64, u32>,
     tick: u64,
     capacity: usize,
     max_bytes: usize,
@@ -68,6 +72,7 @@ impl LayoutCache {
     pub fn with_limits(capacity: usize, max_bytes: usize) -> Self {
         LayoutCache {
             map: HashMap::new(),
+            by_item: HashMap::new(),
             tick: 0,
             capacity: capacity.max(16),
             max_bytes,
@@ -125,6 +130,8 @@ impl LayoutCache {
             },
         ) {
             self.bytes -= old.bytes;
+        } else {
+            *self.by_item.entry(key.item_hash).or_default() += 1;
         }
         if self.map.len() > self.capacity || self.bytes > self.max_bytes {
             self.evict();
@@ -152,10 +159,12 @@ impl LayoutCache {
         let Some(cutoff) = cutoff else { return };
         let before = self.map.len();
         let mut freed = 0;
-        self.map.retain(|_, e| {
+        let by_item = &mut self.by_item;
+        self.map.retain(|k, e| {
             let keep = e.last_used > cutoff;
             if !keep {
                 freed += e.bytes;
+                forget(by_item, k.item_hash);
             }
             keep
         });
@@ -163,9 +172,39 @@ impl LayoutCache {
         self.stats.evicted += (before - self.map.len()) as u64;
     }
 
+    /// Drops the layout under `key`, if any (it became stale without a key change, e.g. a
+    /// formula it showed as pending has rendered since).
+    pub fn remove(&mut self, key: &CacheKey) {
+        if let Some(e) = self.map.remove(key) {
+            self.bytes -= e.bytes;
+            forget(&mut self.by_item, key.item_hash);
+        }
+    }
+
+    /// Whether any layout is cached for an item with this [`CacheKey::item_hash`] (whatever
+    /// the other key parts): `false` means a lookup would miss.
+    pub fn has_item(&self, item_hash: u64) -> bool {
+        self.by_item.contains_key(&item_hash)
+    }
+
+    /// Whether a layout is cached under `key`.
+    pub fn contains(&self, key: &CacheKey) -> bool {
+        self.map.contains_key(key)
+    }
+
     pub fn clear(&mut self) {
         self.map.clear();
+        self.by_item.clear();
         self.bytes = 0;
+    }
+}
+
+fn forget(by_item: &mut HashMap<u64, u32>, item_hash: u64) {
+    if let std::collections::hash_map::Entry::Occupied(mut o) = by_item.entry(item_hash) {
+        *o.get_mut() -= 1;
+        if *o.get() == 0 {
+            o.remove();
+        }
     }
 }
 
