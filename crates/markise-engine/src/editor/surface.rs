@@ -149,6 +149,11 @@ impl EditorView {
                 self.source_load_selection();
             }
         }
+        // PROTOTYPE (lazy view): the caret's page stays materialized
+        if self.view.model().is_paged() && Arc::ptr_eq(self.view.doc(), self.session.doc_arc()) {
+            self.view
+                .lazy_set_caret(self.session.selection().primary().focus.offset);
+        }
     }
 
     /// Releases the view's document reference before an edit (see [`ViewCaret::release_doc`]).
@@ -205,6 +210,9 @@ impl EditorView {
             return false;
         }
         let focus = self.session.selection().primary().focus;
+        if self.view.model().is_paged() && Arc::ptr_eq(self.view.doc(), self.session.doc_arc()) {
+            self.view.lazy_set_caret(focus.offset);
+        }
         let f = markise_layout::caret::focus_for(&self.view, focus, self.reveal);
         self.view.set_focus(f)
     }
@@ -278,6 +286,10 @@ impl EditorView {
 
     /// Scrolls the view so that the caret is visible in a viewport `vh` tall (with a margin).
     pub fn scroll_to_caret(&mut self, vh: f32, shaper: &mut dyn TextShaper, images: &dyn Images) {
+        if self.view.model().is_paged() && Arc::ptr_eq(self.view.doc(), self.session.doc_arc()) {
+            self.view
+                .lazy_set_caret(self.session.selection().primary().focus.offset);
+        }
         let Some(r) = self.caret_rect(shaper, images) else {
             return;
         };

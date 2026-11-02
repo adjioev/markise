@@ -82,6 +82,9 @@ pub enum ItemKind {
     Hidden,
     /// An empty list item (`- `): only its marker is drawn.
     Empty,
+    /// PROTOTYPE (lazy view, `MARKISE_LAZY_VIEW=1`): a page of top-level blocks that is not
+    /// materialized (see [`paged`]). Never laid out.
+    Page(Box<paged::PageStats>),
 }
 
 /// Vertical gap above an item, resolved to points by the layout.
@@ -290,7 +293,12 @@ pub struct DocModel {
     toc_runs: Vec<(usize, usize)>,
     /// Lowest heading level of the outline (TOC indentation base; 1 when empty).
     min_level: u8,
+    /// PROTOTYPE: a paged (lazy) model ([`paged`]).
+    paged: bool,
 }
+
+mod paged;
+pub use paged::{PAGE_TOPS, PageStats, PagedStats, lazy_enabled, paged_stats};
 
 pub(crate) fn hasher() -> ahash::AHasher {
     // fixed keys: hashes must be stable within a process run (cache keys), not across runs
@@ -364,6 +372,9 @@ impl DocModel {
 
     /// Like [`DocModel::build`], unshared (for owners that update it with [`DocModel::apply`]).
     pub fn build_owned(doc: &dyn FormatDoc, path: Option<&Path>) -> DocModel {
+        if lazy_enabled() && doc.top_at(0).is_some() {
+            return Self::build_paged(doc, path);
+        }
         // flattened in batches straight into the chunked list (no full-size intermediate)
         let mut chunks = RelChunks::default();
         let n = doc.top_count();
@@ -384,6 +395,7 @@ impl DocModel {
             root_url,
             toc_runs: Vec::new(),
             min_level: 1,
+            paged: false,
         };
         m.rebuild_outline(doc);
         m.update_tocs(doc);
@@ -401,6 +413,9 @@ impl DocModel {
     /// bytes `reparsed.start .. reparsed.end - delta` before the edit, the new ones cover
     /// `reparsed` after it.
     pub fn apply(&mut self, doc: &dyn FormatDoc, e: &EditSummary) -> ModelChange {
+        if self.paged && (e.deps.all || self.edit_touches_page(e)) {
+            return self.rebuild_paged(doc);
+        }
         if e.deps.all {
             let n = self.items.len();
             let base_dir = self.base_dir.clone();

@@ -2571,6 +2571,11 @@ impl MarkiseApp {
     /// The status bar's word count (issue #53): click cycles words / characters / characters
     /// without spaces.
     fn word_count_label(&mut self, ui: &mut egui::Ui) {
+        if markise_layout::lazy_enabled() {
+            // PROTOTYPE (lazy view): word count is stubbed (it walks every item)
+            self.word_count = None;
+            return;
+        }
         let Some(d) = self.doc.as_ref().filter(|_| self.themes.show_word_count()) else {
             self.word_count = None;
             return;
@@ -2673,9 +2678,14 @@ impl MarkiseApp {
                             self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
                         }
                         if let Some(d) = &mut self.doc {
-                            let model = d.viewer.model().clone();
-                            let cur = model.current_heading(d.viewer.ed.view.anchor().0);
-                            if let Some(item) = outline(ui, &model.outline, cur, &look) {
+                            let clicked = {
+                                let model = d.viewer.model().clone();
+                                let cur = model.current_heading(d.viewer.ed.view.anchor().0);
+                                outline(ui, &model.outline, cur, &look)
+                            };
+                            // the lazy view (prototype) materializes the heading's page first
+                            if let Some(item) = clicked.and_then(|k| d.viewer.ed.view.ensure_heading(k)) {
+                                let model = d.viewer.model().clone();
                                 d.viewer.ed.view.scroll_to_item(item);
                                 // Side by Side: the source pane follows the rendered pane
                                 self.sbs.sync_source = true;

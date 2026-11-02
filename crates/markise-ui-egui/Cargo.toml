@@ -48,3 +48,7 @@ harness = false
 [[bench]]
 name = "save_huge"
 harness = false
+
+[[bench]]
+name = "lazy"
+harness = false

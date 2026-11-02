@@ -75,6 +75,25 @@ pub struct View {
     /// Editing state of the item holding the caret (ADR 0006 §2.4): part of that item's key.
     focus: Option<(usize, ItemFocus, u64)>,
     caret_item: Option<usize>,
+    /// PROTOTYPE (lazy view): state of the paged model's materialization.
+    lazy: LazyState,
+}
+
+/// PROTOTYPE (lazy view, `MARKISE_LAZY_VIEW=1`): what the view keeps resident and counters.
+#[derive(Clone, Debug, Default)]
+pub struct LazyState {
+    /// Source offset of the caret (its page and the neighbouring items stay materialized).
+    pub caret: Option<usize>,
+    /// Layout requests for placeholders (should stay 0: a placeholder is never shown).
+    pub placeholder_layouts: u64,
+    pub materialized: u64,
+    pub evicted: u64,
+    /// Time spent materializing / evicting (ms).
+    pub ms: f64,
+    /// Largest absolute shift of the anchor's content (px) caused by one materialization.
+    pub max_jump: f64,
+    /// Scroll-position changes caused by materializations (sum of absolute values, px).
+    pub sum_jump: f64,
 }
 
 impl View {
@@ -108,6 +127,7 @@ impl View {
             refs: Default::default(),
             focus: None,
             caret_item: None,
+            lazy: LazyState::default(),
         };
         v.reset_heights();
         v
@@ -715,6 +735,7 @@ impl View {
         let wrapped = |chars: u32, lines: u32| -> f32 { (lines as f32).max(chars as f32 / per_line).ceil() };
         let h = match &it.kind {
             ItemKind::Hidden => return pa + pb,
+            ItemKind::Page(st) => return self.page_estimate(st) + pa + pb,
             ItemKind::Heading { level } => {
                 let li = (*level as usize - 1).min(5);
                 let hs = &t.headings[li];
@@ -730,6 +751,14 @@ impl View {
                 t.block_spacing + rows * (line + 2.0 * t.table_cell_padding)
             }
             ItemKind::FrontMatter => t.block_spacing + line + 2.0 * t.meta_block.padding,
+            // PROTOTYPE (lazy view): a TOC's entries are one line each (consistent with the
+            // page estimate, so materializing a page does not move the scrollbar)
+            ItemKind::Toc if self.model.is_paged() => match &it.segment {
+                Some(crate::model::Segment::Toc { start, end, first, .. }) => {
+                    (if *first { t.block_spacing } else { 0.0 }) + (end - start) as f32 * line
+                }
+                _ => t.block_spacing + self.model.outline.len().max(1) as f32 * line,
+            },
             ItemKind::Rule | ItemKind::Empty | ItemKind::Toc => t.block_spacing + line,
             ItemKind::Paragraph => t.block_spacing + wrapped(it.est_chars, it.est_lines) * line,
         };
@@ -874,6 +903,21 @@ impl View {
 
     /// Layout of item `i` (cached or computed now).
     pub fn layout(&mut self, i: usize, shaper: &mut dyn TextShaper, images: &dyn Images) -> Arc<BlockLayout> {
+        if self
+            .model
+            .items
+            .get(i)
+            .is_some_and(|it| matches!(it.kind, ItemKind::Page(_)))
+        {
+            // a page placeholder is never shown (the lazy view materializes it first)
+            self.lazy.placeholder_layouts += 1;
+            if self.lazy.placeholder_layouts < 4 && std::env::var_os("MARKISE_LAZY_TRACE").is_some() {
+                let bt = std::backtrace::Backtrace::force_capture().to_string();
+                let l: Vec<&str> = bt.lines().filter(|l| l.contains("markise")).take(14).collect();
+                eprintln!("lazy view: placeholder layout {i}\n{}", l.join("\n"));
+            }
+            return Arc::new(BlockLayout::default());
+        }
         if self.disclosure_hidden(i) {
             self.heights.set(i, 0.0);
             self.exact[i] = true;
@@ -1030,7 +1074,10 @@ impl View {
     ) -> Vec<Visible> {
         self.cache.tick();
         self.laid_out.clear();
-        let n = self.len();
+        if self.model.is_paged() {
+            self.lazy_prepare(viewport_h);
+        }
+        let mut n = self.len();
         if n == 0 {
             self.last_visible.clear();
             return Vec::new();
@@ -1055,6 +1102,13 @@ impl View {
             let mut y = -self.anchor_off;
             let mut i = self.anchor;
             while i < n && y < viewport_h + margin {
+                if self.model.is_page(i) {
+                    // PROTOTYPE (lazy view): laid-out heights fell short of the estimates
+                    // around the window; later indices only shift
+                    self.materialize_at(i);
+                    n = self.len();
+                    continue;
+                }
                 if let Some(end) = self.disclosures.closed_end(i) {
                     i = end + 1;
                     continue;
@@ -1084,6 +1138,9 @@ impl View {
         let mut i = self.anchor;
         while i > 0 && y > -margin {
             i -= 1;
+            if self.model.is_page(i) {
+                break; // PROTOTYPE (lazy view): not materialized while indices are handed out
+            }
             if let Some((&start, _)) = self
                 .disclosures
                 .groups
@@ -1097,6 +1154,267 @@ impl View {
         }
         self.last_visible = out.iter().map(|v| v.idx).collect();
         out
+    }
+}
+
+/// PROTOTYPE (lazy view): materialization and eviction of the pages of a paged model.
+impl View {
+    /// Lazy-view counters.
+    pub fn lazy(&self) -> &LazyState {
+        &self.lazy
+    }
+
+    /// Height estimate of a page placeholder.
+    fn page_estimate(&self, s: &crate::model::PageStats) -> f32 {
+        if let Some((w, k, h)) = s.measured
+            && w == (self.width * 4.0) as u32
+            && k == self.lazy_key()
+        {
+            return f32::from_bits(h);
+        }
+        let t = &self.theme;
+        let line = t.line_px();
+        let avg_char = t.font_size * 0.5;
+        let per_line = (self.width / avg_char).max(10.0);
+        let shown = s.items.saturating_sub(s.hidden) as f32;
+        let mut h = shown * t.block_spacing;
+        for (li, &n) in s.heads.iter().enumerate() {
+            if n > 0 {
+                let hs = &t.headings[li];
+                let pad = 2.0 * t.heading_decor[li].padding[1];
+                let extra = (hs.margin_top - t.block_spacing).max(0.0);
+                h += n as f32 * (extra + hs.size * 1.3 + hs.margin_bottom + pad);
+            }
+        }
+        h += s.code_lines as f32 * (t.mono_size() * 1.5).round() + s.code_blocks as f32 * 2.0 * t.code_block.padding;
+        h += s.table_rows as f32 * (line + 2.0 * t.table_cell_padding);
+        h += s.front as f32 * (line + 2.0 * t.meta_block.padding) + s.simple as f32 * line;
+        // a TOC lists the whole outline, one line per entry
+        h += s.tocs as f32 * self.model.outline.len().max(1) as f32 * line;
+        let para = (s.para_lines as f32).max(s.para_chars as f32 / per_line) + s.paras as f32 * 0.5;
+        h += para * line;
+        h
+    }
+
+    /// Key of the parameters a measured page height is valid for (theme, fonts, ppp).
+    fn lazy_key(&self) -> u64 {
+        self.theme_fp ^ self.font_gen.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ ((self.ppp * 100.0) as u64) << 48
+    }
+
+    /// Sets the caret offset whose page (and neighbouring items) must stay materialized, and
+    /// materializes them now.
+    pub fn lazy_set_caret(&mut self, offset: usize) {
+        if !self.model.is_paged() {
+            return;
+        }
+        self.lazy.caret = Some(offset);
+        self.ensure_offset(offset);
+    }
+
+    /// Paged models: materializes the page holding source offset `offset` and the pages of the
+    /// items right before and after it (caret moves across items). No-op otherwise.
+    pub fn ensure_offset(&mut self, offset: usize) {
+        if !self.model.is_paged() || self.is_empty() {
+            return;
+        }
+        for _ in 0..4 {
+            let i = self.model.item_at_offset(offset);
+            let j = [i, i.saturating_sub(1), (i + 1).min(self.len() - 1)]
+                .into_iter()
+                .find(|&j| self.model.is_page(j));
+            match j {
+                Some(j) => self.materialize_at(j),
+                None => break,
+            }
+        }
+    }
+
+    /// Paged models: materializes the page of outline entry `k` and returns the heading's item.
+    pub fn ensure_heading(&mut self, k: usize) -> Option<usize> {
+        let i = self.model.outline.get(k)?.item;
+        if self.model.is_page(i) {
+            self.materialize_at(i);
+        }
+        let i = self.model.outline.get(k)?.item;
+        if self.model.is_paged() {
+            let off = self.model.item_start(i);
+            self.ensure_offset(off);
+        }
+        self.model.outline.get(k).map(|o| o.item)
+    }
+
+    /// Materializes page placeholder `i`; the content on screen stays where it is (the anchor
+    /// follows its item; an anchor inside the page keeps its relative position).
+    fn materialize_at(&mut self, i: usize) {
+        let t = std::time::Instant::now();
+        let before = self.scroll_y();
+        let anchor_in = self.anchor == i;
+        let frac = self.anchor_frac() as f64;
+        let focus = self.focus.clone();
+        let caret_item = self.caret_item;
+        let doc = self.doc.clone();
+        let ch = Arc::make_mut(&mut self.model).materialize(&*doc, i);
+        let splices = ch.splices();
+        self.apply_change(doc, &ch);
+        let map = |j: usize| ModelChange::map_index(&splices, j);
+        // keep the editing focus (the caret's item is never a placeholder)
+        self.focus = focus.and_then(|(j, f, h)| map(j).map(|j| (j, f, h)));
+        self.caret_item = caret_item.and_then(map);
+        if let Some(j) = self.focus.as_ref().map(|f| f.0)
+            && j < self.exact.len()
+        {
+            let (v, e) = self.initial_height(j);
+            self.heights.set(j, v);
+            self.exact[j] = e;
+        }
+        if anchor_in && !ch.inserted.is_empty() {
+            let tot = self.heights.prefix(ch.inserted.end) - self.heights.prefix(ch.inserted.start);
+            self.anchor = ch.inserted.start;
+            self.anchor_off = (frac * tot) as f32;
+            self.scroll_by(0.0);
+        }
+        let jump = (self.scroll_y() - before).abs();
+        if anchor_in {
+            self.lazy.max_jump = self.lazy.max_jump.max(jump);
+            self.lazy.sum_jump += jump;
+        }
+        self.lazy.materialized += 1;
+        self.lazy.ms += t.elapsed().as_secs_f64() * 1e3;
+    }
+
+    /// Before a frame: pins the first and last pages (document edges), evicts pages far from
+    /// the viewport and the caret, and materializes the pages within a viewport of it.
+    fn lazy_prepare(&mut self, viewport_h: f32) {
+        if self.is_empty() {
+            return;
+        }
+        if self.model.is_page(0) {
+            self.materialize_at(0);
+        }
+        let n = self.len();
+        if n > 0 && self.model.is_page(n - 1) {
+            self.materialize_at(n - 1);
+        }
+        self.lazy_evict(viewport_h);
+        for _ in 0..64 {
+            let y = self.scroll_y();
+            let lo = self.item_at_y(y - viewport_h as f64);
+            let hi = self.item_at_y(y + 2.0 * viewport_h as f64);
+            match (lo..=hi).find(|&j| self.model.is_page(j)) {
+                Some(j) => self.materialize_at(j),
+                None => break,
+            }
+        }
+        if let Some(off) = self.lazy.caret {
+            self.ensure_offset(off.min(self.doc.text().len()));
+        }
+    }
+
+    /// Evicts runs of materialized items farther than a few viewports from the viewport, in
+    /// chunks of at most [`crate::PAGE_TOPS`] top-level blocks (never the first / last page or
+    /// the caret's page).
+    fn lazy_evict(&mut self, viewport_h: f32) {
+        const KEEP_SCREENS: f64 = 4.0;
+        let n = self.len();
+        if n < 3 {
+            return;
+        }
+        let vh = viewport_h.max(100.0) as f64;
+        let y = self.scroll_y();
+        let keep = (y - KEEP_SCREENS * vh)..(y + (KEEP_SCREENS + 1.0) * vh);
+        // runs of real items
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut start: Option<usize> = None;
+        for (i, it) in self.model.items.iter().enumerate() {
+            let page = matches!(it.kind, ItemKind::Page(_));
+            match (page, start) {
+                (true, Some(a)) => {
+                    runs.push((a, i));
+                    start = None;
+                }
+                (false, None) => start = Some(i),
+                _ => {}
+            }
+        }
+        if let Some(a) = start {
+            runs.push((a, n));
+        }
+        let doc = self.doc.clone();
+        let top = |v: &View, i: usize| doc.top_at(v.model.item_start(i)).unwrap_or(0);
+        let caret_top = self.lazy.caret.and_then(|o| doc.top_at(o));
+        let mut evict: Vec<std::ops::Range<usize>> = Vec::new();
+        for &(a, b) in &runs {
+            // the parts of the run outside the kept band, cut at top-level block boundaries
+            let ya = self.heights.prefix(a);
+            let yb = self.heights.prefix(b);
+            if yb <= keep.start || ya >= keep.end {
+                evict.push(a..b);
+                continue;
+            }
+            if ya < keep.start {
+                let mut s = self.heights.index_at(keep.start).clamp(a, b);
+                while s > a && top(self, s) == top(self, s - 1) {
+                    s -= 1;
+                }
+                if s > a {
+                    evict.push(a..s);
+                }
+            }
+            if yb > keep.end {
+                let mut s = (self.heights.index_at(keep.end) + 1).clamp(a, b);
+                while s < b && top(self, s) == top(self, s - 1) {
+                    s += 1;
+                }
+                if s < b {
+                    evict.push(s..b);
+                }
+            }
+        }
+        if evict.is_empty() {
+            return;
+        }
+        // chunks of at most PAGE_TOPS top-level blocks, last first (indices before stay valid)
+        let mut chunks: Vec<std::ops::Range<usize>> = Vec::new();
+        for r in evict {
+            let mut s = r.start;
+            while s < r.end {
+                let t0 = top(self, s);
+                let mut e = s + 1;
+                while e < r.end && top(self, e) < t0 + crate::PAGE_TOPS {
+                    e += 1;
+                }
+                let pinned = s == 0 || e == n;
+                let has_caret = caret_top.is_some_and(|c| (t0..top(self, e - 1) + 1).contains(&c));
+                if !pinned && !has_caret {
+                    chunks.push(s..e);
+                }
+                s = e;
+            }
+        }
+        if chunks.is_empty() {
+            return;
+        }
+        let t = std::time::Instant::now();
+        let key = self.lazy_key();
+        let wq = (self.width * 4.0) as u32;
+        let focus = self.focus.clone();
+        let caret_item = self.caret_item;
+        for r in chunks.into_iter().rev() {
+            if focus.as_ref().is_some_and(|f| r.contains(&f.0)) || caret_item.is_some_and(|c| r.contains(&c)) {
+                continue;
+            }
+            let h = (self.heights.prefix(r.end) - self.heights.prefix(r.start)) as f32;
+            let ch = Arc::make_mut(&mut self.model).evict(r.clone(), Some((wq, key, h.to_bits())));
+            let splices = ch.splices();
+            let f = self.focus.clone();
+            let c = self.caret_item;
+            self.apply_change(doc.clone(), &ch);
+            let map = |j: usize| ModelChange::map_index(&splices, j);
+            self.focus = f.and_then(|(j, ff, hh)| map(j).map(|j| (j, ff, hh)));
+            self.caret_item = c.and_then(map);
+            self.lazy.evicted += 1;
+        }
+        self.lazy.ms += t.elapsed().as_secs_f64() * 1e3;
     }
 }
 

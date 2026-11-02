@@ -148,6 +148,9 @@ pub struct DocViewer {
     last_visible: Vec<(usize, f32)>,
     /// Column left edge of the last frame (screen x).
     last_left: f32,
+    /// PROTOTYPE (lazy view): the document height when the scrollbar drag started (the
+    /// scrollbar's scale is frozen during a drag while estimates refine).
+    lazy_drag_total: Option<f64>,
     /// Surface top of the last frame (screen y).
     last_top: f32,
     /// Text to put on the clipboard after this frame's input handling.
@@ -210,6 +213,7 @@ impl DocViewer {
             find_matches: None,
             find_reveal: false,
             last_left: 0.0,
+            lazy_drag_total: None,
             last_top: 0.0,
             pending_copy: None,
             last_surface: None,
@@ -369,9 +373,16 @@ impl DocViewer {
         None
     }
 
+    /// Scrolls the caret into view on the next frame (benches, like a find match).
+    pub fn find_reveal_for_bench(&mut self) {
+        self.find_reveal = true;
+    }
+
     pub fn scroll_to_anchor(&mut self, anchor: &str) -> bool {
-        let item = self.model().heading_by_anchor(anchor).map(|e| e.item);
-        if let Some(i) = item {
+        let a = anchor.trim_start_matches('#');
+        let k = self.model().outline.iter().position(|o| o.anchor == a);
+        // the lazy view (prototype) materializes the heading's page first
+        if let Some(i) = k.and_then(|k| self.ed.view.ensure_heading(k)) {
             self.ed.view.scroll_to_item(i);
             true
         } else {
@@ -518,7 +529,14 @@ impl DocViewer {
         // ---- input: scrollbar
         let bar = Rect::from_min_max(pos2(rect.right() - SCROLLBAR_W, rect.top()), rect.right_bottom());
         let bar_resp = ui.interact(bar, id.with("bar"), Sense::click_and_drag());
-        let total = self.ed.view.total_height().max(1.0);
+        let mut total = self.ed.view.total_height().max(1.0);
+        if self.ed.view.model().is_paged() {
+            if bar_resp.dragged() {
+                total = *self.lazy_drag_total.get_or_insert(total);
+            } else {
+                self.lazy_drag_total = None;
+            }
+        }
         if (bar_resp.dragged() || bar_resp.clicked())
             && let Some(p) = bar_resp.interact_pointer_pos()
         {

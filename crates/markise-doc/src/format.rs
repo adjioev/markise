@@ -343,6 +343,13 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
 
     /// Number of top-level blocks.
     fn top_count(&self) -> usize;
+    /// Index of the last top-level block starting at or before absolute offset `offset`
+    /// (`None`: not supported by the format). Prototype hook of the lazy view
+    /// (`MARKISE_LAZY_VIEW`, docs/research/lazy-view-prototype.md).
+    fn top_at(&self, offset: usize) -> Option<usize> {
+        let _ = offset;
+        None
+    }
     /// Emits the leaves of top-level blocks `tops` with their container chains, in order.
     fn flatten(&self, tops: Range<usize>, sink: &mut dyn FnMut(FlatEvent<'_>));
     /// Emits the events needed for the leaves of top-level blocks `tops` that start in

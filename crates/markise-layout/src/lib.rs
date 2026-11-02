@@ -32,7 +32,10 @@ pub use diagram::{DiagramQuery, DiagramState, Diagrams, NoDiagrams};
 pub use highlight::{CodeQuery, Highlights, NoHighlights};
 pub use links::{AllResolved, LinkTargets};
 pub use math::{MATH_SCALE, MathBox, MathQuery, MathState};
-pub use model::{CodeRef, Container, DocModel, Gap, Item, ItemKind, Items, Marker, ModelChange, OutlineEntry};
+pub use model::{
+    CodeRef, Container, DocModel, Gap, Item, ItemKind, Items, Marker, ModelChange, OutlineEntry, PAGE_TOPS, PageStats,
+    PagedStats, lazy_enabled, paged_stats,
+};
 pub use source::{SourceCtx, SourceLayout, SourceLine, SourceParams, SourceView, SourceVisible};
 pub use text::{
     EpaintShaper, FontRole, FragmentId, FragmentKind, MapPiece, ParleyShaper, PieceKind, SourceMap, StyledText,
