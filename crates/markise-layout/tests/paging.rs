@@ -181,6 +181,9 @@ fn the_toy_format_pages_too() {
 // ---- random edits and paging operations == full build -------------------------------------
 
 const SNIPPETS: &[&str] = &[
+    // many blocks at once (a paste spanning pages; with the deletions of up to 3,000 bytes,
+    // edits cross page boundaries and unloaded pages)
+    "## Pasted\n\none\n\n- two\n- three\n\n> four\n\n```\nfive\n```\n\n[toc]\n\n## Pasted\n\nsix\n\nseven\n\neight\n\n",
     "para text\n",
     "\n\n",
     "# Heading\n",
@@ -227,7 +230,7 @@ enum Op {
 
 fn ops() -> impl Strategy<Value = Vec<Op>> {
     let op = prop_oneof![
-        3 => (0usize..100_000, 0usize..20, 0usize..SNIPPETS.len(), any::<bool>(), any::<bool>())
+        3 => (0usize..100_000, prop_oneof![4 => 0usize..20, 1 => 0usize..3000], 0usize..SNIPPETS.len(), any::<bool>(), any::<bool>())
             .prop_map(|(pos, del, snip, ins, real)| Op::Edit { pos, del, snip, ins, real }),
         1 => (0usize..1000).prop_map(Op::Materialize),
         1 => (0usize..1000).prop_map(Op::Evict),
@@ -961,4 +964,145 @@ fn comment_cards_and_jumps_match_the_full_view() {
         jumped += 1;
     }
     assert!(jumped > 10);
+}
+
+/// Phase 5: edits reaching unloaded pages and large pastes re-page only the region they reach
+/// (no rebuild of the paged model), and the model equals a full build afterwards.
+#[test]
+fn edits_reaching_unloaded_pages_re_page_their_region() {
+    let src = big_docs().swap_remove(0);
+    let mut doc = md(&src);
+    let mut m = paged(&doc, 2);
+    assert!(m.page_count() > 20);
+    let before = markise_layout::paging_counters();
+    // a deletion spanning several unloaded pages in the middle
+    let (a, b) = (src.len() / 3, src.len() / 2);
+    let (a, b) = (src[..a].rfind("\n\n").unwrap() + 2, src[..b].rfind("\n\n").unwrap() + 2);
+    let e = doc.apply(&PatchSet::single_verbatim(a..b, ""));
+    m.apply(&doc, &e);
+    m.check_against_full(&doc).unwrap();
+    // a paste of many blocks near the start
+    // (a region of more than half the document is rebuilt instead: keep the paste smaller)
+    let paste = "## P\n\nparagraph\n\n".repeat(60);
+    let at = doc.text().find("\n\n").unwrap() + 2;
+    let e = doc.apply(&PatchSet::single_verbatim(at..at, &paste));
+    m.apply(&doc, &e);
+    m.check_against_full(&doc).unwrap();
+    assert!(
+        m.page_count() > 100,
+        "the paste became placeholders: {}",
+        m.page_count()
+    );
+    // its undo (far from the edges)
+    let e = doc.apply(&PatchSet::single_verbatim(at..at + paste.len(), ""));
+    m.apply(&doc, &e);
+    m.check_against_full(&doc).unwrap();
+    let after = markise_layout::paging_counters();
+    // (process-wide counters: other tests may add to them, never take away)
+    assert!(after.regions >= before.regions + 3, "{before:?} → {after:?}");
+    materialize_all(&mut m, &doc).unwrap();
+}
+
+/// Phase 5 heavy scenario: on a 4 MiB corpus document at the default page size, edits far
+/// from the materialized edges — deletions spanning many unloaded pages, pastes of hundreds of
+/// blocks, their undo — re-page their regions and the model stays equal to a full build.
+#[test]
+#[ignore = "heavy: large input; cargo xtask heavy"]
+fn heavy_suite_far_edits_re_page_regions_on_a_large_document() {
+    let src = markise_corpus::generate(4 << 20, 23);
+    let mut doc = md(&src);
+    let mut m = paged(&doc, markise_layout::PAGE_TOPS);
+    let block = |t: &str, f: f64| {
+        let mut p = (t.len() as f64 * f) as usize;
+        while !t.is_char_boundary(p) {
+            p += 1;
+        }
+        t[p..].find("\n\n").map_or(t.len(), |i| p + i + 2)
+    };
+    let paste = markise_corpus::generate(256 << 10, 9);
+    for (k, f) in [0.2, 0.7, 0.45, 0.9, 0.33].into_iter().enumerate() {
+        let (a, b) = (block(doc.text(), f), block(doc.text(), f + 0.03));
+        let removed = doc.text()[a..b].to_string();
+        let e = doc.apply(&PatchSet::single_verbatim(a..b, ""));
+        m.apply(&doc, &e);
+        m.check_against_full(&doc).unwrap_or_else(|d| panic!("delete {k}: {d}"));
+        let at = block(doc.text(), 1.0 - f);
+        let e = doc.apply(&PatchSet::single_verbatim(at..at, &paste));
+        m.apply(&doc, &e);
+        m.check_against_full(&doc).unwrap_or_else(|d| panic!("paste {k}: {d}"));
+        let e = doc.apply(&PatchSet::single_verbatim(at..at + paste.len(), ""));
+        m.apply(&doc, &e);
+        let e = doc.apply(&PatchSet::single_verbatim(a..a, &removed));
+        m.apply(&doc, &e);
+        m.check_against_full(&doc).unwrap_or_else(|d| panic!("undo {k}: {d}"));
+    }
+    assert_eq!(doc.text(), src, "every edit undone");
+    materialize_all(&mut m, &doc).unwrap();
+}
+
+// ---- review of #145: scroll position through re-paged regions and rebuilds -----------------
+
+/// An edit of the document through the view, as the editor applies it.
+fn edit_view(v: &mut View, d: &mut markise_md::Document, at: std::ops::Range<usize>, text: &str) {
+    let e = d.apply(&PatchSet::single_verbatim(at, text));
+    let ch = v.model_mut().apply(&*d, &e);
+    v.apply_change(Arc::new(d.clone()), &ch);
+}
+
+#[test]
+fn scroll_position_survives_region_edits_and_rebuilds() {
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    // a later segment of a long TOC: an edit far below that changes the outline (headings
+    // deleted in unloaded pages) replaces the model; the view stays on that segment
+    let mut src = String::from("intro\n\n[toc]\n\n");
+    for i in 0..400 {
+        src.push_str(&format!("## H{i}\n\ntext {i}\n\n"));
+    }
+    let mut d = md(&src);
+    let doc: Arc<dyn FormatDoc> = Arc::new(d.clone());
+    let mut v = View::new(doc, Arc::new(paged(&d, 4)), Theme::light(), 700.0, 1.0);
+    let toc = src.find("[toc]").unwrap();
+    v.scroll_to_source(toc, 2, 10.0);
+    v.frame(800.0, 300.0, &mut f, &NoImages);
+    let before = v.source_anchor();
+    assert_eq!((before.0, before.1), (toc, 2), "on the third TOC segment");
+    let (a, b) = (src.find("## H300").unwrap(), src.find("## H350").unwrap());
+    edit_view(&mut v, &mut d, a..b, "");
+    assert_eq!(v.source_anchor(), before, "still on that segment");
+    v.frame(800.0, 300.0, &mut f, &NoImages);
+
+    // a large paste above the viewport (over the half-document rebuild threshold): the view
+    // stays on its paragraph, which moved by the paste
+    let target = d.text().find("text 200\n").unwrap();
+    v.ensure_offset(target);
+    let i = v.model().item_at_offset(target);
+    v.scroll_to_item(i);
+    v.frame(800.0, 300.0, &mut f, &NoImages);
+    let before = v.source_anchor();
+    let paste = "pasted paragraph\n\n".repeat(20_000);
+    let at = d.text().find("text 5\n").unwrap();
+    edit_view(&mut v, &mut d, at..at, &paste);
+    let after = v.source_anchor();
+    assert_eq!(
+        after.0,
+        before.0 + paste.len(),
+        "moved with the paste: {before:?} → {after:?}"
+    );
+    assert!(d.text()[after.0..].starts_with("text 200"));
+    v.frame(800.0, 300.0, &mut f, &NoImages);
+
+    // a deletion containing the anchor: the view goes to where the deleted text was
+    let target = d.text().find("text 250\n").unwrap();
+    v.ensure_offset(target);
+    let i = v.model().item_at_offset(target);
+    v.scroll_to_item(i);
+    v.frame(800.0, 300.0, &mut f, &NoImages);
+    let (a, b) = (d.text().find("## H240").unwrap(), d.text().find("## H260").unwrap());
+    let next = d.text()[b..].to_string();
+    edit_view(&mut v, &mut d, a..b, "");
+    let after = v.source_anchor();
+    assert_eq!(after.0, a, "at the deletion: {after:?}");
+    assert!(d.text()[after.0..].starts_with(&next[..20]));
+    v.model().check_against_full(&d).unwrap();
 }

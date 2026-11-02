@@ -137,6 +137,7 @@ impl EditorView {
 
     /// Brings the view up to the session's document (after any session change).
     pub fn sync(&mut self) {
+        let steps = self.session.take_steps();
         match self.session.take_change() {
             DocChange::None => {
                 // the view may still hold the placeholder after a no-op edit
@@ -152,7 +153,14 @@ impl EditorView {
                 if self.recent.as_ref().is_some_and(|r| r.len() > RECENT_MAX) {
                     self.recent = None;
                 }
-                let ch = self.view.model_mut().apply(self.session.doc(), &e);
+                let mut ch = self.view.model_mut().apply(self.session.doc(), &e);
+                // the edits one by one, not their covering range (a position between two of
+                // them only moved)
+                if ch.moved.is_some()
+                    && let Some(steps) = steps
+                {
+                    ch.moved = Some(markise_layout::Moved::from_steps(steps));
+                }
                 self.view.apply_change(self.session.doc_arc().clone(), &ch);
                 if let Some(p) = self.source.as_mut() {
                     p.view.apply(self.session.doc().text(), &e);

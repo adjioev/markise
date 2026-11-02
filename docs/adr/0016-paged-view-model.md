@@ -51,8 +51,21 @@ frozen; its bottom always means the end of the document.
 
 **Edits.** `DocModel::apply` is unchanged for edits inside real items (the caret's page is
 always real). An edit whose re-parsed range reaches a placeholder (an unclosed fence, Replace
-All, a large undo) rebuilds the paged model (one streaming pass, about 0.3 s on 100 MiB on top
-of the parse that happens anyway); phase 5 re-pages only the affected region.
+All, a large undo far from the view), or that inserts more blocks than two pages hold (a large
+paste), re-pages only the region it reaches (`DocModel::apply_region`, phase 5): the items and
+placeholders the re-parsed blocks overlap (whole placeholders) are replaced by fresh
+placeholders for the region's top-level blocks, built a page at a time; everything after
+shifts in O(chunks). The region's outline entries and disclosure markers are replaced (the
+anchors of affected keys renumbered), real `[toc]` blocks re-keyed, and the view takes the
+result as a new model that keeps its scroll position through the edit (`ModelChange::moved`);
+it then materializes the pages near the viewport and the caret as usual. Fresh pages hold at
+most a page of blocks, so pages never grow without bound; a page left smaller by an edit stays
+smaller until it is evicted and re-cut. An edit whose region spans more than half of the
+document (Replace All), or one the format reports as changing everything (`DepChange::all`),
+rebuilds the model in one streaming pass instead (cheaper for that much). When the region's
+outline change re-segments real `[toc]`s or the resource root changed, the view takes a new
+model; otherwise it splices the region like any edit. `[toc]` segment keys are cached until the outline
+changes, so materializing pages holding repeated TOCs no longer re-hashes the outline.
 
 **Consumers that walked every item** must not: they see placeholders (`Item::is_page`). The
 word count now counts the document's top-level blocks from the edits' summaries
@@ -104,9 +117,9 @@ the caret (its reach is materialized); the gutter's presence is the document sca
 Copy and cut take the session's text of the selection, independent of items. The word count
 sums a selection's fully selected middle exactly from cached totals of runs of blocks.
 
-## Known limits (later phases of #125)
+## Known limits
 
 - A placeholder partly inside a closed disclosure is estimated as if all of it were shown
-  until it is materialized; materializing a page holding repeated `[toc]`s re-hashes the
-  outline per segment (phase 5).
-- There is no rich (HTML) clipboard yet; copy is source text.
+  until it is materialized (it is near the viewport whenever that matters: closed content has
+  no height).
+- There is no rich (HTML) clipboard yet; copy is source text (not a paging limit).

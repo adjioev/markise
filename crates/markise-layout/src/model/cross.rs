@@ -97,7 +97,7 @@ pub struct CrossBlockIndex {
 }
 
 /// The markers among freshly flattened `items` (absolute origins, document order).
-fn markers_of(items: &[Item]) -> Vec<DisclosureMarker> {
+pub(super) fn markers_of(items: &[Item]) -> Vec<DisclosureMarker> {
     let mut out: Vec<DisclosureMarker> = Vec::new();
     for it in items {
         let Some(raw) = it.raw.as_deref() else { continue };
@@ -174,17 +174,25 @@ impl CrossBlockIndex {
         changed: std::ops::Range<usize>,
         delta: isize,
     ) -> bool {
-        let (lo, hi) = match (removed.first(), removed.last()) {
-            (Some(&a), Some(&b)) => (
-                self.markers.partition_point(|r| r.origin < a),
-                self.markers.partition_point(|r| r.origin <= b),
-            ),
-            _ => {
-                let p = self.markers.partition_point(|r| r.origin < at);
-                (p, p)
-            }
+        let old = match (removed.first(), removed.last()) {
+            (Some(&a), Some(&b)) => a..b + 1,
+            _ => at..at,
         };
-        let fresh = markers_of(new_items);
+        self.replace_range(doc, old, markers_of(new_items), changed, delta)
+    }
+
+    /// [`CrossBlockIndex::replace`] by byte range: the markers starting in `old` (pre-edit
+    /// offsets) are replaced by `fresh` (absolute starts after the edit, document order).
+    pub(super) fn replace_range(
+        &mut self,
+        doc: &dyn FormatDoc,
+        old: std::ops::Range<usize>,
+        fresh: Vec<DisclosureMarker>,
+        changed: std::ops::Range<usize>,
+        delta: isize,
+    ) -> bool {
+        let lo = self.markers.partition_point(|r| r.origin < old.start);
+        let hi = self.markers.partition_point(|r| r.origin < old.end).max(lo);
         if lo == hi && fresh.is_empty() {
             // ordinary typing: only shifts (groups refer to markers by index)
             self.markers.splice(lo..lo, Vec::new(), delta);

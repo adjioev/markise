@@ -341,6 +341,7 @@ impl DocViewer {
             .session
             .replace_doc(doc.clone(), label, markise_engine::editor::TxKind::Bulk, join);
         let _ = self.ed.session.take_change();
+        let _ = self.ed.session.take_steps();
         self.ed.view.set_model(doc, model);
         let caret = self.ed.session.selection().clone();
         let len = self.ed.session.text().len();

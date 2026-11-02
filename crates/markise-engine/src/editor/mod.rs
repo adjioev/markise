@@ -225,6 +225,9 @@ impl ChangeLog {
     }
 }
 
+/// Position steps kept between two [`EditorSession::take_steps`].
+const MAX_STEPS: usize = 256;
+
 /// One open document being edited.
 pub struct EditorSession {
     format: Arc<dyn DocumentFormat>,
@@ -234,6 +237,9 @@ pub struct EditorSession {
     change: DocChange,
     /// The changes since [`EditorSession::take_log`] (word count).
     log: ChangeLog,
+    /// The edits since [`EditorSession::take_change`] as position steps (`None`: more than
+    /// [`MAX_STEPS`], or the document was replaced): [`EditorSession::take_steps`].
+    steps: Option<Vec<(usize, usize, isize)>>,
     /// Process-unique identity of the session (its document's history).
     id: u64,
     /// Clones of a shared document made by [`EditorSession::doc_mut`] (diagnostics, tests).
@@ -360,6 +366,7 @@ impl EditorSession {
             doc,
             change: DocChange::None,
             log: ChangeLog::default(),
+            steps: Some(Vec::new()),
             id: {
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -413,6 +420,12 @@ impl EditorSession {
     /// Changes since the last call.
     pub fn take_change(&mut self) -> DocChange {
         std::mem::take(&mut self.change)
+    }
+    /// The edits since the last call as position steps `(start, end, delta)` in the order made,
+    /// each in the coordinates after the ones before it (`None`: too many, or the document was
+    /// replaced): the view keeps positions across the composed change with them.
+    pub fn take_steps(&mut self) -> Option<Vec<(usize, usize, isize)>> {
+        self.steps.replace(Vec::new())
     }
     /// The document changes since the last call, for a consumer besides the view (the word
     /// count, issue #125): unlike [`EditorSession::take_change`] each edit is kept on its own.
@@ -504,6 +517,30 @@ impl EditorSession {
             self.review.last_at = at;
         }
         let e = self.doc_mut().apply_with_hints(ps, hints);
+        // the patches as position steps (each in the coordinates after the ones before it);
+        // the covering range when their lengths do not add up (line ending conversion)
+        if let Some(steps) = &mut self.steps {
+            let mut cum = 0isize;
+            let mut sum = 0isize;
+            let mut add: Vec<(usize, usize, isize)> = Vec::new();
+            for p in ps.patches() {
+                let d = p.insert.len() as isize - p.range.len() as isize;
+                let (a, b) = (
+                    (p.range.start as isize + cum) as usize,
+                    (p.range.end as isize + cum) as usize,
+                );
+                add.push((a, b, d));
+                cum += d;
+                sum += d;
+            }
+            if sum != e.delta {
+                add = vec![(e.changed.start, e.changed.end, e.delta)];
+            }
+            steps.extend(add);
+            if steps.len() > MAX_STEPS {
+                self.steps = None;
+            }
+        }
         self.log.push(e.clone());
         self.change.push(e);
     }
@@ -1642,6 +1679,7 @@ impl EditorSession {
             self.doc = doc;
             self.change = DocChange::Replaced;
             self.log.replaced();
+            self.steps = None;
             self.review.replaced += 1;
             return Ok(());
         }
@@ -1654,6 +1692,7 @@ impl EditorSession {
         }
         self.change = DocChange::Replaced;
         self.log.replaced();
+        self.steps = None;
         self.review.replaced += 1;
         self.transform_live(&forward);
         self.rev.counter += 1;
