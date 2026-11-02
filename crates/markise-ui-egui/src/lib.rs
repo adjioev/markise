@@ -15,12 +15,14 @@ pub mod images;
 pub mod menu;
 pub mod menu_sync;
 pub mod prefs;
+pub mod shortcuts;
 pub mod side_by_side;
 pub mod sidebar;
 pub mod source;
 pub mod text_paint;
 pub mod themes;
 pub mod toolbar;
+pub mod tutorial;
 pub mod viewer;
 #[doc(hidden)]
 pub mod wake_track;

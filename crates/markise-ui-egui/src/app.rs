@@ -51,6 +51,7 @@ use crate::viewer::DocViewer;
 mod attach;
 mod files;
 mod find;
+mod help;
 mod menus;
 mod prefs;
 mod quick_open;
@@ -116,6 +117,9 @@ pub struct AppOptions {
     /// Files copied in a file manager, read on paste ([`crate::clipboard`]). Default: none;
     /// the desktop app passes the system clipboard's file list, tests a scripted one.
     pub clipboard_files: Arc<dyn crate::clipboard::ClipboardFiles>,
+    /// Open the welcome tutorial at the first launch ([`crate::tutorial`]; the settings flag
+    /// `tutorialShown` records it). The desktop app sets it; tests opt in.
+    pub welcome: bool,
 }
 
 impl Default for AppOptions {
@@ -135,6 +139,7 @@ impl Default for AppOptions {
             commit: None,
             confirm: Arc::new(crate::confirm::InApp),
             clipboard_files: Arc::new(crate::clipboard::NoFiles),
+            welcome: false,
         }
     }
 }
@@ -323,6 +328,8 @@ enum Then {
     Install(Box<Loaded>),
     /// File → New: replace the document with an untitled one.
     New,
+    /// Help → Tutorial: replace the document with the tutorial's scratch copy.
+    Tutorial,
 }
 
 struct SaveRequest {
@@ -519,6 +526,10 @@ pub struct MarkiseApp {
     attach: attach::AttachState,
     /// How long the first frame waits for the selected theme ([`FIRST_THEME_WAIT`]; tests).
     first_theme_wait: Duration,
+    /// First launch: open the tutorial once the settings are read ([`AppOptions::welcome`]).
+    welcome_pending: bool,
+    /// Help → Keyboard Shortcuts.
+    cheat_sheet: crate::shortcuts::CheatSheet,
 }
 
 impl MarkiseApp {
@@ -613,6 +624,8 @@ impl MarkiseApp {
             review,
             attach: attach::AttachState::new(opts.clipboard_files),
             first_theme_wait: FIRST_THEME_WAIT,
+            welcome_pending: opts.welcome,
+            cheat_sheet: Default::default(),
         }
     }
 
@@ -1727,6 +1740,7 @@ impl MarkiseApp {
             Then::Open(path) => self.open_now(path, LoadReason::OpenDiscarding),
             Then::Install(loaded) => self.install(*loaded),
             Then::New => self.new_document_now(),
+            Then::Tutorial => self.open_tutorial_now(),
             Then::Close => {
                 self.forget_backup();
                 self.allow_close = true;
@@ -2087,6 +2101,7 @@ impl MarkiseApp {
         self.poll_watcher();
         self.poll_themes(ctx);
         self.workflow_poll(ctx);
+        self.first_launch_tutorial();
         if self.export.poll() && self.export.is_asking_large() {
             self.opened_export_question();
         }
@@ -2172,6 +2187,7 @@ impl MarkiseApp {
         self.complete_pre_input(ctx);
         self.attach_pre_input(ctx);
         self.quick_window(ctx);
+        self.shortcuts_window(ctx);
         self.central(ui);
         self.complete_update();
         self.complete_ui(ctx);

@@ -56,9 +56,11 @@ const TEXT_FIELD_KEYS: [(&str, Modifiers, Key); 3] = [
     ("select.all", Modifiers::COMMAND, Key::A),
 ];
 
-/// Application commands that have no item in the macOS menus because AppKit adds its own
-/// (View → Enter Full Screen); their chords stay handled by the app's shortcut path.
-const MAC_SYSTEM_MENU_COMMANDS: [&str; 1] = ["view.fullScreen"];
+/// Application commands whose chords the app's shortcut path handles also with the native
+/// macOS menu: Full Screen has no item there (AppKit adds its own View → Enter Full Screen);
+/// Keyboard Shortcuts' ⌘? (⇧⌘/) may not reach its key equivalent through AppKit, whose Help
+/// menu search claims ⌘? (opening the cheat sheet twice is harmless).
+const MAC_SYSTEM_MENU_COMMANDS: [&str; 2] = ["view.fullScreen", "help.shortcuts"];
 
 fn text_field_focused(ctx: &Context) -> bool {
     ctx.memory(|m| m.focused())
@@ -340,16 +342,36 @@ impl MarkiseApp {
                 )
                 .kind(MenuKind::Window),
             );
-            // About is in the application menu; Help content is P2 (spec 04 §2.8); macOS
-            // adds its menu search
-            menus.push(Menu::new("Help", Vec::new()).kind(MenuKind::Help));
+            // About is in the application menu; macOS adds its menu search
+            menus.push(Menu::new("Help", self.help_entries()).kind(MenuKind::Help));
         } else {
-            menus.push(Menu::new("Help", vec![self.app_item("app.about", true, Check::None)]).kind(MenuKind::Help));
+            let mut help = vec![self.app_item("app.about", true, Check::None), Entry::Separator];
+            help.extend(self.help_entries());
+            menus.push(Menu::new("Help", help).kind(MenuKind::Help));
         }
         MenuBar {
             platform: self.menu_platform,
             menus,
         }
+    }
+
+    /// Help → Tutorial, Keyboard Shortcuts (issue #63).
+    fn help_entries(&self) -> Vec<Entry> {
+        vec![
+            self.app_item("help.tutorial", true, Check::None),
+            self.app_item("help.shortcuts", true, Check::None),
+        ]
+    }
+
+    /// The keyboard shortcut cheat sheet for the menus' platform: the keymap in effect
+    /// (`keyBinding` applied), like the menus and the toolbar (issue #63).
+    pub fn shortcut_groups(&self) -> Vec<crate::shortcuts::Group> {
+        let km = if self.menu_platform == Platform::current() {
+            self.effective_keymap()
+        } else {
+            &defaults(self.menu_platform).1
+        };
+        crate::shortcuts::cheat_sheet(self.registry(), km, self.menu_platform)
     }
 
     /// Edit → Comments & Suggestions (ADR 0012).
@@ -575,6 +597,8 @@ impl MarkiseApp {
             "file.close" | "app.quit" | "app.exit" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             "app.preferences" => self.open_preferences(),
             "app.about" => self.about.open(),
+            "help.tutorial" => self.open_tutorial(),
+            "help.shortcuts" => self.open_shortcuts(ctx),
             // the focused widget (rich view or a text field) handles these as from the keyboard
             "edit.cut" => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCut),
             "edit.copy" => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy),
@@ -716,9 +740,13 @@ impl MarkiseApp {
                 else {
                     return true;
                 };
-                let Some(mut chord) = crate::viewer::chord_of(*key, *modifiers, platform) else {
+                // egui names no key "?" for the keymap (`Key::Questionmark`): read as ⇧/ below
+                let q = *key == egui::Key::Questionmark;
+                let k = if q { egui::Key::Slash } else { *key };
+                let Some(mut chord) = crate::viewer::chord_of(k, *modifiers, platform) else {
                     return true;
                 };
+                chord.shift |= q;
                 // ⇧= arrives as "+" on most layouts: the zoom chords are written with "="
                 if chord.shift && chord.key == "+" {
                     chord.key = "=".into();

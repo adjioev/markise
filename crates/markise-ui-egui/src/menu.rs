@@ -349,6 +349,14 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("theme.import", "Import Theme…", &[]),
     app("theme.openFolder", "Open Theme Folder", &[]),
     app("theme.report", "Theme Report…", &[]),
+    // Help menu (issue #63): the welcome tutorial and the keyboard shortcut cheat sheet
+    // (⌘? = ⇧⌘/ on macOS, Ctrl+? = Ctrl+Shift+/ elsewhere; no registry default uses them)
+    app("help.tutorial", "Tutorial", &[]),
+    app(
+        "help.shortcuts",
+        "Keyboard Shortcuts",
+        &[both("Shift+Cmd+/", "Ctrl+Shift+/")],
+    ),
 ];
 
 /// The application command `id`.

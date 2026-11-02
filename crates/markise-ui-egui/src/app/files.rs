@@ -103,16 +103,25 @@ impl MarkiseApp {
     }
 
     pub(super) fn new_document_now(&mut self) {
+        // empty text: new lines are written with LF (spec 05 default line ending)
+        self.install_untitled(
+            String::new(),
+            &format!("{}.{}", fsops::UNTITLED, fsops::DEFAULT_EXTENSION),
+        );
+    }
+
+    /// Replaces the document with an untitled one holding `text` (clean: closing it without
+    /// edits asks nothing). `name`: the file name Save As proposes, in [`Self::untitled_dir`].
+    pub(super) fn install_untitled(&mut self, text: String, name: &str) {
         // a load still running would replace the new document when it lands
         if let Some(l) = &self.loader {
             l.cancel();
         }
         self.load = None;
-        let placeholder = self
-            .untitled_dir()
-            .join(format!("{}.{}", fsops::UNTITLED, fsops::DEFAULT_EXTENSION));
-        // empty text: new lines are written with LF (spec 05 default line ending)
-        let doc = Document::parse(String::new(), self.parse.clone());
+        let placeholder = self.untitled_dir().join(name);
+        let version = DiskVersion::of_bytes(text.as_bytes(), None);
+        let bytes = text.len();
+        let doc = Document::parse(text, self.parse.clone());
         let model = DocModel::build(&doc, Some(&placeholder));
         let loaded = Loaded {
             path: placeholder,
@@ -120,9 +129,9 @@ impl MarkiseApp {
             model,
             timings: LoadTimings::default(),
             mtime: None,
-            version: DiskVersion::of_bytes(b"", None),
+            version,
             lossy: false,
-            bytes: 0,
+            bytes,
         };
         self.install_doc(loaded, true);
     }
