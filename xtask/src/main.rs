@@ -100,18 +100,32 @@ fn cmd_ci() -> Result<(), String> {
 
 /// The name filter is mandatory: bare `--ignored` also runs known-bug tests.
 fn cmd_heavy() -> Result<(), String> {
-    run_step(
-        "heavy",
-        &[
-            "test",
-            "--release",
-            "--workspace",
-            "--locked",
-            "heavy_suite_",
-            "--",
-            "--ignored",
-        ],
-    )?;
+    let args = [
+        "test",
+        "--release",
+        "--workspace",
+        "--locked",
+        "heavy_suite_",
+        "--",
+        "--ignored",
+    ];
+    println!("==> cargo {}", args.join(" "));
+    // glibc's mmap threshold is fixed from process start (thread-safe, unlike `mallopt`), so
+    // the scaling checks page-fault large blocks alike at both input sizes (issue #109; see
+    // `markise_corpus::assert_scales_linearly`). Non-glibc targets ignore the variable.
+    let tunable = "glibc.malloc.mmap_threshold=131072";
+    let tunables = match std::env::var("GLIBC_TUNABLES") {
+        Ok(t) if !t.is_empty() => format!("{t}:{tunable}"),
+        _ => tunable.to_string(),
+    };
+    let status = cargo()
+        .env("GLIBC_TUNABLES", tunables)
+        .args(args)
+        .status()
+        .map_err(|e| format!("heavy: {e}"))?;
+    if !status.success() {
+        return Err(format!("heavy failed ({status})"));
+    }
     let status = cargo()
         .env("PROPTEST_CASES", "3000")
         .args([
