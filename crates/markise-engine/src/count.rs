@@ -569,35 +569,27 @@ pub struct CounterStats {
 }
 
 /// A block's cached [`Counts`] (or none yet) in 16 bytes instead of 40: one is kept per
-/// view-model item (issue #29, part 4). Values saturate at `u32::MAX - 1`, which only a
-/// single block of 4 GiB could reach; packing and unpacking are consistent, so the running
-/// totals stay exact sums of the stored values.
+/// view-model item (issue #29, part 4). Counts that do not fit in 32 bits (only a block of
+/// ~4 GiB) are kept exactly, out of line in [`DocCounter::big`]; the slot then holds their
+/// index ([`Slot::BIG`] tag). Never capped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Slot([u32; 4]);
 
 impl Slot {
     const NONE: Slot = Slot([u32::MAX, 0, 0, 0]);
+    /// Tag in the first word: counts are in `DocCounter::big[self.0[1]]`.
+    const BIG: u32 = u32::MAX - 1;
+    /// Largest value stored inline.
+    const MAX_INLINE: u64 = u32::MAX as u64 - 2;
 
-    fn pack(c: Counts) -> Slot {
-        let f = |v: u64| v.min(u32::MAX as u64 - 1) as u32;
-        Slot([f(c.words), f(c.chars), f(c.chars_no_spaces), f(c.approx)])
-    }
-
-    fn get(self) -> Option<Counts> {
-        (self != Slot::NONE).then(|| Counts {
-            words: self.0[0] as u64,
-            chars: self.0[1] as u64,
-            chars_no_spaces: self.0[2] as u64,
-            approx: self.0[3] as u64,
-        })
+    /// The inline slot of `c`, `None` when a value does not fit.
+    fn inline(c: Counts) -> Option<Slot> {
+        let f = |v: u64| (v <= Slot::MAX_INLINE).then_some(v as u32);
+        Some(Slot([f(c.words)?, f(c.chars)?, f(c.chars_no_spaces)?, f(c.approx)?]))
     }
 
     fn is_some(self) -> bool {
         self != Slot::NONE
-    }
-
-    fn take(&mut self) -> Option<Counts> {
-        std::mem::replace(self, Slot::NONE).get()
     }
 }
 
@@ -614,6 +606,9 @@ pub struct DocCounter {
     /// Key of each item of the last reconciled model.
     keys: Vec<ItemKey>,
     counts: Vec<Slot>,
+    /// Out-of-line counts of [`Slot::BIG`] slots, and the free entries among them.
+    big: Vec<Counts>,
+    big_free: Vec<u32>,
     flags: Vec<u8>,
     /// Sum of the known counts.
     known: Counts,
@@ -645,11 +640,52 @@ impl DocCounter {
         (self.missing == 0).then_some(self.known)
     }
 
+    /// A slot holding `c` (out of line when it does not fit inline).
+    fn store(&mut self, c: Counts) -> Slot {
+        if let Some(s) = Slot::inline(c) {
+            return s;
+        }
+        let k = match self.big_free.pop() {
+            Some(k) => {
+                self.big[k as usize] = c;
+                k
+            }
+            None => {
+                self.big.push(c);
+                (self.big.len() - 1) as u32
+            }
+        };
+        Slot([Slot::BIG, k, 0, 0])
+    }
+
+    /// The counts held by `s` (`None`: not counted).
+    fn load(&self, s: Slot) -> Option<Counts> {
+        match s.0[0] {
+            u32::MAX => None,
+            Slot::BIG => Some(self.big[s.0[1] as usize]),
+            _ => Some(Counts {
+                words: s.0[0] as u64,
+                chars: s.0[1] as u64,
+                chars_no_spaces: s.0[2] as u64,
+                approx: s.0[3] as u64,
+            }),
+        }
+    }
+
+    /// `s` is no longer held anywhere: frees its out-of-line entry.
+    fn release(&mut self, s: Slot) {
+        if s.0[0] == Slot::BIG {
+            self.big_free.push(s.0[1]);
+        }
+    }
+
     fn forget(&mut self, i: usize) {
-        if let Some(c) = self.counts[i].take() {
+        let s = std::mem::replace(&mut self.counts[i], Slot::NONE);
+        if let Some(c) = self.load(s) {
             self.known -= c;
             self.missing += 1;
         }
+        self.release(s);
     }
 
     /// Call for every new revision of the document. Matches `model` against the model of the
@@ -684,12 +720,14 @@ impl DocCounter {
         }
         self.stats.reconciles += 1;
         let mut defs = false;
-        for (c, f) in self.counts.drain(pre..old - suf).zip(self.flags.drain(pre..old - suf)) {
-            defs |= f & DEF != 0;
-            match c.get() {
+        let gone: Vec<Slot> = self.counts.drain(pre..old - suf).collect();
+        defs |= self.flags.drain(pre..old - suf).any(|f| f & DEF != 0);
+        for s in gone {
+            match self.load(s) {
                 Some(c) => self.known -= c,
                 None => self.missing -= 1,
             }
+            self.release(s);
         }
         let fresh = n - suf - pre;
         let new: Vec<&markise_layout::model::Item> = items.iter().skip(pre).take(fresh).collect();
@@ -750,15 +788,20 @@ impl DocCounter {
             }
             let (f, e) = block_bounds(model, self.cursor);
             let c = count_block_at(doc, model, f, None);
-            let packed = Slot::pack(c.counts);
             for i in f..e {
-                let v = if i == f { packed } else { Slot::pack(Counts::default()) };
-                if !std::mem::replace(&mut self.counts[i], v).is_some() {
+                let v = if i == f {
+                    self.store(c.counts)
+                } else {
+                    self.store(Counts::default())
+                };
+                let old = std::mem::replace(&mut self.counts[i], v);
+                if !old.is_some() {
                     self.missing -= 1;
                 }
+                self.release(old);
                 self.flags[i] = (self.flags[i] & !REFS) | if c.refs { REFS } else { 0 };
             }
-            self.known += packed.get().expect("packed counts");
+            self.known += c.counts;
             self.stats.blocks_counted += 1;
             read += c.read;
             first = false;
@@ -798,7 +841,7 @@ impl DocCounter {
                 break;
             }
             let span = model.item_span(f);
-            match self.counts[f].get() {
+            match self.load(self.counts[f]) {
                 Some(c) if sel.start <= span.start && span.end <= sel.end => acc += c,
                 _ => {
                     let c = count_block_at(doc, model, f, Some(&sel));
@@ -810,15 +853,15 @@ impl DocCounter {
         }
         let (ma, mb) = (ends[0].1, ends[1].0);
         if mb > ma {
-            let sum = |r: Range<usize>, counts: &[Slot]| {
-                counts[r]
+            let sum = |r: Range<usize>| {
+                self.counts[r]
                     .iter()
-                    .fold(Counts::default(), |s, c| s + c.get().unwrap_or_default())
+                    .fold(Counts::default(), |s, c| s + self.load(*c).unwrap_or_default())
             };
             if mb - ma <= EXACT_ITEMS {
-                acc += sum(ma..mb, &self.counts);
+                acc += sum(ma..mb);
             } else if ma + (n - mb) <= EXACT_ITEMS {
-                acc += total - sum(0..ma, &self.counts) - sum(mb..n, &self.counts);
+                acc += total - sum(0..ma) - sum(mb..n);
             } else {
                 // proportional to the middle's share of the document's bytes
                 let bytes = (model.item_start(mb) - model.item_start(ma)) as u128;
@@ -859,22 +902,47 @@ mod tests {
     }
 
     #[test]
-    fn cached_slot_is_compact_and_round_trips() {
-        // issue #29, part 4: one slot per view-model item
+    fn cached_slot_is_compact_and_keeps_large_counts_exactly() {
+        // issue #29, part 4: one slot per view-model item; counts beyond 32 bits (a ~4 GiB
+        // block) go out of line instead of being capped
         assert_eq!(std::mem::size_of::<Slot>(), 16);
+        let mut d = DocCounter::new();
         let c = Counts {
             words: 3,
             chars: 17,
             chars_no_spaces: 14,
             approx: 1,
         };
-        assert_eq!(Slot::pack(c).get(), Some(c));
-        assert_eq!(Slot::pack(Counts::default()).get(), Some(Counts::default()));
-        assert_eq!(Slot::NONE.get(), None);
-        // saturates instead of wrapping or turning into "not counted"
-        let big = Slot::pack(Counts { words: u64::MAX, ..c });
-        assert!(big.is_some());
-        assert_eq!(big.get().unwrap().words, u32::MAX as u64 - 1);
+        for v in [c, Counts::default()] {
+            let s = d.store(v);
+            assert_eq!(d.load(s), Some(v));
+        }
+        assert_eq!(d.load(Slot::NONE), None);
+        assert!(d.big.is_empty());
+        let huge = Counts {
+            words: 1 << 33,
+            chars: (1 << 34) + 5,
+            ..c
+        };
+        let edge = Counts {
+            chars: Slot::MAX_INLINE + 1,
+            ..c
+        };
+        let (a, b) = (d.store(huge), d.store(edge));
+        assert_eq!((d.load(a), d.load(b)), (Some(huge), Some(edge)));
+        assert_eq!(d.big.len(), 2);
+        d.release(a);
+        let a2 = d.store(edge);
+        assert_eq!(d.big.len(), 2, "freed entry reused");
+        assert_eq!((d.load(a2), d.load(b)), (Some(edge), Some(edge)));
+        assert_eq!(
+            Slot::inline(Counts {
+                chars: Slot::MAX_INLINE,
+                ..c
+            })
+            .map(|s| s.0[1]),
+            Some(u32::MAX - 2)
+        );
     }
 
     #[test]

@@ -65,22 +65,57 @@ pub fn text_identity(text: &str) -> TextIdentity {
 /// is hashed in ~8 ms), which matters because loads, saves and the file watcher hash whole
 /// files (issue #29). File contents are not adversarial input to this comparison.
 ///
-/// The bytes are fed in [`HASH_CHUNK`] pieces, so [`disk_version`] can hash a file while
-/// streaming it through a small buffer with the same result (issue #29, part 4: no
-/// whole-file copy on the watcher or save threads).
+/// The bytes go through [`PieceHasher`]: aHash's result depends on how input is split
+/// across `write` calls, so every path (in-memory text, streamed file) feeds the same
+/// fixed [`HASH_CHUNK`] pieces and agrees for the same bytes however they were read
+/// (issue #29, part 4: [`disk_version`] streams the file instead of copying it).
 pub fn content_hash(bytes: &[u8]) -> u64 {
-    let mut h = ahash::AHasher::default();
-    for c in bytes.chunks(HASH_CHUNK) {
-        h.write(c);
-    }
+    let mut h = PieceHasher::default();
+    h.feed(bytes);
     h.finish()
 }
 
 /// Piece size of [`content_hash`].
 const HASH_CHUNK: usize = 1 << 20;
 
-/// Current version of `path`, `Ok(None)` if it does not exist. Streams the file (one
-/// [`HASH_CHUNK`] buffer), never holding all of it.
+/// Feeds aHash whole [`HASH_CHUNK`] pieces plus one final partial piece (none for empty
+/// input), independent of the boundaries of the [`PieceHasher::feed`] calls.
+#[derive(Default)]
+struct PieceHasher {
+    h: ahash::AHasher,
+    /// Start of the current piece (< `HASH_CHUNK` bytes).
+    part: Vec<u8>,
+}
+
+impl PieceHasher {
+    fn feed(&mut self, mut data: &[u8]) {
+        if !self.part.is_empty() {
+            let take = (HASH_CHUNK - self.part.len()).min(data.len());
+            self.part.extend_from_slice(&data[..take]);
+            data = &data[take..];
+            if self.part.len() < HASH_CHUNK {
+                return;
+            }
+            self.h.write(&self.part);
+            self.part.clear();
+        }
+        while data.len() >= HASH_CHUNK {
+            self.h.write(&data[..HASH_CHUNK]);
+            data = &data[HASH_CHUNK..];
+        }
+        self.part.extend_from_slice(data);
+    }
+
+    fn finish(mut self) -> u64 {
+        if !self.part.is_empty() {
+            self.h.write(&self.part);
+        }
+        self.h.finish()
+    }
+}
+
+/// Current version of `path`, `Ok(None)` if it does not exist. Streams the file through a
+/// [`HASH_CHUNK`] buffer, never holding all of it.
 pub fn disk_version(path: &Path) -> std::io::Result<Option<DiskVersion>> {
     use std::io::Read;
     let mut f = match std::fs::File::open(path) {
@@ -88,27 +123,18 @@ pub fn disk_version(path: &Path) -> std::io::Result<Option<DiskVersion>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    let mut h = ahash::AHasher::default();
+    let mut h = PieceHasher::default();
     let mut buf = vec![0u8; HASH_CHUNK];
     let mut len = 0u64;
     loop {
-        // fill a whole piece (short reads are allowed) so the pieces match `content_hash`
-        let mut n = 0;
-        while n < HASH_CHUNK {
-            match f.read(&mut buf[n..]) {
-                Ok(0) => break,
-                Ok(k) => n += k,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                h.feed(&buf[..n]);
+                len += n as u64;
             }
-        }
-        if n == 0 {
-            break;
-        }
-        h.write(&buf[..n]);
-        len += n as u64;
-        if n < HASH_CHUNK {
-            break;
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
         }
     }
     let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
@@ -280,16 +306,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn streamed_disk_version_matches_the_hash_of_the_bytes() {
-        // issue #29, part 4: the file is hashed through a buffer, piece boundaries included
+    fn streamed_disk_version_matches_the_in_memory_hash() {
+        // issue #29, part 4: the file is hashed through a buffer; the result must equal
+        // `content_hash` / `text_identity` of the same bytes in memory (the UI compares them)
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("f.md");
-        for n in [0, 1, HASH_CHUNK - 1, HASH_CHUNK, HASH_CHUNK + 1, 2 * HASH_CHUNK + 5] {
-            let bytes: Vec<u8> = (0..n).map(|i| (i * 7 % 251) as u8).collect();
+        let sizes = [
+            0,
+            1,
+            1000,
+            HASH_CHUNK - 1,
+            HASH_CHUNK,
+            HASH_CHUNK + 1,
+            3 * HASH_CHUNK + 12_345,
+        ];
+        for n in sizes {
+            let bytes: Vec<u8> = (0..n).map(|i| b'a' + (i * 7 % 26) as u8).collect();
             std::fs::write(&p, &bytes).unwrap();
             let v = disk_version(&p).unwrap().unwrap();
-            assert!(v.same_content(&DiskVersion::of_bytes(&bytes, None)), "{n} bytes");
+            assert_eq!(v.hash, content_hash(&bytes), "{n} bytes");
             assert_eq!(v.len, n as u64);
+            let text = std::str::from_utf8(&bytes).unwrap();
+            assert_eq!(v.text_identity(), text_identity(text), "{n} bytes");
+            // any feed boundaries give the same hash
+            for step in [1usize << 12, 7_777, HASH_CHUNK + 3] {
+                let mut h = PieceHasher::default();
+                bytes.chunks(step).for_each(|c| h.feed(c));
+                assert_eq!(h.finish(), v.hash, "{n} bytes fed in {step}");
+            }
         }
         assert_eq!(disk_version(&d.path().join("missing")).unwrap(), None);
     }
