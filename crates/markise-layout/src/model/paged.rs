@@ -20,7 +20,7 @@
 //! same source position, and placeholders cover exactly the full build's items between their
 //! neighbours ([`DocModel::check_against_full`], property-tested).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -239,13 +239,16 @@ pub struct PagingCounters {
     pub materialized: u64,
     /// Runs of items evicted to a placeholder.
     pub evicted: u64,
-    /// Edits that rebuilt a paged model (they reached a placeholder).
+    /// Edits that rebuilt a paged model (the format reported a change of everything).
     pub rebuilds: u64,
+    /// Edits applied by re-paging the region they reached ([`DocModel::apply_region`]).
+    pub regions: u64,
 }
 
 static MATERIALIZED: AtomicU64 = AtomicU64::new(0);
 static EVICTED: AtomicU64 = AtomicU64::new(0);
 static REBUILDS: AtomicU64 = AtomicU64::new(0);
+static REGIONS: AtomicU64 = AtomicU64::new(0);
 
 /// The process-wide counters of paged models.
 pub fn paging_counters() -> PagingCounters {
@@ -253,6 +256,7 @@ pub fn paging_counters() -> PagingCounters {
         materialized: MATERIALIZED.load(Ordering::Relaxed),
         evicted: EVICTED.load(Ordering::Relaxed),
         rebuilds: REBUILDS.load(Ordering::Relaxed),
+        regions: REGIONS.load(Ordering::Relaxed),
     }
 }
 
@@ -340,6 +344,7 @@ impl DocModel {
             min_level,
             page_tops: tops,
             cross,
+            toc_keys: None,
         };
         m.cross.pair(doc);
         let last = m.items.len().saturating_sub(1);
@@ -469,19 +474,13 @@ impl DocModel {
 
     /// Segments and keys the `[toc]` blocks among freshly flattened items (absolute origins)
     /// for the current outline, as [`DocModel::update_tocs`] does for a fresh model.
-    fn segment_tocs(&self, raw: Vec<Item>) -> Vec<Item> {
+    fn segment_tocs(&mut self, raw: Vec<Item>) -> Vec<Item> {
         if !raw.iter().any(|it| it.kind == ItemKind::Toc) {
             return raw;
         }
         let n = self.outline.len();
         let groups = toc_groups(n);
-        let keys: Vec<u64> = if groups == 0 {
-            vec![self.outline_hash()]
-        } else {
-            (0..groups)
-                .map(|gi| self.toc_group_hash(gi * SEG_UNITS..((gi + 1) * SEG_UNITS).min(n)))
-                .collect()
-        };
+        let keys = self.toc_keys();
         let mut out = Vec::with_capacity(raw.len() + groups);
         for it in raw {
             if it.kind == ItemKind::Toc && it.segment.is_none() {
@@ -489,7 +488,7 @@ impl DocModel {
                 if groups == 0 {
                     seg[0].hash = mix(it.content_hash, keys[0]);
                 } else {
-                    for (s, &gh) in seg.iter_mut().zip(&keys) {
+                    for (s, &gh) in seg.iter_mut().zip(keys.iter()) {
                         let sg = s.segment.as_ref().expect("a TOC segment");
                         s.hash = mix(it.content_hash, toc_segment_key(sg, gh));
                     }
@@ -500,6 +499,27 @@ impl DocModel {
             }
         }
         out
+    }
+
+    /// The keys of the `[toc]` segments for the current outline (one per segment, or the
+    /// whole outline's hash for an unsegmented TOC), cached until the outline changes (issue
+    /// #125, phase 5: materializing pages holding repeated TOCs hashed the outline per
+    /// segment every time).
+    fn toc_keys(&mut self) -> std::sync::Arc<[u64]> {
+        if let Some(k) = &self.toc_keys {
+            return k.clone();
+        }
+        let n = self.outline.len();
+        let groups = toc_groups(n);
+        let keys: std::sync::Arc<[u64]> = if groups == 0 {
+            vec![self.outline_hash()].into()
+        } else {
+            (0..groups)
+                .map(|gi| self.toc_group_hash(gi * SEG_UNITS..((gi + 1) * SEG_UNITS).min(n)))
+                .collect()
+        };
+        self.toc_keys = Some(keys.clone());
+        keys
     }
 
     /// Whether edit `e` (of the document this model was built for) reaches a page placeholder:
@@ -531,6 +551,162 @@ impl DocModel {
             }
         }
         false
+    }
+
+    /// Paged models: applies edit `e` by re-paging only the region it reaches (issue #125,
+    /// phase 5) instead of rebuilding the model: the items and placeholders the re-parsed
+    /// blocks overlap (extended to whole placeholders) are replaced by fresh placeholders for
+    /// the region's top-level blocks, built in page-sized batches (no full-size intermediate);
+    /// everything else shifts. The outline entries of the region are replaced (anchors of the
+    /// affected keys renumbered), the disclosure markers likewise, `[toc]` blocks re-keyed.
+    /// Used when an edit reaches a placeholder, or inserts more blocks than two pages hold (a
+    /// large paste: only the pages near the view are then materialized, by the view). The
+    /// view takes the result as a new model whose positions moved by the edit
+    /// ([`ModelChange::moved`]).
+    pub(super) fn apply_region(&mut self, doc: &dyn FormatDoc, e: &EditSummary) -> ModelChange {
+        let n_before = self.items.len();
+        let tops = self.page_tops.max(1);
+        // pre-edit bytes the update replaces: the edit and the re-parsed blocks
+        let old_lo = e.changed.start.min(e.reparsed.start);
+        let old_hi = e
+            .changed
+            .end
+            .max((e.reparsed.end as isize - e.delta).max(0) as usize)
+            .max(old_lo);
+        // the items and placeholders overlapping them (a placeholder as a whole)
+        let lo = self.items.partition_point(|o, it| o + it.len <= old_lo && o < old_lo);
+        let mut hi = self.items.partition_point(|o, _| o < old_hi).max(lo);
+        if old_hi == old_lo {
+            hi = lo;
+        }
+        let a = self.items.start(lo).map_or(old_lo, |o| o.min(old_lo));
+        let b = (lo..hi)
+            .map(|i| self.item_span(i).end)
+            .max()
+            .unwrap_or(old_hi)
+            .max(old_hi);
+        // the region's top-level blocks after the edit
+        let n_tops = doc.top_count();
+        // the first block after those of the item before the region (unchanged by the edit)
+        let t0 = match lo.checked_sub(1) {
+            Some(p) => doc
+                .top_at(self.item_span(p).end.saturating_sub(1).max(self.item_start(p)))
+                .map_or(0, |t| t + 1),
+            None => 0,
+        }
+        .min(n_tops);
+        let t1 = match self.items.start(hi) {
+            Some(next) => doc.top_at((next as isize + e.delta).max(0) as usize).unwrap_or(n_tops),
+            None => n_tops,
+        }
+        .clamp(t0, n_tops);
+        // fresh placeholders, headings and markers, a page of blocks at a time
+        let mut pages: Vec<Item> = Vec::new();
+        let mut heads: Vec<(usize, u8, usize)> = Vec::new(); // (page, level, heading start)
+        let mut markers = Vec::new();
+        let mut k = t0;
+        while k < t1 {
+            let end = (k + tops).min(t1);
+            let items = flatten(doc, k..end, lo == 0 && pages.is_empty());
+            k = end;
+            if items.is_empty() {
+                continue;
+            }
+            for it in &items {
+                if let ItemKind::Heading { level } = it.kind {
+                    heads.push((pages.len(), level, it.origin));
+                }
+            }
+            markers.extend(super::cross::markers_of(&items));
+            pages.push(page_item(&items, PageStats::of(&items, doc)));
+        }
+        if lo == 0 && pages.is_empty() && hi < n_before && !self.is_page(hi) {
+            // the document's first block changed status (its gap): rare, rebuild
+            return self.rebuild_paged(doc, e);
+        }
+        let added = pages.len();
+        self.items.0.splice(lo..hi, pages, e.delta);
+        let shift = added as isize - (hi - lo) as isize;
+        // outline: the region's entries replaced, later ones shift
+        let mut affected: HashSet<String> = HashSet::new();
+        let ka = self.outline.partition_point(|o| o.item < lo);
+        let kb = self.outline.partition_point(|o| o.item < hi).max(ka);
+        let fresh: Vec<OutlineEntry> = heads
+            .iter()
+            .map(|&(p, level, start)| {
+                let info = doc.heading(start).unwrap_or_default();
+                let key = info.key.to_lowercase();
+                affected.insert(key.clone());
+                OutlineEntry {
+                    level,
+                    text: info.text.trim().to_string(),
+                    anchor: String::new(), // numbered below (its key is affected)
+                    item: lo + p,
+                    key,
+                }
+            })
+            .collect();
+        for o in &mut self.outline[kb..] {
+            o.item = (o.item as isize + shift) as usize;
+        }
+        let old_entries: Vec<OutlineEntry> = self.outline.splice(ka..kb, fresh).collect();
+        let old_count = self.outline.len() + old_entries.len() - heads.len();
+        for o in &old_entries {
+            affected.insert(o.key.clone());
+        }
+        // `[toc]` runs of the replaced items go, later ones shift (re-keyed below)
+        self.toc_runs.retain(|r| r.0 < lo || r.0 >= hi);
+        for r in &mut self.toc_runs {
+            if r.0 >= hi {
+                r.0 = (r.0 as isize + shift) as usize;
+            }
+        }
+        // disclosure markers of the region
+        self.cross.replace_range(doc, a..b, markers, e.changed.clone(), e.delta);
+        // document-level inputs
+        if e.deps.resources {
+            self.root_url = doc.resource_root();
+            let h = images_hash(&self.root_url, &self.base_dir);
+            if h != self.ctx_hash {
+                self.ctx_hash = h;
+                self.cross.gens.resources += 1;
+            }
+        }
+        let mut touched: Vec<usize> = Vec::new();
+        if !e.deps.labels.is_empty() {
+            self.cross.gens.refs += 1;
+            self.retext_headings(doc, &e.deps.labels, &mut affected, &mut touched);
+        }
+        if !affected.is_empty() {
+            touched.extend(self.renumber_anchors(doc, &affected));
+        }
+        let min_level = self.outline.iter().map(|o| o.level).min().unwrap_or(1);
+        let changed_outline = old_count != self.outline.len()
+            || min_level != self.min_level
+            || !touched.is_empty()
+            || old_entries.len() != heads.len()
+            || old_entries
+                .iter()
+                .zip(&self.outline[ka..ka + heads.len()])
+                .any(|(x, y)| !super::same_entry(x, y));
+        self.min_level = min_level;
+        if changed_outline {
+            self.cross.gens.outline += 1;
+            self.toc_keys = None;
+        }
+        // the real `[toc]` blocks follow the outline (segments and keys)
+        if changed_outline && !self.toc_runs.is_empty() {
+            self.update_tocs(doc);
+        }
+        REGIONS.fetch_add(1, Ordering::Relaxed);
+        ModelChange {
+            replaced: 0..n_before,
+            inserted: 0..self.items.len(),
+            labels: e.deps.labels.clone(),
+            full: true,
+            moved: Some((e.changed.end, e.delta)),
+            ..Default::default()
+        }
     }
 
     /// A fresh paged model for `doc` keeping this model's document folder (full rebuild).

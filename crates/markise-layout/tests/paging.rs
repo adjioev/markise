@@ -181,6 +181,9 @@ fn the_toy_format_pages_too() {
 // ---- random edits and paging operations == full build -------------------------------------
 
 const SNIPPETS: &[&str] = &[
+    // many blocks at once (a paste spanning pages; with the deletions of up to 3,000 bytes,
+    // edits cross page boundaries and unloaded pages)
+    "## Pasted\n\none\n\n- two\n- three\n\n> four\n\n```\nfive\n```\n\n[toc]\n\n## Pasted\n\nsix\n\nseven\n\neight\n\n",
     "para text\n",
     "\n\n",
     "# Heading\n",
@@ -227,7 +230,7 @@ enum Op {
 
 fn ops() -> impl Strategy<Value = Vec<Op>> {
     let op = prop_oneof![
-        3 => (0usize..100_000, 0usize..20, 0usize..SNIPPETS.len(), any::<bool>(), any::<bool>())
+        3 => (0usize..100_000, prop_oneof![4 => 0usize..20, 1 => 0usize..3000], 0usize..SNIPPETS.len(), any::<bool>(), any::<bool>())
             .prop_map(|(pos, del, snip, ins, real)| Op::Edit { pos, del, snip, ins, real }),
         1 => (0usize..1000).prop_map(Op::Materialize),
         1 => (0usize..1000).prop_map(Op::Evict),
@@ -961,4 +964,40 @@ fn comment_cards_and_jumps_match_the_full_view() {
         jumped += 1;
     }
     assert!(jumped > 10);
+}
+
+/// Phase 5: edits reaching unloaded pages and large pastes re-page only the region they reach
+/// (no rebuild of the paged model), and the model equals a full build afterwards.
+#[test]
+fn edits_reaching_unloaded_pages_re_page_their_region() {
+    let src = big_docs().swap_remove(0);
+    let mut doc = md(&src);
+    let mut m = paged(&doc, 2);
+    assert!(m.page_count() > 20);
+    let before = markise_layout::paging_counters();
+    // a deletion spanning several unloaded pages in the middle
+    let (a, b) = (src.len() / 3, src.len() / 2);
+    let (a, b) = (src[..a].rfind("\n\n").unwrap() + 2, src[..b].rfind("\n\n").unwrap() + 2);
+    let e = doc.apply(&PatchSet::single_verbatim(a..b, ""));
+    m.apply(&doc, &e);
+    m.check_against_full(&doc).unwrap();
+    // a paste of many blocks near the start
+    let paste = "## P\n\nparagraph\n\n".repeat(200);
+    let at = doc.text().find("\n\n").unwrap() + 2;
+    let e = doc.apply(&PatchSet::single_verbatim(at..at, &paste));
+    m.apply(&doc, &e);
+    m.check_against_full(&doc).unwrap();
+    assert!(
+        m.page_count() > 100,
+        "the paste became placeholders: {}",
+        m.page_count()
+    );
+    // its undo (far from the edges)
+    let e = doc.apply(&PatchSet::single_verbatim(at..at + paste.len(), ""));
+    m.apply(&doc, &e);
+    m.check_against_full(&doc).unwrap();
+    let after = markise_layout::paging_counters();
+    // (process-wide counters: other tests may add to them, never take away)
+    assert!(after.regions >= before.regions + 3, "{before:?} → {after:?}");
+    materialize_all(&mut m, &doc).unwrap();
 }

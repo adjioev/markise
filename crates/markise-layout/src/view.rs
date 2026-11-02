@@ -80,6 +80,9 @@ pub struct View {
     caret_item: Option<usize>,
     /// What a paged model keeps materialized ([`paging`]).
     paging: paging::PagingState,
+    /// The scroll position by source when the model was handed out for an in-place update
+    /// ([`View::model_mut`]): a full replacement keeps it.
+    pre_edit_anchor: Option<(usize, usize, f32)>,
 }
 
 impl View {
@@ -114,6 +117,7 @@ impl View {
             focus: None,
             caret_item: None,
             paging: Default::default(),
+            pre_edit_anchor: None,
         };
         v.reset_heights();
         v
@@ -148,9 +152,15 @@ impl View {
     /// byte offset; layouts of unchanged items are reused from the cache (their keys are
     /// item-relative, so items below a change keep them).
     pub fn set_model(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>) {
+        let anchor_pos = self.model.items.start(self.anchor).unwrap_or(0);
+        self.set_model_at(doc, model, anchor_pos, 0.0);
+    }
+
+    /// [`View::set_model`] with the scroll anchor at source position `anchor_pos` (`off`
+    /// points into its item).
+    fn set_model_at(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>, anchor_pos: usize, off: f32) {
         self.focus = None;
         self.caret_item = None;
-        let anchor_pos = self.model.items.start(self.anchor).unwrap_or(0);
         self.doc = doc;
         self.model = model;
         self.disclosures = crate::disclosure::Disclosures::new(&self.model);
@@ -164,6 +174,9 @@ impl View {
         self.anchor_off = 0.0;
         self.reset_heights();
         self.anchor_at_offset(anchor_pos);
+        if off > 0.0 {
+            self.scroll_by(off);
+        }
     }
 
     /// Installs a model updated incrementally ([`DocModel::apply`]) for `doc`: heights of the
@@ -193,6 +206,8 @@ impl View {
     /// The model, for an in-place incremental update ([`DocModel::apply`]) followed by
     /// [`View::apply_change`]. Clones the model only if someone else holds it.
     pub fn model_mut(&mut self) -> &mut DocModel {
+        // the scroll position by source, in case the update replaces the whole model
+        self.pre_edit_anchor = Some(self.source_anchor());
         Arc::make_mut(&mut self.model)
     }
 
@@ -209,9 +224,21 @@ impl View {
         self.doc = doc;
         let old_focus = self.focus.take().map(|f| f.0);
         self.caret_item = None;
+        let pre = self.pre_edit_anchor.take();
         if change.full {
             let m = self.model.clone();
-            self.set_model(self.doc.clone(), m);
+            match pre {
+                // the model was updated in place: the anchor index named the old items, its
+                // source position (taken before the update) moves with the edit
+                Some((start, _, off)) => {
+                    let at = match change.moved {
+                        Some((end, delta)) if start >= end => (start as isize + delta).max(0) as usize,
+                        _ => start,
+                    };
+                    self.set_model_at(self.doc.clone(), m, at, off);
+                }
+                None => self.set_model(self.doc.clone(), m),
+            }
             return;
         }
         let splices = change.splices();

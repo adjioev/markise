@@ -311,6 +311,9 @@ pub struct DocModel {
     /// Cross-block facts for the whole document ([`cross`]): disclosures, dependency
     /// generations.
     pub cross: CrossBlockIndex,
+    /// Keys of the `[toc]` segments for the current outline (paged models materialize TOCs
+    /// often; `None`: computed when next needed). Dropped whenever the outline changes.
+    toc_keys: Option<Arc<[u64]>>,
 }
 
 mod cross;
@@ -347,6 +350,9 @@ pub struct ModelChange {
     pub resized: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
     /// The whole model was rebuilt.
     pub full: bool,
+    /// With [`ModelChange::full`] after an edit: the edit's old end and length change, so the
+    /// view keeps its position (positions at or after the end moved by the delta).
+    pub moved: Option<(usize, isize)>,
     /// The disclosures' markers or pairing changed, or items holding them came or went
     /// (materialization, eviction): the view derives its disclosure state again. Without it
     /// the derived state only follows the splices (ordinary typing).
@@ -435,6 +441,7 @@ impl DocModel {
             min_level: 1,
             page_tops: 0,
             cross,
+            toc_keys: None,
         };
         m.rebuild_outline(doc);
         m.update_tocs(doc);
@@ -481,8 +488,15 @@ impl DocModel {
     /// bytes `reparsed.start .. reparsed.end - delta` before the edit, the new ones cover
     /// `reparsed` after it.
     pub fn apply(&mut self, doc: &dyn FormatDoc, e: &EditSummary) -> ModelChange {
-        if self.is_paged() && (e.deps.all || self.edit_touches_page(e)) {
-            return self.rebuild_paged(doc, e);
+        if self.is_paged() {
+            if e.deps.all {
+                return self.rebuild_paged(doc, e);
+            }
+            // an edit reaching a placeholder, or inserting more blocks than two pages hold:
+            // re-page the region it reaches (issue #125, phase 5)
+            if self.edit_touches_page(e) || e.new_top.len() > 2 * self.page_tops {
+                return self.apply_region(doc, e);
+            }
         }
         if e.deps.all {
             let n = self.items.len();
@@ -702,47 +716,7 @@ impl DocModel {
         if !e.deps.labels.is_empty() {
             change.labels = e.deps.labels.clone();
             self.cross.gens.refs += 1;
-            let changed: HashSet<u64> = e.deps.labels.iter().copied().collect();
-            // (entry, heading start) of the headings using a changed label; the headings of
-            // a page placeholder are read from its blocks (paged models)
-            let mut retext: Vec<(usize, usize)> = Vec::new();
-            let mut k = 0;
-            while k < self.outline.len() {
-                let i = self.outline[k].item;
-                if let Some(ItemKind::Page(st)) = self.items.get(i).map(|it| &it.kind) {
-                    let kb = self.outline.partition_point(|o| o.item <= i);
-                    if st.heading_refs == 0 {
-                        k = kb;
-                        continue;
-                    }
-                    let heads = self
-                        .page_items(doc, i)
-                        .into_iter()
-                        .filter(|(_, it)| matches!(it.kind, ItemKind::Heading { .. }));
-                    for (j, (start, it)) in (k..kb).zip(heads) {
-                        if references_of(doc, &it, start).iter().any(|r| changed.contains(r)) {
-                            retext.push((j, start));
-                        }
-                    }
-                    k = kb;
-                    continue;
-                }
-                if self.item_references(doc, i).iter().any(|r| changed.contains(r)) {
-                    retext.push((k, self.item_start(i)));
-                }
-                k += 1;
-            }
-            for (k, start) in retext {
-                let info = doc.heading(start).unwrap_or_default();
-                let key = info.key.to_lowercase();
-                let o = &mut self.outline[k];
-                if key != o.key {
-                    affected.insert(std::mem::replace(&mut o.key, key.clone()));
-                    affected.insert(key);
-                }
-                o.text = info.text.trim().to_string();
-                touched.push(k);
-            }
+            self.retext_headings(doc, &e.deps.labels, &mut affected, &mut touched);
         }
         // anchors of the affected keys are renumbered in document order (R7.2: only anchors
         // sharing a key influence each other); the others are kept
@@ -773,6 +747,7 @@ impl DocModel {
         let outline_changed = count_changed || min_changed || !touched.is_empty();
         if outline_changed {
             self.cross.gens.outline += 1;
+            self.toc_keys = None;
         }
         if !self.toc_runs.is_empty() && (outline_changed || run_old.iter().any(Option::is_none)) {
             // entries from here on moved (their indices shifted)
@@ -789,6 +764,59 @@ impl DocModel {
             self.sync_tocs(doc, &shape, &mut change);
         }
         change
+    }
+
+    /// Reference definitions `labels` changed: refreshes the text and key of the outline
+    /// entries of headings that may use one (headings in page placeholders read from their
+    /// pages); changed keys go to `affected`, refreshed entries to `touched`.
+    fn retext_headings(
+        &mut self,
+        doc: &dyn FormatDoc,
+        labels: &[u64],
+        affected: &mut HashSet<String>,
+        touched: &mut Vec<usize>,
+    ) {
+        let changed: HashSet<u64> = labels.iter().copied().collect();
+        // (entry, heading start) of the headings using a changed label; the headings of
+        // a page placeholder are read from its blocks (paged models)
+        let mut retext: Vec<(usize, usize)> = Vec::new();
+        let mut k = 0;
+        while k < self.outline.len() {
+            let i = self.outline[k].item;
+            if let Some(ItemKind::Page(st)) = self.items.get(i).map(|it| &it.kind) {
+                let kb = self.outline.partition_point(|o| o.item <= i);
+                if st.heading_refs == 0 {
+                    k = kb;
+                    continue;
+                }
+                let heads = self
+                    .page_items(doc, i)
+                    .into_iter()
+                    .filter(|(_, it)| matches!(it.kind, ItemKind::Heading { .. }));
+                for (j, (start, it)) in (k..kb).zip(heads) {
+                    if references_of(doc, &it, start).iter().any(|r| changed.contains(r)) {
+                        retext.push((j, start));
+                    }
+                }
+                k = kb;
+                continue;
+            }
+            if self.item_references(doc, i).iter().any(|r| changed.contains(r)) {
+                retext.push((k, self.item_start(i)));
+            }
+            k += 1;
+        }
+        for (k, start) in retext {
+            let info = doc.heading(start).unwrap_or_default();
+            let key = info.key.to_lowercase();
+            let o = &mut self.outline[k];
+            if key != o.key {
+                affected.insert(std::mem::replace(&mut o.key, key.clone()));
+                affected.insert(key);
+            }
+            o.text = info.text.trim().to_string();
+            touched.push(k);
+        }
     }
 
     /// Brings the `[toc]` blocks in step with the outline after an edit (§7.4), without a scan
