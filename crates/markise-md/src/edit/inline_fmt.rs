@@ -18,17 +18,20 @@ use markise_doc::{
 use super::{Edits, is_sp};
 use crate::Document;
 
-/// The largest selection (bytes) the format toggles and Clear Format act on (issue #133).
-/// Planning and applying them is linear in the selection (about 45 ms per MiB measured with the
-/// corpus, release build), so this bounds the work of one command to a fraction of a second on
-/// the UI thread; a larger selection is refused (`NotApplicable`) and the commands are disabled.
+/// The most text (bytes) one format command parses (issue #133): the blocks a format toggle
+/// or Clear Format touches — whole blocks, from the start of the block at the selection start
+/// to the end of the block at its end — or the block Hyperlink / Image acts on. Planning and
+/// applying is linear in it (about 45 ms per MiB measured with the corpus, release build), so
+/// this bounds one command to a fraction of a second on the UI thread; beyond it the command is
+/// refused (`NotApplicable`) and disabled.
 pub const FORMAT_SELECTION_LIMIT: usize = 4 << 20;
 
-/// Up to this selection size (bytes) command enablement and check marks of the format
-/// commands are answered exactly, with a dry run of the plan; above it they are decided
-/// without planning (issue #133): a format toggle is enabled when the selection has text to
-/// format, Clear Format when it has text at all (running it may then find nothing to clear),
-/// and the toggles show unchecked.
+/// Up to this much touched text (bytes, measured like [`FORMAT_SELECTION_LIMIT`]) command
+/// enablement and check marks of the format commands are answered exactly, with a dry run of
+/// the plan; above it they are decided without planning or inline parsing (issue #133): a
+/// format toggle, Hyperlink and Image are enabled when the selection has text to act on,
+/// Clear Format when it has text at all (running it may then find nothing to clear), and the
+/// toggles show unchecked.
 pub const EXACT_QUERY_LIMIT: usize = 16 << 10;
 
 /// An inline style a format command toggles.
@@ -94,6 +97,14 @@ fn flat_nodes(nodes: &[InlineNode], depth: usize, out: &mut Vec<(usize, InlineNo
     }
 }
 
+/// Bytes of a leaf, first line start to last line end.
+fn leaf_len(lines: &[markise_doc::Span]) -> usize {
+    match (lines.first(), lines.last()) {
+        (Some(f), Some(e)) => e.end - f.start,
+        _ => 0,
+    }
+}
+
 /// One selected part of a text leaf.
 #[derive(Clone, Debug)]
 struct Part {
@@ -118,21 +129,10 @@ impl Document {
 
     /// The trimmed, normalised selected parts of the text leaves in `a..b`.
     fn format_parts(&self, a: usize, b: usize, st: Option<Style>) -> Vec<Part> {
-        self.first_format_parts(a, b, st, usize::MAX)
-    }
-
-    /// The first `max` parts of [`Document::format_parts`]: the leaves after them are not
-    /// visited, so asking for one part of a huge selection costs one block (issue #133).
-    fn first_format_parts(&self, a: usize, b: usize, st: Option<Style>, max: usize) -> Vec<Part> {
         let mut parts = Vec::new();
-        if max == 0 {
-            return parts;
-        }
         self.walk_leaves_in(a, b, &mut |leaf| {
-            if let Some(p) = self.leaf_part(&leaf, a, b, st) {
-                parts.push(p);
-            }
-            parts.len() < max
+            parts.extend(self.leaf_part(&leaf, a, b, st));
+            true
         });
         parts
     }
@@ -140,6 +140,44 @@ impl Document {
     /// The trimmed, normalised part of `leaf` inside `a..b` (`None`: nothing but whitespace,
     /// or not a text leaf).
     fn leaf_part(&self, leaf: &super::Leaf, a: usize, b: usize, st: Option<Style>) -> Option<Part> {
+        let (s, e) = self.leaf_trim(leaf, a, b)?;
+        #[cfg(test)]
+        super::tests::PARSES.with(|v| v.set(v.get() + 1));
+        let rich = self.inline(InlineSource::Lines(&leaf.lines), 0);
+        let (s, e) = normalize(&rich, s, e, st);
+        Some(Part { s, e, rich })
+    }
+
+    /// The first text leaf in `a..b` with a part there, and that part trimmed (before
+    /// normalising): no inline parsing (issue #133).
+    fn first_text_leaf(&self, a: usize, b: usize) -> Option<(super::Leaf, usize, usize)> {
+        let mut found = None;
+        self.walk_leaves_in(a, b, &mut |leaf| match self.leaf_trim(&leaf, a, b) {
+            Some((s, e)) => {
+                found = Some((leaf, s, e));
+                false
+            }
+            None => true,
+        });
+        found
+    }
+
+    /// The bytes a format command over `a..b` parses: from the start of the block at `a` to
+    /// the end of the block at `b` (blocks are parsed whole).
+    fn touched_len(&self, a: usize, b: usize) -> usize {
+        let block = |at: usize| {
+            self.leaf_rel(at)
+                .map(|(blk, o)| (blk.span.start + o, blk.span.end + o))
+                .filter(|&(s, e)| s <= at && at <= e)
+        };
+        let s = block(a).map_or(a, |(s, _)| s.min(a));
+        let e = block(b).map_or(b, |(_, e)| e.max(b));
+        e - s
+    }
+
+    /// The trimmed part of `leaf` inside `a..b` before normalising (`None`: nothing but
+    /// whitespace, or not a text leaf).
+    fn leaf_trim(&self, leaf: &super::Leaf, a: usize, b: usize) -> Option<(usize, usize)> {
         let text = self.text().as_bytes();
         if !Self::text_leaf_kind(&leaf.kind) || leaf.lines.is_empty() {
             return None;
@@ -201,9 +239,7 @@ impl Document {
         if s >= e {
             return None;
         }
-        let rich = self.inline(InlineSource::Lines(&leaf.lines), 0);
-        let (s, e) = normalize(&rich, s, e, st);
-        Some(Part { s, e, rich })
+        Some((s, e))
     }
 
     /// The node of style `st` containing part `p` (innermost), if any.
@@ -262,7 +298,7 @@ impl Document {
             ));
         }
         let r0 = sel.range();
-        if r0.len() > FORMAT_SELECTION_LIMIT {
+        if self.touched_len(r0.start, r0.end) > FORMAT_SELECTION_LIMIT {
             return Err(PlanError::NotApplicable("selection too large to format"));
         }
         let parts = self.format_parts(r0.start, r0.end, Some(st));
@@ -369,8 +405,8 @@ impl Document {
             if !Self::text_leaf_kind(&leaf.kind) || leaf.lines.is_empty() {
                 return false;
             }
-            if st.textual() {
-                return false;
+            if st.textual() || leaf_len(&leaf.lines) > EXACT_QUERY_LIMIT {
+                return false; // not computed in a huge block (issue #133)
             }
             let rich = self.inline(InlineSource::Lines(&leaf.lines), 0);
             let mut v = Vec::new();
@@ -379,40 +415,65 @@ impl Document {
                 st.kind_matches(&n.kind) && n.content.start as usize <= a && a <= n.content.end as usize
             });
         }
-        if r0.len() > EXACT_QUERY_LIMIT {
+        if self.touched_len(r0.start, r0.end) > EXACT_QUERY_LIMIT {
             return false; // not computed for large selections (issue #133)
         }
         let parts = self.format_parts(r0.start, r0.end, Some(st));
         !parts.is_empty() && parts.iter().all(|p| self.styled_node(p, st).is_some())
     }
 
-    /// `can_plan` of format toggle `st` (issue #133): exact up to [`EXACT_QUERY_LIMIT`];
-    /// above it, whether [`Document::plan_format`] would find something to act on — a part
-    /// with text (only the first one is looked for) or, failing that, a text block at the
-    /// selection start — without planning. Never above [`FORMAT_SELECTION_LIMIT`].
+    /// `can_plan` of format toggle `st` (issue #133): exact up to [`EXACT_QUERY_LIMIT`] of
+    /// touched text; above it, whether [`Document::plan_format`] would find something to act
+    /// on — a block with text in the selection (the first one is looked for, not parsed) or,
+    /// failing that, a text block at the selection start. Never above
+    /// [`FORMAT_SELECTION_LIMIT`].
     pub(crate) fn can_format(&self, st: Style, req: &PlanRequest) -> bool {
         let sel = req.selection.primary();
         let r0 = sel.range();
-        if sel.is_caret() || r0.len() <= EXACT_QUERY_LIMIT {
+        if sel.is_caret() {
             return self.plan_format(st, req).is_ok();
         }
-        if r0.len() > FORMAT_SELECTION_LIMIT {
+        let touched = self.touched_len(r0.start, r0.end);
+        if touched <= EXACT_QUERY_LIMIT {
+            return self.plan_format(st, req).is_ok();
+        }
+        if touched > FORMAT_SELECTION_LIMIT {
             return false;
         }
-        !self.first_format_parts(r0.start, r0.end, Some(st), 1).is_empty()
+        self.first_text_leaf(r0.start, r0.end).is_some()
             || self.leaf(r0.start).is_some_and(|l| Self::text_leaf_kind(&l.kind))
     }
 
-    /// `can_plan` of Clear Format (issue #133): exact up to [`EXACT_QUERY_LIMIT`]; above it,
-    /// whether the selection has text (the first part is looked for, not the formatting to
-    /// clear). Never above [`FORMAT_SELECTION_LIMIT`].
+    /// `can_plan` of Clear Format (issue #133): exact up to [`EXACT_QUERY_LIMIT`] of touched
+    /// text; above it, whether the selection has text (the first text block is looked for,
+    /// not parsed for formatting to clear). Never above [`FORMAT_SELECTION_LIMIT`].
     pub(crate) fn can_clear_format(&self, req: &PlanRequest) -> bool {
         let sel = req.selection.primary();
         let r0 = sel.range();
-        if sel.is_caret() || r0.len() <= EXACT_QUERY_LIMIT {
+        if sel.is_caret() {
             return self.plan_clear_format(req).is_ok();
         }
-        r0.len() <= FORMAT_SELECTION_LIMIT && !self.first_format_parts(r0.start, r0.end, None, 1).is_empty()
+        let touched = self.touched_len(r0.start, r0.end);
+        if touched <= EXACT_QUERY_LIMIT {
+            return self.plan_clear_format(req).is_ok();
+        }
+        touched <= FORMAT_SELECTION_LIMIT && self.first_text_leaf(r0.start, r0.end).is_some()
+    }
+
+    /// `can_plan` of Hyperlink / Image (issue #133): they act on the first text block of the
+    /// selection only. Exact when that block is at most [`EXACT_QUERY_LIMIT`]; otherwise
+    /// enabled without parsing it, unless it is over [`FORMAT_SELECTION_LIMIT`].
+    pub(crate) fn can_link(&self, image: bool, req: &PlanRequest) -> bool {
+        let sel = req.selection.primary();
+        if sel.is_caret() {
+            return self.plan_link(image, req).is_ok();
+        }
+        let r0 = sel.range();
+        match self.first_text_leaf(r0.start, r0.end) {
+            None => false,
+            Some((leaf, ..)) if leaf_len(&leaf.lines) <= EXACT_QUERY_LIMIT => self.plan_link(image, req).is_ok(),
+            Some((leaf, ..)) => leaf_len(&leaf.lines) <= FORMAT_SELECTION_LIMIT,
+        }
     }
 
     /// Hyperlink / image (spec 02 §3.3): wraps the selection as `[sel](url)` / `![sel](url)`
@@ -439,9 +500,17 @@ impl Document {
             ));
         }
         let r0 = sel.range();
-        // only the first part is used: the rest of a (huge) selection is never visited
-        let parts = self.first_format_parts(r0.start, r0.end, None, 1);
-        let p = parts.first().ok_or(PlanError::NotApplicable("nothing selected"))?;
+        // only the first part is used: the rest of a (huge) selection is never visited, and
+        // its block is parsed only when it is not over the limit (issue #133)
+        let (leaf, ..) = self
+            .first_text_leaf(r0.start, r0.end)
+            .ok_or(PlanError::NotApplicable("nothing selected"))?;
+        if leaf_len(&leaf.lines) > FORMAT_SELECTION_LIMIT {
+            return Err(PlanError::NotApplicable("block too large to format"));
+        }
+        let p = &self
+            .leaf_part(&leaf, r0.start, r0.end, None)
+            .ok_or(PlanError::NotApplicable("nothing selected"))?;
         if !image {
             let mut v = Vec::new();
             flat_nodes(&p.rich.nodes, 0, &mut v);
@@ -479,7 +548,7 @@ impl Document {
         }
         let text = self.text();
         let r0 = sel.range();
-        if r0.len() > FORMAT_SELECTION_LIMIT {
+        if self.touched_len(r0.start, r0.end) > FORMAT_SELECTION_LIMIT {
             return Err(PlanError::NotApplicable("selection too large to format"));
         }
         let parts = self.format_parts(r0.start, r0.end, None);

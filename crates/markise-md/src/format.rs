@@ -2111,6 +2111,9 @@ impl EditBehavior for Document {
         if id == planners::CLEAR_FORMAT {
             return self.can_clear_format(req);
         }
+        if id == planners::LINK || id == planners::IMAGE {
+            return self.can_link(id == planners::IMAGE, req);
+        }
         self.plan(id, req).is_ok()
     }
 
