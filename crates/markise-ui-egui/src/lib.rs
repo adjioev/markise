@@ -24,6 +24,7 @@ pub mod text_paint;
 pub mod themes;
 pub mod toolbar;
 pub mod tutorial;
+pub mod updates;
 pub mod viewer;
 #[doc(hidden)]
 pub mod wake_track;

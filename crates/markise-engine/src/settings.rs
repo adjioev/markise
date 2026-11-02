@@ -33,6 +33,9 @@
 //! | `markdown` | object: `wikilinks` (default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`), `commentDisplay` (`"margin"` cards, default, or `"bubbles"` with hover popovers) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
 //! | `side_by_side_split` | Side by Side divider position: fraction of the editor width given to the source pane, `0.15`–`0.85` (spec 04 §3.3); omitted until the divider is moved | `0.5` |
 //! | `tutorialShown` | `true` once the welcome tutorial was opened at first launch (issue #63); omitted until then | `false` |
+//! | `updates.autoCheck` | `true` / `false`: check GitHub for a newer release at launch, at most once a day (Preferences → General; issue #70); omitted until the user answered the first-launch question — omitted means off | none |
+//! | `updates.lastCheck` | Unix time (seconds) of the last update check that got an answer from GitHub (throttling); omitted until then | none |
+//! | `updates.dismissed` | the version (`"0.2.0"`) whose update notice the user dismissed; a newer version is shown again | none |
 //! | `zoom` | whole-window zoom factor, `0.5`–`3.0` (View → Zoom In / Zoom Out / Actual Size, issue #43); omitted until zoomed | `1.0` |
 //!
 //! **Versions.** A version-1 file (or one without `version`) stores one `theme` id; it migrates
@@ -642,6 +645,13 @@ pub struct Settings {
     pub zoom: Option<f32>,
     /// The welcome tutorial was opened at first launch (key `tutorialShown`, issue #63).
     pub tutorial_shown: bool,
+    /// Automatic update checks (key `updates.autoCheck`, issue #70): `None` until the user
+    /// answered the first-launch question (off until then).
+    pub update_auto: Option<bool>,
+    /// Unix time of the last update check GitHub answered (key `updates.lastCheck`).
+    pub update_last_check: Option<u64>,
+    /// The version whose update notice was dismissed (key `updates.dismissed`).
+    pub update_dismissed: Option<String>,
     /// The file's schema version (written back as [`VERSION`]; a newer file is not written).
     pub version: u64,
     /// Keys this version does not know, kept verbatim.
@@ -689,6 +699,9 @@ impl Default for Settings {
             side_by_side_split: None,
             zoom: None,
             tutorial_shown: false,
+            update_auto: None,
+            update_last_check: None,
+            update_dismissed: None,
             version: VERSION,
             extra: Map::new(),
         }
@@ -801,6 +814,9 @@ pub struct SettingsPatch {
     pub side_by_side_split: Option<f32>,
     pub zoom: Option<f32>,
     pub tutorial_shown: Option<bool>,
+    pub update_auto: Option<bool>,
+    pub update_last_check: Option<u64>,
+    pub update_dismissed: Option<String>,
 }
 
 /// Valid whole-window zoom factors (issue #43: 50–300 %).
@@ -889,6 +905,15 @@ impl SettingsPatch {
         if let Some(v) = self.tutorial_shown {
             s.tutorial_shown = v;
         }
+        if let Some(v) = self.update_auto {
+            s.update_auto = Some(v);
+        }
+        if let Some(v) = self.update_last_check {
+            s.update_last_check = Some(v);
+        }
+        if let Some(v) = &self.update_dismissed {
+            s.update_dismissed = Some(v.clone());
+        }
     }
 
     /// Forgets the fields `saved` sets (they were written later): an older failed change must
@@ -911,6 +936,15 @@ impl SettingsPatch {
         }
         if saved.tutorial_shown.is_some() {
             self.tutorial_shown = None;
+        }
+        if saved.update_auto.is_some() {
+            self.update_auto = None;
+        }
+        if saved.update_last_check.is_some() {
+            self.update_last_check = None;
+        }
+        if saved.update_dismissed.is_some() {
+            self.update_dismissed = None;
         }
         if saved.diagrams.is_some() {
             self.diagrams = None;
@@ -1023,6 +1057,15 @@ impl SettingsPatch {
         if later.tutorial_shown.is_some() {
             self.tutorial_shown = later.tutorial_shown;
         }
+        if later.update_auto.is_some() {
+            self.update_auto = later.update_auto;
+        }
+        if later.update_last_check.is_some() {
+            self.update_last_check = later.update_last_check;
+        }
+        if later.update_dismissed.is_some() {
+            self.update_dismissed = later.update_dismissed;
+        }
     }
 
     /// JSON form (recovery file): absent = unchanged, `null` = cleared override.
@@ -1045,6 +1088,15 @@ impl SettingsPatch {
         }
         if let Some(v) = self.tutorial_shown {
             m.insert(TUTORIAL_SHOWN_KEY.into(), Value::from(v));
+        }
+        if let Some(v) = self.update_auto {
+            m.insert(UPDATE_AUTO_KEY.into(), Value::from(v));
+        }
+        if let Some(v) = self.update_last_check {
+            m.insert(UPDATE_LAST_CHECK_KEY.into(), Value::from(v));
+        }
+        if let Some(v) = &self.update_dismissed {
+            m.insert(UPDATE_DISMISSED_KEY.into(), Value::from(v.clone()));
         }
         if let Some(v) = self.diagrams {
             m.insert("diagrams".into(), Value::from(v));
@@ -1120,6 +1172,9 @@ impl SettingsPatch {
             side_by_side_split: m.get("side_by_side_split").and_then(valid_split),
             zoom: m.get("zoom").and_then(valid_zoom),
             tutorial_shown: m.get(TUTORIAL_SHOWN_KEY).and_then(Value::as_bool),
+            update_auto: m.get(UPDATE_AUTO_KEY).and_then(Value::as_bool),
+            update_last_check: m.get(UPDATE_LAST_CHECK_KEY).and_then(Value::as_u64),
+            update_dismissed: m.get(UPDATE_DISMISSED_KEY).and_then(valid_dismissed),
             diagrams: m.get("diagrams").and_then(Value::as_bool),
             show_toolbar: m.get("showToolbar").and_then(Value::as_bool),
             show_recent: m.get(SHOW_RECENT_KEY).and_then(Value::as_bool),
@@ -1175,6 +1230,20 @@ pub const SHOW_WORD_COUNT_KEY: &str = "statusBar.showWordCount";
 pub const COUNT_MODE_KEY: &str = "statusBar.count";
 /// Settings key of [`Settings::tutorial_shown`].
 pub const TUTORIAL_SHOWN_KEY: &str = "tutorialShown";
+/// Settings key of [`Settings::update_auto`].
+pub const UPDATE_AUTO_KEY: &str = "updates.autoCheck";
+/// Settings key of [`Settings::update_last_check`].
+pub const UPDATE_LAST_CHECK_KEY: &str = "updates.lastCheck";
+/// Settings key of [`Settings::update_dismissed`].
+pub const UPDATE_DISMISSED_KEY: &str = "updates.dismissed";
+
+/// A dismissed version: a short version-like string (anything else is ignored).
+fn valid_dismissed(v: &Value) -> Option<String> {
+    v.as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && t.len() <= 64 && t.bytes().all(|b| b.is_ascii_graphic()))
+        .map(str::to_string)
+}
 const MAX_BYTES: u64 = 1 << 20;
 
 impl Settings {
@@ -1241,6 +1310,11 @@ impl Settings {
         if let Some(Value::Bool(b)) = map.remove(TUTORIAL_SHOWN_KEY) {
             s.tutorial_shown = b;
         }
+        if let Some(Value::Bool(b)) = map.remove(UPDATE_AUTO_KEY) {
+            s.update_auto = Some(b);
+        }
+        s.update_last_check = map.remove(UPDATE_LAST_CHECK_KEY).as_ref().and_then(Value::as_u64);
+        s.update_dismissed = map.remove(UPDATE_DISMISSED_KEY).as_ref().and_then(valid_dismissed);
         if let Some(m) = map
             .remove(COUNT_MODE_KEY)
             .as_ref()
@@ -1308,6 +1382,16 @@ impl Settings {
         // the default (not shown yet) is not written
         if self.tutorial_shown {
             map.insert(TUTORIAL_SHOWN_KEY.into(), Value::from(true));
+        }
+        // update check state: omitted until set
+        if let Some(v) = self.update_auto {
+            map.insert(UPDATE_AUTO_KEY.into(), Value::from(v));
+        }
+        if let Some(v) = self.update_last_check {
+            map.insert(UPDATE_LAST_CHECK_KEY.into(), Value::from(v));
+        }
+        if let Some(v) = &self.update_dismissed {
+            map.insert(UPDATE_DISMISSED_KEY.into(), Value::from(v.clone()));
         }
         let o = self.overrides.to_json(&self.overrides_extra);
         if o.as_object().is_some_and(|m| !m.is_empty()) {
@@ -1607,6 +1691,46 @@ mod tests {
         let mut t = Settings::default();
         q.apply(&mut t);
         assert!(t.tutorial_shown);
+    }
+
+    #[test]
+    fn update_check_state_round_trips_and_patches_member_by_member() {
+        let d = Settings::default();
+        assert_eq!(
+            (d.update_auto, d.update_last_check, d.update_dismissed.as_deref()),
+            (None, None, None)
+        );
+        assert!(!d.to_json().contains("updates."), "defaults are not written");
+        let s = Settings {
+            update_auto: Some(true),
+            update_last_check: Some(1_800_000_000),
+            update_dismissed: Some("0.2.0".into()),
+            ..Settings::default()
+        };
+        let back = Settings::from_json(&s.to_json()).unwrap();
+        assert_eq!(back.update_auto, Some(true));
+        assert_eq!(back.update_last_check, Some(1_800_000_000));
+        assert_eq!(back.update_dismissed.as_deref(), Some("0.2.0"));
+        // invalid values are ignored
+        let bad =
+            Settings::from_json(r#"{"updates.autoCheck":"yes","updates.lastCheck":-5,"updates.dismissed":"a b"}"#)
+                .unwrap();
+        assert_eq!(
+            (bad.update_auto, bad.update_last_check, bad.update_dismissed),
+            (None, None, None)
+        );
+        // a patch carries only its members (two instances do not overwrite each other)
+        let p = SettingsPatch {
+            update_last_check: Some(5),
+            ..Default::default()
+        };
+        let p2 = SettingsPatch::from_json(&p.to_json()).unwrap();
+        assert_eq!(p2, p);
+        let mut t = s.clone();
+        p2.apply(&mut t);
+        assert_eq!(t.update_last_check, Some(5));
+        assert_eq!(t.update_auto, Some(true));
+        assert_eq!(t.update_dismissed.as_deref(), Some("0.2.0"));
     }
 
     /// ADR 0012: CriticMarkup and kept export comments default on, round-trip, and an older

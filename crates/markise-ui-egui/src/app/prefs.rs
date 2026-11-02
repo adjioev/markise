@@ -98,6 +98,11 @@ impl MarkiseApp {
             toolbar_position: self.toolbar_position(),
             show_recent: self.show_recent(),
             show_word_count: self.show_word_count(),
+            update_auto: self.update_auto(),
+            update_unavailable: match &self.updates.source {
+                crate::updates::UpdateSource::Off(why) => Some(why.clone()),
+                crate::updates::UpdateSource::Client(_) => None,
+            },
             zoom: self.zoom(),
             zoom_range: ZOOM_RANGE,
             settings_file: t.settings_file(),
@@ -169,6 +174,7 @@ impl MarkiseApp {
             Change::ToolbarPosition(p) => self.set_toolbar_position(p),
             Change::ShowRecent(on) => self.set_show_recent(on),
             Change::ShowWordCount(on) => self.set_show_word_count(on),
+            Change::UpdateAuto(on) => self.set_update_auto(on),
             Change::Zoom(z) => self.set_zoom(z),
             Change::Images(s) => self.themes.set_image_settings(s),
             Change::RevealSettingsFile => {

@@ -342,6 +342,10 @@ pub struct ThemeManager {
     chose_toolbar: bool,
     chose_recent: bool,
     chose_word_count: bool,
+    /// Update check state changed before the settings file arrived (those members win).
+    chose_update_auto: bool,
+    chose_update_last_check: bool,
+    chose_update_dismissed: bool,
     chose_count_mode: bool,
     chose_toolbar_position: bool,
     chose_editing: bool,
@@ -428,6 +432,9 @@ impl ThemeManager {
             chose_toolbar: false,
             chose_recent: false,
             chose_word_count: false,
+            chose_update_auto: false,
+            chose_update_last_check: false,
+            chose_update_dismissed: false,
             chose_count_mode: false,
             chose_toolbar_position: false,
             chose_editing: false,
@@ -885,6 +892,53 @@ impl ThemeManager {
         }
     }
 
+    /// Automatic update checks (settings key `updates.autoCheck`, issue #70): `None` until the
+    /// user answered the first-launch question (off until then).
+    pub fn update_auto(&self) -> Option<bool> {
+        self.settings.update_auto
+    }
+
+    /// Preferences → General → Check for updates automatically, or the first-launch answer;
+    /// persisted like the other settings.
+    pub fn set_update_auto(&mut self, on: bool) {
+        self.chose_update_auto = true;
+        if self.settings.update_auto != Some(on) {
+            self.settings.update_auto = Some(on);
+            self.dirty.update_auto = Some(on);
+            self.schedule_save();
+        }
+    }
+
+    /// Unix time of the last update check GitHub answered (settings key `updates.lastCheck`).
+    pub fn update_last_check(&self) -> Option<u64> {
+        self.settings.update_last_check
+    }
+
+    /// Records a completed update check; persisted like the other settings.
+    pub fn set_update_last_check(&mut self, t: u64) {
+        self.chose_update_last_check = true;
+        if self.settings.update_last_check != Some(t) {
+            self.settings.update_last_check = Some(t);
+            self.dirty.update_last_check = Some(t);
+            self.schedule_save();
+        }
+    }
+
+    /// The version whose update notice was dismissed (settings key `updates.dismissed`).
+    pub fn update_dismissed(&self) -> Option<&str> {
+        self.settings.update_dismissed.as_deref()
+    }
+
+    /// Dismisses the update notice of `version`; persisted like the other settings.
+    pub fn set_update_dismissed(&mut self, version: &str) {
+        self.chose_update_dismissed = true;
+        if self.settings.update_dismissed.as_deref() != Some(version) {
+            self.settings.update_dismissed = Some(version.to_string());
+            self.dirty.update_dismissed = Some(version.to_string());
+            self.schedule_save();
+        }
+    }
+
     /// The count the status bar shows (settings key `statusBar.count`, default words).
     pub fn count_mode(&self) -> markise_engine::settings::CountMode {
         self.settings.count_mode
@@ -1195,6 +1249,15 @@ impl ThemeManager {
                 }
                 if self.chose_word_count {
                     self.settings.show_word_count = chosen.show_word_count;
+                }
+                if self.chose_update_auto {
+                    self.settings.update_auto = chosen.update_auto;
+                }
+                if self.chose_update_last_check {
+                    self.settings.update_last_check = chosen.update_last_check;
+                }
+                if self.chose_update_dismissed {
+                    self.settings.update_dismissed = chosen.update_dismissed.clone();
                 }
                 if self.chose_count_mode {
                     self.settings.count_mode = chosen.count_mode;

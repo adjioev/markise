@@ -56,6 +56,7 @@ mod menus;
 mod prefs;
 mod quick_open;
 mod review;
+mod updates;
 mod vault;
 mod workflow;
 pub use menus::MenuHost;
@@ -120,6 +121,9 @@ pub struct AppOptions {
     /// Open the welcome tutorial at the first launch ([`crate::tutorial`]; the settings flag
     /// `tutorialShown` records it). The desktop app sets it; tests opt in.
     pub welcome: bool,
+    /// Update checks (issue #70): the desktop app passes its HTTP client; the default (tests,
+    /// tools) is [`crate::updates::UpdateSource::Off`]: nothing ever contacts the network.
+    pub updates: crate::updates::UpdateSource,
 }
 
 impl Default for AppOptions {
@@ -140,6 +144,7 @@ impl Default for AppOptions {
             confirm: Arc::new(crate::confirm::InApp),
             clipboard_files: Arc::new(crate::clipboard::NoFiles),
             welcome: false,
+            updates: Default::default(),
         }
     }
 }
@@ -530,6 +535,8 @@ pub struct MarkiseApp {
     welcome_pending: bool,
     /// Help → Keyboard Shortcuts.
     cheat_sheet: crate::shortcuts::CheatSheet,
+    /// Update check: the launch check, Check for Updates…, the notice (issue #70).
+    updates: crate::updates::UpdateState,
 }
 
 impl MarkiseApp {
@@ -626,6 +633,7 @@ impl MarkiseApp {
             first_theme_wait: FIRST_THEME_WAIT,
             welcome_pending: opts.welcome,
             cheat_sheet: Default::default(),
+            updates: crate::updates::UpdateState::new(opts.updates),
         }
     }
 
@@ -873,6 +881,7 @@ impl MarkiseApp {
             && !self.highlighter.as_ref().is_some_and(|h| h.busy())
             && !self.diagram_renderer.as_ref().is_some_and(|d| d.busy())
             && !self.export.is_running()
+            && self.updates.running.is_none()
             && self.word_count.as_ref().is_none_or(|(_, w)| w.settled())
             && self.doc.as_ref().is_none_or(|d| d.viewer.comments_settled())
             // every published result's wake-up has returned (a result can be taken before
@@ -2109,6 +2118,8 @@ impl MarkiseApp {
         self.poll_themes(ctx);
         self.workflow_poll(ctx);
         self.first_launch_tutorial();
+        self.launch_update_check();
+        self.poll_update_check();
         if self.export.poll() && self.export.is_asking_large() {
             self.opened_export_question();
         }
@@ -2207,6 +2218,7 @@ impl MarkiseApp {
         self.preferences_window(ctx);
         self.recovery_window(ctx);
         self.about.show(ctx, self.commit.as_deref());
+        self.update_card(ctx);
         self.dialogs(ctx);
         self.update_title(ctx);
         self.sync_native_menu();

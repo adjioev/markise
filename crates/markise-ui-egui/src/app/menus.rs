@@ -241,6 +241,7 @@ impl MarkiseApp {
                     "Markise",
                     vec![
                         self.app_item("app.about", true, Check::None),
+                        self.app_item("app.checkUpdates", true, Check::None),
                         Entry::Separator,
                         self.app_item("app.preferences", true, Check::None),
                         Entry::Separator,
@@ -345,7 +346,11 @@ impl MarkiseApp {
             // About is in the application menu; macOS adds its menu search
             menus.push(Menu::new("Help", self.help_entries()).kind(MenuKind::Help));
         } else {
-            let mut help = vec![self.app_item("app.about", true, Check::None), Entry::Separator];
+            let mut help = vec![
+                self.app_item("app.about", true, Check::None),
+                self.app_item("app.checkUpdates", true, Check::None),
+                Entry::Separator,
+            ];
             help.extend(self.help_entries());
             menus.push(Menu::new("Help", help).kind(MenuKind::Help));
         }
@@ -608,6 +613,7 @@ impl MarkiseApp {
             "file.close" | "app.quit" | "app.exit" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             "app.preferences" => self.open_preferences(),
             "app.about" => self.about.open(),
+            "app.checkUpdates" => self.check_for_updates(),
             "help.tutorial" => self.open_tutorial(),
             "help.shortcuts" => self.open_shortcuts(ctx),
             // the focused widget (rich view or a text field) handles these as from the keyboard

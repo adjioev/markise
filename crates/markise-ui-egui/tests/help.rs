@@ -131,7 +131,7 @@ fn help_menu_has_tutorial_and_shortcuts_on_both_platforms() {
             .collect();
         let want: &[&str] = match p {
             Platform::Mac => &["help.tutorial", "help.shortcuts"],
-            Platform::Other => &["app.about", "help.tutorial", "help.shortcuts"],
+            Platform::Other => &["app.about", "app.checkUpdates", "help.tutorial", "help.shortcuts"],
         };
         assert_eq!(keys, want, "{p:?}");
         let sc = bar.item("help.shortcuts").unwrap();
