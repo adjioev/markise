@@ -570,20 +570,29 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
     );
 }
 
-/// Returns freed heap memory to the OS before a measured run (glibc only), so every run of
-/// [`assert_scales_linearly`] page-faults the memory it touches, whatever its size.
+/// Makes every run of [`assert_scales_linearly`] page-fault the large blocks it allocates,
+/// whatever the input size (glibc only): fixes the mmap threshold at 128 KiB and returns freed
+/// heap memory to the OS before each measured run.
 ///
-/// Without this only the large input paid page faults (issue #109): glibc keeps and reuses
-/// freed memory below its mmap threshold (at most 32 MiB), but serves larger allocations with
-/// fresh `mmap`s that `free` unmaps again, so the small input ran on recycled pages while the
-/// large one faulted ~250 000 fresh pages per run on CI runners, kernel time counted in
-/// [`thread_work`] (+60–150 % per byte). With both sizes faulting, the fault cost is linear on
-/// both sides of the ratio.
+/// Without this only the large input paid page faults (issue #109): glibc's dynamic threshold
+/// rises to at most 32 MiB, so the small input's blocks came from recycled heap pages while the
+/// large input's bigger blocks were fresh `mmap`s that `free` unmaps again. On CI runners that
+/// was 0 faults per small run against ~130 000 per large run, kernel time counted in
+/// [`thread_work`] (+60–150 % per byte). With a fixed threshold (which also disables the dynamic
+/// one) blocks of 128 KiB and more are mapped fresh at both sizes, so the fault cost is linear
+/// on both sides of the ratio.
 fn release_freed_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    // SAFETY: malloc_trim only returns free memory to the OS; it is thread-safe.
-    unsafe {
-        libc::malloc_trim(0);
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        // SAFETY: mallopt and malloc_trim only change allocator tuning and return free memory
+        // to the OS; both are thread-safe.
+        unsafe {
+            ONCE.call_once(|| {
+                libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024);
+            });
+            libc::malloc_trim(0);
+        }
     }
 }
 
