@@ -32,6 +32,7 @@
 //! | `images` | object: `location` (`"note_folder"`: a folder next to the note, `"root_folder"`: a folder below the vault / opened folder root, `"same_folder"`: the note's own folder; default `"note_folder"`), `folder` (the folder for the first two, default `"assets"`), `obsidian` (use an Obsidian vault's `attachmentFolderPath` when set, `true`), `relative_paths` (`true`), `copy_images` (copy dropped image files into the image folder, `true`), `copy_files` (also copy other dropped files, `false`), `paste_urls` (a pasted image URL becomes an image, `true`) — pasted and dropped images (spec 04 §7, spec 05 §4.4; Preferences → Files & Images) | defaults |
 //! | `markdown` | object: `wikilinks` (default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`), `commentDisplay` (`"margin"` cards, default, or `"bubbles"` with hover popovers) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
 //! | `side_by_side_split` | Side by Side divider position: fraction of the editor width given to the source pane, `0.15`–`0.85` (spec 04 §3.3); omitted until the divider is moved | `0.5` |
+//! | `tutorialShown` | `true` once the welcome tutorial was opened at first launch (issue #63); omitted until then | `false` |
 //! | `zoom` | whole-window zoom factor, `0.5`–`3.0` (View → Zoom In / Zoom Out / Actual Size, issue #43); omitted until zoomed | `1.0` |
 //!
 //! **Versions.** A version-1 file (or one without `version`) stores one `theme` id; it migrates
@@ -624,6 +625,8 @@ pub struct Settings {
     pub side_by_side_split: Option<f32>,
     /// Whole-window zoom factor (View → Zoom), [`ZOOM_RANGE`]; `None`: 100 %.
     pub zoom: Option<f32>,
+    /// The welcome tutorial was opened at first launch (key `tutorialShown`, issue #63).
+    pub tutorial_shown: bool,
     /// The file's schema version (written back as [`VERSION`]; a newer file is not written).
     pub version: u64,
     /// Keys this version does not know, kept verbatim.
@@ -670,6 +673,7 @@ impl Default for Settings {
             consumed_pending: Vec::new(),
             side_by_side_split: None,
             zoom: None,
+            tutorial_shown: false,
             version: VERSION,
             extra: Map::new(),
         }
@@ -781,6 +785,7 @@ pub struct SettingsPatch {
     pub overrides: OverridesPatch,
     pub side_by_side_split: Option<f32>,
     pub zoom: Option<f32>,
+    pub tutorial_shown: Option<bool>,
 }
 
 /// Valid whole-window zoom factors (issue #43: 50–300 %).
@@ -866,6 +871,9 @@ impl SettingsPatch {
         if let Some(v) = self.zoom {
             s.zoom = Some(v);
         }
+        if let Some(v) = self.tutorial_shown {
+            s.tutorial_shown = v;
+        }
     }
 
     /// Forgets the fields `saved` sets (they were written later): an older failed change must
@@ -885,6 +893,9 @@ impl SettingsPatch {
         }
         if saved.zoom.is_some() {
             self.zoom = None;
+        }
+        if saved.tutorial_shown.is_some() {
+            self.tutorial_shown = None;
         }
         if saved.diagrams.is_some() {
             self.diagrams = None;
@@ -994,6 +1005,9 @@ impl SettingsPatch {
         if later.zoom.is_some() {
             self.zoom = later.zoom;
         }
+        if later.tutorial_shown.is_some() {
+            self.tutorial_shown = later.tutorial_shown;
+        }
     }
 
     /// JSON form (recovery file): absent = unchanged, `null` = cleared override.
@@ -1013,6 +1027,9 @@ impl SettingsPatch {
         }
         if let Some(v) = self.zoom {
             m.insert("zoom".into(), round_zoom(v));
+        }
+        if let Some(v) = self.tutorial_shown {
+            m.insert(TUTORIAL_SHOWN_KEY.into(), Value::from(v));
         }
         if let Some(v) = self.diagrams {
             m.insert("diagrams".into(), Value::from(v));
@@ -1087,6 +1104,7 @@ impl SettingsPatch {
             appearance: m.get("appearance").and_then(Value::as_str).and_then(Appearance::parse),
             side_by_side_split: m.get("side_by_side_split").and_then(valid_split),
             zoom: m.get("zoom").and_then(valid_zoom),
+            tutorial_shown: m.get(TUTORIAL_SHOWN_KEY).and_then(Value::as_bool),
             diagrams: m.get("diagrams").and_then(Value::as_bool),
             show_toolbar: m.get("showToolbar").and_then(Value::as_bool),
             show_recent: m.get(SHOW_RECENT_KEY).and_then(Value::as_bool),
@@ -1140,6 +1158,8 @@ pub const SHOW_RECENT_KEY: &str = "sidebar.showRecent";
 pub const SHOW_WORD_COUNT_KEY: &str = "statusBar.showWordCount";
 /// Settings key of [`Settings::count_mode`].
 pub const COUNT_MODE_KEY: &str = "statusBar.count";
+/// Settings key of [`Settings::tutorial_shown`].
+pub const TUTORIAL_SHOWN_KEY: &str = "tutorialShown";
 const MAX_BYTES: u64 = 1 << 20;
 
 impl Settings {
@@ -1202,6 +1222,9 @@ impl Settings {
         }
         if let Some(Value::Bool(b)) = map.remove(SHOW_WORD_COUNT_KEY) {
             s.show_word_count = b;
+        }
+        if let Some(Value::Bool(b)) = map.remove(TUTORIAL_SHOWN_KEY) {
+            s.tutorial_shown = b;
         }
         if let Some(m) = map
             .remove(COUNT_MODE_KEY)
@@ -1266,6 +1289,10 @@ impl Settings {
         // 100 % is the default: not written (Actual Size leaves no `zoom` behind)
         if let Some(v) = self.zoom.filter(|v| (v - 1.0).abs() > 1e-4) {
             map.insert("zoom".into(), round_zoom(v));
+        }
+        // the default (not shown yet) is not written
+        if self.tutorial_shown {
+            map.insert(TUTORIAL_SHOWN_KEY.into(), Value::from(true));
         }
         let o = self.overrides.to_json(&self.overrides_extra);
         if o.as_object().is_some_and(|m| !m.is_empty()) {
@@ -1542,6 +1569,29 @@ mod tests {
         let mut s = Settings::default();
         p.apply(&mut s);
         assert!(!s.markdown.wikilinks);
+    }
+
+    /// Issue #63: the first-launch tutorial flag defaults off, is not written until set, and
+    /// round-trips through the file and a settings patch.
+    #[test]
+    fn tutorial_shown_flag_round_trip() {
+        let d = Settings::default();
+        assert!(!d.tutorial_shown);
+        assert!(!d.to_json().contains(TUTORIAL_SHOWN_KEY));
+        let s = Settings {
+            tutorial_shown: true,
+            ..Settings::default()
+        };
+        assert!(Settings::from_json(&s.to_json()).unwrap().tutorial_shown);
+        let p = SettingsPatch {
+            tutorial_shown: Some(true),
+            ..Default::default()
+        };
+        let q = SettingsPatch::from_json(&p.to_json()).unwrap();
+        assert_eq!(q, p);
+        let mut t = Settings::default();
+        q.apply(&mut t);
+        assert!(t.tutorial_shown);
     }
 
     /// ADR 0012: CriticMarkup and kept export comments default on, round-trip, and an older

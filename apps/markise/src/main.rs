@@ -106,6 +106,8 @@ fn main() -> eframe::Result {
         confirm: markise_ui_egui::confirm::native(),
         // a file manager copy pasted into the document (issue #51)
         clipboard_files: std::sync::Arc::new(SystemClipboardFiles),
+        // the welcome tutorial at the first launch (issue #63)
+        welcome: true,
         ..Default::default()
     };
     let mut viewport = eframe::egui::ViewportBuilder::default()

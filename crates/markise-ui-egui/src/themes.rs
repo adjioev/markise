@@ -865,6 +865,26 @@ impl ThemeManager {
         }
     }
 
+    /// The settings file has been read (or there is none): first-launch decisions wait for it.
+    pub fn settings_loaded(&self) -> bool {
+        self.settings_loaded
+    }
+
+    /// The welcome tutorial was opened at first launch (settings key `tutorialShown`, issue
+    /// #63).
+    pub fn tutorial_shown(&self) -> bool {
+        self.settings.tutorial_shown
+    }
+
+    /// Records that the first-launch tutorial was opened; persisted like the other settings.
+    pub fn set_tutorial_shown(&mut self) {
+        if !self.settings.tutorial_shown {
+            self.settings.tutorial_shown = true;
+            self.dirty.tutorial_shown = Some(true);
+            self.schedule_save();
+        }
+    }
+
     /// The count the status bar shows (settings key `statusBar.count`, default words).
     pub fn count_mode(&self) -> markise_engine::settings::CountMode {
         self.settings.count_mode
