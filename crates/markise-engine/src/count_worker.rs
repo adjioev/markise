@@ -4,9 +4,10 @@
 //! it each document change as a revision ([`CountWorker::update`]: the edits' summaries, or
 //! "start over") and lends it the document of that revision through a [`DocLease`]; the
 //! session takes the loan back before every edit, so the worker never makes an edit copy the
-//! document, and it reads the document only in steps of about [`FRAME_BYTES`] (an edit waits
-//! at most one step). Only changed top-level blocks are counted again (reference-definition
-//! changes recount the blocks that may use one, as [`DocCounter::apply`] does).
+//! document, and it reads the document only in steps of about [`FRAME_BYTES`], for the
+//! document's count and for selections alike (an edit waits at most one step). Only changed
+//! top-level blocks are counted again (reference-definition changes recount the blocks that
+//! may use one, as [`DocCounter::apply`] does).
 //!
 //! Results are published by revision ([`CountWorker::report`]); the worker wakes the owner
 //! once when a revision's document count is complete and once per selection result
@@ -182,10 +183,15 @@ fn run(rx: Receiver<Msg>, lease: &DocLease, out: &Mutex<Report>, wake: &Wake) {
                 return Step::Counted;
             }
             match sel.take() {
-                Some((r, range)) if r == rev => {
-                    let c = counter.selection(doc, range.clone());
-                    Step::Selected(range, c)
-                }
+                // in steps too (review of #137): a selection of most of a huge list must not
+                // hold the document for longer than one step
+                Some((r, range)) if r == rev => match counter.selection_step(doc, range.clone(), FRAME_BYTES) {
+                    Some(c) => Step::Selected(range, c),
+                    None => {
+                        sel = Some((r, range));
+                        Step::Counted
+                    }
+                },
                 _ => Step::Idle,
             }
         });
@@ -340,6 +346,61 @@ mod tests {
         let r = wait(&cw, "the selection", |r| r.selection.is_some());
         assert_eq!(r.selection, Some((1, 0..src.len(), count_document(&*doc))));
         assert_eq!(wakes.load(Ordering::SeqCst), 2, "the count, then the selection");
+    }
+
+    /// Review of #137: a selection of most of a huge list (one top-level block, partly
+    /// selected) is counted in steps; taking the document back for an edit waits for one
+    /// step, not for the whole selection count.
+    #[test]
+    fn edits_during_a_large_in_container_selection_wait_one_step() {
+        let mut src = String::new();
+        let mut k = 0;
+        while src.len() < 2 << 20 {
+            src.push_str(&format!("- item {k} with a few more words in it\n"));
+            k += 1;
+        }
+        let doc: Arc<dyn FormatDoc> = Arc::new(markise_md::parse(&src));
+        assert_eq!(doc.top_count(), 1, "one list");
+        let range = 3..src.len() - 3;
+        // the whole selection read at once (the old behaviour)
+        let mut c = DocCounter::new();
+        c.reset(&*doc);
+        assert!(c.fill(&*doc, usize::MAX));
+        let t = Instant::now();
+        let expected = c.selection(&*doc, range.clone()).unwrap();
+        let whole = t.elapsed();
+
+        let (cw, _) = worker();
+        let mut rev = 1;
+        cw.update(rev, Change::Reset, doc.clone());
+        final_count(&cw, rev);
+        let mut longest = Duration::ZERO;
+        let mut x = 5u64;
+        for _ in 0..20 {
+            cw.select(rev, range.clone());
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            std::thread::sleep(Duration::from_micros(500 + (x >> 33) % 3000));
+            let t = Instant::now();
+            cw.lease().revoke();
+            longest = longest.max(t.elapsed());
+            // the document is unchanged: the next revision resumes the selection
+            rev += 1;
+            cw.update(rev, Change::Edits(Vec::new()), doc.clone());
+        }
+        cw.select(rev, range.clone());
+        let r = wait(&cw, "the selection", |r| {
+            r.selection.as_ref().is_some_and(|s| s.0 == rev)
+        });
+        assert_eq!(r.selection.unwrap().2, expected);
+        assert!(
+            r.stats.max_call_bytes <= (FRAME_BYTES + crate::count::BIG_BLOCK) as u64,
+            "every step under the lease stays within the byte budget: {:?}",
+            r.stats
+        );
+        assert!(
+            longest * 4 < whole,
+            "an edit waited {longest:?}; counting the whole selection takes {whole:?}"
+        );
     }
 
     /// Dropping the worker takes the document back and stops the thread.

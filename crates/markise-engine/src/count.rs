@@ -618,6 +618,18 @@ impl Slot {
     }
 }
 
+/// Progress of a selection counted in steps: the two end blocks (`a`, `b`), the end being
+/// counted (index into them), where in it to resume, the counts so far.
+#[derive(Debug)]
+struct SelPartial {
+    sel: Range<usize>,
+    a: usize,
+    b: usize,
+    end: usize,
+    from: usize,
+    acc: Counts,
+}
+
 /// Block flag: it may use a reference definition.
 const REFS: u8 = 1;
 
@@ -641,6 +653,8 @@ pub struct DocCounter {
     partial: Option<(usize, usize, Counted)>,
     /// The last selection's counts.
     sel: Option<(Range<usize>, Counts)>,
+    /// A selection counted in steps ([`DocCounter::selection_step`]) not finished yet.
+    sel_partial: Option<SelPartial>,
     stats: CounterStats,
 }
 
@@ -746,6 +760,7 @@ impl DocCounter {
     pub fn apply(&mut self, e: &EditSummary) -> bool {
         // selection counts are by byte range: recomputed after any change
         self.sel = None;
+        self.sel_partial = None;
         if e.deps.all {
             return false;
         }
@@ -857,39 +872,83 @@ impl DocCounter {
     /// at most [`BIG_BLOCK`]). A fully selected middle of more than [`EXACT_ITEMS`] blocks,
     /// when the rest of the document is that large too, is estimated in proportion to its
     /// bytes (marked approximate). The result is kept until the selection or the document
-    /// changes.
+    /// changes. Reads everything at once; [`DocCounter::selection_step`] does it in steps.
     pub fn selection(&mut self, doc: &dyn FormatDoc, sel: Range<usize>) -> Option<Counts> {
+        loop {
+            if let Some(r) = self.selection_step(doc, sel.clone(), usize::MAX) {
+                return r;
+            }
+        }
+    }
+
+    /// [`DocCounter::selection`] in steps of about `budget` source bytes (at least one leaf
+    /// block, each at most [`BIG_BLOCK`]; issue #132: the counting worker reads the lent
+    /// document in short steps even for a selection of most of a huge list): `None` while not
+    /// done — call again (with the same `sel`; another range starts over), `Some` with the
+    /// result of [`DocCounter::selection`] once done. A document change forgets the progress.
+    pub fn selection_step(&mut self, doc: &dyn FormatDoc, sel: Range<usize>, budget: usize) -> Option<Option<Counts>> {
         let n = self.counts.len();
         if n == 0 || sel.is_empty() {
-            return Some(Counts::default());
+            return Some(Some(Counts::default()));
         }
-        let total = self.total()?;
+        let Some(total) = self.total() else {
+            return Some(None);
+        };
         if n != doc.top_count() {
-            return None;
+            return Some(None);
         }
         if let Some((r, c)) = &self.sel
             && *r == sel
         {
-            return Some(*c);
+            return Some(Some(*c));
         }
-        let top_at = |o: usize| doc.top_at(o).unwrap_or(0).min(n - 1);
-        let a = top_at(sel.start);
-        let b = top_at(sel.end.saturating_sub(1).max(sel.start));
-        let mut acc = Counts::default();
-        let mut read = 0;
+        let mut p = match self.sel_partial.take() {
+            Some(p) if p.sel == sel => p,
+            _ => {
+                let top_at = |o: usize| doc.top_at(o).unwrap_or(0).min(n - 1);
+                let a = top_at(sel.start);
+                let b = top_at(sel.end.saturating_sub(1).max(sel.start));
+                SelPartial {
+                    sel: sel.clone(),
+                    a,
+                    b,
+                    end: 0,
+                    from: 0,
+                    acc: Counts::default(),
+                }
+            }
+        };
+        let (a, b) = (p.a, p.b);
         let ends: &[usize] = if a == b { &[a] } else { &[a, b] };
-        for &t in ends {
+        let mut read = 0;
+        while p.end < ends.len() {
+            if read > 0 && read >= budget {
+                self.record(read);
+                self.sel_partial = Some(p);
+                return None;
+            }
+            let t = ends[p.end];
             let span = doc.top_span(t).unwrap_or_default();
             match self.load(self.counts[t]) {
-                Some(c) if sel.start <= span.start && span.end <= sel.end => acc += c,
+                Some(c) if p.from == 0 && sel.start <= span.start && span.end <= sel.end => p.acc += c,
                 _ => {
-                    let tc = count_top(doc, t, Some(&sel), 0, usize::MAX);
-                    acc += tc.counted.counts;
+                    let left = budget.saturating_sub(read).max(1);
+                    let tc = count_top(doc, t, Some(&sel), p.from, left);
+                    p.acc += tc.counted.counts;
                     read += tc.counted.read;
+                    if let Some(next) = tc.next {
+                        p.from = next;
+                        self.record(read);
+                        self.sel_partial = Some(p);
+                        return None;
+                    }
                     self.stats.blocks_counted += 1;
                 }
             }
+            p.end += 1;
+            p.from = 0;
         }
+        let mut acc = p.acc;
         let (ma, mb) = (a + 1, b);
         if mb > ma {
             let sum = |r: Range<usize>| {
@@ -917,7 +976,7 @@ impl DocCounter {
         }
         self.record(read);
         self.sel = Some((sel, acc));
-        Some(acc)
+        Some(Some(acc))
     }
 }
 
