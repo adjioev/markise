@@ -6,11 +6,13 @@ check), `crates/markise-ui-egui/src/updates.rs` and `src/app/updates.rs` (card, 
 
 ## Behaviour
 
-- **The app's only network request.** One `GET
-  https://api.github.com/repos/adjioev/markise/releases?per_page=20` with
+- **The app's only network requests.** A stable build sends one `GET
+  https://api.github.com/repos/adjioev/markise/releases/latest` (latest stable release; 404 =
+  none yet); a beta build also sends `GET …/releases?per_page=20` (newest releases, including
+  prereleases), so a stable release is found however many prereleases follow it. Headers:
   `User-Agent: Markise/<version>` and `Accept: application/vnd.github+json`. No cookies,
-  tokens, identifiers or telemetry. It runs on a background thread, with a 5 s connect and
-  10 s total timeout; the body is capped at 1 MiB.
+  tokens, identifiers or telemetry. Background thread, 5 s connect and 10 s total timeout,
+  body capped at 1 MiB; bodies of non-2xx answers are not read.
 - **First launch.** A small, non-modal card in the bottom right corner asks "Check for updates
   automatically?" (Check Automatically / Not Now). It does not block typing and does not
   cover the welcome tutorial, which opens as a document. Until it is answered, automatic
@@ -19,11 +21,13 @@ check), `crates/markise-ui-egui/src/updates.rs` and `src/app/updates.rs` (card, 
   Off means the app never contacts the network on its own.
 - **Automatic check.** At launch, at most once a day (24 h after the last check that got an
   answer from GitHub). An offline/timeout failure does not count, so the next launch tries
-  again; an HTTP error such as rate limiting (403/429) counts. Automatic checks are silent
+  again; any HTTP answer counts — an error status such as rate limiting (403/429), and a 2xx
+  answer whose body could not be read (oversized, broken off). Automatic checks are silent
   unless a newer version is found.
 - **Notice.** "Markise X.Y.Z is available — What's new · Download"; both links open the
-  release page in the browser (only pages under `https://github.com/adjioev/markise/releases/`
-  are opened). × dismisses the notice for that version (remembered); a newer version is shown
+  release page in the browser. Only strictly validated pages are opened: `https://github.com/`
+  exactly (no userinfo, port, query or fragment), percent-decoded path segments without dot
+  segments, under `adjioev/markise/releases/`; anything else falls back to the releases page. × dismisses the notice for that version (remembered); a newer version is shown
   again.
 - **Check for Updates…** (macOS: application menu; Windows/Linux: Help menu) works even with
   automatic checks off and always reports a result: up to date, the notice (even for a

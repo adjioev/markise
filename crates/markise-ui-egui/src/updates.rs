@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use egui::{Context, RichText};
-use markise_engine::update::{Outcome, Release, ReleaseClient};
+use markise_engine::update::{Checked, Release, ReleaseClient};
 
 /// Where update checks go.
 #[derive(Clone)]
@@ -70,7 +70,7 @@ pub struct UpdateState {
     /// The launch's automatic check was decided (once the settings file was read).
     pub launch_decided: bool,
     /// A running check and whether the user asked for it (its result is then always shown).
-    pub running: Option<(Receiver<Outcome>, bool)>,
+    pub running: Option<(Receiver<Checked>, bool)>,
     /// The newer release being announced.
     pub notice: Option<Release>,
     /// The manual check's result line.

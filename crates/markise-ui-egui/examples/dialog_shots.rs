@@ -48,11 +48,15 @@ type Setup = fn(&mut MarkiseApp, &Context, &Path);
 struct ShotReleases;
 
 impl markise_engine::update::ReleaseClient for ShotReleases {
-    fn get_releases(&self) -> Result<markise_engine::update::Response, markise_engine::update::TransportError> {
-        Ok(markise_engine::update::Response {
-            status: 200,
-            body: r#"[{"tag_name":"v9.1.0","prerelease":false,"draft":false,"html_url":"https://github.com/adjioev/markise/releases/tag/v9.1.0"}]"#.into(),
-        })
+    fn get(&self, url: &str) -> Result<markise_engine::update::Response, markise_engine::update::TransportError> {
+        let release = r#"{"tag_name":"v9.1.0","prerelease":false,"draft":false,"html_url":"https://github.com/adjioev/markise/releases/tag/v9.1.0"}"#;
+        Ok(markise_engine::update::Response::ok(
+            if url == markise_engine::update::LATEST_URL {
+                release.to_string()
+            } else {
+                format!("[{release}]")
+            },
+        ))
     }
 }
 

@@ -63,18 +63,19 @@ impl MarkiseApp {
             return;
         };
         let manual = *manual;
-        let outcome = match rx.try_recv() {
-            Ok(o) => o,
+        let checked = match rx.try_recv() {
+            Ok(c) => c,
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Outcome::Failed(update::CheckError::Offline("the check stopped unexpectedly".into()))
-            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => update::Checked {
+                outcome: Outcome::Failed(update::CheckError::Offline("the check stopped unexpectedly".into())),
+                contacted: false,
+            },
         };
         self.updates.running = None;
-        if outcome.contacted() {
+        if checked.contacted {
             self.themes.set_update_last_check(update::now_secs());
         }
-        match outcome {
+        match checked.outcome {
             Outcome::Available(r) => {
                 let dismissed = self.themes.update_dismissed() == Some(r.version.to_string().as_str());
                 if manual {
@@ -115,7 +116,7 @@ impl MarkiseApp {
                 self.set_update_auto(on);
             }
             CardAction::OpenPage(url) => {
-                if url.starts_with(update::RELEASE_PAGE_PREFIX) || url == update::RELEASES_PAGE {
+                if update::is_release_page(&url) {
                     ctx.open_url(egui::OpenUrl::new_tab(url));
                 }
             }

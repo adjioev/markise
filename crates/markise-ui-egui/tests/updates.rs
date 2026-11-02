@@ -11,59 +11,71 @@ use std::sync::{Arc, Mutex};
 use common::{settle, wait_until};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use markise_engine::update::{ReleaseClient, Response, TransportError};
+use markise_engine::update::{self, ReleaseClient, Response, TransportError};
 use markise_ui_egui::menu::{MenuAction, Platform};
 use markise_ui_egui::updates::{Message, UpdateSource};
 use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp};
 
 type H = Harness<'static, MarkiseApp>;
 
-/// A mocked GitHub: counts calls and answers with the configured response.
+/// A mocked GitHub: counts checks (every check asks for the latest stable release once) and
+/// answers per URL.
 struct Mock {
-    calls: AtomicUsize,
-    answer: Mutex<Result<Response, TransportError>>,
+    checks: AtomicUsize,
+    /// (answer to the releases list, answer to the latest stable release)
+    answers: Mutex<(Result<Response, TransportError>, Result<Response, TransportError>)>,
+}
+
+fn release_json(t: &str, pre: bool) -> String {
+    format!(
+        r#"{{"tag_name":"{t}","prerelease":{pre},"draft":false,"html_url":"https://github.com/adjioev/markise/releases/tag/{t}"}}"#
+    )
+}
+
+/// GitHub's answers for these releases (newest first): the list and the latest stable one.
+fn answers_for(tags: &[(&str, bool)]) -> (Result<Response, TransportError>, Result<Response, TransportError>) {
+    let items: Vec<String> = tags.iter().map(|(t, pre)| release_json(t, *pre)).collect();
+    let latest = tags.iter().find(|(_, pre)| !pre).map_or(
+        Response {
+            status: 404,
+            body: Ok(String::new()),
+        },
+        |(t, _)| Response::ok(release_json(t, false)),
+    );
+    (Ok(Response::ok(format!("[{}]", items.join(",")))), Ok(latest))
 }
 
 impl Mock {
-    fn new(answer: Result<Response, TransportError>) -> Arc<Mock> {
+    fn releases(tags: &[(&str, bool)]) -> Arc<Mock> {
         Arc::new(Mock {
-            calls: AtomicUsize::new(0),
-            answer: Mutex::new(answer),
+            checks: AtomicUsize::new(0),
+            answers: Mutex::new(answers_for(tags)),
         })
     }
 
-    fn releases(tags: &[(&str, bool)]) -> Arc<Mock> {
-        Mock::new(Ok(ok_body(tags)))
+    fn set_releases(&self, tags: &[(&str, bool)]) {
+        *self.answers.lock().unwrap() = answers_for(tags);
     }
 
+    /// The same answer to every request.
     fn set(&self, answer: Result<Response, TransportError>) {
-        *self.answer.lock().unwrap() = answer;
+        *self.answers.lock().unwrap() = (answer.clone(), answer);
     }
 
     fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
+        self.checks.load(Ordering::SeqCst)
     }
 }
 
 impl ReleaseClient for Mock {
-    fn get_releases(&self) -> Result<Response, TransportError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.answer.lock().unwrap().clone()
-    }
-}
-
-fn ok_body(tags: &[(&str, bool)]) -> Response {
-    let items: Vec<String> = tags
-        .iter()
-        .map(|(t, pre)| {
-            format!(
-                r#"{{"tag_name":"{t}","prerelease":{pre},"draft":false,"html_url":"https://github.com/adjioev/markise/releases/tag/{t}"}}"#
-            )
-        })
-        .collect();
-    Response {
-        status: 200,
-        body: format!("[{}]", items.join(",")),
+    fn get(&self, url: &str) -> Result<Response, TransportError> {
+        let a = self.answers.lock().unwrap();
+        if url == update::LATEST_URL {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            a.1.clone()
+        } else {
+            a.0.clone()
+        }
     }
 }
 
@@ -235,7 +247,7 @@ fn a_due_launch_check_runs_and_dismissal_is_per_version() {
     let mut s = read_settings(&cfg);
     s["updates.lastCheck"] = 1000.into();
     write_settings(&cfg, &s.to_string());
-    mock.set(Ok(ok_body(&[("v99.1.0", false), ("v99.0.0", false)])));
+    mock.set_releases(&[("v99.1.0", false), ("v99.0.0", false)]);
     let mut h = harness(&cfg, &mock);
     launched(&mut h);
     assert_eq!(notice_version(h.state()).as_deref(), Some("99.1.0"));
@@ -262,13 +274,13 @@ fn check_for_updates_works_with_automatic_checks_off_and_reports_every_result() 
     // a server error and rate limiting are reported
     mock.set(Ok(Response {
         status: 500,
-        body: String::new(),
+        body: Ok(String::new()),
     }));
     check_now(&mut h);
     assert!(matches!(&h.state().update_state().message, Some(Message::Error(e)) if e.contains("500")));
     mock.set(Ok(Response {
         status: 403,
-        body: "{\"message\":\"API rate limit exceeded\"}".into(),
+        body: Ok("{\"message\":\"API rate limit exceeded\"}".into()),
     }));
     check_now(&mut h);
     assert!(matches!(&h.state().update_state().message, Some(Message::Error(e)) if e.contains("limiting")));
@@ -279,12 +291,12 @@ fn check_for_updates_works_with_automatic_checks_off_and_reports_every_result() 
     // malformed answer
     mock.set(Ok(Response {
         status: 200,
-        body: "<html>".into(),
+        body: Ok("<html>".into()),
     }));
     check_now(&mut h);
     assert!(matches!(&h.state().update_state().message, Some(Message::Error(_))));
     // a newer version is shown even when its notice was dismissed before
-    mock.set(Ok(ok_body(&[("v99.0.0", false)])));
+    mock.set_releases(&[("v99.0.0", false)]);
     check_now(&mut h);
     assert_eq!(notice_version(h.state()).as_deref(), Some("99.0.0"));
     assert_eq!(h.state().update_state().message, None);
@@ -368,4 +380,36 @@ fn check_for_updates_is_in_the_app_menu_on_macos_and_in_help_elsewhere() {
         .map(|i| i.key.clone())
         .collect();
     assert_eq!(help[..2], ["app.about", "app.checkUpdates"]);
+}
+
+/// Review of #146 (P2): an answer whose body could not be read (oversized, broken off) still
+/// counts as contact, so the next launch does not ask again within the day; an offline launch
+/// does not count.
+#[test]
+fn an_unreadable_answer_counts_for_throttling_and_offline_does_not() {
+    let cfg = tmpdir("unreadable").join("config");
+    write_settings(&cfg, r#"{"version":2,"updates.autoCheck":true}"#);
+    let mock = Mock::releases(&[]);
+    mock.set(Err(TransportError("offline".into())));
+    {
+        let mut h = harness(&cfg, &mock);
+        launched(&mut h);
+        assert_eq!(mock.calls(), 1);
+        assert_eq!(h.state().update_settings().1, None, "offline: not counted");
+        h.state_mut().on_exit();
+    }
+    mock.set(Ok(Response {
+        status: 200,
+        body: Err("response body exceeds the limit".into()),
+    }));
+    {
+        let mut h = harness(&cfg, &mock);
+        launched(&mut h);
+        assert_eq!(mock.calls(), 2, "retried after the offline launch");
+        assert!(h.state().update_settings().1.is_some(), "an answer counts");
+        h.state_mut().on_exit();
+    }
+    let mut h = harness(&cfg, &mock);
+    launched(&mut h);
+    assert_eq!(mock.calls(), 2, "throttled");
 }

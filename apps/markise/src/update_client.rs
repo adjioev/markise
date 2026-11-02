@@ -1,4 +1,4 @@
-//! The update check's HTTP client (issue #70): one `GET` of the GitHub releases list over
+//! The update check's HTTP client (issue #70): the `GET` requests of a check (GitHub releases API) over
 //! HTTPS (`ureq` + `rustls` with the `ring` provider; certificates verified by the operating
 //! system through `rustls-platform-verifier`). What is checked and how often:
 //! `markise_engine::update`.
@@ -44,20 +44,28 @@ impl GithubClient {
 }
 
 impl ReleaseClient for GithubClient {
-    fn get_releases(&self) -> Result<Response, TransportError> {
+    fn get(&self, url: &str) -> Result<Response, TransportError> {
         let mut r = self
             .agent
-            .get(update::RELEASES_URL)
+            .get(url)
             .header("Accept", "application/vnd.github+json")
             .call()
             .map_err(|e| TransportError(e.to_string()))?;
+        // from here on GitHub has answered: a failure to read the body is reported with the
+        // status (it counts as contact for throttling), and a non-2xx body is not read at all
         let status = r.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Ok(Response {
+                status,
+                body: Ok(String::new()),
+            });
+        }
         let body = r
             .body_mut()
             .with_config()
             .limit(update::MAX_BODY)
             .read_to_string()
-            .map_err(|e| TransportError(e.to_string()))?;
+            .map_err(|e| e.to_string());
         Ok(Response { status, body })
     }
 }
