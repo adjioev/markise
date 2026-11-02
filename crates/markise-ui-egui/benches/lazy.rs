@@ -403,11 +403,13 @@ fn child(src: &Path) {
         }
         typing.push(ms);
     }
+    println!("  (document copies so far: {}, peak live {} MB)", app.viewer().unwrap().ed.session.copies, PEAK.load(Ordering::Relaxed) >> 20);
     report("typing in the middle (letters, BS, Enter)", typing);
     let mut undo = Vec::new();
     for _ in 0..20 {
         undo.push(frame(&ctx, &mut app, vec![key(Key::Z, cmd())]));
     }
+    println!("  (document copies so far: {}, peak live {} MB)", app.viewer().unwrap().ed.session.copies, PEAK.load(Ordering::Relaxed) >> 20);
     report("undo (20 steps)", undo);
     // typing at the very start
     {
@@ -420,6 +422,7 @@ fn child(src: &Path) {
     for i in 0..100 {
         typing0.push(frame(&ctx, &mut app, vec![keystroke(i)]));
     }
+    println!("  (document copies so far: {}, peak live {} MB)", app.viewer().unwrap().ed.session.copies, PEAK.load(Ordering::Relaxed) >> 20);
     report("typing near the start", typing0);
     // edits at block starts all over the document (Backspace merges with the block before,
     // which may sit in another page), then a consistency check against a full build
@@ -445,12 +448,8 @@ fn child(src: &Path) {
             merge_ms.push(frame(&ctx, &mut app, vec![e]));
         }
     }
+    println!("  (document copies so far: {}, peak live {} MB)", app.viewer().unwrap().ed.session.copies, PEAK.load(Ordering::Relaxed) >> 20);
     report("Backspace/Enter at block starts (12 places)", merge_ms);
-    if lazy {
-        let v = app.viewer().unwrap();
-        let r = v.ed.view.model().check_paged(&**v.ed.view.doc());
-        println!("  lazy: consistency with a full build after edits: {r:?}");
-    }
     if lazy {
         println!("  lazy: {}", lazy_line(&mut app));
     }
@@ -489,7 +488,7 @@ fn child(src: &Path) {
         println!("  lazy: {}", lazy_line(&mut app));
         let v = app.viewer().unwrap();
         let r = v.ed.view.model().check_paged(&**v.ed.view.doc());
-        println!("  lazy: consistency with a full build after traversal: {r:?}");
+        println!("  lazy: consistency with a full build after edits + traversal (measured after the memory numbers): {r:?}");
     }
     drop(app);
     let _ = std::fs::remove_file(&path);
