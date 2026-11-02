@@ -2141,6 +2141,10 @@ impl MarkiseApp {
         // while a question is open nothing else runs: no application command (shortcut or
         // menu: see `menu_action_by`), and no widget has the keyboard focus, so typing does
         // not reach the document; the focus comes back after the answer
+        // the cheat sheet is modal for the keyboard: nothing underneath acts on its keys
+        if !self.is_asking() {
+            self.cheat_sheet.take_keys(ctx);
+        }
         if self.is_asking() {
             if let Some(id) = ctx.memory(|m| m.focused()) {
                 self.focus_before_question.get_or_insert((id, 0));

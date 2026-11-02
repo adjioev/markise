@@ -52,6 +52,12 @@ impl MarkiseApp {
         self.cheat_sheet.open
     }
 
+    /// The find bar and Quick Open are open (tests).
+    #[doc(hidden)]
+    pub fn find_and_quick_open(&self) -> (bool, bool) {
+        (self.find.open, self.quick.open)
+    }
+
     /// Sets the cheat sheet's search text (tests).
     pub fn set_shortcuts_query(&mut self, q: &str) {
         self.cheat_sheet.query = q.to_string();

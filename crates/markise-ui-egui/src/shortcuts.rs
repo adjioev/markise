@@ -186,6 +186,9 @@ pub fn filter(groups: &[Group], query: &str) -> Vec<Group> {
         .collect()
 }
 
+/// Id of the cheat sheet's search field.
+const SEARCH_ID: &str = "markise-shortcuts-search";
+
 /// State of the cheat sheet window.
 #[derive(Default)]
 pub struct CheatSheet {
@@ -193,6 +196,8 @@ pub struct CheatSheet {
     pub query: String,
     focus: bool,
     previous_focus: Option<egui::Id>,
+    /// Escape was pressed this frame ([`CheatSheet::take_keys`]).
+    escape: bool,
 }
 
 impl CheatSheet {
@@ -206,13 +211,48 @@ impl CheatSheet {
         self.focus = true;
     }
 
+    /// The window is modal for the keyboard: called at the start of the frame, before the
+    /// shortcuts, the find bar, Quick Open and the document read their keys, it takes the
+    /// keys those would act on (Escape closes the sheet; Enter, Tab and the arrows do nothing
+    /// underneath) and keeps the keyboard focus in its search field.
+    pub fn take_keys(&mut self, ctx: &egui::Context) {
+        if !self.open {
+            return;
+        }
+        ctx.input_mut(|i| {
+            i.events.retain(|e| match e {
+                egui::Event::Key { key, pressed, .. } => {
+                    if *key == egui::Key::Escape && *pressed {
+                        self.escape = true;
+                    }
+                    !matches!(
+                        key,
+                        egui::Key::Escape
+                            | egui::Key::Enter
+                            | egui::Key::Tab
+                            | egui::Key::ArrowUp
+                            | egui::Key::ArrowDown
+                            | egui::Key::PageUp
+                            | egui::Key::PageDown
+                    )
+                }
+                _ => true,
+            });
+        });
+        // a click elsewhere or a panel's focus request does not take typing away from it
+        let field = egui::Id::unique(SEARCH_ID);
+        if ctx.memory(|m| m.focused()) != Some(field) {
+            ctx.memory_mut(|m| m.request_focus(field));
+        }
+    }
+
     /// Shows the window over `groups`; Escape or its close button closes it and gives the
     /// keyboard focus back.
     pub fn show(&mut self, ctx: &egui::Context, groups: &[Group]) {
         if !self.open {
             return;
         }
-        let escape = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let escape = std::mem::take(&mut self.escape);
         let mut open = true;
         let screen = ctx.content_rect();
         egui::Window::new("Keyboard Shortcuts")
@@ -225,6 +265,7 @@ impl CheatSheet {
             .show(ctx, |ui| {
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
+                        .id(egui::Id::unique(SEARCH_ID))
                         .hint_text("Search shortcuts…")
                         .desired_width(f32::INFINITY),
                 );

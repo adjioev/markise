@@ -250,3 +250,60 @@ fn cheat_sheet_reflects_key_binding_overrides() {
     let all: Vec<&str> = groups.iter().flat_map(|g| g.rows.iter().map(|r| r.id)).collect();
     assert!(all.contains(&"help.shortcuts") && all.contains(&"file.openFolder"));
 }
+
+/// Codex review of PR #120: the cheat sheet is modal for the keyboard. Over the find bar,
+/// Escape closes the sheet (not the bar) and typing goes to the sheet; over Quick Open,
+/// Enter does not open the selected file.
+#[test]
+fn cheat_sheet_keys_do_not_reach_the_find_bar_or_quick_open() {
+    let dir = tmpdir("modal");
+    let doc = dir.join("note.md");
+    let other = dir.join("other.md");
+    std::fs::write(&doc, "Note\n").unwrap();
+    std::fs::write(&other, "Other\n").unwrap();
+    let mut h = harness(AppOptions {
+        open: vec![doc.clone()],
+        ..Default::default()
+    });
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_busy());
+    let ctx = h.ctx.clone();
+    h.state_mut().menu_action(&ctx, &MenuAction::Command("find.open"));
+    steps(&mut h, 2);
+    h.key_press_modifiers(cmd_shift(), Key::Questionmark);
+    steps(&mut h, 2);
+    assert!(h.state().is_shortcuts_open());
+    h.event(egui::Event::Text("x".into()));
+    steps(&mut h, 2);
+    assert_eq!(h.state().document_text().unwrap(), "Note\n");
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    assert!(!h.state().is_shortcuts_open());
+    assert_eq!(
+        h.state().find_and_quick_open(),
+        (true, false),
+        "Escape closed only the sheet"
+    );
+    h.event(egui::Event::Text("y".into()));
+    steps(&mut h, 2);
+    assert_eq!(
+        h.state().document_text().unwrap(),
+        "Note\n",
+        "focus is back in the find bar"
+    );
+
+    h.state_mut().menu_action(&ctx, &MenuAction::Command("file.quickOpen"));
+    steps(&mut h, 2);
+    h.event(egui::Event::Text("other".into()));
+    wait_until(&mut h, "results", |a| a.find_and_quick_open().1);
+    steps(&mut h, 5);
+    h.state_mut().menu_action(&ctx, &MenuAction::Command("help.shortcuts"));
+    steps(&mut h, 2);
+    h.key_press(Key::Enter);
+    steps(&mut h, 3);
+    assert_eq!(
+        h.state().document_path(),
+        Some(doc.as_path()),
+        "Enter did not open a file"
+    );
+    assert!(h.state().find_and_quick_open().1 && h.state().is_shortcuts_open());
+}
