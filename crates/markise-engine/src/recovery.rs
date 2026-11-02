@@ -65,20 +65,7 @@ impl Worker {
                         locks.push(lock);
                     }
                     drafts.sort();
-                    // Publish the directory only after acquiring its lock. Otherwise another instance
-                    // could claim the just-created empty directory and block this worker.
-                    let staging = tempfile::Builder::new().prefix(".session-").tempdir_in(&root)?;
-                    let lock = File::create(staging.path().join("lock"))?;
-                    lock.lock()?;
-                    let session = root.join(
-                        staging
-                            .path()
-                            .file_name()
-                            .unwrap()
-                            .to_string_lossy()
-                            .trim_start_matches('.'),
-                    );
-                    fs::rename(staging.path(), &session)?;
+                    let (session, lock) = claim_session(&root)?;
                     locks.push(lock);
                     let recent_file = root.join("recent.json");
                     let mut recent: Vec<PathBuf> = fs::read(&recent_file)
@@ -203,6 +190,32 @@ fn remove(p: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         r => r,
     }
+}
+/// Creates a fresh `session-*` directory and holds its lock. The directory is visible to other
+/// instances before its lock is held, so one of them may claim it first (by creating the lock file
+/// or winning the lock); then this worker leaves it to them and tries a new name instead of
+/// blocking. The directory is never renamed: Windows refuses to rename a directory while a file
+/// inside it (the held lock) is open.
+fn claim_session(root: &Path) -> std::io::Result<(PathBuf, File)> {
+    for _ in 0..16 {
+        let session = tempfile::Builder::new().prefix("session-").tempdir_in(root)?.keep();
+        let lock = match File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(session.join("lock"))
+        {
+            Ok(lock) => lock,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        match lock.try_lock() {
+            Ok(()) => return Ok((session, lock)),
+            Err(std::fs::TryLockError::WouldBlock) => continue,
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("could not claim a session directory"))
 }
 fn atomic_write(p: &Path, b: &[u8]) -> std::io::Result<()> {
     let dir = p.parent().unwrap();
