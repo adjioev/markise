@@ -132,6 +132,12 @@ impl DiagramService {
         })
     }
 
+    /// The limits jobs run with (a source above `max_source_bytes` is answered "too large"
+    /// without building it).
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
     /// The cached result, or queues a render (copying `source`) and returns `Pending`.
     pub fn request(&self, key: DiagramKey, lang: DiagramLang, source: &str, font_size: f32) -> DiagramLookup {
         let owned = source.to_string();
