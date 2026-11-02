@@ -471,6 +471,14 @@ pub const WORK_PER_SEC: u64 = if cfg!(windows) { 3_000_000_000 } else { 1_000_00
 /// than the cap fails at once. Each attempt's ratio is written to stderr (uncaptured), so CI
 /// logs show the margin.
 pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, run: &dyn Fn(&str)) {
+    scales_linearly_with(name, generate, run, &thread_work);
+}
+
+/// [`assert_scales_linearly`] with the work meter injected: `meter` returns the work done so
+/// far in [`thread_work`] units. Unit tests pass a fake clock that `run` advances by a
+/// deterministic amount, so the pass/fail decision is tested without timing noise (issue
+/// #142).
+fn scales_linearly_with(name: &str, generate: impl Fn(usize) -> String, run: &dyn Fn(&str), meter: &dyn Fn() -> u64) {
     use std::io::Write as _;
     use std::time::Duration;
     let secs = |w: u64| Duration::from_secs_f64(w as f64 / WORK_PER_SEC as f64);
@@ -479,9 +487,9 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
     let cap = Duration::from_secs(if cfg!(debug_assertions) { 15 } else { 5 });
     let once = |s: &str| {
         release_freed_memory();
-        let t = thread_work();
+        let t = meter();
         run(s);
-        thread_work().saturating_sub(t)
+        meter().saturating_sub(t)
     };
     // Best of `samples` runs; the first run is checked against the cap.
     let best = |s: &str, samples: usize| {
@@ -502,11 +510,11 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
         loop {
             let batch = || {
                 release_freed_memory();
-                let t = thread_work();
+                let t = meter();
                 for _ in 0..runs {
                     run(s);
                 }
-                thread_work().saturating_sub(t)
+                meter().saturating_sub(t)
             };
             let first = batch();
             if first >= min_small || runs >= MAX_BATCH {
@@ -684,6 +692,97 @@ mod tests {
         assert!(!scaling_ratio_ok(0.0, 1));
     }
 
+    /// Runs [`super::scales_linearly_with`] on a fake clock: one run of `len` bytes advances it
+    /// by exactly `cost(len)` work units. No real time is measured, so the verdict is
+    /// deterministic (issue #142).
+    fn fake_clock_check(name: &str, cost: impl Fn(u64) -> u64) {
+        let clock = std::cell::Cell::new(0u64);
+        super::scales_linearly_with(
+            name,
+            |n| "a".repeat(n),
+            &|s| clock.set(clock.get() + cost(s.len() as u64)),
+            &|| clock.get(),
+        );
+    }
+
+    /// Work units of a step costing `small_us` µs at [`super::SMALL_BYTES`] and growing as
+    /// `len^exponent`.
+    fn growth(small_us: f64, exponent: f64, len: u64) -> u64 {
+        let us = super::WORK_PER_SEC as f64 / 1e6;
+        (small_us * us * (len as f64 / super::SMALL_BYTES as f64).powf(exponent)) as u64
+    }
+
+    #[test]
+    fn fake_clock_linear_workload_passes() {
+        // timed as a batch (10 µs per run) and as single runs (5 ms per run)
+        fake_clock_check("fake-linear-fast", |len| growth(10.0, 1.0, len));
+        fake_clock_check("fake-linear-slow", |len| growth(5_000.0, 1.0, len));
+        // a 2× per-byte slowdown at the large size (allocation, memory bandwidth) still passes
+        let small = super::SMALL_BYTES as u64;
+        fake_clock_check("fake-linear-slowdown", |len| {
+            growth(10.0, 1.0, len) * if len > 2 * small { 2 } else { 1 }
+        });
+    }
+
+    #[test]
+    fn fake_clock_n_log_n_workload_passes() {
+        fake_clock_check("fake-n-log-n", |len| {
+            let log = (len as f64).ln() / (super::SMALL_BYTES as f64).ln();
+            (growth(10.0, 1.0, len) as f64 * log) as u64
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "super-linear")]
+    fn fake_clock_quadratic_workload_below_the_timer_floor_fails() {
+        // PR #111 review: a quadratic step of 0.01 ms at the small size must not pass
+        fake_clock_check("fake-quadratic", |len| growth(10.0, 2.0, len));
+    }
+
+    #[test]
+    #[should_panic(expected = "super-linear")]
+    fn fake_clock_n_1_5_workload_below_the_timer_floor_fails() {
+        // PR #113 review: 10 µs at the small size (timed as a batch) growing as n^1.5 must fail;
+        // its ratio is exactly 64, so no timing noise can let it pass (issue #142)
+        fake_clock_check("fake-n^1.5", |len| growth(10.0, 1.5, len));
+    }
+
+    #[test]
+    #[should_panic(expected = "super-linear")]
+    fn fake_clock_n_1_5_workload_above_the_timer_floor_fails() {
+        // 2 ms at the small size: timed as single runs
+        fake_clock_check("fake-n^1.5-slow", |len| growth(2_000.0, 1.5, len));
+    }
+
+    #[test]
+    fn fake_clock_one_disturbed_attempt_is_retried() {
+        // the two large runs of the first attempt are 100× slower (e.g. a frequency drop), so
+        // that attempt fails; the second attempt sees linear growth and passes
+        let large_runs = std::cell::Cell::new(0u32);
+        let small = super::SMALL_BYTES as u64;
+        fake_clock_check("fake-disturbed", |len| {
+            let mut work = growth(10.0, 1.0, len);
+            if len > 2 * small {
+                large_runs.set(large_runs.get() + 1);
+                if large_runs.get() <= 2 {
+                    work *= 100;
+                }
+            }
+            work
+        });
+        assert_eq!(large_runs.get(), 4, "exactly one retry");
+    }
+
+    #[test]
+    #[should_panic(expected = "of CPU time (cap")]
+    fn fake_clock_run_over_the_cap_fails_at_once() {
+        // the large run alone takes 20 s, over the cap of 15 s (debug) or 5 s (release)
+        let small = super::SMALL_BYTES as u64;
+        fake_clock_check("fake-over-cap", |len| {
+            growth(10.0, 1.0, len) + if len > 2 * small { 20 * super::WORK_PER_SEC } else { 0 }
+        });
+    }
+
     /// Spins until this thread has done `work` units of [`super::thread_work`].
     fn spin(work: u64) {
         let t = super::thread_work();
@@ -692,8 +791,12 @@ mod tests {
         }
     }
 
+    /// Real-timing smoke tests of [`super::assert_scales_linearly`] with [`super::thread_work`]
+    /// as the meter. Their margins are wide (ratio 16 against [`super::MAX_RATIO`] 40 and 256
+    /// against 40), so clock resolution and spin overshoot on CI runners cannot flip them; the
+    /// verdict's finer distinctions (n^1.5, n log n, retries) are covered on the fake clock.
     #[test]
-    fn fast_linear_workload_below_the_timer_floor_passes() {
+    fn real_timing_fast_linear_workload_passes() {
         // 10 µs at SMALL_BYTES: measured as a batch, ratio ≈ 16
         let us = super::WORK_PER_SEC / 1_000_000;
         let small = super::SMALL_BYTES as u64;
@@ -704,24 +807,14 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "super-linear")]
-    fn fast_quadratic_workload_below_the_timer_floor_fails() {
-        // PR #111 review: a quadratic step of 0.01 ms at the small size must not pass
+    fn real_timing_quadratic_workload_fails() {
+        // 100 µs at SMALL_BYTES growing as n²: ratio ≈ 256, more than 6× above MAX_RATIO even
+        // if the small batch overshoots
         let us = super::WORK_PER_SEC / 1_000_000;
         let small = super::SMALL_BYTES as u64;
-        super::assert_scales_linearly("fast-quadratic", |n| "a".repeat(n), &|s| {
+        super::assert_scales_linearly("real-quadratic", |n| "a".repeat(n), &|s| {
             let k = s.len() as u64;
-            spin(10 * us * k / small * k / small)
-        });
-    }
-
-    #[test]
-    #[should_panic(expected = "super-linear")]
-    fn fast_n_1_5_workload_below_the_timer_floor_fails() {
-        // PR #113 review: 10 µs at the small size (timed as a batch) growing as n^1.5 must fail
-        let us = super::WORK_PER_SEC as f64 / 1e6;
-        let small = super::SMALL_BYTES as f64;
-        super::assert_scales_linearly("fast-n^1.5", |n| "a".repeat(n), &|s| {
-            spin((10.0 * us * (s.len() as f64 / small).powf(1.5)) as u64)
+            spin(100 * us * k / small * k / small)
         });
     }
 
