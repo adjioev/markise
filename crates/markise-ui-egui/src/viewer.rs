@@ -25,6 +25,60 @@ use markise_theme::Theme;
 use crate::images::TextureStore;
 use crate::text_paint::ParleyText;
 
+/// PROTOTYPE (#86, scroll quality): `MARKISE_SCROLL_SNAP=1` renders the viewport at a scroll
+/// offset rounded to device pixels and rounds item origins (every glyph moves by whole pixels).
+fn scroll_snap() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_on("MARKISE_SCROLL_SNAP") || scroll_tiles())
+}
+
+/// PROTOTYPE (#86): `MARKISE_SCROLL_TILES=1` (implies snapping) composites cached tessellated
+/// meshes per item instead of painting and tessellating its layout every frame.
+fn scroll_tiles() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_on("MARKISE_SCROLL_TILES"))
+}
+
+/// PROTOTYPE (#86): `MARKISE_SCROLL_RAW=1` applies trackpad (point-unit) wheel deltas exactly,
+/// including macOS momentum events, instead of egui's smoothed delta.
+fn scroll_raw() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_on("MARKISE_SCROLL_RAW"))
+}
+
+fn env_on(k: &str) -> bool {
+    std::env::var(k).is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+type TileKey = (usize, u32, [usize; 2]);
+type TileEntry = (Arc<egui::epaint::Mesh>, u64, Arc<BlockLayout>);
+
+/// PROTOTYPE (#86): tessellated meshes of item layouts, positioned relative to the item origin.
+#[derive(Default)]
+pub struct TileCache {
+    /// (layout pointer, ppp bits, font atlas size) → (mesh, last frame used)
+    map: std::collections::HashMap<TileKey, TileEntry>,
+    frame: u64,
+    pub hits: u64,
+    pub misses: u64,
+}
+
+impl TileCache {
+    /// Bytes held by the cached meshes.
+    pub fn bytes(&self) -> usize {
+        self.map
+            .values()
+            .map(|(m, _, _)| m.vertices.len() * std::mem::size_of::<egui::epaint::Vertex>() + m.indices.len() * 4)
+            .sum()
+    }
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
 mod code_tools;
 mod comment_place;
 mod comment_presence;
@@ -153,6 +207,8 @@ pub struct DocViewer {
     lazy_drag_total: Option<f64>,
     /// PROTOTYPE (lazy view): where the thumb was grabbed (px from its top) during a drag.
     lazy_drag_grab: Option<f32>,
+    /// PROTOTYPE (#86): per-item mesh tiles (`MARKISE_SCROLL_TILES=1`).
+    pub tiles: TileCache,
     /// Surface top of the last frame (screen y).
     last_top: f32,
     /// Text to put on the clipboard after this frame's input handling.
@@ -217,6 +273,7 @@ impl DocViewer {
             last_left: 0.0,
             lazy_drag_total: None,
             lazy_drag_grab: None,
+            tiles: TileCache::default(),
             last_top: 0.0,
             pending_copy: None,
             last_surface: None,
@@ -376,6 +433,11 @@ impl DocViewer {
         None
     }
 
+    /// Visible items of the last frame: (index, top relative to the surface) (benches).
+    pub fn last_visible_y(&self) -> &[(usize, f32)] {
+        &self.last_visible
+    }
+
     /// Scrolls the caret into view on the next frame (benches, like a find match).
     pub fn find_reveal_for_bench(&mut self) {
         self.find_reveal = true;
@@ -467,7 +529,10 @@ impl DocViewer {
         let col_w = (content_w - 2.0 * theme.column_padding_x)
             .min(theme.column_max_width)
             .max(120.0);
-        let left = rect.left() + ((content_w - col_w) * 0.5).max(4.0);
+        let mut left = rect.left() + ((content_w - col_w) * 0.5).max(4.0);
+        if scroll_snap() {
+            left = (left * ppp).round() / ppp;
+        }
         self.ed.view.set_params(col_w, theme, ppp);
         let vh = rect.height();
 
@@ -491,7 +556,31 @@ impl DocViewer {
 
         // ---- input: wheel / trackpad
         if resp.hovered() || ui.rect_contains_pointer(rect) {
-            let d = ui.input(|i| i.smooth_scroll_delta);
+            let mut d = ui.input(|i| i.smooth_scroll_delta);
+            if scroll_raw() {
+                // trackpad / momentum deltas exactly as delivered; mouse-wheel lines and pages
+                // unsmoothed (egui's smoothing turns momentum events of >= 8 pt into a
+                // delayed exponential tail)
+                let line = theme.line_px();
+                d = ui.input(|i| {
+                    let mut sum = Vec2::ZERO;
+                    for e in &i.events {
+                        if let egui::Event::MouseWheel {
+                            unit, delta, modifiers, ..
+                        } = e
+                            && !modifiers.command
+                        {
+                            sum += match unit {
+                                egui::MouseWheelUnit::Point => *delta,
+                                egui::MouseWheelUnit::Line => *delta * line * 3.0,
+                                egui::MouseWheelUnit::Page => *delta * vh,
+                            };
+                        }
+                    }
+                    sum
+                });
+                ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+            }
             if d.y != 0.0 {
                 self.ed.view.scroll_by(-d.y);
                 ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
@@ -750,6 +839,17 @@ impl DocViewer {
             self.ed.refresh_focus();
             ctx.request_repaint();
         }
+        let mut visible = visible;
+        if scroll_snap() {
+            // render at the scroll offset rounded to device pixels, item origins rounded: as the
+            // scroll moves by whole pixels, every item does, and epaint's per-galley rounding
+            // stays the same (no line moving a pixel before its neighbour)
+            let s = self.ed.view.scroll_y();
+            let shift = (s - (s * ppp as f64).round() / ppp as f64) as f32;
+            for v in &mut visible {
+                v.y = ((rect.top() + v.y + shift) * ppp).round() / ppp - rect.top();
+            }
+        }
         out.painted = visible.len();
         out.laid_out = self.ed.view.laid_out.len();
         self.last_visible = visible.iter().map(|v| (v.idx, v.y)).collect();
@@ -759,8 +859,70 @@ impl DocViewer {
         // ---- paint
         images.begin_frame();
         let mut requests = Vec::new();
+        let tiles = scroll_tiles() && parley.is_none();
+        let focus_item = self.ed.view.focus().map(|f| f.0);
+        let atlas = if tiles {
+            ctx.fonts(|f| f.font_image_size())
+        } else {
+            [0, 0]
+        };
+        self.tiles.frame += 1;
         for v in &visible {
             let origin = pos2(left, rect.top() + v.y);
+            let tileable = tiles
+                && Some(v.idx) != focus_item
+                && !v
+                    .layout
+                    .prims
+                    .iter()
+                    .any(|p| matches!(p, Prim::Image { .. } | Prim::Math { .. }));
+            if tileable {
+                let key = (Arc::as_ptr(&v.layout) as usize, ppp.to_bits(), atlas);
+                let frame_no = self.tiles.frame;
+                if let Some((mesh, used, _)) = self.tiles.map.get_mut(&key) {
+                    *used = frame_no;
+                    let mut m = (**mesh).clone();
+                    m.translate(origin.to_vec2());
+                    painter.add(egui::Shape::mesh(m));
+                    self.tiles.hits += 1;
+                    continue;
+                }
+                // miss: paint it for this frame and capture the whole layout (unculled) on a
+                // scratch layer, tessellated at the origin
+                paint_layout(&painter, ui, &v.layout, origin, images, &mut requests, None);
+                let scratch = painter
+                    .clone()
+                    .with_layer_id(egui::LayerId::new(egui::Order::Background, id.with("tile-scratch")))
+                    .with_clip_rect(Rect::EVERYTHING);
+                let layer = scratch.layer_id();
+                let a = ctx.graphics_mut(|g| g.entry(layer).next_idx());
+                paint_layout(&scratch, ui, &v.layout, origin, images, &mut requests, None);
+                let shapes: Vec<egui::Shape> = ctx.graphics_mut(|g| {
+                    let list = g.entry(layer);
+                    let b = list.next_idx();
+                    let out: Vec<egui::Shape> = list
+                        .all_entries()
+                        .skip(a.0)
+                        .take(b.0 - a.0)
+                        .map(|c| c.shape.clone())
+                        .collect();
+                    for k in a.0..b.0 {
+                        list.reset_shape(egui::layers::ShapeIdx(k));
+                    }
+                    out
+                });
+                // (no prepared discs: circles take the generic path)
+                let (discs, opts) = (Vec::new(), ctx.tessellation_options(|o| *o));
+                let mut t = egui::epaint::Tessellator::new(ppp, opts, atlas, discs);
+                let mut mesh = egui::epaint::Mesh::default();
+                for mut sh in shapes {
+                    sh.translate(-origin.to_vec2());
+                    t.tessellate_shape(sh, &mut mesh);
+                }
+                self.tiles.misses += 1;
+                self.tiles.map.insert(key, (Arc::new(mesh), frame_no, v.layout.clone()));
+                continue;
+            }
             paint_layout(
                 &painter,
                 ui,
@@ -770,6 +932,10 @@ impl DocViewer {
                 &mut requests,
                 parley.as_deref_mut(),
             );
+        }
+        if tiles && self.tiles.frame.is_multiple_of(30) {
+            let f = self.tiles.frame;
+            self.tiles.map.retain(|_, (_, used, _)| f - *used < 120);
         }
         for src in requests {
             images.request(&ctx, &src);

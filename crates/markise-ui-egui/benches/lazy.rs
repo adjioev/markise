@@ -646,11 +646,152 @@ fn end_child(src: &Path) {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Scroll quality (#86): a simulated trackpad gesture with macOS momentum at 120 Hz.
+fn scroll_quality_child(src: &Path) {
+    let lazy = markise_layout::lazy_enabled();
+    let path = src.with_extension(if lazy { "lazy-sq.md" } else { "normal-sq.md" });
+    std::fs::copy(src, &path).expect("copy corpus");
+    let ctx = Context::default();
+    ctx.set_pixels_per_point(2.0);
+    let mut app = MarkiseApp::new(AppOptions::default());
+    let mut t = 0.0f64;
+    let dt = 1.0 / 120.0;
+    let run = |app: &mut MarkiseApp, events: Vec<Event>, t: &mut f64| -> f64 {
+        *t += dt;
+        let input = RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(W, H))),
+            time: Some(*t),
+            predicted_dt: dt as f32,
+            events,
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+        out.textures_delta.clear();
+        let _p = ctx.tessellate(out.shapes, out.pixels_per_point);
+        t0.elapsed().as_secs_f64() * 1e3
+    };
+    run(&mut app, vec![], &mut t);
+    app.open(path.clone());
+    while app.model().is_none() || app.is_loading() {
+        run(&mut app, vec![], &mut t);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let r = app.viewer().unwrap().surface_rect().unwrap();
+    {
+        let v = &mut app.viewer().unwrap().ed.view;
+        let y = v.total_height() * 0.43;
+        v.scroll_to_y(y);
+    }
+    for _ in 0..5 {
+        run(&mut app, vec![Event::PointerMoved(r.center())], &mut t);
+    }
+    let w = |dy: f32, phase: TouchPhase| Event::MouseWheel {
+        unit: MouseWheelUnit::Point,
+        delta: vec2(0.0, dy),
+        phase,
+        source: MouseWheelSource::Unknown,
+        modifiers: Default::default(),
+    };
+    let mut times = Vec::new();
+    let mut input_sum = 0.0f64;
+    let mut track_err = 0.0f64;
+    let mut wobble = 0;
+    let mut frames = 0;
+    let mut prev_gap: Option<(usize, f32)> = None;
+    let mut y_prev = app.viewer().unwrap().ed.view.scroll_y();
+    // 4 gestures: finger phase (40 frames, fractional deltas) then momentum (150 frames,
+    // decaying from 60 pt per event), 120 Hz
+    for g in 0..4 {
+        let dir = if g % 2 == 0 { -1.0 } else { 1.0 };
+        let mut events_seq: Vec<Vec<Event>> = vec![vec![w(0.0, TouchPhase::Start)]];
+        for k in 0..40 {
+            let d = 2.0 + 9.0 * (k as f32 / 40.0 * std::f32::consts::PI).sin() + 0.37;
+            events_seq.push(vec![w(dir * d, TouchPhase::Move)]);
+        }
+        events_seq.push(vec![w(0.0, TouchPhase::End)]);
+        let mut v = 60.0f32;
+        for _ in 0..150 {
+            events_seq.push(vec![w(dir * v, TouchPhase::Move)]);
+            v *= 0.965;
+        }
+        for _ in 0..30 {
+            events_seq.push(vec![]);
+        }
+        for evs in events_seq {
+            let delta: f64 = evs
+                .iter()
+                .map(|e| match e {
+                    Event::MouseWheel { delta, .. } => -delta.y as f64,
+                    _ => 0.0,
+                })
+                .sum();
+            input_sum += delta.abs();
+            let ms = run(&mut app, evs, &mut t);
+            times.push(ms);
+            frames += 1;
+            let viewer = app.viewer().unwrap();
+            let y = viewer.ed.view.scroll_y();
+            track_err += ((y - y_prev) - delta).abs();
+            y_prev = y;
+            // rendered spacing of the first two visible items, as epaint rounds each to a
+            // device pixel: a change while scrolling is a line moving before its neighbour
+            let vis = viewer.last_visible_y();
+            if vis.len() >= 3 {
+                let rd = |y: f32| ((r.top() + y) * 2.0).round() / 2.0;
+                let (i, a) = vis[1];
+                let gap = rd(vis[2].1) - rd(a);
+                if let Some((pi, pg)) = prev_gap
+                    && pi == i
+                    && pg != gap
+                {
+                    wobble += 1;
+                }
+                prev_gap = Some((i, gap));
+            }
+        }
+    }
+    let n = times.len() as f64;
+    let mean = times.iter().sum::<f64>() / n;
+    let sd = (times.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n).sqrt();
+    let over = |b: f64| times.iter().filter(|&&x| x > b).count();
+    let tiles = &app.viewer().unwrap().tiles;
+    let (th, tm, tb, tl) = (tiles.hits, tiles.misses, tiles.bytes(), tiles.len());
+    report("continuous trackpad scroll @120 Hz (frame ms)", times.clone());
+    println!(
+        "  frame time mean {mean:.2} ms, sd {sd:.2} ms; frames > 8.3 ms (120 Hz budget) {}, > 16.7 ms {} of {frames}",
+        over(8.33),
+        over(16.67)
+    );
+    println!(
+        "  tracking: |scroll moved - input delta| summed {track_err:.0} pt over {input_sum:.0} pt of input ({:.1} %)",
+        track_err / input_sum.max(1.0) * 100.0
+    );
+    println!(
+        "  line wobble (rendered spacing of neighbouring items changed between frames): {wobble} of {frames} frames"
+    );
+    println!(
+        "  tiles: {tl} meshes, {:.1} MB, hits {th} misses {tm}",
+        tb as f64 / 1048576.0
+    );
+    println!(
+        "  MEM live {} MB | footprint {} MB",
+        LIVE.load(Ordering::Relaxed).max(0) >> 20,
+        footprint_mb()
+    );
+    drop(app);
+    let _ = std::fs::remove_file(&path);
+}
+
 fn main() {
     if std::env::args().any(|a| a == "--list") {
         return;
     }
     if let Ok(p) = std::env::var("MARKISE_LAZY_CHILD") {
+        if std::env::var_os("MARKISE_LAZY_SCROLLQ").is_some() {
+            scroll_quality_child(&PathBuf::from(p));
+            return;
+        }
         if std::env::var_os("MARKISE_LAZY_END").is_some() {
             end_child(&PathBuf::from(p));
             return;
