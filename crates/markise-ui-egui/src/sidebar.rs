@@ -1417,6 +1417,7 @@ fn virtual_rows(
     .inner
 }
 
+/// Returns the index of the clicked entry.
 pub fn outline(ui: &mut Ui, entries: &[OutlineEntry], current: Option<usize>, look: &SideLook) -> Option<usize> {
     if entries.is_empty() {
         ui.label(RichText::new("No headings").font(look.font.clone()).color(look.icon));
@@ -1437,7 +1438,7 @@ pub fn outline(ui: &mut Ui, entries: &[OutlineEntry], current: Option<usize>, lo
                 current == Some(i),
             );
             if r.clicked() {
-                clicked = Some(e.item);
+                clicked = Some(i);
             }
         }
     });

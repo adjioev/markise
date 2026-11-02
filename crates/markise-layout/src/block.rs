@@ -2434,7 +2434,7 @@ pub fn layout_item(
             empty_anchor = Some((Rect::from_min_size(pos2(x, y), vec2(0.0, line_px)), rel));
             y += line_px;
         }
-        ItemKind::Hidden => {}
+        ItemKind::Hidden | ItemKind::Page(_) => {}
     }
     let content_bottom = y;
 

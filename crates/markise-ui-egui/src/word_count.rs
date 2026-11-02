@@ -5,22 +5,21 @@
 //! [`markise_engine::count::BIG_BLOCK`], a very large selection) are shown with `~`.
 //!
 //! Everything runs on the UI thread, reading the session's text in place (no copy): a frame
-//! without a change only compares the document's revision. After an edit the counts are
+//! without a change only checks the session's change log. After an edit the counts are
 //! brought up to date once the document has been quiet for [`DEBOUNCE`]: the [`DocCounter`]
-//! matches the view model's items by content hash (integer compares, no text) and counts only
-//! the changed blocks. A document up to [`SMALL_DOC`] is counted in its first frame; a larger
+//! keeps one count per top-level block of the document, applies the edits' summaries (no text
+//! read) and counts only the changed blocks; it does not depend on the view model (whose items
+//! a paged model materializes only near the viewport, issue #125). A document up to [`SMALL_DOC`] is counted in its first frame; a larger
 //! one about [`FRAME_BYTES`] of source per frame (each block is at most
 //! [`markise_engine::count::BIG_BLOCK`]), showing the last value (or "Counting…") until done.
 //! A selection reads at most its two partly selected blocks.
 
 use std::ops::Range;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use markise_doc::FormatDoc;
 use markise_engine::count::{CounterStats, Counts, DocCounter, FRAME_BYTES};
+use markise_engine::editor::{ChangeLog, EditorSession};
 use markise_engine::settings::CountMode;
-use markise_layout::DocModel;
 
 /// Quiet time after an edit before the counts are updated.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -135,15 +134,15 @@ pub fn tooltip(shown: &Shown) -> String {
     }
 }
 
-/// The document whose counts are cached: identity of its model, text revision, item count.
-type Seen = (usize, u64, usize);
-
 /// Word-count state of the open document.
 #[derive(Default)]
 pub struct WordCount {
     counter: DocCounter,
-    seen: Option<Seen>,
-    /// The counter is reconciled with the model `seen` describes.
+    /// The session whose document is counted ([`EditorSession::id`]).
+    session: Option<u64>,
+    /// Edits not applied to the counter yet (debounce).
+    pending: ChangeLog,
+    /// The counter is in step with the document.
     synced: bool,
     /// When the document last changed (debounce).
     changed: Option<Instant>,
@@ -165,31 +164,35 @@ impl WordCount {
     }
 
     /// Brings the counts up to date as far as this frame's budget allows and returns what to
-    /// show. `rev` is the document's text revision, `sel` the selected source range.
-    pub fn update(
-        &mut self,
-        ctx: &egui::Context,
-        doc: &dyn FormatDoc,
-        model: &Arc<DocModel>,
-        rev: u64,
-        sel: Range<usize>,
-    ) -> Shown {
+    /// show. Takes the session's document changes ([`EditorSession::take_log`]); `sel` is the
+    /// selected source range.
+    pub fn update(&mut self, ctx: &egui::Context, session: &mut EditorSession, sel: Range<usize>) -> Shown {
         let now = Instant::now();
-        let key = (Arc::as_ptr(model) as usize, rev, model.items.len());
-        if self.seen != Some(key) {
-            // the document just opened: at once; a change (an edit, a rebuilt model): after
-            // the document has been quiet for a moment (the owner starts a new `WordCount`
+        let log = session.take_log();
+        let doc = session.doc();
+        if self.session != Some(session.id()) {
+            // the document just opened: counted at once (the owner starts a new `WordCount`
             // for another document)
-            let fresh = self.seen.is_none();
-            self.seen = Some(key);
+            self.session = Some(session.id());
+            self.counter.reset(doc);
+            self.pending = ChangeLog::default();
+            self.synced = true;
+            self.changed = None;
+        } else if !log.is_empty() {
+            // a change: applied once the document has been quiet for a moment
+            self.pending.append(log);
             self.synced = false;
-            self.changed = if fresh { None } else { Some(now) };
+            self.changed = Some(now);
         }
         if !self.synced {
             match self.changed.map(|t| now.saturating_duration_since(t)) {
                 Some(quiet) if quiet < DEBOUNCE => ctx.request_repaint_after(DEBOUNCE - quiet),
                 _ => {
-                    self.counter.reconcile(model);
+                    let p = std::mem::take(&mut self.pending);
+                    let applied = !p.reset && p.edits.iter().all(|e| self.counter.apply(e));
+                    if !applied || self.counter.len() != doc.top_count() {
+                        self.counter.reset(doc);
+                    }
                     self.synced = true;
                 }
             }
@@ -201,7 +204,7 @@ impl WordCount {
                 } else {
                     FRAME_BYTES
                 };
-                if !self.counter.fill(doc, model, budget) {
+                if !self.counter.fill(doc, budget) {
                     ctx.request_repaint();
                 }
             }
@@ -217,7 +220,7 @@ impl WordCount {
         }
         // the selection is counted once the document is
         let selection = (self.synced && self.counter.missing() == 0)
-            .then(|| self.counter.selection(doc, model, sel))
+            .then(|| self.counter.selection(doc, sel))
             .flatten();
         match (selection, self.last) {
             (Some(selection), Some(document)) => Shown::Selection { selection, document },

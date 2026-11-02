@@ -1018,67 +1018,92 @@ impl SourceView {
             if start >= r.end {
                 break;
             }
-            let it = &model.items[i];
-            if let (ItemKind::Code { lang }, Some(code)) = (&it.kind, it.code.as_deref().copied()) {
-                let units: Vec<markise_doc::Span> = match &it.segment {
-                    Some(Segment::Lines { spans, .. }) => spans
-                        .iter()
-                        .map(|s| markise_doc::Span::new(start + s.start, start + s.end))
-                        .collect(),
-                    _ => ctx.doc.leaf(start).map(|l| l.lines).unwrap_or_default(),
-                };
-                let overlaps =
-                    units.first().is_some_and(|f| f.start < r.end) && units.last().is_some_and(|l| l.end >= r.start);
-                if overlaps && !lang.is_empty() {
-                    let range = item_range(it, &code);
-                    let q = CodeQuery {
-                        code,
-                        lang,
-                        range,
-                        doc: &**ctx.doc,
-                        start,
-                        item: i,
-                    };
-                    if ctx.highlights.ready(&q) {
-                        if let Some(runs) = ctx.highlights.runs(&q) {
-                            // content offsets → source: walk the item's units
-                            let mut cpos = code.offset;
-                            let mut spans = Vec::with_capacity(units.len());
-                            for (k, u) in units.iter().enumerate() {
-                                spans.push((cpos, u.start, u.len()));
-                                cpos += u.len();
-                                if units.get(k + 1).is_none_or(|nx| nx.start != u.end) {
-                                    cpos += 1;
-                                }
-                            }
-                            for run in runs {
-                                let (rs, re) = (run.start as usize, run.end as usize);
-                                let k0 = spans.partition_point(|s| s.0 + s.2 <= rs);
-                                for s in &spans[k0..] {
-                                    if s.0 >= re {
-                                        break;
-                                    }
-                                    let a = rs.max(s.0) - s.0;
-                                    let b = re.min(s.0 + s.2) - s.0;
-                                    if a < b && s.1 + b <= text.len() {
-                                        let abs = s.1 + a..s.1 + b;
-                                        if abs.end > r.start && abs.start < r.end {
-                                            out.push((abs, run.kind));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        ctx.highlights.want(&q);
-                        pending = true;
+            if model.is_page(i) {
+                // a page of a paged model that the rendered view has not materialized (Source
+                // mode does not draw it): its code items, flattened for the lookup
+                for (start, it) in model.page_items(&**ctx.doc, i) {
+                    if start >= r.end {
+                        break;
                     }
+                    Self::item_code_runs(ctx, text, &r, i, start, &it, &mut out, &mut pending);
                 }
+            } else {
+                Self::item_code_runs(ctx, text, &r, i, start, &model.items[i], &mut out, &mut pending);
             }
             i += 1;
         }
         out.sort_by_key(|c| c.0.start);
         (out, pending)
+    }
+
+    /// The highlight runs inside `r` of code item `it` (index `i`, absolute start `start`).
+    #[allow(clippy::too_many_arguments)]
+    fn item_code_runs(
+        ctx: &SourceCtx<'_>,
+        text: &str,
+        r: &Range<usize>,
+        i: usize,
+        start: usize,
+        it: &crate::model::Item,
+        out: &mut Vec<(Range<usize>, TokenKind)>,
+        pending: &mut bool,
+    ) {
+        if let (ItemKind::Code { lang }, Some(code)) = (&it.kind, it.code.as_deref().copied()) {
+            let units: Vec<markise_doc::Span> = match &it.segment {
+                Some(Segment::Lines { spans, .. }) => spans
+                    .iter()
+                    .map(|s| markise_doc::Span::new(start + s.start, start + s.end))
+                    .collect(),
+                _ => ctx.doc.leaf(start).map(|l| l.lines).unwrap_or_default(),
+            };
+            let overlaps =
+                units.first().is_some_and(|f| f.start < r.end) && units.last().is_some_and(|l| l.end >= r.start);
+            if overlaps && !lang.is_empty() {
+                let range = item_range(it, &code);
+                let q = CodeQuery {
+                    code,
+                    lang,
+                    range,
+                    doc: &**ctx.doc,
+                    start,
+                    item: i,
+                };
+                if ctx.highlights.ready(&q) {
+                    if let Some(runs) = ctx.highlights.runs(&q) {
+                        // content offsets → source: walk the item's units
+                        let mut cpos = code.offset;
+                        let mut spans = Vec::with_capacity(units.len());
+                        for (k, u) in units.iter().enumerate() {
+                            spans.push((cpos, u.start, u.len()));
+                            cpos += u.len();
+                            if units.get(k + 1).is_none_or(|nx| nx.start != u.end) {
+                                cpos += 1;
+                            }
+                        }
+                        for run in runs {
+                            let (rs, re) = (run.start as usize, run.end as usize);
+                            let k0 = spans.partition_point(|s| s.0 + s.2 <= rs);
+                            for s in &spans[k0..] {
+                                if s.0 >= re {
+                                    break;
+                                }
+                                let a = rs.max(s.0) - s.0;
+                                let b = re.min(s.0 + s.2) - s.0;
+                                if a < b && s.1 + b <= text.len() {
+                                    let abs = s.1 + a..s.1 + b;
+                                    if abs.end > r.start && abs.start < r.end {
+                                        out.push((abs, run.kind));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    ctx.highlights.want(&q);
+                    *pending = true;
+                }
+            }
+        }
     }
 
     /// The layout of item `i` (cached on the item, or computed now).

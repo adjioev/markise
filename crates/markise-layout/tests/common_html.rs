@@ -109,6 +109,7 @@ fn incremental_changes_repair_pairing_without_losing_toggled_state() {
     let src = "Before\n\n<details>\n<summary>Title</summary>\n\nBody\n\n</details>\n\nAfter\n";
     let mut d = markise_md::parse(src);
     let mut v = view(src);
+    shown(&mut v); // a paged model's pages near the viewport come in with the first frame
     v.toggle_expanded(1);
     assert!(shown(&mut v).contains("Body"));
     let at = d.text().find("Body").unwrap();

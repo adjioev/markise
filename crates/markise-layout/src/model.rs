@@ -82,6 +82,9 @@ pub enum ItemKind {
     Hidden,
     /// An empty list item (`- `): only its marker is drawn.
     Empty,
+    /// A page of top-level blocks of a paged model that is not materialized (a placeholder,
+    /// see [`paged`]): never laid out or shown (the view materializes it first).
+    Page(Box<paged::PageStats>),
 }
 
 /// Vertical gap above an item, resolved to points by the layout.
@@ -255,6 +258,10 @@ impl Items {
     fn get_mut(&mut self, i: usize) -> Option<&mut Item> {
         self.0.get_mut(i)
     }
+    /// Index of the first item starting at or after absolute offset `start`.
+    pub fn partition_point_start(&self, start: usize) -> usize {
+        self.0.partition_point(|r| r.origin < start)
+    }
     fn partition_point(&self, mut pred: impl FnMut(usize, &Item) -> bool) -> usize {
         self.0.partition_point(|r| pred(r.origin, r.item))
     }
@@ -299,7 +306,12 @@ pub struct DocModel {
     toc_runs: Vec<(usize, usize)>,
     /// Lowest heading level of the outline (TOC indentation base; 1 when empty).
     min_level: u8,
+    /// Top-level blocks per page of a paged model ([`paged`]); 0: a full model.
+    page_tops: usize,
 }
+
+mod paged;
+pub use paged::{PAGE_TOPS, PageStats, Paging, PagingCounters, paging_counters};
 
 pub(crate) fn hasher() -> ahash::AHasher {
     // fixed keys: hashes must be stable within a process run (cache keys), not across runs
@@ -372,7 +384,22 @@ impl DocModel {
     }
 
     /// Like [`DocModel::build`], unshared (for owners that update it with [`DocModel::apply`]).
+    /// Paged by default ([`Paging::from_env`]).
     pub fn build_owned(doc: &dyn FormatDoc, path: Option<&Path>) -> DocModel {
+        Self::build_with(doc, path, Paging::from_env())
+    }
+
+    /// Like [`DocModel::build_owned`] with an explicit [`Paging`] (a format without
+    /// [`FormatDoc::top_at`] always gets a full model).
+    pub fn build_with(doc: &dyn FormatDoc, path: Option<&Path>, paging: Paging) -> DocModel {
+        match paging {
+            Paging::Paged { tops } if tops > 0 && doc.top_at(0).is_some() => Self::build_paged(doc, path, tops),
+            _ => Self::build_full(doc, path),
+        }
+    }
+
+    /// A full model: one item per leaf (segment) of the whole document.
+    fn build_full(doc: &dyn FormatDoc, path: Option<&Path>) -> DocModel {
         // flattened in batches straight into the chunked list (no full-size intermediate)
         let mut chunks = RelChunks::default();
         let n = doc.top_count();
@@ -393,6 +420,7 @@ impl DocModel {
             root_url,
             toc_runs: Vec::new(),
             min_level: 1,
+            page_tops: 0,
         };
         m.rebuild_outline(doc);
         m.update_tocs(doc);
@@ -410,10 +438,13 @@ impl DocModel {
     /// bytes `reparsed.start .. reparsed.end - delta` before the edit, the new ones cover
     /// `reparsed` after it.
     pub fn apply(&mut self, doc: &dyn FormatDoc, e: &EditSummary) -> ModelChange {
+        if self.is_paged() && (e.deps.all || self.edit_touches_page(e)) {
+            return self.rebuild_paged(doc, e.deps.labels.clone());
+        }
         if e.deps.all {
             let n = self.items.len();
             let base_dir = self.base_dir.clone();
-            let mut fresh = Self::build_owned(doc, None);
+            let mut fresh = Self::build_with(doc, None, self.paging());
             fresh.base_dir = base_dir;
             fresh.ctx_hash = images_hash(&fresh.root_url, &fresh.base_dir);
             *self = fresh;
@@ -548,7 +579,7 @@ impl DocModel {
                     // item for item: rebuild (rare: the document's first block changed status)
                     let n_before = (n_items as isize - shift) as usize;
                     let base_dir = self.base_dir.clone();
-                    let mut fresh = Self::build_owned(doc, None);
+                    let mut fresh = Self::build_with(doc, None, self.paging());
                     fresh.base_dir = base_dir;
                     fresh.ctx_hash = images_hash(&fresh.root_url, &fresh.base_dir);
                     *self = fresh;
@@ -625,15 +656,36 @@ impl DocModel {
         if !e.deps.labels.is_empty() {
             change.labels = e.deps.labels.clone();
             let changed: HashSet<u64> = e.deps.labels.iter().copied().collect();
-            let retext: Vec<usize> = (0..self.outline.len())
-                .filter(|&k| {
-                    self.item_references(doc, self.outline[k].item)
-                        .iter()
-                        .any(|r| changed.contains(r))
-                })
-                .collect();
-            for k in retext {
-                let start = self.items.start(self.outline[k].item).unwrap_or(0);
+            // (entry, heading start) of the headings using a changed label; the headings of
+            // a page placeholder are read from its blocks (paged models)
+            let mut retext: Vec<(usize, usize)> = Vec::new();
+            let mut k = 0;
+            while k < self.outline.len() {
+                let i = self.outline[k].item;
+                if let Some(ItemKind::Page(st)) = self.items.get(i).map(|it| &it.kind) {
+                    let kb = self.outline.partition_point(|o| o.item <= i);
+                    if st.heading_refs == 0 {
+                        k = kb;
+                        continue;
+                    }
+                    let heads = self
+                        .page_items(doc, i)
+                        .into_iter()
+                        .filter(|(_, it)| matches!(it.kind, ItemKind::Heading { .. }));
+                    for (j, (start, it)) in (k..kb).zip(heads) {
+                        if references_of(doc, &it, start).iter().any(|r| changed.contains(r)) {
+                            retext.push((j, start));
+                        }
+                    }
+                    k = kb;
+                    continue;
+                }
+                if self.item_references(doc, i).iter().any(|r| changed.contains(r)) {
+                    retext.push((k, self.item_start(i)));
+                }
+                k += 1;
+            }
+            for (k, start) in retext {
                 let info = doc.heading(start).unwrap_or_default();
                 let key = info.key.to_lowercase();
                 let o = &mut self.outline[k];
@@ -1269,40 +1321,10 @@ impl DocModel {
     /// without inline references): the dependency of its layout on reference definitions
     /// (ADR 0006 §7.4). Computed on demand (the view memoises it per item hash).
     pub fn item_references(&self, doc: &dyn FormatDoc, i: usize) -> Vec<u64> {
-        let Some(it) = self.items.get(i) else { return Vec::new() };
-        let mut out = Vec::new();
-        // a whole leaf without anything that could be a reference: no lookup of its lines
-        if matches!(
-            it.kind,
-            ItemKind::Paragraph | ItemKind::Heading { .. } | ItemKind::Table
-        ) && it.segment.is_none()
-            && !doc.may_reference(self.item_span(i))
-        {
-            return out;
+        match self.items.get(i) {
+            Some(it) => references_of(doc, it, self.item_start(i)),
+            None => Vec::new(),
         }
-        match (&it.kind, &it.segment) {
-            (ItemKind::Paragraph | ItemKind::Heading { .. }, _) => {
-                doc.reference_candidates(&self.item_lines(doc, i), &mut out);
-            }
-            (ItemKind::Table, seg) => {
-                let start = self.item_start(i);
-                if let Some(t) = doc.table(start) {
-                    let rows: Vec<Span> = match seg {
-                        Some(Segment::Rows { start, end, .. }) => std::iter::once(t.rows[0])
-                            .chain(
-                                t.rows[(*start as usize).min(t.rows.len())..(*end as usize).min(t.rows.len())]
-                                    .iter()
-                                    .copied(),
-                            )
-                            .collect(),
-                        _ => t.rows,
-                    };
-                    doc.reference_candidates(&rows, &mut out);
-                }
-            }
-            _ => {}
-        }
-        out
     }
 
     /// Index of the item containing byte offset `pos` (or the next item after it).
@@ -1365,6 +1387,51 @@ impl DocModel {
         }
         Ok(())
     }
+}
+
+/// Reference labels item `it` (absolute start `start`) may look up (see
+/// [`DocModel::item_references`]).
+fn references_of(doc: &dyn FormatDoc, it: &Item, start: usize) -> Vec<u64> {
+    let mut out = Vec::new();
+    let span = Span::new(start, start + it.len);
+    // a whole leaf without anything that could be a reference: no lookup of its lines
+    if matches!(
+        it.kind,
+        ItemKind::Paragraph | ItemKind::Heading { .. } | ItemKind::Table
+    ) && it.segment.is_none()
+        && !doc.may_reference(span)
+    {
+        return out;
+    }
+    match (&it.kind, &it.segment) {
+        (ItemKind::Paragraph | ItemKind::Heading { .. }, seg) => {
+            let lines = match seg {
+                Some(Segment::Lines { spans, .. }) => spans
+                    .iter()
+                    .map(|s| Span::new(start + s.start, start + s.end))
+                    .collect(),
+                _ => doc.leaf(start).map(|l| l.lines).unwrap_or_default(),
+            };
+            doc.reference_candidates(&lines, &mut out);
+        }
+        (ItemKind::Table, seg) => {
+            if let Some(t) = doc.table(start) {
+                let rows: Vec<Span> = match seg {
+                    Some(Segment::Rows { start, end, .. }) => std::iter::once(t.rows[0])
+                        .chain(
+                            t.rows[(*start as usize).min(t.rows.len())..(*end as usize).min(t.rows.len())]
+                                .iter()
+                                .copied(),
+                        )
+                        .collect(),
+                    _ => t.rows,
+                };
+                doc.reference_candidates(&rows, &mut out);
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 fn images_hash(root_url: &Option<String>, base_dir: &Option<PathBuf>) -> u64 {

@@ -237,6 +237,14 @@ impl SideBySide {
             return false;
         };
         let top = p.view.line_at_y(p.view.scroll_y());
+        // a paged model materializes the page of the source line first
+        let pos = p
+            .view
+            .line_start(viewer.ed.session.text(), top.max(0.0).floor() as usize);
+        viewer.ed.view.ensure_offset(pos);
+        let Some(p) = viewer.ed.source.as_ref() else {
+            return false;
+        };
         let model = viewer.model().clone();
         let lines = ViewLines {
             view: &p.view,
@@ -277,6 +285,8 @@ impl SideBySide {
         let pos = p.sel.primary().focus.offset.min(text.len());
         let line = p.view.line_of(text, pos) as f32;
         let line_y = (p.view.y_of_line(text, line) - p.view.scroll_y()) as f32;
+        // a paged model materializes the caret's page first
+        viewer.ed.view.ensure_offset(pos);
         let model = viewer.model();
         if model.items.is_empty() {
             return false;
@@ -389,7 +399,7 @@ mod tests {
 
     fn model(src: &str) -> (markise_md::Document, DocModel) {
         let d = markise_md::parse(src);
-        let m = DocModel::build_owned(&d, None);
+        let m = DocModel::build_with(&d, None, markise_layout::Paging::Full);
         (d, m)
     }
 

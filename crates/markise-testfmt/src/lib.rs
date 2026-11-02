@@ -289,6 +289,9 @@ impl FormatDoc for TestDoc {
     fn top_count(&self) -> usize {
         self.blocks.len()
     }
+    fn top_span(&self, t: usize) -> Option<Span> {
+        self.blocks.get(t).map(|b| b.span)
+    }
     fn flatten(&self, tops: Range<usize>, sink: &mut dyn FnMut(FlatEvent<'_>)) {
         for (i, b) in self.blocks[tops.clone()].iter().enumerate() {
             let leaf = FlatLeaf {
