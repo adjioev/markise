@@ -15,21 +15,30 @@
 //! Developer switch:
 //! - `MARKISE_TEXT=parley` lays out and paints document text with parley (`markise-text`) and a
 //!   vello_cpu glyph atlas instead of epaint (ADR 0005 T2/T3; interim quality, default off).
+//!
+//! Renderer: wgpu with a glow fallback (`renderer`; `MARKISE_RENDERER=glow` forces glow).
+//! Frame pacing diagnostics: `MARKISE_FRAME_LOG` (`frame_log`, `docs/diagnostics.md`).
 
 // Release builds on Windows are GUI-subsystem executables (no console window); terminal
 // launches re-attach to the parent console (`diag::attach_parent_console`).
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod diag;
+mod frame_log;
 #[cfg(target_os = "macos")]
 mod macos_open;
 #[cfg(target_os = "macos")]
 mod menu_tracking;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native_menu;
+mod renderer;
 
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Instant;
+
+use renderer::Renderer;
 
 use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp};
 
@@ -47,12 +56,16 @@ fn app_icon() -> Option<eframe::egui::IconData> {
 struct App(MarkiseApp);
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         for path in macos_open::take_pending() {
             self.0.open(path);
         }
+        let log = frame_log::start(ui, frame);
         self.0.ui(ui);
+        if let Some(l) = log {
+            l.finish(ui);
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -118,40 +131,62 @@ fn main() -> eframe::Result {
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
     }
-    let native = eframe::NativeOptions {
-        viewport,
-        // repaint only on events (no continuous rendering), NFR-10
-        run_and_return: false,
-        ..Default::default()
+    let native = |r: Renderer| {
+        let mut native = eframe::NativeOptions {
+            viewport: viewport.clone(),
+            // repaint only on events (no continuous rendering), NFR-10
+            run_and_return: false,
+            ..Default::default()
+        };
+        renderer::configure(&mut native, r);
+        native
     };
-    // fonts are loaded by the app's theme worker (off the UI thread)
-    let creator: eframe::AppCreator<'static> = Box::new(move |cc| {
-        if timing {
-            eprintln!(
-                "markise-timing: t={:.1}ms creator-called (window + GL context ready)",
-                start.elapsed().as_secs_f64() * 1e3
-            );
-        }
-        #[cfg(target_os = "macos")]
-        macos_open::set_context(cc.egui_ctx.clone());
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let _ = cc;
-        #[allow(unused_mut)]
-        let mut app = MarkiseApp::new(opts);
-        // native menu bar on macOS and Windows; elsewhere the app shows its egui menu bar
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        if let Some(menu) = native_menu::NativeMenu::new(cc) {
-            app.set_menu_host(Box::new(menu));
-        }
-        Ok(Box::new(App(app)))
-    });
+    // the app is created once, by whichever renderer starts (see `run`)
+    let opts = Rc::new(RefCell::new(Some(opts)));
+    let created = Rc::new(Cell::new(false));
+    let creator = |r: Renderer| -> eframe::AppCreator<'static> {
+        let (opts, created) = (opts.clone(), created.clone());
+        let surface = {
+            let n = native(r);
+            format!(
+                "present={:?} frame_latency={:?}",
+                n.wgpu_options.surface.present_mode, n.wgpu_options.surface.desired_maximum_frame_latency
+            )
+        };
+        // fonts are loaded by the app's theme worker (off the UI thread)
+        Box::new(move |cc| {
+            created.set(true);
+            renderer::startup_log::stop();
+            let desc = renderer::describe(r, cc);
+            diag::log(&format!("renderer: {desc}"));
+            frame_log::set_config(format!("renderer={desc} {surface}"));
+            if timing {
+                eprintln!(
+                    "markise-timing: t={:.1}ms creator-called (window + renderer ready: {desc})",
+                    start.elapsed().as_secs_f64() * 1e3
+                );
+            }
+            #[cfg(target_os = "macos")]
+            macos_open::set_context(cc.egui_ctx.clone());
+            let opts = opts.borrow_mut().take().ok_or("the app was already created")?;
+            #[allow(unused_mut)]
+            let mut app = MarkiseApp::new(opts);
+            // native menu bar on macOS and Windows; elsewhere the app shows its egui menu bar
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if let Some(menu) = native_menu::NativeMenu::new(cc) {
+                app.set_menu_host(Box::new(menu));
+            }
+            Ok(Box::new(App(app)))
+        })
+    };
     diag::log(&format!(
         "markise {} start ({}/{})",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH
     ));
-    let result = run(native, creator);
+    renderer::startup_log::install();
+    let result = run(Renderer::from_env(), &native, &creator, &created);
     if let Err(e) = &result {
         // (main's Err return prints it to stderr as well)
         diag::log(&format!("fatal: {e}"));
@@ -159,22 +194,51 @@ fn main() -> eframe::Result {
     result
 }
 
-#[cfg(not(target_os = "macos"))]
-fn run(native: eframe::NativeOptions, creator: eframe::AppCreator<'static>) -> eframe::Result {
-    eframe::run_native("Markise", native, creator)
-}
+/// Runs the app with renderer `first`; when wgpu fails to start (the app was never created),
+/// once more with glow on the same event loop.
+///
+/// The event loop is created here rather than inside `run_native`: on macOS so the "open
+/// documents" handler can be added to winit's application delegate before the app finishes
+/// launching, everywhere so a second run can reuse it (winit allows one event loop per process).
+fn run(
+    first: Renderer,
+    native: &dyn Fn(Renderer) -> eframe::NativeOptions,
+    creator: &dyn Fn(Renderer) -> eframe::AppCreator<'static>,
+    created: &Cell<bool>,
+) -> eframe::Result {
+    use winit::platform::run_on_demand::EventLoopExtRunOnDemand as _;
 
-/// macOS: the event loop is created here (not inside `run_native`) so the "open documents"
-/// handler can be added to winit's application delegate before the app finishes launching.
-#[cfg(target_os = "macos")]
-fn run(native: eframe::NativeOptions, creator: eframe::AppCreator<'static>) -> eframe::Result {
-    let event_loop = winit::event_loop::EventLoop::<eframe::UserEvent>::with_user_event().build()?;
+    let mut event_loop = winit::event_loop::EventLoop::<eframe::UserEvent>::with_user_event().build()?;
+    #[cfg(target_os = "macos")]
     if !macos_open::install() {
         eprintln!("markise: could not install the macOS open-documents handler");
     }
-    let mut app = eframe::create_native("Markise", native, creator, &event_loop);
-    event_loop.run_app(&mut app)?;
-    Ok(())
+    let mut r = first;
+    loop {
+        {
+            let mut app = eframe::create_native("Markise", native(r), creator(r), &event_loop);
+            event_loop.run_app_on_demand(&mut app)?;
+        }
+        if created.get() {
+            return Ok(());
+        }
+        let why = renderer::startup_log::take();
+        let why = if why.is_empty() {
+            "no error reported".to_string()
+        } else {
+            why
+        };
+        if r == Renderer::Wgpu {
+            let msg = format!("renderer: wgpu could not start ({why}); falling back to glow");
+            eprintln!("markise: {msg}");
+            diag::log(&msg);
+            r = Renderer::Glow;
+            continue;
+        }
+        return Err(eframe::Error::AppCreation(
+            format!("the {} renderer could not start: {why}", r.name()).into(),
+        ));
+    }
 }
 
 #[cfg(test)]

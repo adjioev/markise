@@ -38,10 +38,11 @@ cssparser = "0.38"
 egui = { version = "0.37.0", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts"] }
 epaint = { version = "0.37.0", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts"] }
 # eframe 0.37 switched its default renderer to wgpu and added a system-font provider. Markise
-# keeps the glow renderer and loads system fonts itself (ADR 0004), so the feature set below
-# mirrors the eframe 0.33 defaults; `winit` with its default features restores what eframe's
-# `winit/default` used to enable (Wayland via dlopen, client-side decorations).
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "web_screen_reader", "x11"] }
+# loads system fonts itself (ADR 0004), so the feature set below mirrors the eframe 0.33
+# defaults plus `wgpu`: the app renders with wgpu (Metal on macOS) and falls back to glow
+# (apps/markise/src/renderer.rs, issue #86); `winit` with its default features restores what
+# eframe's `winit/default` used to enable (Wayland via dlopen, client-side decorations).
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "web_screen_reader", "wgpu", "x11"] }
 winit = "0.30.13"
 # macOS open-documents handler in apps/markise (already in the tree through eframe/arboard)
 objc2 = "0.6.5"

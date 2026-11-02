@@ -18,6 +18,7 @@ pub mod prefs;
 pub mod shortcuts;
 pub mod side_by_side;
 pub mod sidebar;
+pub mod smooth_scroll;
 pub mod source;
 pub mod text_paint;
 pub mod themes;

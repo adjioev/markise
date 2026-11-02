@@ -32,6 +32,7 @@ use markise_layout::block::color;
 use markise_layout::source::{self as srcview, SourceParams, SourceVisible};
 use markise_theme::Theme;
 
+use crate::smooth_scroll::{self, SmoothScroll};
 use crate::text_paint::ParleyText;
 use crate::viewer::{BLINK_FOR, DocViewer, chord_of, paint_text_block, with_shaper};
 
@@ -80,6 +81,8 @@ pub struct SourceEditor {
     widget: Option<egui::Id>,
     last_rect: Option<Rect>,
     text_left: f32,
+    /// Wheel / trackpad smoothing (issue #86).
+    smooth: SmoothScroll,
 }
 
 impl Default for SourceEditor {
@@ -111,6 +114,7 @@ impl SourceEditor {
             widget: None,
             last_rect: None,
             text_left: 0.0,
+            smooth: SmoothScroll::default(),
         }
     }
 
@@ -207,7 +211,12 @@ impl SourceEditor {
         } else {
             self.hscroll = 0.0;
         }
-        let text_left = rect.left() + gutter + TEXT_PAD - self.hscroll;
+        let snap = smooth_scroll::snap_enabled();
+        let mut text_left = rect.left() + gutter + TEXT_PAD - self.hscroll;
+        if snap {
+            // the text's left edge on a device pixel (issue #86)
+            text_left = smooth_scroll::round_to_pixel(text_left, ppp);
+        }
         self.text_left = text_left;
 
         // ---- focus
@@ -244,19 +253,23 @@ impl SourceEditor {
             p.view.scroll_to_y(y);
         }
 
-        // ---- wheel / trackpad
-        if resp.hovered() || ui.rect_contains_pointer(rect) {
-            let d = ui.input(|i| i.smooth_scroll_delta);
+        // ---- wheel / trackpad (smooth scrolling, issue #86)
+        {
+            let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
+            let line = srcview::metrics(theme).1 * smooth_scroll::LINES_PER_NOTCH;
+            let mut d = smooth_scroll::take_delta(ui, &mut self.smooth, hovered, line, vh);
+            if prefs.soft_wrap {
+                d.x = 0.0;
+            }
             if d != egui::Vec2::ZERO {
                 if let Some(p) = viewer.ed.source.as_mut()
                     && d.y != 0.0
                 {
                     p.view.scroll_by(-d.y);
                 }
-                if !prefs.soft_wrap && d.x != 0.0 {
+                if d.x != 0.0 {
                     self.hscroll = (self.hscroll - d.x).max(0.0);
                 }
-                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
                 out.user_scrolled = true;
             }
         }
@@ -267,6 +280,7 @@ impl SourceEditor {
             && let Some(pt) = bar_resp.interact_pointer_pos()
             && let Some(p) = viewer.ed.source.as_mut()
         {
+            self.smooth.stop();
             let total = p.view.total_height().max(1.0);
             let frac = ((pt.y - rect.top()) / vh).clamp(0.0, 1.0) as f64;
             p.view.scroll_to_y(frac * (total - vh as f64).max(0.0));
@@ -392,14 +406,32 @@ impl SourceEditor {
         }
 
         // ---- layout of the viewport (+ half a screen of margin)
-        let visible = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
+        let mut visible = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
             viewer.ed.source_frame(vh, vh * 0.5, sh)
         });
         out.laid_out = viewer.ed.source.as_ref().map_or(0, |p| p.view.laid_out.len());
         let (caret_rect, line_rect) = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
             (viewer.ed.source_caret_rect(sh), viewer.ed.source_line_rect(sh))
         });
-        let scroll_y = viewer.ed.source.as_ref().map_or(0.0, |p| p.view.scroll_y()) as f32;
+        let scroll_y64 = viewer.ed.source.as_ref().map_or(0.0, |p| p.view.scroll_y());
+        let scroll_y = scroll_y64 as f32;
+        // pixel snap (issue #86): render at the scroll offset rounded to device pixels with item
+        // origins on device pixels; `tops` keep (unsnapped, snapped) for the caret and the
+        // current-line band
+        let mut tops = Vec::new();
+        if snap {
+            let shift = smooth_scroll::offset_shift(scroll_y64, ppp);
+            tops.reserve(visible.len());
+            for v in &mut visible {
+                let y = smooth_scroll::snap_top(v.y, shift, rect.top(), ppp);
+                tops.push((v.y, y));
+                v.y = y;
+            }
+        }
+        let place = |doc_y: f32| {
+            let y0 = doc_y - scroll_y;
+            y0 + smooth_scroll::shift_at(&tops, y0) + rect.top()
+        };
         // horizontal follow without wrap
         if follow
             && !prefs.soft_wrap
@@ -419,10 +451,8 @@ impl SourceEditor {
         if prefs.current_line
             && let Some(lr) = line_rect
         {
-            let r = Rect::from_min_max(
-                pos2(text_clip.left(), lr.min.y - scroll_y + rect.top()),
-                pos2(text_clip.right(), lr.max.y - scroll_y + rect.top()),
-            );
+            let top = place(lr.min.y);
+            let r = Rect::from_min_max(pos2(text_clip.left(), top), pos2(text_clip.right(), top + lr.height()));
             painter.rect_filled(r, 0.0, color(theme.meta_text).gamma_multiply(0.08));
         }
         if let Some((rev, matches, active)) = &viewer.find_matches
@@ -482,7 +512,7 @@ impl SourceEditor {
             let since = now - self.blink_from;
             let on = since >= BLINK_FOR || ((since / BLINK_HALF) as u64).is_multiple_of(2);
             if let Some(c) = caret_rect {
-                let y = c.min.y - scroll_y + rect.top();
+                let y = place(c.min.y);
                 let r = Rect::from_min_size(pos2(text_left + c.min.x - 0.75, y), vec2(1.5, c.height().max(4.0)));
                 if on && r.intersects(text_clip) {
                     painter.rect_filled(r, 0.0, color(theme.text));

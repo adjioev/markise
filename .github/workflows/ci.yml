@@ -148,6 +148,16 @@ jobs:
       - name: Build release binaries
         if: env.FULL_CI == 'true'
         run: cargo build --release --locked -p markise -p markise-cli
+      # The desktop app starts with its default renderer (wgpu: Metal / DX12 / Vulkan or GL), or
+      # falls back to glow, renders a document and quits by itself (issue #86). Linux runs it
+      # under Xvfb with Mesa's software Vulkan/GL drivers.
+      - name: Smoke start (renderer)
+        if: env.FULL_CI == 'true'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get install -y --no-install-recommends xvfb xauth mesa-vulkan-drivers libgl1-mesa-dri
+          fi
+          ./scripts/smoke-start.sh target/release/markise
       - name: Package
         if: env.FULL_CI == 'true'
         env:
