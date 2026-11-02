@@ -242,9 +242,9 @@ fn copies(h: &mut H) -> u64 {
     h.state_mut().viewer().unwrap().ed.session.copies
 }
 
-/// Issue #29 goal: counting a 10 MB document stays within the per-frame byte budget, never
-/// copies the document, and typing in it recounts only the edited block (counted through the
-/// counter's statistics seam).
+/// Issue #29 goal: counting a 10 MB document stays within the per-step byte budget (the
+/// worker's steps, issue #132), never copies the document, and typing in it recounts only the
+/// edited block (counted through the counter's statistics seam).
 #[test]
 fn typing_recounts_only_the_edited_block() {
     check_typing_in_a_ten_megabyte_document_recounts_only_the_edited_block(256 << 10);
@@ -271,11 +271,7 @@ fn check_typing_in_a_ten_megabyte_document_recounts_only_the_edited_block(size: 
     let budget = (FRAME_BYTES + BIG_BLOCK) as u64;
     assert!(
         before.max_call_bytes <= budget,
-        "per-frame counting stays within the byte budget: {before:?}"
-    );
-    assert!(
-        frames >= big.len() / (FRAME_BYTES + BIG_BLOCK),
-        "counted across frames: {frames}"
+        "each counting step stays within the byte budget: {before:?}"
     );
     assert!(before.bytes_read <= big.len() as u64, "each byte read once: {before:?}");
     assert_eq!(copies(&mut h), copies_before, "counting never copies the document");

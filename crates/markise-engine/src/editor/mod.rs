@@ -259,6 +259,9 @@ pub struct EditorSession {
     review: ReviewEdits,
     /// Memoised `can_plan` / `plan_checked` answers (see [`EditorSession::can_plan`]).
     plan_queries: Mutex<PlanQueries>,
+    /// The document lent to a background reader (the word count, issue #132): taken back
+    /// before every change of the document, so an edit never finds it shared.
+    lease: Option<Arc<crate::lease::DocLease>>,
 }
 
 /// Counters for consumers that track review comments incrementally (the comment gutter,
@@ -375,6 +378,7 @@ impl EditorSession {
             source: None,
             review: ReviewEdits::default(),
             plan_queries: Mutex::new(PlanQueries::default()),
+            lease: None,
         }
     }
 
@@ -418,9 +422,23 @@ impl EditorSession {
     pub fn id(&self) -> u64 {
         self.id
     }
+    /// Lends the document to a background reader through `lease` (issue #132): the session
+    /// revokes the loan before every change of the document ([`crate::lease::DocLease`]), so
+    /// the reader never makes an edit copy the document. Replaces (and revokes) an earlier
+    /// lease.
+    pub fn set_doc_lease(&mut self, lease: Option<Arc<crate::lease::DocLease>>) {
+        self.revoke_lease();
+        self.lease = lease;
+    }
+    fn revoke_lease(&self) {
+        if let Some(l) = &self.lease {
+            l.revoke();
+        }
+    }
     /// The document for an in-place edit: copied first when it is shared.
     fn doc_mut(&mut self) -> &mut dyn FormatDoc {
         self.forget_plan_queries();
+        self.revoke_lease();
         if Arc::get_mut(&mut self.doc).is_none() {
             self.copies += 1;
             self.doc = Arc::from(self.doc.clone_box());
@@ -1609,6 +1627,7 @@ impl EditorSession {
     ) -> Result<(), EditError> {
         self.close_typing();
         self.forget_plan_queries();
+        self.revoke_lease();
         let old = self.doc.text();
         let patches: Vec<Patch> = crate::edit::patches(old, doc.text())
             .into_iter()

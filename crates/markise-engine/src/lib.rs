@@ -8,11 +8,13 @@
 
 pub mod attach;
 pub mod count;
+pub mod count_worker;
 pub mod edit;
 pub mod editor;
 pub mod export;
 pub mod fsops;
 pub mod jobs;
+pub mod lease;
 pub mod load;
 pub mod save;
 pub mod search;
