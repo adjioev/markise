@@ -58,6 +58,7 @@ impl MarkiseApp {
             font_size: th.font_size,
             line_height: th.line_height,
             content_width: th.column_max_width,
+            source_size: th.source_size(),
         }
     }
 

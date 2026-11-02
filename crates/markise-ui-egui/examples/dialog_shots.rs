@@ -52,6 +52,24 @@ fn scenes() -> Vec<(&'static str, Setup)> {
         ("recovery", |app, ctx, _| {
             app.menu_action(ctx, &MenuAction::Command("file.recover"));
         }),
+        // key symbol glyphs and spacing, source vs rendered size (issues #130, #131)
+        ("keys-side-by-side", |app, _, _| {
+            let text = markise_ui_egui::tutorial::TEXT;
+            let table = text.find("| Style |").unwrap();
+            let find = text.find("## 7.").unwrap();
+            let end = text.find("## 8.").unwrap();
+            let doc = format!(
+                "# Keys\n\n{}\n{}",
+                &text[table..text[table..].find("\n\n").unwrap() + table],
+                &text[find..end]
+            );
+            app.edit_source_text(|t| *t = doc);
+            app.set_view_mode(markise_ui_egui::ViewMode::SideBySide);
+        }),
+        ("cheat-sheet", |app, ctx, _| {
+            app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
+            app.menu_action(ctx, &MenuAction::Command("help.shortcuts"));
+        }),
         ("common-html", |app, _, _| {
             app.edit_source_text(|t| *t = "# HTML in your notes\n\nPress <kbd>⌘</kbd> + <kbd>S</kbd> to save.<!-- private note -->\n\n<details>\n<summary>Show the answer</summary>\n\nThis answer is hidden until you expand it.\n\n</details>\n\n<details open>\n<summary>Keyboard shortcuts</summary>\n\n- <kbd>⌘</kbd> + <kbd>F</kbd> finds text.\n- <kbd>Esc</kbd> closes the Find bar.\n\n</details>\n\nYour Markdown stays unchanged.\n".into());
             app.set_view_mode(markise_ui_egui::ViewMode::Rendered);

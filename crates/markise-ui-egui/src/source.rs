@@ -101,6 +101,7 @@ pub fn params(p: &SourceSettings) -> SourceParams {
     SourceParams {
         wrap: p.soft_wrap,
         tab_width: 4,
+        font_size: p.font_size,
     }
 }
 
@@ -195,7 +196,7 @@ impl SourceEditor {
         let sel0 = viewer.ed.source.as_ref().map(|p| p.sel.clone());
 
         // ---- geometry and parameters
-        let (size, _) = srcview::metrics(theme);
+        let (size, _) = srcview::metrics(theme, &params(prefs));
         let char_w = size * 0.6;
         let line_count = viewer.ed.source.as_ref().map_or(1, |p| p.view.line_count());
         let gutter = if prefs.line_numbers {
@@ -262,7 +263,7 @@ impl SourceEditor {
         {
             let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
             smooth_scroll::register_pane(&ctx, resp.rect, ui.layer_id());
-            let line = srcview::metrics(theme).1 * smooth_scroll::LINES_PER_NOTCH;
+            let line = srcview::metrics(theme, &params(prefs)).1 * smooth_scroll::LINES_PER_NOTCH;
             // a programmatic scroll since the last frame (centre line, Side by Side sync, find)
             // drops pending motion
             if let Some(a) = source_anchor(viewer) {

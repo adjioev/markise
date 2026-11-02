@@ -186,6 +186,42 @@ pub fn filter(groups: &[Group], query: &str) -> Vec<Group> {
         .collect()
 }
 
+/// The keys of a chord text, in order: `Shift+Cmd+O` → `Shift`, `Cmd`, `O` (a `+` key, as in
+/// `Cmd++`, stays one key).
+pub fn chord_keys(chord: &str) -> Vec<&str> {
+    let parts: Vec<&str> = chord.split('+').collect();
+    let mut keys = Vec::with_capacity(parts.len());
+    let mut i = 0;
+    while i < parts.len() {
+        if parts[i].is_empty() {
+            keys.push("+");
+            i += 2;
+        } else {
+            keys.push(parts[i]);
+            i += 1;
+        }
+    }
+    keys
+}
+
+/// A chord as a row of small key caps with room between them (issue #131: chords read as
+/// separate keys, not as one cramped word).
+fn key_caps(ui: &mut egui::Ui, chord: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        let v = ui.visuals();
+        let (fill, stroke) = (v.extreme_bg_color, v.widgets.noninteractive.bg_stroke);
+        for k in chord_keys(chord) {
+            egui::Frame::new()
+                .fill(fill)
+                .stroke(stroke)
+                .corner_radius(3.0)
+                .inner_margin(egui::Margin::symmetric(5, 0))
+                .show(ui, |ui| ui.label(egui::RichText::new(k).monospace()));
+        }
+    });
+}
+
 /// Id of the cheat sheet's search field.
 const SEARCH_ID: &str = "markise-shortcuts-search";
 
@@ -297,7 +333,7 @@ impl CheatSheet {
                                 .show(ui, |ui| {
                                     for r in &g.rows {
                                         ui.label(r.label);
-                                        ui.label(egui::RichText::new(&r.chord).monospace());
+                                        key_caps(ui, &r.chord);
                                         ui.end_row();
                                     }
                                 });
@@ -383,6 +419,21 @@ mod tests {
         assert_eq!(find(&g, "find.replace").unwrap().1.chord, "Ctrl+H");
         // macOS-only chords are not listed elsewhere
         assert!(find(&g, "app.quit").is_none() && find(&g, "edit.openLine").is_none());
+    }
+
+    #[test]
+    fn chords_split_into_keys() {
+        assert_eq!(chord_keys("Shift+Cmd+O"), ["Shift", "Cmd", "O"]);
+        assert_eq!(chord_keys("Ctrl+Alt+/"), ["Ctrl", "Alt", "/"]);
+        assert_eq!(chord_keys("Cmd++"), ["Cmd", "+"]);
+        assert_eq!(chord_keys("Shift++"), ["Shift", "+"]);
+        assert_eq!(chord_keys("F11"), ["F11"]);
+        let (r, k) = defaults(Platform::Mac);
+        for g in cheat_sheet(&r, &k, Platform::Mac) {
+            for row in g.rows {
+                assert_eq!(chord_keys(&row.chord).join("+"), row.chord, "{}", row.id);
+            }
+        }
     }
 
     #[test]

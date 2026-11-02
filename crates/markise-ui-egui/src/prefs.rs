@@ -129,6 +129,7 @@ pub enum RowId {
     SoftWrap,
     CurrentLine,
     Whitespace,
+    SourceFontSize,
     ImageLocation,
     ImageFolder,
     ImageObsidian,
@@ -397,6 +398,13 @@ pub const ROWS: &[Row] = &[
         "spaces tabs invisibles marks",
     ),
     row(
+        R::SourceFontSize,
+        S::Source,
+        "Display",
+        "Font size",
+        "text size monospace editor zoom bigger smaller",
+    ),
+    row(
         R::ImageLocation,
         S::Files,
         "Images",
@@ -507,6 +515,8 @@ pub struct FontDefaults {
     pub font_size: f32,
     pub line_height: f32,
     pub content_width: f32,
+    /// The source editor's automatic font size (the theme's, issue #130).
+    pub source_size: f32,
 }
 
 /// The colours a theme preview card is drawn with.
@@ -1478,6 +1488,20 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                     whitespace_marks: on,
                     ..s
                 }));
+            }
+        }
+        R::SourceFontSize => {
+            let mut size = s.font_size;
+            slider_row(
+                ui,
+                p,
+                r.label,
+                &mut size,
+                v.font_defaults.source_size,
+                (SourceSettings::FONT_SIZE, 0.5, 1),
+            );
+            if size != s.font_size {
+                out.push(Change::Source(SourceSettings { font_size: size, ..s }));
             }
         }
         R::Autosave | R::BackupDrafts | R::SaveOnClose | R::RecentRecording => {

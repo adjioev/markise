@@ -14,6 +14,7 @@
 pub mod coverage;
 pub mod face;
 pub mod fallback;
+pub mod keys;
 mod layout;
 pub mod matching;
 pub mod names;

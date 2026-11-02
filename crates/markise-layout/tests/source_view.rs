@@ -121,7 +121,11 @@ proptest! {
     ) {
         let src: String = start.concat();
         let mut doc = markise_md::parse(&src);
-        let params = SourceParams { wrap, tab_width: 4 };
+        let params = SourceParams {
+            wrap,
+            tab_width: 4,
+            ..Default::default()
+        };
         let mut v = SourceView::new(&src, params, &Theme::light(), 300.0, 1.0);
         // lay everything out once so stale layouts would show
         {

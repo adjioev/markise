@@ -94,6 +94,57 @@ mod tests {
         );
     }
 
+    /// Shortcuts are written as `<kbd>` key caps (issue #131: breathing room between chords
+    /// and the surrounding text, readable in other Markdown tools): no modifier glyph outside a
+    /// key cap, every key cap closed on its line, and the live view pairs them into keyboard
+    /// nodes (also inside table cells).
+    #[test]
+    fn tutorial_shortcuts_are_key_caps() {
+        let mut caps = 0;
+        for line in TEXT.lines() {
+            let mut rest = line;
+            let mut outside = String::new();
+            while let Some(a) = rest.find("<kbd>") {
+                outside.push_str(&rest[..a]);
+                let b = rest[a..]
+                    .find("</kbd>")
+                    .unwrap_or_else(|| panic!("unclosed <kbd>: {line}"));
+                let key = &rest[a + 5..a + b];
+                assert!(!key.is_empty() && !key.contains(' ') && !key.contains('<'), "{line}");
+                caps += 1;
+                rest = &rest[a + b + 6..];
+            }
+            outside.push_str(rest);
+            assert!(
+                !outside.contains(['⌘', '⌥', '⌃', '⇧']),
+                "chord outside a key cap: {line}"
+            );
+        }
+        assert!(caps >= 40, "{caps}");
+        // the live view pairs the tags into key caps: the chords show, the tags do not
+        let shown = markise_layout::testing::Shown::new(std::sync::Arc::new(markise_md::parse(TEXT)));
+        let mut view = shown.view(markise_theme::Theme::light(), 900.0, 1.0);
+        let mut fonts = egui::epaint::text::Fonts::new(
+            markise_layout::testing::text_options(),
+            crate::fonts::definitions(false),
+        );
+        let mut sh = fonts.with_pixels_per_point(1.0);
+        let text: String = view
+            .frame(100_000.0, 0.0, &mut sh, &markise_layout::block::NoImages)
+            .iter()
+            .flat_map(|v| &v.layout.prims)
+            .filter_map(|p| match p {
+                markise_layout::block::Prim::Text { text, .. } => Some(text.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text.contains("⇧⌘G") && text.contains("⌥⌘F") && text.contains("⌃⇧`"),
+            "{text}"
+        );
+        assert!(!text.contains("kbd>"), "{text}");
+    }
+
     /// The shortcuts the text names are the real default chords on macOS (the text's
     /// platform), and the menu items it names exist.
     #[test]
@@ -110,42 +161,46 @@ mod tests {
         };
         // (as written in the text, command)
         let named = [
-            ("⌘B", "format.strong"),
-            ("⌘I", "format.emph"),
-            ("⌘U", "format.underline"),
-            ("⌃\\`", "format.code"),
-            ("⌃⇧\\`", "format.strike"),
-            ("⌘K", "format.link"),
-            ("⌘\\\\", "format.clear"),
-            ("⌘1", "block.heading1"),
-            ("⌘6", "block.heading6"),
-            ("⌘0", "block.paragraph"),
-            ("**Tab**", "edit.indentOrNextCell"),
-            ("**⇧Tab**", "edit.outdentOrPrevCell"),
-            ("⌥⌘Q", "block.quote"),
-            ("⌥↑", "edit.moveBlockUp"),
-            ("⌥↓", "edit.moveBlockDown"),
-            ("**⌘/**", "view.sourceMode"),
-            ("**⌃⌘/**", "view.sideBySide"),
-            ("**⌘F**", "find.open"),
-            ("**⌘G**", "find.next"),
-            ("**⇧⌘G**", "find.prev"),
-            ("**⌥⌘F**", "find.replace"),
-            ("**⇧⌘O**", "file.openFolder"),
-            ("**⌘P**", "file.quickOpen"),
-            ("**⌥⌘←**", "go.back"),
-            ("**⌥⌘→**", "go.forward"),
-            ("⇧⌘=", "view.zoomIn"),
-            ("⇧⌘-", "view.zoomOut"),
-            ("⇧⌘0", "view.actualSize"),
-            ("⌃⌘F", "view.fullScreen"),
-            ("⌘,", "app.preferences"),
-            ("**⌘?**", "help.shortcuts"),
+            ("<kbd>⌘B</kbd>", "format.strong"),
+            ("<kbd>⌘I</kbd>", "format.emph"),
+            ("<kbd>⌘U</kbd>", "format.underline"),
+            ("<kbd>⌃\\`</kbd>", "format.code"),
+            ("<kbd>⌃⇧\\`</kbd>", "format.strike"),
+            ("<kbd>⌘K</kbd>", "format.link"),
+            ("<kbd>⌘\\\\</kbd>", "format.clear"),
+            ("<kbd>⌘1</kbd>", "block.heading1"),
+            ("<kbd>⌘6</kbd>", "block.heading6"),
+            ("<kbd>⌘0</kbd>", "block.paragraph"),
+            ("<kbd>Tab</kbd>", "edit.indentOrNextCell"),
+            ("<kbd>⇧Tab</kbd>", "edit.outdentOrPrevCell"),
+            ("<kbd>⌥⌘Q</kbd>", "block.quote"),
+            ("<kbd>⌥↑</kbd>", "edit.moveBlockUp"),
+            ("<kbd>⌥↓</kbd>", "edit.moveBlockDown"),
+            ("<kbd>⌘/</kbd>", "view.sourceMode"),
+            ("<kbd>⌃⌘/</kbd>", "view.sideBySide"),
+            ("<kbd>⌘F</kbd>", "find.open"),
+            ("<kbd>⌘G</kbd>", "find.next"),
+            ("<kbd>⇧⌘G</kbd>", "find.prev"),
+            ("<kbd>⌥⌘F</kbd>", "find.replace"),
+            ("<kbd>⇧⌘O</kbd>", "file.openFolder"),
+            ("<kbd>⌘P</kbd>", "file.quickOpen"),
+            ("<kbd>⌥⌘←</kbd>", "go.back"),
+            ("<kbd>⌥⌘→</kbd>", "go.forward"),
+            ("<kbd>⇧⌘=</kbd>", "view.zoomIn"),
+            ("<kbd>⇧⌘-</kbd>", "view.zoomOut"),
+            ("<kbd>⇧⌘0</kbd>", "view.actualSize"),
+            ("<kbd>⌃⌘F</kbd>", "view.fullScreen"),
+            ("<kbd>⌘,</kbd>", "app.preferences"),
+            ("<kbd>⌘?</kbd>", "help.shortcuts"),
         ];
         for (text, id) in named {
             assert!(TEXT.contains(text), "the text names {text}");
-            // the text's escapes and emphasis are Markdown, not part of the chord
-            let plain = text.replace("**", "").replace("\\\\", "\\").replace("\\`", "`");
+            // the key caps and escapes are Markdown, not part of the chord
+            let plain = text
+                .replace("<kbd>", "")
+                .replace("</kbd>", "")
+                .replace("\\\\", "\\")
+                .replace("\\`", "`");
             let real = chord(id).replace("⇧⌘/", "⌘?");
             assert_eq!(plain, real, "{id}");
         }

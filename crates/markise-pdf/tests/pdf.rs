@@ -393,3 +393,44 @@ fn images_inside_formatting_keep_document_order() {
     let seq: Vec<&str> = order.iter().map(|(_, s)| s.as_str()).collect();
     assert_eq!(seq, ["before", "[img]", "mid", "[img]", "after"], "{order:?}");
 }
+
+/// Issue #131: the keyboard symbols of the welcome tutorial (body text, bold, inline code,
+/// headings, `<kbd>`) have glyphs in PDF/PNG exports even where no installed font has them —
+/// the bundled keyboard-symbol face ends every font stack.
+#[test]
+fn keyboard_symbols_have_glyphs_in_exports() {
+    use markise_pdf::layout::{Item, LayoutOptions, layout};
+    let keys: String = markise_text::keys::SYMBOLS.iter().collect();
+    let md = format!(
+        "# Keys {keys}\n\n{keys} **{keys}** *{keys}* `{keys}` <kbd>{keys}</kbd>\n\n{}",
+        include_str!("../../../assets/tutorial/welcome.md")
+    );
+    let o = LayoutOptions {
+        page_width: 600.0,
+        page_height: f32::INFINITY,
+        margins: [10.0; 4],
+        unit: 1.0,
+        theme: markise_theme::Theme::light(),
+        base_dir: None,
+        break_before_h1: false,
+        header: None,
+        footer: None,
+        vars: Vars::new(),
+    };
+    let laid = layout(&mut engine(), &model(&md), &o, &JobControl::new()).unwrap();
+    let (mut seen, mut missing) = (0, Vec::new());
+    for it in laid.pages.iter().flat_map(|p| &p.items) {
+        let Item::Text(t) = it else { continue };
+        for (g, c) in t.glyphs.iter().zip(&t.clusters) {
+            let s = &t.text[c.clone()];
+            if s.chars().any(|c| markise_text::keys::SYMBOLS.contains(&c)) {
+                seen += 1;
+                if g.id == 0 {
+                    missing.push(s.to_string());
+                }
+            }
+        }
+    }
+    assert!(seen >= 5 * keys.chars().count(), "{seen}");
+    assert!(missing.is_empty(), "{missing:?}");
+}

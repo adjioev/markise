@@ -27,7 +27,7 @@
 //! | `consumed_pending` | names of recovery files already merged into this file (written with the merge; see [`update_file`]); omitted when empty | none |
 //! | `overrides` | object with optional `font_family`, `cyrillic_font`, `greek_font`, `cjk_font` (strings), `font_size`, `line_height`, `content_width` (numbers); omitted when empty | none |
 //! | `editing` | object: `auto_pair_brackets` (default `true`), `auto_pair_markdown` (`false`), `smart_punctuation` (convert on input, `false`), `smart_dashes_em` (`--` → em dash, `false`) (spec 02 §4, §13, §16; Preferences → Editor) | defaults |
-//! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`) — source editor display (spec 02 §12.1.1; Preferences → Source Mode) | defaults |
+//! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`), `font_size` (points, `8`–`40`; omitted = automatic, matched to the body text — issue #130) — source editor display (spec 02 §12.1.1; Preferences → Source Mode) | defaults |
 //! | `keyBinding` | object: command label (menu title) or id → accelerator (`"Ctrl+Shift+K"`), `""` unbinds (spec 05 §4.7); read only, kept verbatim | none |
 //! | `images` | object: `location` (`"note_folder"`: a folder next to the note, `"root_folder"`: a folder below the vault / opened folder root, `"same_folder"`: the note's own folder; default `"note_folder"`), `folder` (the folder for the first two, default `"assets"`), `obsidian` (use an Obsidian vault's `attachmentFolderPath` when set, `true`), `relative_paths` (`true`), `copy_images` (copy dropped image files into the image folder, `true`), `copy_files` (also copy other dropped files, `false`), `paste_urls` (a pasted image URL becomes an image, `true`) — pasted and dropped images (spec 04 §7, spec 05 §4.4; Preferences → Files & Images) | defaults |
 //! | `markdown` | object: `wikilinks` (default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`), `commentDisplay` (`"margin"` cards, default, or `"bubbles"` with hover popovers) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
@@ -316,12 +316,14 @@ impl EditingSettings {
 
 /// Source editor display preferences (spec 02 §12.1.1 display defaults), settings key
 /// `source`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SourceSettings {
     pub line_numbers: bool,
     pub soft_wrap: bool,
     pub current_line: bool,
     pub whitespace_marks: bool,
+    /// Source editor font size in points (`None`: automatic, from the theme's body size).
+    pub font_size: Option<f32>,
 }
 
 impl Default for SourceSettings {
@@ -331,17 +333,24 @@ impl Default for SourceSettings {
             soft_wrap: true,
             current_line: true,
             whitespace_marks: false,
+            font_size: None,
         }
     }
 }
 
 impl SourceSettings {
+    /// Accepted `font_size` values (points).
+    pub const FONT_SIZE: (f32, f32) = (8.0, 40.0);
+
     fn to_json(self) -> Value {
         let mut m = Map::new();
         m.insert("line_numbers".into(), Value::from(self.line_numbers));
         m.insert("soft_wrap".into(), Value::from(self.soft_wrap));
         m.insert("current_line".into(), Value::from(self.current_line));
         m.insert("whitespace_marks".into(), Value::from(self.whitespace_marks));
+        if let Some(v) = self.font_size {
+            m.insert("font_size".into(), Value::from(f64::from(v)));
+        }
         Value::Object(m)
     }
     fn from_json(v: &Value) -> Option<Self> {
@@ -353,6 +362,12 @@ impl SourceSettings {
             soft_wrap: b("soft_wrap", d.soft_wrap),
             current_line: b("current_line", d.current_line),
             whitespace_marks: b("whitespace_marks", d.whitespace_marks),
+            font_size: m
+                .get("font_size")
+                .and_then(Value::as_f64)
+                .map(|v| v as f32)
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(Self::FONT_SIZE.0, Self::FONT_SIZE.1)),
         })
     }
 }
@@ -1666,6 +1681,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(SettingsPatch::from_json(&p.to_json()).unwrap().source, p.source);
+    }
+
+    /// Issue #130: the source editor font size is automatic until set, round-trips, and is
+    /// clamped / ignored when out of range or not a number.
+    #[test]
+    fn source_font_size_round_trips_and_is_clamped() {
+        assert_eq!(Settings::default().source.font_size, None);
+        assert!(
+            !Settings::default().to_json().contains("font_size"),
+            "omitted while automatic"
+        );
+        let s = Settings::from_json(r#"{"version": 2, "source": {"font_size": 13.5}}"#).unwrap();
+        assert_eq!(s.source.font_size, Some(13.5));
+        assert_eq!(Settings::from_json(&s.to_json()).unwrap().source, s.source);
+        let big = Settings::from_json(r#"{"version": 2, "source": {"font_size": 400}}"#).unwrap();
+        assert_eq!(big.source.font_size, Some(SourceSettings::FONT_SIZE.1));
+        let bad = Settings::from_json(r#"{"version": 2, "source": {"font_size": "big"}}"#).unwrap();
+        assert_eq!(bad.source.font_size, None);
     }
 
     #[test]
