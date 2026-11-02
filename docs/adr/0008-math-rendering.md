@@ -150,6 +150,13 @@ MathML output is not produced (spec 04 copy-as-MathML is P2; `pulldown-latex`/`m
   worker's wake callback, calls `math_changed` at most once per frame, uploads bitmaps on first
   paint into a 32 MiB texture LRU and snaps them to the pixel grid (they are rendered 1:1 for
   `font size × 1.21 × pixels per point`, so zoom/scale changes re-render).
+  *(2026-11-02, issue #29: there is no math epoch in the keys any more. The view notes the
+  cached layouts that asked for a pending or unavailable formula, and `math_changed` drops just
+  those from the layout cache. Its cost is O(those layouts) instead of a pass over every item,
+  and items whose formulas were already drawn are not laid out again. For images the view
+  remembers which cached layouts showed each image, and `images_changed_for` drops the
+  layouts of the images whose state changed, including a loaded image re-decoded at a
+  different size.)*
 - Measured (`cargo bench -p markise-layout --bench layout -- math`, 1 MB math-heavy corpus,
   2× scale): first screen 0.75 ms warm (formulas pending); cold first screen 8.9 ms and all 11
   visible formulas rendered and laid out again 0.3 ms later. Document open does no math work.

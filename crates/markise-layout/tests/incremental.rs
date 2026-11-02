@@ -520,7 +520,23 @@ fn step_view(
     fresh.set_model(Arc::new(doc.clone()), Arc::new(m.clone()));
     assert_eq!(v.len(), fresh.len());
     for i in 0..m.items.len() {
-        assert_eq!(v.height(i), fresh.height(i), "height of item {i}");
+        // an item the change did not touch keeps its estimate even when an identical item
+        // elsewhere was laid out since (a fresh view finds that shared layout); a stale exact
+        // height is an error
+        let expect = if !v.is_exact(i) && fresh.is_exact(i) {
+            v.estimate(i)
+        } else {
+            fresh.height(i)
+        };
+        assert_eq!(
+            v.height(i),
+            expect,
+            "height of item {i} (exact {} / {}): {:?}",
+            v.is_exact(i),
+            fresh.is_exact(i),
+            m.items[i]
+        );
+        assert!(!v.is_exact(i) || fresh.is_exact(i), "stale exact height of item {i}");
         assert_eq!(v.cache_key(i), fresh.cache_key(i), "key of item {i}");
     }
     v.cache = std::mem::take(&mut fresh.cache);
@@ -548,10 +564,13 @@ fn toc_resegmentation_across_the_threshold_keeps_the_view_consistent() {
         &PatchSet::single_verbatim(end..end, "\n## Heading 128\n"),
     );
     assert!(tocs(&m) > 1, "segmented");
-    assert!(ch.full, "a TOC changing its item count resets the view");
+    // the TOC is rebuilt in place (one more splice), the view keeps its other heights
+    assert!(!ch.full, "{ch:?}");
+    assert_eq!(ch.resized.len(), 1, "{ch:?}");
     let at = doc.text().rfind("\n## Heading 128\n").unwrap();
-    step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(at..at + 16, ""));
+    let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(at..at + 16, ""));
     assert_eq!(tocs(&m), 1, "unsegmented again");
+    assert!(!ch.full && ch.resized.len() == 1, "{ch:?}");
     // an outline change that keeps the TOC's size is a plain re-key
     let at = doc.text().find("Heading 5").unwrap() + 8;
     let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(at..at, "x"));
@@ -1074,7 +1093,16 @@ fn heading_count_and_level_changes_rekey_tocs_in_place() {
     let end = doc.text().len();
     let more: String = (0..21).map(|i| format!("\n## More {i}\n")).collect();
     let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(end..end, &more));
-    assert!(ch.full, "a TOC changing its item count resets the view");
+    // every TOC gains a trailing segment in place (no full reset)
+    assert!(!ch.full, "{ch:?}");
+    // one splice per TOC outside the re-parsed blocks (the last TOC is re-parsed with the tail)
+    assert!((3..=4).contains(&ch.resized.len()), "one splice per TOC: {ch:?}");
+    assert!(ch.resized.iter().all(|(o, n)| o.is_empty() && n.len() == 1), "{ch:?}");
+    // and loses it again
+    let (at, end) = (doc.text().find("\n## More 0\n").unwrap(), doc.text().len());
+    let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(at..end, ""));
+    assert!(!ch.full && (3..=4).contains(&ch.resized.len()), "{ch:?}");
+    assert!(ch.resized.iter().all(|(o, n)| o.len() == 1 && n.is_empty()), "{ch:?}");
 }
 
 #[test]
@@ -1100,5 +1128,139 @@ fn random_edits_with_many_headings_equal_full_rebuild() {
             continue;
         }
         step(&mut doc, &mut m, &PatchSet::single_verbatim(a..b, ins)).unwrap();
+    }
+}
+
+// ---- issue #29 part 3: large pastes, their undo and redo -------------------------------------
+
+/// A block like a pasted chapter: `heads` headings with text, a `[toc]` when `toc`, and a
+/// reference definition that redefines `r1` when `def`.
+fn pasted_block(heads: usize, toc: bool, def: bool, tag: usize) -> String {
+    let mut s = String::new();
+    for i in 0..heads {
+        s.push_str(&format!(
+            "{} Pasted {tag} {i}\n\nsee [it][r1] and text {i}\n\n",
+            "#".repeat(2 + i % 2)
+        ));
+        if toc && i == heads / 2 {
+            s.push_str("[toc]\n\n");
+        }
+    }
+    if def {
+        s.push_str(&format!("[r1]: http://pasted/{tag}\n\n"));
+    }
+    s
+}
+
+/// Lays out the items around byte `at` (they get exact heights and cached layouts).
+fn show_at(v: &mut View, m: &DocModel, at: usize) {
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    v.scroll_to_item(m.item_at_offset(at).saturating_sub(2));
+    v.frame(600.0, 300.0, &mut f, &NoImages);
+}
+
+#[test]
+fn paste_undo_redo_update_heights_incrementally() {
+    // 300 headings in 5 TOC segments; the paste adds 70 (6 segments): every TOC outside the
+    // paste gains a segment, the pasted `[toc]` comes segmented, `r1` is redefined
+    let mut src = many_tocs_doc();
+    src.push_str("uses [a][r1] here\n\n[r1]: http://first\n");
+    let mut doc = md(&src);
+    let mut m = DocModel::build_owned(&doc, None);
+    let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
+    let at = doc.text().find("text 150\n").unwrap();
+    show_at(&mut v, &m, 0);
+    show_at(&mut v, &m, at);
+    let block = pasted_block(70, true, true, 1);
+    let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(at..at, &block));
+    assert!(!ch.full, "paste: no full reset");
+    assert_eq!(
+        ch.resized.len(),
+        4,
+        "every TOC outside the paste gains a segment: {ch:?}"
+    );
+    assert!(!ch.labels.is_empty(), "the paste redefines a reference");
+    // undo
+    show_at(&mut v, &m, at);
+    let ch = step_view(
+        &mut doc,
+        &mut m,
+        &mut v,
+        &PatchSet::single_verbatim(at..at + block.len(), ""),
+    );
+    assert!(!ch.full, "undo: no full reset");
+    assert_eq!(ch.resized.len(), 4, "{ch:?}");
+    assert_eq!(doc.text(), src);
+    // redo, then Enter right after the pasted block
+    let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(at..at, &block));
+    assert!(!ch.full, "redo: no full reset");
+    show_at(&mut v, &m, at + block.len());
+    let p = at + block.len() + 2;
+    let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(p..p, "\n\n"));
+    assert!(!ch.full && ch.resized.is_empty(), "{ch:?}");
+}
+
+#[test]
+fn paste_across_the_segmentation_threshold_and_into_a_toc() {
+    // 100 headings: unsegmented TOCs; a paste of 40 headings segments them (and back)
+    let mut src = String::from("[toc]\n\n");
+    for i in 0..100 {
+        src.push_str(&format!("## H {i}\n\ntext {i}\n\n"));
+        if i == 60 {
+            src.push_str("[toc]\n\n");
+        }
+    }
+    let mut doc = md(&src);
+    let mut m = DocModel::build_owned(&doc, None);
+    let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
+    let at = doc.text().find("text 30\n").unwrap();
+    show_at(&mut v, &m, at);
+    let block = pasted_block(40, false, false, 2);
+    let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(at..at, &block));
+    assert!(!ch.full && ch.resized.len() == 2, "{ch:?}");
+    let ch = step_view(
+        &mut doc,
+        &mut m,
+        &mut v,
+        &PatchSet::single_verbatim(at..at + block.len(), ""),
+    );
+    assert!(!ch.full && ch.resized.len() == 2, "{ch:?}");
+    // replacing a `[toc]` line together with headings around it
+    let a = doc.text().find("## H 59").unwrap();
+    let b = doc.text().find("## H 63").unwrap();
+    step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(a..b, &block));
+}
+
+#[test]
+fn random_large_edits_keep_the_view_equal_to_a_fresh_one() {
+    // pastes and cuts of whole sections (headings, `[toc]`s, definitions) at random places:
+    // model == full build and incremental view heights / keys == a fresh view's (`step_view`)
+    let mut doc = md(&many_tocs_doc());
+    let mut m = DocModel::build_owned(&doc, None);
+    let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
+    let mut seed = 0x51_7cc1_b727_220au64;
+    let mut rnd = |n: usize| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 33) as usize) % n.max(1)
+    };
+    for k in 0..24 {
+        let t = doc.text();
+        // block starts (after a blank line) keep pastes whole sections
+        let s0 = rnd(t.len());
+        let a = t[s0..].find("\n\n").map_or(t.len(), |i| s0 + i + 2);
+        let (b, ins) = if k % 3 == 2 {
+            // a cut of up to ~40 sections
+            let mut b = a;
+            for _ in 0..rnd(80) {
+                b = t[b..].find("\n\n").map_or(t.len(), |i| b + i + 2);
+            }
+            (b, String::new())
+        } else {
+            (a, pasted_block(rnd(90), rnd(2) == 0, rnd(3) == 0, k))
+        };
+        show_at(&mut v, &m, a);
+        let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(a..b, &ins));
+        assert!(!ch.full, "edit {k}: {ch:?}");
     }
 }

@@ -2090,10 +2090,11 @@ impl MarkiseApp {
         if self.export.poll() && self.export.is_asking_large() {
             self.opened_export_question();
         }
-        if self.images.poll(ctx)
-            && let Some(d) = &mut self.doc
-        {
-            d.viewer.ed.view.images_changed();
+        if self.images.poll(ctx) {
+            let changed = self.images.take_changed();
+            if let Some(d) = &mut self.doc {
+                d.viewer.ed.view.images_changed_for(&changed);
+            }
         }
         self.images.ensure_math(ctx);
         if self.images.poll_math()

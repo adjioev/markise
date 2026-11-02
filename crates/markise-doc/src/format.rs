@@ -386,6 +386,14 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
     fn reference_candidates(&self, lines: &[Span], out: &mut Vec<u64>) {
         let _ = (lines, out);
     }
+    /// Whether a leaf whose source lies in `span` (absolute) may look up a reference at all:
+    /// `false` only when [`FormatDoc::reference_candidates`] finds nothing for any content lines
+    /// inside it. A cheap pre-check that spares the caller finding the leaf's lines. Default:
+    /// `true`.
+    fn may_reference(&self, span: Span) -> bool {
+        let _ = span;
+        true
+    }
     /// Fingerprint of the current definition of reference label `key` (`None`: undefined).
     fn reference_fingerprint(&self, key: u64) -> Option<u64> {
         let _ = key;

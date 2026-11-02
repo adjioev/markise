@@ -1,5 +1,5 @@
 //! Rendered math in layout (ADR 0008): placement of inline and display formulas, fallbacks,
-//! and the math epoch in cache keys.
+//! and re-layout when formulas arrive.
 
 use std::sync::Arc;
 
@@ -193,7 +193,7 @@ fn pending_and_failed_math_show_source() {
 }
 
 #[test]
-fn math_epoch_relayouts_only_math_items() {
+fn math_changed_relayouts_only_math_items() {
     let mut fonts = testing::fonts();
     let mut f = fonts.with_pixels_per_point(1.0);
     let mut v = view("text\n\n$$\nx\n$$\n\nmore $y$\n\nplain\n", 700.0);
@@ -204,6 +204,52 @@ fn math_epoch_relayouts_only_math_items() {
     assert_eq!(v.laid_out, vec![1, 2]);
     assert_eq!(math_prims(&vis[1].layout.prims).len(), 1);
     assert_eq!(math_prims(&vis[2].layout.prims).len(), 1);
+}
+
+/// Formulas listed in `ready` render (as [`FakeMath`]); the others are still pending.
+struct Partly(std::sync::Mutex<Vec<&'static str>>);
+
+impl Images for Partly {
+    fn state(&self, _src: &str) -> ImageState {
+        ImageState::Ready { size: [10, 10] }
+    }
+
+    fn math(&self, q: &MathQuery) -> MathState {
+        if self.0.lock().unwrap().iter().any(|t| *t == &*q.tex) {
+            FakeMath.math(q)
+        } else {
+            MathState::Pending
+        }
+    }
+}
+
+#[test]
+fn arriving_formulas_relayout_only_the_items_that_showed_them_pending() {
+    // issue #29: a finished formula used to re-key every item that may hold math
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut v = view("a $x$ b\n\nc $y$ d\n\ne $x$ f $z$\n\nplain $x$\n", 700.0);
+    let p = Partly(std::sync::Mutex::new(vec!["x"]));
+    v.frame(600.0, 0.0, &mut f, &p);
+    assert_eq!(v.laid_out, vec![0, 1, 2, 3]);
+    // `y` arrives: only its item is laid out again (`x` items were drawn already)
+    p.0.lock().unwrap().push("y");
+    v.math_changed();
+    let vis = v.frame(600.0, 0.0, &mut f, &p);
+    assert_eq!(v.laid_out, vec![1, 2], "the items that showed a pending formula");
+    assert_eq!(math_prims(&vis[1].layout.prims).len(), 1);
+    // nothing pending is left there but `z`
+    v.math_changed();
+    v.frame(600.0, 0.0, &mut f, &p);
+    assert_eq!(v.laid_out, vec![2]);
+    p.0.lock().unwrap().push("z");
+    v.math_changed();
+    let vis = v.frame(600.0, 0.0, &mut f, &p);
+    assert_eq!(v.laid_out, vec![2]);
+    assert_eq!(math_prims(&vis[2].layout.prims).len(), 2);
+    v.math_changed();
+    v.frame(600.0, 0.0, &mut f, &p);
+    assert!(v.laid_out.is_empty(), "everything drawn: no re-layout");
 }
 
 #[test]

@@ -12,12 +12,14 @@
 //! - `MARKISE_HUGE_PHASES`: comma list out of `costs,scroll,typing,edit-kinds,paste,edits,save,
 //!   export,modes` (default all; opening is always measured). `edit-kinds` types separate series
 //!   in the middle of the document: plain letters, a heading, Enter/Backspace across blocks, next
-//!   to a code block and inside one, each with its count of whole-document copies.
+//!   to a code block and inside one, each with its count of whole-document copies. `paste`
+//!   pastes 1 MiB of prose, 1 MiB of mixed content and 10 MiB of prose in the middle, each
+//!   with its Undo, Redo and an Enter/Backspace series right after the pasted text.
 //!
 //! Each document is measured in a fresh child process (clean RSS / peak RSS): open (read +
 //! parse + model on the loader thread, first painted frame), scrolling (wheel at top, bottom,
-//! middle; scrollbar jumps), typing / Backspace / Enter at start, middle and end of the
-//! rendered view, a large paste and its undo, 1,000 edits (memory growth, document copies),
+//! middle, a region not shown before; scrollbar jumps), typing / Backspace / Enter at start,
+//! middle and end of the rendered view, large pastes with Undo / Redo, 1,000 edits (memory growth, document copies),
 //! save (UI-thread part and total), whole-text snapshot / clone costs, Source mode and Side by
 //! Side (typing where the mode is editable), HTML export. Every frame series is reported as
 //! wall time and thread CPU time (the UI thread's own CPU; separates scheduling noise on a
@@ -454,6 +456,19 @@ fn child(src: &Path) {
             "wheel scroll in the middle (300 frames, {at:.4} → {:.4})",
             scrolled(&mut app)
         ));
+        // a region not shown before: its formulas render and its images resolve while scrolling
+        // (each completion used to walk every item)
+        {
+            let v = &mut app.viewer().unwrap().ed.view;
+            let i = v.len() / 4 + 1234;
+            v.scroll_to_item(i);
+        }
+        frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
+        let mut s = Series::default();
+        for _ in 0..300 {
+            s.push(frame(&ctx, &mut app, vec![wheel(-60.0)]));
+        }
+        s.report("wheel scroll in a fresh region (300 frames)");
         let mut seed = 12345u64;
         for _ in 0..100 {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -578,12 +593,16 @@ fn child(src: &Path) {
         );
     }
 
-    // ---- large paste and its undo
-    for (label, size) in [("1 MiB", 1usize << 20), ("10 MiB", 10 << 20)] {
+    // ---- large paste, its undo and redo, Enter right after it (issue #29)
+    for (label, size, profile) in [
+        ("1 MiB prose", 1usize << 20, Profile::Prose),
+        ("1 MiB mixed", 1 << 20, Profile::Mixed),
+        ("10 MiB prose", 10 << 20, Profile::Prose),
+    ] {
         if !phase("paste") {
             break;
         }
-        let paste = generate_profile(size, 7, Profile::Prose, false);
+        let paste = generate_profile(size, 7, profile, false);
         let at = {
             let v = app.viewer().unwrap();
             caret_near(v.ed.session.text(), 0.5)
@@ -594,9 +613,47 @@ fn child(src: &Path) {
         let pasted = text_len(&mut app) - len0;
         let u = frame(&ctx, &mut app, vec![key(Key::Z, cmd())]);
         let back = text_len(&mut app) == len0;
+        let r = frame(&ctx, &mut app, vec![key(Key::Z, cmd() | Modifiers::SHIFT)]);
+        let again = text_len(&mut app) == len0 + pasted;
+        // Enter splits the block at the end of the paste, Backspace joins it back (Redo selects
+        // the re-inserted text and Undo/Redo leave the editing surface unfocused: click it,
+        // then put the caret right after the paste)
+        frame(&ctx, &mut app, click_events(center));
+        let inside = {
+            // inside a word after the paste (Enter at a block start only opens a virtual
+            // paragraph, no edit)
+            let b = app.viewer().unwrap().ed.session.text().as_bytes();
+            let mut p = at + pasted + 1;
+            while !(b[p - 1].is_ascii_lowercase() && b[p].is_ascii_lowercase()) {
+                p += 1;
+            }
+            p
+        };
+        caret_to(&ctx, &mut app, inside);
+        let mut enter = Series::default();
+        let mut split = 0;
+        for i in 0..20 {
+            let k = if i % 2 == 0 { Key::Enter } else { Key::Backspace };
+            let l0 = text_len(&mut app);
+            enter.push(frame(&ctx, &mut app, vec![key(k, Modifiers::default())]));
+            split += usize::from(i % 2 == 0 && text_len(&mut app) > l0);
+        }
+        // back to the original text (Enter/Backspace steps, then the paste)
+        for _ in 0..30 {
+            if text_len(&mut app) == len0 {
+                break;
+            }
+            frame(&ctx, &mut app, vec![key(Key::Z, cmd())]);
+        }
         println!(
-            "  paste {label} (+{pasted} B): frame {:.1} ms wall / {:.1} ms cpu; undo frame {:.1} ms wall / {:.1} ms cpu (restored: {back})",
-            p.0, p.1, u.0, u.1
+            "  paste {label} (+{pasted} B): paste {:.1} ms wall / {:.1} ms cpu; undo {:.1} / {:.1} (restored: {back}); redo {:.1} / {:.1} (re-applied: {again})",
+            p.0, p.1, u.0, u.1, r.0, r.1
+        );
+        enter.report(&format!("Enter / Backspace after the {label} paste ({split}/10 split)"));
+        assert_eq!(
+            text_len(&mut app),
+            len0,
+            "undo restores the text after the {label} paste"
         );
     }
 

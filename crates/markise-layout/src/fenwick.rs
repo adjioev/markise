@@ -165,6 +165,11 @@ impl Fenwick {
         self.len == 0
     }
 
+    /// All values in order.
+    pub fn values(&self) -> impl Iterator<Item = f64> + '_ {
+        self.leaves.iter().flat_map(|l| l.values.iter().copied())
+    }
+
     pub fn get(&self, i: usize) -> f64 {
         let (k, j) = self.locate(i);
         self.leaves[k].values[j]
