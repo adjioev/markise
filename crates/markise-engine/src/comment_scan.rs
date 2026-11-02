@@ -323,6 +323,12 @@ mod tests {
         let (s, wakes) = scanner();
         s.scan(1, 0, doc.clone());
         assert!(answer(&s, 1).found);
+        // the report is published just before the wake: wait for the wake itself
+        let t = Instant::now();
+        while wakes.load(Ordering::SeqCst) == 0 {
+            assert!(t.elapsed() < Duration::from_secs(10), "no wake for the answer");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert_eq!(wakes.load(Ordering::SeqCst), 1, "one wake per answer");
         let inserts = [
             "{>>x<<}",

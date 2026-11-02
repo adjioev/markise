@@ -339,6 +339,12 @@ mod tests {
             std::thread::sleep(Duration::from_micros(200));
         }
         assert!(p.poll_doc(&d, rev(0, 0, 0), 0, 0.0, &ctx).0);
+        // the report is published just before the wake: wait for the wake itself
+        let t = Instant::now();
+        while wakes.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(t.elapsed() < Duration::from_secs(10), "no wake for the answer");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert_eq!(
             wakes.load(std::sync::atomic::Ordering::SeqCst),
             1,
