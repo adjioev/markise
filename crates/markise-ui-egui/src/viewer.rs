@@ -28,6 +28,7 @@ use crate::text_paint::ParleyText;
 mod code_tools;
 mod comment_place;
 mod comment_presence;
+mod scrollbar;
 pub use code_tools::{LangEdit, LangItem, ShownTools, lang_matches};
 
 const SCROLLBAR_W: f32 = 10.0;
@@ -176,6 +177,8 @@ pub struct DocViewer {
     gutter: bool,
     /// Copy button and language field of fenced code blocks (issue #76).
     code: code_tools::CodeTools,
+    /// A press on the scrollbar (issue #123).
+    thumb_drag: scrollbar::ThumbDrag,
 }
 
 impl DocViewer {
@@ -224,6 +227,7 @@ impl DocViewer {
             comment_presence: Default::default(),
             gutter: false,
             code: Default::default(),
+            thumb_drag: Default::default(),
         }
     }
 
@@ -522,8 +526,18 @@ impl DocViewer {
         if (bar_resp.dragged() || bar_resp.clicked())
             && let Some(p) = bar_resp.interact_pointer_pos()
         {
-            let frac = ((p.y - rect.top()) / vh).clamp(0.0, 1.0) as f64;
-            self.ed.view.scroll_to_y(frac * (total - vh as f64).max(0.0));
+            let press = ui.input(|i| i.pointer.press_origin()).map_or(p.y, |o| o.y);
+            let y = self.ed.view.scroll_y();
+            match self
+                .thumb_drag
+                .target(press - rect.top(), p.y - rect.top(), vh, total, y)
+            {
+                scrollbar::Target::Y(y) => self.ed.view.scroll_to_y(y),
+                scrollbar::Target::End => self.ed.view.scroll_to_y(f64::MAX),
+            }
+        }
+        if !bar_resp.dragged() {
+            self.thumb_drag.release();
         }
 
         // ---- input: keyboard editing
@@ -874,10 +888,8 @@ impl DocViewer {
         // ---- scrollbar
         let total = self.ed.view.total_height().max(1.0);
         if total > vh as f64 + 1.0 {
-            let y = self.ed.view.scroll_y();
-            let thumb_h = ((vh as f64 / total) * vh as f64).max(24.0) as f32;
-            let frac = (y / (total - vh as f64).max(1.0)).clamp(0.0, 1.0) as f32;
-            let top = rect.top() + frac * (vh - thumb_h);
+            let (thumb_h, _) = scrollbar::thumb_geometry(vh, total);
+            let top = rect.top() + scrollbar::thumb_top(vh, total, self.ed.view.scroll_y());
             let thumb = Rect::from_min_size(pos2(bar.left() + 2.0, top), vec2(SCROLLBAR_W - 4.0, thumb_h));
             let c = color(theme.meta_text).gamma_multiply(if bar_resp.hovered() || bar_resp.dragged() {
                 0.8

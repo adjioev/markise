@@ -18,7 +18,7 @@ use crate::diagram::{DiagramQuery, DiagramState, Diagrams, NoDiagrams};
 use crate::fenwick::Fenwick;
 use crate::highlight::{CodeQuery, Highlights, NoHighlights, item_range};
 use crate::links::{AllResolved, LinkTargets};
-use crate::model::{DocModel, Item, ItemKind, ModelChange};
+use crate::model::{DocModel, Item, ItemKind, ModelChange, Segment};
 use crate::text::TextShaper;
 
 /// An item to paint this frame.
@@ -730,7 +730,14 @@ impl View {
                 t.block_spacing + rows * (line + 2.0 * t.table_cell_padding)
             }
             ItemKind::FrontMatter => t.block_spacing + line + 2.0 * t.meta_block.padding,
-            ItemKind::Rule | ItemKind::Empty | ItemKind::Toc => t.block_spacing + line,
+            // one line per outline entry (issue #124); later segments of a long TOC have no gap
+            ItemKind::Toc => match &it.segment {
+                Some(Segment::Toc { start, end, first, .. }) => {
+                    (if *first { t.block_spacing } else { 0.0 }) + end.saturating_sub(*start).max(1) as f32 * line
+                }
+                _ => t.block_spacing + self.model.outline.len().max(1) as f32 * line,
+            },
+            ItemKind::Rule | ItemKind::Empty => t.block_spacing + line,
             ItemKind::Paragraph => t.block_spacing + wrapped(it.est_chars, it.est_lines) * line,
         };
         h + pa + pb
