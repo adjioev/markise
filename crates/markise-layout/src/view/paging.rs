@@ -86,8 +86,7 @@ impl View {
         h += s.front as f32 * (line + 2.0 * t.meta_block.padding) + s.simple as f32 * line;
         // a TOC lists the whole outline, one line per entry
         h += s.tocs as f32 * self.model.outline.len().max(1) as f32 * line;
-        let para = (s.para_lines as f32).max(s.para_chars as f32 / per_line) + s.paras as f32 * 0.5;
-        h += para * line;
+        h += s.para_lines_at(per_line) * line;
         h
     }
 

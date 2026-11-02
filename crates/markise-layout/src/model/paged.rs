@@ -37,6 +37,10 @@ use super::{
 /// Top-level blocks per page of a paged model.
 pub const PAGE_TOPS: usize = 128;
 
+/// Line lengths (characters) at which [`PageStats::para_wrapped`] is kept; a page estimate
+/// interpolates between them.
+pub const PARA_LINE_CHARS: [u32; 12] = [10, 20, 30, 40, 50, 60, 70, 80, 100, 120, 160, 240];
+
 /// How a [`DocModel`] holds its items.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Paging {
@@ -93,14 +97,32 @@ pub struct PageStats {
     /// refreshed from the page's blocks when a definition changes).
     pub heading_refs: u32,
     pub paras: u32,
-    pub para_lines: u32,
-    pub para_chars: u64,
+    /// Estimated paragraph lines for the line lengths of [`PARA_LINE_CHARS`]: the sum of each
+    /// paragraph's own estimate (its source lines, or its characters wrapped at that length,
+    /// whichever is more, rounded up), so a page estimate equals the sum of its items'.
+    pub para_wrapped: [u32; PARA_LINE_CHARS.len()],
     /// `(width_q, parameter key, height bits)`: the height the page's items had (laid out or
     /// estimated) when it was evicted; used while the view parameters are the same.
     pub measured: Option<(u32, u64, u32)>,
 }
 
 impl PageStats {
+    /// Estimated paragraph lines at `per_line` characters per line (interpolated).
+    pub fn para_lines_at(&self, per_line: f32) -> f32 {
+        let t = &PARA_LINE_CHARS;
+        let w = &self.para_wrapped;
+        let k = t.partition_point(|&n| (n as f32) < per_line);
+        if k == 0 {
+            return w[0] as f32;
+        }
+        if k == t.len() {
+            return w[t.len() - 1] as f32;
+        }
+        let (a, b) = (t[k - 1] as f32, t[k] as f32);
+        let f = (per_line - a) / (b - a);
+        w[k - 1] as f32 + f * (w[k] as f32 - w[k - 1] as f32)
+    }
+
     /// Headings in the page.
     pub fn headings(&self) -> usize {
         self.heads.iter().map(|&h| h as usize).sum()
@@ -144,8 +166,9 @@ impl PageStats {
             }
             ItemKind::Paragraph => {
                 self.paras += 1;
-                self.para_lines += it.est_lines;
-                self.para_chars += it.est_chars as u64;
+                for (w, &n) in self.para_wrapped.iter_mut().zip(&PARA_LINE_CHARS) {
+                    *w += it.est_lines.max(it.est_chars.div_ceil(n));
+                }
             }
             ItemKind::Page(_) => unreachable!("a page placeholder inside a page"),
         }

@@ -459,3 +459,24 @@ fn heavy_suite_paged_model_equals_full_build_on_a_large_document() {
         run_ops(&mut doc, tops, &ops).unwrap_or_else(|e| panic!("tops {tops}: {e}"));
     }
 }
+
+/// A placeholder's height estimate is the sum of its items' estimates (paragraph wrapping
+/// interpolated between the kept line lengths), so materializing a page barely changes the
+/// document height and the scrollbar (found by the scrollbar drag test of #123: one-line
+/// paragraphs were estimated 30 % too tall).
+#[test]
+fn page_estimates_match_the_items_estimates() {
+    let mut short = String::new();
+    for i in 0..3_000 {
+        short.push_str(&format!("Paragraph {i} of a tall document with a line of text.\n\n"));
+    }
+    for src in [short, big_docs().swap_remove(0), doc(2000)] {
+        let doc: Arc<dyn FormatDoc> = Arc::new(md(&src));
+        for width in [300.0, 700.0, 1200.0] {
+            let p = View::new(doc.clone(), Arc::new(paged(&*doc, 16)), Theme::light(), width, 1.0);
+            let f = View::new(doc.clone(), Arc::new(full(&*doc)), Theme::light(), width, 1.0);
+            let (a, b) = (p.total_height(), f.total_height());
+            assert!((a / b - 1.0).abs() < 0.02, "width {width}: paged {a} vs full {b}");
+        }
+    }
+}
