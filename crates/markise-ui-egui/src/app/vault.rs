@@ -500,8 +500,10 @@ impl MarkiseApp {
             }
             self.offer_create(&w.target, from.as_deref());
         } else {
-            // the folder is still being scanned (no file-system probing on the UI thread)
-            self.banner = Some(Banner::Info("The folder is still being indexed; try again.".into()));
+            // no index: either no folder is open, or the folder is still being scanned (no
+            // file-system probing on the UI thread)
+            let msg = unresolvable_wikilink_message(self.vault_root().is_some());
+            self.banner = Some(Banner::Info(msg.into()));
         }
     }
 
@@ -1064,9 +1066,29 @@ fn file_url(p: &Path) -> String {
     format!("file://{}", markise_engine::vault::percent_encode_path(&s))
 }
 
+/// Why a wikilink cannot be followed while there is no vault index (#121): wikilinks resolve
+/// inside an opened folder, so without one the user is pointed to File → Open Folder; with a
+/// folder, its first scan has not finished yet.
+fn unresolvable_wikilink_message(folder_open: bool) -> &'static str {
+    if folder_open {
+        "The folder is still being indexed; try again."
+    } else {
+        "Wikilinks work inside an opened folder. Open the folder that contains this note \
+         (File → Open Folder…) to follow or create linked notes."
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wikilink_message_without_a_folder_121() {
+        let none = unresolvable_wikilink_message(false);
+        assert!(none.contains("Open Folder"), "{none}");
+        assert!(!none.contains("indexed"), "{none}");
+        assert!(unresolvable_wikilink_message(true).contains("indexed"));
+    }
 
     #[test]
     fn heading_keys_v2_5_1() {
