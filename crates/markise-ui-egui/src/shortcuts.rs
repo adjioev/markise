@@ -201,6 +201,15 @@ pub struct CheatSheet {
 }
 
 impl CheatSheet {
+    /// Closes the window and gives the keyboard focus back.
+    pub fn close(&mut self, ctx: &egui::Context) {
+        self.open = false;
+        self.escape = false;
+        if let Some(id) = self.previous_focus.take() {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
+    }
+
     /// Opens the window (already open: focuses its search field).
     pub fn open(&mut self, ctx: &egui::Context) {
         if !self.open {
@@ -301,10 +310,7 @@ impl CheatSheet {
                 ui.weak("Change shortcuts with a \"keyBinding\" object in settings.json.    Esc: close");
             });
         if !open || escape {
-            self.open = false;
-            if let Some(id) = self.previous_focus.take() {
-                ctx.memory_mut(|m| m.request_focus(id));
-            }
+            self.close(ctx);
         }
     }
 }

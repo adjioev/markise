@@ -307,3 +307,24 @@ fn cheat_sheet_keys_do_not_reach_the_find_bar_or_quick_open() {
     );
     assert!(h.state().find_and_quick_open().1 && h.state().is_shortcuts_open());
 }
+
+/// Codex review of PR #120, round 2: a command that opens another window (Preferences via
+/// its shortcut) closes the cheat sheet, so the sheet no longer holds the keyboard focus.
+#[test]
+fn opening_preferences_closes_the_cheat_sheet() {
+    let mut h = harness(AppOptions::default());
+    steps(&mut h, 2);
+    let ctx = h.ctx.clone();
+    h.state_mut().menu_action(&ctx, &MenuAction::Command("help.shortcuts"));
+    steps(&mut h, 2);
+    assert!(h.state().is_shortcuts_open());
+    let comma = if cfg!(target_os = "macos") {
+        Modifiers::MAC_CMD | Modifiers::COMMAND
+    } else {
+        Modifiers::CTRL | Modifiers::COMMAND
+    };
+    h.key_press_modifiers(comma, Key::Comma);
+    steps(&mut h, 2);
+    assert!(!h.state().is_shortcuts_open(), "Preferences took over");
+    assert!(h.state().is_preferences_open());
+}

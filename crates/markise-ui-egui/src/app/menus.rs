@@ -570,6 +570,11 @@ impl MarkiseApp {
     }
 
     pub(super) fn menu_command(&mut self, ctx: &Context, id: &str, trigger: Trigger) -> bool {
+        // any other command (Preferences, About, Quick Open, a dialog…) takes over from the
+        // cheat sheet, which would otherwise keep the keyboard focus (Codex review of #120)
+        if id != "help.shortcuts" && self.cheat_sheet.open {
+            self.cheat_sheet.close(ctx);
+        }
         match id {
             "file.quickOpen" => self.open_quick(ctx),
             "file.clearRecent" => self.clear_recent_paths(),
