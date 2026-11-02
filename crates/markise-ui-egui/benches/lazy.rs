@@ -512,11 +512,149 @@ fn child(src: &Path) {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Where the viewport is relative to the document end.
+fn end_state(app: &mut MarkiseApp, label: &str, vh: f32) {
+    let v = app.viewer().unwrap();
+    let len = v.ed.session.text().len();
+    let view = &v.ed.view;
+    let n = view.len();
+    let last_vis = view.last_visible.iter().copied().max().unwrap_or(0);
+    let m = view.model();
+    let span = m.item_span(last_vis);
+    let bottom = view.item_y(last_vis) + view.height(last_vis) as f64 - view.scroll_y();
+    println!(
+        "  END {label:<34} scroll {:.0} / total {:.0} (frac {:.5}) | last visible item {last_vis} of {n} (page? {}) ends at byte {} of {len} | its bottom at {bottom:.0} px of a {vh:.0} px viewport",
+        view.scroll_y(),
+        view.total_height(),
+        view.scroll_y() / (view.total_height() - vh as f64).max(1.0),
+        m.is_page(last_vis),
+        span.end
+    );
+}
+
+fn end_child(src: &Path) {
+    let lazy = markise_layout::lazy_enabled();
+    let path = src.with_extension(if lazy { "lazy-end.md" } else { "normal-end.md" });
+    std::fs::copy(src, &path).expect("copy corpus");
+    let ctx = Context::default();
+    let mut app = MarkiseApp::new(AppOptions::default());
+    frame(&ctx, &mut app, vec![]);
+    app.open(path.clone());
+    while app.model().is_none() || app.is_loading() {
+        frame(&ctx, &mut app, vec![]);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    for _ in 0..3 {
+        frame(&ctx, &mut app, vec![]);
+    }
+    let r = app.viewer().unwrap().surface_rect().unwrap();
+    let vh = r.height();
+    let center = r.center();
+    let btn = |pos, pressed| Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    // 0. grab the thumb by its top edge and drag until the thumb *looks* at the bottom of the
+    // bar (the pointer stays a thumb height above the bar end), release
+    {
+        let v = &mut app.viewer().unwrap().ed.view;
+        let y = (v.total_height() - vh as f64) * 0.5;
+        v.scroll_to_y(y);
+    }
+    frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
+    let thumb_h = {
+        let v = &app.viewer().unwrap().ed.view;
+        ((vh as f64 / v.total_height()) * vh as f64).max(24.0) as f32
+    };
+    let top = r.top() + 0.5 * (vh - thumb_h);
+    let q0 = Pos2::new(r.right() - 4.0, top + 2.0);
+    let q1 = Pos2::new(r.right() - 4.0, r.bottom() - thumb_h + 2.0);
+    frame(&ctx, &mut app, vec![Event::PointerMoved(q0), btn(q0, true)]);
+    for k in 1..=10 {
+        let p = Pos2::new(q0.x, q0.y + (q1.y - q0.y) * k as f32 / 10.0);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(p)]);
+    }
+    frame(&ctx, &mut app, vec![btn(q1, false)]);
+    end_state(&mut app, "thumb dragged until it looks at the bottom", vh);
+    for _ in 0..5 {
+        frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
+    }
+    // 1. scrollbar drag from the middle to below the bottom, release
+    let p0 = Pos2::new(r.right() - 4.0, r.center().y);
+    let p1 = Pos2::new(r.right() - 4.0, r.bottom() + 40.0);
+    frame(&ctx, &mut app, vec![Event::PointerMoved(p0), btn(p0, true)]);
+    for k in 1..=10 {
+        let p = Pos2::new(p0.x, p0.y + (p1.y - p0.y) * k as f32 / 10.0);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(p)]);
+    }
+    end_state(&mut app, "drag to bottom (held)", vh);
+    frame(&ctx, &mut app, vec![btn(p1, false)]);
+    end_state(&mut app, "drag released", vh);
+    for _ in 0..10 {
+        frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
+    }
+    end_state(&mut app, "drag released + 10 frames", vh);
+    // 2. wheel down until nothing moves
+    let mut last = f64::NAN;
+    let mut still = 0;
+    let mut frames = 0;
+    while still < 5 && frames < 20000 {
+        frame(&ctx, &mut app, vec![wheel(-200.0)]);
+        frames += 1;
+        let y = app.viewer().unwrap().ed.view.scroll_y();
+        if y == last {
+            still += 1
+        } else {
+            still = 0
+        }
+        last = y;
+    }
+    end_state(&mut app, &format!("wheel down until still ({frames} fr)"), vh);
+    // 3. from 30 screens before the (estimated) end, wheel down until still
+    {
+        let v = &mut app.viewer().unwrap().ed.view;
+        let y = v.total_height() - 30.0 * vh as f64;
+        v.scroll_to_y(y);
+    }
+    frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
+    let (mut last, mut still, mut frames) = (f64::NAN, 0, 0);
+    while still < 5 && frames < 20000 {
+        frame(&ctx, &mut app, vec![wheel(-200.0)]);
+        frames += 1;
+        let y = app.viewer().unwrap().ed.view.scroll_y();
+        if y == last {
+            still += 1
+        } else {
+            still = 0
+        }
+        last = y;
+    }
+    end_state(&mut app, &format!("wheel from -30 screens ({frames} fr)"), vh);
+    // 4. Cmd+Down with the caret in the text
+    frame(&ctx, &mut app, click_events(center));
+    frame(&ctx, &mut app, vec![key(Key::ArrowDown, cmd())]);
+    frame(&ctx, &mut app, vec![]);
+    let c = app.viewer().unwrap().ed.session.selection().primary().focus.offset;
+    end_state(&mut app, &format!("Cmd+Down (caret {c})"), vh);
+    // 5. End key
+    frame(&ctx, &mut app, vec![key(Key::End, Modifiers::default())]);
+    frame(&ctx, &mut app, vec![]);
+    end_state(&mut app, "End key", vh);
+    drop(app);
+    let _ = std::fs::remove_file(&path);
+}
+
 fn main() {
     if std::env::args().any(|a| a == "--list") {
         return;
     }
     if let Ok(p) = std::env::var("MARKISE_LAZY_CHILD") {
+        if std::env::var_os("MARKISE_LAZY_END").is_some() {
+            end_child(&PathBuf::from(p));
+            return;
+        }
         child(&PathBuf::from(p));
         return;
     }

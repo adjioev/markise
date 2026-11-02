@@ -151,6 +151,8 @@ pub struct DocViewer {
     /// PROTOTYPE (lazy view): the document height when the scrollbar drag started (the
     /// scrollbar's scale is frozen during a drag while estimates refine).
     lazy_drag_total: Option<f64>,
+    /// PROTOTYPE (lazy view): where the thumb was grabbed (px from its top) during a drag.
+    lazy_drag_grab: Option<f32>,
     /// Surface top of the last frame (screen y).
     last_top: f32,
     /// Text to put on the clipboard after this frame's input handling.
@@ -214,6 +216,7 @@ impl DocViewer {
             find_reveal: false,
             last_left: 0.0,
             lazy_drag_total: None,
+            lazy_drag_grab: None,
             last_top: 0.0,
             pending_copy: None,
             last_surface: None,
@@ -530,18 +533,51 @@ impl DocViewer {
         let bar = Rect::from_min_max(pos2(rect.right() - SCROLLBAR_W, rect.top()), rect.right_bottom());
         let bar_resp = ui.interact(bar, id.with("bar"), Sense::click_and_drag());
         let mut total = self.ed.view.total_height().max(1.0);
-        if self.ed.view.model().is_paged() {
+        let paged = self.ed.view.model().is_paged();
+        if paged {
             if bar_resp.dragged() {
                 total = *self.lazy_drag_total.get_or_insert(total);
             } else {
                 self.lazy_drag_total = None;
+                self.lazy_drag_grab = None;
             }
         }
         if (bar_resp.dragged() || bar_resp.clicked())
             && let Some(p) = bar_resp.interact_pointer_pos()
         {
-            let frac = ((p.y - rect.top()) / vh).clamp(0.0, 1.0) as f64;
-            self.ed.view.scroll_to_y(frac * (total - vh as f64).max(0.0));
+            if paged {
+                // PROTOTYPE (lazy view): the thumb follows the pointer at the point where it
+                // was grabbed, over the thumb's own travel (the bar height minus the thumb), as
+                // painted below; a press outside the thumb centres it there. The old mapping
+                // (pointer over the whole bar height) left the content ~thumb-height/bar-height
+                // of the document before the end when the thumb looked at the bottom.
+                let thumb_h = ((vh as f64 / total) * vh as f64).max(24.0) as f32;
+                let travel = (vh - thumb_h).max(1.0);
+                let grab = *self.lazy_drag_grab.get_or_insert_with(|| {
+                    let cur = (self.ed.view.scroll_y() / (total - vh as f64).max(1.0)).clamp(0.0, 1.0) as f32;
+                    let top = rect.top() + cur * travel;
+                    let press = ui.input(|i| i.pointer.press_origin()).map_or(p.y, |o| o.y);
+                    if bar_resp.dragged() && (top..=top + thumb_h).contains(&press) {
+                        press - top
+                    } else {
+                        thumb_h * 0.5
+                    }
+                });
+                let frac = ((p.y - grab - rect.top()) / travel).clamp(0.0, 1.0) as f64;
+                if bar_resp.clicked() {
+                    self.lazy_drag_grab = None;
+                }
+                if frac >= 1.0 {
+                    // the bottom of the bar is the end of the document, not the end of the
+                    // scale frozen at the drag start (pages materialized during the drag)
+                    self.ed.view.scroll_to_y(f64::MAX);
+                } else {
+                    self.ed.view.scroll_to_y(frac * (total - vh as f64).max(0.0));
+                }
+            } else {
+                let frac = ((p.y - rect.top()) / vh).clamp(0.0, 1.0) as f64;
+                self.ed.view.scroll_to_y(frac * (total - vh as f64).max(0.0));
+            }
         }
 
         // ---- input: keyboard editing
