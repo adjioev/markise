@@ -492,6 +492,8 @@ pub struct MarkiseApp {
     /// PROTOTYPE (progressive open): the open document is the first part (`cut` bytes) of
     /// this file; the rest is still loading.
     progressive: Option<(PathBuf, usize)>,
+    /// PROTOTYPE (progressive open): a save requested while the rest was loading.
+    progressive_save: Option<SaveRequest>,
     /// Side by Side: the word count follows the source pane's selection (`true`) or the
     /// rendered pane's: the pane that has, or last had, the keyboard focus.
     word_count_source_pane: bool,
@@ -604,6 +606,7 @@ impl MarkiseApp {
             export: Default::default(),
             word_count: None,
             progressive: None,
+            progressive_save: None,
             word_count_source_pane: true,
             frames: 0,
             menu_host: None,
@@ -1114,10 +1117,6 @@ impl MarkiseApp {
         let path = loaded.path.clone();
         self.install(loaded);
         self.progressive = Some((path, cut));
-        self.banner = Some(Banner::Info(
-            "Loading the rest of the file… (outline, find and word count cover the part shown so far; saving waits)"
-                .into(),
-        ));
     }
 
     /// PROTOTYPE (progressive open): the whole file arrived; edits made in the preview are
@@ -1173,8 +1172,8 @@ impl MarkiseApp {
         d.viewer.ed.session.adopt_continuation(doc.clone());
         d.viewer.ed.view.set_model_keep(doc, model);
         self.progressive = None;
-        if matches!(self.banner, Some(Banner::Info(ref m)) if m.starts_with("Loading the rest")) {
-            self.banner = None;
+        if let Some(req) = self.progressive_save.take() {
+            self.start_save(req);
         }
     }
 
@@ -1409,6 +1408,7 @@ impl MarkiseApp {
     /// its placeholder, not watched).
     fn install_doc(&mut self, loaded: Loaded, untitled: bool) {
         self.progressive = None;
+        self.progressive_save = None;
         let recovered = self.workflow.drafts.contains(&loaded.path);
         self.forget_backup();
         let untitled = untitled || recovered;
@@ -1653,10 +1653,9 @@ impl MarkiseApp {
 
     fn start_save(&mut self, req: SaveRequest) {
         if self.progressive.is_some() {
-            // PROTOTYPE (progressive open): the session holds only the first part of the file
-            self.banner = Some(Banner::Info(
-                "The file is still loading; save again in a moment.".into(),
-            ));
+            // PROTOTYPE (progressive open): the session holds only the first part of the file;
+            // the save runs once the whole file is in (noted in the status bar, no banner)
+            self.progressive_save = Some(req);
             return;
         }
         if self.saving.is_some() {
@@ -2660,6 +2659,15 @@ impl MarkiseApp {
                 }
                 if self.saving.is_some() {
                     ui.label("Saving…");
+                }
+                if self.progressive.is_some() {
+                    // PROTOTYPE (progressive open): in the status bar, not as a banner above the
+                    // document (a banner moved the text down and back when it went away)
+                    ui.weak(if self.progressive_save.is_some() {
+                        "Loading the rest of the file… (saving when done)"
+                    } else {
+                        "Loading the rest of the file…"
+                    });
                 }
                 self.export.status(ui);
                 let z = self.themes.zoom();

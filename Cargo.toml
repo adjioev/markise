@@ -41,7 +41,8 @@ epaint = { version = "0.37.0", default-features = false, features = ["default_fo
 # keeps the glow renderer and loads system fonts itself (ADR 0004), so the feature set below
 # mirrors the eframe 0.33 defaults; `winit` with its default features restores what eframe's
 # `winit/default` used to enable (Wayland via dlopen, client-side decorations).
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "web_screen_reader", "x11"] }
+# PROTOTYPE (proto/lazy-view, #86): "wgpu" added so MARKISE_RENDERER=wgpu can try Metal on macOS
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wgpu", "links", "wayland", "web_screen_reader", "x11"] }
 winit = "0.30.13"
 # macOS open-documents handler in apps/markise (already in the tree through eframe/arboard)
 objc2 = "0.6.5"

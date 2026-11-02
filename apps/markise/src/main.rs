@@ -21,6 +21,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod diag;
+mod frame_log;
 #[cfg(target_os = "macos")]
 mod macos_open;
 #[cfg(target_os = "macos")]
@@ -47,12 +48,16 @@ fn app_icon() -> Option<eframe::egui::IconData> {
 struct App(MarkiseApp);
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         for path in macos_open::take_pending() {
             self.0.open(path);
         }
+        let log = frame_log::start(ui, frame);
         self.0.ui(ui);
+        if let Some(l) = log {
+            l.finish(ui);
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -116,12 +121,42 @@ fn main() -> eframe::Result {
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
     }
-    let native = eframe::NativeOptions {
+    let mut native = eframe::NativeOptions {
         viewport,
         // repaint only on events (no continuous rendering), NFR-10
         run_and_return: false,
         ..Default::default()
     };
+    // PROTOTYPE (#86): MARKISE_RENDERER=wgpu (Metal on macOS) instead of glow (OpenGL);
+    // MARKISE_PRESENT=fifo|mailbox|immediate|autovsync|autonovsync (wgpu only)
+    // (with the wgpu feature compiled in, eframe would default to it: keep glow by default)
+    native.renderer = eframe::Renderer::Glow;
+    if std::env::var("MARKISE_RENDERER").is_ok_and(|v| v == "wgpu") {
+        native.renderer = eframe::Renderer::Wgpu;
+        use eframe::wgpu::PresentMode as P;
+        if let Ok(m) = std::env::var("MARKISE_PRESENT") {
+            native.wgpu_options.surface.present_mode = match m.as_str() {
+                "fifo" => P::Fifo,
+                "mailbox" => P::Mailbox,
+                "immediate" => P::Immediate,
+                "autonovsync" => P::AutoNoVsync,
+                _ => P::AutoVsync,
+            };
+        }
+        if let Ok(n) = std::env::var("MARKISE_FRAME_LATENCY").map(|v| v.parse::<u32>()) {
+            native.wgpu_options.surface.desired_maximum_frame_latency = n.ok();
+        }
+    }
+    frame_log::set_config(format!(
+        "renderer={} present={:?} frame_latency={:?}",
+        if native.renderer == eframe::Renderer::Wgpu {
+            "wgpu"
+        } else {
+            "glow"
+        },
+        native.wgpu_options.surface.present_mode,
+        native.wgpu_options.surface.desired_maximum_frame_latency
+    ));
     // fonts are loaded by the app's theme worker (off the UI thread)
     let creator: eframe::AppCreator<'static> = Box::new(move |cc| {
         if timing {

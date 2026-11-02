@@ -39,11 +39,81 @@ fn scroll_tiles() -> bool {
     *ON.get_or_init(|| env_on("MARKISE_SCROLL_TILES"))
 }
 
-/// PROTOTYPE (#86): `MARKISE_SCROLL_RAW=1` applies trackpad (point-unit) wheel deltas exactly,
-/// including macOS momentum events, instead of egui's smoothed delta.
-fn scroll_raw() -> bool {
+/// PROTOTYPE (#86): `MARKISE_SCROLL_RAW=1` applies the delivered wheel deltas (trackpad and
+/// macOS momentum) drained with a one-frame half-life instead of egui's 100 ms smoothing;
+/// `MARKISE_SCROLL_RAW=exact` applies them in the frame they arrive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawMode {
+    Off,
+    Exact,
+    Resampled,
+}
+
+fn scroll_raw_mode() -> RawMode {
+    static M: std::sync::OnceLock<RawMode> = std::sync::OnceLock::new();
+    *M.get_or_init(|| match std::env::var("MARKISE_SCROLL_RAW").as_deref() {
+        Ok("exact") => RawMode::Exact,
+        Ok(v) if !v.is_empty() && v != "0" => RawMode::Resampled,
+        _ => RawMode::Off,
+    })
+}
+
+/// Half-life of the resampled raw drain in seconds (`MARKISE_SCROLL_HALFLIFE_MS`, default 8).
+fn scroll_half_life() -> f32 {
+    static H: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *H.get_or_init(|| {
+        std::env::var("MARKISE_SCROLL_HALFLIFE_MS")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .map_or(0.008, |ms| (ms / 1000.0).max(0.0005))
+    })
+}
+
+/// PROTOTYPE (#86): `MARKISE_DISPLAY_LINK=1` keeps drawing a frame per display refresh while a
+/// scroll gesture or its momentum is active (the present call blocks on vsync).
+pub fn scroll_display_link() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| env_on("MARKISE_SCROLL_RAW"))
+    *ON.get_or_init(|| env_on("MARKISE_DISPLAY_LINK"))
+}
+
+/// PROTOTYPE (#86): scroll input of the last frame, for `MARKISE_FRAME_LOG`.
+#[derive(Clone, Debug, Default)]
+pub struct FrameScroll {
+    /// Wheel events received, of which macOS momentum.
+    pub events: u32,
+    pub momentum: u32,
+    /// Phases of the events in order (S/M/E/C).
+    pub phases: String,
+    /// Sum of the delivered deltas, egui's smoothed delta, the delta applied (points).
+    pub raw: f32,
+    pub smooth: f32,
+    pub applied: f32,
+    /// Resampled mode: delivered but not yet applied.
+    pub pending: f32,
+    /// Scroll offset after the frame.
+    pub scroll_y: f64,
+    pub total: f64,
+}
+
+static FRAME_SCROLL: std::sync::Mutex<FrameScroll> = std::sync::Mutex::new(FrameScroll {
+    events: 0,
+    momentum: 0,
+    phases: String::new(),
+    raw: 0.0,
+    smooth: 0.0,
+    applied: 0.0,
+    pending: 0.0,
+    scroll_y: 0.0,
+    total: 0.0,
+});
+
+fn frame_scroll() -> std::sync::MutexGuard<'static, FrameScroll> {
+    FRAME_SCROLL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Takes the scroll input of the last frame (frame log).
+pub fn take_frame_scroll() -> FrameScroll {
+    std::mem::take(&mut *frame_scroll())
 }
 
 fn env_on(k: &str) -> bool {
@@ -207,6 +277,10 @@ pub struct DocViewer {
     lazy_drag_total: Option<f64>,
     /// PROTOTYPE (lazy view): where the thumb was grabbed (px from its top) during a drag.
     lazy_drag_grab: Option<f32>,
+    /// PROTOTYPE (#86): resampled raw scrolling: delivered, not yet applied (points).
+    raw_pending: f32,
+    /// egui time of the last wheel event.
+    last_wheel: f64,
     /// PROTOTYPE (#86): per-item mesh tiles (`MARKISE_SCROLL_TILES=1`).
     pub tiles: TileCache,
     /// Surface top of the last frame (screen y).
@@ -273,6 +347,8 @@ impl DocViewer {
             last_left: 0.0,
             lazy_drag_total: None,
             lazy_drag_grab: None,
+            raw_pending: 0.0,
+            last_wheel: f64::NEG_INFINITY,
             tiles: TileCache::default(),
             last_top: 0.0,
             pending_copy: None,
@@ -555,34 +631,95 @@ impl DocViewer {
         }
 
         // ---- input: wheel / trackpad
-        if resp.hovered() || ui.rect_contains_pointer(rect) {
-            let mut d = ui.input(|i| i.smooth_scroll_delta);
-            if scroll_raw() {
-                // trackpad / momentum deltas exactly as delivered; mouse-wheel lines and pages
-                // unsmoothed (egui's smoothing turns momentum events of >= 8 pt into a
-                // delayed exponential tail)
-                let line = theme.line_px();
-                d = ui.input(|i| {
-                    let mut sum = Vec2::ZERO;
-                    for e in &i.events {
-                        if let egui::Event::MouseWheel {
-                            unit, delta, modifiers, ..
-                        } = e
-                            && !modifiers.command
-                        {
-                            sum += match unit {
-                                egui::MouseWheelUnit::Point => *delta,
-                                egui::MouseWheelUnit::Line => *delta * line * 3.0,
-                                egui::MouseWheelUnit::Page => *delta * vh,
-                            };
+        {
+            let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
+            let line = theme.line_px();
+            // every wheel event of this frame (frame log, raw modes)
+            let (n_ev, n_mom, raw_sum, phases) = ui.input(|i| {
+                let (mut n, mut m, mut sum, mut ph) = (0u32, 0u32, 0.0f32, String::new());
+                for e in &i.events {
+                    if let egui::Event::MouseWheel {
+                        unit,
+                        delta,
+                        modifiers,
+                        phase,
+                        source,
+                    } = e
+                        && !modifiers.command
+                    {
+                        n += 1;
+                        if matches!(source, egui::MouseWheelSource::Momentum) {
+                            m += 1;
                         }
+                        ph.push(match phase {
+                            egui::TouchPhase::Start => 'S',
+                            egui::TouchPhase::Move => 'M',
+                            egui::TouchPhase::End => 'E',
+                            egui::TouchPhase::Cancel => 'C',
+                        });
+                        sum += match unit {
+                            egui::MouseWheelUnit::Point => delta.y,
+                            egui::MouseWheelUnit::Line => delta.y * line * 3.0,
+                            egui::MouseWheelUnit::Page => delta.y * vh,
+                        };
                     }
-                    sum
-                });
-                ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+                }
+                (n, m, sum, ph)
+            });
+            let smooth = ui.input(|i| i.smooth_scroll_delta.y);
+            let now_t = ui.input(|i| i.time);
+            if n_ev > 0 {
+                self.last_wheel = now_t;
             }
-            if d.y != 0.0 {
-                self.ed.view.scroll_by(-d.y);
+            let mut d = 0.0;
+            if hovered {
+                d = match scroll_raw_mode() {
+                    RawMode::Off => smooth,
+                    // trackpad / momentum deltas exactly as delivered in this frame
+                    RawMode::Exact => raw_sum,
+                    // delivered deltas, drained with a one-frame half-life (8 ms): events do not
+                    // arrive one per frame (0 in one frame, 2 in the next; frames drawn for other
+                    // reasons get none), so applying them as they come stutters; egui's own
+                    // smoothing (90 % in 100 ms) lags. The total is preserved exactly.
+                    RawMode::Resampled => {
+                        self.raw_pending += raw_sum;
+                        let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
+                        let f = 1.0 - 0.5f32.powf(dt / scroll_half_life());
+                        let a = if self.raw_pending.abs() < 0.5 {
+                            self.raw_pending
+                        } else {
+                            self.raw_pending * f
+                        };
+                        self.raw_pending -= a;
+                        if self.raw_pending != 0.0 {
+                            ctx.request_repaint();
+                        }
+                        a
+                    }
+                };
+                if scroll_raw_mode() != RawMode::Off {
+                    ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+                }
+            } else {
+                self.raw_pending = 0.0;
+            }
+            // vsync-paced frames while a scroll gesture or its momentum is going on (frames
+            // then come every display refresh, not only when an event arrives)
+            if scroll_display_link() && (n_ev > 0 || now_t - self.last_wheel < 0.15 || self.raw_pending != 0.0) {
+                ctx.request_repaint();
+            }
+            {
+                let mut f = frame_scroll();
+                f.events = n_ev;
+                f.momentum = n_mom;
+                f.phases = phases;
+                f.raw = raw_sum;
+                f.smooth = smooth;
+                f.applied = d;
+                f.pending = self.raw_pending;
+            }
+            if d != 0.0 {
+                self.ed.view.scroll_by(-d);
                 ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
             }
         }
@@ -838,6 +975,11 @@ impl DocViewer {
         {
             self.ed.refresh_focus();
             ctx.request_repaint();
+        }
+        {
+            let mut f = frame_scroll();
+            f.scroll_y = self.ed.view.scroll_y();
+            f.total = self.ed.view.total_height();
         }
         let mut visible = visible;
         if scroll_snap() {

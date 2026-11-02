@@ -700,6 +700,7 @@ fn scroll_quality_child(src: &Path) {
     let mut frames = 0;
     let mut prev_gap: Option<(usize, f32)> = None;
     let mut y_prev = app.viewer().unwrap().ed.view.scroll_y();
+    let mut moved: Vec<f64> = Vec::new();
     // 4 gestures: finger phase (40 frames, fractional deltas) then momentum (150 frames,
     // decaying from 60 pt per event), 120 Hz
     for g in 0..4 {
@@ -718,6 +719,21 @@ fn scroll_quality_child(src: &Path) {
         for _ in 0..30 {
             events_seq.push(vec![]);
         }
+        // MARKISE_LAZY_SQ_CLUSTER=1: events arrive unevenly across frames, as on hardware
+        // (a frame gets 0, 1 or 2 of them; frames drawn for other reasons get none)
+        if std::env::var_os("MARKISE_LAZY_SQ_CLUSTER").is_some() {
+            let flat: Vec<Event> = events_seq.into_iter().flatten().collect();
+            let pattern = [1usize, 0, 2, 1, 0, 1, 2, 0, 1, 1];
+            let mut out = Vec::new();
+            let mut it = flat.into_iter().peekable();
+            let mut k = 0;
+            while it.peek().is_some() {
+                let n = pattern[k % pattern.len()];
+                out.push(it.by_ref().take(n).collect::<Vec<_>>());
+                k += 1;
+            }
+            events_seq = out;
+        }
         for evs in events_seq {
             let delta: f64 = evs
                 .iter()
@@ -733,6 +749,7 @@ fn scroll_quality_child(src: &Path) {
             let viewer = app.viewer().unwrap();
             let y = viewer.ed.view.scroll_y();
             track_err += ((y - y_prev) - delta).abs();
+            moved.push((y - y_prev).abs());
             y_prev = y;
             // rendered spacing of the first two visible items, as epaint rounds each to a
             // device pixel: a change while scrolling is a line moving before its neighbour
@@ -766,6 +783,24 @@ fn scroll_quality_child(src: &Path) {
     println!(
         "  tracking: |scroll moved - input delta| summed {track_err:.0} pt over {input_sum:.0} pt of input ({:.1} %)",
         track_err / input_sum.max(1.0) * 100.0
+    );
+    // stutter: frame-to-frame change of the per-frame movement while moving (a smooth scroll
+    // changes its speed gradually; 0 / 2x alternation shows as large jumps)
+    let mut jerk = 0.0;
+    let mut stalls = 0;
+    let mut motion = 0;
+    for w in moved.windows(3) {
+        if w[0] > 0.5 && w[2] > 0.5 {
+            motion += 1;
+            jerk += (w[1] - w[0]).abs();
+            if w[1] < 0.25 * (w[0] + w[2]) * 0.5 {
+                stalls += 1;
+            }
+        }
+    }
+    println!(
+        "  stutter: {stalls} stalled frames (moved < 1/4 of its neighbours) of {motion} moving; mean |change of speed| {:.2} pt/frame",
+        jerk / motion.max(1) as f64
     );
     println!(
         "  line wobble (rendered spacing of neighbouring items changed between frames): {wobble} of {frames} frames"
@@ -832,8 +867,9 @@ fn open_child(src: &Path) {
             }
             if frames_preview >= 2 {
                 let v = app.viewer().unwrap();
+                let top = v.surface_rect().map_or(0.0, |r| r.top());
                 let (i, y) = v.last_visible_y().first().copied().unwrap_or((0, 0.0));
-                before = Some((v.model().item_start(i), y));
+                before = Some((v.model().item_start(i), y + top));
             }
         }
         if app.model().is_some() && !app.is_loading() {
@@ -845,8 +881,10 @@ fn open_child(src: &Path) {
     let full = t0.elapsed().as_secs_f64() * 1e3;
     frame(&ctx, &mut app, vec![]);
     let v = app.viewer().unwrap();
+    let top = v.surface_rect().map_or(0.0, |r| r.top());
     let (i, y) = v.last_visible_y().first().copied().unwrap_or((0, 0.0));
-    let after = (v.model().item_start(i), y);
+    // (item start, screen y of its top): the screen position, so a banner moving the surface counts
+    let after = (v.model().item_start(i), y + top);
     println!(
         "  OPEN first painted frame {:.0} ms | fully loaded {full:.0} ms | frames shown while loading {frames_preview} (slowest {max_frame:.1} ms)",
         first.unwrap_or(f64::NAN)
