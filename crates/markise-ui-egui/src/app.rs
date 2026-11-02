@@ -18,8 +18,8 @@
 //!   other file fails, the edited document stays as it was (dirty).
 //! - Every load and save records the file's disk version; saves refuse to overwrite external
 //!   changes (see `markise_engine::save`). Watcher events always trigger a reload check; a
-//!   reload equal to the recorded version (our own save) is ignored; events during a load or
-//!   save are queued. Loads run on one cancellable loader worker (latest request wins).
+//!   file equal to the recorded version (our own save) is recognised by the loader right after
+//!   reading, without parsing it, and ignored; events during a load or save are queued. Loads run on one cancellable loader worker (latest request wins).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,7 +30,7 @@ use egui::{Context, RichText, ThemePreference};
 use markise_engine::Wake;
 use markise_engine::editor::SaveSnapshot;
 use markise_engine::jobs::{Hooks, SaveText, Saved, spawn_save};
-use markise_engine::load::{Loaded, Loader, StageHook};
+use markise_engine::load::{Loaded, Loader, Outcome, StageHook};
 use markise_engine::save::{DiskVersion, Expect, SaveError};
 use markise_engine::settings::Appearance;
 use markise_engine::tree::{MARKDOWN_EXTENSIONS, TEXT_EXTENSIONS, is_markdown};
@@ -210,14 +210,24 @@ struct DocState {
     fp_cache: std::cell::Cell<Option<(u64, TextFp)>>,
 }
 
-/// Content identity of a document text: length and hash.
-type TextFp = (usize, u64);
+/// Content identity of a document text: length and hash — the same identity the load and
+/// save workers compute for the bytes they read or write ([`DiskVersion::text_identity`]), so
+/// a loaded or saved text never has to be hashed again on the UI thread (issue #29).
+type TextFp = markise_engine::save::TextIdentity;
 
 fn text_fp(text: &str) -> TextFp {
-    use std::hash::{Hash, Hasher};
-    let mut h = ahash::AHasher::default();
-    text.hash(&mut h);
-    (text.len(), h.finish())
+    markise_engine::save::text_identity(text)
+}
+
+/// The content identity of a loaded document's text, from what the loader read (a lossily
+/// decoded text differs from the bytes: hashed here; such files are rare and cannot be saved).
+fn loaded_fp(loaded: &Loaded) -> TextFp {
+    if loaded.lossy {
+        text_fp(loaded.doc.text())
+    } else {
+        debug_assert_eq!(loaded.version.text_identity(), text_fp(loaded.doc.text()));
+        loaded.version.text_identity()
+    }
 }
 
 impl DocState {
@@ -325,8 +335,6 @@ struct SaveRequest {
 
 struct Saving {
     doc_id: u64,
-    /// Content identity of the text being saved.
-    fp: TextFp,
     rx: Receiver<Saved>,
     then: Then,
     /// The session state the save writes (marked saved on success).
@@ -1032,8 +1040,23 @@ impl MarkiseApp {
             self.timing
                 .log(&format!("open-start path={} bytes={size}", path.display()));
         }
+        // a watcher event only needs a full load when the content differs from what the
+        // document was loaded from or last saved as: the loader compares right after reading
+        // (our own save's event then costs one read, not a second parsed document; issue #29)
+        let known = match reason {
+            LoadReason::Reload => self
+                .doc
+                .as_ref()
+                .filter(|d| d.file() == Some(path.as_path()))
+                .and_then(|d| d.disk),
+            _ => None,
+        };
         // the single loader worker cancels whatever it was doing for an older request
-        let generation = self.loader.as_ref().expect("loader").request(path.clone());
+        let loader = self.loader.as_ref().expect("loader");
+        let generation = match known {
+            Some(v) => loader.request_unless(path.clone(), v),
+            None => loader.request(path.clone()),
+        };
         self.load = Some(LoadInfo {
             path,
             started: Instant::now(),
@@ -1060,7 +1083,16 @@ impl MarkiseApp {
                 }
                 self.banner = Some(Banner::Error(e));
             }
-            Ok(loaded) => {
+            Ok(Outcome::Unchanged { path, version, read }) => {
+                self.timing.log(&format!(
+                    "reload-unchanged path={} read={:.1}ms wall={:.1}ms",
+                    path.display(),
+                    read.as_secs_f64() * 1e3,
+                    l.started.elapsed().as_secs_f64() * 1e3
+                ));
+                self.disk_unchanged(&path, version);
+            }
+            Ok(Outcome::Loaded(loaded)) => {
                 let t = loaded.timings;
                 self.timing.log(&format!(
                     "loaded path={} bytes={} items={} read={:.1}ms parse={:.1}ms model={:.1}ms wall={:.1}ms",
@@ -1301,8 +1333,8 @@ impl MarkiseApp {
         let format: Arc<dyn markise_doc::DocumentFormat> = Arc::new(MarkdownFormat {
             opts: self.parse.clone(),
         });
+        let saved_fp = Some(loaded_fp(&loaded));
         let mut viewer = DocViewer::new(format, loaded.doc, loaded.model, &self.theme, Some(loaded.path.clone()));
-        let saved_fp = Some(text_fp(viewer.doc().text()));
         viewer.set_font_generation(self.font_gen);
         self.document_changed(&mut viewer);
         let id = self.next_doc_id;
@@ -1355,12 +1387,7 @@ impl MarkiseApp {
             w.acknowledge(&doc.path, Some(loaded.version));
         }
         if doc.disk.is_some_and(|d| d.same_content(&loaded.version)) {
-            // our own save, a touch without a content change, or the file is back after a
-            // deletion with the same content
-            if std::mem::take(&mut doc.deleted) && matches!(&self.banner, Some(Banner::Info(m)) if m == DELETED_NOTICE)
-            {
-                self.banner = None;
-            }
+            self.same_content_on_disk();
             return;
         }
         if self.saving.is_some() {
@@ -1379,6 +1406,35 @@ impl MarkiseApp {
         self.accept_reload(loaded);
     }
 
+    /// A reload check found `version` on disk with the content the document already has
+    /// ([`Outcome::Unchanged`]): nothing was parsed.
+    fn disk_unchanged(&mut self, path: &Path, version: DiskVersion) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        if doc.file() != Some(path) {
+            return;
+        }
+        // as for a full load: what the UI read is the watcher's new baseline
+        if let Some(w) = &self.watcher {
+            w.acknowledge(&doc.path, Some(version));
+        }
+        if doc.disk.is_some_and(|d| d.same_content(&version)) {
+            self.same_content_on_disk();
+        } else {
+            // the document's disk version changed while the check ran (a save finished): the
+            // check compared with an older version, so decide with a full load
+            self.request_reload();
+        }
+    }
+
+    /// The open file holds the document's disk version: our own save, a touch without a
+    /// content change, or the file is back after a deletion with the same content.
+    fn same_content_on_disk(&mut self) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        if std::mem::take(&mut doc.deleted) && matches!(&self.banner, Some(Banner::Info(m)) if m == DELETED_NOTICE) {
+            self.banner = None;
+        }
+    }
+
     /// Replaces the document's text with `loaded` (explicit decision, or a clean document).
     fn accept_reload(&mut self, loaded: Loaded) {
         let Some(doc) = self.doc.as_mut() else { return };
@@ -1392,6 +1448,7 @@ impl MarkiseApp {
         if in_session {
             doc.viewer.ed.session.end_source_session();
         }
+        let fp = loaded_fp(&loaded);
         let _ = doc.viewer.install(loaded.doc, loaded.model, "Reload from Disk", false);
         doc.viewer.ed.session.mark_current_saved();
         if in_session {
@@ -1410,7 +1467,7 @@ impl MarkiseApp {
         doc.lossy = loaded.lossy;
         doc.deleted = false;
         doc.saved_rev = doc.viewer.ed.session.revision().counter;
-        doc.saved_fp = Some(text_fp(doc.viewer.doc().text()));
+        doc.saved_fp = Some(fp);
         if matches!(self.banner, Some(Banner::Conflict(_) | Banner::SaveConflict { .. })) {
             self.banner = None;
         }
@@ -1524,16 +1581,13 @@ impl MarkiseApp {
             (Some(v), true) => Expect::VersionOrMissing(v),
             (None, _) => Expect::Missing,
         });
+        // the text's content identity comes back from the save worker with the written version
+        // (no whole-text hash on the UI thread; issue #29)
         let (text, rev, snap) = doc.snapshot();
-        let fp = match &text {
-            SaveText::Exact(t) => text_fp(t),
-            SaveText::Buffer { text, .. } => text_fp(text),
-        };
         let path = req.target.clone().unwrap_or_else(|| doc.path.clone());
         let rx = spawn_save(text, path.clone(), expect, rev, self.hooks.clone(), wake);
         self.saving = Some(Saving {
             doc_id: doc.id,
-            fp,
             rx,
             then: req.then,
             snap,
@@ -1595,7 +1649,8 @@ impl MarkiseApp {
                     doc.deleted = false;
                     if saved.rev >= doc.saved_rev {
                         doc.saved_rev = saved.rev;
-                        doc.saved_fp = Some(s.fp);
+                        // the written bytes are exactly the saved text
+                        doc.saved_fp = Some(out.version.text_identity());
                     }
                     if let Some(snap) = &s.snap {
                         doc.viewer.ed.session.mark_saved(snap);
@@ -3132,6 +3187,74 @@ pub fn rss_mb() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reload_check_after_our_own_save_reads_but_does_not_parse() {
+        // issue #29: the watcher event of our own save costs one read on the loader (no second
+        // parsed document); a later external change is still loaded. The watcher event itself
+        // is simulated (`request_reload`): file-system event delivery is not deterministic.
+        use markise_engine::load::Stage;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        std::fs::write(&path, "v0\n").unwrap();
+        let (reads, parses) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (r2, p2) = (reads.clone(), parses.clone());
+        let hook: StageHook = Arc::new(move |st, _| match st {
+            Stage::Read => drop(r2.fetch_add(1, Ordering::SeqCst)),
+            Stage::Parse => drop(p2.fetch_add(1, Ordering::SeqCst)),
+            Stage::Model => {}
+        });
+        let mut app = MarkiseApp::new(AppOptions {
+            load_hook: Some(hook),
+            ..Default::default()
+        });
+        app.wake = Some(Arc::new(|| {}));
+        app.install_doc(
+            markise_engine::load::load_file(&path, Default::default()).unwrap(),
+            false,
+        );
+        let wait = |app: &mut MarkiseApp| {
+            let start = Instant::now();
+            while app.saving.is_some() || app.load.is_some() {
+                assert!(start.elapsed() < Duration::from_secs(10), "background job hangs");
+                app.poll_save();
+                app.poll_loading();
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        app.doc.as_mut().unwrap().viewer.ed.session.insert_text("v1 ").unwrap();
+        assert!(app.is_dirty());
+        app.save();
+        wait(&mut app);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v1 v0\n");
+        assert!(!app.is_dirty());
+        let doc = app.doc.as_ref().unwrap();
+        // the identity the save worker returned is the one the UI computes for the text
+        assert_eq!(doc.saved_fp, Some(text_fp(doc.viewer.doc().text())));
+        let disk = doc.disk;
+        // the watcher's event for our own write
+        app.request_reload();
+        wait(&mut app);
+        assert_eq!((reads.load(Ordering::SeqCst), parses.load(Ordering::SeqCst)), (1, 0));
+        assert!(!app.is_dirty());
+        assert!(app.banner.is_none());
+        assert_eq!(app.doc.as_ref().unwrap().disk, disk);
+        // an external write right after our save, with the same length: loaded in full
+        std::fs::write(&path, "ext 1\n").unwrap();
+        app.request_reload();
+        wait(&mut app);
+        assert_eq!((reads.load(Ordering::SeqCst), parses.load(Ordering::SeqCst)), (2, 1));
+        assert_eq!(app.document_text().unwrap(), "ext 1\n");
+        assert!(!app.is_dirty());
+        let doc = app.doc.as_ref().unwrap();
+        assert_eq!(doc.saved_fp, Some(text_fp("ext 1\n")));
+        // editing back to the reloaded text reads clean (identity from the loader)
+        app.doc.as_mut().unwrap().viewer.ed.session.insert_text("x").unwrap();
+        assert!(app.is_dirty());
+        assert!(app.doc.as_mut().unwrap().viewer.ed.session.undo());
+        assert!(!app.is_dirty());
+    }
 
     #[test]
     fn links_only_open_web_schemes_without_asking() {
