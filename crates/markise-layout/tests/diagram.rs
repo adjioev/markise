@@ -258,7 +258,7 @@ fn large_fences_keep_segmented_source_fallback() {
         assert!(
             items
                 .iter()
-                .all(|&i| m.items[i].code.map(|c| c.key) == m.items[items[0]].code.map(|c| c.key)),
+                .all(|&i| m.items[i].code.as_ref().map(|c| c.key) == m.items[items[0]].code.as_ref().map(|c| c.key)),
             "one content key"
         );
         let fake = Arc::new(Fake::default());
@@ -321,7 +321,7 @@ fn editing_a_later_segment_rerenders_the_whole_diagram() {
     };
     let ds = items(&m);
     assert!(ds.len() >= 3, "segmented: {}", ds.len());
-    let old_key = m.items[ds[0]].code.unwrap().key;
+    let old_key = m.items[ds[0]].code.as_deref().unwrap().key;
     let fake = Arc::new(Fake::default());
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
     v.set_diagrams(fake.clone());
@@ -336,10 +336,10 @@ fn editing_a_later_segment_rerenders_the_whole_diagram() {
     let ch = m.apply(&doc, &e);
     m.diff(&markise_layout::DocModel::build_owned(&doc, None)).unwrap();
     let ds2 = items(&m);
-    let new_key = m.items[ds2[0]].code.unwrap().key;
+    let new_key = m.items[ds2[0]].code.as_deref().unwrap().key;
     assert_ne!(new_key, old_key, "new whole-block key");
     assert!(
-        ds2.iter().all(|&i| m.items[i].code.unwrap().key == new_key),
+        ds2.iter().all(|&i| m.items[i].code.as_deref().unwrap().key == new_key),
         "on every segment"
     );
     v.apply(Arc::new(doc.clone()), Arc::new(m.clone()), &ch);

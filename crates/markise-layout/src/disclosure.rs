@@ -22,7 +22,7 @@ impl Disclosures {
     pub fn new(model: &DocModel, doc: &dyn FormatDoc) -> Self {
         let mut this = Self::default();
         for (i, item) in model.items.iter().enumerate() {
-            if let Some(raw) = &item.raw {
+            if let Some(raw) = item.raw.as_deref() {
                 this.markers.insert(i, raw.clone());
             }
         }
@@ -138,7 +138,7 @@ impl Disclosures {
         }
         for (_, ins) in &splices {
             for i in ins.clone() {
-                if let Some(raw) = &model.items[i].raw {
+                if let Some(raw) = model.items[i].raw.as_deref() {
                     next.insert(i, raw.clone());
                 }
             }

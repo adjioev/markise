@@ -295,7 +295,7 @@ fn mermaid_switches_to_a_diagram() {
     assert!(
         m.items
             .iter()
-            .any(|i| matches!(&i.kind, markise_layout::ItemKind::Diagram { lang } if lang == "mermaid")),
+            .any(|i| matches!(&i.kind, markise_layout::ItemKind::Diagram { lang } if &**lang == "mermaid")),
         "a diagram item"
     );
 }

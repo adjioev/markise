@@ -40,7 +40,12 @@ fn nested_details_open_attribute_toggle_and_bytes() {
         .model()
         .items
         .iter()
-        .position(|i| matches!(i.raw, Some(markise_doc::RawPresentation::DisclosureStart { .. })))
+        .position(|i| {
+            matches!(
+                i.raw.as_deref(),
+                Some(&markise_doc::RawPresentation::DisclosureStart { .. })
+            )
+        })
         .unwrap();
     v.toggle_expanded(outer);
     let expanded = shown(&mut v);

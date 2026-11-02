@@ -169,7 +169,7 @@ mod tests {
         };
         DiagramQuery {
             lang: markise_blocks::diagram::DiagramLang::from_info(lang).unwrap(),
-            code: it.code.unwrap(),
+            code: *it.code.as_deref().unwrap(),
             doc,
             start,
             item: i,

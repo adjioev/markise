@@ -118,7 +118,7 @@ mod tests {
         let dg = DiagramRenderer::new(Arc::new(|| {}), 14.0);
         let mut queries = Vec::new();
         for (i, (start, it)) in model.items.iter_with_start().enumerate() {
-            let code = it.code.expect("code item");
+            let code = *it.code.as_deref().expect("code item");
             match &it.kind {
                 ItemKind::Code { lang } => {
                     let q = CodeQuery {

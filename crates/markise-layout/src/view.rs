@@ -360,7 +360,7 @@ impl View {
                 .model
                 .items
                 .get(i)
-                .is_some_and(|it| it.raw == Some(markise_doc::RawPresentation::Comment))
+                .is_some_and(|it| it.raw.as_deref() == Some(&markise_doc::RawPresentation::Comment))
     }
 
     /// Height before this frame: cached layout or estimate.
@@ -519,7 +519,7 @@ impl View {
         let ItemKind::Diagram { lang } = &it.kind else {
             return None;
         };
-        let code = it.code?;
+        let code = *it.code.as_deref()?;
         let lang = markise_blocks::diagram::DiagramLang::from_info(lang)?;
         Some(DiagramQuery {
             lang,
@@ -542,7 +542,7 @@ impl View {
     }
 
     fn code_query_of<'a>(&'a self, i: usize, it: &'a Item, start: impl FnOnce() -> usize) -> Option<CodeQuery<'a>> {
-        let code = it.code?;
+        let code = *it.code.as_deref()?;
         let ItemKind::Code { lang } = &it.kind else { return None };
         Some(CodeQuery {
             code,
@@ -800,7 +800,11 @@ impl View {
         // those by the block's content key too (an edit in a later segment changes the scene
         // drawn by an unchanged first segment)
         let diagram = dtag.map_or(0, |tag| {
-            let block = if tag >= 2 { it.code.map_or(0, |c| c.key) } else { 0 };
+            let block = if tag >= 2 {
+                it.code.as_ref().map_or(0, |c| c.key)
+            } else {
+                0
+            };
             let mut h = std::collections::hash_map::DefaultHasher::new();
             std::hash::Hash::hash(&(self.diagrams.generation(), tag, block, 0xd1a6_u32), &mut h);
             std::hash::Hasher::finish(&h)
