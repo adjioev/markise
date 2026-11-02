@@ -96,6 +96,12 @@ impl DiagramRenderer {
     }
 }
 
+/// The text handed to a diagram job: the block content, or nothing for a block above `limit`
+/// bytes (the service rejects it by its announced length without running the source).
+fn job_source(q: &DiagramQuery, limit: usize) -> String {
+    if q.code.len > limit { String::new() } else { q.content() }
+}
+
 impl Diagrams for DiagramRenderer {
     fn generation(&self) -> u64 {
         // on (non-zero), label size, metrics
@@ -117,12 +123,19 @@ impl Diagrams for DiagramRenderer {
     }
 
     fn want(&self, q: &DiagramQuery) {
-        if let Some(s) = self.service() {
+        let key = self.key(q);
+        if let Some(s) = self.service()
+            && s.wants(key)
+        {
+            // the job gets its own copy of the block (built here, once per block version), never
+            // the shared document (see `CodeHighlighter::want`, issue #29); an oversized block is
+            // answered "too large" by the service without its source, so it is never copied
+            let text = job_source(q, s.limits().max_source_bytes);
             let _ = s.request_with(
-                self.key(q),
+                key,
                 q.lang,
                 q.code.len,
-                Box::new(q.source()),
+                Box::new(move || text),
                 self.font_size(),
                 Some(self.measure()),
             );
@@ -135,5 +148,58 @@ impl Diagrams for DiagramRenderer {
 
     fn set_metrics(&self, fonts: u64, metrics: TableMeasure) {
         *self.metrics.lock().unwrap_or_else(|e| e.into_inner()) = Some((fonts, Arc::new(metrics)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use markise_doc::FormatDoc;
+    use markise_layout::{DocModel, ItemKind};
+
+    fn query_of<'a>(doc: &'a dyn FormatDoc, model: &'a DocModel) -> DiagramQuery<'a> {
+        let (i, (start, it)) = model
+            .items
+            .iter_with_start()
+            .enumerate()
+            .find(|(_, (_, it))| matches!(it.kind, ItemKind::Diagram { .. }))
+            .expect("a diagram item");
+        let ItemKind::Diagram { lang } = &it.kind else {
+            unreachable!()
+        };
+        DiagramQuery {
+            lang: markise_blocks::diagram::DiagramLang::from_info(lang).unwrap(),
+            code: it.code.unwrap(),
+            doc,
+            start,
+            item: i,
+        }
+    }
+
+    /// Codex review of #106: a diagram above the source limit is answered "too large" without
+    /// its content being copied on the UI thread.
+    #[test]
+    fn oversized_diagram_source_is_not_copied() {
+        let limit = markise_blocks::diagram::Limits::default().max_source_bytes;
+        let mut big = String::from("```mermaid\ngraph TD\n");
+        while big.len() <= limit + 1024 {
+            big.push_str("A-->B\n");
+        }
+        big.push_str("```\n");
+        let doc = markise_md::parse(&big);
+        let model = DocModel::build_owned(&doc, None);
+        let q = query_of(&doc, &model);
+        assert!(q.code.len > limit);
+        assert!(job_source(&q, limit).is_empty(), "not built");
+        // the renderer still gets its terminal answer
+        let r = DiagramRenderer::new(Arc::new(|| {}), 14.0);
+        r.want(&q);
+        assert!(matches!(r.state(&q), DiagramState::Done(res) if res.is_err()));
+
+        let small = markise_md::parse("```mermaid\ngraph TD\nA-->B\n```\n");
+        let model = DocModel::build_owned(&small, None);
+        let q = query_of(&small, &model);
+        assert_eq!(job_source(&q, limit), q.content());
+        assert!(!q.content().is_empty());
     }
 }

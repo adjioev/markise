@@ -997,3 +997,108 @@ fn first_item_gap_skips_blocks_without_items() {
     ];
     run_edits(&mut doc, &ops).unwrap();
 }
+
+// ---- issue #29: heading edits in documents with many headings and `[toc]`s ----------------
+
+/// 300 headings (some sharing an anchor key) and four segmented TOCs, the corpus shape that
+/// made every heading keystroke rebuild all TOC items. The markers are spelled differently so
+/// that TOC items do not share cache keys (a fresh view would find layouts made for another
+/// TOC's identical segment, which `step_view` cannot tell from a stale height).
+fn many_tocs_doc() -> String {
+    let mut src = String::from("# Top\n\n[toc]\n\n");
+    let markers = ["[TOC]", "[Toc]", "[tOc]"];
+    for i in 0..300 {
+        let name = if i % 50 == 7 {
+            "Same".to_string()
+        } else {
+            format!("Heading {i}")
+        };
+        src.push_str(&format!("{} {name}\n\ntext {i}\n\n", "#".repeat(2 + i % 3)));
+        if i % 100 == 99 {
+            src.push_str(markers[i / 100]);
+            src.push_str("\n\n");
+        }
+    }
+    src
+}
+
+#[test]
+fn heading_text_edit_rekeys_one_segment_per_toc() {
+    let mut doc = md(&many_tocs_doc());
+    let mut m = DocModel::build_owned(&doc, None);
+    let toc_items = m.items.iter().filter(|i| i.kind == ItemKind::Toc).count();
+    let runs = 4; // three in the body, one at the top
+    assert_eq!(toc_items % runs, 0);
+    assert!(toc_items / runs > 2, "segmented TOCs");
+    let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
+    let at = doc.text().find("Heading 150\n").unwrap() + 11;
+    let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(at..at, "x"));
+    assert!(!ch.full);
+    assert_eq!(ch.replaced.len(), 1, "only the heading item is rebuilt");
+    // one segment of each TOC shows the edited entry: nothing else is re-keyed
+    assert_eq!(ch.rehashed.len() + ch.rekeyed.len(), runs, "{ch:?}");
+    // an edit to a heading sharing its key with others renumbers just those anchors
+    let at = doc.text().find("Same\n").unwrap() + 4;
+    let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(at..at, "r"));
+    assert!(!ch.full);
+    assert!(ch.rehashed.len() + ch.rekeyed.len() <= 2 * runs * 6, "{ch:?}");
+}
+
+#[test]
+fn heading_count_and_level_changes_rekey_tocs_in_place() {
+    let mut doc = md(&many_tocs_doc());
+    let mut m = DocModel::build_owned(&doc, None);
+    let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
+    let n_items = m.items.len();
+    // a new heading (the outline grows by one; the TOCs keep their segment count)
+    let at = doc.text().find("text 200\n").unwrap();
+    let ch = step_view(
+        &mut doc,
+        &mut m,
+        &mut v,
+        &PatchSet::single_verbatim(at..at, "## New\n\n"),
+    );
+    assert!(!ch.full);
+    assert_eq!(m.items.len(), n_items + 1);
+    // the heading turns back into a paragraph
+    let at = doc.text().find("## New").unwrap();
+    let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(at..at + 3, ""));
+    assert!(!ch.full);
+    // the lowest level changes (`# Top` → `## Top`): every TOC segment is re-indented
+    let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(0..0, "#"));
+    assert!(!ch.full);
+    assert_eq!(m.outline_min_level(), 2);
+    let toc_items = m.items.iter().filter(|i| i.kind == ItemKind::Toc).count();
+    assert_eq!(ch.rehashed.len() + ch.rekeyed.len(), toc_items);
+    // the outline crosses a segment boundary (300 → 320 entries: 5 → 5 segments; 321 → 6)
+    let end = doc.text().len();
+    let more: String = (0..21).map(|i| format!("\n## More {i}\n")).collect();
+    let ch = step_view(&mut doc, &mut m, &mut v, &PatchSet::single_verbatim(end..end, &more));
+    assert!(ch.full, "a TOC changing its item count resets the view");
+}
+
+#[test]
+fn random_edits_with_many_headings_equal_full_rebuild() {
+    let mut doc = md(&many_tocs_doc());
+    let mut m = DocModel::build_owned(&doc, None);
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let snippets = ["x", "# ", "## Same\n\n", "\n", "#", "[toc]\n\n", "Heading 3", ""];
+    for k in 0..40 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let t = doc.text();
+        // mostly inside headings
+        let a = match t[(seed >> 20) as usize % t.len()..].find("\n#") {
+            Some(i) if k % 4 != 3 => {
+                let p = (seed >> 20) as usize % t.len() + i + 1;
+                char_floor(t, p + (seed >> 40) as usize % 12)
+            }
+            _ => char_floor(t, (seed >> 20) as usize % t.len()),
+        };
+        let b = char_floor(t, a + (seed >> 56) as usize % 4).max(a);
+        let ins = snippets[k % snippets.len()];
+        if a == b && ins.is_empty() {
+            continue;
+        }
+        step(&mut doc, &mut m, &PatchSet::single_verbatim(a..b, ins)).unwrap();
+    }
+}

@@ -23,7 +23,7 @@ use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 pub use lang::{Language, info_language, known_languages, resolve};
 pub use notice::syntax_license_notice;
 pub use scope::ScopeMapper;
-pub use service::{BlockKey, HighlightService, Lookup, ServiceStats, block_key};
+pub use service::{BlockKey, HighlightService, Lookup, MAX_BLOCK_SOURCE_BYTES, ServiceStats, block_key};
 
 /// Lines longer than this are not parsed, so one pathological line cannot stall the worker.
 /// The parser state after such a line is unknown (it may have opened or closed a comment or

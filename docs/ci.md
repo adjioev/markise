@@ -9,10 +9,11 @@ every PR update and the macOS + Windows matrix only on demand and after merge.
 | Trigger | Linux fast checks | macOS + Windows, release binaries | Heavy (Linux) |
 |---|---|---|---|
 | PR opened / pushed / reopened / marked ready for review | yes | no | no |
-| Any PR event above with the `full-ci` label | yes | yes | yes |
+| Any PR event above with the `full-ci` label | yes | yes | no |
+| Any PR event above with the `heavy` label | yes | only with `full-ci` too | yes |
 | Push to `main` (after a merge) | yes | yes | no |
 | `workflow_dispatch` (manual; not shown in PR checks) | yes | yes | yes |
-| Nightly main | yes | no | yes |
+| Nightly `main` (schedule, 16:23 UTC) | yes | no | yes |
 | Docs-only change (Markdown under `docs/`, `README.md`, `CLAUDE.md`, `site/*.html`, `site/*.css`) | not triggered | not triggered | not triggered |
 
 The Linux jobs are: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
@@ -41,6 +42,11 @@ runs it after every merge in any case.
 
 Label events do not start CI at all (no `labeled` trigger), so adding an unrelated label cannot
 produce a green `CI result` without tests.
+
+The `heavy` label is independent of `full-ci`: set it (at the pilot's discretion) on PRs that
+change the heavy tests themselves or large-document code paths. It is requested the same way
+as `full-ci` below (add the label, then push or close and reopen); with it, `CI result` also
+requires the heavy job to succeed.
 
 ## Triggering the full matrix
 
@@ -91,10 +97,19 @@ Heavy tests retain the original large inputs, scaling checks and full matrices. 
 use the same assertion helpers where possible. Preserve generous asynchronous hang guards;
 wall-clock speed belongs in benchmarks, not correctness assertions.
 
-The heavy job is separate from the OS matrix flag. It runs on nightly main, manual CI and
-PR runs labeled `full-ci`, **not** ordinary main pushes. Nightly uses Linux only; ordinary
-main pushes retain the three-OS matrix. `CI result` requires heavy success when requested and
-accepts its skipped status otherwise; a heavy failure or cancellation fails the gate.
+The heavy job is separate from the OS matrix flag. It runs on nightly `main` (schedule,
+16:23 UTC, at the latest `main` commit), manual CI (`workflow_dispatch`) and PR runs labeled
+`heavy`; **not** on ordinary main pushes and **not** for the `full-ci` label, which only adds
+macOS and Windows. Nightly uses Linux only; ordinary main pushes retain the three-OS matrix.
+`CI result` requires heavy success when requested (the job condition and its `EXPECT_HEAVY`
+are the same expression) and requires it to be skipped otherwise; a heavy failure or
+cancellation fails the gate.
+
+A failed nightly run is reported twice: GitHub e-mails the user who last edited the `schedule`
+cron in `ci.yml`, and the `report nightly failure` job opens one issue labelled
+`nightly-failure` (or comments on the already open one). Close that issue once `main` is
+fixed. The job runs only on scheduled runs, needs only `issues: write`, and is not part of
+`CI result`.
 The release workflow calls the same reusable heavy workflow at `prepare.outputs.sha` and
 requires success before any release build/artifact upload or draft creation. This prevents a
 nightly success for a different commit from being used as a release gate. Spec/theme fetching,

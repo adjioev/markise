@@ -9,6 +9,10 @@
 //! - `MARKISE_HUGE_MIB`: size of the huge files (default 100).
 //! - `MARKISE_HUGE_PROFILES`: comma list out of `10mb,mixed,prose,log` (default all; `10mb` is
 //!   the 10 MiB mixed corpus, the NFR reference size, for comparison).
+//! - `MARKISE_HUGE_PHASES`: comma list out of `costs,scroll,typing,edit-kinds,paste,edits,save,
+//!   export,modes` (default all; opening is always measured). `edit-kinds` types separate series
+//!   in the middle of the document: plain letters, a heading, Enter/Backspace across blocks, next
+//!   to a code block and inside one, each with its count of whole-document copies.
 //!
 //! Each document is measured in a fresh child process (clean RSS / peak RSS): open (read +
 //! parse + model on the loader thread, first painted frame), scrolling (wheel at top, bottom,
@@ -223,6 +227,95 @@ fn caret_to(ctx: &Context, app: &mut MarkiseApp, at: usize) {
     frame(ctx, app, vec![]);
 }
 
+/// Whether phase `name` is selected (`MARKISE_HUGE_PHASES`, default all).
+fn phase(name: &str) -> bool {
+    std::env::var("MARKISE_HUGE_PHASES").map_or(true, |v| v.split(',').any(|p| p.trim() == name))
+}
+
+/// Start of the line containing `p`.
+fn line_start(text: &str, p: usize) -> usize {
+    text[..p].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// End of the line containing `p` (before its newline).
+fn line_end(text: &str, p: usize) -> usize {
+    text[p..].find('\n').map_or(text.len(), |i| p + i)
+}
+
+/// An offset in the middle of the first line of a plain paragraph (a line of words after a blank
+/// line) at or after `frac` of the text.
+fn para_near(text: &str, frac: f64) -> usize {
+    let mut p = ((text.len() as f64) * frac) as usize;
+    loop {
+        let i = p + text[p..].find("\n\n").expect("a paragraph");
+        let ls = i + 2;
+        let le = line_end(text, ls);
+        let line = &text[ls..le];
+        if line.len() > 30 && line.bytes().all(|c| c.is_ascii_lowercase() || c == b' ') {
+            return ls + line.len() / 2;
+        }
+        p = ls;
+    }
+}
+
+/// The end of the first ATX heading line at or after `frac` of the text.
+fn heading_near(text: &str, frac: f64) -> usize {
+    let mut p = ((text.len() as f64) * frac) as usize;
+    loop {
+        let i = p + text[p..].find("\n#").expect("a heading");
+        let ls = i + 1;
+        let le = line_end(text, ls);
+        let hashes = text[ls..le].bytes().take_while(|&c| c == b'#').count();
+        if (1..=6).contains(&hashes) && text[ls + hashes..le].starts_with(' ') && le > ls + hashes + 2 {
+            return le;
+        }
+        p = le;
+    }
+}
+
+/// A fenced code block with a language (highlighted) at or after `frac`: (an offset at the end
+/// of its first content line, an offset inside the first paragraph line after the block).
+fn code_near(text: &str, frac: f64) -> (usize, usize) {
+    let mut p = ((text.len() as f64) * frac) as usize;
+    loop {
+        let i = p + text[p..].find("\n```").expect("a code block");
+        let fence = i + 1;
+        let fe = line_end(text, fence);
+        let lang = &text[fence + 3..fe];
+        if lang.is_empty() || !lang.bytes().all(|c| c.is_ascii_lowercase()) || lang == "math" || lang == "mermaid" {
+            p = fe;
+            continue;
+        }
+        let inside = line_end(text, fe + 1);
+        let close = fe + text[fe..].find("\n```").expect("closing fence") + 1;
+        let mut q = line_end(text, close) + 1;
+        // the next prose line (a lowercase word at its start)
+        while q < text.len() && !text.as_bytes()[q].is_ascii_lowercase() {
+            q = line_end(text, q) + 1;
+        }
+        if q >= text.len() || q - close > 2000 {
+            p = fe;
+            continue;
+        }
+        let after = (q + 3).min(line_end(text, q));
+        debug_assert_eq!(line_start(text, after), q);
+        return (inside, after);
+    }
+}
+
+/// Types `keys` at `at` (rendered view) and reports one series with its document copies.
+fn type_series(ctx: &Context, app: &mut MarkiseApp, label: &str, at: usize, keys: &[Event]) {
+    caret_to(ctx, app, at);
+    let (len0, cp0) = (text_len(app), copies(app));
+    let mut s = Series::default();
+    for k in keys {
+        s.push(frame(ctx, app, vec![k.clone()]));
+    }
+    let grew = text_len(app) as isize - len0 as isize;
+    let cp = copies(app) - cp0;
+    s.report(&format!("{label} (Δ{grew} B, {cp} copies)"));
+}
+
 fn child(src: &Path) {
     // work on a copy: the bench saves the document
     let path = src.with_extension("work.md");
@@ -267,7 +360,7 @@ fn child(src: &Path) {
     println!("  RSS after open: {} MB (peak so far {} MB)", rss_mb(), peak_rss_mb());
 
     // ---- whole-text snapshot / clone costs (what a save, worker search or export pays)
-    {
+    if phase("costs") {
         let doc = app.viewer().unwrap().doc().clone();
         let mut snap = Series::default();
         for _ in 0..10 {
@@ -315,67 +408,72 @@ fn child(src: &Path) {
         let v = &app.viewer().unwrap().ed.view;
         v.scroll_y() / (v.total_height() - r.height() as f64).max(1.0)
     };
-    app.viewer().unwrap().ed.view.scroll_to_item(0);
-    frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
-    let mut s = Series::default();
-    for _ in 0..300 {
-        s.push(frame(&ctx, &mut app, vec![wheel(-60.0)]));
-    }
-    s.report(&format!(
-        "wheel scroll at top (300 frames, ends at {:.4})",
-        scrolled(&mut app)
-    ));
-    let mut j = Series::default();
-    // drag the scrollbar past its bottom end (clamps to the very end of the document)
-    let (p0, p1) = (bar(0.97), Pos2::new(r.right() - 4.0, r.bottom() + 40.0));
-    let btn = |pos, pressed| Event::PointerButton {
-        pos,
-        button: egui::PointerButton::Primary,
-        pressed,
-        modifiers: Default::default(),
-    };
-    frame(&ctx, &mut app, vec![Event::PointerMoved(p0), btn(p0, true)]);
-    j.push(frame(&ctx, &mut app, vec![Event::PointerMoved(p1)]));
-    frame(&ctx, &mut app, vec![btn(p1, false)]);
-    let at = scrolled(&mut app);
-    assert!(at > 0.9999, "scrollbar drag to the bottom must reach the end (at {at})");
-    frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
-    let mut s = Series::default();
-    for _ in 0..300 {
-        s.push(frame(&ctx, &mut app, vec![wheel(60.0)]));
-    }
-    s.report(&format!(
-        "wheel scroll at bottom (300 frames, {at:.4} → {:.4})",
-        scrolled(&mut app)
-    ));
-    j.push(frame(&ctx, &mut app, click_events(bar(0.5))));
-    let at = scrolled(&mut app);
-    assert!((0.45..0.55).contains(&at), "scrollbar click in the middle (at {at})");
-    frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
-    let mut s = Series::default();
-    for _ in 0..300 {
-        s.push(frame(&ctx, &mut app, vec![wheel(-60.0)]));
-    }
-    s.report(&format!(
-        "wheel scroll in the middle (300 frames, {at:.4} → {:.4})",
-        scrolled(&mut app)
-    ));
-    let mut seed = 12345u64;
-    for _ in 0..100 {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        let f = (seed >> 33) as f32 / (1u64 << 31) as f32;
-        j.push(frame(&ctx, &mut app, click_events(bar(f))));
+    if phase("scroll") {
+        app.viewer().unwrap().ed.view.scroll_to_item(0);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
+        let mut s = Series::default();
+        for _ in 0..300 {
+            s.push(frame(&ctx, &mut app, vec![wheel(-60.0)]));
+        }
+        s.report(&format!(
+            "wheel scroll at top (300 frames, ends at {:.4})",
+            scrolled(&mut app)
+        ));
+        let mut j = Series::default();
+        // drag the scrollbar past its bottom end (clamps to the very end of the document)
+        let (p0, p1) = (bar(0.97), Pos2::new(r.right() - 4.0, r.bottom() + 40.0));
+        let btn = |pos, pressed| Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&ctx, &mut app, vec![Event::PointerMoved(p0), btn(p0, true)]);
+        j.push(frame(&ctx, &mut app, vec![Event::PointerMoved(p1)]));
+        frame(&ctx, &mut app, vec![btn(p1, false)]);
         let at = scrolled(&mut app);
-        assert!((at - f as f64).abs() < 0.01, "scrollbar jump to {f} landed at {at}");
+        assert!(at > 0.9999, "scrollbar drag to the bottom must reach the end (at {at})");
+        frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
+        let mut s = Series::default();
+        for _ in 0..300 {
+            s.push(frame(&ctx, &mut app, vec![wheel(60.0)]));
+        }
+        s.report(&format!(
+            "wheel scroll at bottom (300 frames, {at:.4} → {:.4})",
+            scrolled(&mut app)
+        ));
+        j.push(frame(&ctx, &mut app, click_events(bar(0.5))));
+        let at = scrolled(&mut app);
+        assert!((0.45..0.55).contains(&at), "scrollbar click in the middle (at {at})");
+        frame(&ctx, &mut app, vec![Event::PointerMoved(center)]);
+        let mut s = Series::default();
+        for _ in 0..300 {
+            s.push(frame(&ctx, &mut app, vec![wheel(-60.0)]));
+        }
+        s.report(&format!(
+            "wheel scroll in the middle (300 frames, {at:.4} → {:.4})",
+            scrolled(&mut app)
+        ));
+        let mut seed = 12345u64;
+        for _ in 0..100 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let f = (seed >> 33) as f32 / (1u64 << 31) as f32;
+            j.push(frame(&ctx, &mut app, click_events(bar(f))));
+            let at = scrolled(&mut app);
+            assert!((at - f as f64).abs() < 0.01, "scrollbar jump to {f} landed at {at}");
+        }
+        j.report("scrollbar jumps (bottom, middle, 100 random)");
+        println!("  RSS after scrolling: {} MB", rss_mb());
     }
-    j.report("scrollbar jumps (bottom, middle, 100 random)");
-    println!("  RSS after scrolling: {} MB", rss_mb());
 
     // ---- typing in the rendered view
     frame(&ctx, &mut app, click_events(center)); // focus the editing surface
     frame(&ctx, &mut app, vec![]);
     let copies0 = copies(&mut app);
     for (label, frac) in [("start", 0.0), ("middle", 0.5), ("end", 0.999)] {
+        if !phase("typing") {
+            break;
+        }
         let at = {
             let v = app.viewer().unwrap();
             caret_near(v.ed.session.text(), frac)
@@ -397,8 +495,94 @@ fn child(src: &Path) {
         copies(&mut app) - copies0
     );
 
+    // ---- edit kinds in the middle of the document (issue #29)
+    if phase("edit-kinds") {
+        let letters: Vec<Event> = (0..150)
+            .map(|i| Event::Text(((b'a' + (i % 26) as u8) as char).to_string()))
+            .collect();
+        let with_bs: Vec<Event> = (0..150)
+            .map(|i| {
+                if i % 10 == 9 {
+                    key(Key::Backspace, Modifiers::default())
+                } else {
+                    letters[i].clone()
+                }
+            })
+            .collect();
+        // Enter splits the paragraph (one more item), Backspace joins it back
+        let enter_bs: Vec<Event> = (0..100)
+            .map(|i| {
+                if i % 2 == 0 {
+                    key(Key::Enter, Modifiers::default())
+                } else {
+                    key(Key::Backspace, Modifiers::default())
+                }
+            })
+            .collect();
+        let text = |app: &mut MarkiseApp| app.viewer().unwrap().ed.session.text().to_string();
+        let t = text(&mut app);
+        type_series(
+            &ctx,
+            &mut app,
+            "edit kinds: plain letters [middle]",
+            para_near(&t, 0.5),
+            &letters,
+        );
+        let t = text(&mut app);
+        type_series(
+            &ctx,
+            &mut app,
+            "edit kinds: heading text [middle]",
+            heading_near(&t, 0.52),
+            &with_bs,
+        );
+        // Heading 1 (Cmd+1) makes a paragraph a heading (the outline grows), Paragraph (Cmd+0)
+        // turns it back (the outline shrinks): every TOC segment after it is re-keyed
+        let head_count: Vec<Event> = (0..100)
+            .map(|i| key(if i % 2 == 0 { Key::Num1 } else { Key::Num0 }, cmd()))
+            .collect();
+        let t = text(&mut app);
+        let p = para_near(&t, 0.53);
+        type_series(
+            &ctx,
+            &mut app,
+            "edit kinds: heading added / removed [middle]",
+            line_start(&t, p),
+            &head_count,
+        );
+        let t = text(&mut app);
+        type_series(
+            &ctx,
+            &mut app,
+            "edit kinds: Enter / Backspace [middle]",
+            para_near(&t, 0.54),
+            &enter_bs,
+        );
+        let t = text(&mut app);
+        let (_, after) = code_near(&t, 0.56);
+        type_series(
+            &ctx,
+            &mut app,
+            "edit kinds: next to a code block [middle]",
+            after,
+            &with_bs,
+        );
+        let t = text(&mut app);
+        let (inside, _) = code_near(&t, 0.58);
+        type_series(
+            &ctx,
+            &mut app,
+            "edit kinds: inside a code block [middle]",
+            inside,
+            &with_bs,
+        );
+    }
+
     // ---- large paste and its undo
     for (label, size) in [("1 MiB", 1usize << 20), ("10 MiB", 10 << 20)] {
+        if !phase("paste") {
+            break;
+        }
         let paste = generate_profile(size, 7, Profile::Prose, false);
         let at = {
             let v = app.viewer().unwrap();
@@ -417,7 +601,7 @@ fn child(src: &Path) {
     }
 
     // ---- 1,000 edits: memory growth and document copies
-    {
+    if phase("edits") {
         let at = {
             let v = app.viewer().unwrap();
             caret_near(v.ed.session.text(), 0.3)
@@ -444,6 +628,9 @@ fn child(src: &Path) {
 
     // ---- save: snapshot + fingerprint on the UI thread, write on the worker
     for round in 0..3 {
+        if !phase("save") {
+            break;
+        }
         frame(&ctx, &mut app, vec![Event::Text("s".into())]);
         let (c0, p0) = (thread_cpu(), process_cpu());
         let t = Instant::now();
@@ -467,7 +654,7 @@ fn child(src: &Path) {
     println!("  RSS after edits+saves: {} MB (peak {} MB)", rss_mb(), peak_rss_mb());
 
     // ---- HTML export of the whole document (worker-side work, measured inline)
-    {
+    if phase("export") {
         let doc = app.viewer().unwrap().doc().clone();
         let md = doc
             .as_any()
@@ -498,6 +685,9 @@ fn child(src: &Path) {
         ("Source", ViewMode::Source, W * 0.6),
         ("Side by Side", ViewMode::SideBySide, W * 0.25),
     ] {
+        if !phase("modes") {
+            break;
+        }
         let r0 = rss_mb();
         let c0 = thread_cpu();
         let t = Instant::now();
@@ -534,6 +724,7 @@ fn child(src: &Path) {
         frame(&ctx, &mut app, click_events(p));
         frame(&ctx, &mut app, vec![]);
         let len0 = app.document_text().map_or(0, |t| t.len());
+        let cp0 = copies(&mut app);
         let mut s = Series::default();
         for i in 0..100 {
             s.push(frame(&ctx, &mut app, vec![keystroke(i)]));
@@ -542,7 +733,8 @@ fn child(src: &Path) {
             frame(&ctx, &mut app, vec![]);
         }
         let grew = app.document_text().map_or(0, |t| t.len()) as isize - len0 as isize;
-        s.report(&format!("{label}: keystroke → frame (Δ{grew} B)"));
+        let cp = copies(&mut app) - cp0;
+        s.report(&format!("{label}: keystroke → frame (Δ{grew} B, {cp} copies)"));
         app.set_view_mode(ViewMode::Rendered);
         frame(&ctx, &mut app, vec![]);
     }
