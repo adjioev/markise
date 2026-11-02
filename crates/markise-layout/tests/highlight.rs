@@ -175,15 +175,15 @@ fn segmented_block_maps_runs_per_segment() {
     let m = model(&src);
     let segs: Vec<usize> = (0..m.items.len()).filter(|&i| m.items[i].code.is_some()).collect();
     assert!(segs.len() > 2, "segmented: {}", segs.len());
-    let key = m.items[segs[0]].code.unwrap().key;
+    let key = m.items[segs[0]].code.as_deref().unwrap().key;
     assert!(
-        segs.iter().all(|&i| m.items[i].code.unwrap().key == key),
+        segs.iter().all(|&i| m.items[i].code.as_deref().unwrap().key == key),
         "one block key"
     );
     // offsets: each segment starts where the previous one's content ended (+ newline)
     let line = "fn f0() {}\n".len();
-    assert_eq!(m.items[segs[0]].code.unwrap().offset, 0);
-    assert!(m.items[segs[1]].code.unwrap().offset >= 64 * line - 64);
+    assert_eq!(m.items[segs[0]].code.as_deref().unwrap().offset, 0);
+    assert!(m.items[segs[1]].code.as_deref().unwrap().offset >= 64 * line - 64);
 
     let fake = Arc::new(Fake::default());
     let mut v = m.view(theme.clone(), 600.0, 1.0);

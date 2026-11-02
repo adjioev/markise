@@ -62,7 +62,7 @@ pub enum ItemKind {
     },
     /// Fenced or indented code. `lang` is the first word of the info string.
     Code {
-        lang: String,
+        lang: Box<str>,
     },
     /// Display math, shown as styled TeX source in M1 (placeholder, like the HTML export C36).
     Math,
@@ -70,7 +70,7 @@ pub enum ItemKind {
     /// diagrams are on (the first segment draws the scene, later segments are empty), else
     /// styled source, segmented like code.
     Diagram {
-        lang: String,
+        lang: Box<str>,
     },
     /// Raw HTML block, shown as source (M1 placeholder).
     Html,
@@ -127,12 +127,8 @@ pub enum Segment {
         end: u32,
         first: bool,
         last: bool,
-        widths_hash: u64,
-        /// Hash of this segment's row texts and their offsets in the table (cached layouts
-        /// carry table-relative source positions).
-        rows_hash: u64,
-        /// Estimated natural width of each column in characters (shared by all segments).
-        col_chars: Box<[u32]>,
+        /// Boxed: keeps [`Segment`] (and so every [`Item`]) small (issue #29, part 4).
+        data: Box<RowsData>,
     },
     /// Outline entries `start..end` of a `[toc]`.
     Toc {
@@ -141,6 +137,17 @@ pub enum Segment {
         first: bool,
         last: bool,
     },
+}
+
+/// The larger part of a [`Segment::Rows`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RowsData {
+    pub widths_hash: u64,
+    /// Hash of this segment's row texts and their offsets in the table (cached layouts
+    /// carry table-relative source positions).
+    pub rows_hash: u64,
+    /// Estimated natural width of each column in characters (shared by all segments).
+    pub col_chars: Box<[u32]>,
 }
 
 impl Segment {
@@ -177,7 +184,8 @@ pub struct CodeRef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     pub kind: ItemKind,
-    pub raw: Option<markise_doc::RawPresentation>,
+    /// Boxed: rare, and the item record is per leaf (issue #29, part 4).
+    pub raw: Option<Box<markise_doc::RawPresentation>>,
     /// Byte length of the leaf block's span (all segments of a block share it).
     pub len: usize,
     pub containers: Box<[Container]>,
@@ -203,7 +211,8 @@ pub struct Item {
     pub segment: Option<Segment>,
     /// Set for fenced code with a language (highlighting input) and for diagram fences (diagram
     /// input; `key` identifies the whole block's content).
-    pub code: Option<CodeRef>,
+    /// Boxed: only code and diagram items have one (keeps [`Item`] small, issue #29, part 4).
+    pub code: Option<Box<CodeRef>>,
     /// Absolute start while the item is outside the model; 0 inside it (see [`Items`]).
     origin: usize,
 }
@@ -1638,7 +1647,7 @@ impl Flattener<'_> {
                 if units.len() <= SEG_MIN_UNITS && bytes <= SEG_MIN_BYTES {
                     let code = lang.map(|lang| code_ref(self.text, &lang, lines));
                     self.push(kind, span, None);
-                    self.items.last_mut().expect("pushed").code = code;
+                    self.items.last_mut().expect("pushed").code = code.map(Box::new);
                     return;
                 }
                 let offsets = lang.as_ref().map(|_| unit_offsets(lines, &units));
@@ -1660,11 +1669,11 @@ impl Flattener<'_> {
                     };
                     self.push(kind.clone(), span, Some(seg));
                     if let Some(offs) = &offsets {
-                        self.items.last_mut().expect("pushed").code = Some(CodeRef {
+                        self.items.last_mut().expect("pushed").code = Some(Box::new(CodeRef {
                             key: 0,
                             offset: offs[first_unit],
                             len: content_len(lines),
-                        });
+                        }));
                     }
                 }
                 // a segmented block's highlight key: from its segments' text hashes
@@ -1725,9 +1734,11 @@ impl Flattener<'_> {
                         end: rows[g.end - 1] as u32 + 1,
                         first: gi == 0,
                         last: gi + 1 == n,
-                        widths_hash,
-                        rows_hash: rh.finish(),
-                        col_chars: col_chars.clone(),
+                        data: Box::new(RowsData {
+                            widths_hash,
+                            rows_hash: rh.finish(),
+                            col_chars: col_chars.clone(),
+                        }),
                     };
                     self.push(kind.clone(), span, Some(seg));
                 }
@@ -1795,7 +1806,7 @@ impl Flattener<'_> {
         segment.hash(&mut h);
         let content_hash = h.finish();
         let raw = if matches!(kind, ItemKind::Html | ItemKind::Paragraph) {
-            self.doc.raw_presentation(span)
+            self.doc.raw_presentation(span).map(Box::new)
         } else {
             None
         };
@@ -1829,8 +1840,8 @@ fn item_kind(k: &LeafKind) -> ItemKind {
             let lang = info.split_whitespace().next().unwrap_or("").to_string();
             match lang.to_ascii_lowercase().as_str() {
                 "math" => ItemKind::Math,
-                "mermaid" | "flow" | "sequence" => ItemKind::Diagram { lang },
-                _ => ItemKind::Code { lang },
+                "mermaid" | "flow" | "sequence" => ItemKind::Diagram { lang: lang.into() },
+                _ => ItemKind::Code { lang: lang.into() },
             }
         }
         LeafKind::Math => ItemKind::Math,

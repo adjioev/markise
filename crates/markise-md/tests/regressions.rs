@@ -172,3 +172,20 @@ fn md_inc_1_nested_restart_after_task_box() {
     let full = Document::parse(d.text(), ParseOptions::default());
     assert_eq!(debug_tree(&d), debug_tree(&full));
 }
+
+/// Issue #29, part 4 (memory): parsed blocks keep no growth slack in their line and child
+/// lists (it was ~40 % of the parsed document of structured text), also after an edit.
+#[test]
+fn parsed_block_lists_are_exact() {
+    use markise_md::{Block, Document, ParseOptions, PatchSet};
+    fn check(b: &Block) {
+        assert_eq!(b.lines.capacity(), b.lines.len(), "{:?}", b.kind);
+        assert_eq!(b.children.capacity(), b.children.len(), "{:?}", b.kind);
+        b.children.iter().for_each(check);
+    }
+    let src = "# H\n\npara\nline 2\nline 3\n\n- a\n- b\n  - c\n  - d\n- e\n\n> q1\n> q2\n\n```rs\nx\ny\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+    let mut d = Document::parse(src, ParseOptions::default());
+    d.tops().for_each(|t| check(t.block));
+    d.apply_patches(&PatchSet::single_verbatim(30..30, "- f\n- g\n"));
+    d.tops().for_each(|t| check(t.block));
+}

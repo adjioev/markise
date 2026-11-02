@@ -568,6 +568,39 @@ pub struct CounterStats {
     pub reconciles: u64,
 }
 
+/// A block's cached [`Counts`] (or none yet) in 16 bytes instead of 40: one is kept per
+/// view-model item (issue #29, part 4). Values saturate at `u32::MAX - 1`, which only a
+/// single block of 4 GiB could reach; packing and unpacking are consistent, so the running
+/// totals stay exact sums of the stored values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Slot([u32; 4]);
+
+impl Slot {
+    const NONE: Slot = Slot([u32::MAX, 0, 0, 0]);
+
+    fn pack(c: Counts) -> Slot {
+        let f = |v: u64| v.min(u32::MAX as u64 - 1) as u32;
+        Slot([f(c.words), f(c.chars), f(c.chars_no_spaces), f(c.approx)])
+    }
+
+    fn get(self) -> Option<Counts> {
+        (self != Slot::NONE).then(|| Counts {
+            words: self.0[0] as u64,
+            chars: self.0[1] as u64,
+            chars_no_spaces: self.0[2] as u64,
+            approx: self.0[3] as u64,
+        })
+    }
+
+    fn is_some(self) -> bool {
+        self != Slot::NONE
+    }
+
+    fn take(&mut self) -> Option<Counts> {
+        std::mem::replace(self, Slot::NONE).get()
+    }
+}
+
 /// Item flag: a reference definition.
 const DEF: u8 = 1;
 /// Item flag: its block may use a reference definition.
@@ -580,7 +613,7 @@ const REFS: u8 = 2;
 pub struct DocCounter {
     /// Key of each item of the last reconciled model.
     keys: Vec<ItemKey>,
-    counts: Vec<Option<Counts>>,
+    counts: Vec<Slot>,
     flags: Vec<u8>,
     /// Sum of the known counts.
     known: Counts,
@@ -653,7 +686,7 @@ impl DocCounter {
         let mut defs = false;
         for (c, f) in self.counts.drain(pre..old - suf).zip(self.flags.drain(pre..old - suf)) {
             defs |= f & DEF != 0;
-            match c {
+            match c.get() {
                 Some(c) => self.known -= c,
                 None => self.missing -= 1,
             }
@@ -666,7 +699,7 @@ impl DocCounter {
             .collect();
         defs |= new_flags.iter().any(|f| f & DEF != 0);
         self.keys.splice(pre..old - suf, new.iter().map(|it| item_key(it)));
-        self.counts.splice(pre..pre, std::iter::repeat_n(None, fresh));
+        self.counts.splice(pre..pre, std::iter::repeat_n(Slot::NONE, fresh));
         self.flags.splice(pre..pre, new_flags);
         self.missing += fresh;
         // a block is counted as a whole: forget the rest of the blocks around the change
@@ -717,14 +750,15 @@ impl DocCounter {
             }
             let (f, e) = block_bounds(model, self.cursor);
             let c = count_block_at(doc, model, f, None);
+            let packed = Slot::pack(c.counts);
             for i in f..e {
-                let v = if i == f { c.counts } else { Counts::default() };
-                if self.counts[i].replace(v).is_none() {
+                let v = if i == f { packed } else { Slot::pack(Counts::default()) };
+                if !std::mem::replace(&mut self.counts[i], v).is_some() {
                     self.missing -= 1;
                 }
                 self.flags[i] = (self.flags[i] & !REFS) | if c.refs { REFS } else { 0 };
             }
-            self.known += c.counts;
+            self.known += packed.get().expect("packed counts");
             self.stats.blocks_counted += 1;
             read += c.read;
             first = false;
@@ -764,7 +798,7 @@ impl DocCounter {
                 break;
             }
             let span = model.item_span(f);
-            match self.counts[f] {
+            match self.counts[f].get() {
                 Some(c) if sel.start <= span.start && span.end <= sel.end => acc += c,
                 _ => {
                     let c = count_block_at(doc, model, f, Some(&sel));
@@ -776,10 +810,10 @@ impl DocCounter {
         }
         let (ma, mb) = (ends[0].1, ends[1].0);
         if mb > ma {
-            let sum = |r: Range<usize>, counts: &[Option<Counts>]| {
+            let sum = |r: Range<usize>, counts: &[Slot]| {
                 counts[r]
                     .iter()
-                    .fold(Counts::default(), |s, c| s + c.unwrap_or_default())
+                    .fold(Counts::default(), |s, c| s + c.get().unwrap_or_default())
             };
             if mb - ma <= EXACT_ITEMS {
                 acc += sum(ma..mb, &self.counts);
@@ -822,6 +856,25 @@ mod tests {
 
     fn words(src: &str) -> u64 {
         count(src).words
+    }
+
+    #[test]
+    fn cached_slot_is_compact_and_round_trips() {
+        // issue #29, part 4: one slot per view-model item
+        assert_eq!(std::mem::size_of::<Slot>(), 16);
+        let c = Counts {
+            words: 3,
+            chars: 17,
+            chars_no_spaces: 14,
+            approx: 1,
+        };
+        assert_eq!(Slot::pack(c).get(), Some(c));
+        assert_eq!(Slot::pack(Counts::default()).get(), Some(Counts::default()));
+        assert_eq!(Slot::NONE.get(), None);
+        // saturates instead of wrapping or turning into "not counted"
+        let big = Slot::pack(Counts { words: u64::MAX, ..c });
+        assert!(big.is_some());
+        assert_eq!(big.get().unwrap().words, u32::MAX as u64 - 1);
     }
 
     #[test]
