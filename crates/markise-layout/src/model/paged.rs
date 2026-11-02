@@ -1,0 +1,618 @@
+//! Paged models (issue #125, lazy view model): a model that holds real items only near the
+//! viewport.
+//!
+//! Instead of one [`Item`] per leaf of the whole document, a paged model holds one placeholder
+//! item ([`ItemKind::Page`]) per page of about [`PAGE_TOPS`] top-level blocks; only pages near
+//! the viewport and the caret are *materialized* (replaced by their real items,
+//! [`DocModel::materialize`]), pages far away are *evicted* back to a placeholder
+//! ([`DocModel::evict`]); the view decides which (`view/paging.rs`). A placeholder keeps its
+//! source bounds in the same chunked relative-offset list as real items (edits above it shift
+//! it in O(chunks)), aggregate statistics for a height estimate ([`PageStats`]), and the
+//! measured height of its items when it was evicted. The outline stays complete: the entries
+//! of the headings inside a placeholder point at the placeholder's index.
+//!
+//! The global item-index contract of [`DocModel`] is kept: materialization and eviction are
+//! ordinary splices reported as [`ModelChange`]s, so the view, caret geometry, the editor and
+//! the viewer work with item indices as before (a placeholder is one item). Code that walks
+//! every item sees placeholders and must treat them explicitly ([`Item::is_page`]).
+//!
+//! A materialized item is always equal to the item a full build ([`Paging::Full`]) has at the
+//! same source position, and placeholders cover exactly the full build's items between their
+//! neighbours ([`DocModel::check_against_full`], property-tested).
+
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use markise_doc::chunked::RelChunks;
+use markise_doc::{EditSummary, FormatDoc};
+
+use super::{
+    DocModel, Gap, Item, ItemKind, Items, ModelChange, OutlineEntry, SEG_UNITS, Segment, flatten, hasher, images_hash,
+    mix, toc_block_items, toc_groups, toc_segment_key,
+};
+
+/// Top-level blocks per page of a paged model.
+pub const PAGE_TOPS: usize = 128;
+
+/// How a [`DocModel`] holds its items.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Paging {
+    /// One item per leaf block (or segment of one) of the whole document.
+    Full,
+    /// Placeholders for pages of `tops` top-level blocks; real items only where materialized.
+    Paged { tops: usize },
+}
+
+impl Paging {
+    /// The default for new models: paged with [`PAGE_TOPS`]-block pages. `MARKISE_FULL_VIEW=1`
+    /// switches back to full models (comparison during the transition, issue #125);
+    /// `MARKISE_PAGE_TOPS=n` sets the page size (the test suites can run with tiny pages).
+    /// Read once per process.
+    pub fn from_env() -> Paging {
+        static MODE: OnceLock<Paging> = OnceLock::new();
+        *MODE.get_or_init(|| {
+            let on = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty() && v != "0");
+            if on("MARKISE_FULL_VIEW") {
+                return Paging::Full;
+            }
+            let tops = std::env::var("MARKISE_PAGE_TOPS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(PAGE_TOPS);
+            Paging::Paged { tops }
+        })
+    }
+}
+
+/// Aggregate statistics of the items of a page placeholder: its height estimate without the
+/// items.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PageStats {
+    /// Leaf items (a segmented `[toc]` counts once).
+    pub items: u32,
+    /// Link reference definitions (not rendered).
+    pub hidden: u32,
+    /// Headings per level (1–6).
+    pub heads: [u32; 6],
+    /// Code, math, diagram and HTML blocks (and segments of them) …
+    pub code_blocks: u32,
+    /// … and their lines.
+    pub code_lines: u32,
+    pub tables: u32,
+    pub table_rows: u32,
+    pub front: u32,
+    /// Rules, empty list items.
+    pub simple: u32,
+    /// `[toc]` blocks (each lists the whole outline).
+    pub tocs: u32,
+    /// Headings whose text may use a reference definition (their outline entries are
+    /// refreshed from the page's blocks when a definition changes).
+    pub heading_refs: u32,
+    pub paras: u32,
+    pub para_lines: u32,
+    pub para_chars: u64,
+    /// `(width_q, parameter key, height bits)`: the height the page's items had (laid out or
+    /// estimated) when it was evicted; used while the view parameters are the same.
+    pub measured: Option<(u32, u64, u32)>,
+}
+
+impl PageStats {
+    /// Headings in the page.
+    pub fn headings(&self) -> usize {
+        self.heads.iter().map(|&h| h as usize).sum()
+    }
+
+    fn of(items: &[Item], doc: &dyn FormatDoc) -> PageStats {
+        let mut s = PageStats::default();
+        for it in items {
+            s.add(it);
+            if matches!(it.kind, ItemKind::Heading { .. })
+                && doc.may_reference(markise_doc::Span::new(it.origin, it.origin + it.len))
+            {
+                s.heading_refs += 1;
+            }
+        }
+        s
+    }
+
+    fn add(&mut self, it: &Item) {
+        self.items += 1;
+        match &it.kind {
+            ItemKind::Hidden => self.hidden += 1,
+            ItemKind::Heading { level } => self.heads[(*level as usize).clamp(1, 6) - 1] += 1,
+            ItemKind::Code { .. } | ItemKind::Math | ItemKind::Diagram { .. } | ItemKind::Html => {
+                self.code_blocks += 1;
+                self.code_lines += it.est_lines.saturating_sub(2).max(1);
+            }
+            ItemKind::Table => {
+                self.tables += 1;
+                self.table_rows += it.est_lines.saturating_sub(1).max(1);
+            }
+            ItemKind::FrontMatter => self.front += 1,
+            ItemKind::Rule | ItemKind::Empty => self.simple += 1,
+            ItemKind::Toc => {
+                // a segmented TOC counts once (its segments share the block)
+                if it.segment.as_ref().is_none_or(Segment::first) {
+                    self.tocs += 1;
+                } else {
+                    self.items -= 1;
+                }
+            }
+            ItemKind::Paragraph => {
+                self.paras += 1;
+                self.para_lines += it.est_lines;
+                self.para_chars += it.est_chars as u64;
+            }
+            ItemKind::Page(_) => unreachable!("a page placeholder inside a page"),
+        }
+    }
+}
+
+/// The placeholder item of `items` (absolute origins, non-empty). Its hashes are
+/// offset-independent (the items' content hashes and relative positions): an unchanged page
+/// keeps them when text above it changes.
+fn page_item(items: &[Item], stats: PageStats) -> Item {
+    let origin = items[0].origin;
+    let end = items.iter().map(|it| it.origin + it.len).max().unwrap_or(origin);
+    let mut h = hasher();
+    for it in items {
+        (it.content_hash, it.origin - origin).hash(&mut h);
+    }
+    let hash = h.finish();
+    Item {
+        kind: ItemKind::Page(Box::new(stats)),
+        raw: None,
+        len: end - origin,
+        containers: Box::new([]),
+        gap: Gap::Normal,
+        hash,
+        content_hash: hash,
+        est_chars: 0,
+        est_lines: 0,
+        has_image: false,
+        has_math: false,
+        has_wikilink: false,
+        segment: None,
+        code: None,
+        origin,
+    }
+}
+
+/// Process-wide counters of paged models (diagnostics, benchmarks).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PagingCounters {
+    /// Pages materialized.
+    pub materialized: u64,
+    /// Runs of items evicted to a placeholder.
+    pub evicted: u64,
+    /// Edits that rebuilt a paged model (they reached a placeholder).
+    pub rebuilds: u64,
+}
+
+static MATERIALIZED: AtomicU64 = AtomicU64::new(0);
+static EVICTED: AtomicU64 = AtomicU64::new(0);
+static REBUILDS: AtomicU64 = AtomicU64::new(0);
+
+/// The process-wide counters of paged models.
+pub fn paging_counters() -> PagingCounters {
+    PagingCounters {
+        materialized: MATERIALIZED.load(Ordering::Relaxed),
+        evicted: EVICTED.load(Ordering::Relaxed),
+        rebuilds: REBUILDS.load(Ordering::Relaxed),
+    }
+}
+
+/// A splice that changes nothing at `i`.
+fn no_change(i: usize) -> ModelChange {
+    ModelChange {
+        replaced: i..i,
+        inserted: i..i,
+        ..Default::default()
+    }
+}
+
+impl DocModel {
+    /// Whether this model is paged ([`Paging::Paged`]).
+    pub fn is_paged(&self) -> bool {
+        self.page_tops > 0
+    }
+
+    /// How this model holds its items.
+    pub fn paging(&self) -> Paging {
+        match self.page_tops {
+            0 => Paging::Full,
+            tops => Paging::Paged { tops },
+        }
+    }
+
+    /// Whether item `i` is a page placeholder.
+    pub fn is_page(&self, i: usize) -> bool {
+        self.items.get(i).is_some_and(Item::is_page)
+    }
+
+    /// Number of page placeholders (O(items)).
+    pub fn page_count(&self) -> usize {
+        self.items.iter().filter(|it| it.is_page()).count()
+    }
+
+    /// Builds a paged model with pages of `tops` top-level blocks: one streaming flatten pass
+    /// that keeps only the placeholders and the outline; the first and the last page are
+    /// materialized (the view keeps them so: a document of at most two pages is a full model).
+    pub(super) fn build_paged(doc: &dyn FormatDoc, path: Option<&Path>, tops: usize) -> DocModel {
+        let n = doc.top_count();
+        let mut pages: Vec<Item> = Vec::with_capacity(n / tops + 1);
+        let mut outline = Vec::new();
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut k = 0;
+        while k < n {
+            let end = (k + tops).min(n);
+            let items = flatten(doc, k..end, pages.is_empty());
+            k = end;
+            if items.is_empty() {
+                continue;
+            }
+            for it in &items {
+                if let ItemKind::Heading { level } = it.kind {
+                    let info = doc.heading(it.origin).unwrap_or_default();
+                    let key = info.key.to_lowercase();
+                    let c = counts.entry(key.clone()).or_default();
+                    let anchor = doc.anchor_id(&key, *c);
+                    *c += 1;
+                    outline.push(OutlineEntry {
+                        level,
+                        text: info.text.trim().to_string(),
+                        anchor,
+                        item: pages.len(),
+                        key,
+                    });
+                }
+            }
+            pages.push(page_item(&items, PageStats::of(&items, doc)));
+        }
+        let base_dir = path.and_then(|p| p.parent()).map(Path::to_path_buf);
+        let root_url = doc.resource_root();
+        let min_level = outline.iter().map(|o| o.level).min().unwrap_or(1);
+        let mut chunks = RelChunks::default();
+        chunks.extend_abs(pages);
+        let mut m = DocModel {
+            items: Items(chunks),
+            outline,
+            ctx_hash: images_hash(&root_url, &base_dir),
+            base_dir,
+            root_url,
+            toc_runs: Vec::new(),
+            min_level,
+            page_tops: tops,
+        };
+        let last = m.items.len().saturating_sub(1);
+        m.materialize(doc, last);
+        m.materialize(doc, 0);
+        m
+    }
+
+    /// Top-level blocks of page placeholder `i`.
+    fn page_tops_of(&self, doc: &dyn FormatDoc, i: usize) -> std::ops::Range<usize> {
+        let n = doc.top_count();
+        let t0 = doc.top_at(self.item_start(i)).unwrap_or(0);
+        let t1 = match self.items.start(i + 1) {
+            Some(next) => doc.top_at(next).unwrap_or(n),
+            None => n,
+        };
+        t0..t1.clamp(t0 + 1, n.max(t0 + 1))
+    }
+
+    /// The items page placeholder `i` stands for, with their absolute starts, without
+    /// materializing it (`[toc]` blocks unsegmented; empty when `i` is not a placeholder). For
+    /// consumers that read a page's blocks once (the word count).
+    pub fn page_items(&self, doc: &dyn FormatDoc, i: usize) -> Vec<(usize, Item)> {
+        if !self.is_page(i) {
+            return Vec::new();
+        }
+        let tops = self.page_tops_of(doc, i);
+        flatten(doc, tops, i == 0)
+            .into_iter()
+            .map(|it| (it.origin, it))
+            .collect()
+    }
+
+    /// Replaces page placeholder `i` by its items (`[toc]` blocks segmented and keyed for the
+    /// current outline). Indices after it shift: the returned change describes the splice (no
+    /// change when `i` is not a placeholder).
+    pub fn materialize(&mut self, doc: &dyn FormatDoc, i: usize) -> ModelChange {
+        let Some(ItemKind::Page(stats)) = self.items.get(i).map(|it| &it.kind) else {
+            return no_change(i);
+        };
+        let heads = stats.headings();
+        let tops = self.page_tops_of(doc, i);
+        let items = self.segment_tocs(flatten(doc, tops, i == 0));
+        let k = items.len();
+        // outline entries of the page's headings point at the heading items now
+        let ka = self.outline.partition_point(|o| o.item < i);
+        let kb = self.outline.partition_point(|o| o.item <= i);
+        debug_assert_eq!(kb - ka, heads, "page {i}: outline entries vs. page headings");
+        let mut heading_items = items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| matches!(it.kind, ItemKind::Heading { .. }))
+            .map(|(j, _)| i + j);
+        for o in &mut self.outline[ka..kb] {
+            o.item = heading_items.next().unwrap_or(i);
+        }
+        for o in &mut self.outline[kb..] {
+            o.item = o.item + k - 1;
+        }
+        // `[toc]` runs: the page's own come in, later ones shift
+        let at = self.toc_runs.partition_point(|r| r.0 < i);
+        let mut tail = self.toc_runs.split_off(at);
+        for r in &mut tail {
+            r.0 = r.0 + k - 1;
+        }
+        self.toc_runs.extend(toc_runs_of(&items, i));
+        self.toc_runs.extend(tail);
+        self.items.0.splice(i..i + 1, items, 0);
+        MATERIALIZED.fetch_add(1, Ordering::Relaxed);
+        ModelChange {
+            replaced: i..i + 1,
+            inserted: i..i + k,
+            ..Default::default()
+        }
+    }
+
+    /// Replaces real items `r` (whole top-level blocks of `doc`, no placeholder among them) by
+    /// one page placeholder that remembers `measured` (see [`PageStats::measured`]). No
+    /// change when `r` is empty or holds a placeholder.
+    pub fn evict(
+        &mut self,
+        doc: &dyn FormatDoc,
+        r: std::ops::Range<usize>,
+        measured: Option<(u32, u64, u32)>,
+    ) -> ModelChange {
+        if r.is_empty() || r.end > self.items.len() || r.clone().any(|i| self.is_page(i)) {
+            return no_change(r.start);
+        }
+        let items: Vec<Item> = self
+            .items
+            .0
+            .range(r.clone())
+            .map(|rel| {
+                let mut it = rel.item.clone();
+                it.origin = rel.origin;
+                it
+            })
+            .collect();
+        let mut stats = PageStats::of(&items, doc);
+        stats.measured = measured;
+        let page = page_item(&items, stats);
+        let removed = r.len() - 1;
+        let ka = self.outline.partition_point(|o| o.item < r.start);
+        for o in &mut self.outline[ka..] {
+            o.item = if o.item < r.end { r.start } else { o.item - removed };
+        }
+        self.toc_runs.retain(|t| !r.contains(&t.0));
+        for t in &mut self.toc_runs {
+            if t.0 >= r.end {
+                t.0 -= removed;
+            }
+        }
+        self.items.0.splice(r.clone(), vec![page], 0);
+        EVICTED.fetch_add(1, Ordering::Relaxed);
+        ModelChange {
+            replaced: r.clone(),
+            inserted: r.start..r.start + 1,
+            ..Default::default()
+        }
+    }
+
+    /// Segments and keys the `[toc]` blocks among freshly flattened items (absolute origins)
+    /// for the current outline, as [`DocModel::update_tocs`] does for a fresh model.
+    fn segment_tocs(&self, raw: Vec<Item>) -> Vec<Item> {
+        if !raw.iter().any(|it| it.kind == ItemKind::Toc) {
+            return raw;
+        }
+        let n = self.outline.len();
+        let groups = toc_groups(n);
+        let keys: Vec<u64> = if groups == 0 {
+            vec![self.outline_hash()]
+        } else {
+            (0..groups)
+                .map(|gi| self.toc_group_hash(gi * SEG_UNITS..((gi + 1) * SEG_UNITS).min(n)))
+                .collect()
+        };
+        let mut out = Vec::with_capacity(raw.len() + groups);
+        for it in raw {
+            if it.kind == ItemKind::Toc && it.segment.is_none() {
+                let mut seg = toc_block_items(&it, groups, n);
+                if groups == 0 {
+                    seg[0].hash = mix(it.content_hash, keys[0]);
+                } else {
+                    for (s, &gh) in seg.iter_mut().zip(&keys) {
+                        let sg = s.segment.as_ref().expect("a TOC segment");
+                        s.hash = mix(it.content_hash, toc_segment_key(sg, gh));
+                    }
+                }
+                out.extend(seg);
+            } else {
+                out.push(it);
+            }
+        }
+        out
+    }
+
+    /// Whether edit `e` (of the document this model was built for) reaches a page placeholder:
+    /// then the incremental update cannot proceed and the model is rebuilt.
+    pub(super) fn edit_touches_page(&self, e: &EditSummary) -> bool {
+        // the pre-edit bytes the update replaces: the edit and the re-parsed blocks
+        let lo = e.changed.start.min(e.reparsed.start);
+        let hi = e
+            .changed
+            .end
+            .max((e.reparsed.end as isize - e.delta).max(0) as usize)
+            .max(lo + 1);
+        let k = self.items.partition_point(|o, _| o < hi);
+        // the "first item of the document" path re-flattens the block after the edit
+        if (e.new_top.start == 0 || e.replaced_top.start == 0) && self.is_page(k) {
+            return true;
+        }
+        let mut j = k;
+        while j > 0 {
+            j -= 1;
+            let (Some(o), Some(it)) = (self.items.start(j), self.items.get(j)) else {
+                break;
+            };
+            if it.is_page() && o + it.len >= lo {
+                return true;
+            }
+            if o + it.len < lo {
+                break;
+            }
+        }
+        false
+    }
+
+    /// A fresh paged model for `doc` keeping this model's document folder (full rebuild).
+    pub(super) fn rebuild_paged(&mut self, doc: &dyn FormatDoc, labels: Vec<u64>) -> ModelChange {
+        let n = self.items.len();
+        let base_dir: Option<PathBuf> = self.base_dir.clone();
+        let mut fresh = Self::build_paged(doc, None, self.page_tops);
+        fresh.base_dir = base_dir;
+        fresh.ctx_hash = images_hash(&fresh.root_url, &fresh.base_dir);
+        *self = fresh;
+        REBUILDS.fetch_add(1, Ordering::Relaxed);
+        ModelChange {
+            replaced: 0..n,
+            inserted: 0..self.items.len(),
+            labels,
+            full: true,
+            ..Default::default()
+        }
+    }
+
+    /// Checks this model against a full build of `doc` (tests, benchmarks): every real item
+    /// equals the full model's item at the same position, placeholders cover exactly the full
+    /// model's items between their neighbours (with as many headings), the outlines agree
+    /// (entries of real headings point at them) and the `[toc]` runs are those of the real
+    /// items. `Err` describes the first difference.
+    pub fn check_against_full(&self, doc: &dyn FormatDoc) -> Result<(), String> {
+        let full = Self::build_full(doc, None);
+        let fi: Vec<(usize, &Item)> = full.items.iter_with_start().collect();
+        let pi: Vec<(usize, &Item)> = self.items.iter_with_start().collect();
+        let mut j = 0;
+        let mut heads = 0usize;
+        for (i, &(o, it)) in pi.iter().enumerate() {
+            if let ItemKind::Page(p) = &it.kind {
+                let next = pi.get(i + 1).map_or(usize::MAX, |x| x.0);
+                if fi.get(j).is_some_and(|f| f.0 != o) {
+                    return Err(format!(
+                        "page {i} at {o}: the full model's item {j} starts at {}",
+                        fi[j].0
+                    ));
+                }
+                let a = j;
+                while j < fi.len() && fi[j].0 < next {
+                    j += 1;
+                }
+                let h = fi[a..j]
+                    .iter()
+                    .filter(|(_, x)| matches!(x.kind, ItemKind::Heading { .. }))
+                    .count();
+                if h != p.headings() {
+                    return Err(format!(
+                        "page {i} at {o}: {} headings, full model has {h}",
+                        p.headings()
+                    ));
+                }
+                let end = fi[a..j].iter().map(|(fo, x)| fo + x.len).max().unwrap_or(o);
+                if a == j || end - o != it.len {
+                    return Err(format!("page {i} at {o}: len {}, full items span {}", it.len, end - o));
+                }
+                heads += h;
+                continue;
+            }
+            let Some(&(fo, f)) = fi.get(j) else {
+                return Err(format!("item {i} at {o}: past the end of the full model"));
+            };
+            if fo != o || f != it {
+                return Err(format!("item {i}: ({o}, {it:?})\n  != full item {j}: ({fo}, {f:?})"));
+            }
+            if matches!(it.kind, ItemKind::Heading { .. }) {
+                heads += 1;
+            }
+            j += 1;
+        }
+        if j != fi.len() {
+            return Err(format!("{} full items not covered", fi.len() - j));
+        }
+        if heads != self.outline.len() || self.outline.len() != full.outline.len() {
+            return Err(format!(
+                "outline {} entries, {heads} headings in items, full {}",
+                self.outline.len(),
+                full.outline.len()
+            ));
+        }
+        for (k, (a, b)) in self.outline.iter().zip(&full.outline).enumerate() {
+            if (a.level, &a.text, &a.anchor, &a.key) != (b.level, &b.text, &b.anchor, &b.key) {
+                return Err(format!("outline entry {k}: {a:?} != {b:?}"));
+            }
+            let real = matches!(
+                self.items.get(a.item).map(|it| &it.kind),
+                Some(ItemKind::Heading { .. })
+            );
+            if !real && !self.is_page(a.item) {
+                return Err(format!("outline entry {k} points at item {}, not a heading", a.item));
+            }
+            if real && self.item_start(a.item) != full.item_start(b.item) {
+                return Err(format!("outline entry {k} points at item {}", a.item));
+            }
+        }
+        if self.min_level != full.min_level {
+            return Err(format!("lowest level {} != {}", self.min_level, full.min_level));
+        }
+        let runs = toc_runs_of_items(&self.items);
+        if runs != self.toc_runs {
+            return Err(format!("TOC runs {:?} != {:?} (from the items)", self.toc_runs, runs));
+        }
+        if self.root_url != full.root_url {
+            return Err(format!("resource root {:?} != {:?}", self.root_url, full.root_url));
+        }
+        Ok(())
+    }
+}
+
+impl Item {
+    /// Whether this is a page placeholder of a paged model.
+    pub fn is_page(&self) -> bool {
+        matches!(self.kind, ItemKind::Page(_))
+    }
+}
+
+/// `(first item, item count)` of the `[toc]` blocks among `items` (absolute origins), the first
+/// of them at index `base`.
+fn toc_runs_of(items: &[Item], base: usize) -> Vec<(usize, usize)> {
+    runs_of(items.iter().map(|it| (it.origin, it)), base)
+}
+
+/// [`toc_runs_of`] over a model's items.
+fn toc_runs_of_items(items: &Items) -> Vec<(usize, usize)> {
+    runs_of(items.iter_with_start(), 0)
+}
+
+fn runs_of<'a>(items: impl Iterator<Item = (usize, &'a Item)>, base: usize) -> Vec<(usize, usize)> {
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut prev: Option<usize> = None;
+    for (j, (o, it)) in items.enumerate() {
+        if it.kind != ItemKind::Toc {
+            prev = None;
+            continue;
+        }
+        match (prev, runs.last_mut()) {
+            (Some(p), Some(r)) if p == o => r.1 += 1,
+            _ => runs.push((base + j, 1)),
+        }
+        prev = Some(o);
+    }
+    runs
+}

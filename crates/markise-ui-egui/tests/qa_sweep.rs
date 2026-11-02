@@ -221,8 +221,13 @@ impl Ed {
     fn check_model(&mut self, after: &str) {
         let path = self.h.state().document_path().map(|p| p.to_path_buf());
         let Some(v) = self.h.state_mut().viewer() else { return };
-        let built = DocModel::build(v.ed.session.doc(), path.as_deref());
-        if let Err(e) = v.ed.view.model().diff(&built) {
+        let m = v.ed.view.model();
+        let r = if m.is_paged() {
+            m.check_against_full(v.ed.session.doc())
+        } else {
+            m.diff(&DocModel::build(v.ed.session.doc(), path.as_deref()))
+        };
+        if let Err(e) = r {
             panic!("{}: incremental model != rebuild after {after}: {e}", self.name);
         }
     }

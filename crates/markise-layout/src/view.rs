@@ -21,6 +21,9 @@ use crate::links::{AllResolved, LinkTargets};
 use crate::model::{DocModel, Item, ItemKind, ModelChange};
 use crate::text::TextShaper;
 
+mod paging;
+pub use paging::PagingStats;
+
 /// An item to paint this frame.
 #[derive(Clone, Debug)]
 pub struct Visible {
@@ -75,6 +78,8 @@ pub struct View {
     /// Editing state of the item holding the caret (ADR 0006 §2.4): part of that item's key.
     focus: Option<(usize, ItemFocus, u64)>,
     caret_item: Option<usize>,
+    /// What a paged model keeps materialized ([`paging`]).
+    paging: paging::PagingState,
 }
 
 impl View {
@@ -108,6 +113,7 @@ impl View {
             refs: Default::default(),
             focus: None,
             caret_item: None,
+            paging: Default::default(),
         };
         v.reset_heights();
         v
@@ -157,6 +163,7 @@ impl View {
         };
         self.anchor_off = 0.0;
         self.reset_heights();
+        self.anchor_at_offset(anchor_pos);
     }
 
     /// Installs a model updated incrementally ([`DocModel::apply`]) for `doc`: heights of the
@@ -715,6 +722,7 @@ impl View {
         let wrapped = |chars: u32, lines: u32| -> f32 { (lines as f32).max(chars as f32 / per_line).ceil() };
         let h = match &it.kind {
             ItemKind::Hidden => return pa + pb,
+            ItemKind::Page(st) => return self.page_estimate(st) + pa + pb,
             ItemKind::Heading { level } => {
                 let li = (*level as usize - 1).min(5);
                 let hs = &t.headings[li];
@@ -730,6 +738,15 @@ impl View {
                 t.block_spacing + rows * (line + 2.0 * t.table_cell_padding)
             }
             ItemKind::FrontMatter => t.block_spacing + line + 2.0 * t.meta_block.padding,
+            // paged models: a TOC's entries are one line each, consistent with the page
+            // estimate, so materializing a page does not move the content (issue #124 brings
+            // this estimate to full models too)
+            ItemKind::Toc if self.model.is_paged() => match &it.segment {
+                Some(crate::model::Segment::Toc { start, end, first, .. }) => {
+                    (if *first { t.block_spacing } else { 0.0 }) + (end - start) as f32 * line
+                }
+                _ => t.block_spacing + self.model.outline.len().max(1) as f32 * line,
+            },
             ItemKind::Rule | ItemKind::Empty | ItemKind::Toc => t.block_spacing + line,
             ItemKind::Paragraph => t.block_spacing + wrapped(it.est_chars, it.est_lines) * line,
         };
@@ -878,6 +895,12 @@ impl View {
 
     /// Layout of item `i` (cached or computed now).
     pub fn layout(&mut self, i: usize, shaper: &mut dyn TextShaper, images: &dyn Images) -> Arc<BlockLayout> {
+        if self.model.is_page(i) {
+            // a placeholder is never shown (the view materializes it first); hit testing next
+            // to items without caret stops may still ask
+            self.paging.stats.placeholder_layouts += 1;
+            return Arc::new(BlockLayout::default());
+        }
         if self.disclosure_hidden(i) {
             self.heights.set(i, 0.0);
             self.exact[i] = true;
@@ -1034,7 +1057,10 @@ impl View {
     ) -> Vec<Visible> {
         self.cache.tick();
         self.laid_out.clear();
-        let n = self.len();
+        if self.model.is_paged() {
+            self.prepare_pages(viewport_h);
+        }
+        let mut n = self.len();
         if n == 0 {
             self.last_visible.clear();
             return Vec::new();
@@ -1059,6 +1085,13 @@ impl View {
             let mut y = -self.anchor_off;
             let mut i = self.anchor;
             while i < n && y < viewport_h + margin {
+                if self.model.is_page(i) {
+                    // laid-out heights fell short of the estimates around the viewport: the
+                    // page comes in now (later indices only shift)
+                    self.materialize_at(i);
+                    n = self.len();
+                    continue;
+                }
                 if let Some(end) = self.disclosures.closed_end(i) {
                     i = end + 1;
                     continue;
@@ -1088,6 +1121,9 @@ impl View {
         let mut i = self.anchor;
         while i > 0 && y > -margin {
             i -= 1;
+            if self.model.is_page(i) {
+                break; // not materialized while indices of this frame are handed out
+            }
             if let Some((&start, _)) = self
                 .disclosures
                 .groups

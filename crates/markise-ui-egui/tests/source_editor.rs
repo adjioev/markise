@@ -249,6 +249,8 @@ fn position_mapping_in_and_out_of_source_mode() {
     let target = src.find("## Heading 250").unwrap();
     {
         let v = h.state_mut().viewer().unwrap();
+        // a paged model materializes the target's page first
+        v.ed.view.ensure_offset(target);
         let item = v.model().item_at_offset(target);
         v.ed.view.scroll_to_item(item);
     }

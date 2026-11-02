@@ -141,13 +141,25 @@ impl EditorView {
                 self.source_load_selection();
             }
             DocChange::Replaced => {
-                let model = DocModel::build(self.session.doc(), self.path.as_deref());
+                // the same kind of model as before (paged or full)
+                let paging = self.view.model().paging();
+                let model = Arc::new(DocModel::build_with(self.session.doc(), self.path.as_deref(), paging));
                 self.view.set_model(self.session.doc_arc().clone(), model);
                 if let Some(p) = self.source.as_mut() {
                     p.view.rebuild(self.session.doc().text());
                 }
                 self.source_load_selection();
             }
+        }
+        self.pin_caret();
+    }
+
+    /// Paged models (issue #125): the caret's page and the items around it stay materialized
+    /// (not while the view holds a placeholder document during an edit).
+    fn pin_caret(&mut self) {
+        if self.view.model().is_paged() && Arc::ptr_eq(self.view.doc(), self.session.doc_arc()) {
+            let focus = self.session.selection().primary().focus.offset;
+            self.view.set_caret_offset(Some(focus));
         }
     }
 
@@ -204,6 +216,7 @@ impl EditorView {
             // the pointer does not shift mid-selection (ADR 0006 §2.4, M2b-6)
             return false;
         }
+        self.pin_caret();
         let focus = self.session.selection().primary().focus;
         let f = markise_layout::caret::focus_for(&self.view, focus, self.reveal);
         self.view.set_focus(f)
@@ -278,6 +291,7 @@ impl EditorView {
 
     /// Scrolls the view so that the caret is visible in a viewport `vh` tall (with a margin).
     pub fn scroll_to_caret(&mut self, vh: f32, shaper: &mut dyn TextShaper, images: &dyn Images) {
+        self.pin_caret();
         let Some(r) = self.caret_rect(shaper, images) else {
             return;
         };
