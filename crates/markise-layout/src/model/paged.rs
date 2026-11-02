@@ -105,6 +105,9 @@ pub struct PageStats {
     pub images: u32,
     /// Items that may use a reference definition (their height may depend on one).
     pub ref_items: u32,
+    /// The page held part of a disclosure when it was measured (its height depends on the
+    /// disclosure's state).
+    pub in_disclosure: bool,
     /// `(width_q, parameter key, height bits)`: the height the page's items had (laid out or
     /// estimated) when it was evicted; used while the view parameters are the same and the
     /// document-level inputs the page depends on are unchanged ([`PageStats::measured_gens`]).
@@ -162,6 +165,7 @@ impl PageStats {
         (self.tocs == 0 || m.outline == now.outline)
             && (self.images == 0 || m.resources == now.resources)
             && (self.ref_items == 0 || m.refs == now.refs)
+            && (!self.in_disclosure || m.disclosures == now.disclosures)
     }
 
     fn add(&mut self, it: &Item) {
@@ -302,7 +306,7 @@ impl DocModel {
             if items.is_empty() {
                 continue;
             }
-            cross.add_from(doc, &items);
+            cross.add_from(&items);
             for it in &items {
                 if let ItemKind::Heading { level } = it.kind {
                     let info = doc.heading(it.origin).unwrap_or_default();
@@ -408,6 +412,7 @@ impl DocModel {
         ModelChange {
             replaced: i..i + 1,
             inserted: i..i + k,
+            disclosures: true,
             ..Default::default()
         }
     }
@@ -437,6 +442,9 @@ impl DocModel {
         let mut stats = PageStats::of(&items, doc);
         stats.measured = measured;
         stats.measured_gens = self.cross.gens;
+        let lo = items[0].origin;
+        let hi = items.iter().map(|it| it.origin + it.len).max().unwrap_or(lo);
+        stats.in_disclosure = self.cross.disclosure_meets(lo, hi);
         let page = page_item(&items, stats);
         let removed = r.len() - 1;
         let ka = self.outline.partition_point(|o| o.item < r.start);
@@ -454,6 +462,7 @@ impl DocModel {
         ModelChange {
             replaced: r.clone(),
             inserted: r.start..r.start + 1,
+            disclosures: true,
             ..Default::default()
         }
     }

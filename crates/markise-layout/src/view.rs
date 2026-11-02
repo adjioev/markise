@@ -224,7 +224,12 @@ impl View {
             self.set_model(self.doc.clone(), m);
             return;
         }
-        let disclosure_changed = self.disclosures.update(&self.model);
+        let disclosure_changed = if change.disclosures {
+            self.disclosures.update(&self.model)
+        } else {
+            self.disclosures.follow(&splices);
+            false
+        };
         // anchor: on its item, or on the first item of the splice that replaced it
         let map = |i: usize| ModelChange::map_index(&splices, i);
         match map(self.anchor) {
@@ -356,6 +361,11 @@ impl View {
             }
             i = if forward { i.checked_add(1)? } else { i.checked_sub(1)? };
         }
+    }
+
+    /// Full derivations of the disclosure state so far (tests: typing derives nothing).
+    pub fn disclosure_derivations(&self) -> u64 {
+        self.disclosures.derived
     }
 
     /// Disclosure state of item `i` (tests, diagnostics): hidden by a closed disclosure (or a
@@ -601,7 +611,8 @@ impl View {
     pub fn toggle_expanded(&mut self, idx: usize) {
         if let Some(group) = self.disclosures.groups.get(&idx).cloned() {
             let open = !group.open;
-            Arc::make_mut(&mut self.model).cross.set_open(group.start_at, open);
+            let at = self.model.item_start(idx);
+            Arc::make_mut(&mut self.model).cross.set_open(at, open);
             if !open && self.focus.as_ref().is_some_and(|(i, _, _)| idx < *i && *i <= group.end) {
                 self.focus = None;
             }
@@ -1108,6 +1119,12 @@ impl View {
             loop {
                 if let Some(end) = self.disclosures.closed_end(self.anchor) {
                     self.anchor = (end + 1).min(n - 1);
+                }
+                if self.model.is_page(self.anchor) {
+                    // the item after a closed disclosure is in a page not materialized yet
+                    self.materialize_at(self.anchor);
+                    n = self.len();
+                    continue;
                 }
                 self.layout(self.anchor, shaper, images);
                 let h = self.height(self.anchor);

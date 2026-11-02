@@ -72,14 +72,19 @@ by `DocModel::apply` from the replaced items of each edit:
 
 - `<details>` / `<summary>` / `</details>` written as separate raw blocks: every marker with its
   container scope, paired document-wide (nested, quoted, malformed and separate-summary
-  disclosures as a full model pairs them; a summary counts only right after its start). The
-  reader's open/closed choice lives on the start marker, so it survives eviction and edits
-  elsewhere, and a full rebuild carries it over for markers outside the edit. The view derives
+  disclosures as a full model pairs them; a summary counts only as the next block in the
+  same container). Markers live in a chunked relative-offset list and groups refer to them
+  by index: an edit touching no marker (ordinary typing) only shifts them in O(chunks), and
+  the view's derived state follows the splices without a derivation. The
+  reader's open/closed choice lives on the start marker, so it survives eviction, edits
+  elsewhere and a re-parse of its container; a full rebuild carries it over for markers
+  outside the edit. The view derives
   its item-index state (hidden ranges, controls, titles, depths) from the index after every
   change; a placeholder wholly inside a closed disclosure has zero height and is not
   materialized, one holding a start or end counts as visible until it is materialized.
 - Dependency generations of the document-level inputs: the outline (`[toc]` content and
-  length), the resource root (images) and reference definitions. A placeholder's measured
+  length), the resource root (images), reference definitions and the disclosures' pairing
+  and state (a page measured while a disclosure in it was closed). A placeholder's measured
   height records the generations; it is used only while those its blocks depend on are
   unchanged, and the view re-estimates placeholders when a generation changes.
 

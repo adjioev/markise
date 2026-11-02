@@ -347,6 +347,10 @@ pub struct ModelChange {
     pub resized: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
     /// The whole model was rebuilt.
     pub full: bool,
+    /// The disclosures' markers or pairing changed, or items holding them came or went
+    /// (materialization, eviction): the view derives its disclosure state again. Without it
+    /// the derived state only follows the splices (ordinary typing).
+    pub disclosures: bool,
 }
 
 impl ModelChange {
@@ -414,7 +418,7 @@ impl DocModel {
             let end = (k + 512).min(n);
             let doc_start = chunks.is_empty();
             let batch = flatten(doc, k..end, doc_start);
-            cross.add_from(doc, &batch);
+            cross.add_from(&batch);
             chunks.extend_abs(batch);
             k = end;
         }
@@ -461,6 +465,7 @@ impl DocModel {
             outline: g.outline + 1,
             resources: g.resources + 1,
             refs: g.refs + 1,
+            disclosures: g.disclosures + 1,
         };
         fresh
     }
@@ -564,21 +569,15 @@ impl DocModel {
                 new_items = out;
             }
             let n_new = new_items.len();
-            // disclosure markers of the replaced items go, the new items' come in
+            // disclosure markers of the replaced items go, the new items' come in (the
+            // reader's choices of unchanged markers carry over); others shift in O(chunks)
             let mut removed: Vec<usize> = self.items.0.range(lo..hi).map(|r| r.origin).collect();
             removed.dedup();
-            let had = self
+            if self
                 .cross
-                .markers()
-                .iter()
-                .any(|m| removed.binary_search(&m.start).is_ok());
-            let has = new_items.iter().any(|it| it.raw.is_some());
-            self.cross.edit(&removed, e.changed.end, e.delta);
-            if had || has {
-                self.cross.add_from(doc, &new_items);
-                self.cross.pair(doc);
-            } else {
-                self.cross.shift_groups(e.changed.end, e.delta);
+                .replace(doc, &removed, e.reparsed.start, &new_items, e.changed.clone(), e.delta)
+            {
+                change.disclosures = true;
             }
             self.items.0.splice(lo..hi, new_items, e.delta);
             change.replaced = lo..hi;

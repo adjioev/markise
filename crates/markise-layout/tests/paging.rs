@@ -713,3 +713,200 @@ fn paged_and_full_views_show_the_same() {
         }
     }
 }
+
+// ---- review of #136, round 1 ---------------------------------------------------------------
+
+/// A separate summary inside a quote pairs with its start (the blank quote line between them
+/// is not content).
+#[test]
+fn quoted_separate_summaries_pair() {
+    let src = "> <details>\n>\n> <summary>Title</summary>\n>\n> body\n>\n> </details>\n\nafter\n";
+    for m in [paged(&md(src), 1), full(&md(src))] {
+        let g = &m.cross.disclosures()[0];
+        assert_eq!(g.title, "Title", "{:?}", m.cross.disclosures());
+        assert_eq!(g.summary, Some(src.find("<summary>").unwrap()));
+    }
+    // opened, the summary is the disclosure's control, not a separate block
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(src));
+    let mut v = View::new(doc.clone(), Arc::new(full(&*doc)), Theme::light(), 700.0, 1.0);
+    let i = v.model().item_at_offset(src.find("<details>").unwrap());
+    v.toggle_expanded(i);
+    let s = v.model().item_at_offset(src.find("<summary>").unwrap());
+    assert!(v.disclosure_of(s).0, "the summary stays hidden");
+    assert_eq!(v.disclosure_of(i).2, Some(("Title".to_string(), true)));
+}
+
+/// The reader's choice survives an edit that re-parses the container around an unchanged
+/// disclosure (a paragraph split above it in the same quote).
+#[test]
+fn toggles_survive_a_reparse_of_their_container() {
+    let src = "> first paragraph here\n>\n> <details>\n> <summary>T</summary>\n>\n> body\n>\n> </details>\n\nafter\n";
+    let mut d = md(src);
+    let doc: Arc<dyn FormatDoc> = Arc::new(d.clone());
+    let mut v = View::new(doc.clone(), Arc::new(paged(&*doc, 1)), Theme::light(), 700.0, 1.0);
+    let at = src.find("<details>").unwrap();
+    v.ensure_offset(at);
+    let i = v.model().item_at_offset(at);
+    v.toggle_expanded(i);
+    assert_eq!(v.disclosure_of(i).2, Some(("T".to_string(), true)));
+    // split the first paragraph: the whole quote is re-parsed
+    let split = src.find("paragraph").unwrap();
+    let e = d.apply(&PatchSet::single_verbatim(split..split, "\n>\n> "));
+    assert!(e.replaced_top.contains(&0), "{e:?}");
+    let ch = v.model_mut().apply(&d, &e);
+    v.apply_change(Arc::new(d.clone()), &ch);
+    let at = d.text().find("<details>").unwrap();
+    let i = v.model().item_at_offset(at);
+    assert_eq!(v.disclosure_of(i).2, Some(("T".to_string(), true)), "still open");
+}
+
+/// A page evicted while a disclosure in it was closed measured its body as zero height;
+/// reopening the disclosure drops that measurement.
+#[test]
+fn measured_page_heights_follow_disclosure_state() {
+    let mut src = String::from("<details>\n<summary>S</summary>\n\n");
+    for i in 0..30 {
+        src.push_str(&format!("body paragraph {i}\n\n"));
+    }
+    src.push_str("</details>\n\nafter\n\n");
+    for i in 0..30 {
+        src.push_str(&format!("tail {i}\n\n"));
+    }
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(&src));
+    let mut v = View::new(doc.clone(), Arc::new(paged(&*doc, 4)), Theme::light(), 700.0, 1.0);
+    // materialize a body page, evict it with the zero height it has while closed
+    let at = src.find("body paragraph 12").unwrap();
+    v.ensure_offset(at);
+    let i = v.model().item_at_offset(at);
+    assert!(v.disclosure_of(i).0, "hidden while closed");
+    let runs = evictable(v.model(), &*doc, 4);
+    let r = runs.iter().find(|r| r.contains(&i)).unwrap().clone();
+    let h: f32 = r.clone().map(|j| v.height(j)).sum();
+    assert_eq!(h, 0.0);
+    let ch = v.model_mut().evict(&*doc, r.clone(), Some((2800, 0, h.to_bits())));
+    v.apply_change(doc.clone(), &ch);
+    let p = r.start;
+    assert!(v.model().is_page(p) && v.height(p) == 0.0);
+    // open the disclosure: the page is estimated again (not the stale 0)
+    let s = v.model().item_at_offset(0);
+    v.toggle_expanded(s);
+    assert!(v.height(p) > 50.0, "re-estimated: {}", v.height(p));
+}
+
+/// Typing in a document with many disclosures neither derives the disclosure state again nor
+/// pairs the markers nor resets heights: the work does not grow with the disclosure count.
+#[test]
+fn typing_does_no_document_wide_disclosure_work() {
+    let mut src = String::from("Typing here.\n\n");
+    for i in 0..2_000 {
+        src.push_str(&format!(
+            "<details>\n<summary>S{i}</summary>\n\nbody {i}\n\n</details>\n\n"
+        ));
+    }
+    let mut d = md(&src);
+    let doc: Arc<dyn FormatDoc> = Arc::new(d.clone());
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut v = View::new(doc.clone(), Arc::new(paged(&*doc, 16)), Theme::light(), 700.0, 1.0);
+    v.frame(800.0, 300.0, &mut f, &NoImages);
+    let pairings = v.model().cross.pairings;
+    let mut derived_by_edits = 0;
+    let mut at = 6;
+    for k in 0..40 {
+        // letters, and now and then an Enter (the item count changes)
+        let text = if k % 10 == 9 { "\n\n" } else { "x" };
+        let e = d.apply(&PatchSet::single_verbatim(at..at, text));
+        at += text.len();
+        let ch = v.model_mut().apply(&d, &e);
+        assert!(!ch.disclosures);
+        let before = v.disclosure_derivations();
+        v.apply_change(Arc::new(d.clone()), &ch);
+        derived_by_edits += v.disclosure_derivations() - before;
+        // (a frame may materialize or evict a page: that derives, once per page)
+        v.frame(800.0, 300.0, &mut f, &NoImages);
+    }
+    assert_eq!(derived_by_edits, 0, "no derivation while typing");
+    assert_eq!(v.model().cross.pairings, pairings, "no pairing while typing");
+    // the state followed the shifts
+    v.model().check_against_full(&d).unwrap();
+    let doc2: Arc<dyn FormatDoc> = Arc::new(d.clone());
+    let full_v = View::new(doc2.clone(), Arc::new(full(&*doc2)), Theme::light(), 700.0, 1.0);
+    same_states(&v, &full_v).unwrap();
+}
+
+/// Scrolled into a closed disclosure, the frame lays out no placeholder (guard for the frame's
+/// anchor step, which materializes a page it lands on; the placeholder layouts the bench saw
+/// came from caret hit testing walking into pages, which now stops at them).
+#[test]
+fn the_item_after_a_closed_disclosure_is_materialized_before_layout() {
+    let mut src = String::from("start\n\n<details>\n<summary>S</summary>\n\n");
+    for i in 0..20 {
+        src.push_str(&format!("hidden {i}\n\n"));
+    }
+    src.push_str("</details>\n\n");
+    for i in 0..60 {
+        src.push_str(&format!("after {i}\n\n"));
+    }
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(&src));
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut v = View::new(doc.clone(), Arc::new(paged(&*doc, 2)), Theme::light(), 700.0, 1.0);
+    // the anchor on the closed disclosure's (hidden) content
+    let at = src.find("hidden 3").unwrap();
+    v.ensure_offset(at);
+    let i = v.model().item_at_offset(at);
+    assert!(v.disclosure_of(i).0);
+    v.scroll_to_item(i);
+    // scroll_to_item reveals; close it again with the anchor inside
+    let s = v.model().item_at_offset(src.find("<details>").unwrap());
+    v.toggle_expanded(s);
+    let vis = v.frame(800.0, 300.0, &mut f, &NoImages);
+    assert!(vis.iter().all(|x| !v.model().is_page(x.idx)));
+    assert_eq!(v.paging_stats().placeholder_layouts, 0);
+}
+
+/// Keystroke cost (model update, view update, frame) in a document with 10,000 disclosures
+/// stays within 0.1 ms of that with 100 (median, release): ordinary typing does no work per
+/// disclosure (review of #136: it was 0.29 → 4.42 ms).
+#[test]
+#[ignore = "heavy: timing on large inputs; cargo xtask heavy"]
+fn heavy_suite_typing_cost_does_not_grow_with_disclosures() {
+    fn per_keystroke(n: usize) -> f64 {
+        let mut src = String::from("Typing here.\n\n");
+        for i in 0..n {
+            src.push_str(&format!(
+                "<details>\n<summary>S{i}</summary>\n\nbody {i}\n\n</details>\n\n"
+            ));
+        }
+        let mut d = md(&src);
+        let doc: Arc<dyn FormatDoc> = Arc::new(d.clone());
+        let mut fonts = testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        let mut v = View::new(doc.clone(), Arc::new(paged(&*doc, 128)), Theme::light(), 700.0, 1.0);
+        v.frame(800.0, 300.0, &mut f, &NoImages);
+        let mut at = 6;
+        let mut times = Vec::new();
+        let mut keep: Vec<Arc<dyn FormatDoc>> = Vec::new();
+        for k in 0..300 {
+            let text = if k % 30 == 29 { "\n\n" } else { "x" };
+            let e = d.apply(&PatchSet::single_verbatim(at..at, text));
+            // (the test copies the document for the view; the editor edits it in place)
+            let shared: Arc<dyn FormatDoc> = Arc::new(d.clone());
+            // (and drops the old copy outside the measurement)
+            keep.push(v.doc().clone());
+            let t = std::time::Instant::now();
+            let ch = v.model_mut().apply(&d, &e);
+            v.apply_change(shared, &ch);
+            v.frame(800.0, 300.0, &mut f, &NoImages);
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+            at += text.len();
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        times[times.len() / 2]
+    }
+    let small = per_keystroke(100);
+    let large = per_keystroke(10_000);
+    eprintln!("typing p50: 100 disclosures {small:.3} ms, 10,000 disclosures {large:.3} ms");
+    // (what remains is the larger document: more pages, deeper chunk lists)
+    assert!(large < small + 0.1, "100: {small:.3} ms, 10,000: {large:.3} ms");
+}

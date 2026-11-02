@@ -18,8 +18,6 @@ pub(crate) struct Group {
     pub summary: Option<usize>,
     pub title: String,
     pub open: bool,
-    /// Source position of the start marker (the group's identity).
-    pub start_at: usize,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -29,6 +27,8 @@ pub(crate) struct Disclosures {
     hidden: Vec<std::ops::Range<usize>>,
     controls: BTreeSet<usize>,
     depths: Vec<(usize, usize)>,
+    /// Full derivations (tests: ordinary typing derives nothing).
+    pub derived: u64,
 }
 
 /// The item holding source position `at`: `(index, true)` for a real item starting there,
@@ -71,7 +71,6 @@ impl Disclosures {
                         summary,
                         title: g.title.clone(),
                         open: g.open,
-                        start_at: g.start,
                     },
                 );
             }
@@ -111,12 +110,54 @@ impl Disclosures {
             .collect();
     }
 
-    /// Derives again after the items or the disclosures changed; `true` when what is hidden,
-    /// controlled, titled or indented changed (heights must be re-estimated).
+    /// Derives again after the disclosures changed or items holding markers came or went;
+    /// `true` when what is hidden, controlled, titled or indented changed (heights must be
+    /// re-estimated).
     pub fn update(&mut self, model: &DocModel) -> bool {
+        let derived = self.derived + 1;
         let old = std::mem::take(self);
         self.derive(model);
-        *self != old
+        self.derived = derived;
+        self.groups != old.groups
+            || self.hidden != old.hidden
+            || self.controls != old.controls
+            || self.depths != old.depths
+    }
+
+    /// An edit that touched no marker (ordinary typing): the state follows the splices of
+    /// `change` without a derivation; nothing a disclosure hides or indents changes. O(1)
+    /// when no item count changed, else O(groups) index shifts.
+    pub fn follow(&mut self, splices: &[(std::ops::Range<usize>, std::ops::Range<usize>)]) {
+        if splices.iter().all(|(o, i)| o.len() == i.len()) || self.is_empty() {
+            return;
+        }
+        // a boundary (an index right after a marker, or a marker) maps to its item's new index,
+        // or to the new start of the splice that replaced its item (never the marker itself)
+        let map = |b: usize| -> usize {
+            crate::model::ModelChange::map_index(splices, b).unwrap_or_else(|| {
+                let k = splices.partition_point(|(o, _)| o.end <= b);
+                splices.get(k).map_or(b, |(_, n)| n.start)
+            })
+        };
+        self.groups = std::mem::take(&mut self.groups)
+            .into_iter()
+            .map(|(i, mut g)| {
+                g.end = map(g.end);
+                g.summary = g.summary.map(map);
+                (map(i), g)
+            })
+            .collect();
+        self.controls = self.controls.iter().map(|&i| map(i)).collect();
+        for r in &mut self.hidden {
+            *r = map(r.start)..map(r.end);
+        }
+        for d in &mut self.depths {
+            d.0 = map(d.0);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.groups.is_empty() && self.hidden.is_empty() && self.controls.is_empty() && self.depths.is_empty()
     }
 
     pub fn hidden(&self, i: usize) -> bool {
