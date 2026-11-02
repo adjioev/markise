@@ -54,8 +54,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 /// Blocks with a larger source are estimated, not parsed.
 pub const BIG_BLOCK: usize = 64 * 1024;
-/// Source bytes [`DocCounter::fill`] reads per call of the status bar (a frame), plus at most
-/// one block.
+/// Source bytes [`DocCounter::fill`] reads per step of the counting worker
+/// ([`crate::count_worker`]; an edit waits at most one step), plus at most one block.
 pub const FRAME_BYTES: usize = 32 * 1024;
 /// A selection's fully selected middle is summed exactly when it, or the rest of the
 /// document, spans at most this many top-level blocks; otherwise it is estimated.
@@ -518,6 +518,24 @@ pub fn count_document(doc: &dyn FormatDoc) -> Counts {
     let mut acc = Counts::default();
     for t in 0..doc.top_count() {
         acc += count_top(doc, t, None, 0, usize::MAX).counted.counts;
+    }
+    acc
+}
+
+/// Counts of the source byte range `sel` of `doc`, read directly (no cache): every leaf
+/// block inside or partly inside it, clipped. Reads about `sel.len()` bytes plus the leaves
+/// that `sel` cuts, so the status bar uses it for small selections only; larger ones go
+/// through [`DocCounter::selection`] on the counting worker ([`crate::count_worker`]).
+pub fn count_range(doc: &dyn FormatDoc, sel: Range<usize>) -> Counts {
+    let n = doc.top_count();
+    if n == 0 || sel.is_empty() {
+        return Counts::default();
+    }
+    let top_at = |o: usize| doc.top_at(o).unwrap_or(0).min(n - 1);
+    let (a, b) = (top_at(sel.start), top_at(sel.end.saturating_sub(1).max(sel.start)));
+    let mut acc = Counts::default();
+    for t in a..=b {
+        acc += count_top(doc, t, Some(&sel), 0, usize::MAX).counted.counts;
     }
     acc
 }
@@ -1443,6 +1461,31 @@ mod tests {
         // markers inside the selection are not counted
         let src = "Some **bold** text.\n";
         assert_eq!(sel(src, 0, src.len() - 1).chars, "Some bold text.".len() as u64);
+    }
+
+    /// Issue #132: the status bar counts small selections directly ([`count_range`]); it gets
+    /// what the cached counter gets for the same range.
+    #[test]
+    fn direct_range_counts_match_the_counter() {
+        let mut src = String::from("[r]: /u\n\n");
+        for k in 0..12 {
+            src.push_str(&format!(
+                "# H{k}\n\nPara {k} with [r] *five* words.\n\n- item {k}\n- more `c`\n  > quoted {k}\n\n```\ncode {k}\n```\n\n| a | b |\n|---|---|\n| c{k} | d |\n\n<div>html {k}</div>\n\n"
+            ));
+        }
+        let (doc, mut c) = counted(&src);
+        assert_eq!(count_range(&doc, 0..src.len()), count_document(&doc));
+        let mut x = 7usize;
+        for _ in 0..300 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let a = (x >> 33) % src.len();
+            let b = a + (x >> 13) % 400;
+            let (a, b) = (a, b.min(src.len()));
+            if !src.is_char_boundary(a) || !src.is_char_boundary(b) {
+                continue;
+            }
+            assert_eq!(count_range(&doc, a..b), c.selection(&doc, a..b).unwrap(), "{a}..{b}");
+        }
     }
 
     /// Review round 2 P2-3: selection sums are bounded: a middle of up to [`EXACT_ITEMS`]

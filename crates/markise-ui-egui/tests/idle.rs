@@ -111,6 +111,54 @@ fn idle_after_large_open_and_edit_with_word_count_and_comment_margin() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Issue #132: while the window is occluded or minimized the app asks for no repaint, even
+/// with work that would otherwise schedule frames (the word count's debounce after an edit);
+/// visible again, it resumes that work.
+#[test]
+fn hidden_window_requests_no_repaint_and_resumes_when_shown() {
+    let dir = std::env::temp_dir().join(format!("markise-ui-idle-hidden-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("doc.md");
+    std::fs::write(&p, markise_corpus::generate(200 * 1024, 3)).unwrap();
+    let ctx = Context::default();
+    let mut app = MarkiseApp::new(AppOptions {
+        open: vec![p],
+        ..Default::default()
+    });
+    app.set_show_word_count(true);
+    assert_idle(&settle_and_measure(&ctx, &mut app), "after the open");
+    app.viewer().unwrap().ed.session.insert_text("more words ").unwrap();
+    let hidden_frame = |ctx: &Context, app: &mut MarkiseApp, occluded: bool, minimized: bool| {
+        let mut raw = input();
+        raw.viewports.insert(
+            ViewportId::ROOT,
+            egui::ViewportInfo {
+                occluded: Some(occluded),
+                minimized: Some(minimized),
+                ..Default::default()
+            },
+        );
+        let mut out = ctx.run_ui(raw, |ui| app.ui(ui));
+        out.textures_delta.clear();
+        let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+        out.viewport_output[&ViewportId::ROOT].repaint_delay
+    };
+    for (occluded, minimized) in [(true, false), (false, true), (true, true)] {
+        for _ in 0..3 {
+            assert_eq!(
+                hidden_frame(&ctx, &mut app, occluded, minimized),
+                Duration::MAX,
+                "no repaint while hidden (occluded {occluded}, minimized {minimized})"
+            );
+        }
+    }
+    // shown again: the pending word-count update schedules its frame, then everything settles
+    let delay = hidden_frame(&ctx, &mut app, false, false);
+    assert!(delay < Duration::from_secs(1), "work resumes once visible: {delay:?}");
+    assert_idle(&settle_and_measure(&ctx, &mut app), "after showing it again");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Issue #86: a wheel notch over the document scrolls it smoothly (a frame per display refresh
 /// while it moves, by exactly the notch's distance in total) and the window is idle again once
 /// the motion and its short tail are over.
