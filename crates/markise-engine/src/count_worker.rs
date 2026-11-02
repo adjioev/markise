@@ -81,7 +81,7 @@ impl CountWorker {
         })
     }
 
-    /// The lease the session revokes before each edit ([`crate::editor::EditorSession::set_doc_lease`]).
+    /// The lease the session revokes before each edit ([`crate::editor::EditorSession::add_doc_lease`]).
     pub fn lease(&self) -> &Arc<DocLease> {
         &self.lease
     }

@@ -7,7 +7,7 @@
 //! Counting runs off the UI thread (issue #132): a [`CountWorker`] keeps one count per
 //! top-level block of the document and counts only changed blocks. The UI thread sends it the
 //! session's edit summaries once the document has been quiet for [`DEBOUNCE`] (as revisions)
-//! and lends it the document of that revision ([`EditorSession::set_doc_lease`]: the session
+//! and lends it the document of that revision ([`EditorSession::add_doc_lease`]: the session
 //! takes it back before its next edit, so counting never copies the document). The worker
 //! wakes the UI once when a count is complete; the UI never repaints just to count. Until the
 //! first count of a document (or after it was replaced) the status bar shows "Counting…" with
@@ -217,7 +217,7 @@ impl WordCount {
             // the document just opened (the owner starts a new `WordCount` for another
             // document): counted from scratch
             self.session = Some(session.id());
-            session.set_doc_lease(Some(worker.lease().clone()));
+            session.add_doc_lease(worker.lease().clone());
             self.rev += 1;
             worker.update(self.rev, Change::Reset, session.doc_arc().clone());
             self.pending = ChangeLog::default();
@@ -348,9 +348,10 @@ mod tests {
         // frames while the worker counts never ask for a repaint
         let mut frames = 0;
         while !wc.settled() {
-            let woken = wakes.load(std::sync::atomic::Ordering::SeqCst) > 0;
             let (_, delay) = frame(&ctx, &mut wc, &mut s, 0..0);
-            // (the worker's wake-up, when the count is complete, is the only repaint)
+            // (the worker's wake-up, when the count is complete, is the only repaint; it may
+            // land while the frame runs, so it is read after the frame)
+            let woken = wakes.load(std::sync::atomic::Ordering::SeqCst) > 0;
             assert!(
                 delay == Duration::MAX || woken,
                 "frame {frames} asked for a repaint while counting: {delay:?}"

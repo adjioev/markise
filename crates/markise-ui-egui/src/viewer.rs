@@ -443,14 +443,13 @@ impl DocViewer {
         // margin mode with comments in the document: a comment gutter is reserved at the right
         // and the column lays out in the rest (owner decision on #91), unless the window is
         // too narrow for it (then bubbles). "Has comments" is tracked incrementally, reading
-        // the text in place in bounded chunks and only after review-relevant edits
-        // (comment_presence); a gutter change waits for a frame without pointer presses so
-        // clicks are hit-tested against one geometry (Codex review of #94).
+        // the text in place (beyond a first step, on a scanner thread, issue #138) and only
+        // after review-relevant edits (comment_presence); a gutter change waits for a frame
+        // without pointer presses so clicks are hit-tested against one geometry (Codex review
+        // of #94).
         let margin_mode = self.comment_display == markise_engine::settings::CommentDisplay::Margin;
         let has = margin_mode && {
-            let review = self.ed.session.review_edits();
-            let text_rev = self.ed.session.revision().counter;
-            let (has, more) = self.comment_presence.poll(self.ed.session.doc(), review, text_rev, now);
+            let (has, more) = self.comment_presence.poll(&mut self.ed.session, now, &ctx);
             match more {
                 Some(w) if w > 0.0 => ctx.request_repaint_after(std::time::Duration::from_secs_f64(w)),
                 Some(_) => ctx.request_repaint(),
