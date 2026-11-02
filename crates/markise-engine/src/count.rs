@@ -770,6 +770,10 @@ impl DocCounter {
 
     /// Forgets every block that may use a reference definition.
     fn forget_refs(&mut self) {
+        // a block counted in part: the leaves counted so far may use one too (review of #129)
+        if self.partial.is_some_and(|(_, _, c)| c.refs) {
+            self.partial = None;
+        }
         for i in 0..self.counts.len() {
             if self.flags[i] & REFS != 0 {
                 self.forget(i);
@@ -1382,6 +1386,37 @@ mod tests {
         edit(&mut doc, &mut c, end..end, "\n[r]: https://example.com\n");
         assert!(c.fill(&doc, usize::MAX));
         assert_eq!(c.total().unwrap().chars, "See the site now.".len() as u64);
+    }
+
+    /// Review of #129 (P2): a reference definition removed while a large container that
+    /// uses it is counted in part: the leaves counted so far are counted again, so the total
+    /// does not mix the old and the new meaning of the reference.
+    #[test]
+    fn definition_edits_during_a_partial_count_recount_the_part() {
+        let mut src = "- see ![alt text][r] here\n".repeat(3_000);
+        src.push_str("\nA paragraph between.\n\n[r]: /img.png\n");
+        let mut doc = md(&src);
+        let mut c = DocCounter::new();
+        c.reset(&doc);
+        assert!(!c.fill(&doc, 4096));
+        assert!(c.partial.is_some_and(|p| p.2.refs), "the list is counted in part");
+        let at = doc.text().find("[r]:").unwrap();
+        let end = doc.text().len();
+        let before = count_document(&doc);
+        let ps = markise_doc::PatchSet::new(vec![markise_doc::Patch::verbatim(at..end, "")]).unwrap();
+        let e = FormatDoc::apply(&mut doc, &ps);
+        assert_ne!(before, count_document(&doc), "the reference changes the list's text");
+        assert_eq!(e.replaced_top.start, 2, "only the definition is re-parsed: {e:?}");
+        assert!(c.apply(&e));
+        while !c.fill(&doc, 4096) {}
+        assert_eq!(c.total(), Some(count_document(&doc)));
+        // the definition back, again in the middle of the count
+        c.reset(&doc);
+        assert!(!c.fill(&doc, 4096));
+        let end = doc.text().len();
+        edit(&mut doc, &mut c, end..end, "[r]: /img.png\n");
+        while !c.fill(&doc, 4096) {}
+        assert_eq!(c.total(), Some(count_document(&doc)));
     }
 
     /// Review P2-8: entities in raw HTML count as the characters they show.

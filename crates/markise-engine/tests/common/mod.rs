@@ -15,6 +15,8 @@ pub struct T {
     pub ed: EditorView,
     pub fonts: Fonts,
     pub clock: ManualClock,
+    /// Frames run the viewer's selection fix too ([`T::frame`]).
+    pub fix_selection: bool,
 }
 
 impl T {
@@ -37,15 +39,21 @@ impl T {
             ed: EditorView::new(session, view, None),
             fonts: testing::fonts(),
             clock,
+            fix_selection: false,
         };
         t.frame();
         t
     }
 
+    /// One frame: focus and layout (a paged model materializes and evicts pages here); with
+    /// [`T::fix_selection`], then the selection fixed onto caret stops, as the viewer does.
     pub fn frame(&mut self) {
         self.ed.refresh_focus();
         let mut f = self.fonts.with_pixels_per_point(1.0);
         self.ed.view.frame(800.0, 400.0, &mut f, &NoImages);
+        if self.fix_selection && self.ed.fix_selection(&mut f, &NoImages) {
+            self.ed.refresh_focus();
+        }
     }
 
     /// Scrolls the caret into view (as the UI does after a command) and draws a frame.

@@ -3,8 +3,8 @@
 //!
 //! Before each frame ([`View::prepare_pages`]) the view keeps the first and the last page
 //! materialized (document edges), evicts runs of items more than [`KEEP_SCREENS`] viewports
-//! away (cut at top-level block boundaries, at most a page of blocks each, never the caret's
-//! page) and materializes every placeholder within one viewport above and two below. A
+//! away (cut at top-level block boundaries, at most a page of blocks each, never a page
+//! holding the caret or a selection end) and materializes every placeholder within one viewport above and two below. A
 //! placeholder has one height in the Fenwick tree (its measured height when it was evicted,
 //! else an estimate from its statistics). Materializing the page under the scroll anchor keeps
 //! the anchor's relative position in the page; pages above the anchor only shift indices, so
@@ -44,8 +44,9 @@ pub struct PagingStats {
 /// What a view keeps materialized besides the viewport.
 #[derive(Clone, Debug, Default)]
 pub(super) struct PagingState {
-    /// Source offset of the caret: its page and the items around it stay materialized.
-    caret: Option<usize>,
+    /// Source offsets kept materialized (the caret and the selection's ends): their pages and
+    /// the items around them stay.
+    pins: Vec<usize>,
     /// Scroll position and item count at the last eviction scan (the scan runs again after
     /// a viewport of scrolling or a page's worth of new items).
     last_scan: Option<(f64, usize)>,
@@ -97,13 +98,22 @@ impl View {
 
     /// Sets the source offset of the caret (`None`: no caret): its page and the items right
     /// before and after it stay materialized; they are materialized now. No-op for a full
-    /// model.
+    /// model. Same as [`View::set_pinned_offsets`] with one offset.
     pub fn set_caret_offset(&mut self, offset: Option<usize>) {
+        self.set_pinned_offsets(offset.as_slice());
+    }
+
+    /// Sets the source offsets whose pages (and the items around them) stay materialized: the
+    /// caret and both ends of every selection range, so caret geometry never meets a
+    /// placeholder at a selection end (issue #125 review). Materialized now. No-op for a full
+    /// model.
+    pub fn set_pinned_offsets(&mut self, offsets: &[usize]) {
         if !self.model.is_paged() {
             return;
         }
-        self.paging.caret = offset;
-        if let Some(o) = offset {
+        self.paging.pins.clear();
+        self.paging.pins.extend_from_slice(offsets);
+        for &o in offsets {
             self.ensure_offset(o);
         }
     }
@@ -243,14 +253,16 @@ impl View {
                 None => break,
             }
         }
-        if let Some(off) = self.paging.caret {
-            self.ensure_offset(off.min(self.doc.text().len()));
+        let len = self.doc.text().len();
+        for k in 0..self.paging.pins.len() {
+            let off = self.paging.pins[k].min(len);
+            self.ensure_offset(off);
         }
     }
 
     /// Evicts runs of real items farther than [`KEEP_SCREENS`] viewports from the viewport,
     /// in chunks of at most a page of whole top-level blocks. Kept: the first and the last
-    /// chunk (document edges), the chunk holding the caret, the focused item, and chunks with
+    /// chunk (document edges), chunks holding the caret or a selection end, the focused item, and chunks with
     /// a disclosure marker paired with one outside the chunk (its pairing would be lost).
     fn evict_far(&mut self, viewport_h: f32) {
         let n = self.len();
@@ -319,7 +331,7 @@ impl View {
         let Paging::Paged { tops: page_tops } = self.model.paging() else {
             return;
         };
-        let caret_top = self.paging.caret.and_then(|o| doc.top_at(o));
+        let pin_tops: Vec<usize> = self.paging.pins.iter().filter_map(|&o| doc.top_at(o)).collect();
         let focus = self.focus.as_ref().map(|f| f.0);
         let mut chunks: Vec<std::ops::Range<usize>> = Vec::new();
         for r in far {
@@ -331,7 +343,8 @@ impl View {
                     e += 1;
                 }
                 let edge = s == 0 || e == n;
-                let caret = caret_top.is_some_and(|c| (t0..=top(self, e - 1)).contains(&c));
+                let t1 = top(self, e - 1);
+                let caret = pin_tops.iter().any(|c| (t0..=t1).contains(c));
                 let held =
                     focus.is_some_and(|f| (s..e).contains(&f)) || self.caret_item.is_some_and(|c| (s..e).contains(&c));
                 if !edge && !caret && !held && !self.disclosures.paired_outside(s..e) {

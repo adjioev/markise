@@ -30,10 +30,13 @@ struct Pair {
 
 impl Pair {
     fn new(src: &str) -> Pair {
-        let p = Pair {
+        let mut p = Pair {
             paged: T::paged(src, TOPS),
             full: T::with_paging(src, Paging::Full),
         };
+        // the viewer's frame: layout, then the selection fixed onto caret stops
+        p.paged.fix_selection = true;
+        p.full.fix_selection = true;
         assert!(p.paged.ed.view.model().page_count() > 10);
         p
     }
@@ -188,6 +191,38 @@ fn selections_spanning_unloaded_pages() {
     // a caret set far away, then extended back across pages
     p.extend(p.top(28 * TOPS + 1), p.top(3));
     p.key("edit.deleteBackward");
+    p.key("edit.undo");
+    assert_eq!(p.paged.text(), src);
+}
+
+/// Review of #129 (P1): a long selection whose anchor's page would be evicted once the view
+/// follows the focus far away keeps both ends: the selected text, copy and delete are those
+/// of the full model.
+#[test]
+fn a_selection_keeps_its_far_anchor_when_the_view_moves_away() {
+    let src = source();
+    let mut p = Pair::new(&src);
+    let anchor = p.top(10 * TOPS) + 5;
+    p.set(anchor);
+    // extend to the end of the document (the view follows the focus), many frames
+    p.key("select.bottom");
+    for _ in 0..5 {
+        p.paged.frame();
+        p.full.frame();
+    }
+    p.same("after the view moved away");
+    let sel = p.paged.ed.session.selection().primary();
+    assert_eq!(sel.anchor.offset, anchor, "the anchor stays");
+    assert!(p.paged.ed.view.scroll_y() > 2000.0, "the view is far from the anchor");
+    assert!(
+        !p.is_page_at(anchor),
+        "the anchor's page stays materialized while it is a selection end"
+    );
+    let copied = |t: &T| t.text()[t.ed.session.selection().primary().range()].to_string();
+    assert_eq!(copied(&p.paged), copied(&p.full));
+    let end = sel.focus.offset;
+    p.key("edit.deleteBackward");
+    assert_eq!(p.paged.text(), format!("{}{}", &src[..anchor], &src[end..]));
     p.key("edit.undo");
     assert_eq!(p.paged.text(), src);
 }
