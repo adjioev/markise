@@ -370,6 +370,41 @@ fn huge_toc_is_segmented_and_outline_indices_stay_correct() {
     assert_bounded(&s, "toc", 60);
 }
 
+/// #124: a `[toc]` item (unsegmented, or each segment of a long one) is estimated from its
+/// number of entries, close to its laid-out height.
+#[test]
+fn toc_estimate_is_close_to_the_laid_out_height() {
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    for headings in [20, 3_000] {
+        let mut s = String::from("[toc]\n\n");
+        for i in 0..headings {
+            s.push_str(&format!("## Heading {i}\n\ntext {i}\n\n"));
+        }
+        let mut v = view(&s, 700.0);
+        let tocs: Vec<usize> = (0..v.len())
+            .take_while(|&i| v.model().items[i].kind == markise_layout::ItemKind::Toc)
+            .collect();
+        assert!(!tocs.is_empty());
+        let (mut est, mut real) = (0.0f32, 0.0f32);
+        for &i in &tocs {
+            let e = v.estimate(i);
+            v.layout(i, &mut f, &NoImages);
+            let h = v.height(i);
+            assert!(
+                (e - h).abs() <= 0.1 * h,
+                "{headings} headings, item {i}: estimate {e} vs {h}"
+            );
+            est += e;
+            real += h;
+        }
+        assert!(
+            (est - real).abs() <= 0.05 * real,
+            "{headings} headings: {est} vs {real}"
+        );
+    }
+}
+
 #[test]
 fn image_resolution_context_is_part_of_the_cache_key() {
     // review item 12: same paragraph, different typora-root-url → different layout key

@@ -18,7 +18,7 @@ use crate::diagram::{DiagramQuery, DiagramState, Diagrams, NoDiagrams};
 use crate::fenwick::Fenwick;
 use crate::highlight::{CodeQuery, Highlights, NoHighlights, item_range};
 use crate::links::{AllResolved, LinkTargets};
-use crate::model::{DocModel, Item, ItemKind, ModelChange};
+use crate::model::{DocModel, Item, ItemKind, ModelChange, Segment};
 use crate::text::TextShaper;
 
 mod paging;
@@ -738,16 +738,14 @@ impl View {
                 t.block_spacing + rows * (line + 2.0 * t.table_cell_padding)
             }
             ItemKind::FrontMatter => t.block_spacing + line + 2.0 * t.meta_block.padding,
-            // paged models: a TOC's entries are one line each, consistent with the page
-            // estimate, so materializing a page does not move the content (issue #124 brings
-            // this estimate to full models too)
-            ItemKind::Toc if self.model.is_paged() => match &it.segment {
-                Some(crate::model::Segment::Toc { start, end, first, .. }) => {
-                    (if *first { t.block_spacing } else { 0.0 }) + (end - start) as f32 * line
+            // one line per outline entry (issue #124); later segments of a long TOC have no gap
+            ItemKind::Toc => match &it.segment {
+                Some(Segment::Toc { start, end, first, .. }) => {
+                    (if *first { t.block_spacing } else { 0.0 }) + end.saturating_sub(*start).max(1) as f32 * line
                 }
                 _ => t.block_spacing + self.model.outline.len().max(1) as f32 * line,
             },
-            ItemKind::Rule | ItemKind::Empty | ItemKind::Toc => t.block_spacing + line,
+            ItemKind::Rule | ItemKind::Empty => t.block_spacing + line,
             ItemKind::Paragraph => t.block_spacing + wrapped(it.est_chars, it.est_lines) * line,
         };
         h + pa + pb
