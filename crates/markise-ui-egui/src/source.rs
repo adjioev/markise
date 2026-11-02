@@ -92,8 +92,11 @@ impl Default for SourceEditor {
 }
 
 /// The source view's scroll anchor (smooth scrolling follows it, issue #86).
-fn source_anchor(viewer: &DocViewer) -> Option<(usize, f32)> {
-    viewer.ed.source.as_ref().map(|p| p.view.anchor())
+fn source_anchor(viewer: &DocViewer) -> Option<(usize, usize, f32)> {
+    viewer.ed.source.as_ref().map(|p| {
+        let (i, off) = p.view.anchor();
+        (i, 0, off)
+    })
 }
 
 /// The source view parameters for the display preferences.

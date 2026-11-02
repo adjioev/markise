@@ -94,12 +94,19 @@ format's document-wide context; heading texts in placeholders are refreshed from
 when a definition they may use changes (`PageStats::heading_refs`). Comments' presence scans
 the document, independent of items; CriticMarkup does not cross blocks (ADR 0012).
 
+**No item index survives a frame (phase 4).** Whatever is kept across frames names an item by
+source position (its start and its ordinal among the items starting there): the scroll
+position smooth scrolling follows (`View::source_anchor`), the last frame's visible items used
+for hit tests, a pressed task checkbox, navigation history, Side by Side targets
+(`Target::At { start, nth, frac }`, the counterpart's page materialized before scrolling to
+it). Comment cards come from the visible items' layouts every frame; comment jumps go through
+the caret (its reach is materialized); the gutter's presence is the document scanner's.
+Copy and cut take the session's text of the selection, independent of items. The word count
+sums a selection's fully selected middle exactly from cached totals of runs of blocks.
+
 ## Known limits (later phases of #125)
 
-- Selections over more than 4,096 blocks are estimated from their byte share (as before);
-  page totals make them exact (phase 2).
-- Side by Side keeps item targets within one frame; positions between pages are interpolated
-  per item (phase 4: offset-based targets).
 - A placeholder partly inside a closed disclosure is estimated as if all of it were shown
   until it is materialized; materializing a page holding repeated `[toc]`s re-hashes the
   outline per segment (phase 5).
+- There is no rich (HTML) clipboard yet; copy is source text.

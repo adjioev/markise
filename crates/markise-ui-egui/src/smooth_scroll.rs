@@ -237,8 +237,10 @@ pub struct SmoothScroll {
     wheel: [Spring; 2],
     /// egui time of the last wheel event this pane accepted.
     last_event: f64,
-    /// The pane's scroll anchor as this state last left it ([`Self::follow`]).
-    expected: Option<(usize, f32)>,
+    /// The pane's scroll anchor as this state last left it ([`Self::follow`]): a position
+    /// that only a scroll changes (the rendered pane passes its source anchor, which a paged
+    /// model materializing or evicting pages leaves alone, issue #125).
+    expected: Option<(usize, usize, f32)>,
     /// The pane's horizontal offset as this state last left it ([`Self::follow_x`]).
     expected_x: Option<f32>,
 }
@@ -309,7 +311,7 @@ impl SmoothScroll {
     /// after applying it with `own = true` (the pane's own move), before laying out (catches
     /// moves later in the frame) and after laying out with `own = true` (layout normalises the
     /// anchor when estimated heights become real).
-    pub fn follow(&mut self, anchor: (usize, f32), own: bool) {
+    pub fn follow(&mut self, anchor: (usize, usize, f32), own: bool) {
         if !own && self.expected.is_some_and(|e| e != anchor) {
             self.stop();
         }
@@ -737,15 +739,15 @@ mod tests {
             ..Default::default()
         };
         let mut s = SmoothScroll::default();
-        s.follow((3, 10.0), false);
+        s.follow((3, 0, 10.0), false);
         s.step(&notch, true, 0.0, FRAME_120);
         // the pane's own move and the layout's normalisation keep the motion
-        s.follow((3, 14.0), true);
-        s.follow((3, 14.0), false);
-        s.follow((4, 0.5), true);
+        s.follow((3, 0, 14.0), true);
+        s.follow((3, 0, 14.0), false);
+        s.follow((4, 0, 0.5), true);
         assert!(!s.is_settled());
         // anything else moving the pane (a jump) stops it
-        s.follow((40, 0.0), false);
+        s.follow((40, 0, 0.0), false);
         assert!(s.is_settled(), "pending motion dropped");
         assert_eq!(s.step(&WheelInput::default(), true, 0.01, FRAME_120), Vec2::ZERO);
         // new input after the jump moves again

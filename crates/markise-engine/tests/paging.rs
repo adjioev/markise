@@ -291,3 +291,50 @@ fn navigation_from_an_offscreen_caret_crosses_unloaded_pages_and_closed_disclosu
     );
     assert_eq!(p.paged.ed.view.paging_stats().placeholder_layouts, 0);
 }
+
+/// Issue #125 (phase 4): copy and cut take the session's text of the selection, so Select All
+/// or a selection over unloaded pages copies and cuts exactly what a full model does.
+#[test]
+fn copy_and_cut_across_unloaded_pages() {
+    let src = source();
+    let mut p = Pair::new(&src);
+    let copied = |t: &T| t.text()[t.ed.session.selection().primary().range()].to_string();
+    p.key("select.all");
+    assert_eq!(copied(&p.paged), copied(&p.full));
+    assert!(copied(&p.paged).len() > src.len() * 9 / 10, "the whole document");
+    let (a, b) = (p.top(3) + 1, p.top(25 * TOPS) + 4);
+    assert!((3..25 * TOPS).any(|k| p.is_page_at(p.top(k))));
+    p.select(a, b);
+    let c = copied(&p.paged);
+    assert_eq!(c, copied(&p.full));
+    assert!(c.len() > b - a - 8, "the selection (its ends on caret stops)");
+    // cut: the copied text goes as on a full model (the pair compares text and selection)
+    p.key("edit.deleteBackward");
+    p.key("edit.undo");
+    assert_eq!(p.paged.text(), src);
+}
+
+/// Review of #144 (round 2): the edits kept for mapping last-frame positions do not pile up
+/// while no rendered frame clears them (Source mode): beyond a bound, positions are dropped.
+#[test]
+fn recent_edits_are_bounded_without_rendered_frames() {
+    let mut t = T::new("one two three\n");
+    t.ed.clear_recent_edits();
+    assert_eq!(t.ed.map_recent(4), Some(4));
+    t.ed.session
+        .apply_external(&markise_doc::PatchSet::single_verbatim(0..0, "x"), "t", false)
+        .unwrap();
+    t.ed.sync();
+    assert_eq!(t.ed.map_recent(4), Some(5));
+    for _ in 0..200 {
+        t.ed.session
+            .apply_external(&markise_doc::PatchSet::single_verbatim(0..0, "x"), "t", false)
+            .unwrap();
+        t.ed.sync();
+    }
+    assert_eq!(t.ed.map_recent(4), None, "history overflowed: positions dropped");
+    let n = t.ed.changes();
+    assert!(n >= 201);
+    t.ed.clear_recent_edits();
+    assert_eq!(t.ed.map_recent(4), Some(4));
+}

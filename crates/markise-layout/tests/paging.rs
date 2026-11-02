@@ -910,3 +910,55 @@ fn heavy_suite_typing_cost_does_not_grow_with_disclosures() {
     // (what remains is the larger document: more pages, deeper chunk lists)
     assert!(large < small + 0.1, "100: {small:.3} ms, 10,000: {large:.3} ms");
 }
+
+/// Issue #125 (phase 4): comment cards come from the comments of the visible items. Jumping to
+/// each comment (its page loaded on the way) shows the same comments, at the same places, with
+/// the same text and source positions on a paged model (pages of one block) as on a full one.
+#[test]
+fn comment_cards_and_jumps_match_the_full_view() {
+    let mut src = String::new();
+    for i in 0..120 {
+        src.push_str(&format!("Paragraph {i} text"));
+        if i % 7 == 3 {
+            src.push_str(&format!(" with {{>>note {i}<<}} a comment"));
+        }
+        src.push_str(".\n\n");
+    }
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(&src));
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let comments = |v: &mut View, f: &mut dyn markise_layout::TextShaper| -> Vec<(usize, i32, String)> {
+        let vis = v.frame(800.0, 300.0, f, &NoImages);
+        let mut out = Vec::new();
+        for x in &vis {
+            let base = v.model().item_start(x.idx);
+            for c in &x.layout.comments {
+                out.push((
+                    base + c.source.start as usize,
+                    (x.y + c.rect.top()).round() as i32,
+                    c.text.to_string(),
+                ));
+            }
+        }
+        out
+    };
+    let mut full_v = View::new(doc.clone(), Arc::new(full(&*doc)), Theme::light(), 700.0, 1.0);
+    let mut v = View::new(doc.clone(), Arc::new(paged(&*doc, 1)), Theme::light(), 700.0, 1.0);
+    let mut jumped = 0;
+    let mut at = 0;
+    while let Some(k) = src[at..].find("{>>") {
+        let off = at + k;
+        at = off + 3;
+        for view in [&mut v, &mut full_v] {
+            // as the comments panel jumps: the caret's page comes in, then its block at the top
+            view.set_caret_offset(Some(off));
+            let i = view.model().item_at_offset(off);
+            view.scroll_to_item(i);
+        }
+        let (a, b) = (comments(&mut v, &mut f), comments(&mut full_v, &mut f));
+        assert!(a.iter().any(|c| c.0 == off), "the jumped-to comment is shown");
+        assert_eq!(a, b, "jump to {off}");
+        jumped += 1;
+    }
+    assert!(jumped > 10);
+}
