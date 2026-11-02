@@ -452,12 +452,20 @@ pub const WORK_PER_SEC: u64 = if cfg!(windows) { 3_000_000_000 } else { 1_000_00
 /// Asserts that `run` scales (near) linearly on inputs built by `generate`.
 ///
 /// Measured in CPU work of this thread ([`thread_work`]), not wall-clock time, so a busy
-/// machine does not inflate one measurement (issue #42). The small input size starts at 4 000
+/// machine does not inflate one measurement (issue #42). The small input size starts at 1 000
 /// repetitions and doubles until the best-of-5 work is at least [`MIN_SMALL`] (so a fast
-/// quadratic step cannot hide below the timer floor; capped at 64 000 repetitions), then the
-/// large input is 16× that size. Linear ≈ 16×, n^1.5 ≈ 64×, quadratic ≈ 256×: the ratio must
-/// stay below 40×. Caches and frequency changes can still disturb one measurement, so up to
-/// three attempts are made; a super-linear algorithm fails every attempt. A large run that
+/// quadratic step cannot hide below the timer floor; capped at 16 000 repetitions), then the
+/// large input is [`SIZE_FACTOR`] (64×) that size and the work ratio must stay below
+/// [`MAX_RATIO`] (see [`scaling_ratio_ok`]).
+///
+/// Why 64× and not 16× (issue #109): a linear pass whose small input still fits in the CPU
+/// caches gets a one-off per-byte slowdown once the large input spills to main memory. On
+/// GitHub's Linux runners that step alone measured ~2.7×, i.e. 43× for a 16× input, which a
+/// 16× range cannot tell apart from n^1.36. Over 64× the same bounded step gives ≲ 200×, while
+/// n^1.5 gives 512× and quadratic 4 096×. Per-byte costs measured locally were flat from 64 000
+/// to 4 096 000 repetitions for the cases that failed on CI. The large input costs the same as
+/// before (the small one is smaller). Frequency changes can still disturb one measurement, so up
+/// to three attempts are made; a super-linear algorithm fails every attempt. A large run that
 /// needs more CPU time than the cap fails at once.
 pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, run: &dyn Fn(&str)) {
     use std::time::Duration;
@@ -479,34 +487,57 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
         );
         (1..5).map(|_| once(s)).fold(first, u64::min)
     };
-    let floor = WORK_PER_SEC / 1000; // 1 ms: the ratio's denominator never rounds to zero
     let min_small = (MIN_SMALL.as_secs_f64() * WORK_PER_SEC as f64) as u64;
-    let mut last = String::new();
+    let mut failures = Vec::new();
     for _ in 0..3 {
-        let mut n = 4_000;
+        let mut n = 1_000;
         let ws = loop {
             let w = best(&generate(n));
-            if w >= min_small || n >= 64_000 {
+            if w >= min_small || n >= 16_000 {
                 break w;
             }
             n *= 2;
         };
-        let wl = best(&generate(16 * n));
-        let ratio = wl as f64 / ws.max(floor) as f64;
-        if ratio < 40.0 {
+        let wl = best(&generate(SIZE_FACTOR * n));
+        if scaling_ratio_ok(ws, wl) {
             return;
         }
-        last = format!(
-            "{name}: 16× input (n={n}) took {ratio:.1}× more CPU time ({:?} → {:?})",
+        failures.push(format!(
+            "n={n}: {:.1}× ({:?} → {:?})",
+            scaling_ratio(ws, wl),
             secs(ws),
             secs(wl)
-        );
+        ));
     }
-    panic!("{last}");
+    panic!(
+        "{name}: {SIZE_FACTOR}× input took ≥ {MAX_RATIO}× more CPU time in every attempt \
+         (super-linear?): {}",
+        failures.join("; ")
+    );
 }
 
 /// Minimum best-of-5 CPU time of the small input in [`assert_scales_linearly`].
-pub const MIN_SMALL: std::time::Duration = std::time::Duration::from_millis(5);
+pub const MIN_SMALL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Large input size / small input size in [`assert_scales_linearly`].
+pub const SIZE_FACTOR: usize = 64;
+
+/// Largest accepted work ratio for a [`SIZE_FACTOR`]× input: linear is 64×, this allows a 5×
+/// per-byte slowdown from caches and allocation (≈ n^1.39); n^1.5 (512×) and quadratic
+/// (4 096×) fail.
+pub const MAX_RATIO: f64 = 320.0;
+
+/// Work ratio of the large to the small run; the small work is floored at 0.25 ms so a
+/// near-zero measurement cannot blow the ratio up.
+pub fn scaling_ratio(small: u64, large: u64) -> f64 {
+    let floor = WORK_PER_SEC / 4000;
+    large as f64 / small.max(floor) as f64
+}
+
+/// Whether a small/large work pair (in [`thread_work`] units) counts as linear scaling.
+pub fn scaling_ratio_ok(small: u64, large: u64) -> bool {
+    scaling_ratio(small, large) < MAX_RATIO
+}
 
 #[cfg(test)]
 mod tests {
@@ -525,6 +556,26 @@ mod tests {
         if cfg!(any(unix, windows)) {
             assert!(slept < super::WORK_PER_SEC / 50, "sleeping counted {slept}");
         }
+    }
+
+    #[test]
+    fn scaling_verdict_separates_cache_steps_from_superlinear_growth() {
+        use super::{SIZE_FACTOR, WORK_PER_SEC, scaling_ratio_ok};
+        let ms = WORK_PER_SEC / 1000;
+        let small = 2 * ms;
+        let k = SIZE_FACTOR as f64;
+        let large =
+            |exponent: f64, per_byte_slowdown: f64| (small as f64 * k.powf(exponent) * per_byte_slowdown) as u64;
+        // linear, also with the ~2.7× cache step measured on CI (issue #109)
+        assert!(scaling_ratio_ok(small, large(1.0, 1.0)));
+        assert!(scaling_ratio_ok(small, large(1.0, 2.7)));
+        // n log n at the sizes used (16 000 → 1 024 000 repetitions)
+        assert!(scaling_ratio_ok(small, large(1.0, 1_024_000f64.ln() / 16_000f64.ln())));
+        // super-linear growth fails clearly
+        assert!(!scaling_ratio_ok(small, large(1.5, 1.0)));
+        assert!(!scaling_ratio_ok(small, large(2.0, 1.0)));
+        // a tiny small measurement is floored instead of producing a huge ratio
+        assert!(scaling_ratio_ok(1, 64 * WORK_PER_SEC / 4000));
     }
 
     #[test]
