@@ -308,8 +308,13 @@ pub struct DocModel {
     min_level: u8,
     /// Top-level blocks per page of a paged model ([`paged`]); 0: a full model.
     page_tops: usize,
+    /// Cross-block facts for the whole document ([`cross`]): disclosures, dependency
+    /// generations.
+    pub cross: CrossBlockIndex,
 }
 
+mod cross;
+pub use cross::{CrossBlockIndex, DepGens, DisclosureGroup, DisclosureMarker};
 mod paged;
 pub use paged::{PAGE_TOPS, PageStats, Paging, PagingCounters, paging_counters};
 
@@ -402,14 +407,18 @@ impl DocModel {
     fn build_full(doc: &dyn FormatDoc, path: Option<&Path>) -> DocModel {
         // flattened in batches straight into the chunked list (no full-size intermediate)
         let mut chunks = RelChunks::default();
+        let mut cross = CrossBlockIndex::default();
         let n = doc.top_count();
         let mut k = 0;
         while k < n {
             let end = (k + 512).min(n);
             let doc_start = chunks.is_empty();
-            chunks.extend_abs(flatten(doc, k..end, doc_start));
+            let batch = flatten(doc, k..end, doc_start);
+            cross.add_from(doc, &batch);
+            chunks.extend_abs(batch);
             k = end;
         }
+        cross.pair(doc);
         let base_dir = path.and_then(|p| p.parent()).map(Path::to_path_buf);
         let root_url = doc.resource_root();
         let mut m = DocModel {
@@ -421,10 +430,39 @@ impl DocModel {
             toc_runs: Vec::new(),
             min_level: 1,
             page_tops: 0,
+            cross,
         };
         m.rebuild_outline(doc);
         m.update_tocs(doc);
         m
+    }
+
+    /// A fresh model of `doc` replacing this one after edit `e` (a full rebuild): the document
+    /// folder, the reader's disclosure choices (for markers outside the edit) and newer
+    /// dependency generations carry over.
+    fn rebuilt(&mut self, doc: &dyn FormatDoc, e: &EditSummary) -> DocModel {
+        let base_dir = self.base_dir.clone();
+        let mut fresh = Self::build_with(doc, None, self.paging());
+        fresh.base_dir = base_dir;
+        fresh.ctx_hash = images_hash(&fresh.root_url, &fresh.base_dir);
+        let (lo, hi, delta) = (e.changed.start, e.changed.end, e.delta);
+        let toggles = self.cross.take_toggles(|at| {
+            if at < lo {
+                Some(at)
+            } else if at >= hi {
+                Some((at as isize + delta) as usize)
+            } else {
+                None
+            }
+        });
+        fresh.cross.restore_toggles(doc, &toggles);
+        let g = self.cross.gens;
+        fresh.cross.gens = DepGens {
+            outline: g.outline + 1,
+            resources: g.resources + 1,
+            refs: g.refs + 1,
+        };
+        fresh
     }
 
     /// Updates the model after `doc` changed by `e` (the summary of the edit that produced
@@ -439,15 +477,11 @@ impl DocModel {
     /// `reparsed` after it.
     pub fn apply(&mut self, doc: &dyn FormatDoc, e: &EditSummary) -> ModelChange {
         if self.is_paged() && (e.deps.all || self.edit_touches_page(e)) {
-            return self.rebuild_paged(doc, e.deps.labels.clone());
+            return self.rebuild_paged(doc, e);
         }
         if e.deps.all {
             let n = self.items.len();
-            let base_dir = self.base_dir.clone();
-            let mut fresh = Self::build_with(doc, None, self.paging());
-            fresh.base_dir = base_dir;
-            fresh.ctx_hash = images_hash(&fresh.root_url, &fresh.base_dir);
-            *self = fresh;
+            *self = self.rebuilt(doc, e);
             return ModelChange {
                 replaced: 0..n,
                 inserted: 0..self.items.len(),
@@ -530,6 +564,22 @@ impl DocModel {
                 new_items = out;
             }
             let n_new = new_items.len();
+            // disclosure markers of the replaced items go, the new items' come in
+            let mut removed: Vec<usize> = self.items.0.range(lo..hi).map(|r| r.origin).collect();
+            removed.dedup();
+            let had = self
+                .cross
+                .markers()
+                .iter()
+                .any(|m| removed.binary_search(&m.start).is_ok());
+            let has = new_items.iter().any(|it| it.raw.is_some());
+            self.cross.edit(&removed, e.changed.end, e.delta);
+            if had || has {
+                self.cross.add_from(doc, &new_items);
+                self.cross.pair(doc);
+            } else {
+                self.cross.shift_groups(e.changed.end, e.delta);
+            }
             self.items.0.splice(lo..hi, new_items, e.delta);
             change.replaced = lo..hi;
             change.inserted = lo..lo + n_new;
@@ -578,11 +628,7 @@ impl DocModel {
                     // a segmented block (e.g. a `[toc]`, segmented by the outline) does not map
                     // item for item: rebuild (rare: the document's first block changed status)
                     let n_before = (n_items as isize - shift) as usize;
-                    let base_dir = self.base_dir.clone();
-                    let mut fresh = Self::build_with(doc, None, self.paging());
-                    fresh.base_dir = base_dir;
-                    fresh.ctx_hash = images_hash(&fresh.root_url, &fresh.base_dir);
-                    *self = fresh;
+                    *self = self.rebuilt(doc, e);
                     return ModelChange {
                         replaced: 0..n_before,
                         inserted: 0..self.items.len(),
@@ -637,6 +683,7 @@ impl DocModel {
             let h = images_hash(&self.root_url, &self.base_dir);
             if h != self.ctx_hash {
                 self.ctx_hash = h;
+                self.cross.gens.resources += 1;
                 // every item showing an image has a new cache key (the view folds `ctx_hash`
                 // into the keys of image items): report them so their heights are re-estimated
                 change.rehashed.extend(
@@ -655,6 +702,7 @@ impl DocModel {
         // (outline, anchors) need refreshing — a scan over the headings
         if !e.deps.labels.is_empty() {
             change.labels = e.deps.labels.clone();
+            self.cross.gens.refs += 1;
             let changed: HashSet<u64> = e.deps.labels.iter().copied().collect();
             // (entry, heading start) of the headings using a changed label; the headings of
             // a page placeholder are read from its blocks (paged models)
@@ -724,6 +772,9 @@ impl DocModel {
             self.min_level = min_level;
         }
         let outline_changed = count_changed || min_changed || !touched.is_empty();
+        if outline_changed {
+            self.cross.gens.outline += 1;
+        }
         if !self.toc_runs.is_empty() && (outline_changed || run_old.iter().any(Option::is_none)) {
             // entries from here on moved (their indices shifted)
             let moved = edit.as_ref().filter(|_| count_changed).map(|ed| ed.at);
@@ -1384,6 +1435,13 @@ impl DocModel {
         }
         if (self.ctx_hash, &self.root_url) != (other.ctx_hash, &other.root_url) {
             return Err("context differs".into());
+        }
+        if !self.cross.same_disclosures(&other.cross) {
+            return Err(format!(
+                "disclosures {:?}\n  != {:?}",
+                self.cross.disclosures(),
+                other.cross.disclosures()
+            ));
         }
         Ok(())
     }

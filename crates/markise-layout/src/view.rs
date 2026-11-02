@@ -85,7 +85,7 @@ pub struct View {
 impl View {
     pub fn new(doc: Arc<dyn FormatDoc>, model: Arc<DocModel>, theme: Theme, width: f32, ppp: f32) -> View {
         let theme_fp = theme.fingerprint();
-        let disclosures = crate::disclosure::Disclosures::new(&model, &*doc);
+        let disclosures = crate::disclosure::Disclosures::new(&model);
         let mut v = View {
             doc,
             model,
@@ -153,7 +153,7 @@ impl View {
         let anchor_pos = self.model.items.start(self.anchor).unwrap_or(0);
         self.doc = doc;
         self.model = model;
-        self.disclosures = crate::disclosure::Disclosures::new(&self.model, &*self.doc);
+        self.disclosures = crate::disclosure::Disclosures::new(&self.model);
         self.prune_refs();
         self.expanded.clear();
         self.anchor = if self.model.items.is_empty() {
@@ -224,7 +224,7 @@ impl View {
             self.set_model(self.doc.clone(), m);
             return;
         }
-        let disclosure_changed = self.disclosures.update(&self.model, &*self.doc, change);
+        let disclosure_changed = self.disclosures.update(&self.model);
         // anchor: on its item, or on the first item of the splice that replaced it
         let map = |i: usize| ModelChange::map_index(&splices, i);
         match map(self.anchor) {
@@ -329,6 +329,7 @@ impl View {
         if disclosure_changed {
             self.reset_heights();
         }
+        self.refresh_page_heights();
     }
 
     /// Adjacent visible item, jumping whole collapsed ranges for caret navigation.
@@ -355,6 +356,41 @@ impl View {
             }
             i = if forward { i.checked_add(1)? } else { i.checked_sub(1)? };
         }
+    }
+
+    /// Disclosure state of item `i` (tests, diagnostics): hidden by a closed disclosure (or a
+    /// control of one), nesting depth of open ones, and `(title, open)` when it starts one.
+    pub fn disclosure_of(&self, i: usize) -> (bool, usize, Option<(String, bool)>) {
+        (
+            self.disclosures.hidden(i),
+            self.disclosures.depth(i),
+            self.disclosures.groups.get(&i).map(|g| (g.title.clone(), g.open)),
+        )
+    }
+
+    /// Opens the closed disclosures around item `i` (the caret or a jump went there); `true`
+    /// when one opened.
+    fn reveal_item(&mut self, i: usize) -> bool {
+        let Some(o) = self.model.items.start(i) else {
+            return false;
+        };
+        let starts: Vec<usize> = self
+            .model
+            .cross
+            .disclosures()
+            .iter()
+            .filter(|g| !g.open && g.start < o && o <= g.end)
+            .map(|g| g.start)
+            .collect();
+        if starts.is_empty() {
+            return false;
+        }
+        let cross = &mut Arc::make_mut(&mut self.model).cross;
+        for s in starts {
+            cross.set_open(s, true);
+        }
+        self.disclosures.update(&self.model);
+        true
     }
 
     fn disclosure_hidden(&self, i: usize) -> bool {
@@ -563,12 +599,13 @@ impl View {
 
     /// Toggles a collapsible block (front matter or disclosure).
     pub fn toggle_expanded(&mut self, idx: usize) {
-        if let Some(group) = self.disclosures.groups.get_mut(&idx) {
-            group.open = !group.open;
-            if !group.open && self.focus.as_ref().is_some_and(|(i, _, _)| idx < *i && *i <= group.end) {
+        if let Some(group) = self.disclosures.groups.get(&idx).cloned() {
+            let open = !group.open;
+            Arc::make_mut(&mut self.model).cross.set_open(group.start_at, open);
+            if !open && self.focus.as_ref().is_some_and(|(i, _, _)| idx < *i && *i <= group.end) {
                 self.focus = None;
             }
-            self.disclosures.refresh();
+            self.disclosures.update(&self.model);
             self.reset_heights();
             return;
         }
@@ -641,13 +678,14 @@ impl View {
         self.heights = Fenwick::from_values(values);
         self.exact = exact;
         self.anchor = self.anchor.min(n.saturating_sub(1));
+        self.paging.gens = self.model.cross.gens;
     }
 
     /// Sets the editing state of item `i` (marker reveal, virtual paragraph; ADR 0006 §2.4) or
     /// clears it. Only that item's cache key changes; returns `true` when the focus changed.
     pub fn set_focus(&mut self, focus: Option<(usize, ItemFocus)>) -> bool {
         let caret_item = focus.as_ref().map(|(i, _)| *i);
-        let opened = caret_item != self.caret_item && caret_item.is_some_and(|i| self.disclosures.reveal(i));
+        let opened = caret_item != self.caret_item && caret_item.is_some_and(|i| self.reveal_item(i));
         self.caret_item = caret_item;
         let focus = focus.filter(|(i, f)| *i < self.len() && !f.is_empty());
         let same = match (&self.focus, &focus) {
@@ -1016,7 +1054,7 @@ impl View {
     /// Puts item `i` at the top of the viewport (outline click).
     pub fn scroll_to_item(&mut self, i: usize) {
         if i < self.len() {
-            if self.disclosures.reveal(i) {
+            if self.reveal_item(i) {
                 self.reset_heights();
             }
             self.anchor = i;
@@ -1083,15 +1121,15 @@ impl View {
             let mut y = -self.anchor_off;
             let mut i = self.anchor;
             while i < n && y < viewport_h + margin {
+                if let Some(end) = self.disclosures.closed_end(i) {
+                    i = end + 1;
+                    continue;
+                }
                 if self.model.is_page(i) {
                     // laid-out heights fell short of the estimates around the viewport: the
                     // page comes in now (later indices only shift)
                     self.materialize_at(i);
                     n = self.len();
-                    continue;
-                }
-                if let Some(end) = self.disclosures.closed_end(i) {
-                    i = end + 1;
                     continue;
                 }
                 let l = self.layout(i, shaper, images);
@@ -1122,13 +1160,12 @@ impl View {
             if self.model.is_page(i) {
                 break; // not materialized while indices of this frame are handed out
             }
-            if let Some((&start, _)) = self
-                .disclosures
-                .groups
-                .range(..=i)
-                .find(|(start, g)| !g.open && **start < i && i <= g.end)
-            {
-                i = start;
+            // a closed disclosure: on to its start marker
+            if let Some(r) = self.disclosures.closed_range(i) {
+                i = r.start.saturating_sub(1);
+                if self.model.is_page(i) {
+                    break;
+                }
             }
             self.layout(i, shaper, images);
             y -= self.height(i);

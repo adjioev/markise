@@ -70,6 +70,25 @@ fn materialize_all(m: &mut DocModel, doc: &dyn FormatDoc) -> Result<(), String> 
     m.diff(&full(doc))
 }
 
+/// Disclosures of every shape (issue #125, phase 3): separate summaries, titles in the start
+/// tag, open ones, nesting, quoted ones (their own scope), malformed ones (an unmatched end,
+/// an unclosed start, a summary not right after its start).
+fn disclosure_snippet(i: usize) -> String {
+    match i % 9 {
+        0 => format!("<details>\n<summary>Sum {i}</summary>\n\nhidden {i}\n\n</details>\n\n"),
+        1 => format!("<details open>\n\nopen body {i}\n\n- list {i}\n\n</details>\n\n"),
+        2 => format!(
+            "<details>\n<summary>Outer {i}</summary>\n\nouter {i}\n\n<details>\n<summary>Inner {i}</summary>\n\ninner {i}\n\n</details>\n\nafter inner {i}\n\n</details>\n\n"
+        ),
+        3 => format!("> <details>\n> <summary>Quoted {i}</summary>\n>\n> quoted body {i}\n>\n> </details>\n\n"),
+        4 => format!("</details>\n\nstray end above {i}\n\n"),
+        5 => format!("<details>\n\nfar apart {i}\n\n"),
+        6 => format!("text {i}\n\n</details>\n\n"),
+        7 => format!("<details>\n\npara between {i}\n\n<summary>Late {i}</summary>\n\n</details>\n\n"),
+        _ => format!("<details><summary>Inline {i}</summary>\n\nbody {i}\n\n</details>\n\n"),
+    }
+}
+
 fn big_docs() -> Vec<String> {
     let mut v = Vec::new();
     let mut s = String::from("---\ntitle: t\n---\n\n[toc]\n\n");
@@ -84,6 +103,7 @@ fn big_docs() -> Vec<String> {
             s.push_str(&"long code line\n".repeat(150).replace("long", "    long"));
             s.push('\n');
         }
+        s.push_str(&disclosure_snippet(i));
     }
     v.push(s);
     // headings enough to segment the TOCs, repeated anchors
@@ -176,6 +196,10 @@ const SNIPPETS: &[&str] = &[
     "[toc]\n",
     "<details>\n",
     "</details>\n",
+    "<summary>T</summary>\n",
+    "<details open>\n",
+    "[r]: http://other\n",
+    "> <details>\n",
     "---\n",
     "x",
     "#",
@@ -470,13 +494,222 @@ fn page_estimates_match_the_items_estimates() {
     for i in 0..3_000 {
         short.push_str(&format!("Paragraph {i} of a tall document with a line of text.\n\n"));
     }
-    for src in [short, big_docs().swap_remove(0), doc(2000)] {
+    // (closed disclosures hide content a placeholder partly holding them still counts: the
+    // documents here have none)
+    for src in [short, big_docs().swap_remove(1), doc(2000)] {
         let doc: Arc<dyn FormatDoc> = Arc::new(md(&src));
         for width in [300.0, 700.0, 1200.0] {
             let p = View::new(doc.clone(), Arc::new(paged(&*doc, 16)), Theme::light(), width, 1.0);
             let f = View::new(doc.clone(), Arc::new(full(&*doc)), Theme::light(), width, 1.0);
             let (a, b) = (p.total_height(), f.total_height());
             assert!((a / b - 1.0).abs() < 0.02, "width {width}: paged {a} vs full {b}");
+        }
+    }
+}
+
+// ---- cross-block facts (phase 3) ---------------------------------------------------------
+
+/// Hidden, depth, `(title, open)` of an item ([`View::disclosure_of`]).
+type DisclosureState = (bool, usize, Option<(String, bool)>);
+
+/// Disclosure state of every real item of `v`, by source position (start, segment ordinal).
+fn disclosure_states(v: &View) -> Vec<((usize, usize), DisclosureState)> {
+    let m = v.model();
+    let mut out = Vec::new();
+    let mut prev = (usize::MAX, 0);
+    for i in 0..m.items.len() {
+        if m.is_page(i) {
+            prev = (usize::MAX, 0);
+            continue;
+        }
+        let at = m.item_start(i);
+        let nth = if prev.0 == at { prev.1 + 1 } else { 0 };
+        prev = (at, nth);
+        out.push(((at, nth), v.disclosure_of(i)));
+    }
+    out
+}
+
+/// The paged view's states equal the full view's for the same items.
+fn same_states(paged: &View, full: &View) -> Result<(), String> {
+    let f: std::collections::HashMap<_, _> = disclosure_states(full).into_iter().collect();
+    for (k, st) in disclosure_states(paged) {
+        match f.get(&k) {
+            Some(x) if *x == st => {}
+            other => return Err(format!("item at {k:?}: paged {st:?} != full {other:?}")),
+        }
+    }
+    Ok(())
+}
+
+fn materialize_in_view(v: &mut View, i: usize) {
+    let doc = v.doc().clone();
+    let ch = v.model_mut().materialize(&*doc, i);
+    v.apply_change(doc, &ch);
+}
+
+fn evict_in_view(v: &mut View, r: std::ops::Range<usize>) {
+    let doc = v.doc().clone();
+    let ch = v.model_mut().evict(&*doc, r, None);
+    v.apply_change(doc, &ch);
+}
+
+/// Disclosures pair document-wide: whatever pages are materialized, in whatever order, and
+/// whatever the reader toggled, every real item of a paged view (pages of 1 and 2 blocks) is
+/// hidden, indented and titled as in the full view; nested, quoted, malformed and
+/// separate-summary disclosures included.
+#[test]
+fn disclosures_pair_alike_in_every_load_and_evict_order() {
+    let mut src = String::from("# Top\n\n");
+    for i in 0..45 {
+        src.push_str(&format!("Paragraph {i}.\n\n"));
+        src.push_str(&disclosure_snippet(i));
+    }
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(&src));
+    let mut full_v = View::new(doc.clone(), Arc::new(full(&*doc)), Theme::light(), 700.0, 1.0);
+    for tops in [1, 2] {
+        for order in 0..3u64 {
+            let mut v = View::new(doc.clone(), Arc::new(paged(&*doc, tops)), Theme::light(), 700.0, 1.0);
+            assert_eq!(v.model().cross.disclosures(), full_v.model().cross.disclosures());
+            same_states(&v, &full_v).unwrap_or_else(|e| panic!("tops {tops}: open: {e}"));
+            // materialize in an order (back to front, front to back, from the middle out),
+            // evicting every third run on the way
+            let mut seed = 0x2545_f491_4f6c_dd1du64 ^ order;
+            let mut step = 0;
+            while let Some(i) = {
+                let pages: Vec<usize> = (0..v.len()).filter(|&i| v.model().is_page(i)).collect();
+                match order {
+                    0 => pages.last().copied(),
+                    1 => pages.first().copied(),
+                    _ => pages.get(pages.len() / 2).copied(),
+                }
+            } {
+                materialize_in_view(&mut v, i);
+                step += 1;
+                if step % 3 == 0 {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let runs = evictable(v.model(), &**v.doc(), tops.max(2));
+                    if !runs.is_empty() && step < 60 {
+                        evict_in_view(&mut v, runs[seed as usize % runs.len()].clone());
+                    }
+                }
+                same_states(&v, &full_v).unwrap_or_else(|e| panic!("tops {tops} order {order} step {step}: {e}"));
+                if step > 400 {
+                    break;
+                }
+            }
+        }
+    }
+    // the reader's toggle survives the eviction of the disclosure's start marker
+    let mut v = View::new(doc.clone(), Arc::new(paged(&*doc, 1)), Theme::light(), 700.0, 1.0);
+    let at = src.find("<details>\n<summary>Sum 9</summary>").unwrap();
+    for view in [&mut v, &mut full_v] {
+        view.ensure_offset(at);
+        let i = view.model().item_at_offset(at);
+        assert!(view.disclosure_of(i).2.is_some_and(|(t, open)| t == "Sum 9" && !open));
+        view.toggle_expanded(i);
+    }
+    same_states(&v, &full_v).unwrap();
+    let i = v.model().item_at_offset(at);
+    let runs = evictable(v.model(), &**v.doc(), 1);
+    let r = runs.iter().find(|r| r.contains(&i)).unwrap().clone();
+    evict_in_view(&mut v, r);
+    assert!(v.model().is_page(v.model().item_at_offset(at)));
+    v.ensure_offset(at);
+    let i = v.model().item_at_offset(at);
+    assert_eq!(v.disclosure_of(i).2, Some(("Sum 9".to_string(), true)), "still open");
+    same_states(&v, &full_v).unwrap();
+}
+
+/// A placeholder's measured height is dropped when an input its blocks depend on changes:
+/// the outline (a page holding a `[toc]`) and the resource root (a page showing images).
+#[test]
+fn measured_page_heights_follow_document_level_inputs() {
+    let mut src = String::from("---\ntypora-root-url: /a\n---\n\n");
+    for i in 0..40 {
+        src.push_str(&format!("## Heading {i}\n\ntext {i}\n\n"));
+        if i == 20 {
+            src.push_str("[toc]\n\n![pic](p.png)\n\n");
+        }
+    }
+    let mut d = md(&src);
+    let doc: Arc<dyn FormatDoc> = Arc::new(d.clone());
+    let mut v = View::new(doc.clone(), Arc::new(paged(&*doc, 2)), Theme::light(), 700.0, 1.0);
+    let toc = src.find("[toc]").unwrap();
+    v.ensure_offset(toc);
+    let i = v.model().item_at_offset(toc);
+    // evict the run holding the TOC with a deliberately wrong measured height
+    let runs = evictable(v.model(), &*doc, 2);
+    let r = runs.iter().find(|r| r.contains(&i)).unwrap().clone();
+    let key_probe = v.estimate(r.start);
+    let _ = key_probe;
+    let docc = v.doc().clone();
+    let ch = v
+        .model_mut()
+        .evict(&*docc, r.clone(), Some((2800, 0, 12345.0f32.to_bits())));
+    v.apply_change(docc, &ch);
+    let p = r.start;
+    assert!(v.model().is_page(p));
+    let before = v.height(p);
+    // more headings: the outline grows, the TOC page is estimated again
+    let end = d.text().len();
+    let e = d.apply(&PatchSet::single_verbatim(end..end, "## New A\n\n## New B\n\n"));
+    let ch = v.model_mut().apply(&d, &e);
+    v.apply_change(Arc::new(d.clone()), &ch);
+    assert!(v.model().is_page(p));
+    assert_eq!(v.height(p), v.estimate(p), "re-estimated after the outline changed");
+    assert_ne!(v.height(p), before);
+    // the resource root changes: an image page is estimated again
+    let at = d.text().find("/a").unwrap();
+    let gens = v.model().cross.gens;
+    let e = d.apply(&PatchSet::single_verbatim(at..at + 2, "/b"));
+    let ch = v.model_mut().apply(&d, &e);
+    v.apply_change(Arc::new(d.clone()), &ch);
+    assert!(v.model().cross.gens.resources > gens.resources);
+}
+
+/// What the reader sees is the same: jumping to source positions all over a document with
+/// disclosures, `[toc]`s, references and repeated headings, the paged view (pages of 1 and 2
+/// blocks) shows the same items at the same places with the same rendered text as the full
+/// view.
+#[test]
+fn paged_and_full_views_show_the_same() {
+    let src = big_docs().swap_remove(0);
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(&src));
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let shown = |v: &mut View, f: &mut dyn markise_layout::TextShaper| -> Vec<(usize, i32, String)> {
+        let vis = v.frame(800.0, 300.0, f, &NoImages);
+        vis.iter()
+            .map(|x| {
+                let text: String = x
+                    .layout
+                    .prims
+                    .iter()
+                    .filter_map(|p| match p {
+                        markise_layout::block::Prim::Text { text, .. } => Some(text.text().to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                (v.model().item_start(x.idx), x.y.round() as i32, text)
+            })
+            .collect()
+    };
+    for tops in [1, 2] {
+        let mut full_v = View::new(doc.clone(), Arc::new(full(&*doc)), Theme::light(), 700.0, 1.0);
+        let mut v = View::new(doc.clone(), Arc::new(paged(&*doc, tops)), Theme::light(), 700.0, 1.0);
+        for k in 0..25 {
+            let at = src.len() * k / 25;
+            let at = src[..at].rfind("\n\n").map_or(0, |p| p + 2);
+            for view in [&mut v, &mut full_v] {
+                view.ensure_offset(at);
+                let i = view.model().item_at_offset(at);
+                view.scroll_to_item(i);
+            }
+            let (a, b) = (shown(&mut v, &mut f), shown(&mut full_v, &mut f));
+            assert_eq!(a, b, "tops {tops}, at {at}");
         }
     }
 }

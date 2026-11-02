@@ -47,6 +47,8 @@ pub(super) struct PagingState {
     /// Source offsets kept materialized (the caret and the selection's ends): their pages and
     /// the items around them stay.
     pins: Vec<usize>,
+    /// Dependency generations the placeholder heights were estimated for.
+    pub(super) gens: crate::model::DepGens,
     /// Scroll position and item count at the last eviction scan (the scan runs again after
     /// a viewport of scrolling or a page's worth of new items).
     last_scan: Option<(f64, usize)>,
@@ -65,6 +67,7 @@ impl View {
         if let Some((w, k, h)) = s.measured
             && w == (self.width * 4.0) as u32
             && k == self.paging_key()
+            && s.deps_unchanged(&self.model.cross.gens)
         {
             return f32::from_bits(h);
         }
@@ -115,6 +118,27 @@ impl View {
         self.paging.pins.extend_from_slice(offsets);
         for &o in offsets {
             self.ensure_offset(o);
+        }
+    }
+
+    /// Paged models: after the document-level inputs changed (outline, resource root,
+    /// reference definitions), placeholders whose measured height depended on them are
+    /// estimated again (a `[toc]` page follows the outline's length, an image page the
+    /// resource root).
+    pub(super) fn refresh_page_heights(&mut self) {
+        let gens = self.model.cross.gens;
+        if gens == self.paging.gens {
+            return;
+        }
+        self.paging.gens = gens;
+        if !self.model.is_paged() {
+            return;
+        }
+        for i in 0..self.len().min(self.exact.len()) {
+            if self.model.is_page(i) {
+                let v = self.estimate(i) as f64;
+                self.heights.set(i, v);
+            }
         }
     }
 
@@ -248,7 +272,8 @@ impl View {
             let y = self.scroll_y();
             let lo = self.item_at_y(y - AHEAD_ABOVE * vh);
             let hi = self.item_at_y(y + AHEAD_BELOW * vh);
-            match (lo..=hi).find(|&j| self.model.is_page(j)) {
+            // placeholders inside a closed disclosure stay (zero height, never shown)
+            match (lo..=hi).find(|&j| self.model.is_page(j) && !self.disclosure_hidden(j)) {
                 Some(j) => self.materialize_at(j),
                 None => break,
             }
@@ -262,8 +287,8 @@ impl View {
 
     /// Evicts runs of real items farther than [`KEEP_SCREENS`] viewports from the viewport,
     /// in chunks of at most a page of whole top-level blocks. Kept: the first and the last
-    /// chunk (document edges), chunks holding the caret or a selection end, the focused item, and chunks with
-    /// a disclosure marker paired with one outside the chunk (its pairing would be lost).
+    /// chunk (document edges), chunks holding the caret or a selection end and the focused item (disclosures are
+    /// paired document-wide, so markers may be evicted).
     fn evict_far(&mut self, viewport_h: f32) {
         let n = self.len();
         if n < 3 {
@@ -347,7 +372,7 @@ impl View {
                 let caret = pin_tops.iter().any(|c| (t0..=t1).contains(c));
                 let held =
                     focus.is_some_and(|f| (s..e).contains(&f)) || self.caret_item.is_some_and(|c| (s..e).contains(&c));
-                if !edge && !caret && !held && !self.disclosures.paired_outside(s..e) {
+                if !edge && !caret && !held {
                     chunks.push(s..e);
                 }
                 s = e;
