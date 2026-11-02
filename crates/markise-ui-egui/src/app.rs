@@ -53,8 +53,10 @@ mod files;
 mod find;
 mod menus;
 mod prefs;
+mod quick_open;
 mod review;
 mod vault;
+mod workflow;
 pub use menus::MenuHost;
 pub use vault::{Completion, NavHistory, Suggestion};
 
@@ -427,6 +429,8 @@ pub struct MarkiseApp {
     /// Formatting toolbar state (spec 04 §3.2; shown per the `showToolbar` setting).
     toolbar: crate::toolbar::Toolbar,
     find: find::FindState,
+    workflow: workflow::Workflow,
+    quick: quick_open::QuickOpen,
     tab: Tab,
     /// Recent files of the session and the sidebar's collapsed sections.
     side: crate::sidebar::SideState,
@@ -545,6 +549,8 @@ impl MarkiseApp {
             sidebar_visible: true,
             toolbar: Default::default(),
             find: Default::default(),
+            workflow: Default::default(),
+            quick: Default::default(),
             tab: Tab::Outline,
             side: Default::default(),
             tree: None,
@@ -961,6 +967,7 @@ impl MarkiseApp {
             if let Some(w) = self.watcher.as_mut() {
                 w.watch_folder(&path);
             }
+            self.remember_path(&path);
             self.tree = Some(FileTree::new(path));
             self.tab = Tab::Files;
             self.sidebar_visible = true;
@@ -992,6 +999,7 @@ impl MarkiseApp {
 
     fn open_now(&mut self, path: PathBuf, reason: LoadReason) {
         if self.tree.is_none()
+            && !self.workflow.drafts.contains(&path)
             && let Some(parent) = path.parent()
         {
             // Mount the file's folder (lazy listing, decision M1-1).
@@ -1255,7 +1263,16 @@ impl MarkiseApp {
     /// Replaces the document; `untitled`: a new document without a file (`loaded.path` is
     /// its placeholder, not watched).
     fn install_doc(&mut self, loaded: Loaded, untitled: bool) {
+        let recovered = self.workflow.drafts.contains(&loaded.path);
+        self.forget_backup();
+        let untitled = untitled || recovered;
+        if recovered {
+            self.workflow.recovered = Some(loaded.path.clone());
+        }
         if !untitled {
+            self.remember_path(&loaded.path);
+        }
+        if !untitled && self.themes.file_settings().record_recent {
             self.side.opened(&loaded.path);
         }
         let same = !untitled
@@ -1304,6 +1321,12 @@ impl MarkiseApp {
             saved_fp,
             fp_cache: std::cell::Cell::new(None),
         });
+        if recovered {
+            let d = self.doc.as_mut().unwrap();
+            d.path = std::env::temp_dir().join("Recovered.md");
+            d.saved_fp = None;
+            d.viewer.ed.session.clear_saved_state();
+        }
         self.nav_installed(untitled);
     }
 
@@ -1593,6 +1616,9 @@ impl MarkiseApp {
                         let written = self.doc.as_ref().and_then(|d| d.disk);
                         self.document_moved(&target, written);
                     }
+                    if !self.is_dirty() {
+                        self.forget_backup();
+                    }
                     self.finish_then(s.then);
                 }
                 Err(SaveError::Conflict { found }) => {
@@ -1647,6 +1673,7 @@ impl MarkiseApp {
             Then::Install(loaded) => self.install(*loaded),
             Then::New => self.new_document_now(),
             Then::Close => {
+                self.forget_backup();
                 self.allow_close = true;
                 if let Some(c) = &self.ctx {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1662,7 +1689,16 @@ impl MarkiseApp {
             d.sync();
         }
         if self.allow_close || !self.is_dirty() {
+            self.forget_backup();
             return true;
+        }
+        if self.themes.file_settings().save_on_close && self.saving.is_none() {
+            self.start_save(SaveRequest {
+                expect: None,
+                target: None,
+                then: Then::Close,
+            });
+            return false;
         }
         self.set_ask(Ask::Unsaved(Then::Close));
         false
@@ -1995,6 +2031,7 @@ impl MarkiseApp {
         self.poll_save();
         self.poll_watcher();
         self.poll_themes(ctx);
+        self.workflow_poll(ctx);
         if self.export.poll() && self.export.is_asking_large() {
             self.opened_export_question();
         }
@@ -2078,12 +2115,14 @@ impl MarkiseApp {
         self.rename_blur(ctx);
         self.complete_pre_input(ctx);
         self.attach_pre_input(ctx);
+        self.quick_window(ctx);
         self.central(ui);
         self.complete_update();
         self.complete_ui(ctx);
         self.theme_report_window(ctx);
         self.font_window(ctx);
         self.preferences_window(ctx);
+        self.recovery_window(ctx);
         self.about.show(ctx, self.commit.as_deref());
         self.dialogs(ctx);
         self.update_title(ctx);

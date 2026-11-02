@@ -152,7 +152,50 @@ const fn review_cmd(
 }
 
 /// Commands implemented by the Markdown planners (spec 02 §10, §15; ADR 0006 §3.2).
-pub static MARKDOWN_COMMANDS: [CommandDescriptor; 45] = [
+pub static MARKDOWN_COMMANDS: [CommandDescriptor; 58] = [
+    cmd("table.addRowAbove", "Add Row Above", &[], S),
+    cmd(
+        "table.addRowBelow",
+        "Add Row Below",
+        &[key("Cmd+Enter", "Ctrl+Enter")],
+        S,
+    ),
+    cmd(
+        "table.deleteRow",
+        "Delete Row",
+        &[key("Shift+Cmd+Backspace", "Ctrl+Shift+Backspace")],
+        S,
+    ),
+    cmd("table.addColumnBefore", "Add Column Before", &[], S),
+    cmd("table.addColumnAfter", "Add Column After", &[], S),
+    cmd("table.deleteColumn", "Delete Column", &[], S),
+    cmd(
+        "table.moveRowUp",
+        "Move Table Row Up",
+        &[key("Ctrl+Cmd+Up", "Ctrl+Alt+Up")],
+        S,
+    ),
+    cmd(
+        "table.moveRowDown",
+        "Move Table Row Down",
+        &[key("Ctrl+Cmd+Down", "Ctrl+Alt+Down")],
+        S,
+    ),
+    cmd(
+        "table.moveColumnLeft",
+        "Move Table Column Left",
+        &[key("Ctrl+Cmd+Left", "Ctrl+Alt+Left")],
+        S,
+    ),
+    cmd(
+        "table.moveColumnRight",
+        "Move Table Column Right",
+        &[key("Ctrl+Cmd+Right", "Ctrl+Alt+Right")],
+        S,
+    ),
+    cmd("table.alignLeft", "Align Column Left", &[], S),
+    cmd("table.alignCenter", "Align Column Center", &[], S),
+    cmd("table.alignRight", "Align Column Right", &[], S),
     cmd("block.toggleTask", "Toggle Task Status", &[mac_only("Ctrl+X")], S),
     cmd("block.paragraph", "Paragraph", &[key("Cmd+0", "Ctrl+0")], S),
     cmd("block.heading1", "Heading 1", &[key("Cmd+1", "Ctrl+1")], S),
@@ -1394,7 +1437,7 @@ impl Document {
     }
 
     /// The leaf block starting at (or containing) absolute offset `at`, relative to its origin.
-    fn leaf_rel(&self, at: usize) -> Option<(&Block, usize)> {
+    pub(crate) fn leaf_rel(&self, at: usize) -> Option<(&Block, usize)> {
         let path = self.block_path_at(at);
         for depth in 1..=path.len() {
             let (b, origin) = self.block_at_path_rel(&path[..depth])?;
@@ -2043,6 +2086,9 @@ impl Document {
 
 impl EditBehavior for Document {
     fn can_plan(&self, id: PlannerId, req: &PlanRequest) -> bool {
+        if id.0.starts_with("table.") {
+            return self.can_table_op(id.0, req);
+        }
         if let Some(ok) = self.can_plan_review(id, req) {
             return ok;
         }
@@ -2058,6 +2104,9 @@ impl EditBehavior for Document {
     }
 
     fn plan(&self, id: PlannerId, req: &PlanRequest) -> Result<Plan, PlanError> {
+        if id.0.starts_with("table.") {
+            return self.plan_table_op(id.0, req);
+        }
         if let Some(r) = self.heading_block_request(id, req) {
             // the caret stays where it was (after the whitespace), mapped through the patches
             let mut plan = self.plan(id, &r)?;

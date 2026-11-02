@@ -22,6 +22,7 @@ use markise_theme::catalog::{StyleId, ThemeId};
 pub enum MenuAction {
     /// A registry command or an [`APP_COMMANDS`] id.
     Command(&'static str),
+    Recent(std::path::PathBuf),
     /// Theme → Style.
     Style(StyleId),
     /// Theme → Colors.
@@ -38,6 +39,7 @@ impl MenuAction {
     /// Stable key of the action (native menu item id).
     pub fn key(&self) -> String {
         match self {
+            MenuAction::Recent(p) => format!("recent:{}", p.display()),
             MenuAction::Command(id) => (*id).to_string(),
             MenuAction::Style(s) => format!("theme.style:{s:?}"),
             MenuAction::Colors(t) => format!("theme.colors:{t:?}"),
@@ -284,6 +286,9 @@ const fn mac_only(mac: &'static str) -> DefaultKey {
 /// the engine registry does not hold. Same descriptor type as the registry, so labels and
 /// per-platform chords have one source (spec 02 §15).
 pub static APP_COMMANDS: &[CommandDescriptor] = &[
+    app("file.clearRecent", "Clear Items", &[]),
+    app("file.recover", "Recover Unsaved Drafts…", &[]),
+    app("file.quickOpen", "Quick Open…", &[both("Cmd+P", "Ctrl+P")]),
     app(
         "file.openFolder",
         "Open Folder…",
@@ -681,6 +686,23 @@ fn entries_egui(ui: &mut egui::Ui, entries: &[Entry], platform: Platform, chosen
         }
     }
 }
+
+/// Table operations in the Paragraph and document context menus (spec 02 §6).
+pub const TABLE_COMMANDS: &[Option<&str>] = &[
+    Some("table.addRowAbove"),
+    Some("table.addRowBelow"),
+    Some("table.deleteRow"),
+    Some("table.addColumnBefore"),
+    Some("table.addColumnAfter"),
+    Some("table.deleteColumn"),
+    Some("table.moveRowUp"),
+    Some("table.moveRowDown"),
+    Some("table.moveColumnLeft"),
+    Some("table.moveColumnRight"),
+    Some("table.alignLeft"),
+    Some("table.alignCenter"),
+    Some("table.alignRight"),
+];
 
 #[cfg(test)]
 mod tests {

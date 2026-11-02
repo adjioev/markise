@@ -221,7 +221,10 @@ impl MarkiseApp {
     /// document now corresponds to (what Save As wrote; for a rename the unchanged content),
     /// the watcher's baseline for the new path (ADR 0010).
     pub(super) fn document_moved(&mut self, path: &Path, version: Option<DiskVersion>) {
-        self.side.opened(path);
+        if self.themes.file_settings().record_recent {
+            self.side.opened(path);
+        }
+        self.remember_path(path);
         if let Some(w) = self.watcher.as_mut() {
             w.watch_file(path, version);
         }

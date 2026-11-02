@@ -104,6 +104,7 @@ impl MarkiseApp {
             has_theme_folder: t.has_user_dir(),
             key_bindings: self.key_bindings_override.clone().unwrap_or_else(|| t.key_bindings()),
             images: t.image_settings().clone(),
+            files: t.file_settings(),
         }
     }
 
@@ -145,6 +146,7 @@ impl MarkiseApp {
     /// Applies one change from the Preferences window exactly as the menu item would.
     pub fn apply_preference(&mut self, ctx: &Context, c: Change) {
         match c {
+            Change::Files(f) => self.themes.set_file_settings(f),
             Change::Editing(e) => self.themes.set_editing(e),
             Change::Source(s) => self.themes.set_source_prefs(s),
             Change::Diagrams(on) => self.set_diagrams(on),
@@ -215,9 +217,11 @@ impl MarkiseApp {
                     self.set_zoom(1.0);
                 }
             }
-            Section::Files => self
-                .themes
-                .set_image_settings(markise_engine::settings::ImageSettings::default()),
+            Section::Files => {
+                self.themes
+                    .set_image_settings(markise_engine::settings::ImageSettings::default());
+                self.themes.set_file_settings(Default::default());
+            }
             Section::General | Section::Export => {}
         }
         if let Some(c) = &self.ctx {

@@ -25,3 +25,7 @@ pub mod watch;
 
 /// Callback that wakes the UI (e.g. `egui::Context::request_repaint`).
 pub type Wake = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+pub mod recovery;
+
+pub mod quick_open;

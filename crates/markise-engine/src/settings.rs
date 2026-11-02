@@ -543,6 +543,46 @@ impl MarkdownSettings {
     }
 }
 
+/// Saving preferences (issues #49/#52). Backups are independent of autosave-to-file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileSettings {
+    pub autosave: bool,
+    pub autosave_minutes: u32,
+    pub backups: bool,
+    pub save_on_close: bool,
+    pub record_recent: bool,
+}
+impl Default for FileSettings {
+    fn default() -> Self {
+        Self {
+            autosave: false,
+            autosave_minutes: 5,
+            backups: true,
+            save_on_close: false,
+            record_recent: true,
+        }
+    }
+}
+impl FileSettings {
+    fn to_json(self) -> Value {
+        serde_json::json!({"enableAutoSave":self.autosave,"autoSaveTimer":self.autosave_minutes,"noUnsavedDraftsBackup":!self.backups,"saveOnClose":self.save_on_close,"noRecentFiles":!self.record_recent})
+    }
+    fn from_json(v: &Value) -> Option<Self> {
+        let m = v.as_object()?;
+        Some(Self {
+            autosave: m.get("enableAutoSave").and_then(Value::as_bool).unwrap_or(false),
+            autosave_minutes: m
+                .get("autoSaveTimer")
+                .and_then(Value::as_u64)
+                .unwrap_or(5)
+                .clamp(1, 1440) as u32,
+            backups: !m.get("noUnsavedDraftsBackup").and_then(Value::as_bool).unwrap_or(false),
+            save_on_close: m.get("saveOnClose").and_then(Value::as_bool).unwrap_or(false),
+            record_recent: !m.get("noRecentFiles").and_then(Value::as_bool).unwrap_or(false),
+        })
+    }
+}
+
 /// The settings the app persists.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -572,6 +612,7 @@ pub struct Settings {
     pub markdown: MarkdownSettings,
     /// Pasted and dropped images (key `images`).
     pub images: ImageSettings,
+    pub files: FileSettings,
     pub overrides: FontOverrides,
     /// Members of `overrides` this version does not know, kept verbatim.
     pub overrides_extra: Map<String, Value>,
@@ -623,6 +664,7 @@ impl Default for Settings {
             source: SourceSettings::default(),
             markdown: MarkdownSettings::default(),
             images: ImageSettings::default(),
+            files: FileSettings::default(),
             overrides: FontOverrides::default(),
             overrides_extra: Map::new(),
             consumed_pending: Vec::new(),
@@ -735,6 +777,7 @@ pub struct SettingsPatch {
     pub source: Option<SourceSettings>,
     pub markdown: Option<MarkdownSettings>,
     pub images: Option<ImageSettings>,
+    pub files: Option<FileSettings>,
     pub overrides: OverridesPatch,
     pub side_by_side_split: Option<f32>,
     pub zoom: Option<f32>,
@@ -810,6 +853,9 @@ impl SettingsPatch {
         if let Some(v) = self.markdown {
             s.markdown = v;
         }
+        if let Some(v) = self.files {
+            s.files = v;
+        }
         if let Some(v) = &self.images {
             s.images = v.clone();
         }
@@ -866,6 +912,9 @@ impl SettingsPatch {
         }
         if saved.markdown.is_some() {
             self.markdown = None;
+        }
+        if saved.files.is_some() {
+            self.files = None;
         }
         if saved.images.is_some() {
             self.images = None;
@@ -932,6 +981,9 @@ impl SettingsPatch {
         if later.markdown.is_some() {
             self.markdown = later.markdown;
         }
+        if later.files.is_some() {
+            self.files = later.files;
+        }
         if later.images.is_some() {
             self.images = later.images;
         }
@@ -989,6 +1041,9 @@ impl SettingsPatch {
         if let Some(v) = self.markdown {
             m.insert("markdown".into(), v.to_json());
         }
+        if let Some(v) = self.files {
+            m.insert("files".into(), v.to_json());
+        }
         if let Some(v) = &self.images {
             m.insert("images".into(), v.to_json());
         }
@@ -1045,6 +1100,7 @@ impl SettingsPatch {
             source: m.get("source").and_then(SourceSettings::from_json),
             markdown: m.get("markdown").and_then(MarkdownSettings::from_json),
             images: m.get("images").and_then(ImageSettings::from_json),
+            files: m.get("files").and_then(FileSettings::from_json),
             ..Default::default()
         };
         if let Some(Value::Object(o)) = m.get("overrides") {
@@ -1172,6 +1228,9 @@ impl Settings {
         if let Some(e) = map.remove("markdown").as_ref().and_then(MarkdownSettings::from_json) {
             s.markdown = e;
         }
+        if let Some(e) = map.remove("files").as_ref().and_then(FileSettings::from_json) {
+            s.files = e;
+        }
         if let Some(e) = map.remove("images").as_ref().and_then(ImageSettings::from_json) {
             s.images = e;
         }
@@ -1197,6 +1256,7 @@ impl Settings {
         map.insert("source".into(), self.source.to_json());
         map.insert("markdown".into(), self.markdown.to_json());
         map.insert("images".into(), self.images.to_json());
+        map.insert("files".into(), self.files.to_json());
         if !self.consumed_pending.is_empty() {
             map.insert("consumed_pending".into(), Value::from(self.consumed_pending.clone()));
         }
@@ -1438,6 +1498,32 @@ mod tests {
     use super::*;
 
     /// DG-2/DG-7: `diagrams` defaults to on, round-trips, and patches carry it.
+    #[test]
+    fn file_preferences_patch_roundtrip_and_timer_bounds() {
+        let settings = Settings::from_json(
+            r#"{"version":2,"files":{"enableAutoSave":true,"autoSaveTimer":0,"saveOnClose":true},"unrelated":"kept"}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.files.autosave_minutes, 1);
+        assert!(settings.files.autosave && settings.files.backups && settings.files.save_on_close);
+        let patch = SettingsPatch {
+            files: Some(FileSettings {
+                record_recent: false,
+                ..settings.files
+            }),
+            ..Default::default()
+        };
+        let patch = SettingsPatch::from_json(&patch.to_json()).unwrap();
+        let mut changed = settings;
+        patch.apply(&mut changed);
+        let changed = Settings::from_json(&changed.to_json()).unwrap();
+        assert!(!changed.files.record_recent);
+        assert_eq!(changed.extra["unrelated"], "kept");
+        let mut pending = SettingsPatch::default();
+        pending.merge(patch.clone());
+        assert_eq!(pending.files, patch.files);
+    }
+
     #[test]
     fn markdown_settings_default_on_and_round_trip() {
         assert!(Settings::default().markdown.wikilinks);

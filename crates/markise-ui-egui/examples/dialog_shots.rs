@@ -46,6 +46,12 @@ type Setup = fn(&mut MarkiseApp, &Context, &Path);
 
 fn scenes() -> Vec<(&'static str, Setup)> {
     vec![
+        ("quick-open", |app, ctx, _| {
+            app.menu_action(ctx, &MenuAction::Command("file.quickOpen"));
+        }),
+        ("recovery", |app, ctx, _| {
+            app.menu_action(ctx, &MenuAction::Command("file.recover"));
+        }),
         ("common-html", |app, _, _| {
             app.edit_source_text(|t| *t = "# HTML in your notes\n\nPress <kbd>⌘</kbd> + <kbd>S</kbd> to save.<!-- private note -->\n\n<details>\n<summary>Show the answer</summary>\n\nThis answer is hidden until you expand it.\n\n</details>\n\n<details open>\n<summary>Keyboard shortcuts</summary>\n\n- <kbd>⌘</kbd> + <kbd>F</kbd> finds text.\n- <kbd>Esc</kbd> closes the Find bar.\n\n</details>\n\nYour Markdown stays unchanged.\n".into());
             app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
