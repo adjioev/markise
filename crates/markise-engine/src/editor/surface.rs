@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use epaint::Rect;
-use markise_doc::{DocPos, DocumentFormat, FormatDoc, FormatOptions, Params, Selection};
+use markise_doc::{DocPos, DocumentFormat, EditSummary, FormatDoc, FormatOptions, Params, Selection};
 use markise_layout::caret::Geometry;
 use markise_layout::{DocModel, Images, TextShaper, View};
 
@@ -80,6 +80,9 @@ pub struct EditorView {
     /// The source editor (Source and Side by Side modes; M2d), kept in step by
     /// [`EditorView::sync`].
     pub source: Option<super::SourcePane>,
+    /// The document's edits since [`EditorView::clear_recent_edits`] (`None`: replaced): the UI
+    /// maps positions it kept from its last frame through them ([`EditorView::map_recent`]).
+    recent: Option<Vec<EditSummary>>,
 }
 
 impl EditorView {
@@ -96,6 +99,7 @@ impl EditorView {
             placeholder,
             reveal: true,
             source: None,
+            recent: Some(Vec::new()),
         };
         e.sync();
         e
@@ -131,6 +135,9 @@ impl EditorView {
                 }
             }
             DocChange::Edited(e) => {
+                if let Some(r) = &mut self.recent {
+                    r.push(e.clone());
+                }
                 let ch = self.view.model_mut().apply(self.session.doc(), &e);
                 self.view.apply_change(self.session.doc_arc().clone(), &ch);
                 if let Some(p) = self.source.as_mut() {
@@ -141,6 +148,7 @@ impl EditorView {
                 self.source_load_selection();
             }
             DocChange::Replaced => {
+                self.recent = None;
                 // the same kind of model as before (paged or full)
                 let paging = self.view.model().paging();
                 let model = Arc::new(DocModel::build_with(self.session.doc(), self.path.as_deref(), paging));
@@ -152,6 +160,27 @@ impl EditorView {
             }
         }
         self.pin_caret();
+    }
+
+    /// Forgets the recent edits (the UI took a fresh look at the document: its last frame).
+    pub fn clear_recent_edits(&mut self) {
+        self.recent = Some(Vec::new());
+    }
+
+    /// Source position `at` of the document as it was at [`EditorView::clear_recent_edits`],
+    /// in the current document: moved by the edits since, `None` when an edit changed the text
+    /// there (or the document was replaced). For positions the UI keeps from its last frame
+    /// (hit geometry, a pressed checkbox) when keys edit the text before the pointer is handled.
+    pub fn map_recent(&self, at: usize) -> Option<usize> {
+        let mut at = at;
+        for e in self.recent.as_ref()? {
+            if at >= e.changed.end {
+                at = (at as isize + e.delta) as usize;
+            } else if at >= e.changed.start && !e.changed.is_empty() {
+                return None;
+            }
+        }
+        Some(at)
     }
 
     /// Paged models (issue #125): the pages of the caret and of both ends of every selection

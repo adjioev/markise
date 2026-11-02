@@ -153,6 +153,8 @@ pub struct DocViewer {
     /// Visible items of the last frame (index, top relative to the surface), for hit tests.
     /// (Kept by source position, [`DocViewer::item_key`]: a paged model may materialize pages
     /// between frames, which shifts item indices; [`DocViewer::shown`] resolves them.)
+    /// Keys are handled before the pointer: positions are mapped through the edits since the
+    /// frame ([`EditorView::map_recent`]; an item whose text an edit changed is not hit).
     last_visible: Vec<((usize, usize), f32)>,
     /// Column left edge of the last frame (screen x).
     last_left: f32,
@@ -620,9 +622,11 @@ impl DocViewer {
             let over = ui
                 .input(|i| i.pointer.interact_pos())
                 .and_then(|p| self.task_box_at(p, rect.top()));
+            // (the press's item moved with the edits since: compared at its current position)
+            let pressed_at = self.ed.map_recent(t.0.0).map(|at| ((at, t.0.1), t.1));
             if let Some((i, ord)) = over
                 && editable
-                && (self.item_key(i), ord) == t
+                && Some((self.item_key(i), ord)) == pressed_at
                 && self.toggle_task(i, ord)
             {
                 out.edited = true;
@@ -781,6 +785,7 @@ impl DocViewer {
         out.painted = visible.len();
         out.laid_out = self.ed.view.laid_out.len();
         self.last_visible = visible.iter().map(|v| (self.item_key(v.idx), v.y)).collect();
+        self.ed.clear_recent_edits();
         self.last_left = left;
         self.last_top = rect.top();
 
@@ -1075,6 +1080,8 @@ impl DocViewer {
         self.last_visible
             .iter()
             .filter_map(|&((start, nth), y)| {
+                // moved by the edits since the frame (keys come before the pointer)
+                let start = self.ed.map_recent(start)?;
                 let i = m.items.partition_point_start(start) + nth;
                 (i < m.items.len() && m.item_start(i) == start && !m.is_page(i)).then_some((i, y))
             })

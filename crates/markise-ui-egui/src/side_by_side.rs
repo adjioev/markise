@@ -166,7 +166,9 @@ pub fn rendered_target(view: &mut markise_layout::View, lines: &dyn LineMap, top
         return None;
     }
     view.ensure_offset(lines.doc_start(top.max(0.0).floor() as usize));
-    for _ in 0..8 {
+    // each round materializes a page (a long run of definition-only pages takes many): at
+    // most as many rounds as there are items
+    for _ in 0..=view.len() {
         let t = source_to_rendered(view.model(), lines, top)?;
         match t {
             Target::At { start, nth, .. } if target_item(view.model(), start, nth).is_none() => {
@@ -552,5 +554,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Review of #144: a source line in a long run of definition-only pages (more than any
+    /// fixed retry limit) still finds the next rendered block, loading page after page.
+    #[test]
+    fn sync_crosses_long_runs_of_definition_only_pages() {
+        let mut src = String::from("first\n\n");
+        for i in 0..40 {
+            src.push_str(&format!("[d{i}]: http://x/{i}\n\n"));
+        }
+        src.push_str("after\n\nmore\n\nend\n");
+        let doc: std::sync::Arc<dyn markise_doc::FormatDoc> = std::sync::Arc::new(markise_md::parse(&src));
+        let mk = |paging| {
+            let m = std::sync::Arc::new(DocModel::build_with(&*doc, None, paging));
+            markise_layout::View::new(doc.clone(), m, Theme::light(), 600.0, 1.0)
+        };
+        let mut full = mk(markise_layout::Paging::Full);
+        let mut paged = mk(markise_layout::Paging::Paged { tops: 1 });
+        let li = LineIndex::new(&src);
+        let line = li.line_of_doc(src.find("[d1]").unwrap()) as f32;
+        let t = rendered_target(&mut paged, &li, line);
+        assert_eq!(t, rendered_target(&mut full, &li, line));
+        let Some(Target::At { start, nth, .. }) = t else {
+            panic!("{t:?}")
+        };
+        assert_eq!(start, src.find("after").unwrap(), "the block after the definitions");
+        assert!(target_item(paged.model(), start, nth).is_some(), "a real item");
     }
 }
