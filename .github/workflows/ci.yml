@@ -5,6 +5,8 @@
 # binaries on every OS): pushes to main, workflow_dispatch (manual; not reported into PR
 # checks), and PR runs while the PR carries the `full-ci` label. The binaries are uploaded as
 # artifacts (3 days) only from pushes to main, to keep Actions storage small.
+# Heavy suite (heavy.yml, Linux): nightly (schedule), workflow_dispatch, and PR runs while the PR
+# carries the separate `heavy` label. `full-ci` does not run it.
 # macOS minutes are billed at 10x and Windows at 2x the Linux rate on private repositories, which is why they do not run on every PR push.
 #
 # Superseded runs of the same PR/branch are cancelled (never on main). Docs-only changes
@@ -38,14 +40,17 @@ on:
       - "**/testdata/**"
   pull_request:
     # No `labeled`: label events would start runs (unrelated labels: all jobs skipped, which
-    # reads as green). After adding `full-ci`, push a commit (an empty one is fine) or close and
-    # reopen the PR; every later PR run then includes macOS + Windows while the label is set.
+    # reads as green). After adding `full-ci` or `heavy`, push a commit (an empty one is fine)
+    # or close and reopen the PR; every later PR run then includes macOS + Windows (`full-ci`)
+    # or the heavy suite (`heavy`) while the label is set.
     types: [opened, synchronize, reopened, ready_for_review]
     paths: *paths
-  # Manual full-matrix run on main or any branch. It does not report into PR checks.
+  # Manual full-matrix + heavy run on main or any branch. It does not report into PR checks.
   workflow_dispatch:
   schedule:
-    - cron: "23 16 * * *" # nightly on the default branch (main), UTC
+    # Nightly on the default branch (main), 16:23 UTC: Linux fast checks + heavy suite. Failures
+    # e-mail the last editor of this cron and open/update a `nightly-failure` issue (below).
+    - cron: "23 16 * * *"
 
 # PR runs are keyed by PR number (a new push cancels the superseded run, pending or in
 # progress); every push to main gets its own group (run id), so no main run is ever cancelled
@@ -165,15 +170,19 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+  # Heavy suite: nightly, manual, or PRs labeled `heavy` (not `full-ci`, not pushes to main).
+  # The condition is repeated as EXPECT_HEAVY in `CI result`; keep both in sync. On schedule,
+  # github.sha is the latest commit on the default branch (main).
   heavy:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'heavy'))
     uses: ./.github/workflows/heavy.yml
     with:
       sha: ${{ github.sha }}
 
   # Single merge gate: green only when every job of this run succeeded (any failure or
   # cancellation, including one matrix entry, fails it). On a PR run without `full-ci` the
-  # matrix is Linux only, so the gate then certifies Linux only.
+  # matrix is Linux only, so the gate then certifies Linux only; heavy must succeed when it
+  # was requested (EXPECT_HEAVY, same condition as the job) and be skipped otherwise.
   # Branch protection is not available for this private repository on the Free plan, so this is
   # the check to look at before merging (docs/ci.md).
   result:
@@ -188,7 +197,7 @@ jobs:
           LINT: ${{ needs.lint.result }}
           TEST: ${{ needs.test.result }}
           HEAVY: ${{ needs.heavy.result }}
-          EXPECT_HEAVY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
+          EXPECT_HEAVY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'heavy')) }}
           FULL: ${{ env.FULL_CI }}
         run: |
           echo "lint=$LINT test=$TEST heavy=$HEAVY full-matrix=$FULL"
@@ -199,6 +208,33 @@ jobs:
             [ "$HEAVY" = success ]
           else
             [ "$HEAVY" = skipped ]
+          fi
+
+  # A failing nightly run opens one issue labelled `nightly-failure` (or comments on the open one),
+  # in addition to GitHub's e-mail to the user who last edited the cron. Close the issue once
+  # main is fixed. Scheduled runs only; not part of `CI result`.
+  nightly-failure:
+    name: report nightly failure
+    needs: [result]
+    if: always() && github.event_name == 'schedule' && needs.result.result != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the nightly-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          body="Nightly CI failed on main at $SHA: $RUN_URL"
+          number="$(gh issue list --label nightly-failure --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "Nightly CI failure" --label nightly-failure --body "$body"
           fi
 
   # Cargo caches are saved only from main (.github/actions/setup-rust), but rust-cache puts the
