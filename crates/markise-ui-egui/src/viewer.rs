@@ -493,9 +493,7 @@ impl DocViewer {
         // ---- input: wheel / trackpad (smooth scrolling, issue #86)
         {
             let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
-            if resp.hovered() {
-                smooth_scroll::note_hovered_pane(&ctx, page_rect);
-            }
+            smooth_scroll::register_pane(&ctx, page_rect, ui.layer_id());
             let line = theme.line_px() * smooth_scroll::LINES_PER_NOTCH;
             // a programmatic scroll since the last frame (outline, anchor, find, Side by Side
             // sync, edits) drops pending motion

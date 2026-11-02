@@ -261,15 +261,14 @@ impl SourceEditor {
         // ---- wheel / trackpad (smooth scrolling, issue #86)
         {
             let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
-            if resp.hovered() {
-                smooth_scroll::note_hovered_pane(&ctx, resp.rect);
-            }
+            smooth_scroll::register_pane(&ctx, resp.rect, ui.layer_id());
             let line = srcview::metrics(theme).1 * smooth_scroll::LINES_PER_NOTCH;
             // a programmatic scroll since the last frame (centre line, Side by Side sync, find)
             // drops pending motion
             if let Some(a) = source_anchor(viewer) {
                 self.smooth.follow(a, false);
             }
+            self.smooth.follow_x(self.hscroll, false);
             let mut d = smooth_scroll::take_delta(ui, &mut self.smooth, hovered, line, vh);
             if prefs.soft_wrap {
                 d.x = 0.0;
@@ -288,6 +287,7 @@ impl SourceEditor {
             if let Some(a) = source_anchor(viewer) {
                 self.smooth.follow(a, true);
             }
+            self.smooth.follow_x(self.hscroll, true);
         }
         // ---- scrollbar
         let bar = Rect::from_min_max(pos2(rect.right() - SCROLLBAR_W, rect.top()), rect.right_bottom());
@@ -426,6 +426,7 @@ impl SourceEditor {
         if let Some(a) = source_anchor(viewer) {
             self.smooth.follow(a, false);
         }
+        self.smooth.follow_x(self.hscroll, false);
         let mut visible = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
             viewer.ed.source_frame(vh, vh * 0.5, sh)
         });
@@ -433,6 +434,7 @@ impl SourceEditor {
         if let Some(a) = source_anchor(viewer) {
             self.smooth.follow(a, true);
         }
+        self.smooth.follow_x(self.hscroll, true);
         out.laid_out = viewer.ed.source.as_ref().map_or(0, |p| p.view.laid_out.len());
         let (caret_rect, line_rect) = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
             (viewer.ed.source_caret_rect(sh), viewer.ed.source_line_rect(sh))

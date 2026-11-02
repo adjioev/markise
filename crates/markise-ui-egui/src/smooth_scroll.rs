@@ -35,7 +35,9 @@
 //! instead (comparison only); `MARKISE_SCROLL_SNAP=0` turns the pixel snap off. The frame log
 //! (`MARKISE_FRAME_LOG`, see `docs/diagnostics.md`) reads [`take_frame_diag`].
 
-use egui::{Context, Event, Id, MouseWheelSource, MouseWheelUnit, Pos2, RawInput, Rect, TouchPhase, Ui, Vec2, vec2};
+use egui::{
+    Context, Event, Id, LayerId, MouseWheelSource, MouseWheelUnit, Pos2, RawInput, Rect, TouchPhase, Ui, Vec2, vec2,
+};
 
 /// Half-life of the precise-delta drain (seconds): about one frame at 120 Hz.
 pub const PRECISE_HALF_LIFE: f32 = 0.008;
@@ -237,6 +239,8 @@ pub struct SmoothScroll {
     last_event: f64,
     /// The pane's scroll anchor as this state last left it ([`Self::follow`]).
     expected: Option<(usize, f32)>,
+    /// The pane's horizontal offset as this state last left it ([`Self::follow_x`]).
+    expected_x: Option<f32>,
 }
 
 impl Default for SmoothScroll {
@@ -246,6 +250,7 @@ impl Default for SmoothScroll {
             wheel: Default::default(),
             last_event: f64::NEG_INFINITY,
             expected: None,
+            expected_x: None,
         }
     }
 }
@@ -291,6 +296,7 @@ impl SmoothScroll {
         *self = SmoothScroll {
             last_event: self.last_event,
             expected: self.expected,
+            expected_x: self.expected_x,
             ..Default::default()
         };
     }
@@ -308,6 +314,16 @@ impl SmoothScroll {
             self.stop();
         }
         self.expected = Some(anchor);
+    }
+
+    /// [`Self::follow`] for a horizontal offset (the source editor without soft wrap): a
+    /// horizontal move by something else (the caret reveal) drops the pending horizontal motion.
+    pub fn follow_x(&mut self, x: f32, own: bool) {
+        if !own && self.expected_x.is_some_and(|e| e != x) {
+            self.precise[0] = Drain::default();
+            self.wheel[0] = Spring::default();
+        }
+        self.expected_x = Some(x);
     }
 }
 
@@ -367,26 +383,35 @@ struct Claimed {
     events: std::sync::Arc<Vec<Event>>,
 }
 
-/// Screen rectangles of the panes the pointer was over (honouring layers) in the frame being
-/// built, and in the frame before.
+/// Screen rectangles and layers of the panes shown in the frame being built, and in the frame
+/// before.
 #[derive(Clone, Default)]
 struct Panes {
-    current: Vec<Rect>,
-    last: Vec<Rect>,
+    current: Vec<(Rect, LayerId)>,
+    last: Vec<(Rect, LayerId)>,
 }
 
-/// A pane notes that the pointer is over it (egui `hovered`, so not under a popup or dialog):
-/// the next frame's wheel events at that spot are claimed for the panes.
-pub fn note_hovered_pane(ctx: &Context, rect: Rect) {
+/// A pane registers where it is (every frame it is shown): the next frame's wheel events over
+/// it are claimed for the panes unless another layer (a popup, a dialog) is on top there.
+pub fn register_pane(ctx: &Context, rect: Rect, layer: LayerId) {
     ctx.data_mut(|d| {
         d.get_temp_mut_or_default::<Panes>(Id::unique(PANES_ID))
             .current
-            .push(rect)
+            .push((rect, layer))
     });
 }
 
+/// The pointer at `pos` is over a pane and no other layer covers it there (egui's layer at the
+/// position, from the last frame's areas; the panes' own panel layer has no area).
+fn owns_pointer(ctx: &Context, panes: &[(Rect, LayerId)], pos: Pos2) -> bool {
+    let top = ctx.layer_id_at(pos);
+    panes
+        .iter()
+        .any(|(r, layer)| r.contains(pos) && top.is_none_or(|t| t == *layer))
+}
+
 /// Before egui processes `raw` (eframe's `raw_input_hook`): when the pointer is over a pane that
-/// was hovered in the last frame, its wheel events (not Command + wheel: zoom) are taken out of
+/// was shown in the last frame and is not covered by another layer there, its wheel events (not Command + wheel: zoom) are taken out of
 /// `raw` and kept for the panes ([`take_delta`]), so egui neither smooths them nor hands them
 /// to another widget. Elsewhere the input is left alone.
 pub fn claim_wheel_events(ctx: &Context, raw: &mut RawInput) {
@@ -403,7 +428,7 @@ pub fn claim_wheel_events(ctx: &Context, raw: &mut RawInput) {
             _ => {}
         }
     }
-    let over = pointer.is_some_and(|p| panes.iter().any(|r| r.contains(p)));
+    let over = pointer.is_some_and(|p| owns_pointer(ctx, &panes, p));
     let mut claimed = Vec::new();
     if over && !egui_smoothing() {
         raw.events.retain(|e| {
@@ -728,15 +753,29 @@ mod tests {
         assert!(!s.is_settled());
     }
 
+    /// How the pointer meets the pane in [`scenario`].
+    #[derive(Clone, Copy, PartialEq)]
+    enum Pointer {
+        /// Rests on the pane, wheels, then moves on to the other widget.
+        OnPane,
+        /// Comes from the other widget onto the pane in the frame of the wheel event, then
+        /// moves back.
+        Enters,
+        /// Rests on a popup over the pane and wheels there.
+        OnPopup,
+    }
+
     /// Runs frames of a document pane (left half, smooth scrolling) next to another scrollable
-    /// widget (right half, reads egui's smoothed delta) with `claim` as the app's input hook.
-    /// Returns the distance the pane and the other widget scrolled.
-    fn pane_and_other(claim: bool) -> (f32, f32) {
+    /// widget (right half) and under a popup (top left), the two reading egui's smoothed delta;
+    /// `claim`: the app's input hook. Returns the distances the pane, the other widget and the
+    /// popup scrolled.
+    fn scenario(claim: bool, pointer: Pointer) -> (f32, f32, f32) {
         let ctx = Context::default();
         let pane = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(400.0, 600.0));
         let other = Rect::from_min_max(egui::pos2(400.0, 0.0), egui::pos2(800.0, 600.0));
+        let popup = Rect::from_min_max(egui::pos2(50.0, 50.0), egui::pos2(250.0, 250.0));
         let mut state = SmoothScroll::default();
-        let (mut pane_d, mut other_d) = (0.0, 0.0);
+        let (mut pane_d, mut other_d, mut popup_d) = (0.0, 0.0, 0.0);
         let notch = Event::MouseWheel {
             unit: MouseWheelUnit::Line,
             delta: vec2(0.0, -1.0),
@@ -744,13 +783,21 @@ mod tests {
             source: MouseWheelSource::Wheel,
             modifiers: Modifiers::NONE,
         };
+        let (on_pane, on_other, on_popup) = (
+            egui::pos2(300.0, 400.0),
+            egui::pos2(600.0, 100.0),
+            egui::pos2(100.0, 100.0),
+        );
         for f in 0..60 {
-            let events = match f {
-                0 => vec![Event::PointerMoved(egui::pos2(100.0, 100.0))],
-                // (egui hit-tests against the widgets of the previous pass)
-                3 => vec![notch.clone()],
-                // right after the notch the pointer moves on to the other widget
-                5 => vec![Event::PointerMoved(egui::pos2(600.0, 100.0))],
+            // (egui hit-tests against the widgets and areas of the previous pass)
+            let events = match (pointer, f) {
+                (Pointer::OnPane, 0) => vec![Event::PointerMoved(on_pane)],
+                (Pointer::OnPane, 3) => vec![notch.clone()],
+                (Pointer::Enters, 0) => vec![Event::PointerMoved(on_other)],
+                (Pointer::Enters, 3) => vec![Event::PointerMoved(on_pane), notch.clone()],
+                (Pointer::OnPopup, 0) => vec![Event::PointerMoved(on_popup)],
+                (Pointer::OnPopup, 3) => vec![notch.clone()],
+                (Pointer::OnPane | Pointer::Enters, 5) => vec![Event::PointerMoved(on_other)],
                 _ => vec![],
             };
             let mut raw = RawInput {
@@ -765,28 +812,62 @@ mod tests {
             }
             let mut out = ctx.run_ui(raw, |ui| {
                 let resp = ui.interact(pane, Id::unique("pane"), egui::Sense::hover());
-                if resp.hovered() {
-                    note_hovered_pane(ui.ctx(), pane);
-                }
+                register_pane(ui.ctx(), pane, ui.layer_id());
                 pane_d += take_delta(ui, &mut state, resp.hovered(), 60.0, 600.0).y;
                 if ui.rect_contains_pointer(other) {
                     other_d += ui.input(|i| i.smooth_scroll_delta.y);
                 }
+                egui::Area::new(Id::unique("popup"))
+                    .fixed_pos(popup.min)
+                    .show(ui.ctx(), |ui| {
+                        ui.allocate_rect(Rect::from_min_size(popup.min, popup.size()), egui::Sense::hover());
+                        if ui.rect_contains_pointer(popup) {
+                            popup_d += ui.input(|i| i.smooth_scroll_delta.y);
+                        }
+                    });
             });
             out.textures_delta.clear(); // headless: no renderer
         }
-        (pane_d, other_d)
+        (pane_d, other_d, popup_d)
     }
 
     #[test]
     fn claimed_wheel_events_do_not_also_scroll_the_next_widget() {
-        let (pane, other) = pane_and_other(true);
-        assert!((pane + 60.0).abs() < 1e-3, "the pane got the whole notch: {pane}");
-        assert_eq!(other, 0.0, "nothing of the notch reached the other widget");
+        for pointer in [Pointer::OnPane, Pointer::Enters] {
+            let (pane, other, popup) = scenario(true, pointer);
+            assert!((pane + 60.0).abs() < 1e-3, "the pane got the whole notch: {pane}");
+            assert_eq!((other, popup), (0.0, 0.0), "nothing of the notch reached the others");
+        }
         // without the hook egui keeps smoothing the notch and hands the rest to the widget
         // under the pointer (the bug this guards against)
-        let (_, leaked) = pane_and_other(false);
+        let (_, leaked, _) = scenario(false, Pointer::OnPane);
         assert!(leaked < -1.0, "{leaked}");
+    }
+
+    #[test]
+    fn wheel_events_over_a_popup_on_the_pane_stay_with_the_popup() {
+        let (pane, other, popup) = scenario(true, Pointer::OnPopup);
+        assert_eq!((pane, other), (0.0, 0.0));
+        assert!(popup < -30.0, "the popup scrolled: {popup}");
+    }
+
+    #[test]
+    fn a_horizontal_jump_drops_pending_horizontal_motion_only() {
+        let input = WheelInput {
+            precise: vec2(-80.0, -80.0),
+            events: 1,
+            ..Default::default()
+        };
+        let mut s = SmoothScroll::default();
+        s.follow_x(200.0, false);
+        let d = s.step(&input, true, 0.0, FRAME_120);
+        s.follow_x(200.0 - d.x, true);
+        s.follow_x(200.0 - d.x, false);
+        // the caret reveal puts the offset back to the line start
+        s.follow_x(0.0, false);
+        let next = s.step(&WheelInput::default(), true, 0.01, FRAME_120);
+        assert_eq!(next.x, 0.0, "horizontal motion dropped");
+        assert!(next.y != 0.0, "vertical motion continues");
     }
 
     #[test]
