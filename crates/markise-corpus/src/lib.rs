@@ -453,10 +453,12 @@ pub const WORK_PER_SEC: u64 = if cfg!(windows) { 3_000_000_000 } else { 1_000_00
 ///
 /// Measured in CPU work of this thread ([`thread_work`]), not wall-clock time, so a busy
 /// machine does not inflate one measurement (issue #42). The small input size starts at 1 000
-/// repetitions and doubles until the best-of-5 work is at least [`MIN_SMALL`] (so a fast
-/// quadratic step cannot hide below the timer floor; capped at 16 000 repetitions), then the
-/// large input is [`SIZE_FACTOR`] (64×) that size and the work ratio must stay below
-/// [`MAX_RATIO`] (see [`scaling_ratio_ok`]).
+/// repetitions and doubles until one run takes at least [`MIN_SMALL`] (capped at 16 000
+/// repetitions), then the large input is [`SIZE_FACTOR`] (64×) that size and the work ratio
+/// must stay below [`MAX_RATIO`] (see [`scaling_ratio_ok`]). A small input that is still faster
+/// than [`MIN_SMALL`] at the cap is timed as a batch of back-to-back runs lasting at least
+/// [`MIN_SMALL`] and divided by the batch size, so the denominator is a real measurement and
+/// never a floor that could hide super-linear growth (PR #111 review).
 ///
 /// Why 64× and not 16× (issue #109): a linear pass whose small input still fits in the CPU
 /// caches gets a one-off per-byte slowdown once the large input spills to main memory. On
@@ -488,16 +490,46 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
         (1..5).map(|_| once(s)).fold(first, u64::min)
     };
     let min_small = (MIN_SMALL.as_secs_f64() * WORK_PER_SEC as f64) as u64;
+    // Best-of-5 work per run, timing batches of `runs` back-to-back runs that together last at
+    // least `min_small`.
+    let best_per_run = |s: &str| -> f64 {
+        let mut runs = 1u64;
+        loop {
+            let batch = || {
+                let t = thread_work();
+                for _ in 0..runs {
+                    run(s);
+                }
+                thread_work().saturating_sub(t)
+            };
+            let first = batch();
+            if first >= min_small || runs >= MAX_BATCH {
+                assert!(
+                    first >= min_small,
+                    "{name}: {runs} runs of {} bytes took less than {MIN_SMALL:?}; cannot \
+                     measure the small input reliably",
+                    s.len()
+                );
+                let w = (1..5).map(|_| batch()).fold(first, u64::min);
+                return w as f64 / runs as f64;
+            }
+            // aim for about twice the minimum so the next batch does not fall just short
+            let per_run = (first / runs).max(1);
+            runs = (runs * 2).max(2 * min_small / per_run + 1).min(MAX_BATCH);
+        }
+    };
     let mut failures = Vec::new();
     for _ in 0..3 {
         let mut n = 1_000;
-        let ws = loop {
-            let w = best(&generate(n));
+        let (small, w) = loop {
+            let small = generate(n);
+            let w = best(&small);
             if w >= min_small || n >= 16_000 {
-                break w;
+                break (small, w);
             }
             n *= 2;
         };
+        let ws = if w >= min_small { w as f64 } else { best_per_run(&small) };
         let wl = best(&generate(SIZE_FACTOR * n));
         if scaling_ratio_ok(ws, wl) {
             return;
@@ -505,7 +537,7 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
         failures.push(format!(
             "n={n}: {:.1}× ({:?} → {:?})",
             scaling_ratio(ws, wl),
-            secs(ws),
+            Duration::from_secs_f64(ws / WORK_PER_SEC as f64),
             secs(wl)
         ));
     }
@@ -516,8 +548,13 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
     );
 }
 
-/// Minimum best-of-5 CPU time of the small input in [`assert_scales_linearly`].
+/// Minimum CPU time of one measurement of the small input in [`assert_scales_linearly`]
+/// (one run, or a batch of runs at the size cap).
 pub const MIN_SMALL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Most back-to-back runs in one batch of the small input; not reaching [`MIN_SMALL`] even
+/// then fails instead of guessing a denominator.
+const MAX_BATCH: u64 = 1 << 20;
 
 /// Large input size / small input size in [`assert_scales_linearly`].
 pub const SIZE_FACTOR: usize = 64;
@@ -527,15 +564,19 @@ pub const SIZE_FACTOR: usize = 64;
 /// (4 096×) fail.
 pub const MAX_RATIO: f64 = 320.0;
 
-/// Work ratio of the large to the small run; the small work is floored at 0.25 ms so a
-/// near-zero measurement cannot blow the ratio up.
-pub fn scaling_ratio(small: u64, large: u64) -> f64 {
-    let floor = WORK_PER_SEC / 4000;
-    large as f64 / small.max(floor) as f64
+/// Work ratio of the large run to the small run (both in [`thread_work`] units per run). There
+/// is deliberately no floor on the small work: a floor would cap the ratio and let a fast
+/// super-linear workload pass. A small work of zero gives an infinite ratio, i.e. a failure.
+pub fn scaling_ratio(small: f64, large: u64) -> f64 {
+    if small > 0.0 {
+        large as f64 / small
+    } else {
+        f64::INFINITY
+    }
 }
 
-/// Whether a small/large work pair (in [`thread_work`] units) counts as linear scaling.
-pub fn scaling_ratio_ok(small: u64, large: u64) -> bool {
+/// Whether a small/large work pair (in [`thread_work`] units per run) counts as linear scaling.
+pub fn scaling_ratio_ok(small: f64, large: u64) -> bool {
     scaling_ratio(small, large) < MAX_RATIO
 }
 
@@ -561,11 +602,10 @@ mod tests {
     #[test]
     fn scaling_verdict_separates_cache_steps_from_superlinear_growth() {
         use super::{SIZE_FACTOR, WORK_PER_SEC, scaling_ratio_ok};
-        let ms = WORK_PER_SEC / 1000;
-        let small = 2 * ms;
+        let ms = (WORK_PER_SEC / 1000) as f64;
+        let small = 2.0 * ms;
         let k = SIZE_FACTOR as f64;
-        let large =
-            |exponent: f64, per_byte_slowdown: f64| (small as f64 * k.powf(exponent) * per_byte_slowdown) as u64;
+        let large = |exponent: f64, per_byte_slowdown: f64| (small * k.powf(exponent) * per_byte_slowdown) as u64;
         // linear, also with the ~2.7× cache step measured on CI (issue #109)
         assert!(scaling_ratio_ok(small, large(1.0, 1.0)));
         assert!(scaling_ratio_ok(small, large(1.0, 2.7)));
@@ -574,8 +614,40 @@ mod tests {
         // super-linear growth fails clearly
         assert!(!scaling_ratio_ok(small, large(1.5, 1.0)));
         assert!(!scaling_ratio_ok(small, large(2.0, 1.0)));
-        // a tiny small measurement is floored instead of producing a huge ratio
-        assert!(scaling_ratio_ok(1, 64 * WORK_PER_SEC / 4000));
+        // fast workloads below any timer floor: no floor may mask super-linear growth
+        // (PR #111 review: n^1.5 0.1 ms → 51.2 ms and n² 0.01 ms → 40.96 ms)
+        assert!(!scaling_ratio_ok(0.1 * ms, (51.2 * ms) as u64));
+        assert!(!scaling_ratio_ok(0.01 * ms, (40.96 * ms) as u64));
+        assert!(scaling_ratio_ok(0.01 * ms, (0.64 * ms) as u64));
+        assert!(!scaling_ratio_ok(0.0, 1));
+    }
+
+    /// Spins until this thread has done `work` units of [`super::thread_work`].
+    fn spin(work: u64) {
+        let t = super::thread_work();
+        while super::thread_work() - t < work {
+            std::hint::black_box(0);
+        }
+    }
+
+    #[test]
+    fn fast_linear_workload_below_the_timer_floor_passes() {
+        // 10 µs at 16 000 bytes: measured as a batch, ratio ≈ 64
+        let us = super::WORK_PER_SEC / 1_000_000;
+        super::assert_scales_linearly("fast-linear", |n| "a".repeat(n), &|s| {
+            spin(10 * us * s.len() as u64 / 16_000)
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "super-linear")]
+    fn fast_quadratic_workload_below_the_timer_floor_fails() {
+        // PR #111 review: 0.01 ms at 16 000 bytes → 40.96 ms at 1 024 000 must not pass
+        let us = super::WORK_PER_SEC / 1_000_000;
+        super::assert_scales_linearly("fast-quadratic", |n| "a".repeat(n), &|s| {
+            let k = s.len() as u64;
+            spin(10 * us * k * k / (16_000 * 16_000))
+        });
     }
 
     #[test]
