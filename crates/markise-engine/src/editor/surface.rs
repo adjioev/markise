@@ -141,13 +141,33 @@ impl EditorView {
                 self.source_load_selection();
             }
             DocChange::Replaced => {
-                let model = DocModel::build(self.session.doc(), self.path.as_deref());
+                // the same kind of model as before (paged or full)
+                let paging = self.view.model().paging();
+                let model = Arc::new(DocModel::build_with(self.session.doc(), self.path.as_deref(), paging));
                 self.view.set_model(self.session.doc_arc().clone(), model);
                 if let Some(p) = self.source.as_mut() {
                     p.view.rebuild(self.session.doc().text());
                 }
                 self.source_load_selection();
             }
+        }
+        self.pin_caret();
+    }
+
+    /// Paged models (issue #125): the pages of the caret and of both ends of every selection
+    /// range, and the items around them, stay materialized (not while the view holds a
+    /// placeholder document during an edit): caret geometry and selection fixing never see a
+    /// placeholder at a selection end.
+    fn pin_caret(&mut self) {
+        if self.view.model().is_paged() && Arc::ptr_eq(self.view.doc(), self.session.doc_arc()) {
+            let sel = self.session.selection();
+            let mut pins: Vec<usize> = vec![sel.primary().focus.offset, sel.primary().anchor.offset];
+            for r in sel.ranges() {
+                pins.extend([r.anchor.offset, r.focus.offset]);
+            }
+            pins.sort_unstable();
+            pins.dedup();
+            self.view.set_pinned_offsets(&pins);
         }
     }
 
@@ -204,6 +224,7 @@ impl EditorView {
             // the pointer does not shift mid-selection (ADR 0006 §2.4, M2b-6)
             return false;
         }
+        self.pin_caret();
         let focus = self.session.selection().primary().focus;
         let f = markise_layout::caret::focus_for(&self.view, focus, self.reveal);
         self.view.set_focus(f)
@@ -241,6 +262,9 @@ impl EditorView {
     /// a view-mode change): each end goes to the nearest stop after the object. No history
     /// entry. Returns `true` when the selection changed.
     pub fn fix_selection(&mut self, shaper: &mut dyn TextShaper, images: &dyn Images) -> bool {
+        // paged models: both ends are materialized before they are checked (an end in a
+        // placeholder would be "normalized" to another caret stop, changing the selection)
+        self.pin_caret();
         let sel = self.session.selection().primary();
         let mut g = self.geometry(shaper, images);
         // whitespace after the text of a paragraph, heading or cell is laid out only while the
@@ -249,8 +273,14 @@ impl EditorView {
         let in_trailing_ws = |g: &Geometry<'_>, p: DocPos| {
             markise_layout::caret::focus_for(g.view, p, true).is_some_and(|(_, f)| f.trailing_ws.is_some())
         };
+        // an end in a page placeholder (not materialized) is left alone: there is no layout
+        // to check it against
+        let in_page = |g: &Geometry<'_>, p: DocPos| {
+            let m = g.view.model();
+            m.is_paged() && m.is_page(m.item_at_offset(p.offset))
+        };
         let ok = |g: &mut Geometry<'_>, p: DocPos| {
-            in_trailing_ws(g, p) || (g.caret_rect(p).is_some() && g.normalize(p).offset == p.offset)
+            in_page(g, p) || in_trailing_ws(g, p) || (g.caret_rect(p).is_some() && g.normalize(p).offset == p.offset)
         };
         if ok(&mut g, sel.focus) && (sel.is_caret() || ok(&mut g, sel.anchor)) {
             return false;
@@ -278,6 +308,7 @@ impl EditorView {
 
     /// Scrolls the view so that the caret is visible in a viewport `vh` tall (with a margin).
     pub fn scroll_to_caret(&mut self, vh: f32, shaper: &mut dyn TextShaper, images: &dyn Images) {
+        self.pin_caret();
         let Some(r) = self.caret_rect(shaper, images) else {
             return;
         };

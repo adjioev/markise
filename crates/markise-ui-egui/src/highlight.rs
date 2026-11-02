@@ -113,7 +113,7 @@ mod tests {
             src.push_str(&format!("```mermaid\ngraph TD\nA{i}-->B{i}\n```\n\n"));
         }
         let doc: Arc<dyn FormatDoc> = Arc::new(markise_md::parse(&src));
-        let model = DocModel::build(&*doc, None);
+        let model = DocModel::build_with(&*doc, None, markise_layout::Paging::Full);
         let hl = CodeHighlighter::new(Arc::new(|| {}));
         let dg = DiagramRenderer::new(Arc::new(|| {}), 14.0);
         let mut queries = Vec::new();

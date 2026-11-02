@@ -178,6 +178,53 @@ struct PlanQueries {
     asked: u64,
 }
 
+/// Document changes for a consumer besides the view (the status bar's word count): each
+/// edit's summary in the order the edits were made, or "start over".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChangeLog {
+    /// Each summary describes the change from the state after the one before it.
+    pub edits: Vec<EditSummary>,
+    /// The document was replaced, or more edits piled up than are kept: start over.
+    pub reset: bool,
+}
+
+impl ChangeLog {
+    /// Edits kept before the log turns into "start over".
+    const MAX: usize = 1024;
+
+    fn push(&mut self, e: EditSummary) {
+        if self.reset {
+            return;
+        }
+        if self.edits.len() >= Self::MAX {
+            self.replaced();
+        } else {
+            self.edits.push(e);
+        }
+    }
+
+    fn replaced(&mut self) {
+        self.edits.clear();
+        self.reset = true;
+    }
+
+    /// Nothing changed.
+    pub fn is_empty(&self) -> bool {
+        self.edits.is_empty() && !self.reset
+    }
+
+    /// Appends `later` (the changes made after these).
+    pub fn append(&mut self, later: ChangeLog) {
+        if later.reset {
+            *self = later;
+        } else {
+            for e in later.edits {
+                self.push(e);
+            }
+        }
+    }
+}
+
 /// One open document being edited.
 pub struct EditorSession {
     format: Arc<dyn DocumentFormat>,
@@ -185,6 +232,10 @@ pub struct EditorSession {
     /// (otherwise copied first — the caller should release other references before editing).
     doc: Arc<dyn FormatDoc>,
     change: DocChange,
+    /// The changes since [`EditorSession::take_log`] (word count).
+    log: ChangeLog,
+    /// Process-unique identity of the session (its document's history).
+    id: u64,
     /// Clones of a shared document made by [`EditorSession::doc_mut`] (diagnostics, tests).
     pub copies: u64,
     sel: Selection,
@@ -304,6 +355,11 @@ impl EditorSession {
             format,
             doc,
             change: DocChange::None,
+            log: ChangeLog::default(),
+            id: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
             copies: 0,
             sel: Selection::caret(0),
             marks: Vec::new(),
@@ -352,6 +408,15 @@ impl EditorSession {
     /// Changes since the last call.
     pub fn take_change(&mut self) -> DocChange {
         std::mem::take(&mut self.change)
+    }
+    /// The document changes since the last call, for a consumer besides the view (the word
+    /// count, issue #125): unlike [`EditorSession::take_change`] each edit is kept on its own.
+    pub fn take_log(&mut self) -> ChangeLog {
+        std::mem::take(&mut self.log)
+    }
+    /// Process-unique identity of this session.
+    pub fn id(&self) -> u64 {
+        self.id
     }
     /// The document for an in-place edit: copied first when it is shared.
     fn doc_mut(&mut self) -> &mut dyn FormatDoc {
@@ -418,10 +483,12 @@ impl EditorSession {
             self.review.last_at = at;
         }
         let e = self.doc_mut().apply_with_hints(ps, hints);
+        self.log.push(e.clone());
         self.change.push(e);
     }
     fn doc_set_hints(&mut self, hints: &HintSet) {
         let e = self.doc_mut().set_hints(hints);
+        self.log.push(e.clone());
         self.change.push(e);
     }
     pub fn text(&self) -> &str {
@@ -1552,6 +1619,7 @@ impl EditorSession {
         if forward.is_empty() && hints_before.is_empty() {
             self.doc = doc;
             self.change = DocChange::Replaced;
+            self.log.replaced();
             self.review.replaced += 1;
             return Ok(());
         }
@@ -1563,6 +1631,7 @@ impl EditorSession {
             self.doc_mut().set_hints(&HintSet::new());
         }
         self.change = DocChange::Replaced;
+        self.log.replaced();
         self.review.replaced += 1;
         self.transform_live(&forward);
         self.rev.counter += 1;

@@ -14,8 +14,14 @@ fn doc(n: usize) -> String {
     s
 }
 
+/// A view of a full model (these tests address items by index across the document; paged
+/// models: `tests/paging.rs`).
 fn view(src: &str, width: f32) -> View {
-    markise_layout::testing::Shown::new(Arc::new(markise_md::parse(src))).view(Theme::light(), width, 1.0)
+    markise_layout::testing::Shown::full(Arc::new(markise_md::parse(src))).view(Theme::light(), width, 1.0)
+}
+
+fn full(doc: &dyn markise_doc::FormatDoc, path: Option<&std::path::Path>) -> Arc<DocModel> {
+    Arc::new(DocModel::build_with(doc, path, markise_layout::Paging::Full))
 }
 
 #[test]
@@ -78,7 +84,7 @@ fn cache_invalidates_on_width_theme_and_content_change() {
     let mut d = markise_md::parse(&src);
     let pos = src.find("Paragraph 1 ").unwrap();
     d.edit(pos..pos + 9, "Changed");
-    let m = DocModel::build(&d, None);
+    let m = full(&d, None);
     v.set_model(Arc::new(d), m);
     v.scroll_to_item(0);
     v.frame(600.0, 0.0, &mut f, &NoImages);
@@ -349,7 +355,7 @@ fn huge_toc_is_segmented_and_outline_indices_stay_correct() {
     for i in 0..3_000 {
         s.push_str(&format!("## Heading {i}\n\ntext {i}\n\n"));
     }
-    let m = DocModel::build(&markise_md::parse(&s), None);
+    let m = full(&markise_md::parse(&s), None);
     assert!(
         m.items
             .iter()
@@ -402,20 +408,20 @@ fn toc_estimate_is_close_to_the_laid_out_height() {
 #[test]
 fn image_resolution_context_is_part_of_the_cache_key() {
     // review item 12: same paragraph, different typora-root-url → different layout key
-    let a = DocModel::build(
+    let a = full(
         &markise_md::parse("---\ntypora-root-url: old\n---\n![x](/p.png)\n"),
         None,
     );
-    let b = DocModel::build(
+    let b = full(
         &markise_md::parse("---\ntypora-root-url: new\n---\n![x](/p.png)\n"),
         None,
     );
     assert_ne!(a.ctx_hash, b.ctx_hash);
-    let c = DocModel::build(
+    let c = full(
         &markise_md::parse("![x](p.png)\n"),
         Some(std::path::Path::new("/a/doc.md")),
     );
-    let d = DocModel::build(
+    let d = full(
         &markise_md::parse("![x](p.png)\n"),
         Some(std::path::Path::new("/b/doc.md")),
     );
@@ -433,7 +439,7 @@ impl Images for Recorder {
 
 fn requested_src(dir: &std::path::Path, md: &str) -> String {
     let doc: Arc<dyn markise_doc::FormatDoc> = Arc::new(markise_md::parse(md));
-    let model = DocModel::build(&*doc, Some(&dir.join("doc.md")));
+    let model = full(&*doc, Some(&dir.join("doc.md")));
     let mut v = View::new(doc, model, Theme::light(), 700.0, 1.0);
     let mut fonts = testing::fonts();
     let mut f = fonts.with_pixels_per_point(1.0);

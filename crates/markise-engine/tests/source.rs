@@ -88,11 +88,14 @@ impl S {
         v.check(text).unwrap();
         let full = SourceView::new(text, v.params(), &Theme::light(), v.width(), 1.0);
         assert_eq!(v.lines_debug(text), full.lines_debug(text));
-        self.ed
-            .view
-            .model()
-            .diff(&DocModel::build(self.ed.session.doc(), None))
-            .expect("rendered model == full build");
+        let m = self.ed.view.model();
+        if m.is_paged() {
+            m.check_against_full(self.ed.session.doc())
+                .expect("rendered paged model == full build");
+        } else {
+            m.diff(&DocModel::build(self.ed.session.doc(), None))
+                .expect("rendered model == full build");
+        }
     }
 }
 

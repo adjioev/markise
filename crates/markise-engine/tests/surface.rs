@@ -82,14 +82,17 @@ impl T {
         self.ed.view.focus().is_some_and(|(_, f)| !f.reveal.is_empty())
     }
 
-    /// The incremental model equals a full rebuild.
+    /// The incremental model equals a full rebuild (a paged one where it holds real items).
     fn check_model(&self) {
-        let full = DocModel::build(self.ed.session.doc(), None);
-        self.ed
-            .view
-            .model()
-            .diff(&full)
-            .expect("incremental model == full build");
+        let doc = self.ed.session.doc();
+        let m = self.ed.view.model();
+        if m.is_paged() {
+            m.check_against_full(doc)
+                .expect("incremental paged model == full build");
+        } else {
+            m.diff(&DocModel::build(doc, None))
+                .expect("incremental model == full build");
+        }
     }
 }
 

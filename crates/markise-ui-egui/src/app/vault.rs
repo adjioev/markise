@@ -29,7 +29,9 @@ const SUGGEST_MAX: usize = 50;
 pub struct NavEntry {
     pub path: PathBuf,
     /// Viewport anchor (item, offset into it).
-    anchor: Option<(usize, f32)>,
+    /// Scroll position ([`markise_layout::View::source_anchor`]: by source position, so it
+    /// survives a paged model materializing or evicting pages).
+    anchor: Option<(usize, usize, f32)>,
     selection: Option<Selection>,
 }
 
@@ -175,7 +177,8 @@ fn heading_key(s: &str) -> String {
 
 /// The outline entry a heading path names (V2.5.1, V2.5.2): the last segment's heading whose
 /// ancestors include the earlier segments in order, else the first heading matching the last
-/// segment, else (Markdown fragments, V2.6.4) the heading whose slug anchor it is.
+/// segment, else (Markdown fragments, V2.6.4) the heading whose slug anchor it is. Returns the
+/// entry's index in the outline.
 pub fn find_heading(model: &DocModel, segs: &[String]) -> Option<usize> {
     let last = segs.last()?;
     let want = heading_key(last);
@@ -197,16 +200,14 @@ pub fn find_heading(model: &DocModel, segs: &[String]) -> Option<usize> {
         need == 0
     };
     if let Some(k) = (0..outline.len()).find(|&k| keys[k] == want && ancestors_ok(k)) {
-        return Some(outline[k].item);
+        return Some(k);
     }
     if let Some(k) = (0..outline.len()).find(|&k| keys[k] == want) {
-        return Some(outline[k].item);
+        return Some(k);
     }
     let anchor = markise_md::slug::slug(last);
-    model
-        .heading_by_anchor(&anchor)
-        .or_else(|| model.heading_by_anchor(last))
-        .map(|e| e.item)
+    let by_anchor = |a: &str| outline.iter().position(|o| o.anchor == a.trim_start_matches('#'));
+    by_anchor(&anchor).or_else(|| by_anchor(last))
 }
 
 impl MarkiseApp {
@@ -471,7 +472,9 @@ impl MarkiseApp {
             return;
         }
         if let Some(d) = self.doc.as_mut()
-            && let Some(i) = find_heading(d.viewer.model(), segs)
+            && let Some(k) = find_heading(d.viewer.model(), segs)
+            // a paged model materializes the heading's page first
+            && let Some(i) = d.viewer.ed.view.ensure_heading(k)
         {
             d.viewer.ed.view.scroll_to_item(i);
         }
@@ -608,7 +611,7 @@ impl MarkiseApp {
         if let Some(e) = h.entries.get_mut(h.index)
             && e.path == p
         {
-            e.anchor = Some(d.viewer.ed.view.anchor());
+            e.anchor = Some(d.viewer.ed.view.source_anchor());
             e.selection = Some(d.viewer.ed.session.selection().clone());
         }
     }
@@ -654,9 +657,8 @@ impl MarkiseApp {
         if let Some(e) = restore
             && let Some(d) = self.doc.as_mut()
         {
-            if let Some((i, off)) = e.anchor {
-                d.viewer.ed.view.scroll_to_item(i);
-                d.viewer.ed.view.scroll_by(off);
+            if let Some((start, nth, off)) = e.anchor {
+                d.viewer.ed.view.scroll_to_source(start, nth, off);
             }
             if let Some(sel) = e.selection
                 && sel.primary().end().offset <= d.viewer.ed.session.text().len()

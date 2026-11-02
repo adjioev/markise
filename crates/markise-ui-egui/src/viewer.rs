@@ -152,6 +152,9 @@ pub struct DocViewer {
     last_visible: Vec<(usize, f32)>,
     /// Column left edge of the last frame (screen x).
     last_left: f32,
+    /// Paged models: the document height when the scrollbar drag started (the scrollbar's
+    /// scale is frozen during a drag while page estimates refine, issue #125).
+    drag_total: Option<f64>,
     /// Surface top of the last frame (screen y).
     last_top: f32,
     /// Text to put on the clipboard after this frame's input handling.
@@ -218,6 +221,7 @@ impl DocViewer {
             find_matches: None,
             find_reveal: false,
             last_left: 0.0,
+            drag_total: None,
             last_top: 0.0,
             pending_copy: None,
             last_surface: None,
@@ -379,9 +383,16 @@ impl DocViewer {
         None
     }
 
+    /// Scrolls the caret into view on the next frame (benches, like a find match).
+    pub fn find_reveal_for_bench(&mut self) {
+        self.find_reveal = true;
+    }
+
     pub fn scroll_to_anchor(&mut self, anchor: &str) -> bool {
-        let item = self.model().heading_by_anchor(anchor).map(|e| e.item);
-        if let Some(i) = item {
+        let a = anchor.trim_start_matches('#');
+        let k = self.model().outline.iter().position(|o| o.anchor == a);
+        // a paged model materializes the heading's page first
+        if let Some(i) = k.and_then(|k| self.ed.view.ensure_heading(k)) {
             self.ed.view.scroll_to_item(i);
             true
         } else {
@@ -540,7 +551,13 @@ impl DocViewer {
         // ---- input: scrollbar
         let bar = Rect::from_min_max(pos2(rect.right() - SCROLLBAR_W, rect.top()), rect.right_bottom());
         let bar_resp = ui.interact(bar, id.with("bar"), Sense::click_and_drag());
-        let total = self.ed.view.total_height().max(1.0);
+        let mut total = self.ed.view.total_height().max(1.0);
+        let paged = self.ed.view.model().is_paged();
+        if paged && bar_resp.dragged() {
+            total = *self.drag_total.get_or_insert(total);
+        } else {
+            self.drag_total = None;
+        }
         if (bar_resp.dragged() || bar_resp.clicked())
             && let Some(p) = bar_resp.interact_pointer_pos()
         {
@@ -931,7 +948,7 @@ impl DocViewer {
         }
 
         // ---- scrollbar
-        let total = self.ed.view.total_height().max(1.0);
+        let total = self.drag_total.unwrap_or_else(|| self.ed.view.total_height()).max(1.0);
         if total > vh as f64 + 1.0 {
             let (thumb_h, _) = scrollbar::thumb_geometry(vh, total);
             let top = rect.top() + scrollbar::thumb_top(vh, total, self.ed.view.scroll_y());
