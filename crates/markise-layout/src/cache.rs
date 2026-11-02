@@ -5,7 +5,8 @@
 //! definitions, footnotes, outline for `[toc]`), the column width, the theme fingerprint, the
 //! pixels-per-point and an `extra` word (expanded state, focus). A change of any input
 //! produces a different key, so stale layouts are never returned ("invalidated on change"; a
-//! layout that showed a formula or image still pending is removed when it arrives instead);
+//! layout that showed a formula still pending, or an image whose state changed, is removed
+//! instead);
 //! unused entries are evicted least-recently-used once the cache exceeds its capacity.
 //! Identical blocks (same key) share one layout.
 

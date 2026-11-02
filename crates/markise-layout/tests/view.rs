@@ -129,35 +129,49 @@ impl Images for Sized {
 }
 
 #[test]
-fn arriving_images_relayout_only_the_items_that_showed_them_pending() {
-    // issue #29: a decoded image used to re-key every item that mentions an image
-    struct Some1;
-    impl Images for Some1 {
+fn arriving_images_relayout_only_the_items_that_showed_them() {
+    // issue #29: a decoded image used to re-key every item that mentions an image; only the
+    // layouts showing the changed images are dropped — loading or already loaded (a re-decode
+    // after a texture eviction may find a different size: PR #115 review)
+    use std::sync::Mutex;
+    struct Sizes(Mutex<Vec<(&'static str, ImageState)>>);
+    impl Images for Sizes {
         fn state(&self, src: &str) -> ImageState {
-            if src.contains("ready") {
-                ImageState::Ready { size: [200, 100] }
-            } else {
-                ImageState::Pending
-            }
+            let m = self.0.lock().unwrap();
+            m.iter()
+                .find(|(s, _)| src.ends_with(s))
+                .map_or(ImageState::Pending, |(_, st)| st.clone())
         }
     }
+    let img = |p: &Prim| match p {
+        Prim::Image { rect, .. } => Some(rect.width()),
+        _ => None,
+    };
     let mut fonts = testing::fonts();
     let mut f = fonts.with_pixels_per_point(1.0);
     let mut v = view("![a](ready.png)\n\n![b](later.png)\n\ntext\n", 700.0);
-    v.frame(600.0, 0.0, &mut f, &Some1);
+    let p = Sizes(Mutex::new(vec![("ready.png", ImageState::Ready { size: [200, 100] })]));
+    v.frame(600.0, 0.0, &mut f, &p);
     assert_eq!(v.laid_out, vec![0, 1, 2]);
-    v.images_changed();
-    let vis = v.frame(600.0, 0.0, &mut f, &Sized);
-    assert_eq!(v.laid_out, vec![1], "only the item whose image was pending");
-    assert!(
-        vis[1]
-            .layout
-            .prims
-            .iter()
-            .any(|p| matches!(p, Prim::Image { rect, .. } if rect.width() == 200.0))
-    );
-    v.images_changed();
-    v.frame(600.0, 0.0, &mut f, &Sized);
+    // `later.png` loads: only its item is laid out again
+    p.0.lock()
+        .unwrap()
+        .push(("later.png", ImageState::Ready { size: [300, 100] }));
+    v.images_changed_for(&["later.png"]);
+    let vis = v.frame(600.0, 0.0, &mut f, &p);
+    assert_eq!(v.laid_out, vec![1], "only the item whose image changed");
+    assert_eq!(vis[1].layout.prims.iter().find_map(img), Some(300.0));
+    // `ready.png` is re-decoded at another size (its file changed while its texture was
+    // evicted): its laid-out item gets the new size and height
+    let h0 = v.height(0);
+    p.0.lock().unwrap()[0].1 = ImageState::Ready { size: [100, 300] };
+    v.images_changed_for(&["ready.png"]);
+    let vis = v.frame(600.0, 0.0, &mut f, &p);
+    assert_eq!(v.laid_out, vec![0]);
+    assert_eq!(vis[0].layout.prims.iter().find_map(img), Some(100.0));
+    assert!(v.height(0) > h0, "the taller image moves what follows");
+    v.images_changed_for(&["other.png"]);
+    v.frame(600.0, 0.0, &mut f, &p);
     assert!(v.laid_out.is_empty());
 }
 

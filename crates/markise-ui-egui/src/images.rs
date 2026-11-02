@@ -74,6 +74,8 @@ pub struct TextureStore {
     math_bytes: usize,
     /// Formula uploads (count, bytes) in the current frame.
     math_uploads: (usize, usize),
+    /// Images whose layout-relevant state changed since [`TextureStore::take_changed`].
+    changed: Vec<String>,
 }
 
 impl Default for TextureStore {
@@ -99,6 +101,7 @@ impl TextureStore {
             math_tex: HashMap::new(),
             math_bytes: 0,
             math_uploads: (0, 0),
+            changed: Vec::new(),
         }
     }
 
@@ -277,7 +280,10 @@ impl TextureStore {
                     let tex = ctx.load_texture(&d.src, ci, TextureOptions::LINEAR);
                     self.bytes += bytes;
                     uploads += 1;
-                    changed |= known != Some(img.size);
+                    if known != Some(img.size) {
+                        changed = true;
+                        self.changed.push(d.src.clone());
+                    }
                     Entry::Ready {
                         tex,
                         size: img.size,
@@ -287,6 +293,7 @@ impl TextureStore {
                 }
                 Err(e) => {
                     changed = true;
+                    self.changed.push(d.src.clone());
                     Entry::Failed(e)
                 }
             };
@@ -297,6 +304,12 @@ impl TextureStore {
         }
         self.evict();
         changed
+    }
+
+    /// The images whose layout-relevant state changed since the last call (loaded, failed, or
+    /// re-decoded at a different size after an eviction): their layouts must be redone.
+    pub fn take_changed(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.changed)
     }
 
     /// Drops least-recently painted textures above the budget (never those painted in the
@@ -345,6 +358,7 @@ impl TextureStore {
         }
         self.entries.clear();
         self.retry.clear();
+        self.changed.clear();
         self.bytes = 0;
         if let Some(m) = &self.math {
             m.clear_queue();

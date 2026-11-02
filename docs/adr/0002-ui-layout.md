@@ -49,7 +49,8 @@ therefore not the bottleneck for M1's budgets; window/GPU start-up is (see "Meas
   epaint's skew, CJK via a memory-mapped system fallback font.
 - Galleys are cached inside per-block layouts (key: block content hash, document context
   hash, width, theme fingerprint, pixels-per-point, font generation; *2026-11-02, issue #29:*
-  no image epoch any more — layouts that showed a pending image are dropped when it loads). Because an
+  no image epoch any more — the layouts that showed an image are dropped when its state or size
+  changes). Because an
   egui font-atlas rebuild invalidates glyph UVs, the painter re-requests each visible galley
   from egui's galley cache every frame (a hash lookup on a hit), so a cached layout can never
   paint stale glyphs.

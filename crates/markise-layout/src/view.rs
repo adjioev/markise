@@ -5,7 +5,7 @@
 //! anchor is laid out and its height changes, the content on screen does not move (no scroll
 //! jumps). Absolute positions (scrollbar) come from a Fenwick tree of heights in `f64`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -47,8 +47,12 @@ pub struct View {
     /// Cached layouts that showed a formula still rendering ([`View::math_changed`] drops
     /// them) …
     pending_math: Vec<CacheKey>,
-    /// … or an image still loading ([`View::images_changed`]).
-    pending_images: Vec<CacheKey>,
+    /// Cached layouts that showed each image (loading or loaded): [`View::images_changed_for`]
+    /// drops those of the images whose state changed (a size arrived, or a re-decode after a
+    /// texture eviction found a different size).
+    image_layouts: std::collections::HashMap<Box<str>, Vec<CacheKey>>,
+    /// Entries of `image_layouts` (pruned against the cache when it outgrows it).
+    image_keys: usize,
     font_gen: u64,
     pub cache: LayoutCache,
     /// Items laid out (cache misses) during the last [`View::frame`] call.
@@ -91,7 +95,8 @@ impl View {
             expanded: HashSet::new(),
             disclosures,
             pending_math: Vec::new(),
-            pending_images: Vec::new(),
+            image_layouts: Default::default(),
+            image_keys: 0,
             font_gen: 0,
             cache: LayoutCache::default(),
             laid_out: Vec::new(),
@@ -413,24 +418,58 @@ impl View {
         }
     }
 
-    /// Image sizes arrived: the cached layouts that showed an image as pending are dropped and
+    /// The state of images `srcs` changed (a size arrived, a load failed, a re-decode found a
+    /// different size): the cached layouts that showed them, loading or loaded, are dropped and
     /// laid out again when shown. O(such layouts), not O(items).
-    pub fn images_changed(&mut self) {
-        for k in std::mem::take(&mut self.pending_images) {
-            self.cache.remove(&k);
+    pub fn images_changed_for<S: AsRef<str>>(&mut self, srcs: &[S]) {
+        for s in srcs {
+            if let Some(keys) = self.image_layouts.remove(s.as_ref()) {
+                self.image_keys -= keys.len();
+                for k in keys {
+                    self.cache.remove(&k);
+                }
+            }
         }
     }
 
-    /// Remembers that the layout cached under `key` showed pending media.
-    fn note_pending(&mut self, key: CacheKey, math: bool, image: bool) {
+    /// Some image changed state (unknown which): every cached layout showing an image is
+    /// dropped. O(such layouts), not O(items).
+    pub fn images_changed(&mut self) {
+        for (_, keys) in std::mem::take(&mut self.image_layouts) {
+            for k in keys {
+                self.cache.remove(&k);
+            }
+        }
+        self.image_keys = 0;
+    }
+
+    /// Remembers that the layout cached under `key` showed a pending formula (`math`) and the
+    /// images `images`.
+    fn note_media(&mut self, key: CacheKey, math: bool, images: Vec<String>) {
         // layouts the cache evicted meanwhile are forgotten once the lists outgrow it
         let cap = 2 * self.cache.len() + 1024;
-        for (on, list) in [(math, &mut self.pending_math), (image, &mut self.pending_images)] {
-            if on {
-                if list.len() > cap {
-                    list.retain(|k| self.cache.contains(k));
-                }
-                list.push(key);
+        if math {
+            if self.pending_math.len() > cap {
+                self.pending_math.retain(|k| self.cache.contains(k));
+            }
+            self.pending_math.push(key);
+        }
+        if images.is_empty() {
+            return;
+        }
+        if self.image_keys > cap {
+            let cache = &self.cache;
+            self.image_layouts.retain(|_, keys| {
+                keys.retain(|k| cache.contains(k));
+                !keys.is_empty()
+            });
+            self.image_keys = self.image_layouts.values().map(Vec::len).sum();
+        }
+        for src in images {
+            let keys = self.image_layouts.entry(src.into_boxed_str()).or_default();
+            if !keys.contains(&key) {
+                keys.push(key);
+                self.image_keys += 1;
             }
         }
     }
@@ -900,7 +939,7 @@ impl View {
                 let rec = Recording {
                     inner: images,
                     math: Cell::new(false),
-                    image: Cell::new(false),
+                    images: RefCell::new(Vec::new()),
                 };
                 let l = Arc::new(layout_item(&*self.doc, &self.model, i, &params, shaper, &rec));
                 if !self.missing_glyphs {
@@ -908,7 +947,7 @@ impl View {
                 }
                 if cacheable {
                     self.cache.insert(key, l.clone());
-                    self.note_pending(key, rec.math.get(), rec.image.get());
+                    self.note_media(key, rec.math.get(), rec.images.into_inner());
                 }
                 self.laid_out.push(i);
                 l
@@ -1061,22 +1100,22 @@ impl View {
     }
 }
 
-/// An [`Images`] provider that notes whether a layout asked for media not ready yet (the
-/// layout is dropped from the cache when it arrives: [`View::math_changed`],
-/// [`View::images_changed`]).
+/// An [`Images`] provider that notes whether a layout asked for a formula not ready yet and
+/// which images it showed (the layout is dropped from the cache when they change:
+/// [`View::math_changed`], [`View::images_changed_for`]).
 struct Recording<'a> {
     inner: &'a dyn Images,
     math: Cell<bool>,
-    image: Cell<bool>,
+    images: RefCell<Vec<String>>,
 }
 
 impl Images for Recording<'_> {
     fn state(&self, src: &str) -> ImageState {
-        let s = self.inner.state(src);
-        if matches!(s, ImageState::Pending) {
-            self.image.set(true);
+        let mut seen = self.images.borrow_mut();
+        if !seen.iter().any(|s| s == src) {
+            seen.push(src.to_string());
         }
-        s
+        self.inner.state(src)
     }
 
     fn math(&self, q: &crate::math::MathQuery) -> crate::math::MathState {
