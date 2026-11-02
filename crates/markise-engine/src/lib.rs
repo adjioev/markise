@@ -21,6 +21,7 @@ pub mod save;
 pub mod search;
 pub mod settings;
 pub mod tree;
+pub mod update;
 pub mod vault;
 #[doc(hidden)]
 pub mod wake_track;

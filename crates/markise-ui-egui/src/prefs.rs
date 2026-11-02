@@ -99,6 +99,7 @@ pub enum RowId {
     AutosaveMinutes,
     KeyBindings,
     WordCount,
+    UpdateCheck,
     AutoPairBrackets,
     AutoPairMarkdown,
     SmartPunctuation,
@@ -216,6 +217,13 @@ pub const ROWS: &[Row] = &[
         "Status bar",
         "Show word count",
         "words characters statistics reading time status bar",
+    ),
+    row(
+        R::UpdateCheck,
+        S::General,
+        "Updates",
+        "Check for updates automatically",
+        "update new version release github network download",
     ),
     row(
         R::AutoPairBrackets,
@@ -577,6 +585,10 @@ pub struct Values {
     pub show_recent: bool,
     /// Status bar word count (issue #53).
     pub show_word_count: bool,
+    /// Automatic update checks (issue #70; `None`: not answered yet = off).
+    pub update_auto: Option<bool>,
+    /// Why update checks are unavailable in this session (shown under the switch).
+    pub update_unavailable: Option<String>,
     pub zoom: f32,
     pub zoom_range: (f32, f32),
     pub settings_file: Option<PathBuf>,
@@ -610,6 +622,7 @@ pub enum Change {
     ToolbarPosition(ToolbarPosition),
     ShowRecent(bool),
     ShowWordCount(bool),
+    UpdateAuto(bool),
     Zoom(f32),
     Images(ImageSettings),
     RevealSettingsFile,
@@ -1447,6 +1460,17 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
             if let Some(on) = switch(ui, v.show_word_count) {
                 out.push(Change::ShowWordCount(on));
             }
+        }
+        R::UpdateCheck => {
+            if let Some(on) = switch(ui, v.update_auto == Some(true)) {
+                out.push(Change::UpdateAuto(on));
+            }
+            let note = v.update_unavailable.as_deref().unwrap_or(
+                "Once a day at launch, Markise asks GitHub for the latest release; only the app's \
+                 version is sent. Check for Updates… works either way.",
+            );
+            ui.add(egui::Label::new(RichText::new(note).size(12.0).color(p.look.weak)).wrap());
+            ui.add_space(10.0);
         }
         R::Zoom => {
             let step = |z: f32, d: i32| ((z * 10.0).round() as i32 + d) as f32 / 10.0;

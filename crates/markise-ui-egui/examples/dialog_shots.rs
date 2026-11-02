@@ -44,8 +44,28 @@ fn review_setup(app: &mut MarkiseApp) {
 
 type Setup = fn(&mut MarkiseApp, &Context, &Path);
 
+/// A canned GitHub for the update scene (issue #70): one newer stable release.
+struct ShotReleases;
+
+impl markise_engine::update::ReleaseClient for ShotReleases {
+    fn get(&self, url: &str) -> Result<markise_engine::update::Response, markise_engine::update::TransportError> {
+        let release = r#"{"tag_name":"v9.1.0","prerelease":false,"draft":false,"html_url":"https://github.com/adjioev/markise/releases/tag/v9.1.0"}"#;
+        Ok(markise_engine::update::Response::ok(
+            if url == markise_engine::update::LATEST_URL {
+                release.to_string()
+            } else {
+                format!("[{release}]")
+            },
+        ))
+    }
+}
+
 fn scenes() -> Vec<(&'static str, Setup)> {
     vec![
+        // the first-launch question above the notice of a manual check (issue #70)
+        ("update-card", |app, ctx, _| {
+            app.menu_action(ctx, &MenuAction::Command("app.checkUpdates"));
+        }),
         ("quick-open", |app, ctx, _| {
             app.menu_action(ctx, &MenuAction::Command("file.quickOpen"));
         }),
@@ -269,6 +289,11 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
         open: vec![dir.join("log.md")],
         system_fonts: true,
         config: ConfigDir::Dir(config),
+        updates: if name.starts_with("update") {
+            markise_ui_egui::updates::UpdateSource::Client(std::sync::Arc::new(ShotReleases))
+        } else {
+            Default::default()
+        },
         ..Default::default()
     });
     app.set_theme_choice(appearance);

@@ -301,6 +301,8 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("app.quit", "Quit Markise", &[mac_only("Cmd+Q")]),
     app("app.exit", "Exit", &[]),
     app("app.about", "About Markise", &[]),
+    // update check (issue #70): macOS application menu, Help menu elsewhere
+    app("app.checkUpdates", "Check for Updates…", &[]),
     app("app.preferences", "Preferences…", &[both("Cmd+,", "Ctrl+,")]),
     app("edit.cut", "Cut", &[both("Cmd+X", "Ctrl+X")]),
     app("edit.copy", "Copy", &[both("Cmd+C", "Ctrl+C")]),

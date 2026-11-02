@@ -18,6 +18,10 @@
 //!
 //! Renderer: wgpu with a glow fallback (`renderer`; `MARKISE_RENDERER=glow` forces glow).
 //! Frame pacing diagnostics: `MARKISE_FRAME_LOG` (`frame_log`, `docs/diagnostics.md`).
+//!
+//! Update check (issue #70; `update_client`): release builds may check GitHub once a day after
+//! the user agreed; debug builds only with `MARKISE_UPDATE_CHECK=1`; `MARKISE_UPDATE_CHECK=0`
+//! turns checks off in any build.
 
 // Release builds on Windows are GUI-subsystem executables (no console window); terminal
 // launches re-attach to the parent console (`diag::attach_parent_console`).
@@ -32,6 +36,7 @@ mod menu_tracking;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native_menu;
 mod renderer;
+mod update_client;
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -126,6 +131,8 @@ fn main() -> eframe::Result {
         clipboard_files: std::sync::Arc::new(SystemClipboardFiles),
         // the welcome tutorial at the first launch (issue #63)
         welcome: true,
+        // the update check's HTTP client (issue #70; off in debug builds unless enabled)
+        updates: update_client::source(),
         ..Default::default()
     };
     let mut viewport = eframe::egui::ViewportBuilder::default()
