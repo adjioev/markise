@@ -1,5 +1,6 @@
 //! Lending the session's shared document to a background reader (the word count's worker,
-//! issue #132) without making the next edit copy it.
+//! issue #132; the comment presence scanner, issue #138) without making the next edit copy
+//! it. Each reader has its own lease; the session revokes all of them before an edit.
 //!
 //! The session edits its document in place only while no one else holds it
 //! ([`crate::editor::EditorSession`] copies a shared document first — 100 MiB for a huge

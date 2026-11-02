@@ -2801,7 +2801,14 @@ impl MarkiseApp {
                 match &mut self.doc {
                     Some(d) => {
                         d.viewer.set_font_generation(self.font_gen);
+                        let gutter = d.viewer.comment_gutter();
                         let out = d.viewer.show(ui, &mut self.images, &t, self.parley.as_mut(), true);
+                        if d.viewer.comment_gutter() != gutter {
+                            // MARKISE_TIMING: when the comment gutter appears or goes (issue
+                            // #138 measurements)
+                            let on = if gutter { "hidden" } else { "shown" };
+                            self.timing.log(&format!("comment gutter {on}"));
+                        }
                         if out.edited {
                             d.sync();
                         }

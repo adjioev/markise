@@ -259,9 +259,10 @@ pub struct EditorSession {
     review: ReviewEdits,
     /// Memoised `can_plan` / `plan_checked` answers (see [`EditorSession::can_plan`]).
     plan_queries: Mutex<PlanQueries>,
-    /// The document lent to a background reader (the word count, issue #132): taken back
-    /// before every change of the document, so an edit never finds it shared.
-    lease: Option<Arc<crate::lease::DocLease>>,
+    /// The leases lending the document to background readers (the word count, issue #132;
+    /// the comment presence scan, issue #138): taken back before every change of the
+    /// document, so an edit never finds it shared.
+    leases: Vec<Arc<crate::lease::DocLease>>,
 }
 
 /// Counters for consumers that track review comments incrementally (the comment gutter,
@@ -378,7 +379,7 @@ impl EditorSession {
             source: None,
             review: ReviewEdits::default(),
             plan_queries: Mutex::new(PlanQueries::default()),
-            lease: None,
+            leases: Vec::new(),
         }
     }
 
@@ -422,16 +423,18 @@ impl EditorSession {
     pub fn id(&self) -> u64 {
         self.id
     }
-    /// Lends the document to a background reader through `lease` (issue #132): the session
-    /// revokes the loan before every change of the document ([`crate::lease::DocLease`]), so
-    /// the reader never makes an edit copy the document. Replaces (and revokes) an earlier
-    /// lease.
-    pub fn set_doc_lease(&mut self, lease: Option<Arc<crate::lease::DocLease>>) {
-        self.revoke_lease();
-        self.lease = lease;
+    /// Lets a background reader borrow the document through `lease` (issue #132): the
+    /// session revokes the loan before every change of the document
+    /// ([`crate::lease::DocLease`]), so the reader never makes an edit copy the document.
+    /// Several readers each have their own lease (the word count, the comment presence scan);
+    /// adding a lease that is already registered does nothing.
+    pub fn add_doc_lease(&mut self, lease: Arc<crate::lease::DocLease>) {
+        if !self.leases.iter().any(|l| Arc::ptr_eq(l, &lease)) {
+            self.leases.push(lease);
+        }
     }
     fn revoke_lease(&self) {
-        if let Some(l) = &self.lease {
+        for l in &self.leases {
             l.revoke();
         }
     }
