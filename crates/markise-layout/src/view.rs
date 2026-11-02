@@ -259,7 +259,17 @@ impl View {
                 }
             }
         }
+        // re-keyed items: their estimates did not change, so only laid-out ones (few: they were
+        // shown) need their new key looked up
+        again.extend(
+            change
+                .rekeyed
+                .iter()
+                .copied()
+                .filter(|&i| self.exact.get(i) == Some(&true)),
+        );
         again.extend([0, n.saturating_sub(1), n.saturating_sub(2)]);
+
         for i in again {
             if i < n {
                 let (v, e) = self.initial_height(i);
@@ -426,7 +436,7 @@ impl View {
         Some(DiagramQuery {
             lang,
             code,
-            doc: &self.doc,
+            doc: &*self.doc,
             start: start(),
             item: i,
         })
@@ -450,7 +460,7 @@ impl View {
             code,
             lang,
             range: item_range(it, &code),
-            doc: &self.doc,
+            doc: &*self.doc,
             start: start(),
             item: i,
         })

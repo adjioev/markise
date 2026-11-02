@@ -1035,7 +1035,7 @@ impl SourceView {
                         code,
                         lang,
                         range,
-                        doc: ctx.doc,
+                        doc: &**ctx.doc,
                         start,
                         item: i,
                     };

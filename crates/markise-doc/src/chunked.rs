@@ -319,6 +319,26 @@ impl<T> RelChunks<T> {
             .take(n)
     }
 
+    /// Mutable elements `range` in order (relative offsets; origins cannot change). O(log) to
+    /// start, then sequential.
+    pub fn range_mut(&mut self, range: Range<usize>) -> impl Iterator<Item = &mut T> + '_ {
+        let n = range.end.min(self.len).saturating_sub(range.start);
+        let start = if range.start < self.len {
+            self.locate(range.start)
+        } else {
+            (self.chunks.len(), 0)
+        };
+        let from = start.0.min(self.chunks.len());
+        self.chunks[from..]
+            .iter_mut()
+            .enumerate()
+            .flat_map(move |(ci, c)| {
+                let skip = if ci == 0 { start.1 } else { 0 };
+                c.items[skip..].iter_mut()
+            })
+            .take(n)
+    }
+
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
         self.chunks.iter_mut().flat_map(|c| c.items.iter_mut())
     }
@@ -525,6 +545,25 @@ mod tests {
             flat.extend(tail);
             t.splice(a..b, new, delta);
             assert_eq!(t.to_abs_vec(), flat);
+        }
+    }
+
+    #[test]
+    fn range_mut_visits_exactly_the_range_across_chunks() {
+        let t = RelChunks::from_abs((0..1000).map(|i| e(i * 10, i * 10 + 5)).collect());
+        for r in [0..0, 0..1, 250..770, 255..257, 990..1000, 999..1200, 1000..1000] {
+            let mut u = t.clone();
+            let mut seen = 0;
+            for x in u.range_mut(r.clone()) {
+                x.1.push(Span::new(0, 1)); // relative offsets: the origin is untouched
+                seen += 1;
+            }
+            assert_eq!(seen, r.end.min(1000).saturating_sub(r.start), "{r:?}");
+            for i in 0..1000 {
+                let marked = u.get(i).unwrap().item.1.len() == 2;
+                assert_eq!(marked, r.contains(&i), "{r:?} at {i}");
+                assert_eq!(u.origin(i), t.origin(i));
+            }
         }
     }
 }

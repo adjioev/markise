@@ -9,7 +9,6 @@
 //! arrives — never with stale colors.
 
 use std::ops::Range;
-use std::sync::Arc;
 
 use markise_doc::{FormatDoc, Span};
 use markise_theme::TokenRun;
@@ -24,9 +23,10 @@ pub struct CodeQuery<'a> {
     pub lang: &'a str,
     /// The item's content range (byte offsets into the block content).
     pub range: (usize, usize),
-    /// The document (shared, so the content can be built off the UI thread,
-    /// [`CodeQuery::source`]) and the absolute start of the code block.
-    pub doc: &'a Arc<dyn FormatDoc>,
+    /// The document (borrowed: a query cannot keep the shared document alive, so a pending
+    /// background job never makes the next edit copy it, issue #29) and the absolute start of
+    /// the code block.
+    pub doc: &'a dyn FormatDoc,
     pub start: usize,
     /// The item's index.
     pub item: usize,
@@ -49,26 +49,15 @@ impl CodeQuery<'_> {
         self.range.0..self.range.1
     }
 
-    /// The block content: every line followed by `\n` (O(block); not for the UI thread on
-    /// large blocks — use [`CodeQuery::source`]).
+    /// The block content: every line followed by `\n` (O(block)). Highlighters build it once
+    /// per block version, when they queue the block, and hand the owned text to their worker.
     pub fn content(&self) -> String {
         let lines = self.doc.leaf(self.start).map(|l| l.lines).unwrap_or_default();
         block_content(&lines, self.doc.text(), self.code.len)
     }
-
-    /// A `'static` builder of the block content that shares the document (O(1) to create);
-    /// call it on a worker thread.
-    pub fn source(&self) -> impl FnOnce() -> String + Send + 'static {
-        let doc = self.doc.clone();
-        let (start, len) = (self.start, self.code.len);
-        move || {
-            let lines = doc.leaf(start).map(|l| l.lines).unwrap_or_default();
-            block_content(&lines, doc.text(), len)
-        }
-    }
 }
 
-fn block_content(lines: &[Span], text: &str, len: usize) -> String {
+pub(crate) fn block_content(lines: &[Span], text: &str, len: usize) -> String {
     let mut s = String::with_capacity(len);
     for l in lines {
         s.push_str(l.slice(text));

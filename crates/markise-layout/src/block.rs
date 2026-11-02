@@ -2380,7 +2380,7 @@ pub fn layout_item(
         }
         ItemKind::Toc => {
             let st = Style::base(t.font_size, line_px, color(t.link));
-            let min_level = model.outline.iter().map(|o| o.level).min().unwrap_or(1);
+            let min_level = model.outline_min_level();
             if model.outline.is_empty() {
                 let mut e = st.clone();
                 e.color = color(t.meta_text);

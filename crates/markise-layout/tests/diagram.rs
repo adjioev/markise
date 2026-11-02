@@ -46,7 +46,7 @@ impl Diagrams for Fake {
 
     fn want(&self, q: &DiagramQuery) {
         self.wants.fetch_add(1, Ordering::Relaxed);
-        let src = q.source()();
+        let src = q.content();
         self.queued.lock().unwrap().entry(q.code.key).or_insert((q.lang, src));
     }
 

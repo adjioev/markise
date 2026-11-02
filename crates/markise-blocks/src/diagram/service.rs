@@ -132,6 +132,12 @@ impl DiagramService {
         })
     }
 
+    /// The limits jobs run with (a source above `max_source_bytes` is answered "too large"
+    /// without building it).
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
     /// The cached result, or queues a render (copying `source`) and returns `Pending`.
     pub fn request(&self, key: DiagramKey, lang: DiagramLang, source: &str, font_size: f32) -> DiagramLookup {
         let owned = source.to_string();
@@ -139,7 +145,9 @@ impl DiagramService {
     }
 
     /// Like [`DiagramService::request`], but the source (of `len` bytes) is built by `source` on
-    /// the worker thread, so the caller does not copy the block (O(1) on the UI thread).
+    /// the worker thread. `source` must not capture shared state the caller mutates in place
+    /// (the editor's document; issue #29): the app hands over the block text, built when
+    /// [`wants`](Self::wants) says the diagram is new.
     /// `measure` overrides the service's label metrics for this job (its id must be part of
     /// `key`).
     pub fn request_with(
@@ -203,6 +211,14 @@ impl DiagramService {
         drop(st);
         self.shared.cv.notify_one();
         DiagramLookup::Pending
+    }
+
+    /// Whether [`request_with`](Self::request_with) for `key` would queue a job (not cached and
+    /// not requested for the current generation): callers that build the source themselves
+    /// build it only then.
+    pub fn wants(&self, key: DiagramKey) -> bool {
+        let st = self.shared.lock();
+        !st.entries.contains_key(&key) && st.pending.get(&key).is_none_or(|&g| g < st.generation)
     }
 
     pub fn lookup(&self, key: DiagramKey) -> DiagramLookup {
