@@ -350,13 +350,45 @@ pub struct ModelChange {
     pub resized: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
     /// The whole model was rebuilt.
     pub full: bool,
-    /// With [`ModelChange::full`] after an edit: the edit's old end and length change, so the
-    /// view keeps its position (positions at or after the end moved by the delta).
-    pub moved: Option<(usize, isize)>,
+    /// The edit behind a change that replaced items wholesale (a re-paged region, a rebuild):
+    /// the view maps its scroll position through it ([`Moved::anchor`]).
+    pub moved: Option<Moved>,
     /// The disclosures' markers or pairing changed, or items holding them came or went
     /// (materialization, eviction): the view derives its disclosure state again. Without it
     /// the derived state only follows the splices (ordinary typing).
     pub disclosures: bool,
+}
+
+/// An edit's pre-edit changed range and length change, for positions kept across it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Moved {
+    pub start: usize,
+    pub end: usize,
+    pub delta: isize,
+}
+
+impl Moved {
+    pub fn of(e: &EditSummary) -> Moved {
+        Moved {
+            start: e.changed.start,
+            end: e.changed.end,
+            delta: e.delta,
+        }
+    }
+
+    /// A scroll position by source (`(item start, ordinal among the items starting there,
+    /// points into it)`) after the edit: before the changed range it stays, after it it moves
+    /// by the delta, inside it (deleted or replaced text) it goes to the start of the
+    /// replacement.
+    pub fn anchor(&self, (start, nth, off): (usize, usize, f32)) -> (usize, usize, f32) {
+        if start < self.start {
+            (start, nth, off)
+        } else if start >= self.end {
+            ((start as isize + self.delta).max(0) as usize, nth, off)
+        } else {
+            (self.start, 0, 0.0)
+        }
+    }
 }
 
 impl ModelChange {
@@ -505,6 +537,7 @@ impl DocModel {
                 replaced: 0..n,
                 inserted: 0..self.items.len(),
                 full: true,
+                moved: Some(Moved::of(e)),
                 ..Default::default()
             };
         }
@@ -647,6 +680,7 @@ impl DocModel {
                         inserted: 0..self.items.len(),
                         labels: e.deps.labels.clone(),
                         full: true,
+                        moved: Some(Moved::of(e)),
                         ..Default::default()
                     };
                 }

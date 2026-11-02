@@ -717,7 +717,7 @@ impl DocModel {
                 inserted: 0..self.items.len(),
                 labels: e.deps.labels.clone(),
                 full: true,
-                moved: Some((e.changed.end, e.delta)),
+                moved: Some(super::Moved::of(e)),
                 ..Default::default()
             };
         }
@@ -725,7 +725,7 @@ impl DocModel {
             replaced: lo..hi,
             inserted: lo..lo + added,
             labels: e.deps.labels.clone(),
-            moved: Some((e.changed.end, e.delta)),
+            moved: Some(super::Moved::of(e)),
             disclosures: true,
             ..Default::default()
         }
@@ -742,6 +742,7 @@ impl DocModel {
             inserted: 0..self.items.len(),
             labels,
             full: true,
+            moved: Some(super::Moved::of(e)),
             ..Default::default()
         }
     }

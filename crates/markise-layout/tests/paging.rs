@@ -1039,3 +1039,70 @@ fn heavy_suite_far_edits_re_page_regions_on_a_large_document() {
     assert_eq!(doc.text(), src, "every edit undone");
     materialize_all(&mut m, &doc).unwrap();
 }
+
+// ---- review of #145: scroll position through re-paged regions and rebuilds -----------------
+
+/// An edit of the document through the view, as the editor applies it.
+fn edit_view(v: &mut View, d: &mut markise_md::Document, at: std::ops::Range<usize>, text: &str) {
+    let e = d.apply(&PatchSet::single_verbatim(at, text));
+    let ch = v.model_mut().apply(&*d, &e);
+    v.apply_change(Arc::new(d.clone()), &ch);
+}
+
+#[test]
+fn scroll_position_survives_region_edits_and_rebuilds() {
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    // a later segment of a long TOC: an edit far below that changes the outline (headings
+    // deleted in unloaded pages) replaces the model; the view stays on that segment
+    let mut src = String::from("intro\n\n[toc]\n\n");
+    for i in 0..400 {
+        src.push_str(&format!("## H{i}\n\ntext {i}\n\n"));
+    }
+    let mut d = md(&src);
+    let doc: Arc<dyn FormatDoc> = Arc::new(d.clone());
+    let mut v = View::new(doc, Arc::new(paged(&d, 4)), Theme::light(), 700.0, 1.0);
+    let toc = src.find("[toc]").unwrap();
+    v.scroll_to_source(toc, 2, 10.0);
+    v.frame(800.0, 300.0, &mut f, &NoImages);
+    let before = v.source_anchor();
+    assert_eq!((before.0, before.1), (toc, 2), "on the third TOC segment");
+    let (a, b) = (src.find("## H300").unwrap(), src.find("## H350").unwrap());
+    edit_view(&mut v, &mut d, a..b, "");
+    assert_eq!(v.source_anchor(), before, "still on that segment");
+    v.frame(800.0, 300.0, &mut f, &NoImages);
+
+    // a large paste above the viewport (over the half-document rebuild threshold): the view
+    // stays on its paragraph, which moved by the paste
+    let target = d.text().find("text 200\n").unwrap();
+    v.ensure_offset(target);
+    let i = v.model().item_at_offset(target);
+    v.scroll_to_item(i);
+    v.frame(800.0, 300.0, &mut f, &NoImages);
+    let before = v.source_anchor();
+    let paste = "pasted paragraph\n\n".repeat(20_000);
+    let at = d.text().find("text 5\n").unwrap();
+    edit_view(&mut v, &mut d, at..at, &paste);
+    let after = v.source_anchor();
+    assert_eq!(
+        after.0,
+        before.0 + paste.len(),
+        "moved with the paste: {before:?} → {after:?}"
+    );
+    assert!(d.text()[after.0..].starts_with("text 200"));
+    v.frame(800.0, 300.0, &mut f, &NoImages);
+
+    // a deletion containing the anchor: the view goes to where the deleted text was
+    let target = d.text().find("text 250\n").unwrap();
+    v.ensure_offset(target);
+    let i = v.model().item_at_offset(target);
+    v.scroll_to_item(i);
+    v.frame(800.0, 300.0, &mut f, &NoImages);
+    let (a, b) = (d.text().find("## H240").unwrap(), d.text().find("## H260").unwrap());
+    let next = d.text()[b..].to_string();
+    edit_view(&mut v, &mut d, a..b, "");
+    let after = v.source_anchor();
+    assert_eq!(after.0, a, "at the deletion: {after:?}");
+    assert!(d.text()[after.0..].starts_with(&next[..20]));
+    v.model().check_against_full(&d).unwrap();
+}

@@ -33,8 +33,8 @@ pub use highlight::{CodeQuery, Highlights, NoHighlights};
 pub use links::{AllResolved, LinkTargets};
 pub use math::{MATH_SCALE, MathBox, MathQuery, MathState};
 pub use model::{
-    CodeRef, Container, DocModel, Gap, Item, ItemKind, Items, Marker, ModelChange, OutlineEntry, PAGE_TOPS, PageStats,
-    Paging, PagingCounters, paging_counters,
+    CodeRef, Container, DocModel, Gap, Item, ItemKind, Items, Marker, ModelChange, Moved, OutlineEntry, PAGE_TOPS,
+    PageStats, Paging, PagingCounters, paging_counters,
 };
 pub use source::{SourceCtx, SourceLayout, SourceLine, SourceParams, SourceView, SourceVisible};
 pub use text::{

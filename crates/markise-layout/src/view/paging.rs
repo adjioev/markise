@@ -256,17 +256,6 @@ impl View {
         self.model.outline.get(k).map(|o| o.item)
     }
 
-    /// Paged models: after the model was replaced, materializes the page holding `offset`
-    /// (the old anchor's position) and puts the anchor on its item.
-    pub(super) fn anchor_at_offset(&mut self, offset: usize) {
-        if !self.model.is_paged() || self.is_empty() {
-            return;
-        }
-        self.ensure_offset(offset);
-        self.anchor = self.model.item_at_offset(offset);
-        self.anchor_off = 0.0;
-    }
-
     /// Materializes page placeholder `i`. The content on screen stays where it is: the anchor
     /// follows its item, an anchor on the placeholder keeps its relative position in the page.
     pub(super) fn materialize_at(&mut self, i: usize) {

@@ -153,12 +153,12 @@ impl View {
     /// item-relative, so items below a change keep them).
     pub fn set_model(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>) {
         let anchor_pos = self.model.items.start(self.anchor).unwrap_or(0);
-        self.set_model_at(doc, model, anchor_pos, 0.0);
+        self.set_model_at(doc, model, (anchor_pos, 0, 0.0));
     }
 
-    /// [`View::set_model`] with the scroll anchor at source position `anchor_pos` (`off`
-    /// points into its item).
-    fn set_model_at(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>, anchor_pos: usize, off: f32) {
+    /// [`View::set_model`] with the scroll position at `anchor` (by source:
+    /// [`View::source_anchor`]).
+    fn set_model_at(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>, anchor: (usize, usize, f32)) {
         self.focus = None;
         self.caret_item = None;
         self.doc = doc;
@@ -169,11 +169,34 @@ impl View {
         self.anchor = if self.model.items.is_empty() {
             0
         } else {
-            self.model.item_at_offset(anchor_pos)
+            self.model.item_at_offset(anchor.0)
         };
         self.anchor_off = 0.0;
         self.reset_heights();
-        self.anchor_at_offset(anchor_pos);
+        self.anchor_at_source(anchor);
+    }
+
+    /// Puts the scroll anchor at `(start, nth, off)` ([`View::source_anchor`]): the `nth` item
+    /// starting at `start` (segments of a large block share their start), else the item holding
+    /// `start`; `off` points into it. A paged model materializes its page first.
+    fn anchor_at_source(&mut self, (start, nth, off): (usize, usize, f32)) {
+        if self.is_empty() {
+            return;
+        }
+        self.ensure_offset(start);
+        let n = self.len();
+        let first = self.model.items.partition_point_start(start);
+        let i = if first < n && self.model.item_start(first) == start {
+            let mut i = first;
+            while i < first + nth && i + 1 < n && self.model.item_start(i + 1) == start {
+                i += 1;
+            }
+            i
+        } else {
+            self.model.item_at_offset(start)
+        };
+        self.anchor = i.min(n - 1);
+        self.anchor_off = 0.0;
         if off > 0.0 {
             self.scroll_by(off);
         }
@@ -230,12 +253,9 @@ impl View {
             match pre {
                 // the model was updated in place: the anchor index named the old items, its
                 // source position (taken before the update) moves with the edit
-                Some((start, _, off)) => {
-                    let at = match change.moved {
-                        Some((end, delta)) if start >= end => (start as isize + delta).max(0) as usize,
-                        _ => start,
-                    };
-                    self.set_model_at(self.doc.clone(), m, at, off);
+                Some(a) => {
+                    let a = change.moved.map_or(a, |m| m.anchor(a));
+                    self.set_model_at(self.doc.clone(), m, a);
                 }
                 None => self.set_model(self.doc.clone(), m),
             }
@@ -261,20 +281,15 @@ impl View {
         let map = |i: usize| ModelChange::map_index(&splices, i);
         // (its item replaced by placeholders of a re-paged region: kept by source position
         // below, once the heights are in place)
-        let mut keep_at: Option<(usize, f32)> = None;
+        let mut keep_at: Option<(usize, usize, f32)> = None;
         match map(self.anchor) {
             Some(i) => self.anchor = i,
             None => {
                 let k = splices.partition_point(|(o, _)| o.end <= self.anchor);
                 self.anchor = splices.get(k).map_or(0, |(_, i)| i.start);
                 self.anchor_off = 0.0;
-                if let (Some((start, _, off)), Some((end, delta))) = (pre, change.moved) {
-                    let at = if start >= end {
-                        (start as isize + delta).max(0) as usize
-                    } else {
-                        start
-                    };
-                    keep_at = Some((at, off));
+                if let (Some(a), Some(m)) = (pre, change.moved) {
+                    keep_at = Some(m.anchor(a));
                 }
             }
         }
@@ -373,9 +388,8 @@ impl View {
             self.reset_heights();
         }
         self.refresh_page_heights();
-        if let Some((at, off)) = keep_at {
-            self.anchor_at_offset(at);
-            self.scroll_by(off);
+        if let Some(a) = keep_at {
+            self.anchor_at_source(a);
         }
     }
 
