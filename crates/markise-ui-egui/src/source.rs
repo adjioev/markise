@@ -93,6 +93,7 @@ pub fn params(p: &SourceSettings) -> SourceParams {
     SourceParams {
         wrap: p.soft_wrap,
         tab_width: 4,
+        font_size: p.font_size,
     }
 }
 
@@ -186,7 +187,7 @@ impl SourceEditor {
         let sel0 = viewer.ed.source.as_ref().map(|p| p.sel.clone());
 
         // ---- geometry and parameters
-        let (size, _) = srcview::metrics(theme);
+        let (size, _) = srcview::metrics(theme, &params(prefs));
         let char_w = size * 0.6;
         let line_count = viewer.ed.source.as_ref().map_or(1, |p| p.view.line_count());
         let gutter = if prefs.line_numbers {

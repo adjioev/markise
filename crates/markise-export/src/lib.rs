@@ -252,7 +252,8 @@ pub const DEFAULT_CSS: &str = "\
 html { font-size: 16px; }
 body { margin: 0; background: #fff; color: #222; }
 #write { max-width: 860px; margin: 0 auto; padding: 30px; font-family: system-ui, sans-serif; line-height: 1.6; }
-#write pre.md-fences, #write code { font-family: ui-monospace, monospace; }
+#write pre.md-fences, #write code, #write kbd { font-family: ui-monospace, monospace; }
+#write kbd { font-size: 0.9em; background: #f6f6f4; border: 1px solid #ccc; border-radius: 3px; padding: 0 4px; margin: 0 2px; white-space: nowrap; }
 #write pre.md-fences { background: #f6f6f4; padding: 8px 12px; overflow-x: auto; }
 #write blockquote { border-left: 4px solid #ddd; margin-left: 0; padding-left: 1em; color: #555; }
 #write table { border-collapse: collapse; }

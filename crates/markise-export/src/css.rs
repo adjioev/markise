@@ -220,6 +220,15 @@ pub fn theme_css(theme: &Theme) -> String {
         ic.padding + 1.0,
         ic.radius
     );
+    // `<kbd>` as a small key cap, like the editor's live view (issue #131)
+    let _ = writeln!(
+        c,
+        "#write kbd {{ font-family: var(--monospace); font-size: {:.3}em; background: {}; color: {}; border: 1px solid {}; border-radius: 3px; padding: 0 4px; margin: 0 2px; white-space: nowrap; }}",
+        t.mono_scale,
+        color(ic.background),
+        color(ic.text),
+        color(t.rule)
+    );
     let _ = writeln!(
         c,
         "#write pre.md-fences {{ {} font-family: var(--monospace); font-size: {:.3}em; line-height: 1.5; overflow-x: auto; white-space: pre; }}",
@@ -341,6 +350,7 @@ mod tests {
             "#write h1 {",
             "#write h6 {",
             "#write pre.md-fences {",
+            "#write kbd {",
             "#write blockquote {",
             "#write th, #write td {",
             ".md-alert-warning",

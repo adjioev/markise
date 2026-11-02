@@ -45,8 +45,6 @@ fn harness(open: Vec<PathBuf>, hooks: JobHooks) -> Harness<'static, MarkiseApp> 
     });
     Harness::builder()
         .with_size(egui::vec2(1000.0, 700.0))
-        // the menu's ⌘/⇧ shortcut hints are not in egui's bundled fonts: tofu, as in the app
-        .allow_missing_glyphs()
         .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), app)
 }
 

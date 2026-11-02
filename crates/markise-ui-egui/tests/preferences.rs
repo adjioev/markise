@@ -630,3 +630,47 @@ fn script_font_override_is_searchable_saved_and_resettable() {
     });
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Issue #130: Source Mode → Font size. Automatic by default (the theme's source size, smaller
+/// than the rendered view's code size); a chosen size reaches the source view and
+/// settings.json, and Reset (↺) returns to automatic.
+#[test]
+fn source_font_size_preference_reaches_the_source_view() {
+    use markise_engine::settings::SourceSettings;
+    use markise_ui_egui::prefs::Change;
+    let dir = tmpdir("source-font-size");
+    let mut h = harness(&dir);
+    let ctx = h.ctx.clone();
+    h.state_mut().set_view_mode(markise_ui_egui::ViewMode::Source);
+    h.run_steps(3);
+    let params = |h: &mut H| {
+        h.state_mut()
+            .viewer()
+            .and_then(|v| v.ed.source.as_ref().map(|p| p.view.params()))
+            .expect("source pane")
+    };
+    assert_eq!(params(&mut h).font_size, None, "automatic by default");
+    let theme = h.state().theme().clone();
+    assert!(theme.source_size() < theme.mono_size());
+    open_at(&mut h, Section::Source);
+    assert!(h.query_by_role_and_label(egui::Role::Slider, "Font size").is_some());
+    let s = h.state().source_prefs();
+    h.state_mut().apply_preference(
+        &ctx,
+        Change::Source(SourceSettings {
+            font_size: Some(18.0),
+            ..s
+        }),
+    );
+    h.run_steps(3);
+    assert_eq!(h.state().source_prefs().font_size, Some(18.0));
+    assert_eq!(params(&mut h).font_size, Some(18.0));
+    wait_for_file(&mut h, &settings_file(&dir), "font size written", |s| {
+        s.contains("\"font_size\": 18")
+    });
+    // the ↺ button next to the overridden slider goes back to automatic
+    click(&mut h, egui::Role::Button, "Use the style’s font size");
+    h.run_steps(3);
+    assert_eq!(h.state().source_prefs().font_size, None);
+    assert_eq!(params(&mut h).font_size, None);
+}
