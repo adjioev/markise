@@ -328,3 +328,36 @@ fn opening_preferences_closes_the_cheat_sheet() {
     assert!(!h.state().is_shortcuts_open(), "Preferences took over");
     assert!(h.state().is_preferences_open());
 }
+
+/// Codex review of PR #120, round 3: the Edit menu's text-field commands (Paste, Undo…)
+/// act on the cheat sheet's search field: the sheet stays open and the document is untouched.
+#[test]
+fn edit_commands_keep_the_cheat_sheet_open_and_leave_the_document_alone() {
+    let dir = tmpdir("editcmds");
+    let doc = dir.join("note.md");
+    std::fs::write(&doc, "Note\n").unwrap();
+    let mut h = harness(AppOptions {
+        open: vec![doc],
+        ..Default::default()
+    });
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_busy());
+    let ctx = h.ctx.clone();
+    h.state_mut().menu_action(&ctx, &MenuAction::Command("help.shortcuts"));
+    steps(&mut h, 2);
+    for id in [
+        "edit.paste",
+        "edit.cut",
+        "edit.copy",
+        "edit.undo",
+        "edit.redo",
+        "select.all",
+    ] {
+        h.state_mut().menu_action(&ctx, &MenuAction::Command(id));
+        steps(&mut h, 2);
+        assert!(h.state().is_shortcuts_open(), "{id} closed the sheet");
+    }
+    h.event(egui::Event::Paste("pasted".into()));
+    steps(&mut h, 2);
+    assert_eq!(h.state().document_text().unwrap(), "Note\n");
+    assert!(h.state().is_shortcuts_open());
+}

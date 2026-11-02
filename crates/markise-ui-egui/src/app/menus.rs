@@ -572,7 +572,13 @@ impl MarkiseApp {
     pub(super) fn menu_command(&mut self, ctx: &Context, id: &str, trigger: Trigger) -> bool {
         // any other command (Preferences, About, Quick Open, a dialog…) takes over from the
         // cheat sheet, which would otherwise keep the keyboard focus (Codex review of #120)
-        if id != "help.shortcuts" && self.cheat_sheet.open {
+        // cheat sheet, which would otherwise keep the keyboard focus (Codex review of #120);
+        // the editing commands a focused text field performs act on its search field instead
+        let field_edit = matches!(
+            id,
+            "edit.cut" | "edit.copy" | "edit.paste" | "edit.undo" | "edit.redo" | "select.all"
+        );
+        if id != "help.shortcuts" && !field_edit && self.cheat_sheet.open {
             self.cheat_sheet.close(ctx);
         }
         match id {
