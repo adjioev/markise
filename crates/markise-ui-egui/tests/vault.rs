@@ -592,3 +592,29 @@ fn obsidian_settings_edited_in_place_take_effect() {
     });
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// #121: an untitled document (here the tutorial, where it was found) has no folder and so
+/// no vault; following a wikilink explains that wikilinks work inside an opened folder instead
+/// of claiming the folder is still being indexed.
+#[test]
+fn a_wikilink_without_an_open_folder_explains_why() {
+    let s = Scripted::new();
+    let opts = AppOptions {
+        confirm: s.clone() as Arc<dyn Confirm>,
+        ..Default::default()
+    };
+    let mut h: H = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), MarkiseApp::new(opts));
+    h.state_mut().open_tutorial();
+    h.run_steps(3);
+    assert!(h.state().document_path().is_none(), "an untitled document");
+    assert!(h.state().vault_index().is_none(), "no folder, no vault");
+    h.state_mut().follow_link("[[Some Note]]");
+    h.run_steps(2);
+    let banner = h.state().banner_text().expect("a message");
+    assert!(banner.contains("Open Folder"), "{banner}");
+    assert!(!banner.contains("indexed"), "{banner}");
+    assert!(s.asked().is_empty(), "nothing is offered without a folder");
+}
