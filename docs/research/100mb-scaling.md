@@ -174,3 +174,71 @@ MARKISE_BENCH_CORPUS=/path/to/scratch/huge-mixed.md cargo bench -p markise-engin
 
 `MARKISE_HUGE_PROFILES` selects documents (`10mb,mixed,prose,log`), `MARKISE_HUGE_MIB` the size. The
 corpus needs ~320 MB of disk plus a working copy per run; delete it afterwards.
+
+## 6. Memory breakdown and first compaction (2026-11-02, part 4)
+
+Measured with `crates/markise-ui-egui/benches/memory.rs` (opt-in: `MARKISE_BENCH_MEMORY=1`): a
+counting global allocator (live bytes and allocations per phase), walks over the parsed document
+and the view model that attribute bytes to structures, and, at steady state after open in the
+rendered view, RSS and the macOS physical footprint (Activity Monitor's "Memory"). Release build,
+fresh process per document, same corpus as §1, `main` 3f42af7 versus this change. Live bytes are
+deterministic; RSS and footprint vary by ±30 MB between runs.
+
+Steady state after open (rendered view), multiples of the 100 MiB file:
+
+| | mixed before → after | prose before → after | log before → after |
+|---|---|---|---|
+| Live heap | 1,033 → 691 MB (10.3× → 6.9×) | 381 → 315 MB (3.8× → 3.1×) | 197 → 174 MB (2.0× → 1.7×) |
+| Physical footprint | 1,185 → 808 MB (11.9× → 8.1×) | 613 → 475 MB (6.1× → 4.7×) | 316 → 210 MB (3.2× → 2.1×) |
+| RSS | 1,233 → 942 MB | 629 → 491 MB | 330 → 225 MB |
+| Peak live during open | 1,079 → 738 MB | 455 → 327 MB | 298 → 176 MB |
+
+Where the live bytes go (100 MiB mixed: 562 k top-level blocks, 1.1 M blocks, 1.99 M view items):
+
+| Structure | Before | After | Notes |
+|---|---|---|---|
+| Text | 100 MB | 100 MB | one copy; loader, session, view and model share it |
+| Parsed document: block records (160 B each) | 86 + 218 MB | 86 + 82 MB | child lists kept up to 4× growth slack |
+| Parsed document: line spans | 49 MB | 25 MB | same slack |
+| View model: item records | 395 MB (208 B) | 258 MB (136 B) | |
+| View model: containers, origins, outline | 35 MB | 35 MB | |
+| Item heights (Fenwick, values + tree) | 32 MB | 32 MB | 16 B per item |
+| Word count cache | 113 MB (57 B/item) | 65 MB (33 B/item) | |
+| Allocator rounding / retained free memory | 114 / 38 MB | 50 / 67 MB | footprint − live |
+
+No document data is duplicated at steady state, fonts and the UI cost < 1 MB live before a
+document is open, and layout caches only hold visible items. Top offenders before: block-list
+growth slack (~160 MB), the 208 B item record (×2 M), the word-count cache (57 B per item), and a
+transient whole-file copy for the watcher's content hash (100 MB at open, often left resident by
+the allocator afterwards).
+
+Changes (no behaviour change; regression tests pin the sizes): the parser shrinks a block's line
+and child lists when it appends the finished block; `Item` boxes its rare fields (raw
+presentation, code reference, table-segment data) and stores the code language as `Box<str>`
+(208 → 136 B, `Segment` 48 → 32 B); the word-count cache packs each block's counts into 16 B;
+`disk_version` hashes the file through a 1 MiB buffer (`content_hash` feeds the same pieces).
+Typing, scrolling and paste on the huge bench are unchanged or slightly faster (a 1 MiB prose paste into
+mixed 172 → 96 ms CPU, its undo 84 → 64 ms; keystroke p50 and scroll p99 within noise).
+
+**Remaining gap to the ≤ 3× beta target:** log content meets it, prose is at 3.1× live / 4.7×
+footprint, mixed at 6.9× / 8.1×. In the mixed corpus 1.23 M of the 1.99 M items are `[toc]`
+segments (a `[TOC]` every ~200 blocks, each listing all 29 k headings in 454 segments), ~190 B
+each with heights and word count: ~240 MB, a corpus artefact (real documents have one TOC). The
+rest is records per block and per item. Options, with estimated savings on mixed / prose:
+
+| Option | Mixed | Prose | Effort |
+|---|---|---|---|
+| A `[toc]` as one item, its entries virtualised inside it (overlaps the TOC segment work of #115) | −240 MB | 0 | M |
+| Block record 160 → ≤ 112 B (box the fenced-code / link-definition payloads, 32-bit widths, niche for `clean_line`) | −50 MB | −25 MB | M |
+| Item record 136 → ~96 B (side tables for segment/containers; drop the always-zero `origin` by keeping origins only in the chunk index) | −30 MB after A (−80 before) | −22 MB | M–L |
+| Word count per block instead of per item; Fenwick without the duplicate values array | −15 MB after A | −15 MB | S–M |
+| Fewer transient allocations while parsing (allocator keeps 70–100 MB of freed parse temporaries resident on macOS) | −50…100 MB footprint | −50…100 MB footprint | S–M, uncertain |
+| Lazy view model: items only for top-level blocks near the viewport, heights per top-level block | items → O(visible) | items → O(visible) | L (2+ weeks), touches view, outline, search |
+
+A–D together bring mixed to ~3.5× live and prose to ~2.6× live; with the parse-allocation fix the
+footprint lands near 4×. Meeting ≤ 3× footprint for structured content needs the lazy view model
+(last row) or a compact block store, which is a redesign and not started here.
+
+```sh
+MARKISE_BENCH_MEMORY=1 MARKISE_HUGE_DIR=/path/to/scratch cargo bench -p markise-ui-egui --bench memory
+```
