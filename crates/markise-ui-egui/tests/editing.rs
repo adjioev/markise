@@ -1534,3 +1534,83 @@ fn cross_block_risks_block_ownership() {
     }
     assert!(fails.is_empty(), "{}", fails.join("\n"));
 }
+
+/// Presses the scrollbar at `from`, drags in steps to `to` and releases there.
+fn drag_scrollbar(h: &mut Harness<'static, MarkiseApp>, from: egui::Pos2, to: egui::Pos2) {
+    let button = |pos, pressed| Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::default(),
+    };
+    h.event(Event::PointerMoved(from));
+    h.event(button(from, true));
+    h.step();
+    for k in 1..=10 {
+        h.event(Event::PointerMoved(from + (to - from) * (k as f32 / 10.0)));
+        h.step();
+    }
+    h.event(button(to, false));
+    h.step();
+}
+
+/// Thumb height and top (screen y) as painted, from the view's scroll state.
+fn thumb(h: &mut Harness<'static, MarkiseApp>) -> (f32, f32) {
+    let v = h.state_mut().viewer().unwrap();
+    let r = v.surface_rect().unwrap();
+    let (vh, view) = (r.height(), &v.ed.view);
+    let total = view.total_height();
+    let th = ((vh as f64 / total) * vh as f64).max(24.0) as f32;
+    let frac = (view.scroll_y() / (total - vh as f64)).clamp(0.0, 1.0) as f32;
+    (th, r.top() + frac * (vh - th))
+}
+
+/// #123: the scrollbar thumb follows the pointer from where it was grabbed, and dragged to the
+/// bottom of the bar it shows the end of a tall document.
+#[test]
+fn scrollbar_thumb_keeps_its_grab_point_and_reaches_the_end() {
+    let dir = tmpdir("scrollbar");
+    let p = dir.join("tall.md");
+    let mut body = String::new();
+    for i in 0..3_000 {
+        body.push_str(&format!("Paragraph {i} of a tall document with a line of text.\n\n"));
+    }
+    body.push_str("THE LAST BLOCK\n");
+    std::fs::write(&p, body).unwrap();
+    let mut h = harness(vec![p]);
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    let r = h.state_mut().viewer().unwrap().surface_rect().unwrap();
+    let x = r.right() - 4.0;
+
+    // from the middle: a click inside the thumb does not move it; grabbed 20 pt below its
+    // top and dragged 120 pt down, it moves with the pointer
+    {
+        let view = &mut h.state_mut().viewer().unwrap().ed.view;
+        let y = (view.total_height() - r.height() as f64) * 0.5;
+        view.scroll_to_y(y);
+    }
+    h.step();
+    let (th, top) = thumb(&mut h);
+    let from = egui::pos2(x, top + 20.0);
+    drag_scrollbar(&mut h, from, from);
+    let (_, still) = thumb(&mut h);
+    assert!((still - top).abs() < 1.0, "a click moved the thumb: {top} -> {still}");
+    drag_scrollbar(&mut h, from, from + egui::vec2(0.0, 120.0));
+    let (_, moved) = thumb(&mut h);
+    assert!((moved - (top + 120.0)).abs() < 2.0, "thumb top {top} -> {moved}");
+
+    // grab the thumb near its top and drag until it sits at the bottom of the bar (the
+    // pointer stays a thumb height above the bar end): the last block is visible
+    let (_, top) = thumb(&mut h);
+    let from = egui::pos2(x, top + 2.0);
+    drag_scrollbar(&mut h, from, egui::pos2(x, r.bottom() - th + 2.0));
+    for _ in 0..3 {
+        h.step();
+    }
+    let shown = h.state_mut().viewer().unwrap().visible_text();
+    assert!(
+        shown.contains("THE LAST BLOCK"),
+        "end not shown: …{}",
+        &shown[shown.len().saturating_sub(200)..]
+    );
+}

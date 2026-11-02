@@ -315,8 +315,8 @@ pub struct ModelChange {
     pub inserted: std::ops::Range<usize>,
     /// Other items whose hash changed (indices after the change; dependency invalidation).
     pub rehashed: Vec<usize>,
-    /// Items whose hash changed but nothing their height estimate reads (`[toc]` segments
-    /// whose entries changed): the view keeps their heights and only marks laid-out ones for
+    /// Items whose hash changed but nothing their height estimate reads (`[toc]` items whose
+    /// entries changed but not their number): the view keeps their heights and only marks laid-out ones for
     /// a new layout, so a large re-keying costs O(1) per item.
     pub rekeyed: Vec<usize>,
     /// Reference labels whose definitions changed: items that may use them get new cache keys
@@ -711,7 +711,13 @@ impl DocModel {
                 if let Some(it) = self.items.get_mut(a) {
                     it.hash = mix(it.content_hash, oh);
                 }
-                if !is_new(ri) {
+                if is_new(ri) {
+                    continue;
+                }
+                // the estimate reads the number of entries (issue #124)
+                if c.old_count != n {
+                    change.rehashed.push(a);
+                } else {
                     change.rekeyed.push(a);
                 }
             }
