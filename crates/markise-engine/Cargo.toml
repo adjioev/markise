@@ -16,6 +16,8 @@ notify.workspace = true
 trash.workspace = true
 tempfile.workspace = true
 similar.workspace = true
+# content identity of texts and files (src/save.rs)
+ahash.workspace = true
 serde_json.workspace = true
 unicode-segmentation.workspace = true
 unicode-normalization.workspace = true

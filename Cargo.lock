@@ -2691,6 +2691,7 @@ dependencies = [
 name = "markise-engine"
 version = "0.1.0-beta.1"
 dependencies = [
+ "ahash",
  "cap-fs-ext",
  "cap-std",
  "chrono",

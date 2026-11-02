@@ -9,16 +9,40 @@ use std::{
 };
 
 pub enum Request {
+    /// Write a draft backup: `text` with the escape patches that materialise its literal hints
+    /// applied (on the worker; build it with [`Request::backup`]).
     Backup {
         id: u64,
         name: String,
-        doc: Box<dyn markise_doc::FormatDoc>,
+        text: std::sync::Arc<str>,
+        literal: Vec<markise_doc::Patch>,
     },
     Remove(u64),
     RemoveRecovered(PathBuf),
     Recent(PathBuf),
     ClearRecent,
 }
+impl Request {
+    /// A backup of `doc` as the user sees it. Only a text snapshot and the (few) hint escape
+    /// patches are taken on the caller's thread — no copy of the parsed document, which is
+    /// tens of milliseconds on a 100 MiB document (issue #29); the patches are applied on the
+    /// worker, so the document itself keeps its hints.
+    pub fn backup(id: u64, name: String, doc: &dyn markise_doc::FormatDoc) -> Request {
+        let literal = doc
+            .hints()
+            .iter()
+            .filter_map(|h| doc.materialize_hint(h))
+            .flat_map(|p| p.patches().to_vec())
+            .collect();
+        Request::Backup {
+            id,
+            name,
+            text: doc.snapshot(),
+            literal,
+        }
+    }
+}
+
 pub enum Event {
     Ready {
         drafts: Vec<PathBuf>,
@@ -97,17 +121,20 @@ impl Worker {
                     for req in requests {
                         let result = (|| -> std::io::Result<()> {
                             match req {
-                                Request::Backup { id, name, mut doc } => {
-                                    let patches: Vec<_> = doc
-                                        .hints()
-                                        .iter()
-                                        .filter_map(|h| doc.materialize_hint(h))
-                                        .flat_map(|p| p.patches().to_vec())
-                                        .collect();
-                                    let patches = markise_doc::PatchSet::new(patches).map_err(std::io::Error::other)?;
-                                    doc.apply_with_hints(&patches, Some(&markise_doc::HintSet::new()));
-                                    let text = doc.snapshot();
-                                    drop(doc);
+                                Request::Backup {
+                                    id,
+                                    name,
+                                    text,
+                                    literal,
+                                } => {
+                                    let text: std::borrow::Cow<str> = if literal.is_empty() {
+                                        std::borrow::Cow::Borrowed(&text)
+                                    } else {
+                                        let patches =
+                                            markise_doc::PatchSet::new(literal).map_err(std::io::Error::other)?;
+                                        patches.validate(&text).map_err(std::io::Error::other)?;
+                                        std::borrow::Cow::Owned(patches.apply_to(&text))
+                                    };
                                     let path = backups.entry(id).or_insert_with(|| {
                                         let name = if name == "Untitled" {
                                             text.lines()
@@ -227,18 +254,13 @@ mod tests {
     }
     #[test]
     fn backup_materializes_literal_syntax_only_in_its_copy() {
-        use markise_doc::{FormatDoc, HintOrigin, HintSet, LiteralHint};
+        use markise_doc::{HintOrigin, HintSet, LiteralHint};
         let dir = tempfile::tempdir().unwrap();
         let w = worker(dir.path());
         event(&w);
         let mut doc = markise_md::Document::parse("# literal\n", Default::default());
         doc.set_hints(&HintSet::from_hints([LiteralHint::new(0, HintOrigin::EnterPending)]));
-        w.tx.send(Request::Backup {
-            id: 1,
-            name: "Untitled".into(),
-            doc: doc.clone_box(),
-        })
-        .unwrap();
+        w.tx.send(Request::backup(1, "Untitled".into(), &doc)).unwrap();
         assert!(matches!(event(&w), Event::BackedUp(1)));
         assert_eq!(doc.text(), "# literal\n");
         assert!(!doc.hints().is_empty());
@@ -258,11 +280,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = worker(dir.path());
         assert!(matches!(event(&a),Event::Ready {drafts,..} if drafts.is_empty()));
-        a.tx.send(Request::Backup {
-            name: "Untitled".into(),
-            id: 1,
-            doc: Box::new(markise_md::Document::parse("unsaved ✓", Default::default())),
-        })
+        a.tx.send(Request::backup(
+            1,
+            "Untitled".into(),
+            &markise_md::Document::parse("unsaved ✓", Default::default()),
+        ))
         .unwrap();
         assert!(matches!(event(&a), Event::BackedUp(1)));
         let b = worker(dir.path());
@@ -291,11 +313,11 @@ mod tests {
         assert_eq!(drafts.len(), 1);
         assert_eq!(fs::read_to_string(&drafts[0]).unwrap(), "unsaved ✓");
         c.tx.send(Request::RemoveRecovered(drafts[0].clone())).unwrap();
-        c.tx.send(Request::Backup {
-            name: "Untitled".into(),
-            id: 2,
-            doc: Box::new(markise_md::Document::parse("next", Default::default())),
-        })
+        c.tx.send(Request::backup(
+            2,
+            "Untitled".into(),
+            &markise_md::Document::parse("next", Default::default()),
+        ))
         .unwrap();
         assert!(matches!(event(&c), Event::BackedUp(2)));
         assert!(!drafts[0].exists());
@@ -309,21 +331,21 @@ mod tests {
         for p in ["first.md", "folder", "first.md"] {
             w.tx.send(Request::Recent(PathBuf::from(p))).unwrap();
         }
-        w.tx.send(Request::Backup {
-            name: "Untitled".into(),
-            id: 1,
-            doc: Box::new(markise_md::Document::parse("", Default::default())),
-        })
+        w.tx.send(Request::backup(
+            1,
+            "Untitled".into(),
+            &markise_md::Document::parse("", Default::default()),
+        ))
         .unwrap();
         event(&w);
         let v: Vec<PathBuf> = serde_json::from_slice(&fs::read(dir.path().join("recent.json")).unwrap()).unwrap();
         assert_eq!(v, vec![PathBuf::from("first.md"), PathBuf::from("folder")]);
         w.tx.send(Request::ClearRecent).unwrap();
-        w.tx.send(Request::Backup {
-            name: "Untitled".into(),
-            id: 1,
-            doc: Box::new(markise_md::Document::parse("", Default::default())),
-        })
+        w.tx.send(Request::backup(
+            1,
+            "Untitled".into(),
+            &markise_md::Document::parse("", Default::default()),
+        ))
         .unwrap();
         event(&w);
         assert_eq!(fs::read_to_string(dir.path().join("recent.json")).unwrap(), "[]");

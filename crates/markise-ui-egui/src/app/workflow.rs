@@ -139,16 +139,9 @@ impl MarkiseApp {
                     let d = self.doc.as_ref().unwrap();
                     let key = (d.id, d.viewer.ed.session.revision().counter);
                     if self.workflow.backed != Some(key) {
-                        let doc = d.viewer.ed.session.doc().clone_box();
-                        if worker
-                            .tx
-                            .send(Request::Backup {
-                                id: d.id,
-                                name: d.display_name(),
-                                doc,
-                            })
-                            .is_ok()
-                        {
+                        // a text snapshot, not a copy of the parsed document (issue #29)
+                        let req = Request::backup(d.id, d.display_name(), d.viewer.ed.session.doc());
+                        if worker.tx.send(req).is_ok() {
                             self.workflow.pending = Some(key);
                         }
                     }
@@ -325,11 +318,11 @@ mod tests {
         wait(&mut app, |a| a.workflow.pending.is_none());
         // A worker barrier: all previous queued writes/removals are now complete.
         let w = app.workflow.worker.as_ref().unwrap();
-        w.tx.send(Request::Backup {
-            id: 999,
-            name: "barrier".into(),
-            doc: Box::new(markise_md::Document::parse("barrier", Default::default())),
-        })
+        w.tx.send(Request::backup(
+            999,
+            "barrier".into(),
+            &markise_md::Document::parse("barrier", Default::default()),
+        ))
         .unwrap();
         loop {
             if matches!(w.rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::BackedUp(999)) {
