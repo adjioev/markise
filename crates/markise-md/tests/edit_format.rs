@@ -172,3 +172,91 @@ fn clear_format_keeps_literal_code_content() {
     assert_eq!(run("a <u>⟦x⟧</u> b", "format.clear"), "a ⟦x⟧ b");
     assert_eq!(run("⟦$<u>$ **b**⟧", "format.clear"), "⟦$<u>$ b⟧");
 }
+
+const FORMAT_IDS: [&str; 11] = [
+    "format.strong",
+    "format.emph",
+    "format.underline",
+    "format.code",
+    "format.strike",
+    "format.highlight",
+    "format.inlineMath",
+    "format.comment",
+    "format.link",
+    "format.image",
+    "format.clear",
+];
+
+/// Issue #133: above `EXACT_QUERY_LIMIT` the format commands decide `can_plan` without
+/// planning; the answer agrees with the planner (Clear Format: enabled whenever it would act).
+#[test]
+fn large_selections_decide_format_enablement_without_planning() {
+    let limit = markise_md::EXACT_QUERY_LIMIT;
+    let prose = markise_corpus::generate(3 * limit, 7);
+    let mut code = String::from("```\n");
+    while code.len() < 2 * limit {
+        code.push_str("let x = **not markup**;\n");
+    }
+    code.push_str("```\n");
+    let blank = format!("Text.\n{}\nMore.\n", "\n".repeat(2 * limit));
+    for text in [prose, code, blank] {
+        let d = Document::parse(text.clone(), ParseOptions::default());
+        let n = text.len();
+        let mut ranges = vec![(0, n), (n / 3, n), (7, limit + 9)];
+        if let Some(i) = text.get(1..).and_then(|t| t.find("\n\n")) {
+            ranges.push((i + 1, n)); // starting in whitespace between blocks
+        }
+        for (a, b) in ranges {
+            assert!(b - a > limit);
+            for id in FORMAT_IDS {
+                let req = PlanRequest::at(Selection::range(a, b));
+                let planned = d.plan(PlannerId(id), &req).is_ok();
+                let can = d.can_plan(PlannerId(id), &req);
+                if id == "format.clear" {
+                    assert!(can || !planned, "{id} {a}..{b}: enabled whenever it acts");
+                } else {
+                    let head: String = text.chars().take(20).collect();
+                    assert_eq!(can, planned, "{id} {a}..{b} of {head:?}…");
+                }
+                // check marks are not computed for large selections
+                assert!(!d.plan_checked(PlannerId(id), &req));
+            }
+        }
+    }
+}
+
+/// Issue #133: the format toggles and Clear Format refuse selections over
+/// `FORMAT_SELECTION_LIMIT` (bounded work on the UI thread); Hyperlink acts on the first block
+/// only and stays available.
+#[test]
+fn format_toggles_refuse_selections_over_the_limit() {
+    let para = "Some words, and a **bold** one.\n\n";
+    let text = para.repeat(markise_md::FORMAT_SELECTION_LIMIT / para.len() + 2);
+    let d = Document::parse(text.clone(), ParseOptions::default());
+    let req = PlanRequest::at(Selection::range(0, text.len()));
+    for id in FORMAT_IDS {
+        let can = d.can_plan(PlannerId(id), &req);
+        let plan = d.plan(PlannerId(id), &req);
+        if matches!(id, "format.link" | "format.image") {
+            assert!(can && plan.is_ok(), "{id}");
+        } else {
+            assert!(!can, "{id} disabled");
+            assert!(
+                matches!(plan, Err(markise_doc::PlanError::NotApplicable(m)) if m.contains("too large")),
+                "{id}: {plan:?}"
+            );
+        }
+    }
+    // the link wraps the first block's text, as with a selection of that block alone
+    let first = run(&format!("⟦{}⟧", para.trim_end()), "format.link");
+    let plan = d.plan(PlannerId("format.link"), &req).unwrap();
+    let mut d2 = d.clone();
+    for st in &plan.steps {
+        let ps = d2.canonicalize(&st.patches);
+        FormatDoc::apply(&mut d2, &ps);
+    }
+    let caret = plan.selection_after.unwrap().primary().focus.offset;
+    let mut shown = d2.text()[..para.len() + 3].to_string();
+    shown.insert(caret, '‸');
+    assert_eq!(shown.trim_end(), first);
+}

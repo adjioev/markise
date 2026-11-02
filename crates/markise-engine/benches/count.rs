@@ -1,6 +1,6 @@
-//! `count-1mb` / `count-10mb` (issue #53): word counting on the UI thread in per-frame byte
-//! budgets ([`FRAME_BYTES`], as the status bar uses them for documents over 256 KB) — the first
-//! count of the corpus
+//! `count-1mb` / `count-10mb` (issue #53): word counting in byte-budgeted steps
+//! ([`FRAME_BYTES`], as the status bar's counting worker takes them, issue #132; an edit waits
+//! at most one step) — the first count of the corpus
 //! (calls, longest call) and the work after a keystroke ([`DocCounter::apply`] of the edit's
 //! summary + counting the changed block).
 //!
@@ -56,8 +56,8 @@ fn main() {
         assert!(c.fill(&doc, FRAME_BYTES));
         let filled = (t.elapsed(), thread_cpu() - cpu);
         println!(
-            "count-{mb}mb: {} top-level blocks, {words} words; first count: {calls} frames, CPU {cpu_total:?} in all, \
-             longest frame {longest:?} (CPU {longest_cpu:?}); after a keystroke: apply {:?} (CPU {:?}), \
+            "count-{mb}mb: {} top-level blocks, {words} words; first count: {calls} steps, CPU {cpu_total:?} in all, \
+             longest step {longest:?} (CPU {longest_cpu:?}); after a keystroke: apply {:?} (CPU {:?}), \
              {} block(s) {:?} (CPU {:?}); approximate: {}",
             c.len(),
             reconciled.0,

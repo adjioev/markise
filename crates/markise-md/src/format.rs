@@ -2104,6 +2104,16 @@ impl EditBehavior for Document {
         if let Some(ok) = self.can_plan_review(id, req) {
             return ok;
         }
+        // format commands over a large selection decide without planning (issue #133)
+        if let Some(st) = style_of(id) {
+            return self.can_format(st, req);
+        }
+        if id == planners::CLEAR_FORMAT {
+            return self.can_clear_format(req);
+        }
+        if id == planners::LINK || id == planners::IMAGE {
+            return self.can_link(id == planners::IMAGE, req);
+        }
         self.plan(id, req).is_ok()
     }
 

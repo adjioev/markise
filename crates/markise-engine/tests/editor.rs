@@ -885,3 +885,40 @@ fn selection_inside_one_block_keeps_its_syntax() {
     s.insert_text("x").unwrap();
     assert_eq!(s.text(), "x");
 }
+
+/// Issue #133: command enablement and check state are memoised per (document, selection,
+/// preferences) state — the menus ask every frame — and recomputed after any change.
+#[test]
+fn enablement_is_memoised_until_the_document_or_selection_changes() {
+    let (mut s, _) = md_session("alpha beta\n\ngamma\n");
+    let reg = Registry::for_format(&MarkdownFormat::default());
+    s.set_selection(Selection::range(0, 5));
+    let ask = |s: &EditorSession| (reg.enabled(s, "format.strong").is_ok(), reg.checked(s, "format.strong"));
+    assert_eq!(ask(&s), (true, false));
+    let runs = s.plan_queries_run();
+    for _ in 0..5 {
+        assert_eq!(ask(&s), (true, false));
+    }
+    assert_eq!(s.plan_queries_run(), runs, "answered from memory");
+    // an edit at the same selection: the answers are recomputed
+    reg.execute(&mut s, "format.strong", &Params::new()).unwrap();
+    assert_eq!(s.text(), "**alpha** beta\n\ngamma\n");
+    assert_eq!(ask(&s), (true, true));
+    assert!(s.plan_queries_run() > runs);
+    // undo too
+    assert!(s.undo());
+    s.set_selection(Selection::range(0, 5));
+    assert_eq!(ask(&s), (true, false));
+    // another selection
+    s.set_selection(Selection::range(5, 6));
+    let runs = s.plan_queries_run();
+    assert_eq!(ask(&s).0, reg.enabled(&s, "format.strong").is_ok());
+    assert!(s.plan_queries_run() > runs);
+    // preferences changes are part of the state
+    let runs = s.plan_queries_run();
+    let mut prefs = *s.prefs();
+    prefs.auto_pair_brackets = !prefs.auto_pair_brackets;
+    s.set_prefs(prefs);
+    ask(&s);
+    assert!(s.plan_queries_run() > runs);
+}

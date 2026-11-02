@@ -2026,6 +2026,13 @@ impl MarkiseApp {
     /// Runs one frame in the root `Ui` of a pass (`Context::run_ui`, `eframe::App::ui`).
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
+        if ctx.input(|i| i.viewport().visible() == Some(false)) {
+            // minimized or occluded (issue #132): nothing would be shown, and presenting can
+            // block (macOS withholds drawables). eframe runs no pass for a hidden window;
+            // should one run anyway, it does no work and asks for no repaint. Background
+            // results wait in their channels; un-occluding repaints and picks them up.
+            return;
+        }
         if self.ctx.is_none() {
             // chrome text (status bar, sidebar, toolbar, dialogs) is not selectable: no I-beam
             // over it (issue #36); text that is worth copying opts back in locally
@@ -2616,8 +2623,16 @@ impl MarkiseApp {
             Some(p) if source_pane => p.sel.primary().range(),
             _ => ed.session.selection().primary().range(),
         };
+        let was_settled = wc.settled();
         let shown = wc.update(ui.ctx(), &mut ed.session, sel);
         let mode = self.themes.count_mode();
+        if !was_settled && wc.settled() {
+            // MARKISE_TIMING: when a count arrives (issue #132 measurements)
+            self.timing.log(&format!(
+                "word count settled: {}",
+                crate::word_count::label(&shown, mode)
+            ));
+        }
         let r = ui
             .add(
                 egui::Label::new(egui::RichText::new(crate::word_count::label(&shown, mode)).weak())
@@ -2786,7 +2801,14 @@ impl MarkiseApp {
                 match &mut self.doc {
                     Some(d) => {
                         d.viewer.set_font_generation(self.font_gen);
+                        let gutter = d.viewer.comment_gutter();
                         let out = d.viewer.show(ui, &mut self.images, &t, self.parley.as_mut(), true);
+                        if d.viewer.comment_gutter() != gutter {
+                            // MARKISE_TIMING: when the comment gutter appears or goes (issue
+                            // #138 measurements)
+                            let on = if gutter { "hidden" } else { "shown" };
+                            self.timing.log(&format!("comment gutter {on}"));
+                        }
                         if out.edited {
                             d.sync();
                         }

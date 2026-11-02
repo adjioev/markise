@@ -4,43 +4,49 @@
 //! Counts that include an estimate (a block larger than
 //! [`markise_engine::count::BIG_BLOCK`], a very large selection) are shown with `~`.
 //!
-//! Everything runs on the UI thread, reading the session's text in place (no copy): a frame
-//! without a change only checks the session's change log. After an edit the counts are
-//! brought up to date once the document has been quiet for [`DEBOUNCE`]: the [`DocCounter`]
-//! keeps one count per top-level block of the document, applies the edits' summaries (no text
-//! read) and counts only the changed blocks; it does not depend on the view model (whose items
-//! a paged model materializes only near the viewport, issue #125). A document up to [`SMALL_DOC`] is counted in its first frame; a larger
-//! one about [`FRAME_BYTES`] of source per frame (each block is at most
-//! [`markise_engine::count::BIG_BLOCK`]), showing the last value (or "Counting…") until done.
-//! A selection reads at most its two partly selected blocks.
+//! Counting runs off the UI thread (issue #132): a [`CountWorker`] keeps one count per
+//! top-level block of the document and counts only changed blocks. The UI thread sends it the
+//! session's edit summaries once the document has been quiet for [`DEBOUNCE`] (as revisions)
+//! and lends it the document of that revision ([`EditorSession::add_doc_lease`]: the session
+//! takes it back before its next edit, so counting never copies the document). The worker
+//! wakes the UI once when a count is complete; the UI never repaints just to count. Until the
+//! first count of a document (or after it was replaced) the status bar shows "Counting…" with
+//! the progress as of the last frame; after an edit the previous count stays until the new
+//! one arrives (a few blocks: milliseconds).
+//!
+//! A selection up to [`SMALL_SELECTION`] bytes is counted at once on the UI thread (reading
+//! about that much); a larger one is counted by the worker from its cached block counts.
 
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use markise_engine::count::{CounterStats, Counts, DocCounter, FRAME_BYTES};
+use markise_engine::count::{CounterStats, Counts, count_range};
+use markise_engine::count_worker::{Change, CountWorker, Report};
 use markise_engine::editor::{ChangeLog, EditorSession};
 use markise_engine::settings::CountMode;
 
 /// Quiet time after an edit before the counts are updated.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
-/// Documents up to this size are counted in one frame (opening one leaves no counting work
-/// for later frames).
-pub const SMALL_DOC: usize = 256 * 1024;
+/// Selections up to this many source bytes are counted on the UI thread, at once.
+pub const SMALL_SELECTION: usize = 16 * 1024;
 
 /// What the status bar shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shown {
-    /// Not counted yet.
-    Counting,
+    /// Not counted yet: the percentage of the document's blocks counted so far, if known.
+    Counting(Option<u8>),
     Document(Counts),
     Selection {
         selection: Counts,
         document: Counts,
     },
-    /// A selection while the document is still being counted.
+    /// A selection while it or the document is still being counted.
     SelectionPending {
+        selection: Option<Counts>,
         document: Option<Counts>,
     },
+    /// The counting thread could not be started.
+    Unavailable,
 }
 
 /// Formats `n` with thousands separators (`3,456`).
@@ -82,10 +88,14 @@ fn unit(mode: CountMode, n: u64) -> &'static str {
 }
 
 /// The status bar label: `1,234 words · 7 min read`, `12 of 3,456 words`, `~5,000 words`,
-/// `Counting…`.
+/// `Counting… 40%`, `… of 3,456 words` / `12 of … words` while a part is being counted.
 pub fn label(shown: &Shown, mode: CountMode) -> String {
+    let counting = |p: &Option<u8>| match p {
+        Some(p) => format!("Counting… {p}%"),
+        None => "Counting…".into(),
+    };
     match shown {
-        Shown::Counting => "Counting…".into(),
+        Shown::Counting(p) => counting(p),
         Shown::Document(c) => {
             let mut s = format!("{} {}", number(c, mode), unit(mode, value(c, mode)));
             if c.words > 0 {
@@ -93,9 +103,10 @@ pub fn label(shown: &Shown, mode: CountMode) -> String {
             }
             s
         }
-        Shown::SelectionPending { document } => match document {
-            Some(d) => format!("… of {} {}", number(d, mode), unit(mode, value(d, mode))),
-            None => "Counting…".into(),
+        Shown::SelectionPending { selection, document } => match (selection, document) {
+            (_, Some(d)) => format!("… of {} {}", number(d, mode), unit(mode, value(d, mode))),
+            (Some(s), None) => format!("{} of … {}", number(s, mode), unit(mode, 2)),
+            (None, None) => counting(&None),
         },
         Shown::Selection { selection, document } => format!(
             "{} of {} {}",
@@ -103,6 +114,7 @@ pub fn label(shown: &Shown, mode: CountMode) -> String {
             number(document, mode),
             unit(mode, value(document, mode))
         ),
+        Shown::Unavailable => "Word count unavailable".into(),
     }
 }
 
@@ -121,7 +133,8 @@ pub fn tooltip(shown: &Shown) -> String {
         s
     };
     match shown {
-        Shown::Counting | Shown::SelectionPending { .. } => "Counting words…".into(),
+        Shown::Counting(_) | Shown::SelectionPending { .. } => "Counting words in the background…".into(),
+        Shown::Unavailable => "The word count could not start a background thread".into(),
         Shown::Document(c) => format!(
             "{}\nReading time: {} min (at 200 words per minute)\n\nClick to switch between words and characters",
             all(c),
@@ -134,97 +147,150 @@ pub fn tooltip(shown: &Shown) -> String {
     }
 }
 
-/// Word-count state of the open document.
+/// Word-count state of the open document (see the module docs).
 #[derive(Default)]
 pub struct WordCount {
-    counter: DocCounter,
+    /// The counting thread (started at the first update; `Err` when it could not start).
+    worker: Option<Result<CountWorker, ()>>,
     /// The session whose document is counted ([`EditorSession::id`]).
     session: Option<u64>,
-    /// Edits not applied to the counter yet (debounce).
+    /// The revision last sent to the worker.
+    rev: u64,
+    /// Edits not sent to the worker yet (debounce).
     pending: ChangeLog,
-    /// The counter is in step with the document.
+    /// The worker has every change (no debounce pending).
     synced: bool,
     /// When the document last changed (debounce).
     changed: Option<Instant>,
+    /// Bumped on every document change (keys the small-selection count).
+    generation: u64,
     /// Last complete document counts (shown, stale, while an update is pending).
     last: Option<Counts>,
+    /// The whole document is being counted again (opened or replaced): `last` does not
+    /// describe it.
+    recounting: bool,
+    /// The last small selection counted on the UI thread: generation, range, counts.
+    small: Option<(u64, Range<usize>, Counts)>,
+    /// The large selection asked of the worker (revision, range).
+    asked: Option<(u64, Range<usize>)>,
+    /// A selection result is outstanding (as of the last frame).
+    waiting: bool,
+    /// The worker's report as of the last frame.
+    report: Report,
 }
 
 impl WordCount {
-    /// Counting statistics (tests: typing does not recount the document; per-frame reads stay
-    /// within the byte budget).
+    /// Counting statistics of the worker (tests: typing does not recount the document; every
+    /// step stays within the byte budget).
     pub fn stats(&self) -> CounterStats {
-        self.counter.stats()
+        self.report.stats
     }
 
     /// Test hook ("background settled", issue #42): the counts are up to date — no debounce
-    /// or per-frame counting is pending (as of the last frame).
+    /// is pending and the worker has published the current revision's count (and the
+    /// selection asked of it), as of the last frame.
     pub fn settled(&self) -> bool {
-        self.synced && self.counter.missing() == 0
+        let failed = matches!(self.worker, Some(Err(())));
+        failed || (self.synced && self.current() && !self.waiting)
     }
 
-    /// Brings the counts up to date as far as this frame's budget allows and returns what to
-    /// show. Takes the session's document changes ([`EditorSession::take_log`]); `sel` is the
-    /// selected source range.
+    /// The worker's report describes the revision last sent, completely.
+    fn current(&self) -> bool {
+        self.report.rev == self.rev && self.report.total.is_some()
+    }
+
+    /// Brings the worker up to date with the session's document changes
+    /// ([`EditorSession::take_log`]) and returns what to show; `sel` is the selected source
+    /// range. Never requests a repaint for counting: the worker wakes `ctx` when a result
+    /// arrives; only the debounce schedules one frame.
     pub fn update(&mut self, ctx: &egui::Context, session: &mut EditorSession, sel: Range<usize>) -> Shown {
         let now = Instant::now();
         let log = session.take_log();
-        let doc = session.doc();
+        if self.worker.is_none() {
+            let c = ctx.clone();
+            self.worker = Some(CountWorker::spawn(std::sync::Arc::new(move || c.request_repaint())).map_err(|_| ()));
+        }
+        let Some(Ok(worker)) = self.worker.as_ref() else {
+            return Shown::Unavailable;
+        };
         if self.session != Some(session.id()) {
-            // the document just opened: counted at once (the owner starts a new `WordCount`
-            // for another document)
+            // the document just opened (the owner starts a new `WordCount` for another
+            // document): counted from scratch
             self.session = Some(session.id());
-            self.counter.reset(doc);
+            session.add_doc_lease(worker.lease().clone());
+            self.rev += 1;
+            worker.update(self.rev, Change::Reset, session.doc_arc().clone());
             self.pending = ChangeLog::default();
             self.synced = true;
             self.changed = None;
+            self.recounting = true;
+            self.generation += 1;
         } else if !log.is_empty() {
-            // a change: applied once the document has been quiet for a moment
+            // a change: sent once the document has been quiet for a moment
             self.pending.append(log);
             self.synced = false;
             self.changed = Some(now);
+            self.generation += 1;
         }
         if !self.synced {
             match self.changed.map(|t| now.saturating_duration_since(t)) {
                 Some(quiet) if quiet < DEBOUNCE => ctx.request_repaint_after(DEBOUNCE - quiet),
                 _ => {
                     let p = std::mem::take(&mut self.pending);
-                    let applied = !p.reset && p.edits.iter().all(|e| self.counter.apply(e));
-                    if !applied || self.counter.len() != doc.top_count() {
-                        self.counter.reset(doc);
-                    }
+                    let change = if p.reset {
+                        self.recounting = true;
+                        Change::Reset
+                    } else {
+                        Change::Edits(p.edits)
+                    };
+                    self.rev += 1;
+                    worker.update(self.rev, change, session.doc_arc().clone());
                     self.synced = true;
                 }
             }
         }
-        if self.synced {
-            if self.counter.missing() > 0 {
-                let budget = if doc.text().len() <= SMALL_DOC {
-                    usize::MAX
-                } else {
-                    FRAME_BYTES
-                };
-                if !self.counter.fill(doc, budget) {
-                    ctx.request_repaint();
-                }
-            }
-            if let Some(t) = self.counter.total() {
-                self.last = Some(t);
-            }
+        self.report = worker.report();
+        if self.current() {
+            self.last = self.report.total;
+            self.recounting = false;
         }
+        let document = if self.recounting { None } else { self.last };
+        self.waiting = false;
         if sel.is_empty() {
-            return match self.last {
+            return match document {
                 Some(d) => Shown::Document(d),
-                None => Shown::Counting,
+                None => {
+                    let r = &self.report;
+                    let progress =
+                        (r.rev == self.rev && r.blocks > 0).then(|| (r.counted * 100 / r.blocks).min(99) as u8);
+                    Shown::Counting(progress)
+                }
             };
         }
-        // the selection is counted once the document is
-        let selection = (self.synced && self.counter.missing() == 0)
-            .then(|| self.counter.selection(doc, sel))
-            .flatten();
-        match (selection, self.last) {
+        let selection = match &self.small {
+            Some((g, r, c)) if *g == self.generation && *r == sel => Some(*c),
+            _ if sel.len() <= SMALL_SELECTION => {
+                let c = count_range(session.doc(), sel.clone());
+                self.small = Some((self.generation, sel.clone(), c));
+                Some(c)
+            }
+            _ if self.synced => match &self.report.selection {
+                Some((r, range, c)) if *r == self.rev && *range == sel => Some(*c),
+                _ => {
+                    let ask = (self.rev, sel.clone());
+                    if self.asked.as_ref() != Some(&ask) {
+                        worker.select(ask.0, ask.1.clone());
+                        self.asked = Some(ask);
+                    }
+                    self.waiting = true;
+                    None
+                }
+            },
+            _ => None,
+        };
+        match (selection, document) {
             (Some(selection), Some(document)) => Shown::Selection { selection, document },
-            (_, document) => Shown::SelectionPending { document },
+            (selection, document) => Shown::SelectionPending { selection, document },
         }
     }
 }
@@ -232,6 +298,112 @@ impl WordCount {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs one frame that updates `wc`; returns what it shows and the repaint delay asked.
+    fn frame(ctx: &egui::Context, wc: &mut WordCount, s: &mut EditorSession, sel: Range<usize>) -> (Shown, Duration) {
+        let mut shown = Shown::Unavailable;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            shown = wc.update(ui.ctx(), s, sel.clone())
+        });
+        out.textures_delta.clear(); // headless
+        (shown, out.viewport_output[&egui::ViewportId::ROOT].repaint_delay)
+    }
+
+    fn wait_settled(ctx: &egui::Context, wc: &mut WordCount, s: &mut EditorSession, sel: Range<usize>) -> Shown {
+        let t = Instant::now();
+        loop {
+            let (shown, _) = frame(ctx, wc, s, sel.clone());
+            if wc.settled() {
+                return shown;
+            }
+            assert!(t.elapsed() < Duration::from_secs(120), "never settled: {shown:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Issue #132: counting a large document runs on the worker: no frame asks for a repaint
+    /// to count (the window stays idle), the worker wakes the UI once when the count is
+    /// complete, typing never copies the document, and the edit is counted after the
+    /// debounce; a large selection is counted by the worker, a small one at once.
+    #[test]
+    fn counting_requests_no_repaint_and_wakes_once() {
+        let text = markise_corpus::generate(2 << 20, 5);
+        let mut s = EditorSession::new(std::sync::Arc::new(markise_md::MarkdownFormat::default()), text.clone());
+        let ctx = egui::Context::default();
+        let wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let w = wakes.clone();
+        ctx.set_request_repaint_callback(move |_| {
+            w.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        // egui's own first passes ask for repaints
+        for _ in 0..3 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
+            out.textures_delta.clear();
+        }
+        let mut wc = WordCount::default();
+        let (shown, delay) = frame(&ctx, &mut wc, &mut s, 0..0);
+        assert!(matches!(shown, Shown::Counting(_)), "{shown:?}");
+        assert_eq!(delay, Duration::MAX, "no repaint requested to count");
+        wakes.store(0, std::sync::atomic::Ordering::SeqCst);
+        // frames while the worker counts never ask for a repaint
+        let mut frames = 0;
+        while !wc.settled() {
+            let (_, delay) = frame(&ctx, &mut wc, &mut s, 0..0);
+            // (the worker's wake-up, when the count is complete, is the only repaint; it may
+            // land while the frame runs, so it is read after the frame)
+            let woken = wakes.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            assert!(
+                delay == Duration::MAX || woken,
+                "frame {frames} asked for a repaint while counting: {delay:?}"
+            );
+            frames += 1;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let shown = frame(&ctx, &mut wc, &mut s, 0..0).0;
+        let total = markise_engine::count::count_document(s.doc());
+        assert_eq!(shown, Shown::Document(total));
+        // the worker's wake-up and the frame egui runs for it
+        assert!(
+            wakes.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "one wake when the count arrived: {}",
+            wakes.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert_eq!(frame(&ctx, &mut wc, &mut s, 0..0).1, Duration::MAX, "idle once counted");
+
+        // typing: no document copy; counted after the debounce
+        let copies = s.copies;
+        s.set_selection(markise_doc::Selection::single(
+            markise_doc::DocPos::new(text.len()),
+            markise_doc::DocPos::new(text.len()),
+        ));
+        for w in ["\n\nzebra", " quokka", " okapi"] {
+            s.insert_text(w).unwrap();
+            let (_, delay) = frame(&ctx, &mut wc, &mut s, 0..0);
+            assert!(delay <= DEBOUNCE, "the debounce schedules a frame: {delay:?}");
+        }
+        assert_eq!(s.copies, copies, "the lent document was taken back before each edit");
+        std::thread::sleep(DEBOUNCE);
+        let shown = wait_settled(&ctx, &mut wc, &mut s, 0..0);
+        assert_eq!(shown, Shown::Document(markise_engine::count::count_document(s.doc())));
+        assert_eq!(total.words + 3, markise_engine::count::count_document(s.doc()).words);
+
+        // a small selection: counted at once; Select All: by the worker
+        let len = s.doc().text().len();
+        let (shown, _) = frame(&ctx, &mut wc, &mut s, len - 12..len);
+        assert!(
+            matches!(shown, Shown::Selection { selection, .. } if selection.words == 2),
+            "{shown:?}"
+        );
+        let shown = wait_settled(&ctx, &mut wc, &mut s, 0..len);
+        let doc = markise_engine::count::count_document(s.doc());
+        assert_eq!(
+            shown,
+            Shown::Selection {
+                selection: doc,
+                document: doc
+            }
+        );
+    }
 
     #[test]
     fn thousands_separators() {
@@ -294,8 +466,26 @@ mod tests {
         );
         assert!(tooltip(&Shown::Document(e)).contains("~ estimated"));
         assert_eq!(
-            label(&Shown::SelectionPending { document: Some(c) }, CountMode::Words),
+            label(
+                &Shown::SelectionPending {
+                    selection: None,
+                    document: Some(c)
+                },
+                CountMode::Words
+            ),
             "… of 1,234 words"
         );
+        assert_eq!(
+            label(
+                &Shown::SelectionPending {
+                    selection: Some(s),
+                    document: None
+                },
+                CountMode::Words
+            ),
+            "12 of … words"
+        );
+        assert_eq!(label(&Shown::Counting(None), CountMode::Words), "Counting…");
+        assert_eq!(label(&Shown::Counting(Some(40)), CountMode::Words), "Counting… 40%");
     }
 }

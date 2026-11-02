@@ -7,12 +7,15 @@
 //! Nothing here runs on the UI thread except cheap channel polls.
 
 pub mod attach;
+pub mod comment_scan;
 pub mod count;
+pub mod count_worker;
 pub mod edit;
 pub mod editor;
 pub mod export;
 pub mod fsops;
 pub mod jobs;
+pub mod lease;
 pub mod load;
 pub mod save;
 pub mod search;

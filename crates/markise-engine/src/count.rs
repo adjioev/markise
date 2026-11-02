@@ -54,8 +54,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 /// Blocks with a larger source are estimated, not parsed.
 pub const BIG_BLOCK: usize = 64 * 1024;
-/// Source bytes [`DocCounter::fill`] reads per call of the status bar (a frame), plus at most
-/// one block.
+/// Source bytes [`DocCounter::fill`] reads per step of the counting worker
+/// ([`crate::count_worker`]; an edit waits at most one step), plus at most one block.
 pub const FRAME_BYTES: usize = 32 * 1024;
 /// A selection's fully selected middle is summed exactly when it, or the rest of the
 /// document, spans at most this many top-level blocks; otherwise it is estimated.
@@ -522,6 +522,24 @@ pub fn count_document(doc: &dyn FormatDoc) -> Counts {
     acc
 }
 
+/// Counts of the source byte range `sel` of `doc`, read directly (no cache): every leaf
+/// block inside or partly inside it, clipped. Reads about `sel.len()` bytes plus the leaves
+/// that `sel` cuts, so the status bar uses it for small selections only; larger ones go
+/// through [`DocCounter::selection`] on the counting worker ([`crate::count_worker`]).
+pub fn count_range(doc: &dyn FormatDoc, sel: Range<usize>) -> Counts {
+    let n = doc.top_count();
+    if n == 0 || sel.is_empty() {
+        return Counts::default();
+    }
+    let top_at = |o: usize| doc.top_at(o).unwrap_or(0).min(n - 1);
+    let (a, b) = (top_at(sel.start), top_at(sel.end.saturating_sub(1).max(sel.start)));
+    let mut acc = Counts::default();
+    for t in a..=b {
+        acc += count_top(doc, t, Some(&sel), 0, usize::MAX).counted.counts;
+    }
+    acc
+}
+
 /// What [`count_top`] found.
 struct TopCount {
     counted: Counted,
@@ -600,6 +618,18 @@ impl Slot {
     }
 }
 
+/// Progress of a selection counted in steps: the two end blocks (`a`, `b`), the end being
+/// counted (index into them), where in it to resume, the counts so far.
+#[derive(Debug)]
+struct SelPartial {
+    sel: Range<usize>,
+    a: usize,
+    b: usize,
+    end: usize,
+    from: usize,
+    acc: Counts,
+}
+
 /// Block flag: it may use a reference definition.
 const REFS: u8 = 1;
 
@@ -623,6 +653,8 @@ pub struct DocCounter {
     partial: Option<(usize, usize, Counted)>,
     /// The last selection's counts.
     sel: Option<(Range<usize>, Counts)>,
+    /// A selection counted in steps ([`DocCounter::selection_step`]) not finished yet.
+    sel_partial: Option<SelPartial>,
     stats: CounterStats,
 }
 
@@ -728,6 +760,7 @@ impl DocCounter {
     pub fn apply(&mut self, e: &EditSummary) -> bool {
         // selection counts are by byte range: recomputed after any change
         self.sel = None;
+        self.sel_partial = None;
         if e.deps.all {
             return false;
         }
@@ -839,39 +872,83 @@ impl DocCounter {
     /// at most [`BIG_BLOCK`]). A fully selected middle of more than [`EXACT_ITEMS`] blocks,
     /// when the rest of the document is that large too, is estimated in proportion to its
     /// bytes (marked approximate). The result is kept until the selection or the document
-    /// changes.
+    /// changes. Reads everything at once; [`DocCounter::selection_step`] does it in steps.
     pub fn selection(&mut self, doc: &dyn FormatDoc, sel: Range<usize>) -> Option<Counts> {
+        loop {
+            if let Some(r) = self.selection_step(doc, sel.clone(), usize::MAX) {
+                return r;
+            }
+        }
+    }
+
+    /// [`DocCounter::selection`] in steps of about `budget` source bytes (at least one leaf
+    /// block, each at most [`BIG_BLOCK`]; issue #132: the counting worker reads the lent
+    /// document in short steps even for a selection of most of a huge list): `None` while not
+    /// done — call again (with the same `sel`; another range starts over), `Some` with the
+    /// result of [`DocCounter::selection`] once done. A document change forgets the progress.
+    pub fn selection_step(&mut self, doc: &dyn FormatDoc, sel: Range<usize>, budget: usize) -> Option<Option<Counts>> {
         let n = self.counts.len();
         if n == 0 || sel.is_empty() {
-            return Some(Counts::default());
+            return Some(Some(Counts::default()));
         }
-        let total = self.total()?;
+        let Some(total) = self.total() else {
+            return Some(None);
+        };
         if n != doc.top_count() {
-            return None;
+            return Some(None);
         }
         if let Some((r, c)) = &self.sel
             && *r == sel
         {
-            return Some(*c);
+            return Some(Some(*c));
         }
-        let top_at = |o: usize| doc.top_at(o).unwrap_or(0).min(n - 1);
-        let a = top_at(sel.start);
-        let b = top_at(sel.end.saturating_sub(1).max(sel.start));
-        let mut acc = Counts::default();
-        let mut read = 0;
+        let mut p = match self.sel_partial.take() {
+            Some(p) if p.sel == sel => p,
+            _ => {
+                let top_at = |o: usize| doc.top_at(o).unwrap_or(0).min(n - 1);
+                let a = top_at(sel.start);
+                let b = top_at(sel.end.saturating_sub(1).max(sel.start));
+                SelPartial {
+                    sel: sel.clone(),
+                    a,
+                    b,
+                    end: 0,
+                    from: 0,
+                    acc: Counts::default(),
+                }
+            }
+        };
+        let (a, b) = (p.a, p.b);
         let ends: &[usize] = if a == b { &[a] } else { &[a, b] };
-        for &t in ends {
+        let mut read = 0;
+        while p.end < ends.len() {
+            if read > 0 && read >= budget {
+                self.record(read);
+                self.sel_partial = Some(p);
+                return None;
+            }
+            let t = ends[p.end];
             let span = doc.top_span(t).unwrap_or_default();
             match self.load(self.counts[t]) {
-                Some(c) if sel.start <= span.start && span.end <= sel.end => acc += c,
+                Some(c) if p.from == 0 && sel.start <= span.start && span.end <= sel.end => p.acc += c,
                 _ => {
-                    let tc = count_top(doc, t, Some(&sel), 0, usize::MAX);
-                    acc += tc.counted.counts;
+                    let left = budget.saturating_sub(read).max(1);
+                    let tc = count_top(doc, t, Some(&sel), p.from, left);
+                    p.acc += tc.counted.counts;
                     read += tc.counted.read;
+                    if let Some(next) = tc.next {
+                        p.from = next;
+                        self.record(read);
+                        self.sel_partial = Some(p);
+                        return None;
+                    }
                     self.stats.blocks_counted += 1;
                 }
             }
+            p.end += 1;
+            p.from = 0;
         }
+        let mut acc = p.acc;
         let (ma, mb) = (a + 1, b);
         if mb > ma {
             let sum = |r: Range<usize>| {
@@ -899,7 +976,7 @@ impl DocCounter {
         }
         self.record(read);
         self.sel = Some((sel, acc));
-        Some(acc)
+        Some(Some(acc))
     }
 }
 
@@ -1443,6 +1520,31 @@ mod tests {
         // markers inside the selection are not counted
         let src = "Some **bold** text.\n";
         assert_eq!(sel(src, 0, src.len() - 1).chars, "Some bold text.".len() as u64);
+    }
+
+    /// Issue #132: the status bar counts small selections directly ([`count_range`]); it gets
+    /// what the cached counter gets for the same range.
+    #[test]
+    fn direct_range_counts_match_the_counter() {
+        let mut src = String::from("[r]: /u\n\n");
+        for k in 0..12 {
+            src.push_str(&format!(
+                "# H{k}\n\nPara {k} with [r] *five* words.\n\n- item {k}\n- more `c`\n  > quoted {k}\n\n```\ncode {k}\n```\n\n| a | b |\n|---|---|\n| c{k} | d |\n\n<div>html {k}</div>\n\n"
+            ));
+        }
+        let (doc, mut c) = counted(&src);
+        assert_eq!(count_range(&doc, 0..src.len()), count_document(&doc));
+        let mut x = 7usize;
+        for _ in 0..300 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let a = (x >> 33) % src.len();
+            let b = a + (x >> 13) % 400;
+            let (a, b) = (a, b.min(src.len()));
+            if !src.is_char_boundary(a) || !src.is_char_boundary(b) {
+                continue;
+            }
+            assert_eq!(count_range(&doc, a..b), c.selection(&doc, a..b).unwrap(), "{a}..{b}");
+        }
     }
 
     /// Review round 2 P2-3: selection sums are bounded: a middle of up to [`EXACT_ITEMS`]
