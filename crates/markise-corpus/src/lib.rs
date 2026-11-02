@@ -521,6 +521,7 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
             runs = (runs * 2).max(2 * min_small / per_run + 1).min(MAX_BATCH);
         }
     };
+    keep_freed_memory();
     let mut failures = Vec::new();
     for attempt in 1..=3 {
         let mut n = 1_000;
@@ -532,16 +533,21 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
             }
             n *= 2;
         };
+        let faults = minor_faults();
         let ws = if w >= min_small {
             best(&small, 3) as f64
         } else {
             best_per_run(&small)
         };
+        let small_faults = minor_faults() - faults;
         let large = generate(SIZE_FACTOR * n);
+        let faults = minor_faults();
         let wl = best(&large, 2);
+        let large_faults = minor_faults() - faults;
         let ratio = scaling_ratio(ws, wl);
         let line = format!(
-            "{name}: n={n} ({} → {} bytes): {ratio:.1}× ({:?} → {:?})",
+            "{name}: n={n} ({} → {} bytes): {ratio:.1}× ({:?} → {:?}; page faults {small_faults} → \
+             {large_faults})",
             small.len(),
             large.len(),
             Duration::from_secs_f64(ws / WORK_PER_SEC as f64),
@@ -558,6 +564,39 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
          (super-linear?): {}",
         failures.join("; ")
     );
+}
+
+/// Keeps freed heap memory in the process (glibc only) so repeated runs of a large input reuse
+/// it instead of page-faulting fresh memory on every run. glibc serves allocations above its
+/// mmap threshold (at most 32 MiB) with fresh `mmap`s that `free` unmaps again, so only the
+/// large input paid the page faults (kernel time counted in [`thread_work`]) on each run, a
+/// per-byte step on Linux CI runners (issue #109). Fault costs are linear and real, but they
+/// are not what the scaling check is about. Affects only the test process that calls
+/// [`assert_scales_linearly`].
+fn keep_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        // SAFETY: mallopt only changes allocator tuning parameters; it is thread-safe.
+        ONCE.call_once(|| unsafe {
+            libc::mallopt(libc::M_MMAP_MAX, 0);
+            libc::mallopt(libc::M_TRIM_THRESHOLD, libc::c_int::MAX);
+        });
+    }
+}
+
+/// Minor page faults of the calling thread so far (Linux; 0 elsewhere), for the diagnostics of
+/// [`assert_scales_linearly`].
+fn minor_faults() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `usage` is a valid, writable rusage; RUSAGE_THREAD is a constant.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) } == 0 {
+            return usage.ru_minflt as u64;
+        }
+    }
+    0
 }
 
 /// Minimum text length of the small input in [`assert_scales_linearly`], so that its working
