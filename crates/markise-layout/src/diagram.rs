@@ -9,8 +9,6 @@
 //! the theme, which the key covers already. So a diagram is laid out as source first and once
 //! more when its scene arrives.
 
-use std::sync::Arc;
-
 use markise_blocks::diagram::{DiagramLang, DiagramResult, TableMeasure};
 use markise_doc::FormatDoc;
 
@@ -22,7 +20,8 @@ pub struct DiagramQuery<'a> {
     pub lang: DiagramLang,
     /// Content key and length of the block.
     pub code: CodeRef,
-    pub doc: &'a Arc<dyn FormatDoc>,
+    /// Borrowed: a query cannot keep the shared document alive (see [`crate::CodeQuery::doc`]).
+    pub doc: &'a dyn FormatDoc,
     /// Absolute start of the block.
     pub start: usize,
     pub item: usize,
@@ -40,22 +39,11 @@ impl std::fmt::Debug for DiagramQuery<'_> {
 }
 
 impl DiagramQuery<'_> {
-    /// A `'static` builder of the block content (lines joined with `\n`) that shares the
-    /// document (O(1) to create); call it on a worker thread.
-    pub fn source(&self) -> impl FnOnce() -> String + Send + 'static {
-        let doc = self.doc.clone();
-        let start = self.start;
-        let len = self.code.len;
-        move || {
-            let lines = doc.leaf(start).map(|l| l.lines).unwrap_or_default();
-            let text = doc.text();
-            let mut s = String::with_capacity(len);
-            for l in &lines {
-                s.push_str(l.slice(text));
-                s.push('\n');
-            }
-            s
-        }
+    /// The block content (lines joined with `\n`; O(block)). The renderer builds it once per
+    /// block version, when it queues the block, and hands the owned text to its worker.
+    pub fn content(&self) -> String {
+        let lines = self.doc.leaf(self.start).map(|l| l.lines).unwrap_or_default();
+        crate::highlight::block_content(&lines, self.doc.text(), self.code.len)
     }
 }
 

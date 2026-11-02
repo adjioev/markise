@@ -117,12 +117,18 @@ impl Diagrams for DiagramRenderer {
     }
 
     fn want(&self, q: &DiagramQuery) {
-        if let Some(s) = self.service() {
+        let key = self.key(q);
+        if let Some(s) = self.service()
+            && s.wants(key)
+        {
+            // the job gets its own copy of the block (built here, once per block version), never
+            // the shared document (see `CodeHighlighter::want`, issue #29)
+            let text = q.content();
             let _ = s.request_with(
-                self.key(q),
+                key,
                 q.lang,
                 q.code.len,
-                Box::new(q.source()),
+                Box::new(move || text),
                 self.font_size(),
                 Some(self.measure()),
             );

@@ -13,9 +13,8 @@
 //!   drops their partial results. A newer request for the same block adopts the running job.
 //! - The wake callback (repaint) is throttled to one call per [`WAKE_INTERVAL`] while chunks
 //!   of a long job arrive, plus one when a block completes or a job is cancelled.
-//! - Memory is bounded: block content is built *on the worker* from a caller-supplied source
-//!   (the UI thread never concatenates a block), and the source bytes of queued and running jobs
-//!   are reserved against [`MAX_SOURCE_BYTES`] before a job is admitted; results — pending ones
+//! - Memory is bounded: block content comes from a caller-supplied source that runs on the
+//!   worker, and the source bytes of queued and running jobs are reserved against [`MAX_SOURCE_BYTES`] before a job is admitted; results — pending ones
 //!   included — count against the cache budget. A block whose content exceeds
 //!   [`MAX_BLOCK_SOURCE_BYTES`], or whose runs would exceed a quarter of the cache budget (or
 //!   not fit at all), gets a bounded *terminal* result: the runs so far, plain for the rest. It
@@ -257,8 +256,11 @@ impl HighlightService {
 
     /// Requests highlighting of block `key` (language `lang`, `len` content bytes) for the
     /// current generation. `source` builds the content (lines each followed by `\n`) and runs on
-    /// the worker thread. No-op when the block is cached or already requested; `false` when the
-    /// queue or the source-byte budget is full (ask again later). A block above
+    /// the worker thread. It must not capture shared state the caller mutates in place (the
+    /// editor's document): a queued job would keep it alive and force a copy on the next edit
+    /// (issue #29); the app builds the block text when [`wants`](Self::wants) says the block is
+    /// new and hands that over. No-op when the block is cached or already requested; `false`
+    /// when the queue or the source-byte budget is full (ask again later). A block above
     /// [`MAX_BLOCK_SOURCE_BYTES`] gets a terminal plain result at once.
     pub fn request(&self, key: BlockKey, lang: &str, len: usize, source: BlockSource) -> bool {
         let generation = self.generation();
@@ -311,6 +313,14 @@ impl HighlightService {
                 false
             }
         }
+    }
+
+    /// Whether [`request`](Self::request) for block `key` would queue a job (the block is
+    /// neither cached nor requested): callers that build the content themselves build it only
+    /// then.
+    pub fn wants(&self, key: BlockKey) -> bool {
+        let st = self.shared.lock();
+        !st.pending.contains_key(&key) && !st.entries.contains_key(&key)
     }
 
     /// [`request`](Self::request) with content already in hand (tests, tools).
