@@ -230,3 +230,26 @@ whole file is in. Edits made meanwhile are carried over as one diff patch on the
 | Edit during loading kept, view unchanged at install, model consistent | yes | yes | yes |
 
 The read itself is ~40 ms; the lag was parse + model on 100 MB.
+
+### Touchpad smoothness, round 2 (owner: RAW broke smoothness; SNAP alone not as smooth as Zed)
+
+- **Why RAW was worse:** applying deltas in the frame they arrive stutters when trackpad events
+  do not arrive one per frame (0 in one frame, 2 in the next; frames drawn for other reasons
+  get none). Simulated with uneven delivery (`MARKISE_LAZY_SQ_CLUSTER=1`): stalled frames —
+  exact raw 232 of ~300 moving, egui smoothing 148 (it passes finger-phase deltas through),
+  **resampled raw 4**. `MARKISE_SCROLL_RAW=1` now drains delivered deltas with a one-frame
+  half-life (`MARKISE_SCROLL_HALFLIFE_MS`, default 8, total preserved); `=exact` keeps the
+  old behaviour.
+- **Zed / GPUI** (read for ideas, Apache-2.0, `crates/gpui_macos`): frames are driven by a
+  `CAMetalDisplayLink` (macOS 14+; `CVDisplayLink` before) — one drawable per refresh, Metal
+  rendering; precise deltas become `ScrollDelta::Pixels` and are applied as delivered, so each
+  frame shows everything since the last refresh. Markise renders with glow (OpenGL), likely
+  capped at 60 Hz on ProMotion. Closest analogue here: `MARKISE_RENDERER=wgpu` (Metal) +
+  `MARKISE_DISPLAY_LINK=1` (a frame per refresh while scrolling, present blocks on vsync) +
+  resampled raw. A real display-link driver would need wgpu/winit changes.
+- **`MARKISE_FRAME_LOG=1`** writes `/tmp/markise-frames-<pid>.csv` (per frame: interval, UI
+  wall/CPU, previous frame CPU, wheel events / momentum / phases, raw / egui / applied /
+  pending deltas, scroll offset, repaint requested, input-driven; header: renderer, present
+  mode, display max fps) for checking pacing on the real display.
+- Progressive open: the loading note is in the status bar now (no banner moving the text); a
+  save requested while loading runs when the file is complete.
