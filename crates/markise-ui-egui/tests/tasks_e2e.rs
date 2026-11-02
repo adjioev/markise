@@ -427,3 +427,32 @@ fn a_click_after_an_edit_in_the_same_frame_toggles_the_painted_task() {
     h.step();
     assert_eq!(text(&h), "intro12345678\n\n- [ ] A\n- [x] B\n");
 }
+
+/// Review of #144 (round 2): a checkbox press held while the document changes (text typed
+/// elsewhere, a frame drawn in between) is cancelled on release; the next click toggles.
+#[test]
+fn a_press_held_across_an_edit_toggles_nothing() {
+    let doc = "intro\n\n- [ ] A\n- [ ] B\n";
+    let (mut h, _p) = open("held-press", doc);
+    let b = doc.find("B").unwrap();
+    let b_box = box_center(&mut h, b);
+    h.hover_at(b_box);
+    h.step();
+    h.drag_at(b_box);
+    h.step();
+    {
+        let v = h.state_mut().viewer().unwrap();
+        let ps = markise_doc::PatchSet::single_verbatim(5..5, "12345678");
+        v.ed.session.apply_external(&ps, "test", false).unwrap();
+        v.ed.sync();
+    }
+    h.step();
+    h.step();
+    h.drop_at(b_box);
+    h.step();
+    h.step();
+    assert_eq!(text(&h), "intro12345678\n\n- [ ] A\n- [ ] B\n", "nothing toggled");
+    let nb = text(&h).find("B").unwrap();
+    click_box(&mut h, nb);
+    assert_eq!(text(&h), "intro12345678\n\n- [ ] A\n- [x] B\n");
+}

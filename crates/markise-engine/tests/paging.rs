@@ -313,3 +313,28 @@ fn copy_and_cut_across_unloaded_pages() {
     p.key("edit.undo");
     assert_eq!(p.paged.text(), src);
 }
+
+/// Review of #144 (round 2): the edits kept for mapping last-frame positions do not pile up
+/// while no rendered frame clears them (Source mode): beyond a bound, positions are dropped.
+#[test]
+fn recent_edits_are_bounded_without_rendered_frames() {
+    let mut t = T::new("one two three\n");
+    t.ed.clear_recent_edits();
+    assert_eq!(t.ed.map_recent(4), Some(4));
+    t.ed.session
+        .apply_external(&markise_doc::PatchSet::single_verbatim(0..0, "x"), "t", false)
+        .unwrap();
+    t.ed.sync();
+    assert_eq!(t.ed.map_recent(4), Some(5));
+    for _ in 0..200 {
+        t.ed.session
+            .apply_external(&markise_doc::PatchSet::single_verbatim(0..0, "x"), "t", false)
+            .unwrap();
+        t.ed.sync();
+    }
+    assert_eq!(t.ed.map_recent(4), None, "history overflowed: positions dropped");
+    let n = t.ed.changes();
+    assert!(n >= 201);
+    t.ed.clear_recent_edits();
+    assert_eq!(t.ed.map_recent(4), Some(4));
+}

@@ -166,19 +166,37 @@ pub fn rendered_target(view: &mut markise_layout::View, lines: &dyn LineMap, top
         return None;
     }
     view.ensure_offset(lines.doc_start(top.max(0.0).floor() as usize));
-    // each round materializes a page (a long run of definition-only pages takes many): at
-    // most as many rounds as there are items
-    for _ in 0..=view.len() {
-        let t = source_to_rendered(view.model(), lines, top)?;
-        match t {
-            Target::At { start, nth, .. } if target_item(view.model(), start, nth).is_none() => {
-                // the next rendered item is in a page not materialized: bring it in, again
-                view.ensure_offset(start);
+    let t = source_to_rendered(view.model(), lines, top)?;
+    let Target::At { start, nth, .. } = t else {
+        return Some(t);
+    };
+    if target_item(view.model(), start, nth).is_some() {
+        return Some(t);
+    }
+    // the source maps past hidden source to the top of the next rendered block, which is in
+    // a page not materialized: one walk forward from there (linear in the pages passed), over
+    // hidden items and pages holding nothing but hidden blocks (definitions: skipped from
+    // their statistics without materializing), materializing only the page that shows it
+    let mut j = view.model().items.partition_point_start(start);
+    loop {
+        let m = view.model();
+        let Some(it) = m.items.get(j) else {
+            return Some(Target::End);
+        };
+        match &it.kind {
+            ItemKind::Hidden => j += 1,
+            ItemKind::Page(st) if st.items == st.hidden => j += 1,
+            ItemKind::Page(_) => {
+                let at = m.item_start(j);
+                // (the page is replaced by its items from `j` on: continue from `j`)
+                view.ensure_offset(at);
+                if view.model().is_page(j) {
+                    return None; // could not materialize (defensive)
+                }
             }
-            _ => return Some(t),
+            _ => return Some(at(view.model(), j, 0.0)),
         }
     }
-    source_to_rendered(view.model(), lines, top)
 }
 
 /// Rendered target for the source line `top` (fractional: `3.5` = halfway through line 3).
@@ -574,7 +592,12 @@ mod tests {
         let mut paged = mk(markise_layout::Paging::Paged { tops: 1 });
         let li = LineIndex::new(&src);
         let line = li.line_of_doc(src.find("[d1]").unwrap()) as f32;
+        let before = paged.paging_stats().materialized;
         let t = rendered_target(&mut paged, &li, line);
+        // review of #144 round 2: definition-only pages are skipped from their statistics,
+        // not materialized (linear, bounded work): only the line's and the target's pages
+        let loaded = paged.paging_stats().materialized - before;
+        assert!(loaded <= 6, "{loaded} pages materialized for one sync");
         assert_eq!(t, rendered_target(&mut full, &li, line));
         let Some(Target::At { start, nth, .. }) = t else {
             panic!("{t:?}")

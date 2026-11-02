@@ -146,8 +146,9 @@ pub struct DocViewer {
     drag: Option<Drag>,
     /// A press on a task checkbox waiting for its release: its item by source position
     /// (start, ordinal among items starting there: indices shift when a paged model
-    /// materializes pages between frames) and the list item ordinal.
-    task_press: Option<((usize, usize), u16)>,
+    /// materializes pages between frames), the list item ordinal and the document's change
+    /// count at the press (a press held while the document changed is cancelled).
+    task_press: Option<((usize, usize), u16, u64)>,
     /// Last primary press: time, position, click count.
     last_press: Option<(f64, Pos2, u32)>,
     /// Visible items of the last frame (index, top relative to the surface), for hit tests.
@@ -613,7 +614,7 @@ impl DocViewer {
             None
         };
         if let Some((i, ord)) = task {
-            self.task_press = Some((self.item_key(i), ord));
+            self.task_press = Some((self.item_key(i), ord, self.ed.changes()));
         }
         if let Some(t) = self.task_press
             && ui.input(|i| i.pointer.primary_released())
@@ -622,11 +623,11 @@ impl DocViewer {
             let over = ui
                 .input(|i| i.pointer.interact_pos())
                 .and_then(|p| self.task_box_at(p, rect.top()));
-            // (the press's item moved with the edits since: compared at its current position)
-            let pressed_at = self.ed.map_recent(t.0.0).map(|at| ((at, t.0.1), t.1));
+            // (a press held while the document changed is cancelled: it named the old text)
             if let Some((i, ord)) = over
                 && editable
-                && Some((self.item_key(i), ord)) == pressed_at
+                && t.2 == self.ed.changes()
+                && (self.item_key(i), ord) == (t.0, t.1)
                 && self.toggle_task(i, ord)
             {
                 out.edited = true;

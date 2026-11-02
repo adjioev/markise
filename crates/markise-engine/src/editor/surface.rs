@@ -80,10 +80,19 @@ pub struct EditorView {
     /// The source editor (Source and Side by Side modes; M2d), kept in step by
     /// [`EditorView::sync`].
     pub source: Option<super::SourcePane>,
-    /// The document's edits since [`EditorView::clear_recent_edits`] (`None`: replaced): the UI
-    /// maps positions it kept from its last frame through them ([`EditorView::map_recent`]).
+    /// The document's edits since [`EditorView::clear_recent_edits`] (`None`: replaced, or more
+    /// than [`RECENT_MAX`] — the rendered surface was not drawn meanwhile, e.g. Source mode):
+    /// the UI maps positions it kept from its last frame through them
+    /// ([`EditorView::map_recent`]).
     recent: Option<Vec<EditSummary>>,
+    /// Document changes so far (a pressed checkbox is cancelled when the document changed
+    /// while it was held).
+    changes: u64,
 }
+
+/// Recent edits kept for [`EditorView::map_recent`]; beyond them positions kept from the last
+/// frame are dropped.
+const RECENT_MAX: usize = 64;
 
 impl EditorView {
     /// Wraps `session`, showing it in `view` (built for the session's document).
@@ -100,6 +109,7 @@ impl EditorView {
             reveal: true,
             source: None,
             recent: Some(Vec::new()),
+            changes: 0,
         };
         e.sync();
         e
@@ -135,8 +145,12 @@ impl EditorView {
                 }
             }
             DocChange::Edited(e) => {
+                self.changes += 1;
                 if let Some(r) = &mut self.recent {
                     r.push(e.clone());
+                }
+                if self.recent.as_ref().is_some_and(|r| r.len() > RECENT_MAX) {
+                    self.recent = None;
                 }
                 let ch = self.view.model_mut().apply(self.session.doc(), &e);
                 self.view.apply_change(self.session.doc_arc().clone(), &ch);
@@ -148,6 +162,7 @@ impl EditorView {
                 self.source_load_selection();
             }
             DocChange::Replaced => {
+                self.changes += 1;
                 self.recent = None;
                 // the same kind of model as before (paged or full)
                 let paging = self.view.model().paging();
@@ -160,6 +175,11 @@ impl EditorView {
             }
         }
         self.pin_caret();
+    }
+
+    /// Document changes so far (edits, replacements).
+    pub fn changes(&self) -> u64 {
+        self.changes
     }
 
     /// Forgets the recent edits (the UI took a fresh look at the document: its last frame).
