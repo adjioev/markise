@@ -972,7 +972,11 @@ impl<'a> Parser<'a> {
         self.append_child(blk);
     }
 
-    fn append_child(&mut self, blk: Block) {
+    fn append_child(&mut self, mut blk: Block) {
+        // the block is complete: drop the growth slack of its lists (issue #29, part 4: up to
+        // 4× the element size per list, ~40 % of the parsed document on structured text)
+        blk.lines.shrink_to_fit();
+        blk.children.shrink_to_fit();
         let text = self.text;
         let parent = &mut self.stack.last_mut().unwrap().block;
         // R3.14.2: adjacent HTML blocks merge.

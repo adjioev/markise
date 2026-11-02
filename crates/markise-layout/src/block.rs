@@ -1828,7 +1828,8 @@ pub fn layout_item(
         return BlockLayout::default();
     };
     if item.kind == ItemKind::Hidden
-        || (item.raw == Some(markise_doc::RawPresentation::Comment) && !p.focus.is_some_and(|f| f.raw_source))
+        || (item.raw.as_deref() == Some(&markise_doc::RawPresentation::Comment)
+            && !p.focus.is_some_and(|f| f.raw_source))
     {
         return BlockLayout::default();
     }
@@ -3180,7 +3181,7 @@ fn layout_table(
             .collect()
     };
     let estimated: Option<&[u32]> = match seg {
-        Some(BlockSegment::Rows { col_chars, .. }) => Some(col_chars),
+        Some(BlockSegment::Rows { data, .. }) => Some(&data.col_chars),
         _ => None,
     };
     // small tables: shape every row for natural widths; segmented: the model's estimate

@@ -1019,7 +1019,7 @@ impl SourceView {
                 break;
             }
             let it = &model.items[i];
-            if let (ItemKind::Code { lang }, Some(code)) = (&it.kind, it.code) {
+            if let (ItemKind::Code { lang }, Some(code)) = (&it.kind, it.code.as_deref().copied()) {
                 let units: Vec<markise_doc::Span> = match &it.segment {
                     Some(Segment::Lines { spans, .. }) => spans
                         .iter()

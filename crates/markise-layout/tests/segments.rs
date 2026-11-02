@@ -117,3 +117,26 @@ fn segmented_table_alignment_is_part_of_the_key_item10() {
         assert_ne!(x.hash, y.hash, "every segment's key changes with the alignment");
     }
 }
+
+/// Issue #29, part 4 (memory): one `Item` exists per leaf block or segment (2 M in a 100 MB
+/// structured document), so its size is a memory budget. Rare data (code reference, raw
+/// presentation, table-segment data, code language) is boxed; grow it only deliberately.
+#[test]
+fn item_record_stays_small() {
+    use markise_layout::{Item, ItemKind};
+    assert!(
+        std::mem::size_of::<Item>() <= 136,
+        "Item is {} B",
+        std::mem::size_of::<Item>()
+    );
+    assert!(
+        std::mem::size_of::<Segment>() <= 32,
+        "Segment is {} B",
+        std::mem::size_of::<Segment>()
+    );
+    assert!(
+        std::mem::size_of::<ItemKind>() <= 24,
+        "ItemKind is {} B",
+        std::mem::size_of::<ItemKind>()
+    );
+}
