@@ -2897,6 +2897,7 @@ dependencies = [
  "ahash",
  "egui",
  "egui_kittest",
+ "embed-resource",
  "image",
  "libc",
  "markise-blocks",
