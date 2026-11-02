@@ -8,7 +8,10 @@
 //! 3. check the expected version again (catches writers active during step 2);
 //! 4. keep the current file recoverable: hard-link it (or copy it, where links are not
 //!    supported) to a unique `.<name>.markise-backup-…` entry;
-//! 5. rename the temporary file over the target and fsync the directory;
+//! 5. rename the temporary file over the target and fsync the directory (on Windows, a
+//!    rename refused because another process has the target open — antivirus, indexer — is
+//!    retried with a short backoff for up to about a second, re-checking the expected
+//!    version before each retry; issue #65);
 //! 6. verify the backup still holds the expected version: if it does, the backup is deleted;
 //!    if not, another program wrote the file between steps 3 and 5 — the save succeeded, but
 //!    the backup with the other program's content is kept and reported
@@ -19,7 +22,7 @@
 use std::hash::Hasher;
 use std::io::Write;
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Identity of a file's content on disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,8 +259,22 @@ pub fn save_checked_with(path: &Path, text: &str, expect: Expect, hooks: &SaveHo
     if let Some(h) = &hooks.after_backup {
         h();
     }
-    // 5. replace
-    tmp.persist(path).map_err(|e| io(path, e.error))?;
+    // 5. replace (retrying a transiently refused rename; nothing is replaced while another
+    // program changed the file in the meantime — the backup is still the expected version)
+    persist_retrying(
+        tmp,
+        path,
+        |pause| {
+            std::thread::sleep(pause);
+            let found = disk_version(path).map_err(|e| io(path, e))?;
+            if expect.accepts(&found) {
+                Ok(())
+            } else {
+                Err(SaveError::Conflict { found })
+            }
+        },
+        |e| io(path, e),
+    )?;
     #[cfg(unix)]
     if let Ok(d) = std::fs::File::open(dir) {
         let _ = d.sync_all();
@@ -293,12 +310,92 @@ pub fn save_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     if let Ok(meta) = std::fs::metadata(path) {
         let _ = std::fs::set_permissions(tmp.path(), meta.permissions());
     }
-    tmp.persist(path).map_err(|e| e.error)?;
+    persist_retrying(
+        tmp,
+        path,
+        |pause| {
+            std::thread::sleep(pause);
+            Ok(())
+        },
+        |e| e,
+    )?;
     #[cfg(unix)]
     if let Ok(d) = std::fs::File::open(dir) {
         let _ = d.sync_all();
     }
     Ok(())
+}
+
+/// Pauses before each retry of the final rename (issue #65): about one second in total.
+const RENAME_RETRY_PAUSES: [Duration; 7] = [
+    Duration::from_millis(10),
+    Duration::from_millis(20),
+    Duration::from_millis(40),
+    Duration::from_millis(80),
+    Duration::from_millis(160),
+    Duration::from_millis(250),
+    Duration::from_millis(400),
+];
+
+/// Windows error codes of a rename refused because another process has the target open
+/// without sharing deletion (antivirus, search indexer, backup tools): `ERROR_ACCESS_DENIED`
+/// and `ERROR_SHARING_VIOLATION`. They usually clear within milliseconds.
+fn is_sharing_conflict_code(code: Option<i32>) -> bool {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    matches!(code, Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION))
+}
+
+/// The final rename failed in a way worth retrying: only on Windows, where another process
+/// holding the target open blocks a replacing rename (elsewhere the codes mean other things
+/// and a rename over an open file succeeds).
+fn rename_error_is_transient(e: &std::io::Error) -> bool {
+    cfg!(windows) && is_sharing_conflict_code(e.raw_os_error())
+}
+
+/// Renames `tmp` over `path`, retrying transient failures ([`rename_error_is_transient`])
+/// after the pauses of [`RENAME_RETRY_PAUSES`]. `between` waits out a pause and may stop the
+/// retries (a version re-check); `fail` maps the final I/O error.
+fn persist_retrying<E>(
+    tmp: tempfile::NamedTempFile,
+    path: &Path,
+    between: impl FnMut(Duration) -> Result<(), E>,
+    fail: impl Fn(std::io::Error) -> E,
+) -> Result<(), E> {
+    retry_transient(
+        tmp,
+        |t| t.persist(path).map(|_| ()).map_err(|e| (e.error, e.file)),
+        rename_error_is_transient,
+        &RENAME_RETRY_PAUSES,
+        between,
+        fail,
+    )
+}
+
+/// Runs `attempt` until it succeeds, fails with an error `transient` rejects, or the pauses
+/// run out. A failed attempt hands its state back for the next one; `between` is called with
+/// each pause before a retry and may stop the loop with its own error.
+fn retry_transient<S, T, E>(
+    mut state: S,
+    mut attempt: impl FnMut(S) -> Result<T, (std::io::Error, S)>,
+    transient: impl Fn(&std::io::Error) -> bool,
+    pauses: &[Duration],
+    mut between: impl FnMut(Duration) -> Result<(), E>,
+    fail: impl Fn(std::io::Error) -> E,
+) -> Result<T, E> {
+    let mut pauses = pauses.iter();
+    loop {
+        match attempt(state) {
+            Ok(t) => return Ok(t),
+            Err((e, s)) => {
+                let Some(pause) = pauses.next().filter(|_| transient(&e)) else {
+                    return Err(fail(e));
+                };
+                between(*pause)?;
+                state = s;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -450,6 +547,122 @@ mod tests {
         let out = save_checked(&p, "mine 2", Expect::Version(out.version)).unwrap();
         assert!(out.kept_backup.is_none());
         assert_eq!(entries(&d).len(), 2, "doc + the one kept backup: {:?}", entries(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rename_retry_classification_65() {
+        assert!(is_sharing_conflict_code(Some(5)), "ERROR_ACCESS_DENIED");
+        assert!(is_sharing_conflict_code(Some(32)), "ERROR_SHARING_VIOLATION");
+        for other in [None, Some(0), Some(2), Some(3), Some(33), Some(112)] {
+            assert!(!is_sharing_conflict_code(other), "{other:?}");
+        }
+        let denied = std::io::Error::from_raw_os_error(5);
+        assert_eq!(rename_error_is_transient(&denied), cfg!(windows), "Windows only");
+        let total: Duration = RENAME_RETRY_PAUSES.iter().sum();
+        assert!(
+            total <= Duration::from_millis(1000),
+            "bounded by about a second: {total:?}"
+        );
+        assert!(
+            total >= Duration::from_millis(500),
+            "long enough to outlast a scan: {total:?}"
+        );
+        assert!(RENAME_RETRY_PAUSES.windows(2).all(|w| w[0] <= w[1]), "backoff grows");
+    }
+
+    #[test]
+    fn retry_transient_retries_only_transient_errors_within_the_pauses_65() {
+        let sharing = |n: &u32| (std::io::Error::from_raw_os_error(32), *n);
+        let transient = |e: &std::io::Error| is_sharing_conflict_code(e.raw_os_error());
+        let run = |fails: u32, err: &dyn Fn(&u32) -> (std::io::Error, u32)| {
+            let mut slept = Vec::new();
+            let r = retry_transient(
+                0u32,
+                |n| if n < fails { Err(err(&(n + 1))) } else { Ok(n) },
+                transient,
+                &RENAME_RETRY_PAUSES,
+                |d| {
+                    slept.push(d);
+                    Ok::<(), std::io::Error>(())
+                },
+                |e| e,
+            );
+            (r, slept)
+        };
+        // succeeds on the third attempt after two pauses
+        let (r, slept) = run(2, &sharing);
+        assert_eq!(r.unwrap(), 2);
+        assert_eq!(slept, RENAME_RETRY_PAUSES[..2]);
+        // a lasting refusal gives up after all pauses (one attempt more than pauses)
+        let (r, slept) = run(u32::MAX, &sharing);
+        assert_eq!(r.unwrap_err().raw_os_error(), Some(32));
+        assert_eq!(slept, RENAME_RETRY_PAUSES);
+        // other errors are reported at once
+        let (r, slept) = run(u32::MAX, &|n| (std::io::Error::from_raw_os_error(2), *n));
+        assert_eq!(r.unwrap_err().raw_os_error(), Some(2));
+        assert!(slept.is_empty());
+        // `between` can stop the retries (the version re-check of `save_checked`)
+        let r: Result<u32, &str> = retry_transient(
+            0u32,
+            |n| Err((std::io::Error::from_raw_os_error(5), n)),
+            transient,
+            &RENAME_RETRY_PAUSES,
+            |_| Err("changed on disk"),
+            |_| "io",
+        );
+        assert_eq!(r.unwrap_err(), "changed on disk");
+    }
+
+    /// Issue #65: another process holding the target open without delete sharing (as
+    /// antivirus scanners and indexers do) makes the replacing rename fail with access
+    /// denied; the save retries and succeeds once the handle is closed.
+    #[cfg(windows)]
+    #[test]
+    fn save_waits_out_a_briefly_held_target_65() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        let hold = |p: &Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(p)
+                .unwrap()
+        };
+        let d = dir("held");
+        let p = d.join("doc.md");
+        std::fs::write(&p, "v1").unwrap();
+        let v1 = disk_version(&p).unwrap().unwrap();
+        // the hold really blocks a plain rename (otherwise the test proves nothing)
+        let probe = d.join("probe.tmp");
+        std::fs::write(&probe, "x").unwrap();
+        let held = hold(&p);
+        let e = std::fs::rename(&probe, &p).unwrap_err();
+        assert!(rename_error_is_transient(&e), "{e:?}");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(held);
+        });
+        let out = save_checked(&p, "mine", Expect::Version(v1)).unwrap();
+        release.join().unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "mine");
+        assert!(out.kept_backup.is_none());
+        // the unconditional writer retries as well
+        let held = hold(&p);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(held);
+        });
+        save_atomic(&p, "atomic").unwrap();
+        release.join().unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "atomic");
+        // a hold outlasting the retries fails the save and keeps the file
+        let held = hold(&p);
+        let v = disk_version(&p).unwrap().unwrap();
+        let r = save_checked(&p, "never", Expect::Version(v));
+        drop(held);
+        assert!(matches!(r, Err(SaveError::Io(_))), "{r:?}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "atomic");
         let _ = std::fs::remove_dir_all(&d);
     }
 
