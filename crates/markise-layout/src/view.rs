@@ -1105,6 +1105,7 @@ impl View {
         self.cache.tick();
         self.laid_out.clear();
         if self.model.is_paged() {
+            self.paging.last_vh = viewport_h;
             self.prepare_pages(viewport_h);
         }
         let mut n = self.len();
