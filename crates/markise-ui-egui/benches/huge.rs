@@ -12,12 +12,14 @@
 //! - `MARKISE_HUGE_PHASES`: comma list out of `costs,scroll,typing,edit-kinds,paste,edits,save,
 //!   export,modes` (default all; opening is always measured). `edit-kinds` types separate series
 //!   in the middle of the document: plain letters, a heading, Enter/Backspace across blocks, next
-//!   to a code block and inside one, each with its count of whole-document copies.
+//!   to a code block and inside one, each with its count of whole-document copies. `paste`
+//!   pastes 1 MiB of prose, 1 MiB of mixed content and 10 MiB of prose in the middle, each
+//!   with its Undo, Redo and an Enter/Backspace series right after the pasted text.
 //!
 //! Each document is measured in a fresh child process (clean RSS / peak RSS): open (read +
 //! parse + model on the loader thread, first painted frame), scrolling (wheel at top, bottom,
-//! middle; scrollbar jumps), typing / Backspace / Enter at start, middle and end of the
-//! rendered view, a large paste and its undo, 1,000 edits (memory growth, document copies),
+//! middle, a region not shown before; scrollbar jumps), typing / Backspace / Enter at start,
+//! middle and end of the rendered view, large pastes with Undo / Redo, 1,000 edits (memory growth, document copies),
 //! save (UI-thread part and total), whole-text snapshot / clone costs, Source mode and Side by
 //! Side (typing where the mode is editable), HTML export. Every frame series is reported as
 //! wall time and thread CPU time (the UI thread's own CPU; separates scheduling noise on a
@@ -614,9 +616,20 @@ fn child(src: &Path) {
         let r = frame(&ctx, &mut app, vec![key(Key::Z, cmd() | Modifiers::SHIFT)]);
         let again = text_len(&mut app) == len0 + pasted;
         // Enter splits the block at the end of the paste, Backspace joins it back (Redo selects
-        // the re-inserted text: collapse the selection first)
-        app.viewer().unwrap().ed.set_caret(DocPos::new(at + pasted), false);
-        frame(&ctx, &mut app, vec![]);
+        // the re-inserted text and Undo/Redo leave the editing surface unfocused: click it,
+        // then put the caret right after the paste)
+        frame(&ctx, &mut app, click_events(center));
+        let inside = {
+            // inside a word after the paste (Enter at a block start only opens a virtual
+            // paragraph, no edit)
+            let b = app.viewer().unwrap().ed.session.text().as_bytes();
+            let mut p = at + pasted + 1;
+            while !(b[p - 1].is_ascii_lowercase() && b[p].is_ascii_lowercase()) {
+                p += 1;
+            }
+            p
+        };
+        caret_to(&ctx, &mut app, inside);
         let mut enter = Series::default();
         let mut split = 0;
         for i in 0..20 {
