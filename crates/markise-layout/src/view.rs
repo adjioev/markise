@@ -254,7 +254,7 @@ impl View {
                 // the model was updated in place: the anchor index named the old items, its
                 // source position (taken before the update) moves with the edit
                 Some(a) => {
-                    let a = change.moved.map_or(a, |m| m.anchor(a));
+                    let a = change.moved.as_ref().map_or(a, |m| m.anchor(a));
                     self.set_model_at(self.doc.clone(), m, a);
                 }
                 None => self.set_model(self.doc.clone(), m),
@@ -288,7 +288,7 @@ impl View {
                 let k = splices.partition_point(|(o, _)| o.end <= self.anchor);
                 self.anchor = splices.get(k).map_or(0, |(_, i)| i.start);
                 self.anchor_off = 0.0;
-                if let (Some(a), Some(m)) = (pre, change.moved) {
+                if let (Some(a), Some(m)) = (pre, change.moved.as_ref()) {
                     keep_at = Some(m.anchor(a));
                 }
             }

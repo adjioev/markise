@@ -338,3 +338,56 @@ fn recent_edits_are_bounded_without_rendered_frames() {
     t.ed.clear_recent_edits();
     assert_eq!(t.ed.map_recent(4), Some(4));
 }
+
+/// Review of #145 (round 2): two edits applied before the view syncs (composed into one change
+/// covering both) — a large paste near the top and an insertion far below, both re-paging
+/// their regions — leave a scroll position between them where its text went, not clamped to
+/// the covering range's start; and so does undoing both at once.
+#[test]
+fn a_scroll_position_between_two_composed_edits_moves_with_them() {
+    let mut src = String::new();
+    for i in 0..400 {
+        src.push_str(&format!("Paragraph {i} has words here.\n\n"));
+    }
+    let mut t = T::paged(&src, 2);
+    let target = src.find("Paragraph 200 ").unwrap();
+    t.ed.view.ensure_offset(target);
+    let i = t.ed.view.model().item_at_offset(target);
+    t.ed.view.scroll_to_item(i);
+    t.frame();
+    let (start, nth, _) = t.ed.view.source_anchor();
+    assert_eq!((start, nth), (target, 0));
+    let paste = "Pasted block.\n\n".repeat(40);
+    let far = src.find("Paragraph 390 ").unwrap();
+    {
+        let s = &mut t.ed.session;
+        s.apply_external(
+            &markise_doc::PatchSet::single_verbatim(far..far, "Far insert.\n\n"),
+            "a",
+            false,
+        )
+        .unwrap();
+        s.apply_external(
+            &markise_doc::PatchSet::single_verbatim(10..10, &paste[..paste.len() - 2]),
+            "b",
+            false,
+        )
+        .unwrap();
+    }
+    t.ed.sync();
+    let moved = target + paste.len() - 2;
+    assert_eq!(
+        t.ed.view.source_anchor().0,
+        moved,
+        "the paragraph moved by the paste only"
+    );
+    assert!(t.text()[moved..].starts_with("Paragraph 200 "));
+    t.frame();
+    // both undone before the view syncs
+    assert!(t.ed.session.undo());
+    assert!(t.ed.session.undo());
+    t.ed.sync();
+    assert_eq!(t.text(), src);
+    assert_eq!(t.ed.view.source_anchor().0, target, "back where it was");
+    t.check_model();
+}

@@ -359,35 +359,43 @@ pub struct ModelChange {
     pub disclosures: bool,
 }
 
-/// An edit's pre-edit changed range and length change, for positions kept across it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// How an edit moved positions, for positions kept across it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Moved {
-    pub start: usize,
-    pub end: usize,
-    pub delta: isize,
+    /// `(start, end, delta)` of each step in the order made, each in the coordinates after the
+    /// steps before it (one step: the edit's covering range).
+    pub steps: Vec<(usize, usize, isize)>,
 }
 
 impl Moved {
+    /// The edit as one step: its covering changed range.
     pub fn of(e: &EditSummary) -> Moved {
         Moved {
-            start: e.changed.start,
-            end: e.changed.end,
-            delta: e.delta,
+            steps: vec![(e.changed.start, e.changed.end, e.delta)],
         }
     }
 
+    /// The edit as its individual steps (the patches of each edit composed into one summary:
+    /// a position between two of them only moves, it is not inside the covering range).
+    pub fn from_steps(steps: Vec<(usize, usize, isize)>) -> Moved {
+        Moved { steps }
+    }
+
     /// A scroll position by source (`(item start, ordinal among the items starting there,
-    /// points into it)`) after the edit: before the changed range it stays, after it it moves
-    /// by the delta, inside it (deleted or replaced text) it goes to the start of the
-    /// replacement.
-    pub fn anchor(&self, (start, nth, off): (usize, usize, f32)) -> (usize, usize, f32) {
-        if start < self.start {
-            (start, nth, off)
-        } else if start >= self.end {
-            ((start as isize + self.delta).max(0) as usize, nth, off)
-        } else {
-            (self.start, 0, 0.0)
+    /// points into it)`) after the edit, step by step: before a step's changed range it
+    /// stays, after it it moves by the delta, inside it (deleted or replaced text) it goes to
+    /// the start of the replacement.
+    pub fn anchor(&self, a: (usize, usize, f32)) -> (usize, usize, f32) {
+        let (mut start, mut nth, mut off) = a;
+        for &(s, e, delta) in &self.steps {
+            if start < s {
+            } else if start >= e {
+                start = (start as isize + delta).max(0) as usize;
+            } else {
+                (start, nth, off) = (s, 0, 0.0);
+            }
         }
+        (start, nth, off)
     }
 }
 
