@@ -92,6 +92,11 @@ impl Section {
 /// One setting (or one control group) in the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RowId {
+    Autosave,
+    BackupDrafts,
+    SaveOnClose,
+    RecentRecording,
+    AutosaveMinutes,
     KeyBindings,
     WordCount,
     AutoPairBrackets,
@@ -162,6 +167,41 @@ use Section as S;
 
 /// Every row, in display order.
 pub const ROWS: &[Row] = &[
+    row(
+        R::Autosave,
+        S::Files,
+        "Saving",
+        "Automatically save files",
+        "autosave save timer",
+    ),
+    row(
+        R::AutosaveMinutes,
+        S::Files,
+        "Saving",
+        "Autosave interval (minutes)",
+        "autosave timer minutes",
+    ),
+    row(
+        R::BackupDrafts,
+        S::Files,
+        "Saving",
+        "Back up unsaved drafts",
+        "recovery crash backup",
+    ),
+    row(
+        R::SaveOnClose,
+        S::Files,
+        "Saving",
+        "Save when closing",
+        "save close quit",
+    ),
+    row(
+        R::RecentRecording,
+        S::Files,
+        "Saving",
+        "Remember recent files and folders",
+        "recent history privacy",
+    ),
     row(
         R::KeyBindings,
         S::General,
@@ -536,11 +576,13 @@ pub struct Values {
     pub key_bindings: Vec<(String, String)>,
     /// Pasted and dropped images (Files & Images).
     pub images: ImageSettings,
+    pub files: markise_engine::settings::FileSettings,
 }
 
 /// What the user changed in the window this frame.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
+    Files(markise_engine::settings::FileSettings),
     Editing(EditingSettings),
     Source(SourceSettings),
     Diagrams(bool),
@@ -1438,6 +1480,28 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                 }));
             }
         }
+        R::Autosave | R::BackupDrafts | R::SaveOnClose | R::RecentRecording => {
+            let mut f = v.files;
+            let value = match r.id {
+                R::Autosave => &mut f.autosave,
+                R::BackupDrafts => &mut f.backups,
+                R::SaveOnClose => &mut f.save_on_close,
+                _ => &mut f.record_recent,
+            };
+            if let Some(on) = switch(ui, *value) {
+                *value = on;
+                out.push(Change::Files(f));
+            }
+        }
+        R::AutosaveMinutes => {
+            let mut f = v.files;
+            if control_row(ui, p, r.label, |ui| {
+                ui.add(egui::DragValue::new(&mut f.autosave_minutes).range(1..=1440))
+                    .changed()
+            }) {
+                out.push(Change::Files(f));
+            }
+        }
         R::ImageLocation => {
             let items = [
                 (ImageLocation::NoteFolder, "Folder next to the note".to_string()),
@@ -1741,7 +1805,7 @@ pub fn section_at_defaults(s: Section, v: &Values) -> bool {
                 && v.show_recent
                 && (v.zoom - 1.0).abs() < 1e-3
         }
-        Section::Files => v.images == ImageSettings::default(),
+        Section::Files => v.images == ImageSettings::default() && v.files == Default::default(),
         Section::General | Section::Export => true,
     }
 }

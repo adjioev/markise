@@ -8,6 +8,7 @@ pub(crate) mod review;
 pub(crate) mod rules;
 pub(crate) mod select;
 pub(crate) mod structure;
+pub(crate) mod tables;
 
 use std::ops::Range;
 

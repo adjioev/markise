@@ -1257,6 +1257,21 @@ impl DocViewer {
         let mut chosen = None;
         resp.context_menu(|ui| {
             let enabled = |id: &str| self.ed.registry.enabled(&self.ed.session, id).is_ok();
+            if enabled("table.addRowBelow") {
+                ui.menu_button("Table", |ui| {
+                    for id in crate::menu::TABLE_COMMANDS.iter().flatten() {
+                        let Some(spec) = self.ed.registry.get(id) else { continue };
+                        if ui
+                            .add_enabled(enabled(id), egui::Button::new(spec.desc.label))
+                            .clicked()
+                        {
+                            chosen = Some(spec.desc.id);
+                            ui.close();
+                        }
+                    }
+                });
+                ui.separator();
+            }
             for e in CONTEXT_COMMANDS {
                 match e {
                     None => {

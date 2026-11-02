@@ -259,6 +259,24 @@ impl MarkiseApp {
             self.item(MenuAction::Command("file.new"), "New", true, Check::None),
             self.item(MenuAction::Command("file.open"), "Open…", true, Check::None),
             self.app_item("file.openFolder", true, Check::None),
+            self.app_item("file.quickOpen", true, Check::None),
+            Entry::Submenu(Menu::new(
+                "Open Recent",
+                self.workflow
+                    .recent
+                    .iter()
+                    .map(|p| {
+                        self.item(
+                            MenuAction::Recent(p.clone()),
+                            p.display().to_string(),
+                            true,
+                            Check::None,
+                        )
+                    })
+                    .chain(std::iter::once(self.app_item("file.clearRecent", true, Check::None)))
+                    .collect(),
+            )),
+            self.app_item("file.recover", true, Check::None),
             Entry::Separator,
             self.item(MenuAction::Command("file.save"), "Save", has_doc, Check::None),
             self.item(MenuAction::Command("file.saveAs"), "Save As…", has_doc, Check::None),
@@ -291,7 +309,12 @@ impl MarkiseApp {
             edit.entries.push(self.app_item("app.preferences", true, Check::None));
         }
         menus.push(edit);
-        menus.push(self.registry_menu("Paragraph", PARAGRAPH_ORDER, text_field));
+        let mut paragraph = self.registry_menu("Paragraph", PARAGRAPH_ORDER, text_field);
+        paragraph.entries.push(Entry::Submenu(Menu::new(
+            "Table",
+            self.command_entries(crate::menu::TABLE_COMMANDS, text_field),
+        )));
+        menus.push(paragraph);
         let format = self.registry_menu("Format", FORMAT_ORDER, text_field);
         if !format.entries.is_empty() {
             menus.push(format);
@@ -482,6 +505,10 @@ impl MarkiseApp {
             return false;
         }
         match action {
+            MenuAction::Recent(p) => {
+                self.open(p.clone());
+                true
+            }
             MenuAction::Command(id) => self.menu_command(ctx, id, trigger),
             MenuAction::Style(id) => {
                 let colors = self.themes.selection().colors.clone();
@@ -522,6 +549,9 @@ impl MarkiseApp {
 
     pub(super) fn menu_command(&mut self, ctx: &Context, id: &str, trigger: Trigger) -> bool {
         match id {
+            "file.quickOpen" => self.open_quick(ctx),
+            "file.clearRecent" => self.clear_recent_paths(),
+            "file.recover" => self.workflow.show_recovery = true,
             "find.open" => self.open_find(false),
             "find.replace" => self.open_find(true),
             "find.next" => self.find_next(false),
