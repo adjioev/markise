@@ -793,7 +793,8 @@ impl Registry {
         let spec = self.get(id).ok_or_else(|| CommandError::Unknown(id.to_string()))?;
         match spec.run {
             Run::Planner(pid) => {
-                if s.doc().can_plan(pid, &s.request(Params::new())) {
+                // memoised per (document, selection) state: menus ask every frame (issue #133)
+                if s.can_plan(pid) {
                     Ok(())
                 } else {
                     Err(CommandError::Disabled("not applicable here"))
@@ -810,7 +811,7 @@ impl Registry {
     /// Whether toggle command `id` is active at the selection (menu check marks, toolbar).
     pub fn checked(&self, s: &EditorSession, id: &str) -> bool {
         match self.get(id).map(|c| c.run) {
-            Some(Run::Planner(pid)) => s.doc().plan_checked(pid, &s.request(Params::new())),
+            Some(Run::Planner(pid)) => s.plan_checked(pid),
             _ => false,
         }
     }
