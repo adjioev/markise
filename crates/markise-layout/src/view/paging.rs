@@ -46,6 +46,9 @@ pub struct PagingStats {
 pub(super) struct PagingState {
     /// Source offset of the caret: its page and the items around it stay materialized.
     caret: Option<usize>,
+    /// Scroll position and item count at the last eviction scan (the scan runs again after
+    /// a viewport of scrolling or a page's worth of new items).
+    last_scan: Option<(f64, usize)>,
     pub(super) stats: PagingStats,
 }
 
@@ -257,6 +260,13 @@ impl View {
         }
         let vh = viewport_h.max(100.0) as f64;
         let y = self.scroll_y();
+        if let Some((ly, ln)) = self.paging.last_scan
+            && (y - ly).abs() < vh
+            && n < ln + 64
+        {
+            return;
+        }
+        self.paging.last_scan = Some((y, n));
         let keep = (y - KEEP_SCREENS * vh)..(y + (KEEP_SCREENS + 1.0) * vh);
         // runs of real items
         let mut runs: Vec<(usize, usize)> = Vec::new();
@@ -353,6 +363,7 @@ impl View {
             self.caret_item = caret_item.and_then(map);
             self.paging.stats.evicted += 1;
         }
+        self.paging.last_scan = Some((self.scroll_y(), self.len()));
         self.paging.stats.ms += t.elapsed().as_secs_f64() * 1e3;
     }
 }

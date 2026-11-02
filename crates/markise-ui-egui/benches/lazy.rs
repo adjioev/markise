@@ -104,12 +104,22 @@ fn raw(events: Vec<Event>) -> RawInput {
     }
 }
 
+/// CPU time of the calling thread in ms (frame and jump times are UI-thread CPU: wall times
+/// are scheduling noise on a loaded machine).
+fn cpu_ms() -> f64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: valid pointer to a timespec; CLOCK_THREAD_CPUTIME_ID is supported on macOS/Linux.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 * 1e3 + ts.tv_nsec as f64 / 1e6
+}
+
+/// One frame; returns its UI-thread CPU time (ms).
 fn frame(ctx: &Context, app: &mut MarkiseApp, events: Vec<Event>) -> f64 {
-    let t = Instant::now();
+    let t = cpu_ms();
     let mut out = ctx.run_ui(raw(events), |ui| app.ui(ui));
     out.textures_delta.clear();
     let _prims = ctx.tessellate(out.shapes, out.pixels_per_point);
-    t.elapsed().as_secs_f64() * 1e3
+    cpu_ms() - t
 }
 
 fn pct(v: &mut [f64], p: f64) -> f64 {
@@ -284,7 +294,7 @@ fn child(src: &Path) {
     let mut misses = 0;
     for f in [0.25, 0.5, 0.75, 0.99, 0.33, 0.66] {
         let k = ((n_out as f64 - 1.0) * f) as usize;
-        let t = Instant::now();
+        let t = cpu_ms();
         {
             let v = &mut app.viewer().unwrap().ed.view;
             if let Some(i) = v.ensure_heading(k) {
@@ -292,7 +302,7 @@ fn child(src: &Path) {
             }
         }
         frame(&ctx, &mut app, vec![]);
-        outline_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        outline_ms.push(cpu_ms() - t);
         // the heading is shown
         let want = app.model().unwrap().outline[k].item;
         if !app.viewer().unwrap().ed.view.last_visible.contains(&want) {
@@ -307,7 +317,7 @@ fn child(src: &Path) {
     // ---- jumps: find next (selection far away → scroll to caret)
     let mut find_ms = Vec::new();
     for &at in &finds {
-        let t = Instant::now();
+        let t = cpu_ms();
         {
             let v = app.viewer().unwrap();
             v.ed.session.set_selection(markise_doc::Selection::range(at, at + 3));
@@ -315,7 +325,7 @@ fn child(src: &Path) {
             v.find_reveal_for_bench();
         }
         frame(&ctx, &mut app, vec![]);
-        find_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        find_ms.push(cpu_ms() - t);
     }
     report("jump: find next (cold, 6 targets)", find_ms);
 
