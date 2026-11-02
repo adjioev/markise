@@ -359,15 +359,18 @@ impl SideBySide {
         }
 
         // ---- right: the rendered document (read-only in this version)
-        let user_scrolls_rendered = ui.input(|i| {
+        // (wheel scrolling counts while the rendered pane's smooth scrolling moves it, also after
+        // the last wheel event, issue #86)
+        let mut user_scrolls_rendered = ui.input(|i| {
             let over = i.pointer.hover_pos().is_some_and(|p| right.contains(p));
-            over && (i.smooth_scroll_delta.y != 0.0 || i.pointer.primary_down())
+            over && i.pointer.primary_down()
         });
         {
             let mut rui = ui.new_child(UiBuilder::new().max_rect(right).id_salt("markise-sbs-right"));
             let vo = viewer.show(&mut rui, f.images, f.theme, parley, false);
             out.link = vo.link;
             out.right = Some(pane);
+            user_scrolls_rendered |= vo.wheel_scrolled;
         }
         if user_scrolls_rendered || self.sync_source {
             self.sync_source = false;
