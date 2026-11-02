@@ -458,10 +458,11 @@ pub const WORK_PER_SEC: u64 = if cfg!(windows) { 3_000_000_000 } else { 1_000_00
 /// 1 000 repetitions and doubles until the text is at least [`SMALL_BYTES`] long or one run
 /// takes at least [`SMALL_WORK`]; the large input is [`SIZE_FACTOR`] (16×) that size and the
 /// work ratio must stay below [`MAX_RATIO`] (see [`scaling_ratio_ok`]). Comparing a small input
-/// that fits in the caches with a large one that does not added a one-off per-byte slowdown of
-/// up to ~5× on GitHub's Linux runners, which no ratio threshold can tell apart from
-/// super-linear growth. The work bound keeps per-byte expensive (compute-bound) cases fast;
-/// their cache effects are small relative to their work. A small input faster than
+/// that fits in the caches with a large one that does not added a one-off per-byte slowdown on
+/// GitHub's Linux runners, which no ratio threshold can tell apart from super-linear growth;
+/// so did page faults paid by the large input only (see `release_freed_memory`). The work
+/// bound keeps per-byte expensive (compute-bound) cases fast; their cache effects are small
+/// relative to their work. A small input faster than
 /// [`MIN_SMALL`] is timed as a batch of back-to-back runs divided by the batch size, never
 /// floored (PR #111 review).
 ///
@@ -477,6 +478,7 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
     // Debug builds on shared CI runners are slow; release gets the tighter cap.
     let cap = Duration::from_secs(if cfg!(debug_assertions) { 15 } else { 5 });
     let once = |s: &str| {
+        release_freed_memory();
         let t = thread_work();
         run(s);
         thread_work().saturating_sub(t)
@@ -499,8 +501,11 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
         let mut runs = 1u64;
         loop {
             let batch = || {
+                release_freed_memory();
                 let t = thread_work();
                 for _ in 0..runs {
+                    // timed with the runs, so every run starts from the same allocator state
+                    release_freed_memory();
                     run(s);
                 }
                 thread_work().saturating_sub(t)
@@ -521,7 +526,6 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
             runs = (runs * 2).max(2 * min_small / per_run + 1).min(MAX_BATCH);
         }
     };
-    keep_freed_memory();
     let mut failures = Vec::new();
     for attempt in 1..=3 {
         let mut n = 1_000;
@@ -566,22 +570,20 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
     );
 }
 
-/// Keeps freed heap memory in the process (glibc only) so repeated runs of a large input reuse
-/// it instead of page-faulting fresh memory on every run. glibc serves allocations above its
-/// mmap threshold (at most 32 MiB) with fresh `mmap`s that `free` unmaps again, so only the
-/// large input paid the page faults (kernel time counted in [`thread_work`]) on each run, a
-/// per-byte step on Linux CI runners (issue #109). Fault costs are linear and real, but they
-/// are not what the scaling check is about. Affects only the test process that calls
-/// [`assert_scales_linearly`].
-fn keep_freed_memory() {
+/// Returns freed heap memory to the OS before a measured run (glibc only), so every run of
+/// [`assert_scales_linearly`] page-faults the memory it touches, whatever its size.
+///
+/// Without this only the large input paid page faults (issue #109): glibc keeps and reuses
+/// freed memory below its mmap threshold (at most 32 MiB), but serves larger allocations with
+/// fresh `mmap`s that `free` unmaps again, so the small input ran on recycled pages while the
+/// large one faulted ~250 000 fresh pages per run on CI runners, kernel time counted in
+/// [`thread_work`] (+60–150 % per byte). With both sizes faulting, the fault cost is linear on
+/// both sides of the ratio.
+fn release_freed_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        // SAFETY: mallopt only changes allocator tuning parameters; it is thread-safe.
-        ONCE.call_once(|| unsafe {
-            libc::mallopt(libc::M_MMAP_MAX, 0);
-            libc::mallopt(libc::M_TRIM_THRESHOLD, libc::c_int::MAX);
-        });
+    // SAFETY: malloc_trim only returns free memory to the OS; it is thread-safe.
+    unsafe {
+        libc::malloc_trim(0);
     }
 }
 
