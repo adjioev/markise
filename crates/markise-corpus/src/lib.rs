@@ -504,8 +504,6 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
                 release_freed_memory();
                 let t = thread_work();
                 for _ in 0..runs {
-                    // timed with the runs, so every run starts from the same allocator state
-                    release_freed_memory();
                     run(s);
                 }
                 thread_work().saturating_sub(t)
@@ -570,29 +568,23 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
     );
 }
 
-/// Makes every run of [`assert_scales_linearly`] page-fault the large blocks it allocates,
-/// whatever the input size (glibc only): fixes the mmap threshold at 128 KiB and returns freed
-/// heap memory to the OS before each measured run.
+/// Returns freed heap memory to the OS (glibc only; never inside a timed region), so each
+/// measured run of [`assert_scales_linearly`] page-faults the large blocks it allocates,
+/// whatever the input size.
 ///
-/// Without this only the large input paid page faults (issue #109): glibc's dynamic threshold
-/// rises to at most 32 MiB, so the small input's blocks came from recycled heap pages while the
-/// large input's bigger blocks were fresh `mmap`s that `free` unmaps again. On CI runners that
-/// was 0 faults per small run against ~130 000 per large run, kernel time counted in
-/// [`thread_work`] (+60–150 % per byte). With a fixed threshold (which also disables the dynamic
-/// one) blocks of 128 KiB and more are mapped fresh at both sizes, so the fault cost is linear
-/// on both sides of the ratio.
+/// Without it only the large input paid page faults (issue #109): glibc's dynamic mmap
+/// threshold rises to at most 32 MiB, so the small input's blocks came from recycled heap pages
+/// while the large input's bigger blocks were fresh `mmap`s that `free` unmaps again. On CI
+/// runners that was 0 faults per small run against ~130 000 per large run, kernel time counted
+/// in [`thread_work`] (+60–150 % per byte). `cargo xtask heavy` therefore also fixes the
+/// threshold at 128 KiB from process start (`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072`,
+/// which disables the dynamic one), so blocks of 128 KiB and more are fresh mappings at both
+/// sizes and the fault cost is linear on both sides of the ratio.
 fn release_freed_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        // SAFETY: mallopt and malloc_trim only change allocator tuning and return free memory
-        // to the OS; both are thread-safe.
-        unsafe {
-            ONCE.call_once(|| {
-                libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024);
-            });
-            libc::malloc_trim(0);
-        }
+    // SAFETY: malloc_trim only returns free memory to the OS and is thread-safe (MT-Safe).
+    unsafe {
+        libc::malloc_trim(0);
     }
 }
 
@@ -719,6 +711,17 @@ mod tests {
         super::assert_scales_linearly("fast-quadratic", |n| "a".repeat(n), &|s| {
             let k = s.len() as u64;
             spin(10 * us * k / small * k / small)
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "super-linear")]
+    fn fast_n_1_5_workload_below_the_timer_floor_fails() {
+        // PR #113 review: 10 µs at the small size (timed as a batch) growing as n^1.5 must fail
+        let us = super::WORK_PER_SEC as f64 / 1e6;
+        let small = super::SMALL_BYTES as f64;
+        super::assert_scales_linearly("fast-n^1.5", |n| "a".repeat(n), &|s| {
+            spin((10.0 * us * (s.len() as f64 / small).powf(1.5)) as u64)
         });
     }
 
