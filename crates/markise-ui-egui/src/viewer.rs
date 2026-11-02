@@ -493,12 +493,19 @@ impl DocViewer {
         // ---- input: wheel / trackpad (smooth scrolling, issue #86)
         {
             let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
+            if resp.hovered() {
+                smooth_scroll::note_hovered_pane(&ctx, page_rect);
+            }
             let line = theme.line_px() * smooth_scroll::LINES_PER_NOTCH;
+            // a programmatic scroll since the last frame (outline, anchor, find, Side by Side
+            // sync, edits) drops pending motion
+            self.smooth.follow(self.ed.view.anchor(), false);
             let d = smooth_scroll::take_delta(ui, &mut self.smooth, hovered, line, vh);
             if d.y != 0.0 {
                 self.ed.view.scroll_by(-d.y);
                 out.wheel_scrolled = true;
             }
+            self.smooth.follow(self.ed.view.anchor(), true);
         }
         // ---- input: keyboard scrolling, only when no widget has focus
         if !focused && ui.memory(|m| m.focused().is_none()) {
@@ -695,6 +702,8 @@ impl DocViewer {
             });
         }
 
+        // keyboard scrolling, the scrollbar or a caret / find reveal in this frame took over
+        self.smooth.follow(self.ed.view.anchor(), false);
         // ---- layout of the viewport (+ half a screen of margin)
         let visible = {
             let view = &mut self.ed.view;
@@ -707,6 +716,8 @@ impl DocViewer {
                 None => ctx.fonts_mut(|f| view.frame(vh, vh * 0.5, f, imgs)),
             }
         };
+        // (layout moves the anchor on once estimated heights become real)
+        self.smooth.follow(self.ed.view.anchor(), true);
         // the available caret stops may have changed under the selection (a diagram or
         // formula became rendered, front matter collapsed): move it to the nearest stop
         // (not on a read-only surface without the focus: in Side by Side the session's selection

@@ -91,6 +91,11 @@ impl Default for SourceEditor {
     }
 }
 
+/// The source view's scroll anchor (smooth scrolling follows it, issue #86).
+fn source_anchor(viewer: &DocViewer) -> Option<(usize, f32)> {
+    viewer.ed.source.as_ref().map(|p| p.view.anchor())
+}
+
 /// The source view parameters for the display preferences.
 pub fn params(p: &SourceSettings) -> SourceParams {
     SourceParams {
@@ -256,7 +261,15 @@ impl SourceEditor {
         // ---- wheel / trackpad (smooth scrolling, issue #86)
         {
             let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
+            if resp.hovered() {
+                smooth_scroll::note_hovered_pane(&ctx, resp.rect);
+            }
             let line = srcview::metrics(theme).1 * smooth_scroll::LINES_PER_NOTCH;
+            // a programmatic scroll since the last frame (centre line, Side by Side sync, find)
+            // drops pending motion
+            if let Some(a) = source_anchor(viewer) {
+                self.smooth.follow(a, false);
+            }
             let mut d = smooth_scroll::take_delta(ui, &mut self.smooth, hovered, line, vh);
             if prefs.soft_wrap {
                 d.x = 0.0;
@@ -271,6 +284,9 @@ impl SourceEditor {
                     self.hscroll = (self.hscroll - d.x).max(0.0);
                 }
                 out.user_scrolled = true;
+            }
+            if let Some(a) = source_anchor(viewer) {
+                self.smooth.follow(a, true);
             }
         }
         // ---- scrollbar
@@ -406,9 +422,17 @@ impl SourceEditor {
         }
 
         // ---- layout of the viewport (+ half a screen of margin)
+        // keyboard, the scrollbar or a caret / find reveal in this frame took over
+        if let Some(a) = source_anchor(viewer) {
+            self.smooth.follow(a, false);
+        }
         let mut visible = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
             viewer.ed.source_frame(vh, vh * 0.5, sh)
         });
+        // (layout moves the anchor on once estimated heights become real)
+        if let Some(a) = source_anchor(viewer) {
+            self.smooth.follow(a, true);
+        }
         out.laid_out = viewer.ed.source.as_ref().map_or(0, |p| p.view.laid_out.len());
         let (caret_rect, line_rect) = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
             (viewer.ed.source_caret_rect(sh), viewer.ed.source_line_rect(sh))

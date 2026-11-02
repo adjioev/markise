@@ -175,3 +175,56 @@ fn wheel_scroll_moves_smoothly_then_goes_idle() {
     assert_eq!(app.viewer().unwrap().ed.view.scroll_y(), *ys.last().unwrap(), "at rest");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Issue #86 (review): a jump while a wheel notch is still moving the document (outline click,
+/// anchor link, find) wins: the pending motion is dropped and the document stays where the
+/// jump put it.
+#[test]
+fn jump_during_wheel_motion_stays_put() {
+    let dir = std::env::temp_dir().join(format!("markise-ui-idle-jump-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("doc.md");
+    std::fs::write(&p, markise_corpus::generate(200 * 1024, 3)).unwrap();
+    let ctx = Context::default();
+    let mut app = MarkiseApp::new(AppOptions {
+        open: vec![p],
+        ..Default::default()
+    });
+    assert_idle(&settle_and_measure(&ctx, &mut app), "after the open");
+    let mut t = ctx.input(|i| i.time) + 1.0;
+    let mut timed = |ctx: &Context, app: &mut MarkiseApp, events: Vec<egui::Event>| {
+        t += 1.0 / 120.0;
+        let mut raw = input();
+        raw.time = Some(t);
+        raw.predicted_dt = 1.0 / 120.0;
+        raw.events = events;
+        let mut out = ctx.run_ui(raw, |ui| app.ui(ui));
+        out.textures_delta.clear();
+        let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+    };
+    timed(
+        &ctx,
+        &mut app,
+        vec![egui::Event::PointerMoved(egui::pos2(700.0, 400.0))],
+    );
+    let notch = egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, -4.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+        modifiers: egui::Modifiers::NONE,
+    };
+    timed(&ctx, &mut app, vec![notch]);
+    timed(&ctx, &mut app, vec![]);
+    let v = &mut app.viewer().unwrap().ed.view;
+    assert!(v.scroll_y() > 0.0, "the notch started moving");
+    // the jump (as the outline does) while the notch is still under way
+    v.scroll_to_item(40);
+    for _ in 0..30 {
+        timed(&ctx, &mut app, vec![]);
+    }
+    // (the anchor: the absolute offset changes as estimated heights above become real)
+    let anchor = app.viewer().unwrap().ed.view.anchor();
+    assert_eq!(anchor, (40, 0.0), "the document stayed where the jump put it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
