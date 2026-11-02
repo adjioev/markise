@@ -1508,6 +1508,16 @@ impl EditorSession {
         Ok(())
     }
 
+    /// PROTOTYPE (progressive open): replaces the document by `doc`, whose text continues the
+    /// current one (the rest of the file arrived); not an edit — history, selection and marks
+    /// stay valid (they all lie in the current text). The caller installs the view model.
+    pub fn adopt_continuation(&mut self, doc: Arc<dyn FormatDoc>) {
+        debug_assert!(doc.text().starts_with(self.doc.text()));
+        self.close_typing();
+        self.doc = doc;
+        self.change = DocChange::None;
+    }
+
     /// Applies patches made outside the session's planners (Side by Side source edits; the
     /// patches are the document text's minimal diff, verbatim) as one step of a joinable
     /// transaction `label` (same join rule as [`EditorSession::replace_doc`]). Hints are

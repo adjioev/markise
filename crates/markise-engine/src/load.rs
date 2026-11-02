@@ -40,6 +40,13 @@ pub struct Loaded {
 #[derive(Debug)]
 pub enum Outcome {
     Loaded(Loaded),
+    /// PROTOTYPE (progressive open, `MARKISE_PROGRESSIVE_OPEN=1` with the lazy view): the first
+    /// `cut` bytes of the file, parsed and modelled, while the rest is still parsing; the full
+    /// document follows as [`Outcome::Loaded`] for the same request.
+    Preview {
+        loaded: Loaded,
+        cut: usize,
+    },
     /// A reload check found the file's content equal to the version the caller already has
     /// ([`Loader::request_unless`]; e.g. the watcher's event for our own save): nothing was
     /// decoded, parsed or built.
@@ -56,7 +63,7 @@ impl Outcome {
     pub fn into_loaded(self) -> Option<Loaded> {
         match self {
             Outcome::Loaded(l) => Some(l),
-            Outcome::Unchanged { .. } => None,
+            Outcome::Unchanged { .. } | Outcome::Preview { .. } => None,
         }
     }
 }
@@ -139,6 +146,137 @@ pub fn load_staged_unless(
     })))
 }
 
+/// PROTOTYPE: progressive open (`MARKISE_PROGRESSIVE_OPEN=1`, only with the lazy view).
+pub fn progressive_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        markise_layout::lazy_enabled()
+            && std::env::var("MARKISE_PROGRESSIVE_OPEN").is_ok_and(|v| !v.is_empty() && v != "0")
+    })
+}
+
+/// Files smaller than this open in one step.
+const PROGRESSIVE_MIN: usize = 4 << 20;
+/// Size of the first part shown.
+const PROGRESSIVE_PREFIX: usize = 200 << 10;
+
+/// A cut near `want` bytes at a blank line outside fenced code and display math (a heuristic:
+/// only the preview's last block can come out different; the full parse replaces it).
+fn safe_cut(text: &str, want: usize) -> usize {
+    let b = text.as_bytes();
+    let mut fences = 0usize; // fence / `$$` lines seen before the position
+    let mut fence_kind: Option<&[u8]> = None;
+    let mut i = 0;
+    let mut last_ok = 0;
+    while i < b.len() {
+        let e = memchr_nl(b, i);
+        let line = &b[i..e];
+        let t = line.trim_ascii_start();
+        for k in [&b"```"[..], b"~~~", b"$$"] {
+            if t.starts_with(k) {
+                match fence_kind {
+                    None => fence_kind = Some(k),
+                    Some(open) if open == k => fence_kind = None,
+                    _ => {}
+                }
+                fences += 1;
+                break;
+            }
+        }
+        let next = (e + 1).min(b.len());
+        if line.is_empty() && fence_kind.is_none() && i > 0 {
+            last_ok = next;
+            if next >= want {
+                return next;
+            }
+        }
+        i = next;
+        if i == e {
+            break;
+        }
+    }
+    let _ = fences;
+    if last_ok == 0 { b.len() } else { last_ok }
+}
+
+fn memchr_nl(b: &[u8], from: usize) -> usize {
+    b[from..].iter().position(|&c| c == b'\n').map_or(b.len(), |p| from + p)
+}
+
+/// Like [`load_staged_unless`] (no version check): for a large file, the first
+/// [`PROGRESSIVE_PREFIX`] bytes are parsed, modelled and handed to `preview` first.
+pub fn load_progressive(
+    path: &Path,
+    opts: ParseOptions,
+    go: &mut dyn FnMut(Stage) -> bool,
+    preview: &mut dyn FnMut(Outcome),
+) -> Result<Option<Outcome>, String> {
+    if !go(Stage::Read) {
+        return Ok(None);
+    }
+    let t0 = Instant::now();
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let n = bytes.len();
+    let version = crate::save::DiskVersion::of_bytes(&bytes, mtime);
+    let (text, lossy) = match String::from_utf8(bytes) {
+        Ok(s) => (s, false),
+        Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), true),
+    };
+    let t1 = Instant::now();
+    if text.len() >= PROGRESSIVE_MIN {
+        let cut = safe_cut(&text, PROGRESSIVE_PREFIX);
+        if cut < text.len() {
+            let tp = Instant::now();
+            let doc = Document::parse(text[..cut].to_string(), opts.clone());
+            let tm = Instant::now();
+            let model = DocModel::build(&doc, Some(path));
+            preview(Outcome::Preview {
+                loaded: Loaded {
+                    path: path.to_path_buf(),
+                    doc: Arc::new(doc),
+                    model,
+                    timings: LoadTimings {
+                        read: t1 - t0,
+                        parse: tm - tp,
+                        model: tm.elapsed(),
+                    },
+                    mtime,
+                    version,
+                    lossy,
+                    bytes: n,
+                },
+                cut,
+            });
+        }
+    }
+    let t1b = Instant::now();
+    if !go(Stage::Parse) {
+        return Ok(None);
+    }
+    let doc = Document::parse(text, opts);
+    let t2 = Instant::now();
+    if !go(Stage::Model) {
+        return Ok(None);
+    }
+    let model = DocModel::build(&doc, Some(path));
+    let t3 = Instant::now();
+    Ok(Some(Outcome::Loaded(Loaded {
+        path: path.to_path_buf(),
+        doc: Arc::new(doc),
+        model,
+        timings: LoadTimings {
+            read: t1 - t0,
+            parse: t2 - t1b,
+            model: t3 - t2,
+        },
+        mtime,
+        version,
+        lossy,
+        bytes: n,
+    })))
+}
+
 /// Hook called by the loader worker before each stage of request `generation` (tests use it
 /// to hold the worker at a stage deterministically).
 pub type StageHook = Arc<dyn Fn(Stage, u64) + Send + Sync>;
@@ -182,7 +320,18 @@ impl Loader {
                         }
                         c2.load(Ordering::Acquire) == generation
                     };
-                    match load_staged_unless(&path, opts.clone(), unless, &mut go) {
+                    let progressive = unless.is_none() && progressive_enabled();
+                    let result = if progressive {
+                        let mut preview = |o: Outcome| {
+                            if c2.load(Ordering::Acquire) == generation && tx.send((generation, Ok(o))).is_ok() {
+                                wake();
+                            }
+                        };
+                        load_progressive(&path, opts.clone(), &mut go, &mut preview)
+                    } else {
+                        load_staged_unless(&path, opts.clone(), unless, &mut go)
+                    };
+                    match result {
                         Ok(None) => {} // cancelled
                         r => {
                             let r = r.map(|o| o.expect("not cancelled"));

@@ -783,11 +783,104 @@ fn scroll_quality_child(src: &Path) {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Progressive open: open → first painted frame → fully loaded; scrolling and an edit while the
+/// rest loads; the view must not move when the full document is installed.
+fn open_child(src: &Path) {
+    let lazy = markise_layout::lazy_enabled();
+    let path = src.with_extension(if lazy { "lazy-open.md" } else { "normal-open.md" });
+    std::fs::copy(src, &path).expect("copy corpus");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let ctx = Context::default();
+    let mut app = MarkiseApp::new(AppOptions {
+        timing: true,
+        ..Default::default()
+    });
+    frame(&ctx, &mut app, vec![]);
+    frame(&ctx, &mut app, vec![]);
+    let t0 = Instant::now();
+    app.open(path.clone());
+    let mut first = None;
+    let mut max_frame: f64 = 0.0;
+    let mut frames_preview = 0;
+    let mut edited_at = None;
+    let mut before = None;
+    loop {
+        let ms = frame(&ctx, &mut app, vec![]);
+        if app.model().is_some() {
+            max_frame = max_frame.max(ms);
+            if first.is_none() {
+                first = Some(t0.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        if app.model().is_some() && app.is_loading() {
+            frames_preview += 1;
+            // read and edit while the rest loads: scroll a little, type near the top
+            if frames_preview == 2 {
+                let r = app.viewer().unwrap().surface_rect().unwrap();
+                frame(&ctx, &mut app, vec![Event::PointerMoved(r.center())]);
+                for _ in 0..10 {
+                    frame(&ctx, &mut app, vec![wheel(-60.0)]);
+                }
+                let at = {
+                    let t = app.viewer().unwrap().ed.session.text();
+                    para_near(t, 0.3)
+                };
+                let v = app.viewer().unwrap();
+                v.ed.set_caret(DocPos::new(at), false);
+                let _ = v.ed.edit(|s| s.insert_text("XYZ"));
+                edited_at = Some(at);
+            }
+            if frames_preview >= 2 {
+                let v = app.viewer().unwrap();
+                let (i, y) = v.last_visible_y().first().copied().unwrap_or((0, 0.0));
+                before = Some((v.model().item_start(i), y));
+            }
+        }
+        if app.model().is_some() && !app.is_loading() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(t0.elapsed() < Duration::from_secs(600));
+    }
+    let full = t0.elapsed().as_secs_f64() * 1e3;
+    frame(&ctx, &mut app, vec![]);
+    let v = app.viewer().unwrap();
+    let (i, y) = v.last_visible_y().first().copied().unwrap_or((0, 0.0));
+    let after = (v.model().item_start(i), y);
+    println!(
+        "  OPEN first painted frame {:.0} ms | fully loaded {full:.0} ms | frames shown while loading {frames_preview} (slowest {max_frame:.1} ms)",
+        first.unwrap_or(f64::NAN)
+    );
+    if let (Some(at), Some(b)) = (edited_at, before) {
+        let mut want = original.clone();
+        want.insert_str(at, "XYZ");
+        let text_ok = v.ed.session.text() == want;
+        println!(
+            "  OPEN edit during loading kept: {text_ok} | first visible item before install {b:?}, after {after:?} (same: {}) | undo steps {}",
+            b == after,
+            v.ed.session.history().undo_len()
+        );
+        let r = v.ed.view.model().check_paged(&**v.ed.view.doc());
+        println!("  OPEN consistency with a full build: {r:?}");
+    }
+    println!(
+        "  MEM live {} MB | footprint {} MB",
+        LIVE.load(Ordering::Relaxed).max(0) >> 20,
+        footprint_mb()
+    );
+    drop(app);
+    let _ = std::fs::remove_file(&path);
+}
+
 fn main() {
     if std::env::args().any(|a| a == "--list") {
         return;
     }
     if let Ok(p) = std::env::var("MARKISE_LAZY_CHILD") {
+        if std::env::var_os("MARKISE_LAZY_OPEN").is_some() {
+            open_child(&PathBuf::from(p));
+            return;
+        }
         if std::env::var_os("MARKISE_LAZY_SCROLLQ").is_some() {
             scroll_quality_child(&PathBuf::from(p));
             return;

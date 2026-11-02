@@ -225,7 +225,9 @@ fn loaded_fp(loaded: &Loaded) -> TextFp {
     if loaded.lossy {
         text_fp(loaded.doc.text())
     } else {
-        debug_assert_eq!(loaded.version.text_identity(), text_fp(loaded.doc.text()));
+        debug_assert!(
+            loaded.bytes != loaded.doc.text().len() || loaded.version.text_identity() == text_fp(loaded.doc.text())
+        );
         loaded.version.text_identity()
     }
 }
@@ -487,6 +489,9 @@ pub struct MarkiseApp {
     pub(crate) export: crate::export_ui::ExportUi,
     /// Status bar word count of the open document (by document id; issue #53).
     word_count: Option<(u64, crate::word_count::WordCount)>,
+    /// PROTOTYPE (progressive open): the open document is the first part (`cut` bytes) of
+    /// this file; the rest is still loading.
+    progressive: Option<(PathBuf, usize)>,
     /// Side by Side: the word count follows the source pane's selection (`true`) or the
     /// rendered pane's: the pane that has, or last had, the keyboard focus.
     word_count_source_pane: bool,
@@ -598,6 +603,7 @@ impl MarkiseApp {
             theme: Theme::light(),
             export: Default::default(),
             word_count: None,
+            progressive: None,
             word_count_source_pane: true,
             frames: 0,
             menu_host: None,
@@ -644,6 +650,11 @@ impl MarkiseApp {
 
     pub fn is_loading(&self) -> bool {
         self.load.is_some()
+    }
+
+    /// PROTOTYPE (progressive open): the open document is still only the first part of its file.
+    pub fn is_preview(&self) -> bool {
+        self.progressive.is_some()
     }
 
     /// A load or save job is running.
@@ -1067,13 +1078,107 @@ impl MarkiseApp {
 
     fn poll_loading(&mut self) {
         let Some(loader) = &self.loader else { return };
-        let mut got = None;
+        let mut got = Vec::new();
         while let Some((generation, r)) = loader.try_recv() {
             if self.load.as_ref().is_some_and(|l| l.generation == generation) {
-                got = Some(r);
+                got.push(r);
             } // else: superseded
         }
-        let Some(r) = got else { return };
+        for r in got {
+            match r {
+                // PROTOTYPE (progressive open): the first part of the file, the load goes on
+                Ok(Outcome::Preview { loaded, cut }) => self.install_preview(loaded, cut),
+                r => self.finish_load(r),
+            }
+        }
+    }
+
+    /// PROTOTYPE (progressive open): shows the first `cut` bytes while the rest parses.
+    fn install_preview(&mut self, loaded: Loaded, cut: usize) {
+        let open = self
+            .load
+            .as_ref()
+            .is_some_and(|l| matches!(l.reason, LoadReason::Open | LoadReason::OpenDiscarding));
+        if !open || self.is_dirty() {
+            return; // only plain opens show a preview
+        }
+        self.timing.log(&format!(
+            "preview path={} cut={cut} parse={:.1}ms model={:.1}ms wall={:.1}ms",
+            loaded.path.display(),
+            loaded.timings.parse.as_secs_f64() * 1e3,
+            loaded.timings.model.as_secs_f64() * 1e3,
+            self.load
+                .as_ref()
+                .map_or(0.0, |l| l.started.elapsed().as_secs_f64() * 1e3)
+        ));
+        let path = loaded.path.clone();
+        self.install(loaded);
+        self.progressive = Some((path, cut));
+        self.banner = Some(Banner::Info(
+            "Loading the rest of the file… (outline, find and word count cover the part shown so far; saving waits)"
+                .into(),
+        ));
+    }
+
+    /// PROTOTYPE (progressive open): the whole file arrived; edits made in the preview are
+    /// carried over as one diff patch, the document and model are swapped without moving the
+    /// view.
+    fn complete_progressive(&mut self, loaded: Loaded, cut: usize) {
+        let Some(d) = self.doc.as_mut() else { return };
+        let mut full = loaded.doc;
+        let mut model = loaded.model;
+        let cur = d.viewer.ed.session.text().to_string();
+        let orig = &full.text()[..cut.min(full.text().len())];
+        if cur != orig {
+            let patches: Vec<markise_doc::Patch> = markise_engine::edit::patches(orig, &cur)
+                .into_iter()
+                .map(|p| markise_doc::Patch::verbatim(p.start..p.end, p.insert))
+                .collect();
+            if let Ok(ps) = markise_doc::PatchSet::new(patches) {
+                let t = Instant::now();
+                let shared = Arc::get_mut(&mut full).is_none();
+                if shared {
+                    full = Arc::new((*full).clone());
+                }
+                // the pages under the edit are materialized first (else the paged model would
+                // rebuild instead of updating incrementally)
+                if let (Some(a), Some(b)) = (ps.patches().first(), ps.patches().last()) {
+                    let m = Arc::make_mut(&mut model);
+                    for off in [a.range.start, b.range.end] {
+                        for _ in 0..2 {
+                            let i = m.item_at_offset(off);
+                            match [i, i.saturating_sub(1)].into_iter().find(|&j| m.is_page(j)) {
+                                Some(j) => {
+                                    m.materialize(&*full, j);
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+                let t1 = t.elapsed();
+                let doc = Arc::get_mut(&mut full).expect("unique");
+                let e = markise_doc::FormatDoc::apply(doc, &ps);
+                let t2 = t.elapsed();
+                let msh = Arc::strong_count(&model) > 1;
+                Arc::make_mut(&mut model).apply(&*full, &e);
+                self.timing.log(&format!(
+                    "progressive-merge shared_doc={shared} clone={t1:?} apply={:?} shared_model={msh} model={:?}",
+                    t2 - t1,
+                    t.elapsed() - t2
+                ));
+            }
+        }
+        let doc: Arc<dyn markise_doc::FormatDoc> = full;
+        d.viewer.ed.session.adopt_continuation(doc.clone());
+        d.viewer.ed.view.set_model_keep(doc, model);
+        self.progressive = None;
+        if matches!(self.banner, Some(Banner::Info(ref m)) if m.starts_with("Loading the rest")) {
+            self.banner = None;
+        }
+    }
+
+    fn finish_load(&mut self, r: Result<Outcome, String>) {
         let l = self.load.take().expect("load");
         match r {
             Err(e) => {
@@ -1083,6 +1188,7 @@ impl MarkiseApp {
                 }
                 self.banner = Some(Banner::Error(e));
             }
+            Ok(Outcome::Preview { .. }) => {}
             Ok(Outcome::Unchanged { path, version, read }) => {
                 self.timing.log(&format!(
                     "reload-unchanged path={} read={:.1}ms wall={:.1}ms",
@@ -1104,6 +1210,13 @@ impl MarkiseApp {
                     t.model.as_secs_f64() * 1e3,
                     l.started.elapsed().as_secs_f64() * 1e3
                 ));
+                if let Some((p, cut)) = self.progressive.clone()
+                    && p == loaded.path
+                    && matches!(l.reason, LoadReason::Open | LoadReason::OpenDiscarding)
+                {
+                    self.complete_progressive(loaded, cut);
+                    return;
+                }
                 match l.reason {
                     LoadReason::Open => {
                         if self.is_dirty() {
@@ -1295,6 +1408,7 @@ impl MarkiseApp {
     /// Replaces the document; `untitled`: a new document without a file (`loaded.path` is
     /// its placeholder, not watched).
     fn install_doc(&mut self, loaded: Loaded, untitled: bool) {
+        self.progressive = None;
         let recovered = self.workflow.drafts.contains(&loaded.path);
         self.forget_backup();
         let untitled = untitled || recovered;
@@ -1538,6 +1652,13 @@ impl MarkiseApp {
     // ------------------------------------------------------------------ saving
 
     fn start_save(&mut self, req: SaveRequest) {
+        if self.progressive.is_some() {
+            // PROTOTYPE (progressive open): the session holds only the first part of the file
+            self.banner = Some(Banner::Info(
+                "The file is still loading; save again in a moment.".into(),
+            ));
+            return;
+        }
         if self.saving.is_some() {
             // latest request wins, but a pending continuation is not forgotten
             let then = match (&req.then, self.queued_save.take()) {

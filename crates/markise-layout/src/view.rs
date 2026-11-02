@@ -179,6 +179,26 @@ impl View {
         self.reset_heights();
     }
 
+    /// PROTOTYPE (progressive open): like [`View::set_model`], and for a paged model the
+    /// anchor's page is materialized at once and the anchor keeps its offset into its item
+    /// (the content on screen does not move).
+    pub fn set_model_keep(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>) {
+        let pos = self.model.items.start(self.anchor).unwrap_or(0);
+        let off = self.anchor_off;
+        self.set_model(doc, model);
+        if self.model.is_paged() && !self.is_empty() {
+            self.ensure_offset(pos);
+            if let Some(c) = self.lazy.caret {
+                self.ensure_offset(c);
+            }
+            let i = self.model.item_at_offset(pos);
+            if self.model.items.start(i) == Some(pos) {
+                self.anchor = i;
+                self.anchor_off = off;
+            }
+        }
+    }
+
     /// Installs a model updated incrementally ([`DocModel::apply`]) for `doc`: heights of the
     /// replaced items are spliced (O(changed) when the item count is unchanged, else one
     /// linear pass over the heights), the anchor stays on its item (or moves to the first
