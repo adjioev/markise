@@ -168,3 +168,65 @@ cargo run --release -p markise -- /tmp/markise-corpus/huge-mixed.md
 MARKISE_BENCH_LAZY=1 MARKISE_LAZY_FILES=/tmp/markise-corpus/huge-mixed.md,/tmp/markise-corpus/huge-prose.md \
   cargo bench -p markise-ui-egui --bench lazy
 ```
+
+## Follow-ups after the owner tried it (2026-11-02)
+
+### Scrollbar drag did not reach the end (lazy mode)
+
+Reproduced headlessly (`MARKISE_LAZY_END=1` probe in `benches/lazy.rs`); two causes:
+
+1. The pointer was mapped over the whole bar height while the thumb travels only bar − thumb,
+   and the grab offset was ignored: with the thumb visually at the bottom the scroll fraction
+   was ~0.969 — on the lazy model's correct height (~2.1·10⁹ px on mixed) about 65 M px,
+   thousands of screens, before the end. Lazy mode now maps the pointer at its grab point over
+   the thumb's travel (a press outside the thumb centres it). **Normal mode has the same bug**
+   (fraction 0.969, ~3 M px short on its 1·10⁸ px estimate) and keeps it on this branch; worth
+   fixing on main.
+2. The scale frozen during a drag: fraction 1.0 mapped to the frozen total − viewport while
+   pages loaded during the drag had grown the document (last block ~80 px below the viewport).
+   Fraction 1.0 now pins the end.
+
+Wheel, Cmd+Down and End reached the end in both modes.
+
+### Text quality while scrolling (#86) — switches, all modes
+
+| Switch | What it does |
+|---|---|
+| `MARKISE_SCROLL_SNAP=1` | render at the scroll offset rounded to device pixels, item origins and column edge rounded |
+| `MARKISE_SCROLL_RAW=1` | trackpad / momentum wheel deltas applied exactly (egui smooths ≥ 8 pt deltas after `TouchPhase::End` into a delayed tail) |
+| `MARKISE_SCROLL_TILES=1` | (implies snap) per-item tessellated meshes cached and composited at the snapped offset |
+
+Simulated 120 Hz trackpad gesture with momentum, ppp 2 (`MARKISE_LAZY_SCROLLQ=1`):
+
+| | mixed normal | mixed lazy | prose normal | prose lazy |
+|---|---|---|---|---|
+| Line wobble frames (neighbouring items' rendered spacing changed), off → snap | 78 → 0 | 0 → 0 (inside a TOC) | 148 → 0 | 124 → 0 |
+| Momentum tracking error, off → raw | 19.4 % → 0 % | 19.4 % → 0 % | 19.4 % → 0 % | 19.4 % → 0 % |
+| Frame time mean / sd / p99, snap+raw | 2.30 / 0.32 / 3.9 ms | 0.55 / 0.16 / 1.3 ms | 2.18 / 0.27 / 3.0 ms | 0.42 / 0.09 / 0.8 ms |
+| Frames over 8.3 ms (120 Hz) | 0 of 888 | 0 | 0 | 0 |
+| Tiles+raw: frame mean / sd, mesh memory | 2.23 / 0.31 ms, 0.1 MB | 0.54 / 0.13 ms, 0.1 MB | 2.24 / 0.43 ms, < 0.1 MB | 0.42 / 0.09 ms, < 0.1 MB |
+
+Epaint rounds each galley to a device pixel on its own, so at fractional offsets neighbouring
+lines crossed a pixel boundary on different frames — a 1 px relative wobble; snapping removes
+it. Mesh tiles bring no measurable gain: once the offset is snapped, glyph quads from the atlas
+already composite pixel-identically, and raster-texture tiles would need a new BlockLayout
+rasterizer for the same pixels. Recommendation: snap + raw, no tiles. Headless frame times are
+CPU only; real 60/120 Hz pacing and the visual result need checking on the device.
+
+### Progressive open (`MARKISE_PROGRESSIVE_OPEN=1`, lazy view only)
+
+Files ≥ 4 MiB: the loader parses the first ~200 KB (cut at a blank line outside fences / `$$`)
+and shows it at once, then parses the whole file and swaps it in without moving the view.
+While loading: reading, scrolling and editing work on the part shown; outline, find, Cmd+Down
+and `[TOC]` cover that part; a banner says the rest is loading; save is refused until the
+whole file is in. Edits made meanwhile are carried over as one diff patch on the full document
+(undo history, selection kept). Measured (`MARKISE_LAZY_OPEN=1`):
+
+| | mixed | prose | log |
+|---|---|---|---|
+| Open → first painted frame: normal / lazy / lazy+progressive | 1,389 / 867 / **47 ms** | 570 / 458 / **50 ms** | 287 / 277 / **35 ms** |
+| Open → fully loaded, lazy+progressive | 782 ms | 503 ms | 328 ms |
+| Slowest UI frame while loading (install with an edit included) | 32 ms | 29 ms | 32 ms |
+| Edit during loading kept, view unchanged at install, model consistent | yes | yes | yes |
+
+The read itself is ~40 ms; the lag was parse + model on 100 MB.
