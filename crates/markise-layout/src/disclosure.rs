@@ -147,6 +147,16 @@ impl Disclosures {
         self.pair(model, doc);
         true
     }
+    /// Whether items `r` hold a marker of a group whose other markers lie outside `r` (a paged
+    /// model must not evict them: the pairing would be lost).
+    pub fn paired_outside(&self, r: std::ops::Range<usize>) -> bool {
+        self.groups.iter().any(|(&start, g)| {
+            let inside = |i: usize| r.contains(&i);
+            let all = [Some(start), Some(g.end), g.summary];
+            let n_in = all.iter().flatten().filter(|&&i| inside(i)).count();
+            n_in > 0 && n_in < all.iter().flatten().count()
+        })
+    }
     pub fn hidden(&self, i: usize) -> bool {
         self.controls.contains(&i) || self.closed_end(i).is_some()
     }

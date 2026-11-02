@@ -16,12 +16,18 @@ use markise_layout::{Container, DocModel, Gap, ItemKind, Marker, View, testing};
 use markise_theme::Theme;
 use proptest::prelude::*;
 
+/// A full model (one item per leaf): these tests pin the incremental update of the items
+/// against a full rebuild; paged models are covered by `tests/paging.rs`.
+fn full(doc: &dyn FormatDoc, path: Option<&std::path::Path>) -> DocModel {
+    DocModel::build_with(doc, path, markise_layout::Paging::Full)
+}
+
 fn md(src: &str) -> markise_md::Document {
     markise_md::parse(src)
 }
 
 fn model(src: &str) -> DocModel {
-    DocModel::build_owned(&md(src), None)
+    full(&md(src), None)
 }
 
 #[test]
@@ -126,7 +132,7 @@ fn item_hash_depends_on_content_and_context() {
 fn step(doc: &mut dyn FormatDoc, m: &mut DocModel, ps: &PatchSet) -> Result<(), String> {
     let e = doc.apply(ps);
     m.apply(doc, &e);
-    let full = DocModel::build_owned(doc, None);
+    let full = full(doc, None);
     m.diff(&full)
         .map_err(|d| format!("after {ps:?} -> {:?}\n{e:?}\n{d}", doc.text()))
 }
@@ -193,7 +199,7 @@ fn edits() -> impl Strategy<Value = Vec<(usize, usize, usize, bool)>> {
 }
 
 fn run_edits(doc: &mut dyn FormatDoc, ops: &[(usize, usize, usize, bool)]) -> Result<(), String> {
-    let mut m = DocModel::build_owned(doc, None);
+    let mut m = full(doc, None);
     for &(pos, del, snip, insert) in ops {
         let t = doc.text();
         let a = char_floor(t, if t.is_empty() { 0 } else { pos % (t.len() + 1) });
@@ -244,7 +250,7 @@ fn check_apply_equals_full_on_a_large_document_with_many_chunks(edits: usize) {
     // > 256 top-level blocks and items: edits cross chunk boundaries of both relative lists
     let text = markise_corpus::generate(300 << 10, 7);
     let mut doc = md(&text);
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut seed = 0x9e37_79b9_7f4a_7c15u64;
     for k in 0..edits {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -261,15 +267,15 @@ fn apply_with_hints_reports_combined_change() {
     // the keystroke completing ``` on a fresh line with its hint: one summary covers both
     use markise_doc::{HintOrigin, HintSet, LiteralHint};
     let mut doc = md("a\n\n``\n\nb\n\nc\n");
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let hints = HintSet::from_hints([LiteralHint::new(3, HintOrigin::EnterPending)]);
     let e = doc.apply_with_hints(&PatchSet::single_verbatim(5..5, "`"), Some(&hints));
     m.apply(&doc, &e);
-    m.diff(&DocModel::build_owned(&doc, None)).unwrap();
+    m.diff(&full(&doc, None)).unwrap();
     // removing the hint alone re-projects the line as a fence that swallows the rest
     let e = doc.apply_with_hints(&PatchSet::empty(), Some(&HintSet::new()));
     m.apply(&doc, &e);
-    m.diff(&DocModel::build_owned(&doc, None)).unwrap();
+    m.diff(&full(&doc, None)).unwrap();
     assert_eq!(m.items.len(), 2, "para + fence");
 }
 
@@ -278,7 +284,7 @@ fn apply_with_hints_reports_combined_change() {
 #[test]
 fn adding_a_definition_rekeys_only_items_that_may_use_it() {
     let mut doc = md("see [foo] here\n\nplain text\n\n[bar] other\n\nlink [foo](http://inline) only\n\nend\n");
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
     let keys = |v: &View| (0..v.len()).map(|i| v.cache_key(i)).collect::<Vec<_>>();
     let before = keys(&v);
@@ -286,7 +292,7 @@ fn adding_a_definition_rekeys_only_items_that_may_use_it() {
     let e = doc.apply(&PatchSet::single_verbatim(end..end, "\n[foo]: http://x\n"));
     assert!(!e.deps.labels.is_empty(), "the new definition is reported");
     let ch = m.apply(&doc, &e);
-    m.diff(&DocModel::build_owned(&doc, None)).unwrap();
+    m.diff(&full(&doc, None)).unwrap();
     assert_eq!(ch.labels, e.deps.labels);
     v.apply(Arc::new(doc.clone()), Arc::new(m.clone()), &ch);
     let after = keys(&v);
@@ -302,36 +308,36 @@ fn adding_a_definition_rekeys_only_items_that_may_use_it() {
 #[test]
 fn heading_anchor_renumbering_through_apply() {
     let mut doc = md("# Intro\n\n# Intro\n\n# Intro\n");
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let anchors = |m: &DocModel| m.outline.iter().map(|o| o.anchor.clone()).collect::<Vec<_>>();
     assert_eq!(anchors(&m), ["intro", "intro-2", "intro-3"]);
     // rename the first: later ids shift down
     let e = doc.apply(&PatchSet::single_verbatim(2..7, "Other"));
     m.apply(&doc, &e);
-    m.diff(&DocModel::build_owned(&doc, None)).unwrap();
+    m.diff(&full(&doc, None)).unwrap();
     assert_eq!(anchors(&m), ["other", "intro", "intro-2"]);
     // a definition used inside a heading changes its text and id
     let mut doc = md("# [x]\n\ntext\n");
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     assert_eq!(m.outline[0].text, "[x]");
     let end = doc.text().len();
     let e = doc.apply(&PatchSet::single_verbatim(end..end, "\n[x]: http://y\n"));
     m.apply(&doc, &e);
-    m.diff(&DocModel::build_owned(&doc, None)).unwrap();
+    m.diff(&full(&doc, None)).unwrap();
     assert_eq!(m.outline[0].text, "x");
 }
 
 #[test]
 fn resource_root_change_is_a_dependency() {
     let mut doc = md("---\ntypora-root-url: old\n---\n\n![x](/p.png)\n\ntext\n");
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let h = m.ctx_hash;
     let at = doc.text().find("old").unwrap();
     let e = doc.apply(&PatchSet::single_verbatim(at..at + 3, "new"));
     assert!(e.deps.resources);
     m.apply(&doc, &e);
     assert_ne!(m.ctx_hash, h);
-    m.diff(&DocModel::build_owned(&doc, None)).unwrap();
+    m.diff(&full(&doc, None)).unwrap();
 }
 
 // ---- cache keys (C-18) -----------------------------------------------------------------
@@ -342,7 +348,7 @@ fn text_inserted_above_keeps_cached_layouts_of_unchanged_blocks() {
     let code: String = (0..400).map(|i| format!("line {i}\n")).collect();
     let src = format!("first paragraph\n\n```\n{code}```\n\nafter the code\n\n| a | b |\n|---|---|\n| 1 | 2 |\n");
     let mut doc = md(&src);
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let n = m.items.len();
     assert!(n > 5, "code is segmented");
     let mut fonts = testing::fonts();
@@ -355,7 +361,7 @@ fn text_inserted_above_keeps_cached_layouts_of_unchanged_blocks() {
     // insert text into the first paragraph (above everything else)
     let e = doc.apply(&PatchSet::single_verbatim(5..5, " inserted words"));
     m.apply(&doc, &e);
-    m.diff(&DocModel::build_owned(&doc, None)).unwrap();
+    m.diff(&full(&doc, None)).unwrap();
     for (i, h) in hashes.iter().enumerate().skip(1) {
         assert_eq!(m.items[i].hash, *h, "item {i}: offset-independent hash");
     }
@@ -381,7 +387,7 @@ fn heavy_suite_view_apply_matches_a_fresh_view() {
 fn check_view_apply_matches_a_fresh_view(edits: usize) {
     let text = markise_corpus::generate(64 << 10, 3);
     let mut doc = md(&text);
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut fonts = testing::fonts();
     let mut f = fonts.with_pixels_per_point(1.0);
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
@@ -408,7 +414,7 @@ fn check_view_apply_matches_a_fresh_view(edits: usize) {
         // keys (with reference fingerprints) equal those of a view of a freshly parsed copy:
         // the definitions context is never stale after an edit
         let reparsed = md(doc.text());
-        let rm = DocModel::build(&reparsed, None);
+        let rm = Arc::new(full(&reparsed, None));
         let other = View::new(Arc::new(reparsed), rm, Theme::light(), 600.0, 1.0);
         for i in 0..m.items.len() {
             assert_eq!(v.cache_key(i), other.cache_key(i), "step {k}: key of item {i}");
@@ -436,7 +442,7 @@ fn text_prims(v: &mut View, i: usize) -> Vec<(markise_layout::FragmentId, Arc<dy
 fn source_maps_round_trip_and_are_item_relative() {
     let src = "intro\n\n> a **bold** [link](http://x) &amp; `co de` x\\*y\n> second line\n\n| h | `c\\|d` |\n|---|---|\n| **v** | w |\n\n```\nfn a()\n  b\n```\n";
     let doc = md(src);
-    let shown = testing::Shown::new(Arc::new(doc));
+    let shown = testing::Shown::full(Arc::new(doc));
     let mut v = shown.view(Theme::light(), 800.0, 1.0);
     let mut checked = 0;
     for i in 0..shown.items.len() {
@@ -482,8 +488,8 @@ fn source_maps_round_trip_and_are_item_relative() {
 #[test]
 fn item_layout_is_identical_wherever_the_item_is() {
     // same block, different offsets: equal fragment ids and source maps (cacheable by content)
-    let a = testing::Shown::new(Arc::new(md("x\n\n> a *b* c\n")));
-    let b = testing::Shown::new(Arc::new(md("much longer text above\n\nmore\n\n> a *b* c\n")));
+    let a = testing::Shown::full(Arc::new(md("x\n\n> a *b* c\n")));
+    let b = testing::Shown::full(Arc::new(md("much longer text above\n\nmore\n\n> a *b* c\n")));
     let (ia, ib) = (1, 2);
     assert_eq!(a.items[ia].hash, b.items[ib].hash);
     let mut va = a.view(Theme::light(), 600.0, 1.0);
@@ -509,7 +515,7 @@ fn step_view(
 ) -> markise_layout::ModelChange {
     let e = doc.apply(ps);
     let ch = m.apply(&*doc, &e);
-    m.diff(&DocModel::build_owned(&*doc, None)).unwrap();
+    m.diff(&full(&*doc, None)).unwrap();
     v.apply(Arc::new(doc.clone()), Arc::new(m.clone()), &ch);
     let mut fonts = testing::fonts();
     let mut f = fonts.with_pixels_per_point(1.0);
@@ -552,7 +558,7 @@ fn toc_resegmentation_across_the_threshold_keeps_the_view_consistent() {
     }
     src.push_str("tail\n");
     let mut doc = md(&src);
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let tocs = |m: &DocModel| m.items.iter().filter(|i| i.kind == ItemKind::Toc).count();
     assert_eq!(tocs(&m), 1);
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
@@ -581,7 +587,7 @@ fn toc_resegmentation_across_the_threshold_keeps_the_view_consistent() {
 fn footnote_reference_followed_by_parens_is_a_dependency() {
     // `[^n](url)` is tried as a footnote first: adding `[^n]: …` changes its meaning
     let mut doc = md("# Head [^n](u)\n\nbody [^n](http://x) text\n\nend\n");
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
     let before: Vec<_> = (0..v.len()).map(|i| v.cache_key(i)).collect();
     let text_before = m.outline[0].text.clone();
@@ -611,7 +617,7 @@ fn footnote_reference_followed_by_parens_is_a_dependency() {
 fn escaped_pipe_labels_in_table_cells_are_dependencies() {
     // the cell `[a\|b]` is looked up as `a|b` (GFM: `\|` → `|` before inline parsing)
     let mut doc = md("| h | x |\n|---|---|\n| [a\\|b] | y |\n\nend\n");
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
     let k0 = v.cache_key(0);
     let end = doc.text().len();
@@ -639,7 +645,7 @@ fn segmented_table_keys_cover_row_offsets() {
         src.push_str(&format!("| r{i} | {i} |\n"));
     }
     let mut doc = md(&src);
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     assert!(m.items.len() >= 3, "segmented: {}", m.items.len());
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
     let mut fonts = testing::fonts();
@@ -685,7 +691,7 @@ fn deleting_the_first_block_before_a_segmented_toc() {
         src.push_str(&format!("## Heading {i}\n\n"));
     }
     let mut doc = md(&src);
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let tocs = |m: &DocModel| m.items.iter().filter(|i| i.kind == ItemKind::Toc).count();
     let segments = tocs(&m);
     assert!(segments > 1, "segmented TOC");
@@ -706,7 +712,7 @@ fn definition_change_after_memo_pruning_demotes_dependent_heights() {
     // the definition is far from its user, so the edit re-parses only the definition
     let src = format!("[foo]: http://a\n\ntyped\n\n{filler}uses [foo] here\n\n{filler}");
     let mut doc = md(&src);
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
     let mut fonts = testing::fonts();
     let mut f = fonts.with_pixels_per_point(1.0);
@@ -756,7 +762,7 @@ fn resource_root_change_demotes_image_heights_in_the_view() {
     let filler: String = (0..30).map(|i| format!("filler paragraph {i}\n\n")).collect();
     let src = format!("---\ntypora-root-url: old\n---\n\n{filler}![pic](/p.png)\n\n{filler}");
     let mut doc = md(&src);
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
     let mut fonts = testing::fonts();
     let mut f = fonts.with_pixels_per_point(1.0);
@@ -773,7 +779,7 @@ fn resource_root_change_demotes_image_heights_in_the_view() {
     let e = doc.apply(&PatchSet::single_verbatim(at..at + 3, "new"));
     assert!(e.deps.resources);
     let ch = m.apply(&doc, &e);
-    m.diff(&DocModel::build_owned(&doc, None)).unwrap();
+    m.diff(&full(&doc, None)).unwrap();
     v.apply(Arc::new(doc.clone()), Arc::new(m.clone()), &ch);
     assert_ne!(v.cache_key(img), key);
     assert!(!v.is_exact(img), "stale exact image height demoted");
@@ -884,7 +890,7 @@ proptest! {
     ) {
         let docs = container_docs();
         let mut d = md(&docs[doc]);
-        let mut m = DocModel::build_owned(&d, None);
+        let mut m = full(&d, None);
         for (pos, del, snip, ins) in ops {
             let t = d.text();
             let a = char_floor(t, pos % (t.len() + 1));
@@ -907,12 +913,12 @@ fn nested_restarts_update_only_the_region() {
         s.push_str(&format!("- item {i} words\n"));
     }
     let mut d = md(&s);
-    let mut m = DocModel::build_owned(&d, None);
+    let mut m = full(&d, None);
     let at = s.find("item 1500 words").unwrap() + 15;
     let e = d.apply(&PatchSet::single_verbatim(at..at, "\n- new"));
     assert!(e.nested_from.is_some(), "{e:?}");
     let ch = m.apply(&d, &e);
-    m.diff(&DocModel::build_owned(&d, None)).unwrap();
+    m.diff(&full(&d, None)).unwrap();
     assert!(ch.replaced.len() <= 3 && ch.inserted.len() <= 4, "{ch:?}");
 }
 
@@ -939,12 +945,12 @@ fn nested_restart_in_quote_and_nested_list_is_local() {
         (&n, "nested item 3999 with some words", "\n  - "),
     ] {
         let mut d = md(src);
-        let mut m = DocModel::build_owned(&d, None);
+        let mut m = full(&d, None);
         let at = src.find(needle).unwrap() + 20;
         let e = d.apply(&PatchSet::single_verbatim(at..at, enter));
         assert!(e.nested_from.is_some(), "{needle}: {e:?}");
         let ch = m.apply(&d, &e);
-        m.diff(&DocModel::build_owned(&d, None)).unwrap();
+        m.diff(&full(&d, None)).unwrap();
         assert!(ch.replaced.len() <= 3 && ch.inserted.len() <= 4, "{needle}: {ch:?}");
     }
 }
@@ -968,7 +974,7 @@ fn nested_region_keeps_unspent_decorations() {
     for &(doc, needle, ins) in cases {
         let at = doc.find(needle).unwrap();
         let mut d = md(doc);
-        let mut m = DocModel::build_owned(&d, None);
+        let mut m = full(&d, None);
         if let Err(e) = step(&mut d, &mut m, &PatchSet::single_verbatim(at..at, ins)) {
             panic!("{doc:?} insert {ins:?} at {at}: {e}");
         }
@@ -985,7 +991,7 @@ fn segment_refresh_recomputes_has_math() {
         src.push_str(&format!("line {i} of a long paragraph with plain words\n"));
     }
     let mut doc = md(&src);
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let segs: Vec<usize> = (0..m.items.len()).filter(|&i| m.items[i].segment.is_some()).collect();
     assert!(segs.len() > 1, "the paragraph is segmented");
     assert!(segs.iter().all(|&i| !m.items[i].has_math));
@@ -1044,7 +1050,7 @@ fn many_tocs_doc() -> String {
 #[test]
 fn heading_text_edit_rekeys_one_segment_per_toc() {
     let mut doc = md(&many_tocs_doc());
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let toc_items = m.items.iter().filter(|i| i.kind == ItemKind::Toc).count();
     let runs = 4; // three in the body, one at the top
     assert_eq!(toc_items % runs, 0);
@@ -1066,7 +1072,7 @@ fn heading_text_edit_rekeys_one_segment_per_toc() {
 #[test]
 fn heading_count_and_level_changes_rekey_tocs_in_place() {
     let mut doc = md(&many_tocs_doc());
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
     let n_items = m.items.len();
     // a new heading (the outline grows by one; the TOCs keep their segment count)
@@ -1108,7 +1114,7 @@ fn heading_count_and_level_changes_rekey_tocs_in_place() {
 #[test]
 fn random_edits_with_many_headings_equal_full_rebuild() {
     let mut doc = md(&many_tocs_doc());
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let snippets = ["x", "# ", "## Same\n\n", "\n", "#", "[toc]\n\n", "Heading 3", ""];
     for k in 0..40 {
@@ -1167,7 +1173,7 @@ fn paste_undo_redo_update_heights_incrementally() {
     let mut src = many_tocs_doc();
     src.push_str("uses [a][r1] here\n\n[r1]: http://first\n");
     let mut doc = md(&src);
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
     let at = doc.text().find("text 150\n").unwrap();
     show_at(&mut v, &m, 0);
@@ -1212,7 +1218,7 @@ fn paste_across_the_segmentation_threshold_and_into_a_toc() {
         }
     }
     let mut doc = md(&src);
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
     let at = doc.text().find("text 30\n").unwrap();
     show_at(&mut v, &m, at);
@@ -1237,7 +1243,7 @@ fn random_large_edits_keep_the_view_equal_to_a_fresh_one() {
     // pastes and cuts of whole sections (headings, `[toc]`s, definitions) at random places:
     // model == full build and incremental view heights / keys == a fresh view's (`step_view`)
     let mut doc = md(&many_tocs_doc());
-    let mut m = DocModel::build_owned(&doc, None);
+    let mut m = full(&doc, None);
     let mut v = View::new(Arc::new(doc.clone()), Arc::new(m.clone()), Theme::light(), 600.0, 1.0);
     let mut seed = 0x51_7cc1_b727_220au64;
     let mut rnd = |n: usize| {

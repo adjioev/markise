@@ -343,6 +343,29 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
 
     /// Number of top-level blocks.
     fn top_count(&self) -> usize;
+    /// Absolute span of top-level block `t` (`None`: past the end, or not supported by the
+    /// format). Paged view models and the word count address the document by top-level block
+    /// (issue #125).
+    fn top_span(&self, t: usize) -> Option<Span> {
+        let _ = t;
+        None
+    }
+    /// Index of the last top-level block starting at or before absolute offset `offset`
+    /// (0 when none does; `None`: not supported by the format). The default searches
+    /// [`FormatDoc::top_span`].
+    fn top_at(&self, offset: usize) -> Option<usize> {
+        self.top_span(0)?;
+        let (mut lo, mut hi) = (0, self.top_count());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.top_span(mid).is_some_and(|s| s.start <= offset) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Some(lo.saturating_sub(1))
+    }
     /// Emits the leaves of top-level blocks `tops` with their container chains, in order.
     fn flatten(&self, tops: Range<usize>, sink: &mut dyn FnMut(FlatEvent<'_>));
     /// Emits the events needed for the leaves of top-level blocks `tops` that start in

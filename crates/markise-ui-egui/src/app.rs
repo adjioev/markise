@@ -2591,7 +2591,8 @@ impl MarkiseApp {
     /// The status bar's word count (issue #53): click cycles words / characters / characters
     /// without spaces.
     fn word_count_label(&mut self, ui: &mut egui::Ui) {
-        let Some(d) = self.doc.as_ref().filter(|_| self.themes.show_word_count()) else {
+        let show = self.themes.show_word_count();
+        let Some(d) = self.doc.as_mut().filter(|_| show) else {
             self.word_count = None;
             return;
         };
@@ -2601,7 +2602,6 @@ impl MarkiseApp {
         let Some((_, wc)) = self.word_count.as_mut() else {
             return;
         };
-        let ed = &d.viewer.ed;
         if self.side_by_side {
             let ctx = ui.ctx();
             if d.source_ui.has_focus(ctx) {
@@ -2611,17 +2611,12 @@ impl MarkiseApp {
             }
         }
         let source_pane = self.source_visible || (self.side_by_side && self.word_count_source_pane);
+        let ed = &mut d.viewer.ed;
         let sel = match ed.source.as_ref() {
             Some(p) if source_pane => p.sel.primary().range(),
             _ => ed.session.selection().primary().range(),
         };
-        let shown = wc.update(
-            ui.ctx(),
-            ed.session.doc(),
-            d.viewer.model(),
-            ed.session.revision().counter,
-            sel,
-        );
+        let shown = wc.update(ui.ctx(), &mut ed.session, sel);
         let mode = self.themes.count_mode();
         let r = ui
             .add(
@@ -2693,9 +2688,14 @@ impl MarkiseApp {
                             self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
                         }
                         if let Some(d) = &mut self.doc {
-                            let model = d.viewer.model().clone();
-                            let cur = model.current_heading(d.viewer.ed.view.anchor().0);
-                            if let Some(item) = outline(ui, &model.outline, cur, &look) {
+                            let clicked = {
+                                let model = d.viewer.model().clone();
+                                let cur = model.current_heading(d.viewer.ed.view.anchor().0);
+                                outline(ui, &model.outline, cur, &look)
+                            };
+                            // a paged model materializes the heading's page first
+                            if let Some(item) = clicked.and_then(|k| d.viewer.ed.view.ensure_heading(k)) {
+                                let model = d.viewer.model().clone();
                                 d.viewer.ed.view.scroll_to_item(item);
                                 // Side by Side: the source pane follows the rendered pane
                                 self.sbs.sync_source = true;
@@ -3080,6 +3080,8 @@ fn source_middle_to_rendered(viewer: &mut DocViewer, vh: f32) {
     let text = viewer.ed.session.text();
     let line = pane.view.line_at_y(pane.view.scroll_y() + vh as f64 * 0.5);
     let off = pane.view.line_start(text, line.floor().max(0.0) as usize);
+    // a paged model materializes the page of the line first
+    viewer.ed.view.ensure_offset(off);
     let model = viewer.model().clone();
     if model.items.is_empty() {
         return;

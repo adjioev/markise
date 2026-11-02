@@ -530,6 +530,12 @@ impl FormatDoc for Document {
     fn top_count(&self) -> usize {
         self.top_len()
     }
+    fn top_span(&self, t: usize) -> Option<Span> {
+        self.top(t).map(|t| t.span())
+    }
+    fn top_at(&self, offset: usize) -> Option<usize> {
+        Some(self.top_partition_point(|t| t.start() <= offset).saturating_sub(1))
+    }
     fn flatten(&self, tops: Range<usize>, sink: &mut dyn FnMut(FlatEvent<'_>)) {
         let text = self.text();
         for (k, t) in self.tops_range(tops.clone()).enumerate() {

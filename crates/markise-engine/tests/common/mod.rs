@@ -7,7 +7,7 @@ use epaint::text::Fonts;
 use markise_doc::{DocPos, DocumentFormat, Params};
 use markise_engine::editor::{EditorSession, EditorView, HistoryLimits, ManualClock};
 use markise_layout::block::NoImages;
-use markise_layout::{DocModel, View, testing};
+use markise_layout::{DocModel, Paging, View, testing};
 use markise_md::MarkdownFormat;
 use markise_theme::Theme;
 
@@ -15,28 +15,54 @@ pub struct T {
     pub ed: EditorView,
     pub fonts: Fonts,
     pub clock: ManualClock,
+    /// Frames run the viewer's selection fix too ([`T::frame`]).
+    pub fix_selection: bool,
 }
 
 impl T {
     pub fn new(text: &str) -> T {
+        Self::with_paging(text, Paging::from_env())
+    }
+
+    /// With a paged model of `tops`-block pages (issue #125).
+    pub fn paged(text: &str, tops: usize) -> T {
+        Self::with_paging(text, Paging::Paged { tops })
+    }
+
+    pub fn with_paging(text: &str, paging: Paging) -> T {
         let clock = ManualClock::default();
         let format: Arc<dyn DocumentFormat> = Arc::new(MarkdownFormat::default());
         let session = EditorSession::with(format, text, HistoryLimits::default(), Box::new(clock.clone()));
-        let model = DocModel::build(session.doc(), None);
+        let model = Arc::new(DocModel::build_with(session.doc(), None, paging));
         let view = View::new(session.doc_arc().clone(), model, Theme::light(), 600.0, 1.0);
         let mut t = T {
             ed: EditorView::new(session, view, None),
             fonts: testing::fonts(),
             clock,
+            fix_selection: false,
         };
         t.frame();
         t
     }
 
+    /// One frame: focus and layout (a paged model materializes and evicts pages here); with
+    /// [`T::fix_selection`], then the selection fixed onto caret stops, as the viewer does.
     pub fn frame(&mut self) {
         self.ed.refresh_focus();
         let mut f = self.fonts.with_pixels_per_point(1.0);
         self.ed.view.frame(800.0, 400.0, &mut f, &NoImages);
+        if self.fix_selection && self.ed.fix_selection(&mut f, &NoImages) {
+            self.ed.refresh_focus();
+        }
+    }
+
+    /// Scrolls the caret into view (as the UI does after a command) and draws a frame.
+    pub fn reveal(&mut self) {
+        {
+            let mut f = self.fonts.with_pixels_per_point(1.0);
+            self.ed.scroll_to_caret(400.0, &mut f, &NoImages);
+        }
+        self.frame();
     }
 
     pub fn run(&mut self, id: &str) {
@@ -80,14 +106,17 @@ impl T {
         self.ed.view.focus().is_some_and(|(_, f)| !f.reveal.is_empty())
     }
 
-    /// The incremental model equals a full rebuild.
+    /// The incremental model equals a full rebuild (a paged one where it holds real items).
     pub fn check_model(&self) {
-        let full = DocModel::build(self.ed.session.doc(), None);
-        self.ed
-            .view
-            .model()
-            .diff(&full)
-            .expect("incremental model == full build");
+        let doc = self.ed.session.doc();
+        let m = self.ed.view.model();
+        if m.is_paged() {
+            m.check_against_full(doc)
+                .expect("incremental paged model == full build");
+        } else {
+            m.diff(&DocModel::build_with(doc, None, Paging::Full))
+                .expect("incremental model == full build");
+        }
     }
 }
 
