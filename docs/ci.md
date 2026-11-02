@@ -19,7 +19,9 @@ every PR update and the macOS + Windows matrix only on demand and after merge.
 The Linux jobs are: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
 `cargo xtask layers` and `cargo xtask assets` (job `fmt + clippy (Linux)`), and the workspace
 fast correctness tests (job `test + build (linux-x86_64)`). The full matrix also runs the tests on macOS (Apple Silicon) and
-Windows and builds and packages release binaries on all three OSes. The packaged binaries are
+Windows and builds and packages release binaries on all three OSes; each OS also starts the
+release app once on a document (`scripts/smoke-start.sh`: it must start a renderer — wgpu, or
+glow after a fallback — and quit by itself; Linux under Xvfb). The packaged binaries are
 uploaded as artifacts (`markise-<os>`, kept 3 days) **only from pushes to `main`**; `full-ci` PR
 runs and manual runs build and package but upload nothing.
 

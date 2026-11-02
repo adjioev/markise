@@ -110,3 +110,121 @@ fn idle_after_large_open_and_edit_with_word_count_and_comment_margin() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Issue #86: a wheel notch over the document scrolls it smoothly (a frame per display refresh
+/// while it moves, by exactly the notch's distance in total) and the window is idle again once
+/// the motion and its short tail are over.
+#[test]
+fn wheel_scroll_moves_smoothly_then_goes_idle() {
+    let dir = std::env::temp_dir().join(format!("markise-ui-idle-wheel-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("doc.md");
+    std::fs::write(&p, markise_corpus::generate(200 * 1024, 3)).unwrap();
+    let ctx = Context::default();
+    let mut app = MarkiseApp::new(AppOptions {
+        open: vec![p],
+        ..Default::default()
+    });
+    assert_idle(&settle_and_measure(&ctx, &mut app), "after the open");
+    // frames at 120 Hz from here on, with the pointer over the document
+    let center = egui::pos2(700.0, 400.0);
+    let mut t = ctx.input(|i| i.time) + 1.0;
+    let mut timed = |ctx: &Context, app: &mut MarkiseApp, events: Vec<egui::Event>| {
+        t += 1.0 / 120.0;
+        let mut raw = input();
+        raw.time = Some(t);
+        raw.predicted_dt = 1.0 / 120.0;
+        raw.events = events;
+        let mut out = ctx.run_ui(raw, |ui| app.ui(ui));
+        out.textures_delta.clear();
+        let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+        out.viewport_output[&ViewportId::ROOT].repaint_delay
+    };
+    timed(&ctx, &mut app, vec![egui::Event::PointerMoved(center)]);
+    timed(&ctx, &mut app, vec![]);
+    let y0 = app.viewer().unwrap().ed.view.scroll_y();
+    let notch = egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, -1.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut ys = Vec::new();
+    let mut delays = Vec::new();
+    delays.push(timed(&ctx, &mut app, vec![notch]));
+    ys.push(app.viewer().unwrap().ed.view.scroll_y());
+    for _ in 0..60 {
+        delays.push(timed(&ctx, &mut app, vec![]));
+        ys.push(app.viewer().unwrap().ed.view.scroll_y());
+    }
+    let moved = ys.last().unwrap() - y0;
+    assert!(moved > 0.0, "the notch scrolled down");
+    // ~90 % of the notch within ~120 ms: not all of it in the first frame, most by frame 15
+    assert!(ys[0] - y0 < moved * 0.5, "spread over frames: {:?}", &ys[..4]);
+    assert!(
+        ys[15] - y0 > moved * 0.85,
+        "mostly there after 125 ms: {} of {moved}",
+        ys[15] - y0
+    );
+    // while moving, the next frame is wanted right away
+    assert!(delays[..10].iter().all(|d| *d == Duration::ZERO), "{delays:?}");
+    // idle again after the motion and its tail
+    let rest: Vec<Duration> = (0..4).map(|_| timed(&ctx, &mut app, vec![])).collect();
+    assert_idle(&rest, "after a wheel notch");
+    assert_eq!(app.viewer().unwrap().ed.view.scroll_y(), *ys.last().unwrap(), "at rest");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #86 (review): a jump while a wheel notch is still moving the document (outline click,
+/// anchor link, find) wins: the pending motion is dropped and the document stays where the
+/// jump put it.
+#[test]
+fn jump_during_wheel_motion_stays_put() {
+    let dir = std::env::temp_dir().join(format!("markise-ui-idle-jump-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("doc.md");
+    std::fs::write(&p, markise_corpus::generate(200 * 1024, 3)).unwrap();
+    let ctx = Context::default();
+    let mut app = MarkiseApp::new(AppOptions {
+        open: vec![p],
+        ..Default::default()
+    });
+    assert_idle(&settle_and_measure(&ctx, &mut app), "after the open");
+    let mut t = ctx.input(|i| i.time) + 1.0;
+    let mut timed = |ctx: &Context, app: &mut MarkiseApp, events: Vec<egui::Event>| {
+        t += 1.0 / 120.0;
+        let mut raw = input();
+        raw.time = Some(t);
+        raw.predicted_dt = 1.0 / 120.0;
+        raw.events = events;
+        let mut out = ctx.run_ui(raw, |ui| app.ui(ui));
+        out.textures_delta.clear();
+        let _ = ctx.tessellate(out.shapes, out.pixels_per_point);
+    };
+    timed(
+        &ctx,
+        &mut app,
+        vec![egui::Event::PointerMoved(egui::pos2(700.0, 400.0))],
+    );
+    let notch = egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, -4.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+        modifiers: egui::Modifiers::NONE,
+    };
+    timed(&ctx, &mut app, vec![notch]);
+    timed(&ctx, &mut app, vec![]);
+    let v = &mut app.viewer().unwrap().ed.view;
+    assert!(v.scroll_y() > 0.0, "the notch started moving");
+    // the jump (as the outline does) while the notch is still under way
+    v.scroll_to_item(40);
+    for _ in 0..30 {
+        timed(&ctx, &mut app, vec![]);
+    }
+    // (the anchor: the absolute offset changes as estimated heights above become real)
+    let anchor = app.viewer().unwrap().ed.view.anchor();
+    assert_eq!(anchor, (40, 0.0), "the document stayed where the jump put it");
+    let _ = std::fs::remove_dir_all(&dir);
+}

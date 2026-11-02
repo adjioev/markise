@@ -23,6 +23,7 @@ use markise_layout::{DocModel, TextShaper, View};
 use markise_theme::Theme;
 
 use crate::images::TextureStore;
+use crate::smooth_scroll::{self, SmoothScroll};
 use crate::text_paint::ParleyText;
 
 mod code_tools;
@@ -56,6 +57,8 @@ pub struct ViewerOutput {
     /// suggestion (ADR 0012): command id and the source offset it acts at (`None`: at the
     /// selection).
     pub review: Option<(&'static str, Option<usize>)>,
+    /// Wheel / trackpad scrolling moved the document this frame (smooth scrolling included).
+    pub wheel_scrolled: bool,
 }
 
 /// The suggestion under the pointer and its floating Accept / Reject bar (ADR 0012).
@@ -182,6 +185,8 @@ pub struct DocViewer {
     code: code_tools::CodeTools,
     /// A press on the scrollbar (issue #123).
     thumb_drag: scrollbar::ThumbDrag,
+    /// Wheel / trackpad smoothing (issue #86).
+    smooth: SmoothScroll,
 }
 
 impl DocViewer {
@@ -232,6 +237,7 @@ impl DocViewer {
             gutter: false,
             code: Default::default(),
             thumb_drag: Default::default(),
+            smooth: Default::default(),
         }
     }
 
@@ -468,7 +474,12 @@ impl DocViewer {
         let col_w = (content_w - 2.0 * theme.column_padding_x)
             .min(theme.column_max_width)
             .max(120.0);
-        let left = rect.left() + ((content_w - col_w) * 0.5).max(4.0);
+        let mut left = rect.left() + ((content_w - col_w) * 0.5).max(4.0);
+        let snap = smooth_scroll::snap_enabled();
+        if snap {
+            // the column edge on a device pixel (issue #86)
+            left = smooth_scroll::round_to_pixel(left, ppp);
+        }
         self.ed.view.set_params(col_w, theme, ppp);
         let vh = rect.height();
 
@@ -490,13 +501,20 @@ impl DocViewer {
             });
         }
 
-        // ---- input: wheel / trackpad
-        if resp.hovered() || ui.rect_contains_pointer(rect) {
-            let d = ui.input(|i| i.smooth_scroll_delta);
+        // ---- input: wheel / trackpad (smooth scrolling, issue #86)
+        {
+            let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
+            smooth_scroll::register_pane(&ctx, page_rect, ui.layer_id());
+            let line = theme.line_px() * smooth_scroll::LINES_PER_NOTCH;
+            // a programmatic scroll since the last frame (outline, anchor, find, Side by Side
+            // sync, edits) drops pending motion
+            self.smooth.follow(self.ed.view.anchor(), false);
+            let d = smooth_scroll::take_delta(ui, &mut self.smooth, hovered, line, vh);
             if d.y != 0.0 {
                 self.ed.view.scroll_by(-d.y);
-                ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+                out.wheel_scrolled = true;
             }
+            self.smooth.follow(self.ed.view.anchor(), true);
         }
         // ---- input: keyboard scrolling, only when no widget has focus
         if !focused && ui.memory(|m| m.focused().is_none()) {
@@ -543,6 +561,7 @@ impl DocViewer {
         if (bar_resp.dragged() || bar_resp.clicked())
             && let Some(p) = bar_resp.interact_pointer_pos()
         {
+            self.smooth.stop();
             let press = ui.input(|i| i.pointer.press_origin()).map_or(p.y, |o| o.y);
             let y = self.ed.view.scroll_y();
             match self
@@ -698,6 +717,8 @@ impl DocViewer {
             });
         }
 
+        // keyboard scrolling, the scrollbar or a caret / find reveal in this frame took over
+        self.smooth.follow(self.ed.view.anchor(), false);
         // ---- layout of the viewport (+ half a screen of margin)
         let visible = {
             let view = &mut self.ed.view;
@@ -710,6 +731,8 @@ impl DocViewer {
                 None => ctx.fonts_mut(|f| view.frame(vh, vh * 0.5, f, imgs)),
             }
         };
+        // (layout moves the anchor on once estimated heights become real)
+        self.smooth.follow(self.ed.view.anchor(), true);
         // the available caret stops may have changed under the selection (a diagram or
         // formula became rendered, front matter collapsed): move it to the nearest stop
         // (not on a read-only surface without the focus: in Side by Side the session's selection
@@ -726,6 +749,27 @@ impl DocViewer {
         {
             self.ed.refresh_focus();
             ctx.request_repaint();
+        }
+        // pixel snap (issue #86): render at the scroll offset rounded to device pixels with item
+        // origins on device pixels, so every line moves by whole pixels and neighbouring lines
+        // never cross a pixel boundary on different frames; `tops` keep (unsnapped, snapped)
+        // for things placed inside an item (the caret)
+        let mut visible = visible;
+        let scroll_y = self.ed.view.scroll_y();
+        let mut tops = Vec::new();
+        if snap {
+            let shift = smooth_scroll::offset_shift(scroll_y, ppp);
+            tops.reserve(visible.len());
+            for v in &mut visible {
+                let y = smooth_scroll::snap_top(v.y, shift, rect.top(), ppp);
+                tops.push((v.y, y));
+                v.y = y;
+            }
+        }
+        if smooth_scroll::diag_enabled() {
+            let mut f = smooth_scroll::frame_diag();
+            f.scroll_y = scroll_y;
+            f.total = self.ed.view.total_height();
         }
         out.painted = visible.len();
         out.laid_out = self.ed.view.laid_out.len();
@@ -834,7 +878,8 @@ impl DocViewer {
             let caret = with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.caret_rect(sh, &*images));
             self.caret_screen = None;
             if let Some(c) = caret {
-                let y = c.min.y - self.ed.view.scroll_y() as f32 + rect.top();
+                let y0 = c.min.y - scroll_y as f32;
+                let y = y0 + smooth_scroll::shift_at(&tops, y0) + rect.top();
                 let r = Rect::from_min_size(pos2(left + c.min.x - 0.75, y), vec2(1.5, c.height().max(4.0)));
                 self.caret_screen = Some(r);
                 if on && r.intersects(rect) {
