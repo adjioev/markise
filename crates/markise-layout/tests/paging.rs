@@ -982,7 +982,8 @@ fn edits_reaching_unloaded_pages_re_page_their_region() {
     m.apply(&doc, &e);
     m.check_against_full(&doc).unwrap();
     // a paste of many blocks near the start
-    let paste = "## P\n\nparagraph\n\n".repeat(200);
+    // (a region of more than half the document is rebuilt instead: keep the paste smaller)
+    let paste = "## P\n\nparagraph\n\n".repeat(60);
     let at = doc.text().find("\n\n").unwrap() + 2;
     let e = doc.apply(&PatchSet::single_verbatim(at..at, &paste));
     m.apply(&doc, &e);
@@ -999,5 +1000,42 @@ fn edits_reaching_unloaded_pages_re_page_their_region() {
     let after = markise_layout::paging_counters();
     // (process-wide counters: other tests may add to them, never take away)
     assert!(after.regions >= before.regions + 3, "{before:?} → {after:?}");
+    materialize_all(&mut m, &doc).unwrap();
+}
+
+/// Phase 5 heavy scenario: on a 4 MiB corpus document at the default page size, edits far
+/// from the materialized edges — deletions spanning many unloaded pages, pastes of hundreds of
+/// blocks, their undo — re-page their regions and the model stays equal to a full build.
+#[test]
+#[ignore = "heavy: large input; cargo xtask heavy"]
+fn heavy_suite_far_edits_re_page_regions_on_a_large_document() {
+    let src = markise_corpus::generate(4 << 20, 23);
+    let mut doc = md(&src);
+    let mut m = paged(&doc, markise_layout::PAGE_TOPS);
+    let block = |t: &str, f: f64| {
+        let mut p = (t.len() as f64 * f) as usize;
+        while !t.is_char_boundary(p) {
+            p += 1;
+        }
+        t[p..].find("\n\n").map_or(t.len(), |i| p + i + 2)
+    };
+    let paste = markise_corpus::generate(256 << 10, 9);
+    for (k, f) in [0.2, 0.7, 0.45, 0.9, 0.33].into_iter().enumerate() {
+        let (a, b) = (block(doc.text(), f), block(doc.text(), f + 0.03));
+        let removed = doc.text()[a..b].to_string();
+        let e = doc.apply(&PatchSet::single_verbatim(a..b, ""));
+        m.apply(&doc, &e);
+        m.check_against_full(&doc).unwrap_or_else(|d| panic!("delete {k}: {d}"));
+        let at = block(doc.text(), 1.0 - f);
+        let e = doc.apply(&PatchSet::single_verbatim(at..at, &paste));
+        m.apply(&doc, &e);
+        m.check_against_full(&doc).unwrap_or_else(|d| panic!("paste {k}: {d}"));
+        let e = doc.apply(&PatchSet::single_verbatim(at..at + paste.len(), ""));
+        m.apply(&doc, &e);
+        let e = doc.apply(&PatchSet::single_verbatim(a..a, &removed));
+        m.apply(&doc, &e);
+        m.check_against_full(&doc).unwrap_or_else(|d| panic!("undo {k}: {d}"));
+    }
+    assert_eq!(doc.text(), src, "every edit undone");
     materialize_all(&mut m, &doc).unwrap();
 }

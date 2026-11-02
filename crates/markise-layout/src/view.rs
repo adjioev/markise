@@ -259,12 +259,23 @@ impl View {
         };
         // anchor: on its item, or on the first item of the splice that replaced it
         let map = |i: usize| ModelChange::map_index(&splices, i);
+        // (its item replaced by placeholders of a re-paged region: kept by source position
+        // below, once the heights are in place)
+        let mut keep_at: Option<(usize, f32)> = None;
         match map(self.anchor) {
             Some(i) => self.anchor = i,
             None => {
                 let k = splices.partition_point(|(o, _)| o.end <= self.anchor);
                 self.anchor = splices.get(k).map_or(0, |(_, i)| i.start);
                 self.anchor_off = 0.0;
+                if let (Some((start, _, off)), Some((end, delta))) = (pre, change.moved) {
+                    let at = if start >= end {
+                        (start as isize + delta).max(0) as usize
+                    } else {
+                        start
+                    };
+                    keep_at = Some((at, off));
+                }
             }
         }
         // expanded blocks
@@ -362,6 +373,10 @@ impl View {
             self.reset_heights();
         }
         self.refresh_page_heights();
+        if let Some((at, off)) = keep_at {
+            self.anchor_at_offset(at);
+            self.scroll_by(off);
+        }
     }
 
     /// Adjacent visible item, jumping whole collapsed ranges for caret navigation.

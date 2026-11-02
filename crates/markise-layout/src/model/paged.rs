@@ -600,6 +600,11 @@ impl DocModel {
             None => n_tops,
         }
         .clamp(t0, n_tops);
+        if 2 * (t1 - t0) > n_tops {
+            // most of the document (Replace All): a streaming rebuild costs less than
+            // replacing it piecewise
+            return self.rebuild_paged(doc, e);
+        }
         // fresh placeholders, headings and markers, a page of blocks at a time
         let mut pages: Vec<Item> = Vec::new();
         let mut heads: Vec<(usize, u8, usize)> = Vec::new(); // (page, level, heading start)
@@ -664,12 +669,14 @@ impl DocModel {
         // disclosure markers of the region
         self.cross.replace_range(doc, a..b, markers, e.changed.clone(), e.delta);
         // document-level inputs
+        let mut full = false;
         if e.deps.resources {
             self.root_url = doc.resource_root();
             let h = images_hash(&self.root_url, &self.base_dir);
             if h != self.ctx_hash {
                 self.ctx_hash = h;
                 self.cross.gens.resources += 1;
+                full = true; // every image item has a new key
             }
         }
         let mut touched: Vec<usize> = Vec::new();
@@ -694,17 +701,32 @@ impl DocModel {
             self.cross.gens.outline += 1;
             self.toc_keys = None;
         }
-        // the real `[toc]` blocks follow the outline (segments and keys)
+        // the real `[toc]` blocks follow the outline (segments and keys): re-segmented in
+        // place, so the view takes a new model; otherwise the view splices the region
         if changed_outline && !self.toc_runs.is_empty() {
             self.update_tocs(doc);
+            full = true;
+        }
+        if lo == 0 && added > 0 {
+            full = true; // the first item's gap may have changed
         }
         REGIONS.fetch_add(1, Ordering::Relaxed);
+        if full {
+            return ModelChange {
+                replaced: 0..n_before,
+                inserted: 0..self.items.len(),
+                labels: e.deps.labels.clone(),
+                full: true,
+                moved: Some((e.changed.end, e.delta)),
+                ..Default::default()
+            };
+        }
         ModelChange {
-            replaced: 0..n_before,
-            inserted: 0..self.items.len(),
+            replaced: lo..hi,
+            inserted: lo..lo + added,
             labels: e.deps.labels.clone(),
-            full: true,
             moved: Some((e.changed.end, e.delta)),
+            disclosures: true,
             ..Default::default()
         }
     }

@@ -472,6 +472,11 @@ fn child(src: &Path) {
     }
     mem("after typing");
 
+    // ---- edits reaching pages far from the view (issue #125, phase 5): each is one session
+    // edit (the document re-parses incrementally) plus the frame after it, UI-thread CPU
+    far_edits(&ctx, &mut app);
+    mem("after far edits");
+
     // ---- traversal of the whole document (scrollbar steps)
     let steps = std::env::var("MARKISE_LAZY_STEPS")
         .ok()
@@ -509,6 +514,89 @@ fn child(src: &Path) {
     }
     drop(app);
     let _ = std::fs::remove_file(&path);
+}
+
+/// Edits reaching pages far from the view: a deletion spanning pages in an unloaded region, a
+/// 1 MiB paste of mixed blocks in the middle and its undo after scrolling to the top, and a
+/// "Replace All" (one patch set of a replacement every ~64 KiB through the document).
+fn far_edits(ctx: &Context, app: &mut MarkiseApp) {
+    // (returns the start time; prints the part of the view model and view update)
+    let edit = |app: &mut MarkiseApp, ps: markise_doc::PatchSet| -> f64 {
+        let t = cpu_ms();
+        let v = app.viewer().unwrap();
+        v.ed.session.apply_external(&ps, "bench", false).unwrap();
+        let s = cpu_ms();
+        v.ed.sync();
+        println!(
+            "    (document re-parse {:.1} ms, view model + view {:.1} ms)",
+            s - t,
+            cpu_ms() - s
+        );
+        t
+    };
+    let top = |app: &mut MarkiseApp| app.viewer().unwrap().ed.view.scroll_to_y(0.0);
+    let block_after = |text: &str, frac: f64| {
+        let mut p = (text.len() as f64 * frac) as usize;
+        while !text.is_char_boundary(p) {
+            p += 1;
+        }
+        text[p..].find("\n\n").map_or(text.len(), |i| p + i + 2)
+    };
+    top(app);
+    for _ in 0..3 {
+        frame(ctx, app, vec![]);
+    }
+    // a deletion of ~200 KiB in an unloaded region
+    let (a, b) = {
+        let text = app.viewer().unwrap().ed.session.text();
+        (block_after(text, 0.6), block_after(text, 0.602))
+    };
+    let t = edit(app, markise_doc::PatchSet::single_verbatim(a..b, ""));
+    let ms = cpu_ms() - t + frame(ctx, app, vec![]);
+    println!(
+        "  far edit: delete {} KiB in an unloaded region: {ms:.1} ms",
+        (b - a) >> 10
+    );
+    // a 1 MiB paste in the middle, viewed there, then undone from the top
+    let paste = markise_corpus::generate(1 << 20, 5);
+    let at = {
+        let text = app.viewer().unwrap().ed.session.text();
+        block_after(text, 0.5)
+    };
+    let t = edit(app, markise_doc::PatchSet::single_verbatim(at..at, paste.clone()));
+    let ms = cpu_ms() - t + frame(ctx, app, vec![]);
+    println!("  far edit: paste 1 MiB of mixed blocks in the middle: {ms:.1} ms");
+    top(app);
+    for _ in 0..3 {
+        frame(ctx, app, vec![]);
+    }
+    let t = edit(app, markise_doc::PatchSet::single_verbatim(at..at + paste.len(), ""));
+    let ms = cpu_ms() - t + frame(ctx, app, vec![]);
+    println!("  far edit: undo of that paste, viewed from the top: {ms:.1} ms");
+    // "Replace All": a replacement every ~64 KiB
+    let patches: Vec<markise_doc::Patch> = {
+        let text = app.viewer().unwrap().ed.session.text();
+        let mut v = Vec::new();
+        let mut p = 0;
+        while let Some(i) = text[p..].find(" river ") {
+            let s = p + i + 1;
+            v.push(markise_doc::Patch::verbatim(s..s + 5, "RIVER"));
+            p = (s + 64 * 1024).min(text.len());
+            while !text.is_char_boundary(p) {
+                p += 1;
+            }
+        }
+        v
+    };
+    let n = patches.len();
+    if let Ok(ps) = markise_doc::PatchSet::new(patches) {
+        let t = edit(app, ps);
+        let ms = cpu_ms() - t + frame(ctx, app, vec![]);
+        println!("  far edit: replace all ({n} replacements through the document): {ms:.1} ms");
+    }
+    for _ in 0..3 {
+        frame(ctx, app, vec![]);
+    }
 }
 
 /// Where the viewport is relative to the document end.

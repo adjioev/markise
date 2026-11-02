@@ -60,8 +60,11 @@ anchors of affected keys renumbered), real `[toc]` blocks re-keyed, and the view
 result as a new model that keeps its scroll position through the edit (`ModelChange::moved`);
 it then materializes the pages near the viewport and the caret as usual. Fresh pages hold at
 most a page of blocks, so pages never grow without bound; a page left smaller by an edit stays
-smaller until it is evicted and re-cut. Only an edit the format reports as changing everything
-(`DepChange::all`) rebuilds the model. `[toc]` segment keys are cached until the outline
+smaller until it is evicted and re-cut. An edit whose region spans more than half of the
+document (Replace All), or one the format reports as changing everything (`DepChange::all`),
+rebuilds the model in one streaming pass instead (cheaper for that much). When the region's
+outline change re-segments real `[toc]`s or the resource root changed, the view takes a new
+model; otherwise it splices the region like any edit. `[toc]` segment keys are cached until the outline
 changes, so materializing pages holding repeated TOCs no longer re-hashes the outline.
 
 **Consumers that walked every item** must not: they see placeholders (`Item::is_page`). The
