@@ -910,11 +910,133 @@ fn open_child(src: &Path) {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Replays the mouse-wheel events of a frame log (`MARKISE_FRAME_LOG` CSV, `MARKISE_LAZY_WHEELREPLAY`)
+/// at 120 Hz as line-unit events and reports per-frame movement and stalled frames.
+fn wheel_replay_child(src: &Path, log: &Path) {
+    // wheel events: phase M, not momentum, outside a trackpad touch (S..E)
+    let text = std::fs::read_to_string(log).expect("frame log");
+    let mut events: Vec<(f64, f32)> = Vec::new();
+    let mut in_touch = false;
+    for l in text.lines().filter(|l| !l.starts_with('#') && !l.starts_with("frame")) {
+        let c: Vec<&str> = l.split(',').collect();
+        if c.len() < 15 {
+            continue;
+        }
+        let (t, n, mom, ph, raw) = (
+            c[1].parse::<f64>().unwrap_or(0.0),
+            c[8].parse::<u32>().unwrap_or(0),
+            c[9].parse::<u32>().unwrap_or(0),
+            c[10],
+            c[11].parse::<f32>().unwrap_or(0.0),
+        );
+        if ph.contains('S') {
+            in_touch = true;
+        }
+        if n > 0 && mom == 0 && !in_touch && ph.chars().all(|x| x == 'M') {
+            events.push((t, raw));
+        }
+        if ph.contains('E') {
+            in_touch = false;
+        }
+    }
+    println!("  replay: {} wheel events from {}", events.len(), log.display());
+    let path = src.with_extension("wheel-replay.md");
+    std::fs::copy(src, &path).expect("copy corpus");
+    let ctx = Context::default();
+    ctx.set_pixels_per_point(2.0);
+    let mut app = MarkiseApp::new(AppOptions::default());
+    let dt = 1.0 / 120.0;
+    let mut t = 0.0f64;
+    let run = |app: &mut MarkiseApp, events: Vec<Event>, t: &mut f64| {
+        *t += dt;
+        let input = RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(W, H))),
+            time: Some(*t),
+            predicted_dt: dt as f32,
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+        out.textures_delta.clear();
+    };
+    run(&mut app, vec![], &mut t);
+    app.open(path.clone());
+    while app.model().is_none() || app.is_loading() {
+        run(&mut app, vec![], &mut t);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let r = app.viewer().unwrap().surface_rect().unwrap();
+    {
+        let v = &mut app.viewer().unwrap().ed.view;
+        let y = v.total_height() * 0.4;
+        v.scroll_to_y(y);
+    }
+    for _ in 0..5 {
+        run(&mut app, vec![Event::PointerMoved(r.center())], &mut t);
+    }
+    let t0 = events.first().map_or(0.0, |e| e.0);
+    let last = events.last().map_or(0.0, |e| e.0);
+    let n_frames = ((last - t0) / (dt * 1e3)) as usize + 40;
+    let mut by_frame: Vec<Vec<Event>> = vec![Vec::new(); n_frames];
+    for &(te, raw) in &events {
+        let k = ((te - t0) / (dt * 1e3)).round() as usize;
+        by_frame[k.min(n_frames - 1)].push(Event::MouseWheel {
+            unit: MouseWheelUnit::Line,
+            // the log has points = lines * 3 * line height (~28 pt in the owner's theme)
+            delta: vec2(0.0, raw / 84.0),
+            phase: TouchPhase::Move,
+            source: MouseWheelSource::Wheel,
+            modifiers: Default::default(),
+        });
+    }
+    let mut moved = Vec::new();
+    let mut y0 = app.viewer().unwrap().ed.view.scroll_y();
+    for evs in by_frame {
+        run(&mut app, evs, &mut t);
+        let y = app.viewer().unwrap().ed.view.scroll_y();
+        moved.push(y - y0);
+        y0 = y;
+    }
+    // bursts: runs of wheel events closer than 200 ms; inside a burst, a frame that does not
+    // move (or moves < 1/4 of its neighbours) is a stall
+    let mut stalls = 0;
+    let mut motion = 0;
+    for w in moved.windows(3) {
+        if w[0].abs() > 0.5 && w[2].abs() > 0.5 {
+            motion += 1;
+            if w[1].abs() < 0.25 * (w[0].abs() + w[2].abs()) * 0.5 {
+                stalls += 1;
+            }
+        }
+    }
+    let zero_inside = moved
+        .windows(1)
+        .enumerate()
+        .filter(|(k, w)| {
+            w[0].abs() < 0.01
+                && moved[..*k].iter().rev().take(12).any(|m| m.abs() > 1.0)
+                && moved[k + 1..].iter().take(12).any(|m| m.abs() > 1.0)
+        })
+        .count();
+    println!(
+        "  replay: {} frames, {motion} moving windows, {stalls} stalled (< 1/4 of neighbours), {zero_inside} frames without movement between moving frames (12-frame window)",
+        moved.len()
+    );
+    let first: Vec<String> = moved.iter().take(48).map(|m| format!("{m:.1}")).collect();
+    println!("  replay: first 48 frames' movement (pt): {}", first.join(" "));
+    drop(app);
+    let _ = std::fs::remove_file(&path);
+}
+
 fn main() {
     if std::env::args().any(|a| a == "--list") {
         return;
     }
     if let Ok(p) = std::env::var("MARKISE_LAZY_CHILD") {
+        if let Some(log) = std::env::var_os("MARKISE_LAZY_WHEELREPLAY") {
+            wheel_replay_child(&PathBuf::from(p), &PathBuf::from(log));
+            return;
+        }
         if std::env::var_os("MARKISE_LAZY_OPEN").is_some() {
             open_child(&PathBuf::from(p));
             return;

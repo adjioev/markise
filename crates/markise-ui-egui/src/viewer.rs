@@ -281,6 +281,9 @@ pub struct DocViewer {
     raw_pending: f32,
     /// egui time of the last wheel event.
     last_wheel: f64,
+    /// PROTOTYPE (#86): mouse-wheel spring: distance still to go and velocity (points).
+    wheel_target: f32,
+    wheel_vel: f32,
     /// PROTOTYPE (#86): per-item mesh tiles (`MARKISE_SCROLL_TILES=1`).
     pub tiles: TileCache,
     /// Surface top of the last frame (screen y).
@@ -349,6 +352,8 @@ impl DocViewer {
             lazy_drag_grab: None,
             raw_pending: 0.0,
             last_wheel: f64::NEG_INFINITY,
+            wheel_target: 0.0,
+            wheel_vel: 0.0,
             tiles: TileCache::default(),
             last_top: 0.0,
             pending_copy: None,
@@ -635,8 +640,8 @@ impl DocViewer {
             let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
             let line = theme.line_px();
             // every wheel event of this frame (frame log, raw modes)
-            let (n_ev, n_mom, raw_sum, phases) = ui.input(|i| {
-                let (mut n, mut m, mut sum, mut ph) = (0u32, 0u32, 0.0f32, String::new());
+            let (n_ev, n_mom, raw_sum, wheel_sum, phases) = ui.input(|i| {
+                let (mut n, mut m, mut sum, mut wsum, mut ph) = (0u32, 0u32, 0.0f32, 0.0f32, String::new());
                 for e in &i.events {
                     if let egui::Event::MouseWheel {
                         unit,
@@ -657,14 +662,16 @@ impl DocViewer {
                             egui::TouchPhase::End => 'E',
                             egui::TouchPhase::Cancel => 'C',
                         });
-                        sum += match unit {
-                            egui::MouseWheelUnit::Point => delta.y,
-                            egui::MouseWheelUnit::Line => delta.y * line * 3.0,
-                            egui::MouseWheelUnit::Page => delta.y * vh,
-                        };
+                        // precise (trackpad, Magic Mouse) deltas come in points; discrete mouse
+                        // wheel notches in lines (winit LineDelta, no precise deltas)
+                        match unit {
+                            egui::MouseWheelUnit::Point => sum += delta.y,
+                            egui::MouseWheelUnit::Line => wsum += delta.y * line * 3.0,
+                            egui::MouseWheelUnit::Page => wsum += delta.y * vh,
+                        }
                     }
                 }
-                (n, m, sum, ph)
+                (n, m, sum, wsum, ph)
             });
             let smooth = ui.input(|i| i.smooth_scroll_delta.y);
             let now_t = ui.input(|i| i.time);
@@ -676,7 +683,7 @@ impl DocViewer {
                 d = match scroll_raw_mode() {
                     RawMode::Off => smooth,
                     // trackpad / momentum deltas exactly as delivered in this frame
-                    RawMode::Exact => raw_sum,
+                    RawMode::Exact => raw_sum + wheel_sum,
                     // delivered deltas, drained with a one-frame half-life (8 ms): events do not
                     // arrive one per frame (0 in one frame, 2 in the next; frames drawn for other
                     // reasons get none), so applying them as they come stutters; egui's own
@@ -694,7 +701,32 @@ impl DocViewer {
                         if self.raw_pending != 0.0 {
                             ctx.request_repaint();
                         }
-                        a
+                        // mouse-wheel notches: a critically damped spring towards the target
+                        // (~120 ms to 90 %), retargeted by each notch with its velocity kept, so
+                        // notches ~50 ms apart blend into one continuous motion
+                        self.wheel_target += wheel_sum;
+                        let mut w = 0.0;
+                        if self.wheel_target != 0.0 || self.wheel_vel != 0.0 {
+                            const OMEGA: f32 = 33.0;
+                            // sub-steps keep the integration stable at long frames
+                            let n = (dt / 0.004).ceil().max(1.0);
+                            let h = dt / n;
+                            for _ in 0..n as usize {
+                                let acc = OMEGA * OMEGA * self.wheel_target - 2.0 * OMEGA * self.wheel_vel;
+                                self.wheel_vel += acc * h;
+                                let step = self.wheel_vel * h;
+                                self.wheel_target -= step;
+                                w += step;
+                            }
+                            if self.wheel_target.abs() < 0.25 && self.wheel_vel.abs() < 5.0 {
+                                w += self.wheel_target;
+                                self.wheel_target = 0.0;
+                                self.wheel_vel = 0.0;
+                            } else {
+                                ctx.request_repaint();
+                            }
+                        }
+                        a + w
                     }
                 };
                 if scroll_raw_mode() != RawMode::Off {
@@ -702,10 +734,14 @@ impl DocViewer {
                 }
             } else {
                 self.raw_pending = 0.0;
+                self.wheel_target = 0.0;
+                self.wheel_vel = 0.0;
             }
             // vsync-paced frames while a scroll gesture or its momentum is going on (frames
             // then come every display refresh, not only when an event arrives)
-            if scroll_display_link() && (n_ev > 0 || now_t - self.last_wheel < 0.15 || self.raw_pending != 0.0) {
+            if scroll_display_link()
+                && (n_ev > 0 || now_t - self.last_wheel < 0.15 || self.raw_pending != 0.0 || self.wheel_target != 0.0)
+            {
                 ctx.request_repaint();
             }
             {
@@ -713,10 +749,10 @@ impl DocViewer {
                 f.events = n_ev;
                 f.momentum = n_mom;
                 f.phases = phases;
-                f.raw = raw_sum;
+                f.raw = raw_sum + wheel_sum;
                 f.smooth = smooth;
                 f.applied = d;
-                f.pending = self.raw_pending;
+                f.pending = self.raw_pending + self.wheel_target;
             }
             if d != 0.0 {
                 self.ed.view.scroll_by(-d);
