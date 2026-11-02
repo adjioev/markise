@@ -667,6 +667,10 @@ impl Geometry<'_> {
             let mut next = self.view.adjacent_visible(i, direction);
             for _ in 0..64 {
                 let Some(j) = next else { break };
+                if self.view.model().is_page(j) {
+                    // a page not materialized: no stop known beyond it this way
+                    break;
+                }
                 let l = self.layout(j);
                 if let Some(p) = edge_row(&l, x, j > i) {
                     return Some(self.doc_pos(j, p));

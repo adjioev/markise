@@ -226,3 +226,68 @@ fn a_selection_keeps_its_far_anchor_when_the_view_moves_away() {
     p.key("edit.undo");
     assert_eq!(p.paged.text(), src);
 }
+
+/// Review of #136 (round 2): with the caret off screen (the view scrolled away) before a long
+/// closed disclosure, navigation keys reach the content behind unloaded pages and closed
+/// disclosures exactly as on a full model, and caret geometry lays out no placeholder.
+#[test]
+fn navigation_from_an_offscreen_caret_crosses_unloaded_pages_and_closed_disclosures() {
+    let mut src = String::new();
+    for i in 0..10 {
+        src.push_str(&format!("Intro {i} words here.\n\n"));
+    }
+    src.push_str("<details>\n<summary>Closed</summary>\n\n");
+    for i in 0..40 {
+        src.push_str(&format!("Hidden paragraph {i}.\n\n"));
+    }
+    src.push_str("</details>\n\n");
+    for i in 0..400 {
+        src.push_str(&format!("After {i} has words.\n\n"));
+    }
+    let mut p = Pair::new(&src);
+    let tail = |p: &mut Pair| {
+        for t in [&mut p.paged, &mut p.full] {
+            t.ed.view.scroll_to_y(f64::MAX);
+            t.frame();
+            t.frame();
+        }
+    };
+    // the caret at the end of the paragraph right before the disclosure
+    let before = src.find("<details>").unwrap() - 2;
+    p.set(before);
+    let keys = [
+        "caret.right",
+        "caret.left",
+        "caret.right",
+        "caret.down",
+        "caret.down",
+        "caret.up",
+        "caret.lineEnd",
+        "caret.lineStart",
+        "caret.pageDown",
+        "caret.pageUp",
+        "caret.pageDown",
+        "caret.left",
+        "caret.up",
+    ];
+    for k in keys {
+        tail(&mut p);
+        assert!(p.paged.ed.view.scroll_y() > 8000.0, "the caret is off screen");
+        p.paged.run(k);
+        p.full.run(k);
+        p.same(k);
+    }
+    let after = src.find("After 0").unwrap();
+    // Right from before the disclosure lands right after it
+    p.set(before);
+    tail(&mut p);
+    p.paged.run("caret.right");
+    p.full.run("caret.right");
+    p.same("right over the closed disclosure");
+    assert!(
+        p.paged.caret().offset <= after + 1,
+        "{} vs {after}",
+        p.paged.caret().offset
+    );
+    assert_eq!(p.paged.ed.view.paging_stats().placeholder_layouts, 0);
+}

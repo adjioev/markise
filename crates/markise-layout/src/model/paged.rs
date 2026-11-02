@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -30,8 +30,8 @@ use markise_doc::chunked::RelChunks;
 use markise_doc::{EditSummary, FormatDoc};
 
 use super::{
-    DocModel, Gap, Item, ItemKind, Items, ModelChange, OutlineEntry, SEG_UNITS, Segment, flatten, hasher, images_hash,
-    mix, toc_block_items, toc_groups, toc_segment_key,
+    CrossBlockIndex, DepGens, DocModel, Gap, Item, ItemKind, Items, ModelChange, OutlineEntry, SEG_UNITS, Segment,
+    flatten, hasher, images_hash, mix, toc_block_items, toc_groups, toc_segment_key,
 };
 
 /// Top-level blocks per page of a paged model.
@@ -101,9 +101,19 @@ pub struct PageStats {
     /// paragraph's own estimate (its source lines, or its characters wrapped at that length,
     /// whichever is more, rounded up), so a page estimate equals the sum of its items'.
     pub para_wrapped: [u32; PARA_LINE_CHARS.len()],
+    /// Items showing an image (their height depends on the resource root).
+    pub images: u32,
+    /// Items that may use a reference definition (their height may depend on one).
+    pub ref_items: u32,
+    /// The page held part of a disclosure when it was measured (its height depends on the
+    /// disclosure's state).
+    pub in_disclosure: bool,
     /// `(width_q, parameter key, height bits)`: the height the page's items had (laid out or
-    /// estimated) when it was evicted; used while the view parameters are the same.
+    /// estimated) when it was evicted; used while the view parameters are the same and the
+    /// document-level inputs the page depends on are unchanged ([`PageStats::measured_gens`]).
     pub measured: Option<(u32, u64, u32)>,
+    /// The dependency generations when the height was measured.
+    pub measured_gens: DepGens,
 }
 
 impl PageStats {
@@ -132,13 +142,30 @@ impl PageStats {
         let mut s = PageStats::default();
         for it in items {
             s.add(it);
-            if matches!(it.kind, ItemKind::Heading { .. })
-                && doc.may_reference(markise_doc::Span::new(it.origin, it.origin + it.len))
-            {
-                s.heading_refs += 1;
+            s.images += it.has_image as u32;
+            let prose = matches!(
+                it.kind,
+                ItemKind::Heading { .. } | ItemKind::Paragraph | ItemKind::Table
+            );
+            if prose && doc.may_reference(markise_doc::Span::new(it.origin, it.origin + it.len)) {
+                s.ref_items += 1;
+                if matches!(it.kind, ItemKind::Heading { .. }) {
+                    s.heading_refs += 1;
+                }
             }
         }
         s
+    }
+
+    /// Whether a measured height is still valid for dependency generations `now`: the
+    /// generations of the inputs this page depends on (the outline for a `[toc]`, the resource
+    /// root for images, reference definitions) did not change since it was measured.
+    pub fn deps_unchanged(&self, now: &DepGens) -> bool {
+        let m = &self.measured_gens;
+        (self.tocs == 0 || m.outline == now.outline)
+            && (self.images == 0 || m.resources == now.resources)
+            && (self.ref_items == 0 || m.refs == now.refs)
+            && (!self.in_disclosure || m.disclosures == now.disclosures)
     }
 
     fn add(&mut self, it: &Item) {
@@ -270,6 +297,7 @@ impl DocModel {
         let mut pages: Vec<Item> = Vec::with_capacity(n / tops + 1);
         let mut outline = Vec::new();
         let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut cross = CrossBlockIndex::default();
         let mut k = 0;
         while k < n {
             let end = (k + tops).min(n);
@@ -278,6 +306,7 @@ impl DocModel {
             if items.is_empty() {
                 continue;
             }
+            cross.add_from(&items);
             for it in &items {
                 if let ItemKind::Heading { level } = it.kind {
                     let info = doc.heading(it.origin).unwrap_or_default();
@@ -310,7 +339,9 @@ impl DocModel {
             toc_runs: Vec::new(),
             min_level,
             page_tops: tops,
+            cross,
         };
+        m.cross.pair(doc);
         let last = m.items.len().saturating_sub(1);
         m.materialize(doc, last);
         m.materialize(doc, 0);
@@ -381,6 +412,7 @@ impl DocModel {
         ModelChange {
             replaced: i..i + 1,
             inserted: i..i + k,
+            disclosures: true,
             ..Default::default()
         }
     }
@@ -409,6 +441,10 @@ impl DocModel {
             .collect();
         let mut stats = PageStats::of(&items, doc);
         stats.measured = measured;
+        stats.measured_gens = self.cross.gens;
+        let lo = items[0].origin;
+        let hi = items.iter().map(|it| it.origin + it.len).max().unwrap_or(lo);
+        stats.in_disclosure = self.cross.disclosure_meets(lo, hi);
         let page = page_item(&items, stats);
         let removed = r.len() - 1;
         let ka = self.outline.partition_point(|o| o.item < r.start);
@@ -426,6 +462,7 @@ impl DocModel {
         ModelChange {
             replaced: r.clone(),
             inserted: r.start..r.start + 1,
+            disclosures: true,
             ..Default::default()
         }
     }
@@ -497,13 +534,10 @@ impl DocModel {
     }
 
     /// A fresh paged model for `doc` keeping this model's document folder (full rebuild).
-    pub(super) fn rebuild_paged(&mut self, doc: &dyn FormatDoc, labels: Vec<u64>) -> ModelChange {
+    pub(super) fn rebuild_paged(&mut self, doc: &dyn FormatDoc, e: &EditSummary) -> ModelChange {
         let n = self.items.len();
-        let base_dir: Option<PathBuf> = self.base_dir.clone();
-        let mut fresh = Self::build_paged(doc, None, self.page_tops);
-        fresh.base_dir = base_dir;
-        fresh.ctx_hash = images_hash(&fresh.root_url, &fresh.base_dir);
-        *self = fresh;
+        let labels = e.deps.labels.clone();
+        *self = self.rebuilt(doc, e);
         REBUILDS.fetch_add(1, Ordering::Relaxed);
         ModelChange {
             replaced: 0..n,
@@ -597,6 +631,13 @@ impl DocModel {
         let runs = toc_runs_of_items(&self.items);
         if runs != self.toc_runs {
             return Err(format!("TOC runs {:?} != {:?} (from the items)", self.toc_runs, runs));
+        }
+        if !self.cross.same_disclosures(&full.cross) {
+            return Err(format!(
+                "disclosures {:?}\n  != full {:?}",
+                self.cross.disclosures(),
+                full.cross.disclosures()
+            ));
         }
         if self.root_url != full.root_url {
             return Err(format!("resource root {:?} != {:?}", self.root_url, full.root_url));

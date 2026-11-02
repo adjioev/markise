@@ -1,98 +1,105 @@
-//! Display-only disclosure pairing. Only marker items are revisited after edits.
-use crate::model::{DocModel, ModelChange};
-use markise_doc::{FormatDoc, RawPresentation};
+//! Display state of the disclosures (`<details>`) in item terms, derived from the model's
+//! document-wide disclosure index ([`crate::model::CrossBlockIndex`], by source position):
+//! which items are hidden by a closed disclosure, which are its controls (summary, end marker),
+//! the title and state of each start marker and the nesting depth of open ones. Derived again
+//! whenever the items change (edits, materialization, eviction): pairing never depends on which
+//! pages of a paged model are materialized (issue #125, phase 3).
+//!
+//! A placeholder holding a disclosure's start or end is treated as visible (it also holds
+//! content outside the disclosure); placeholders wholly inside a closed one are hidden.
+use crate::model::DocModel;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Group {
+    /// Item of the end marker (or the placeholder holding it).
     pub end: usize,
+    /// Item of the separate summary block, if materialized.
     pub summary: Option<usize>,
     pub title: String,
     pub open: bool,
 }
-#[derive(Default)]
+
+#[derive(Default, Debug, PartialEq, Eq)]
 pub(crate) struct Disclosures {
-    markers: BTreeMap<usize, RawPresentation>,
+    /// Groups by the item of their (materialized) start marker.
     pub groups: BTreeMap<usize, Group>,
     hidden: Vec<std::ops::Range<usize>>,
     controls: BTreeSet<usize>,
     depths: Vec<(usize, usize)>,
+    /// Full derivations (tests: ordinary typing derives nothing).
+    pub derived: u64,
 }
+
+/// The item holding source position `at`: `(index, true)` for a real item starting there,
+/// else the placeholder (or item) containing it with `false`.
+fn locate(model: &DocModel, at: usize) -> (usize, bool) {
+    let n = model.items.len();
+    let i = model.items.partition_point_start(at);
+    if i < n && model.item_start(i) == at {
+        return (i, !model.is_page(i));
+    }
+    (i.saturating_sub(1).min(n.saturating_sub(1)), false)
+}
+
 impl Disclosures {
-    pub fn new(model: &DocModel, doc: &dyn FormatDoc) -> Self {
-        let mut this = Self::default();
-        for (i, item) in model.items.iter().enumerate() {
-            if let Some(raw) = item.raw.as_deref() {
-                this.markers.insert(i, raw.clone());
-            }
-        }
-        this.pair(model, doc);
-        this
+    pub fn new(model: &DocModel) -> Self {
+        let mut d = Self::default();
+        d.derive(model);
+        d
     }
-    fn pair(&mut self, model: &DocModel, doc: &dyn FormatDoc) {
-        let previous = std::mem::take(&mut self.groups);
-        let mut stacks = BTreeMap::<Vec<usize>, Vec<usize>>::new();
-        for (&i, raw) in &self.markers {
-            let scope = doc
-                .containers_at(model.item_start(i))
-                .iter()
-                .map(|c| c.span.start)
-                .collect();
-            let stack = stacks.entry(scope).or_default();
-            match raw {
-                RawPresentation::DisclosureStart { .. } => stack.push(i),
-                RawPresentation::DisclosureEnd { count } if *count <= stack.len() => {
-                    for _ in 0..*count {
-                        let start = stack.pop().unwrap();
-                        let RawPresentation::DisclosureStart { title, open } = &self.markers[&start] else {
-                            unreachable!()
-                        };
-                        let (title, summary) = match self.markers.get(&(start + 1)) {
-                            Some(RawPresentation::DisclosureSummary { title: s }) if title.is_empty() => {
-                                (s.clone(), Some(start + 1))
-                            }
-                            _ => (title.clone(), None),
-                        };
-                        self.groups.insert(
-                            start,
-                            Group {
-                                end: i,
-                                summary,
-                                title: if title.is_empty() { "Details".into() } else { title },
-                                open: previous.get(&start).map_or(*open, |g| g.open),
-                            },
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-        self.refresh();
-    }
-    /// Rebuild the small marker index, never the document's item list.
-    pub fn refresh(&mut self) {
+
+    /// Derives the item-index view of the model's disclosures.
+    fn derive(&mut self, model: &DocModel) {
+        self.groups.clear();
         self.hidden.clear();
         self.controls.clear();
+        self.depths.clear();
+        if model.items.is_empty() {
+            return;
+        }
         let mut events = BTreeMap::<usize, isize>::new();
-        for (&start, g) in &self.groups {
-            self.controls.insert(g.end);
-            if let Some(i) = g.summary {
+        for g in model.cross.disclosures() {
+            let (s, s_real) = locate(model, g.start);
+            let (e, e_real) = locate(model, g.end);
+            let summary = g.summary.map(|at| locate(model, at)).filter(|x| x.1).map(|x| x.0);
+            if s_real {
+                self.groups.insert(
+                    s,
+                    Group {
+                        end: e,
+                        summary,
+                        title: g.title.clone(),
+                        open: g.open,
+                    },
+                );
+            }
+            if e_real {
+                self.controls.insert(e);
+            }
+            if let Some(i) = summary {
                 self.controls.insert(i);
             }
             if g.open {
-                *events.entry(start + 1).or_default() += 1;
-                *events.entry(g.end).or_default() -= 1;
+                *events.entry(s + 1).or_default() += 1;
+                *events.entry(e).or_default() -= 1;
             } else {
-                let range = start + 1..g.end + 1;
-                if let Some(last) = self.hidden.last_mut()
-                    && last.end >= range.start
-                {
-                    last.end = last.end.max(range.end);
-                } else {
+                // a placeholder holding the end also holds what follows it: not hidden
+                let range = s + 1..if e_real { e + 1 } else { e };
+                if !range.is_empty() {
                     self.hidden.push(range);
                 }
             }
         }
+        self.hidden.sort_by_key(|r| r.start);
+        let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(self.hidden.len());
+        for r in self.hidden.drain(..) {
+            match merged.last_mut() {
+                Some(last) if last.end >= r.start => last.end = last.end.max(r.end),
+                _ => merged.push(r),
+            }
+        }
+        self.hidden = merged;
         let mut depth = 0isize;
         self.depths = events
             .into_iter()
@@ -102,61 +109,57 @@ impl Disclosures {
             })
             .collect();
     }
-    /// Returns whether structural visibility changed (ordinary prose edits do no pairing).
-    pub fn update(&mut self, model: &DocModel, doc: &dyn FormatDoc, change: &ModelChange) -> bool {
-        let splices = change.splices();
-        let moved = splices.iter().any(|(o, i)| o.len() != i.len());
-        let affected = splices.iter().any(|(o, i)| {
-            self.markers.range(o.clone()).next().is_some() || i.clone().any(|i| model.items[i].raw.is_some())
-        });
-        if !moved && !affected {
-            return false;
+
+    /// Derives again after the disclosures changed or items holding markers came or went;
+    /// `true` when what is hidden, controlled, titled or indented changed (heights must be
+    /// re-estimated).
+    pub fn update(&mut self, model: &DocModel) -> bool {
+        let derived = self.derived + 1;
+        let old = std::mem::take(self);
+        self.derive(model);
+        self.derived = derived;
+        self.groups != old.groups
+            || self.hidden != old.hidden
+            || self.controls != old.controls
+            || self.depths != old.depths
+    }
+
+    /// An edit that touched no marker (ordinary typing): the state follows the splices of
+    /// `change` without a derivation; nothing a disclosure hides or indents changes. O(1)
+    /// when no item count changed, else O(groups) index shifts.
+    pub fn follow(&mut self, splices: &[(std::ops::Range<usize>, std::ops::Range<usize>)]) {
+        if splices.iter().all(|(o, i)| o.len() == i.len()) || self.is_empty() {
+            return;
         }
-        let map = |i: usize| ModelChange::map_index(&splices, i);
-        let mut next = BTreeMap::new();
-        for (&i, raw) in &self.markers {
-            if let Some(j) = map(i) {
-                next.insert(j, raw.clone());
-            }
-        }
-        // (a replaced end or summary marker makes the change `affected`: paired again below)
+        // a boundary (an index right after a marker, or a marker) maps to its item's new index,
+        // or to the new start of the splice that replaced its item (never the marker itself)
+        let map = |b: usize| -> usize {
+            crate::model::ModelChange::map_index(splices, b).unwrap_or_else(|| {
+                let k = splices.partition_point(|(o, _)| o.end <= b);
+                splices.get(k).map_or(b, |(_, n)| n.start)
+            })
+        };
         self.groups = std::mem::take(&mut self.groups)
             .into_iter()
-            .filter_map(|(i, mut group)| {
-                let i = map(i)?;
-                group.end = map(group.end).unwrap_or(group.end);
-                group.summary = group.summary.and_then(map);
-                Some((i, group))
+            .map(|(i, mut g)| {
+                g.end = map(g.end);
+                g.summary = g.summary.map(map);
+                (map(i), g)
             })
             .collect();
-        if !affected {
-            // the markers only moved with their items: the groups move along and every item
-            // keeps its visibility (its height moves with it), so no height is reset
-            self.markers = next;
-            self.refresh();
-            return false;
+        self.controls = self.controls.iter().map(|&i| map(i)).collect();
+        for r in &mut self.hidden {
+            *r = map(r.start)..map(r.end);
         }
-        for (_, ins) in &splices {
-            for i in ins.clone() {
-                if let Some(raw) = model.items[i].raw.as_deref() {
-                    next.insert(i, raw.clone());
-                }
-            }
+        for d in &mut self.depths {
+            d.0 = map(d.0);
         }
-        self.markers = next;
-        self.pair(model, doc);
-        true
     }
-    /// Whether items `r` hold a marker of a group whose other markers lie outside `r` (a paged
-    /// model must not evict them: the pairing would be lost).
-    pub fn paired_outside(&self, r: std::ops::Range<usize>) -> bool {
-        self.groups.iter().any(|(&start, g)| {
-            let inside = |i: usize| r.contains(&i);
-            let all = [Some(start), Some(g.end), g.summary];
-            let n_in = all.iter().flatten().filter(|&&i| inside(i)).count();
-            n_in > 0 && n_in < all.iter().flatten().count()
-        })
+
+    fn is_empty(&self) -> bool {
+        self.groups.is_empty() && self.hidden.is_empty() && self.controls.is_empty() && self.depths.is_empty()
     }
+
     pub fn hidden(&self, i: usize) -> bool {
         self.controls.contains(&i) || self.closed_end(i).is_some()
     }
@@ -173,18 +176,5 @@ impl Disclosures {
         let at = self.hidden.partition_point(|r| r.start <= i);
         at.checked_sub(1)
             .and_then(|j| (i < self.hidden[j].end).then_some(self.hidden[j].end - 1))
-    }
-    pub fn reveal(&mut self, i: usize) -> bool {
-        let mut changed = false;
-        for (&start, g) in &mut self.groups {
-            if start < i && i <= g.end && !g.open {
-                g.open = true;
-                changed = true;
-            }
-        }
-        if changed {
-            self.refresh();
-        }
-        changed
     }
 }

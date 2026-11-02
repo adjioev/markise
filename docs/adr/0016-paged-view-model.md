@@ -42,8 +42,8 @@ editing at page edges against a full model: `crates/markise-engine/tests/paging.
 first and the last page stay (document edges; a document of at most two pages is a full
 model), the caret's page and the items around it stay, placeholders within one viewport above
 and two below are materialized, runs of items more than four viewports away are evicted in
-chunks of at most a page of whole top-level blocks (not ones holding the caret, the focused
-item or a disclosure marker paired outside the chunk). Materializing the page under the scroll
+chunks of at most a page of whole top-level blocks (not ones holding the caret, a selection
+end or the focused item). Materializing the page under the scroll
 anchor keeps the anchor's relative position; pages above the anchor only shift indices, so the
 content on screen never moves. Jumps (outline, anchors, wikilink headings, find, Side by Side,
 comments, history) materialize their target first. While the scrollbar is dragged its scale is
@@ -64,16 +64,42 @@ Source mode's code highlighting reads a placeholder's code items without materia
 during the transition); `MARKISE_PAGE_TOPS=n` sets the page size (the suites can run with
 tiny pages). A format without `FormatDoc::top_span` / `top_at` gets full models.
 
+**Cross-block facts (phase 3).** Most multi-line constructs (lists, quotes, callouts,
+tables, code, math, front matter, HTML blocks) belong to one parsed top-level block, which a
+page never splits. What does cross top-level blocks is kept document-wide in
+`CrossBlockIndex` (`model/cross.rs`), built during the model's streaming pass and kept in step
+by `DocModel::apply` from the replaced items of each edit:
+
+- `<details>` / `<summary>` / `</details>` written as separate raw blocks: every marker with its
+  container scope, paired document-wide (nested, quoted, malformed and separate-summary
+  disclosures as a full model pairs them; a summary counts only as the next block in the
+  same container). Markers live in a chunked relative-offset list and groups refer to them
+  by index: an edit touching no marker (ordinary typing) only shifts them in O(chunks), and
+  the view's derived state follows the splices without a derivation. The
+  reader's open/closed choice lives on the start marker, so it survives eviction, edits
+  elsewhere and a re-parse of its container; a full rebuild carries it over for markers
+  outside the edit. The view derives
+  its item-index state (hidden ranges, controls, titles, depths) from the index after every
+  change; a placeholder wholly inside a closed disclosure has zero height and is not
+  materialized, one holding a start or end counts as visible until it is materialized.
+- Dependency generations of the document-level inputs: the outline (`[toc]` content and
+  length), the resource root (images), reference definitions and the disclosures' pairing
+  and state (a page measured while a disclosure in it was closed). A placeholder's measured
+  height records the generations; it is used only while those its blocks depend on are
+  unchanged, and the view re-estimates placeholders when a generation changes.
+
+Headings, duplicate slugs and anchors are the outline (complete in every model); reference
+definitions (first one wins, also inside containers) and footnote labels are resolved by the
+format's document-wide context; heading texts in placeholders are refreshed from their pages
+when a definition they may use changes (`PageStats::heading_refs`). Comments' presence scans
+the document, independent of items; CriticMarkup does not cross blocks (ADR 0012).
+
 ## Known limits (later phases of #125)
 
 - Selections over more than 4,096 blocks are estimated from their byte share (as before);
   page totals make them exact (phase 2).
-- `<details>` pairs are indexed over real items only: a disclosure whose markers are in
-  different pages is paired once both are materialized (phase 3: an index on source
-  positions).
 - Side by Side keeps item targets within one frame; positions between pages are interpolated
   per item (phase 4: offset-based targets).
-- Heading texts of placeholders are not refreshed when a reference definition changes; a
-  placeholder's height estimate does not follow outline count changes until it is
-  re-estimated; materializing a page holding repeated `[toc]`s re-hashes the outline per
-  segment (phase 5).
+- A placeholder partly inside a closed disclosure is estimated as if all of it were shown
+  until it is materialized; materializing a page holding repeated `[toc]`s re-hashes the
+  outline per segment (phase 5).
