@@ -36,6 +36,31 @@ pub struct Loaded {
     pub bytes: usize,
 }
 
+/// What a load request produced.
+#[derive(Debug)]
+pub enum Outcome {
+    Loaded(Loaded),
+    /// A reload check found the file's content equal to the version the caller already has
+    /// ([`Loader::request_unless`]; e.g. the watcher's event for our own save): nothing was
+    /// decoded, parsed or built.
+    Unchanged {
+        path: PathBuf,
+        /// What is on disk now (the same content; its modification time may differ).
+        version: crate::save::DiskVersion,
+        read: Duration,
+    },
+}
+
+impl Outcome {
+    /// The loaded document (`None` for [`Outcome::Unchanged`]).
+    pub fn into_loaded(self) -> Option<Loaded> {
+        match self {
+            Outcome::Loaded(l) => Some(l),
+            Outcome::Unchanged { .. } => None,
+        }
+    }
+}
+
 /// Loading stages (cancellation points, test hooks).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
@@ -56,6 +81,18 @@ pub fn load_staged(
     opts: ParseOptions,
     go: &mut dyn FnMut(Stage) -> bool,
 ) -> Result<Option<Loaded>, String> {
+    // without a version to compare with, every completed load is `Outcome::Loaded`
+    Ok(load_staged_unless(path, opts, None, go)?.and_then(Outcome::into_loaded))
+}
+
+/// Like [`load_staged`]; when the bytes read have the same content as `unless`, stops after
+/// reading with [`Outcome::Unchanged`] (no decode, parse or model build).
+pub fn load_staged_unless(
+    path: &Path,
+    opts: ParseOptions,
+    unless: Option<crate::save::DiskVersion>,
+    go: &mut dyn FnMut(Stage) -> bool,
+) -> Result<Option<Outcome>, String> {
     if !go(Stage::Read) {
         return Ok(None);
     }
@@ -64,6 +101,13 @@ pub fn load_staged(
     let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     let n = bytes.len();
     let version = crate::save::DiskVersion::of_bytes(&bytes, mtime);
+    if unless.is_some_and(|k| k.same_content(&version)) {
+        return Ok(Some(Outcome::Unchanged {
+            path: path.to_path_buf(),
+            version,
+            read: t0.elapsed(),
+        }));
+    }
     let (text, lossy) = match String::from_utf8(bytes) {
         Ok(s) => (s, false),
         Err(e) => (String::from_utf8_lossy(e.as_bytes()).into_owned(), true),
@@ -79,7 +123,7 @@ pub fn load_staged(
     }
     let model = DocModel::build(&doc, Some(path));
     let t3 = Instant::now();
-    Ok(Some(Loaded {
+    Ok(Some(Outcome::Loaded(Loaded {
         path: path.to_path_buf(),
         doc: Arc::new(doc),
         model,
@@ -92,14 +136,16 @@ pub fn load_staged(
         version,
         lossy,
         bytes: n,
-    }))
+    })))
 }
 
 /// Hook called by the loader worker before each stage of request `generation` (tests use it
 /// to hold the worker at a stage deterministically).
 pub type StageHook = Arc<dyn Fn(Stage, u64) + Send + Sync>;
 
-type Slot = Arc<(Mutex<Option<(PathBuf, u64)>>, Condvar)>;
+/// A queued request: path, generation, version to compare with ([`Loader::request_unless`]).
+type Job = (PathBuf, u64, Option<crate::save::DiskVersion>);
+type Slot = Arc<(Mutex<Option<Job>>, Condvar)>;
 
 /// A single loader worker with a latest-request slot: a new request replaces a queued one and
 /// cancels the running one at its next stage boundary (read → parse → model), so superseded
@@ -107,7 +153,7 @@ type Slot = Arc<(Mutex<Option<(PathBuf, u64)>>, Condvar)>;
 pub struct Loader {
     slot: Slot,
     current: Arc<AtomicU64>,
-    rx: Receiver<(u64, Result<Loaded, String>)>,
+    rx: Receiver<(u64, Result<Outcome, String>)>,
 }
 
 impl Loader {
@@ -120,7 +166,7 @@ impl Loader {
             .name("markise-load".into())
             .spawn(move || {
                 loop {
-                    let (path, generation) = {
+                    let (path, generation, unless) = {
                         let (m, cv) = &*s2;
                         let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
                         loop {
@@ -136,7 +182,7 @@ impl Loader {
                         }
                         c2.load(Ordering::Acquire) == generation
                     };
-                    match load_staged(&path, opts.clone(), &mut go) {
+                    match load_staged_unless(&path, opts.clone(), unless, &mut go) {
                         Ok(None) => {} // cancelled
                         r => {
                             let r = r.map(|o| o.expect("not cancelled"));
@@ -157,9 +203,20 @@ impl Loader {
 
     /// Requests `path`, superseding every earlier request; returns its generation.
     pub fn request(&self, path: PathBuf) -> u64 {
+        self.request_job(path, None)
+    }
+
+    /// Like [`Loader::request`] for a reload check: if the file's content equals `known` (the
+    /// version the caller has, e.g. what its own save wrote), the result is
+    /// [`Outcome::Unchanged`] right after reading — no second document is parsed and built.
+    pub fn request_unless(&self, path: PathBuf, known: crate::save::DiskVersion) -> u64 {
+        self.request_job(path, Some(known))
+    }
+
+    fn request_job(&self, path: PathBuf, unless: Option<crate::save::DiskVersion>) -> u64 {
         let generation = self.current.fetch_add(1, Ordering::AcqRel) + 1;
         let (m, cv) = &*self.slot;
-        *m.lock().unwrap_or_else(|e| e.into_inner()) = Some((path, generation));
+        *m.lock().unwrap_or_else(|e| e.into_inner()) = Some((path, generation, unless));
         cv.notify_one();
         generation
     }
@@ -170,7 +227,7 @@ impl Loader {
         *self.slot.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    pub fn try_recv(&self) -> Option<(u64, Result<Loaded, String>)> {
+    pub fn try_recv(&self) -> Option<(u64, Result<Outcome, String>)> {
         self.rx.try_recv().ok()
     }
 }
@@ -218,13 +275,52 @@ mod tests {
             std::thread::yield_now();
         };
         assert_eq!(generation, 2);
-        assert_eq!(r.unwrap().doc.text(), "# B\n");
+        assert_eq!(r.unwrap().into_loaded().unwrap().doc.text(), "# B\n");
         let stages = seen.lock().unwrap().clone();
         assert!(
             !stages.contains(&(Stage::Model, 1)),
             "request 1 stopped before building: {stages:?}"
         );
         assert!(l.try_recv().is_none(), "no result for the superseded request");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reload_check_of_an_unchanged_file_stops_after_reading() {
+        // issue #29: the watcher event of our own save must not parse a second document
+        let dir = std::env::temp_dir().join(format!("markise-engine-unless-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.md");
+        std::fs::write(&p, "# Saved\n").unwrap();
+        let known = crate::save::disk_version(&p).unwrap().unwrap();
+        let stages: Arc<Mutex<Vec<Stage>>> = Default::default();
+        let s2 = stages.clone();
+        let hook: StageHook = Arc::new(move |st, _| s2.lock().unwrap().push(st));
+        let l = Loader::new(ParseOptions::default(), Arc::new(|| {}), Some(hook)).unwrap();
+        let next = || loop {
+            if let Some((_, r)) = l.try_recv() {
+                break r.unwrap();
+            }
+            std::thread::yield_now();
+        };
+        l.request_unless(p.clone(), known);
+        match next() {
+            Outcome::Unchanged { path, version, .. } => {
+                assert_eq!(path, p);
+                assert!(version.same_content(&known));
+            }
+            o => panic!("expected Unchanged, got {o:?}"),
+        }
+        assert_eq!(*stages.lock().unwrap(), vec![Stage::Read], "no parse, no model");
+        // a different content (same length included) is loaded in full
+        std::fs::write(&p, "# Other\n").unwrap();
+        l.request_unless(p.clone(), known);
+        let loaded = next().into_loaded().expect("changed content is loaded");
+        assert_eq!(loaded.doc.text(), "# Other\n");
+        assert_eq!(
+            *stages.lock().unwrap(),
+            vec![Stage::Read, Stage::Read, Stage::Parse, Stage::Model]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -239,7 +335,7 @@ mod tests {
         l.request(p.clone());
         let loaded = loop {
             if let Some((_, r)) = l.try_recv() {
-                break r.unwrap();
+                break r.unwrap().into_loaded().unwrap();
             }
             std::thread::yield_now();
         };
