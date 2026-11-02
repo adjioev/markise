@@ -291,3 +291,25 @@ fn navigation_from_an_offscreen_caret_crosses_unloaded_pages_and_closed_disclosu
     );
     assert_eq!(p.paged.ed.view.paging_stats().placeholder_layouts, 0);
 }
+
+/// Issue #125 (phase 4): copy and cut take the session's text of the selection, so Select All
+/// or a selection over unloaded pages copies and cuts exactly what a full model does.
+#[test]
+fn copy_and_cut_across_unloaded_pages() {
+    let src = source();
+    let mut p = Pair::new(&src);
+    let copied = |t: &T| t.text()[t.ed.session.selection().primary().range()].to_string();
+    p.key("select.all");
+    assert_eq!(copied(&p.paged), copied(&p.full));
+    assert!(copied(&p.paged).len() > src.len() * 9 / 10, "the whole document");
+    let (a, b) = (p.top(3) + 1, p.top(25 * TOPS) + 4);
+    assert!((3..25 * TOPS).any(|k| p.is_page_at(p.top(k))));
+    p.select(a, b);
+    let c = copied(&p.paged);
+    assert_eq!(c, copied(&p.full));
+    assert!(c.len() > b - a - 8, "the selection (its ends on caret stops)");
+    // cut: the copied text goes as on a full model (the pair compares text and selection)
+    p.key("edit.deleteBackward");
+    p.key("edit.undo");
+    assert_eq!(p.paged.text(), src);
+}

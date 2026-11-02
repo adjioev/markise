@@ -3102,16 +3102,24 @@ fn source_middle_to_rendered(viewer: &mut DocViewer, vh: f32) {
     let text = viewer.ed.session.text();
     let line = pane.view.line_at_y(pane.view.scroll_y() + vh as f64 * 0.5);
     let off = pane.view.line_start(text, line.floor().max(0.0) as usize);
-    // a paged model materializes the page of the line first
-    viewer.ed.view.ensure_offset(off);
-    let model = viewer.model().clone();
-    if model.items.is_empty() {
-        return;
-    }
-    let mut item = model.item_at_offset(off);
-    while item + 1 < model.items.len() && matches!(model.items[item].kind, markise_layout::ItemKind::Hidden) {
-        item += 1;
-    }
+    // a paged model materializes the page of the line, and of the block it maps to past
+    // hidden source, first
+    let mut at = off;
+    let item = loop {
+        viewer.ed.view.ensure_offset(at);
+        let model = viewer.model();
+        if model.items.is_empty() {
+            return;
+        }
+        let mut item = model.item_at_offset(off);
+        while item + 1 < model.items.len() && matches!(model.items[item].kind, markise_layout::ItemKind::Hidden) {
+            item += 1;
+        }
+        if !model.is_page(item) || model.item_start(item) == at {
+            break item;
+        }
+        at = model.item_start(item);
+    };
     let rvh = viewer.surface_rect().map_or(vh, |r| r.height());
     let v = &mut viewer.ed.view;
     v.scroll_to_item(item);

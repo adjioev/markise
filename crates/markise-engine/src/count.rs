@@ -25,11 +25,10 @@
 //! **Estimates (documented approximation).** A block whose source is larger than
 //! [`BIG_BLOCK`] (a pathological single paragraph, table or code block) is not parsed: its
 //! counts are estimated from its byte length (characters ≈ bytes, words ≈ bytes / 6;
-//! [`estimate`]) and marked with [`Counts::approx`], which the status bar shows as `~`. A
-//! selection whose fully selected middle spans more than [`EXACT_ITEMS`] blocks on both sides
-//! (it is neither small nor almost the whole document) is estimated from the document's
-//! counts in proportion to its bytes, also marked. Documents of normal-sized blocks are
-//! counted exactly.
+//! [`estimate`]) and marked with [`Counts::approx`], which the status bar shows as `~`.
+//! Documents and selections of normal-sized blocks are counted exactly, however large: a
+//! selection's fully selected middle is summed from cached totals of runs of blocks (issue
+//! #125; it was estimated beyond 4,096 blocks).
 //!
 //! **Incremental, bounded counting.** [`DocCounter`] keeps one [`Counts`] per *top-level
 //! block* of the document (not per view-model item: a paged view model materializes items only
@@ -57,9 +56,6 @@ pub const BIG_BLOCK: usize = 64 * 1024;
 /// Source bytes [`DocCounter::fill`] reads per step of the counting worker
 /// ([`crate::count_worker`]; an edit waits at most one step), plus at most one block.
 pub const FRAME_BYTES: usize = 32 * 1024;
-/// A selection's fully selected middle is summed exactly when it, or the rest of the
-/// document, spans at most this many top-level blocks; otherwise it is estimated.
-pub const EXACT_ITEMS: usize = 4096;
 /// Average bytes per word of the estimate.
 const BYTES_PER_WORD: u64 = 6;
 
@@ -655,8 +651,14 @@ pub struct DocCounter {
     sel: Option<(Range<usize>, Counts)>,
     /// A selection counted in steps ([`DocCounter::selection_step`]) not finished yet.
     sel_partial: Option<SelPartial>,
+    /// Totals of the blocks `k * SUM_BLOCKS ..` (`None`: not summed since a change): a
+    /// selection's fully selected middle is summed from them exactly (issue #125).
+    sums: Vec<Option<Counts>>,
     stats: CounterStats,
 }
+
+/// Top-level blocks per cached total ([`DocCounter::sums`]).
+const SUM_BLOCKS: usize = 1024;
 
 impl DocCounter {
     pub fn new() -> Self {
@@ -726,6 +728,7 @@ impl DocCounter {
     }
 
     fn forget(&mut self, i: usize) {
+        self.dirty(i);
         let s = std::mem::replace(&mut self.counts[i], Slot::NONE);
         if let Some(c) = self.load(s) {
             self.known -= c;
@@ -784,6 +787,14 @@ impl DocCounter {
             .splice(r.clone(), std::iter::repeat_n(Slot::NONE, fresh))
             .collect();
         self.flags.splice(r.clone(), std::iter::repeat_n(0, fresh));
+        if fresh == r.len() {
+            for k in r.start / SUM_BLOCKS..r.end.div_ceil(SUM_BLOCKS) {
+                self.dirty(k * SUM_BLOCKS);
+            }
+        } else {
+            // the blocks after the splice moved: their totals start over
+            self.sums.truncate(r.start / SUM_BLOCKS);
+        }
         for s in gone {
             match self.load(s) {
                 Some(c) => self.known -= c,
@@ -802,6 +813,47 @@ impl DocCounter {
     }
 
     /// Forgets every block that may use a reference definition.
+    /// The cached total holding block `i` is stale.
+    fn dirty(&mut self, i: usize) {
+        if let Some(s) = self.sums.get_mut(i / SUM_BLOCKS) {
+            *s = None;
+        }
+    }
+
+    /// Exact counts of blocks `r` (all counted), from the cached totals where whole.
+    fn sum_range(&mut self, r: Range<usize>) -> Counts {
+        let slots = |c: &Self, r: Range<usize>| {
+            c.counts[r]
+                .iter()
+                .fold(Counts::default(), |s, x| s + c.load(*x).unwrap_or_default())
+        };
+        let n = self.counts.len();
+        self.sums.resize(n.div_ceil(SUM_BLOCKS), None);
+        let mut acc = Counts::default();
+        let mut i = r.start;
+        while i < r.end {
+            let k = i / SUM_BLOCKS;
+            let (a, b) = (k * SUM_BLOCKS, ((k + 1) * SUM_BLOCKS).min(n));
+            if i == a && b <= r.end {
+                let t = match self.sums[k] {
+                    Some(t) => t,
+                    None => {
+                        let t = slots(self, a..b);
+                        self.sums[k] = Some(t);
+                        t
+                    }
+                };
+                acc += t;
+                i = b;
+            } else {
+                let e = b.min(r.end);
+                acc += slots(self, i..e);
+                i = e;
+            }
+        }
+        acc
+    }
+
     fn forget_refs(&mut self) {
         // a block counted in part: the leaves counted so far may use one too (review of #129)
         if self.partial.is_some_and(|(_, _, c)| c.refs) {
@@ -852,6 +904,7 @@ impl DocCounter {
                 break;
             }
             let v = self.store(acc.counts);
+            self.dirty(t);
             let old = std::mem::replace(&mut self.counts[t], v);
             if !old.is_some() {
                 self.missing -= 1;
@@ -869,9 +922,9 @@ impl DocCounter {
     /// Counts of the source byte range `sel` of `doc` (the document the counter is in step
     /// with, every block counted — else `None`): whole blocks from the cache, the partly
     /// selected blocks at both ends with a clip (only their leaves inside it are read, each
-    /// at most [`BIG_BLOCK`]). A fully selected middle of more than [`EXACT_ITEMS`] blocks,
-    /// when the rest of the document is that large too, is estimated in proportion to its
-    /// bytes (marked approximate). The result is kept until the selection or the document
+    /// at most [`BIG_BLOCK`]); the fully selected middle exactly, from cached totals of runs
+    /// of [`SUM_BLOCKS`] blocks (O(middle / SUM_BLOCKS) once they are summed). The result is
+    /// kept until the selection or the document
     /// changes. Reads everything at once; [`DocCounter::selection_step`] does it in steps.
     pub fn selection(&mut self, doc: &dyn FormatDoc, sel: Range<usize>) -> Option<Counts> {
         loop {
@@ -891,9 +944,9 @@ impl DocCounter {
         if n == 0 || sel.is_empty() {
             return Some(Some(Counts::default()));
         }
-        let Some(total) = self.total() else {
+        if self.total().is_none() {
             return Some(None);
-        };
+        }
         if n != doc.top_count() {
             return Some(None);
         }
@@ -951,28 +1004,8 @@ impl DocCounter {
         let mut acc = p.acc;
         let (ma, mb) = (a + 1, b);
         if mb > ma {
-            let sum = |r: Range<usize>| {
-                self.counts[r]
-                    .iter()
-                    .fold(Counts::default(), |s, c| s + self.load(*c).unwrap_or_default())
-            };
-            if mb - ma <= EXACT_ITEMS {
-                acc += sum(ma..mb);
-            } else if ma + (n - mb) <= EXACT_ITEMS {
-                acc += total - sum(0..ma) - sum(mb..n);
-            } else {
-                // proportional to the middle's share of the document's bytes
-                let start = |t: usize| doc.top_span(t).map_or(0, |s| s.start);
-                let bytes = (start(mb) - start(ma)) as u128;
-                let len = doc.text().len().max(1) as u128;
-                let part = |v: u64| (v as u128 * bytes / len) as u64;
-                acc += Counts {
-                    words: part(total.words),
-                    chars: part(total.chars),
-                    chars_no_spaces: part(total.chars_no_spaces),
-                    approx: 1,
-                };
-            }
+            // exact, from the cached totals of whole runs of blocks (issue #125)
+            acc += self.sum_range(ma..mb);
         }
         self.record(read);
         self.sel = Some((sel, acc));
@@ -1547,20 +1580,19 @@ mod tests {
         }
     }
 
-    /// Review round 2 P2-3: selection sums are bounded: a middle of up to [`EXACT_ITEMS`]
-    /// items (or one whose complement is that small, like Select All) is exact; a middle and
-    /// complement both larger are estimated from the byte share and marked.
+    /// Issue #125 (phase 4): selections of any size are exact (a middle of tens of thousands of
+    /// blocks too), summed from cached totals; edits keep the totals right.
     #[test]
-    fn large_selections_are_exact_or_marked_estimates() {
-        let n = 4 * EXACT_ITEMS;
+    fn large_selections_are_exact() {
+        let n = 5 * SUM_BLOCKS + 37;
         let src = "One two three.\n\n".repeat(n);
-        let doc = md(&src);
+        let mut doc = md(&src);
         let mut c = DocCounter::new();
         c.reset(&doc);
         assert_eq!(c.selection(&doc, 0..10), None, "needs the document counted");
         assert!(c.fill(&doc, usize::MAX));
         let before = c.stats().blocks_counted;
-        // almost everything: exact through the complement
+        // almost everything
         let s = c.selection(&doc, 4..src.len() - 9).unwrap();
         assert!(!s.is_approx());
         assert_eq!(s.words, n as u64 * 3 - 2);
@@ -1569,16 +1601,21 @@ mod tests {
             2,
             "only the two partial blocks are read"
         );
-        // a small middle: exact
-        let p = 16;
-        let s = c.selection(&doc, 0..p * 100).unwrap();
-        assert!(!s.is_approx());
-        assert_eq!(s.words, 300);
-        // the middle half: estimated, close to the truth
+        // the middle half: exact
         let q = src.len() / 4;
-        let s = c.selection(&doc, q..3 * q).unwrap();
-        assert!(s.is_approx());
-        let truth = 2 * EXACT_ITEMS as u64 * 3;
-        assert!(s.words.abs_diff(truth) <= 6, "{} vs {truth}", s.words);
+        let (a, b) = (q - q % 16, 3 * q - (3 * q) % 16);
+        let s = c.selection(&doc, a..b).unwrap();
+        assert!(!s.is_approx());
+        assert_eq!(s, count_range(&doc, a..b));
+        // after edits (a block gained a word, blocks came and went), still exact
+        edit(&mut doc, &mut c, 16 * 700..16 * 700, "Four ");
+        edit(&mut doc, &mut c, 16 * 3000..16 * 3000, "New.\n\n");
+        edit(&mut doc, &mut c, 16 * 10..16 * 12, "");
+        assert!(c.fill(&doc, usize::MAX));
+        let len = doc.text().len();
+        for (a, b) in [(4, len - 9), (16 * 5, len / 2), (len / 3, len - 100)] {
+            let s = c.selection(&doc, a..b).unwrap();
+            assert_eq!(s, count_range(&doc, a..b), "{a}..{b}");
+        }
     }
 }

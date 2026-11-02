@@ -144,12 +144,16 @@ pub struct DocViewer {
     /// egui time of the last caret activity (blink phase, blink timeout).
     blink_from: f64,
     drag: Option<Drag>,
-    /// A press on a task checkbox (item, list item ordinal) waiting for its release.
-    task_press: Option<(usize, u16)>,
+    /// A press on a task checkbox waiting for its release: its item by source position
+    /// (start, ordinal among items starting there: indices shift when a paged model
+    /// materializes pages between frames) and the list item ordinal.
+    task_press: Option<((usize, usize), u16)>,
     /// Last primary press: time, position, click count.
     last_press: Option<(f64, Pos2, u32)>,
     /// Visible items of the last frame (index, top relative to the surface), for hit tests.
-    last_visible: Vec<(usize, f32)>,
+    /// (Kept by source position, [`DocViewer::item_key`]: a paged model may materialize pages
+    /// between frames, which shifts item indices; [`DocViewer::shown`] resolves them.)
+    last_visible: Vec<((usize, usize), f32)>,
     /// Column left edge of the last frame (screen x).
     last_left: f32,
     /// Paged models: the document height when the scrollbar drag started (the scrollbar's
@@ -365,7 +369,7 @@ impl DocViewer {
     /// Screen centre of the first visible link whose target is `target` (last frame's
     /// geometry; tests click it).
     pub fn link_center(&self, target: &str) -> Option<Pos2> {
-        for &(idx, y) in &self.last_visible {
+        for &(idx, y) in &self.shown() {
             let Some(l) = self.ed.view.cache_peek(idx) else {
                 continue;
             };
@@ -507,13 +511,13 @@ impl DocViewer {
             let line = theme.line_px() * smooth_scroll::LINES_PER_NOTCH;
             // a programmatic scroll since the last frame (outline, anchor, find, Side by Side
             // sync, edits) drops pending motion
-            self.smooth.follow(self.ed.view.anchor(), false);
+            self.smooth.follow(self.ed.view.source_anchor(), false);
             let d = smooth_scroll::take_delta(ui, &mut self.smooth, hovered, line, vh);
             if d.y != 0.0 {
                 self.ed.view.scroll_by(-d.y);
                 out.wheel_scrolled = true;
             }
-            self.smooth.follow(self.ed.view.anchor(), true);
+            self.smooth.follow(self.ed.view.source_anchor(), true);
         }
         // ---- input: keyboard scrolling, only when no widget has focus
         if !focused && ui.memory(|m| m.focused().is_none()) {
@@ -606,8 +610,8 @@ impl DocViewer {
         } else {
             None
         };
-        if task.is_some() {
-            self.task_press = task;
+        if let Some((i, ord)) = task {
+            self.task_press = Some((self.item_key(i), ord));
         }
         if let Some(t) = self.task_press
             && ui.input(|i| i.pointer.primary_released())
@@ -616,7 +620,11 @@ impl DocViewer {
             let over = ui
                 .input(|i| i.pointer.interact_pos())
                 .and_then(|p| self.task_box_at(p, rect.top()));
-            if editable && over == Some(t) && self.toggle_task(t.0, t.1) {
+            if let Some((i, ord)) = over
+                && editable
+                && (self.item_key(i), ord) == t
+                && self.toggle_task(i, ord)
+            {
                 out.edited = true;
             }
         }
@@ -717,7 +725,7 @@ impl DocViewer {
         }
 
         // keyboard scrolling, the scrollbar or a caret / find reveal in this frame took over
-        self.smooth.follow(self.ed.view.anchor(), false);
+        self.smooth.follow(self.ed.view.source_anchor(), false);
         // ---- layout of the viewport (+ half a screen of margin)
         let visible = {
             let view = &mut self.ed.view;
@@ -731,7 +739,7 @@ impl DocViewer {
             }
         };
         // (layout moves the anchor on once estimated heights become real)
-        self.smooth.follow(self.ed.view.anchor(), true);
+        self.smooth.follow(self.ed.view.source_anchor(), true);
         // the available caret stops may have changed under the selection (a diagram or
         // formula became rendered, front matter collapsed): move it to the nearest stop
         // (not on a read-only surface without the focus: in Side by Side the session's selection
@@ -772,7 +780,7 @@ impl DocViewer {
         }
         out.painted = visible.len();
         out.laid_out = self.ed.view.laid_out.len();
-        self.last_visible = visible.iter().map(|v| (v.idx, v.y)).collect();
+        self.last_visible = visible.iter().map(|v| (self.item_key(v.idx), v.y)).collect();
         self.last_left = left;
         self.last_top = rect.top();
 
@@ -970,7 +978,7 @@ impl DocViewer {
     pub fn item_screen_rect(&self, offset: usize) -> Option<Rect> {
         let model = self.ed.view.model();
         let i = model.item_at_offset(offset);
-        let &(_, y) = self.last_visible.iter().find(|(idx, _)| *idx == i)?;
+        let &(_, y) = self.shown().iter().find(|(idx, _)| *idx == i)?;
         let l = self.ed.view.cache_peek(i)?;
         Some(Rect::from_min_size(
             pos2(self.last_left, self.last_top + y),
@@ -1048,7 +1056,7 @@ impl DocViewer {
     /// The text of the visible items at the last frame, item after item (tests).
     pub fn visible_text(&self) -> String {
         let mut out = String::new();
-        for &(idx, _) in &self.last_visible {
+        for &(idx, _) in &self.shown() {
             if let Some(l) = self.ed.view.cache_peek(idx) {
                 for p in &l.prims {
                     if let markise_layout::Prim::Text { text, .. } = p {
@@ -1059,6 +1067,26 @@ impl DocViewer {
             }
         }
         out
+    }
+
+    /// The items shown at the last frame with their tops, at their current indices.
+    fn shown(&self) -> Vec<(usize, f32)> {
+        let m = self.ed.view.model();
+        self.last_visible
+            .iter()
+            .filter_map(|&((start, nth), y)| {
+                let i = m.items.partition_point_start(start) + nth;
+                (i < m.items.len() && m.item_start(i) == start && !m.is_page(i)).then_some((i, y))
+            })
+            .collect()
+    }
+
+    /// Item `i` by source position: its start and its ordinal among the items starting there
+    /// (segments of a large block), stable while a paged model materializes or evicts pages.
+    fn item_key(&self, i: usize) -> (usize, usize) {
+        let m = self.ed.view.model();
+        let start = m.item_start(i);
+        (start, i - m.items.partition_point_start(start).min(i))
     }
 
     /// The shown comment whose bubble or card is under screen point `p`.
@@ -1233,7 +1261,7 @@ impl DocViewer {
     }
 
     fn on_toggle_or_link(&self, p: Pos2, top: f32, m: egui::Modifiers) -> bool {
-        for &(idx, y) in &self.last_visible {
+        for &(idx, y) in &self.shown() {
             let Some(l) = self.ed.view.cache_peek(idx) else {
                 continue;
             };
@@ -1249,7 +1277,7 @@ impl DocViewer {
     /// The task checkbox under screen point `p` (last frame's geometry): the visible item and
     /// the box's list item ordinal ([`BlockLayout::tasks`]).
     fn task_box_at(&self, p: Pos2, top: f32) -> Option<(usize, u16)> {
-        for &(idx, y) in &self.last_visible {
+        for &(idx, y) in &self.shown() {
             let Some(l) = self.ed.view.cache_peek(idx) else {
                 continue;
             };
@@ -1452,9 +1480,10 @@ impl DocViewer {
         sh: &mut dyn TextShaper,
         images: &dyn markise_layout::Images,
     ) -> Option<DocPos> {
-        let (&(first, fy), &(last, _)) = (self.last_visible.first()?, self.last_visible.last()?);
+        let shown = self.shown();
+        let (&(first, fy), &(last, _)) = (shown.first()?, shown.last()?);
         let mut target = None;
-        for &(idx, y) in &self.last_visible {
+        for &(idx, y) in &self.shown() {
             if p.y >= top + y {
                 target = Some((idx, y));
             }

@@ -2,7 +2,7 @@
 //! (click to cycle, persisted as `statusBar.count`) and the reading time of the document, or
 //! "12 of 3,456 words" for a non-empty selection. Counting rules: [`markise_engine::count`].
 //! Counts that include an estimate (a block larger than
-//! [`markise_engine::count::BIG_BLOCK`], a very large selection) are shown with `~`.
+//! [`markise_engine::count::BIG_BLOCK`]) are shown with `~`; selections of any size are exact.
 //!
 //! Counting runs off the UI thread (issue #132): a [`CountWorker`] keeps one count per
 //! top-level block of the document and counts only changed blocks. The UI thread sends it the
