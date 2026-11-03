@@ -307,9 +307,7 @@ fn footer(prefix: &str) -> String {
         <p>Markise — the marquise of Markdown editors. © 2026 The Markise contributors.
           Dual-licensed under MIT or Apache-2.0. This site uses no cookies, trackers or
           third-party requests.</p>
-        <p class='trademarks'>Obsidian is a trademark of Dynalist Inc. Markise is not affiliated with or endorsed by Obsidian.
-          Typora is a trademark of its respective owner. Markise is an independent project and is
-          not affiliated with or endorsed by Typora.</p>
+        <p class='trademarks'>Obsidian is a trademark of Dynalist Inc. Markise is not affiliated with or endorsed by Obsidian.</p>
       </div>
     </div>
   </footer>"
