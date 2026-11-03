@@ -845,3 +845,45 @@ fn a_fifo_app_json_does_not_block() {
     sc.mount(root.clone());
     assert!(sc.recv_timeout(HANG_GUARD).unwrap().settings().obsidian);
 }
+
+/// Review of #150: repeated "walk everything again" notices (FSEvents must-scan-subdirs under
+/// load) are coalesced: notices arriving during a walk cause one follow-up walk, not one each.
+#[test]
+fn rescan_notices_during_a_walk_cause_at_most_one_more_walk() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
+    let root = std::env::temp_dir().join(format!("markise-vault-rescans-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("A.md"), "a").unwrap();
+    let walks = Arc::new(AtomicUsize::new(0));
+    let held = Arc::new((Mutex::new(true), Condvar::new()));
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let entered_tx = Mutex::new(entered_tx);
+    let hook: RescanHook = {
+        let (walks, held) = (walks.clone(), held.clone());
+        Arc::new(move || {
+            walks.fetch_add(1, Ordering::SeqCst);
+            let _ = entered_tx.lock().unwrap().send(());
+            let (m, cv) = &*held;
+            let mut g = m.lock().unwrap();
+            while *g {
+                g = cv.wait(g).unwrap();
+            }
+        })
+    };
+    let sc = VaultScanner::with_rescan_hook(Arc::new(|| {}), Some(hook)).unwrap();
+    sc.mount(root.clone());
+    sc.recv_timeout(HANG_GUARD).expect("mount snapshot");
+    sc.rescan();
+    entered.recv_timeout(HANG_GUARD).expect("first walk started");
+    for _ in 0..20 {
+        sc.rescan();
+        sc.changed(root.join("A.md"));
+    }
+    *held.0.lock().unwrap() = false;
+    held.1.notify_all();
+    assert!(quiet(&sc), "nothing changed on disk");
+    assert_eq!(walks.load(Ordering::SeqCst), 2, "one walk plus one follow-up");
+    let _ = std::fs::remove_dir_all(&root);
+}
