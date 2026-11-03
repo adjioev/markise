@@ -190,24 +190,38 @@ impl DocViewer {
     }
 
     /// The patches that write the open draft into the document's current text, without
-    /// applying them (crash-recovery backups include the draft); `None`: no draft, or it
-    /// cannot be written.
+    /// applying them (crash-recovery backups include the draft); `None`: no draft.
+    ///
+    /// A draft the planner refuses (a refused save: Comments & Suggestions off, …) is still
+    /// backed up: its text replaces the comment's text verbatim between the delimiters (only
+    /// `<<}` kept apart), so a backup never loses what the user typed (Codex review 2 of
+    /// #158). The draft's comment source is checked at its key first.
     pub fn card_draft_patches(&self) -> Option<Vec<markise_doc::Patch>> {
         if !self.has_card_draft() {
             return None;
         }
         let e = self.card_edit.as_ref()?;
+        let draft = Self::draft_text(e);
         let params = Params::new()
             .with("at", ParamValue::Int((e.key + 3) as i64))
-            .with("text", ParamValue::Text(Self::draft_text(e)));
+            .with("text", ParamValue::Text(draft.clone()));
         let req = self.ed.session.request(params);
-        let plan = self.ed.session.doc().plan(planners::REVIEW_EDIT_COMMENT, &req).ok()?;
-        Some(
-            plan.steps
-                .into_iter()
-                .flat_map(|s| s.patches.patches().to_vec())
-                .collect(),
-        )
+        if let Ok(plan) = self.ed.session.doc().plan(planners::REVIEW_EDIT_COMMENT, &req) {
+            return Some(
+                plan.steps
+                    .into_iter()
+                    .flat_map(|s| s.patches.patches().to_vec())
+                    .collect(),
+            );
+        }
+        let text = self.ed.session.text();
+        let end = e.key + e.source.len();
+        if text.get(e.key..end) != Some(e.source.as_str()) || e.source.len() < 6 {
+            return None;
+        }
+        let mut p = markise_doc::Patch::new(e.key + 3..end - 3, draft.replace("<<}", "<< }"));
+        p.verbatim = true;
+        Some(vec![p])
     }
 
     /// An identity of the open draft (its comment and text), so a backup is refreshed when it

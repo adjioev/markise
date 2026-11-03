@@ -404,4 +404,45 @@ mod tests {
         v.edit_card_for_test(5, "newer");
         assert_eq!(backup(&mut app), "Note {>>newer<<} end.\n");
     }
+
+    /// Codex review 2 of #158: a draft whose save is refused (here Comments & Suggestions
+    /// are off in the document's parse) is still in the backup, verbatim between the
+    /// comment's delimiters, so recovery never loses what was typed.
+    #[test]
+    fn backup_keeps_a_refused_card_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = MarkiseApp::new(AppOptions::default());
+        app.workflow.started = true;
+        app.workflow.worker = Some(Worker::new(dir.path().to_owned(), Arc::new(|| {})).unwrap());
+        let src = "Note {>>old<<} end.\n";
+        app.install_untitled(src.into(), "note.md");
+        let v = &mut app.doc.as_mut().unwrap().viewer;
+        v.edit_card_for_test(5, "new\ntext");
+        // the document re-parsed with CriticMarkup off: the planner refuses
+        let off = markise_md::ParseOptions {
+            critic_markup: false,
+            ..Default::default()
+        };
+        let doc = Arc::new(markise_md::Document::parse(src, off));
+        let model = markise_layout::DocModel::build(doc.as_ref(), None);
+        v.install(doc, model, "Re-parse", false).unwrap();
+        assert!(v.commit_card_edit().is_err(), "refused");
+        assert!(app.is_dirty());
+        app.workflow.backup_at = Instant::now() - Duration::from_secs(31);
+        app.workflow_poll(&Context::default());
+        assert!(app.workflow.pending.is_some(), "a backup was requested");
+        wait(&mut app, |a| a.workflow.pending.is_none());
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .flat_map(|e| std::fs::read_dir(e.path()).unwrap().flatten())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+            .collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(files[0].path()).unwrap(),
+            "Note {>>new\ntext<<} end.\n"
+        );
+    }
 }
