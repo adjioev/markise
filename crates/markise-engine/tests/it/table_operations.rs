@@ -1,6 +1,7 @@
 //! Spec 02 §6 / issue #54: structural commands retain cell data, containers and undo.
 use crate::common;
 use common::T;
+use markise_layout::Paging;
 
 #[test]
 fn table_operations_are_single_undo_steps_in_containers_and_crlf() {
@@ -69,4 +70,149 @@ fn boundaries_keep_header_and_minimum_body_and_column() {
     }
     let t = T::at("| ‸H |\n| --- |\n| a |\n| b |\n");
     assert!(t.ed.registry.enabled(&t.ed.session, "table.deleteRow").is_err());
+}
+
+/// The cell span at table line `line` (0 = header, 1 = delimiter, 2.. = body), column `col`.
+fn cell(t: &T, line: usize, col: usize) -> markise_doc::Span {
+    let doc = t.ed.session.doc();
+    let start = t.text().find('|').unwrap();
+    let table = doc.table(start).unwrap();
+    doc.table_row_cells(table.rows[line])[col]
+}
+
+/// The trimmed cell texts of table line `line`.
+fn row(t: &T, line: usize) -> Vec<String> {
+    let doc = t.ed.session.doc();
+    let start = t.text().find('|').unwrap();
+    let table = doc.table(start).unwrap();
+    doc.table_row_cells(table.rows[line])
+        .iter()
+        .map(|c| c.slice(t.text()).to_owned())
+        .collect()
+}
+
+/// Issue #163: after Add Row Above/Below (menu or ⌘↩) the caret is in the new row's cell of
+/// the same column, on a caret stop (the viewer's per-frame fix keeps it there), and typing,
+/// Tab and Shift+Tab work there — the full and paged models, first and last rows.
+#[test]
+fn typing_into_a_freshly_added_row_issue_163() {
+    let src = "para\n\n| H | J |\n| --- | --- |\n| a | b |\n| c | d |\n\nafter\n";
+    // (command, caret's cell text, column, the new row's table line)
+    let cases = [
+        ("table.addRowBelow", "a", 0, 3),
+        ("table.addRowBelow", "d", 1, 4),
+        ("table.addRowAbove", "a", 0, 2),
+        ("table.addRowAbove", "c", 0, 3),
+        ("table.addRowAbove", "J", 1, 2),
+        ("table.addRowBelow", "H", 0, 2),
+    ];
+    for paging in [Paging::Full, Paging::Paged { tops: 1 }] {
+        for (cmd, at, col, line) in cases {
+            let what = format!("{paging:?} {cmd} at {at}");
+            let mut t = T::with_paging(src, paging);
+            t.fix_selection = true;
+            t.set(src.find(&format!("| {at} ")).unwrap() + 2);
+            t.run(cmd);
+            assert_eq!(row(&t, line), ["", ""], "{what}: {}", t.shown());
+            assert_eq!(t.caret().offset, cell(&t, line, col).start, "{what}: {}", t.shown());
+            assert!(t.selection_on_stops(), "{what}: caret on a stop");
+            assert!(t.caret_visible(), "{what}");
+            t.typ("xy");
+            let mut want = vec![String::new(), String::new()];
+            want[col] = "xy".into();
+            assert_eq!(row(&t, line), want, "{what}: {}", t.shown());
+            t.check_model();
+            // Tab / Shift+Tab move into the other (empty) cell of the new row; typing works there
+            let other = 1 - col;
+            t.run(if other > col {
+                "edit.indentOrNextCell"
+            } else {
+                "edit.outdentOrPrevCell"
+            });
+            assert_eq!(
+                t.caret().offset,
+                cell(&t, line, other).start,
+                "{what}: Tab {}",
+                t.shown()
+            );
+            t.typ("z");
+            want[other] = "z".into();
+            assert_eq!(row(&t, line), want, "{what}: {}", t.shown());
+            t.check_model();
+        }
+    }
+}
+
+/// Issue #163: every empty cell is a caret stop (it was skipped, so the caret snapped out
+/// of the cell or the table): a table whose body is all empty cells, header cells, padded
+/// and unpadded empty cells.
+#[test]
+fn empty_cells_are_caret_stops_issue_163() {
+    for src in [
+        "| H | J |\n| --- | --- |\n|   |   |\n",
+        "| H | J |\n|---|---|\n|||\n",
+        "|   | J |\n| --- | --- |\n| a |   |\n",
+        "> | H | J |\n> | --- | --- |\n> |   |   |\n",
+    ] {
+        let mut t = T::new(src);
+        t.fix_selection = true;
+        let start = src.find('|').unwrap();
+        let table = t.ed.session.doc().table(start).unwrap();
+        for line in [0, 2] {
+            for col in 0..2 {
+                let c = t.ed.session.doc().table_row_cells(table.rows[line])[col];
+                if !c.is_empty() {
+                    continue;
+                }
+                t.set(c.start);
+                assert_eq!(t.caret().offset, c.start, "{src:?} {line}/{col}");
+                assert!(t.caret_visible(), "{src:?} {line}/{col}");
+            }
+        }
+        // the new row of an all-empty table takes text too
+        let c = cell(&t, 2, 1);
+        t.set(c.start);
+        t.run("table.addRowBelow");
+        assert_eq!(t.caret().offset, cell(&t, 3, 1).start, "{src:?}: {}", t.shown());
+        t.typ("q");
+        assert_eq!(row(&t, 3), ["", "q"], "{src:?}: {}", t.shown());
+        t.check_model();
+    }
+}
+
+/// Issue #163: after undo and redo of Add Row the caret is back in the new row and typing
+/// goes into it.
+#[test]
+fn typing_into_an_added_row_after_undo_redo_issue_163() {
+    for paging in [Paging::Full, Paging::Paged { tops: 1 }] {
+        let src = "| H | J |\n| --- | --- |\n| a | b |\n\nafter\n";
+        let mut t = T::with_paging(src, paging);
+        t.fix_selection = true;
+        t.set(src.find("| b").unwrap() + 2);
+        t.run("table.addRowBelow");
+        let added = t.text().to_owned();
+        t.run("edit.undo");
+        assert_eq!(t.text(), src);
+        t.run("edit.redo");
+        assert_eq!(t.text(), added);
+        assert_eq!(t.caret().offset, cell(&t, 3, 1).start, "{paging:?}: {}", t.shown());
+        t.typ("r");
+        assert_eq!(row(&t, 3), ["", "r"], "{paging:?}: {}", t.shown());
+        t.check_model();
+    }
+}
+
+/// Issue #163: column commands put the caret into the new (empty) column of the caret's row.
+#[test]
+fn caret_lands_in_a_new_column_issue_163() {
+    for (cmd, col) in [("table.addColumnBefore", 0), ("table.addColumnAfter", 1)] {
+        let src = "| H |\n| --- |\n| a |\n";
+        let mut t = T::new(src);
+        t.fix_selection = true;
+        t.set(src.find("| a").unwrap() + 2);
+        t.run(cmd);
+        assert_eq!(t.caret().offset, cell(&t, 2, col).start, "{cmd}: {}", t.shown());
+        t.typ("n");
+        assert_eq!(row(&t, 2)[col], "n", "{cmd}: {}", t.shown());
+    }
 }
