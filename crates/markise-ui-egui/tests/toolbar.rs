@@ -8,7 +8,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use egui::{Event, Key, Modifiers, RawInput, ViewportId};
 use egui_kittest::Harness;
@@ -470,20 +470,16 @@ fn idle_check(name: &str, position: ToolbarPosition) {
         out.viewport_output[&ViewportId::ROOT].repaint_delay
     };
     // load, then wait for every background job (theme worker, settings write of the toggle —
-    // a scheduled wake-up, not a loop —, watches, vault, images) to finish: issue #42
-    let t = Instant::now();
-    loop {
-        common::sync_watches(&app, t);
-        frame(&mut app);
-        if app.model().is_some() && !app.is_loading() && app.background_settled() {
-            break;
-        }
-        assert!(t.elapsed() < common::HANG_GUARD, "load / background never settled");
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    // a scheduled wake-up, not a loop —, watches, vault, images) to finish: issue #42; a
+    // measurement a late file-system event disturbed is repeated (issue #147)
+    let delays = common::idle_delays(&mut app, frame, 8);
     assert!(app.toolbar_state().is_some());
-    let delays: Vec<Duration> = (0..8).map(|_| frame(&mut app)).collect();
-    assert_eq!(*delays.last().unwrap(), Duration::MAX, "NFR-10, closed: {delays:?}");
+    assert_eq!(
+        *delays.last().unwrap(),
+        Duration::MAX,
+        "NFR-10, closed: {delays:?}, causes: {:?}",
+        ctx.repaint_causes()
+    );
     // an open drop-down is idle too
     let at = app.toolbar().bar_rect().unwrap().left_center() + egui::vec2(30.0, 0.0);
     let press = |pressed| {
@@ -507,12 +503,14 @@ fn idle_check(name: &str, position: ToolbarPosition) {
         out.textures_delta.clear();
     }
     assert!(app.toolbar().popup_open(), "block style list opened");
-    let delays: Vec<Duration> = (0..8).map(|_| frame(&mut app)).collect();
+    let delays = common::idle_delays(&mut app, frame, 8);
     assert!(app.toolbar().popup_open());
-    if *delays.last().unwrap() != Duration::MAX {
-        eprintln!("causes: {:?}", ctx.repaint_causes());
-    }
-    assert_eq!(*delays.last().unwrap(), Duration::MAX, "NFR-10, open: {delays:?}");
+    assert_eq!(
+        *delays.last().unwrap(),
+        Duration::MAX,
+        "NFR-10, open: {delays:?}, causes: {:?}",
+        ctx.repaint_causes()
+    );
 }
 
 /// The first lines are never under the bar: the document surface starts below it in the

@@ -34,8 +34,8 @@ pub enum WatchEvent {
     /// folder's watch (re)started, the folder itself is reported: anything beneath it may have
     /// changed.
     ThemeChanged(PathBuf),
-    /// The watch of the mounted folder (re)started: changes made before it took effect have no
-    /// events of their own, so directories listed earlier must be listed again.
+    /// The watch of the mounted folder (re)started, or the backend dropped events: changes made
+    /// meanwhile have no events of their own, so directories listed earlier must be listed again.
     FolderWatched(PathBuf),
     /// Watching failed (the paths stay wanted; the next request retries).
     Error(String),
@@ -74,6 +74,8 @@ pub struct FileWatcher {
     /// (tests: [`Self::is_synced`]).
     requests: std::sync::atomic::AtomicU64,
     synced: std::sync::atomic::AtomicU64,
+    /// Events the file system reported that were passed on (tests: [`Self::fs_events`]).
+    fs_events: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn same(a: &Path, b: &Path) -> bool {
@@ -174,12 +176,62 @@ fn reconcile(file: &Path, known: Baseline) -> (Option<WatchEvent>, Baseline) {
     }
 }
 
+/// What a file-system event means for the watched targets (the `notify` callback).
+fn route(ev: &notify::Event, targets: &TargetSet) -> Vec<WatchEvent> {
+    let TargetSet { file, folder, themes } = targets;
+    let mut out = Vec::new();
+    let file_event = |f: &PathBuf| {
+        if f.exists() {
+            WatchEvent::FileChanged(f.clone())
+        } else {
+            WatchEvent::FileRemoved(f.clone())
+        }
+    };
+    if ev.need_rescan() {
+        // the backend dropped events (FSEvents "must scan subdirectories" when it falls behind
+        // under load, an inotify queue overflow): anything watched may have changed, so
+        // everything is caught up as after a restart of the watch (issue #147)
+        out.extend(file.as_ref().map(file_event));
+        out.extend(folder.clone().map(WatchEvent::FolderWatched));
+        out.extend(themes.clone().map(WatchEvent::ThemeChanged));
+    }
+    for p in &ev.paths {
+        if themes.as_ref().is_some_and(|root| p.starts_with(root)) {
+            out.push(WatchEvent::ThemeChanged(p.clone()));
+        }
+        if let Some(f) = file
+            && p.file_name() == f.file_name()
+            && p.parent().zip(f.parent()).is_some_and(|(a, b)| same(a, b))
+        {
+            out.push(file_event(f));
+        }
+        // `.obsidian/app.json` (the only config file spec 06 §14 reads), content edits
+        // included — DirChanged covers names only; Obsidian's constant workspace and
+        // plugin writes are not reported
+        if let Some(root) = folder.as_ref().filter(|root| vault_config_event(root, p, &ev.kind)) {
+            out.push(WatchEvent::VaultConfigChanged(root.clone()));
+        }
+        if folder.as_ref().is_some_and(|root| p.starts_with(root))
+            && matches!(
+                ev.kind,
+                EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(notify::event::ModifyKind::Name(_))
+            )
+            && let Some(dir) = p.parent()
+        {
+            out.push(WatchEvent::DirChanged(dir.to_path_buf()));
+        }
+    }
+    out
+}
+
 /// The worker: owns the `notify` watcher and applies the latest wanted targets.
 ///
 /// After every change of the registration — on macOS the whole FSEvents stream is stopped and
 /// restarted "since now", so nothing that happens meanwhile is reported — and whenever a new
 /// file is opened, it catches up: the mounted folder's listings are refreshed
 /// ([`WatchEvent::FolderWatched`]) and the open file is compared with the caller's version.
+/// A newly opened file is also compared before a registration change, so a change made before
+/// the request does not wait for the (possibly slow) registration.
 fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
     let Worker {
         targets,
@@ -224,6 +276,28 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
         let next = wanted(&want);
         let mut out = Vec::new();
         let restarted = next != active;
+        let publish = |out: Vec<WatchEvent>| {
+            let published = crate::wake_track::publishing();
+            let mut sent = false;
+            for e in out {
+                sent |= events.send(e).is_ok();
+            }
+            if sent {
+                wake();
+            }
+            drop(published);
+        };
+        if restarted
+            && new_file
+            && let Some(f) = &want.file
+        {
+            // a change made before this request is reported now, not only once the
+            // registration below is in effect: that can take many seconds (FSEvents under load,
+            // issue #147). The catch-up after the registration compares with what is seen here.
+            let (e, now) = reconcile(f, known);
+            known = now;
+            publish(e.into_iter().collect());
+        }
         if restarted {
             // one batched change: the backend restarts at most once (FSEvents restarts its
             // stream on every individual watch/unwatch)
@@ -283,15 +357,7 @@ fn run_worker(mut watcher: RecommendedWatcher, w: Worker) {
             known = now;
             out.extend(e);
         }
-        let published = crate::wake_track::publishing();
-        let mut sent = false;
-        for e in out {
-            sent |= events.send(e).is_ok();
-        }
-        if sent {
-            wake();
-        }
-        drop(published);
+        publish(out);
         for tx in acks {
             let _ = tx.send(failure.clone().map_or(Ok(()), Err));
         }
@@ -309,48 +375,22 @@ impl FileWatcher {
         let targets: Targets = Default::default();
         let shared = targets.clone();
         let (events, wake2) = (tx.clone(), wake.clone());
+        let fs_events: std::sync::Arc<std::sync::atomic::AtomicU64> = Default::default();
+        let reported = fs_events.clone();
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let Ok(ev) = res else { return };
             if matches!(ev.kind, EventKind::Access(_)) {
                 return;
             }
-            let TargetSet { file, folder, themes } = shared.lock().map(|g| g.clone()).unwrap_or_default();
+            let targets = shared.lock().map(|g| g.clone()).unwrap_or_default();
             let published = crate::wake_track::publishing();
             let mut sent = false;
-            for p in &ev.paths {
-                if themes.as_ref().is_some_and(|root| p.starts_with(root)) {
-                    sent |= tx.send(WatchEvent::ThemeChanged(p.clone())).is_ok();
-                }
-                if let Some(f) = &file
-                    && p.file_name() == f.file_name()
-                    && p.parent().zip(f.parent()).is_some_and(|(a, b)| same(a, b))
-                {
-                    let e = if f.exists() {
-                        WatchEvent::FileChanged(f.clone())
-                    } else {
-                        WatchEvent::FileRemoved(f.clone())
-                    };
-                    sent |= tx.send(e).is_ok();
-                }
-                // `.obsidian/app.json` (the only config file spec 06 §14 reads), content edits
-                // included — DirChanged covers names only; Obsidian's constant workspace and
-                // plugin writes are not reported
-                if let Some(root) = folder.as_ref().filter(|root| vault_config_event(root, p, &ev.kind)) {
-                    sent |= tx.send(WatchEvent::VaultConfigChanged(root.clone())).is_ok();
-                }
-                if folder.as_ref().is_some_and(|root| p.starts_with(root))
-                    && matches!(
-                        ev.kind,
-                        EventKind::Create(_)
-                            | EventKind::Remove(_)
-                            | EventKind::Modify(notify::event::ModifyKind::Name(_))
-                    )
-                    && let Some(dir) = p.parent()
-                {
-                    sent |= tx.send(WatchEvent::DirChanged(dir.to_path_buf())).is_ok();
-                }
+            for e in route(&ev, &targets) {
+                sent |= tx.send(e).is_ok();
             }
             if sent {
+                // counted before the wake: a test that sees the wake also sees the count
+                reported.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 wake();
             }
             drop(published);
@@ -376,6 +416,7 @@ impl FileWatcher {
             ctl,
             requests: Default::default(),
             synced: Default::default(),
+            fs_events,
         })
     }
 
@@ -451,6 +492,16 @@ impl FileWatcher {
     pub fn is_synced(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.synced.load(Ordering::Acquire) >= self.requests.load(Ordering::Acquire)
+    }
+
+    /// Test hook (issue #147): how many file-system events were passed on so far (catch-up
+    /// events of the worker are not counted). The file system reports changes with a delay,
+    /// on macOS also changes made shortly *before* a watch started (FSEvents assigns event
+    /// ids asynchronously), so no sync can promise that none is still coming: tests that
+    /// check for quiet compare this count before and after instead.
+    #[doc(hidden)]
+    pub fn fs_events(&self) -> u64 {
+        self.fs_events.load(std::sync::atomic::Ordering::Acquire)
     }
 
     fn post(&self, c: Ctl) {
@@ -712,7 +763,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// End to end: a change between the caller's read and the watch is reported.
+    /// End to end: a change between the caller's read and the watch is reported — before the
+    /// registration is in effect (issue #147: under load, starting an FSEvents stream took
+    /// longer than the test's hang guard). The worker is held inside the registration while
+    /// the event is awaited, so the test does not depend on how long registering takes.
     #[test]
     fn a_change_before_the_watch_takes_effect_is_reported() {
         let dir = tmp("gap");
@@ -720,9 +774,53 @@ mod tests {
         std::fs::write(&p, "read by the caller").unwrap();
         let v = crate::save::disk_version(&p).unwrap();
         std::fs::write(&p, "changed before the watch").unwrap();
-        let mut w = FileWatcher::new(Arc::new(|| {})).unwrap();
+        let (gate, hooks) = Gate::new();
+        let mut w = FileWatcher::with_hooks(Arc::new(|| {}), hooks).unwrap();
+        gate.hold();
         w.watch_file(&p, v);
-        assert!(wait_event(&w, &WatchEvent::FileChanged(p.clone())));
+        gate.wait_entered();
+        let reported = wait_event(&w, &WatchEvent::FileChanged(p.clone()));
+        gate.release();
+        assert!(
+            reported,
+            "the change is reported while the registration is still in progress"
+        );
+        w.sync().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #147: when the backend drops events (FSEvents falling behind under load, an inotify
+    /// queue overflow), every target is caught up instead of the notice being ignored.
+    #[test]
+    fn dropped_events_catch_up_every_target() {
+        let dir = tmp("rescan");
+        let doc = dir.join("doc.md");
+        std::fs::write(&doc, "x").unwrap();
+        let gone = dir.join("gone.md");
+        let themes = dir.join("themes");
+        let rescan = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        let t = TargetSet {
+            file: Some(doc.clone()),
+            folder: Some(dir.clone()),
+            themes: Some(themes.clone()),
+        };
+        assert_eq!(
+            route(&rescan, &t),
+            vec![
+                WatchEvent::FileChanged(doc.clone()),
+                WatchEvent::FolderWatched(dir.clone()),
+                WatchEvent::ThemeChanged(themes.clone()),
+            ]
+        );
+        let t = TargetSet {
+            file: Some(gone.clone()),
+            ..Default::default()
+        };
+        assert_eq!(route(&rescan, &t), vec![WatchEvent::FileRemoved(gone)]);
+        assert_eq!(route(&rescan, &TargetSet::default()), vec![]);
+        // an ordinary event elsewhere means nothing for the targets
+        let other = notify::Event::new(EventKind::Any).add_path(std::env::temp_dir().join("elsewhere.md"));
+        assert_eq!(route(&other, &TargetSet::default()), vec![]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
