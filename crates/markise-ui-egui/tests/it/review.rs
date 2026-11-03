@@ -202,20 +202,23 @@ fn add_comment_on_a_selection_with_the_shortcut() {
     let (mut h, p) = open("add", "The quick fox jumps.\n");
     select(&mut h, 4, 13);
     h.key_press_modifiers(add_comment_chord(), Key::M);
-    h.run_steps(2);
+    h.run_steps(3);
     assert_eq!(text(&h), "The {==quick fox==}{>><<} jumps.\n");
-    assert_eq!(caret(&mut h), 22, "the caret is in the empty comment");
+    // the comment is written in its card (issue #87); the caret waits after the comment
+    assert_eq!(edited(&mut h), Some((19, String::new())));
+    assert_eq!(caret(&mut h), 25);
     typ(&mut h, "too vague");
+    assert_eq!(edited(&mut h), Some((19, "too vague".into())));
+    assert_eq!(
+        text(&h),
+        "The {==quick fox==}{>><<} jumps.\n",
+        "not written until saved"
+    );
+    save_card(&mut h);
+    assert_eq!(edited(&mut h), None);
     assert_eq!(text(&h), "The {==quick fox==}{>>too vague<<} jumps.\n");
     assert_eq!(save_and_read(&mut h, &p), "The {==quick fox==}{>>too vague<<} jumps.\n");
-    // undo the typing (word by word), then the command in one step
-    for _ in 0..4 {
-        if text(&h) == "The {==quick fox==}{>><<} jumps.\n" {
-            break;
-        }
-        undo(&mut h);
-    }
-    assert_eq!(text(&h), "The {==quick fox==}{>><<} jumps.\n");
+    // the comment and its text are one undo step
     undo(&mut h);
     assert_eq!(text(&h), "The quick fox jumps.\n");
     // the menu item is there with its shortcut
@@ -545,15 +548,17 @@ Risks are low because the beta had no major bugs.\n";
     let a = draft.find("March 3").unwrap();
     select(&mut h, a, a + "March 3".len());
     h.key_press_modifiers(add_comment_chord(), Key::M);
-    h.run_steps(2);
+    h.run_steps(3);
     typ(&mut h, "is this date confirmed");
+    save_card(&mut h);
     let t = text(&h);
     let b = t.find("Risks are low").unwrap();
     let e = t.find("major bugs.").unwrap() + "major bugs.".len();
     select(&mut h, b, e);
     h.key_press_modifiers(add_comment_chord(), Key::M);
-    h.run_steps(2);
+    h.run_steps(3);
     typ(&mut h, "too optimistic");
+    save_card(&mut h);
     let commented = save_and_read(&mut h, &p);
     assert_eq!(
         commented,
@@ -639,6 +644,33 @@ fn click_at(h: &mut H, p: egui::Pos2) {
     h.step();
 }
 
+/// The comment being edited in its card: its source start and the field's text.
+fn edited(h: &mut H) -> Option<(usize, String)> {
+    h.state_mut()
+        .viewer()
+        .unwrap()
+        .card_edit()
+        .map(|(k, t)| (k, t.to_string()))
+}
+
+/// ⌘Enter (Ctrl+Enter): saves the card being edited.
+fn save_card(h: &mut H) {
+    h.key_press_modifiers(cmd(), Key::Enter);
+    h.run_steps(3);
+}
+
+/// Clicks the card of the shown comment starting at `key` (its margin card, or its glyph in
+/// bubbles mode).
+fn open_card(h: &mut H, key: usize) {
+    let c = comments(h)
+        .into_iter()
+        .find(|c| c.source.start == key)
+        .unwrap_or_else(|| panic!("no comment at {key}"));
+    click_at(h, c.card.map_or(c.glyph.center(), |r| r.center()));
+    h.run_steps(3);
+    assert_eq!(edited(h).map(|c| c.0), Some(key), "editing");
+}
+
 fn visible_text(h: &mut H) -> String {
     h.state_mut().viewer().unwrap().visible_text()
 }
@@ -687,7 +719,8 @@ fn comment_markers_show_only_with_the_caret_inside() {
 }
 
 /// Margin cards: the text as written (plain, with its line breaks) beside its line; a click
-/// on the card puts the caret in the comment (its source shows).
+/// on the card opens its text for editing in the card (issue #87): the source is not
+/// revealed, and a click elsewhere saves the edit.
 #[test]
 fn margin_cards_show_the_text_and_open_for_editing() {
     let src = "Plan {==date==}{>>first line\nsecond **line** [l](u)<<} ok.\n\nMore {>>solo<<} text.\n";
@@ -705,12 +738,25 @@ fn margin_cards_show_the_text_and_open_for_editing() {
     assert!((card.top() - cs[0].glyph.top()).abs() < 12.0, "aligned with its line");
     click_at(&mut h, card.center());
     h.run_steps(3);
-    let c = caret(&mut h);
-    assert!(
-        cs[0].content.start <= c && c <= cs[0].content.end,
-        "caret in the comment: {c}"
+    assert_eq!(
+        edited(&mut h),
+        Some((cs[0].source.start, "first line\nsecond **line** [l](u)".into()))
     );
-    assert!(visible_text(&mut h).contains("{>>first line"));
+    let c = caret(&mut h);
+    assert!(c >= cs[0].source.end, "caret after the comment: {c}");
+    assert!(!visible_text(&mut h).contains("{>>"), "the source is not revealed");
+    // typed at the end of the text; a click into the document saves
+    typ(&mut h, " ok");
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(src.len() - 3).unwrap();
+    click_at(&mut h, r.left_center() + egui::vec2(4.0, 0.0));
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), None);
+    assert_eq!(
+        text(&h),
+        "Plan {==date==}{>>first line\nsecond **line** [l](u) ok<<} ok.\n\nMore {>>solo<<} text.\n"
+    );
+    // the click placed its own caret (in the second paragraph)
+    assert!(caret(&mut h) > src.find("More").unwrap());
 }
 
 /// Bubbles: hovering the glyph opens a popover after a short rest, leaving closes it,
@@ -735,16 +781,26 @@ fn bubbles_show_a_popover_on_hover() {
     h.hover_at(glyph.center() + egui::vec2(0.0, 200.0));
     h.run_steps(3);
     assert!(!h.state_mut().viewer().unwrap().popover_open());
-    // a click on the glyph: editing, pinned
+    // a click on the glyph: editing in the popover, pinned
     click_at(&mut h, glyph.center());
     h.run_steps(3);
-    let c = caret(&mut h);
-    assert!(cs[0].content.start <= c && c <= cs[0].content.end);
+    assert_eq!(edited(&mut h), Some((cs[0].source.start, "check **this** `x`".into())));
     h.hover_at(glyph.center() + egui::vec2(0.0, 200.0));
     h.run_steps(3);
     assert!(h.state_mut().viewer().unwrap().popover_open(), "pinned");
+    // Esc cancels the edit and closes the popover
+    typ(&mut h, "!");
     h.key_press(Key::Escape);
     h.run_steps(3);
+    assert_eq!(edited(&mut h), None);
+    assert!(!h.state_mut().viewer().unwrap().popover_open());
+    assert_eq!(text(&h), NOTE);
+    // edited in the popover and saved with ⌘Enter
+    click_at(&mut h, glyph.center());
+    h.run_steps(3);
+    typ(&mut h, "!");
+    save_card(&mut h);
+    assert_eq!(text(&h), "Note {==this==}{>>check **this** `x`!<<} end.\n");
     assert!(!h.state_mut().viewer().unwrap().popover_open());
 }
 
@@ -1380,4 +1436,194 @@ fn unindenting_a_code_line_with_a_comment_shows_the_gutter_after_the_idle_rescan
     assert_eq!(h.state_mut().viewer().unwrap().comment_scans().0, 2);
     h.run_steps(3);
     assert!(comments(&mut h).iter().all(|c| c.card.is_some()), "margin cards");
+}
+
+// ---------------------------------------------------------------- editing in the card (#87)
+
+/// The card keeps the author prefix, writes one undo step, and leaves document shortcuts
+/// alone while its field has the focus.
+#[test]
+fn card_edit_keeps_the_author_and_is_one_undo_step() {
+    let src = "Note {>>@ai: old text<<} end.\n";
+    let (mut h, _p) = open_roomy("card-author", src);
+    open_card(&mut h, 5);
+    assert_eq!(
+        edited(&mut h),
+        Some((5, "old text".into())),
+        "the author is not in the field"
+    );
+    // ⌘B is not the document's while the field has the focus
+    h.key_press_modifiers(cmd(), Key::B);
+    h.run_steps(2);
+    assert_eq!(text(&h), src);
+    // a click inside the card being edited stays in the field
+    let r = comments(&mut h)[0].card.expect("the card");
+    click_at(&mut h, r.center());
+    h.run_steps(2);
+    assert_eq!(edited(&mut h).map(|e| e.0), Some(5));
+    h.key_press(Key::End);
+    for _ in 0.."old text".len() {
+        h.key_press(Key::Backspace);
+    }
+    typ(&mut h, "new");
+    save_card(&mut h);
+    assert_eq!(text(&h), "Note {>>@ai: new<<} end.\n");
+    undo(&mut h);
+    assert_eq!(text(&h), src, "one undo step");
+    // saving an unchanged text writes nothing
+    open_card(&mut h, 5);
+    save_card(&mut h);
+    assert_eq!(edited(&mut h), None);
+    assert_eq!(text(&h), src);
+    assert!(
+        h.state_mut().viewer().unwrap().ed.session.history().can_redo(),
+        "no new step"
+    );
+}
+
+/// An emptied comment goes, with its highlight (the highlighted text stays).
+#[test]
+fn emptied_card_removes_the_comment_and_its_highlight() {
+    let (mut h, _p) = open_roomy("card-empty", "A {==b==}{>>c<<} d.\n");
+    open_card(&mut h, 9);
+    h.key_press(Key::Backspace);
+    save_card(&mut h);
+    assert_eq!(text(&h), "A b d.\n");
+    undo(&mut h);
+    assert_eq!(text(&h), "A {==b==}{>>c<<} d.\n");
+}
+
+/// A new comment cancelled (Esc) or saved empty leaves no trace, not even an undo step;
+/// Add Comment from the menu opens the card too.
+#[test]
+fn new_comment_cancelled_or_left_empty_leaves_no_trace() {
+    let src = "The quick fox.\n";
+    let (mut h, _p) = open_roomy("card-new", src);
+    select(&mut h, 4, 9);
+    h.key_press_modifiers(add_comment_chord(), Key::M);
+    h.run_steps(3);
+    assert_eq!(text(&h), "The {==quick==}{>><<} fox.\n");
+    typ(&mut h, "x");
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert_eq!(text(&h), src);
+    let can = |h: &mut H| {
+        let s = &h.state_mut().viewer().unwrap().ed.session;
+        (s.history().can_undo(), s.history().can_redo())
+    };
+    assert_eq!(can(&mut h), (false, false));
+    // from the menu, saved without text
+    select(&mut h, 4, 9);
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("review.addComment"));
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), Some((15, String::new())));
+    save_card(&mut h);
+    assert_eq!(text(&h), src);
+    assert_eq!(can(&mut h), (false, false));
+}
+
+/// Comments in quotes and list items get line breaks with the continuation prefix; in a
+/// heading Enter saves (its comment is one line).
+#[test]
+fn card_edit_in_headings_lists_and_quotes() {
+    let src = "# Title{>>h<<}\n\n> quoted {>>q<<} text\n\n- item {>>l<<} end\n";
+    let (mut h, _p) = open_roomy("card-blocks", src);
+    let key = |s: &str, n: &str| s.find(n).unwrap();
+    // heading: Enter saves
+    open_card(&mut h, key(src, "{>>h"));
+    typ(&mut h, "x");
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), None);
+    let t = text(&h);
+    assert!(t.starts_with("# Title{>>hx<<}\n"), "{t:?}");
+    // quote: Enter is a line break
+    open_card(&mut h, key(&t, "{>>q"));
+    h.key_press(Key::Enter);
+    typ(&mut h, "two");
+    save_card(&mut h);
+    let t = text(&h);
+    assert!(t.contains("> quoted {>>q\n> two<<} text\n"), "{t:?}");
+    // list item: the item's content indent
+    open_card(&mut h, key(&t, "{>>l"));
+    h.key_press(Key::Enter);
+    typ(&mut h, "two");
+    save_card(&mut h);
+    let t = text(&h);
+    assert!(t.ends_with("- item {>>l\n  two<<} end\n"), "{t:?}");
+    // the multi-line comment opens with its lines
+    open_card(&mut h, key(&t, "{>>q"));
+    assert_eq!(edited(&mut h).unwrap().1, "q\ntwo");
+}
+
+/// Paged model (ADR 0016): a card being edited whose comment scrolls far away (its page is
+/// evicted) is saved, not lost; the comment's page coming back shows the new text.
+#[test]
+fn card_edit_is_saved_when_its_page_unloads() {
+    let mut src = String::from("Intro {==a==}{>>c<<} here.\n\n");
+    for i in 0..600 {
+        src.push_str(&format!("Paragraph {i} with some text.\n\n"));
+    }
+    let (mut h, _p) = open_roomy("card-paged", &src);
+    assert!(h.state_mut().viewer().unwrap().model().is_paged());
+    open_card(&mut h, 13);
+    typ(&mut h, " more");
+    h.state_mut().viewer().unwrap().ed.view.scroll_to_y(f64::MAX);
+    h.run_steps(5);
+    assert_eq!(edited(&mut h), None);
+    assert!(text(&h).starts_with("Intro {==a==}{>>c more<<} here.\n"));
+    h.state_mut().viewer().unwrap().ed.view.scroll_to_y(0.0);
+    h.run_steps(5);
+    let cs = comments(&mut h);
+    assert_eq!(&*cs[0].text, "c more");
+}
+
+/// Side by Side: the rendered pane is read-only, so its cards open no editor (a click puts
+/// the caret at the end of the comment's text, where the source pane edits it); a card being
+/// edited when Side by Side is entered is saved, and so is one open when the file is saved.
+#[test]
+fn card_edit_in_side_by_side_and_on_save() {
+    use markise_ui_egui::ViewMode;
+    let src = "Note {>>c<<} end.\n";
+    let (mut h, p) = open_roomy("card-sbs", src);
+    open_card(&mut h, 5);
+    typ(&mut h, "d");
+    h.state_mut().set_view_mode(ViewMode::SideBySide);
+    h.run_steps(4);
+    assert_eq!(edited(&mut h), None);
+    assert_eq!(text(&h), "Note {>>cd<<} end.\n");
+    settle(&mut h);
+    let c = comments(&mut h).into_iter().next().expect("the comment is shown");
+    click_at(&mut h, c.card.map_or(c.glyph.center(), |r| r.center()));
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), None, "read-only: no editor");
+    assert_eq!(caret(&mut h), c.content.end);
+    // back in the rendered view: ⌘S saves the card's text too
+    h.state_mut().set_view_mode(ViewMode::Rendered);
+    h.run_steps(4);
+    settle(&mut h);
+    open_card(&mut h, 5);
+    typ(&mut h, "e");
+    assert_eq!(save_and_read(&mut h, &p), "Note {>>cde<<} end.\n");
+}
+
+/// An edit elsewhere while the card is open (as the source pane or a menu makes them) moves
+/// the comment; the card follows it.
+#[test]
+fn card_edit_follows_edits_elsewhere() {
+    let (mut h, _p) = open_roomy("card-follow", "Note {>>c<<} end.\n");
+    open_card(&mut h, 5);
+    typ(&mut h, "d");
+    h.state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .edit(|s| s.apply_external(&markise_doc::PatchSet::single_verbatim(0..0, "A "), "Edit", false))
+        .unwrap();
+    h.run_steps(2);
+    assert_eq!(edited(&mut h), Some((7, "cd".into())));
+    save_card(&mut h);
+    assert_eq!(text(&h), "A Note {>>cd<<} end.\n");
 }

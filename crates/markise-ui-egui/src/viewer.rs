@@ -12,7 +12,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use egui::{
-    Color32, CornerRadius, CursorIcon, Event, EventFilter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
+    Color32, CornerRadius, CursorIcon, Event, EventFilter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
+    pos2, vec2,
 };
 use markise_doc::{ContainerKind, DocPos, DocumentFormat, FormatDoc, Params, Selection, planners};
 use markise_engine::editor::keymap::{Chord, Keymap, Platform};
@@ -26,6 +27,7 @@ use crate::images::TextureStore;
 use crate::smooth_scroll::{self, SmoothScroll};
 use crate::text_paint::ParleyText;
 
+mod card_edit;
 mod code_tools;
 mod comment_place;
 mod comment_presence;
@@ -188,6 +190,12 @@ pub struct DocViewer {
     /// Comments of the visible items at the last frame, with their cards.
     comments: Vec<ShownComment>,
     popover: Option<Popover>,
+    /// The comment whose text is being edited in its card (issue #87).
+    card_edit: Option<card_edit::CardEdit>,
+    /// The bubble popover editor's size at its last frame (placement).
+    card_edit_size: Option<Vec2>,
+    /// The surface accepts edits (the last `show`).
+    editable: bool,
     /// Debounced "the document has comments" (the comment gutter, issue #91).
     comment_presence: comment_presence::CommentPresence,
     /// The comment gutter was reserved at the last frame.
@@ -247,6 +255,9 @@ impl DocViewer {
             comment_display: Default::default(),
             comments: Vec::new(),
             popover: None,
+            card_edit: None,
+            card_edit_size: None,
+            editable: false,
             comment_presence: Default::default(),
             gutter: false,
             code: Default::default(),
@@ -448,10 +459,15 @@ impl DocViewer {
                 "available once the whole file has loaded",
             ));
         }
+        // an open card edit is saved before another command acts on the document
+        self.commit_card_edit();
         let images = markise_layout::block::NoImages;
         let r = with_shaper(ctx, parley, |sh| self.ed.execute(id, params, sh, &images, 600.0));
         self.ed.refresh_focus();
         self.blink_from = ctx.input(|i| i.time);
+        if r.is_ok() && id == "review.addComment" {
+            self.after_add_comment();
+        }
         r
     }
 
@@ -467,6 +483,11 @@ impl DocViewer {
         editable: bool,
     ) -> ViewerOutput {
         let mut out = ViewerOutput::default();
+        self.editable = editable;
+        if !editable {
+            // a read-only surface (Side by Side's rendered pane) edits no comment
+            self.commit_card_edit();
+        }
         let rect = ui.available_rect_before_wrap();
         let id = ui.scope_id().with("markise-viewer");
         let page_rect = Rect::from_min_max(rect.min, pos2(rect.right() - SCROLLBAR_W, rect.bottom()));
@@ -522,7 +543,11 @@ impl DocViewer {
         self.ed.view.set_params(col_w, theme, ppp);
         let vh = rect.height();
 
-        if resp.clicked() || resp.drag_started() || std::mem::take(&mut self.refocus) {
+        // (a click on a comment's bubble or card opens its card editor, which takes the focus)
+        let press_on_comment = ui
+            .input(|i| i.pointer.press_origin())
+            .is_some_and(|p| self.comment_at(p).is_some() || self.on_edited_card(p));
+        if ((resp.clicked() || resp.drag_started()) && !press_on_comment) || std::mem::take(&mut self.refocus) {
             resp.request_focus();
         }
         let focused = resp.has_focus();
@@ -666,8 +691,13 @@ impl DocViewer {
                 out.edited = true;
             }
         }
-        // a press on a comment's bubble or card opens the comment for editing (ADR 0012)
-        let comment_press = if pressed && task.is_none() {
+        // a press on a comment's bubble or card opens the comment for editing in its card
+        // (issue #87); a press inside the card being edited is the field's
+        let on_edited = pressed
+            && ui
+                .input(|i| i.pointer.interact_pos())
+                .is_some_and(|p| self.on_edited_card(p));
+        let comment_press = if pressed && task.is_none() && !on_edited {
             ui.input(|i| i.pointer.interact_pos()).and_then(|p| self.comment_at(p))
         } else {
             None
@@ -680,6 +710,7 @@ impl DocViewer {
         if pressed
             && task.is_none()
             && comment_press.is_none()
+            && !on_edited
             && let Some(p) = ui.input(|i| i.pointer.interact_pos())
             && !self.on_toggle_or_link(p, rect.top(), modifiers)
         {
@@ -819,6 +850,7 @@ impl DocViewer {
         out.painted = visible.len();
         out.laid_out = self.ed.view.laid_out.len();
         self.last_visible = visible.iter().map(|v| (self.item_key(v.idx), v.y)).collect();
+        self.track_card_edit();
         self.ed.clear_recent_edits();
         self.last_left = left;
         self.last_top = rect.top();
@@ -1144,13 +1176,19 @@ impl DocViewer {
             .position(|c| (!c.revealed && c.glyph.expand(2.0).contains(p)) || c.card.is_some_and(|r| r.contains(p)))
     }
 
-    /// Puts the caret at the end of comment `i`'s text (its source is then revealed for
-    /// editing); `pin`: its popover stays open.
+    /// Opens comment `i` for editing in its card (issue #87; the caret goes after it);
+    /// `pin`: its popover stays open. On a read-only surface the caret goes after the comment.
     fn open_comment(&mut self, i: usize, pin: bool) {
         let Some(c) = self.comments.get(i).cloned() else { return };
-        self.ed.set_selection(Selection::caret(c.content.end));
-        self.ed.refresh_focus();
-        self.refocus = true;
+        if self.editable {
+            self.start_card_edit(c.source.start, Some(&c.text), false);
+        } else {
+            // read-only (Side by Side): the caret goes to the end of its text, where the
+            // source pane shows it for editing
+            self.ed.set_selection(Selection::caret(c.content.end));
+            self.ed.refresh_focus();
+            self.refocus = true;
+        }
         if pin {
             self.popover = Some(Popover {
                 key: c.source.start,
@@ -1204,6 +1242,13 @@ impl DocViewer {
         let look = CardLook::new(theme, &ctx);
         let painter = ui.painter_at(vis);
         let mut clicked = None;
+        // the card editor's keys come out of the input before anything reads them (issue #87)
+        if let Some(f) = self.card_edit_keys(&ctx) {
+            self.finish_card_edit(f, true);
+            ctx.request_repaint();
+        }
+        let mut finish = None;
+        let mut edited_drawn = false;
         if let Some((x, w)) = slot {
             self.popover = None;
             let mut next_y = rect.top();
@@ -1214,8 +1259,18 @@ impl DocViewer {
                 if y > vis.bottom() {
                     break;
                 }
-                let galley = look.galley(&ctx, &c.text, w);
-                let card = Rect::from_min_size(pos2(x, y), look.size(&galley, w));
+                let editing = self.editing(c.source.start);
+                let card = if editing {
+                    let (card, f) = self.card_editor(ui, &look, pos2(x, y), w, vis);
+                    edited_drawn = true;
+                    finish = finish.or(f);
+                    card
+                } else {
+                    let galley = look.galley(&ctx, &c.text, w);
+                    let card = Rect::from_min_size(pos2(x, y), look.size(&galley, w));
+                    look.paint(&painter, card, galley);
+                    card
+                };
                 next_y = card.bottom() + 6.0;
                 // the connector from the bubble's line to its card, in the margin only (it never
                 // crosses text), starting with a dot at the column edge
@@ -1224,22 +1279,30 @@ impl DocViewer {
                 let line = Stroke::new(1.0, look.accent.gamma_multiply(0.5));
                 painter.circle_filled(from, 2.0, look.accent.gamma_multiply(0.7));
                 painter.line_segment([from, to], line);
-                look.paint(&painter, card, galley);
-                let r = ui.interact(
-                    card,
-                    ui.scope_id().with(("markise-comment-card", c.source.start)),
-                    Sense::click(),
-                );
-                let r = r.on_hover_cursor(CursorIcon::PointingHand);
-                if r.clicked() {
-                    clicked = Some(i);
+                if !editing {
+                    let r = ui.interact(
+                        card,
+                        ui.scope_id().with(("markise-comment-card", c.source.start)),
+                        Sense::click(),
+                    );
+                    let r = r.on_hover_cursor(CursorIcon::PointingHand);
+                    if r.clicked() {
+                        clicked = Some(i);
+                    }
                 }
                 c.card = Some(card);
             }
         } else {
-            // bubbles: a popover over the hovered (after a short rest) or pinned bubble
+            // bubbles: a popover over the hovered (after a short rest) or pinned bubble; the
+            // comment being edited keeps its popover open
             let pointer = ctx.input(|i| i.pointer.hover_pos());
-            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if let Some(e) = &self.card_edit {
+                self.popover = Some(Popover {
+                    key: e.key,
+                    since: 0.0,
+                    pinned: true,
+                });
+            } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.popover = None;
             }
             let over_card = |p: Pos2| {
@@ -1254,6 +1317,7 @@ impl DocViewer {
                     .map(|c| c.source.start)
             });
             match (hovered, self.popover) {
+                _ if self.card_edit.is_some() => {}
                 (Some(k), Some(pop)) if pop.key == k => {}
                 (Some(k), Some(pop)) if pop.pinned && pop.key != k => {
                     self.popover = Some(Popover {
@@ -1279,29 +1343,55 @@ impl DocViewer {
                 if pop.pinned || wait <= 0.0 {
                     let c = &shown[i];
                     let w = comment_place::popover_width(vis);
-                    let galley = look.galley(&ctx, &c.text, w);
-                    let size = look.size(&galley, w);
-                    // below the bubble, flipped left / up near the visible area's edges
-                    let at = comment_place::popover_pos(c.glyph, size, vis);
-                    let area = egui::Area::new(egui::Id::unique(("markise-comment-popover", pop.key)))
-                        .order(egui::Order::Foreground)
-                        .constrain_to(vis)
-                        .fixed_pos(at)
-                        .show(&ctx, |ui| {
-                            let (r, resp) = ui.allocate_exact_size(size, Sense::click());
-                            look.paint(ui.painter(), r, galley);
-                            resp.on_hover_cursor(CursorIcon::PointingHand)
-                        });
-                    if area.inner.clicked() {
-                        clicked = Some(i);
+                    let editing = self.editing(c.source.start);
+                    if editing {
+                        // the editor's height is known only once drawn: placed with the size
+                        // of its last frame (first frame: one line)
+                        let est = self.card_edit_size.unwrap_or(vec2(w, CARD_ICON + 2.0 * CARD_PAD + 8.0));
+                        let at = comment_place::popover_pos(c.glyph, est, vis);
+                        let area = egui::Area::new(egui::Id::unique(("markise-comment-popover-edit", pop.key)))
+                            .order(egui::Order::Foreground)
+                            .constrain_to(vis)
+                            .fixed_pos(at)
+                            .show(&ctx, |ui| self.card_editor(ui, &look, ui.max_rect().min, w, vis));
+                        let (card, f) = area.inner;
+                        self.card_edit_size = Some(card.size());
+                        edited_drawn = true;
+                        finish = finish.or(f);
+                        shown[i].card = Some(card);
+                    } else {
+                        let galley = look.galley(&ctx, &c.text, w);
+                        let size = look.size(&galley, w);
+                        // below the bubble, flipped left / up near the visible area's edges
+                        let at = comment_place::popover_pos(c.glyph, size, vis);
+                        let area = egui::Area::new(egui::Id::unique(("markise-comment-popover", pop.key)))
+                            .order(egui::Order::Foreground)
+                            .constrain_to(vis)
+                            .fixed_pos(at)
+                            .show(&ctx, |ui| {
+                                let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+                                look.paint(ui.painter(), r, galley);
+                                resp.on_hover_cursor(CursorIcon::PointingHand)
+                            });
+                        if area.inner.clicked() {
+                            clicked = Some(i);
+                        }
+                        shown[i].card = Some(area.response.rect);
                     }
-                    shown[i].card = Some(area.response.rect);
                 } else {
                     ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait.max(0.01)));
                 }
             }
         }
         self.comments = shown;
+        if let Some(f) = finish {
+            // the field lost the focus to a click elsewhere: that click placed its own caret
+            self.finish_card_edit(f, false);
+            ctx.request_repaint();
+        } else if self.card_edit.is_some() && !edited_drawn {
+            self.card_edit_unseen();
+            ctx.request_repaint();
+        }
         if let Some(i) = clicked {
             self.open_comment(i, !use_margin);
             ctx.request_repaint();
@@ -1660,6 +1750,10 @@ impl DocViewer {
         let r = self.ed.execute(id, params, sh, images, vh);
         // each command sees the reveal state of the previous one's caret
         self.ed.refresh_focus();
+        if r.is_ok() && id == "review.addComment" {
+            // the new comment is written in its card (issue #87)
+            self.after_add_comment();
+        }
         r.is_ok() || matches!(r, Err(markise_engine::editor::command::CommandError::Disabled(_)))
     }
 }
@@ -1747,13 +1841,29 @@ impl CardLook {
     }
 
     fn paint(&self, p: &egui::Painter, r: Rect, galley: Arc<egui::Galley>) {
-        p.rect(
+        p.add(self.background(r, false));
+        self.paint_icon(p, r);
+        p.galley(r.min + vec2(CARD_PAD + CARD_ICON, CARD_PAD), galley, self.text);
+    }
+
+    /// The card's rounded background; `editing`: a stronger border (its text is a field).
+    fn background(&self, r: Rect, editing: bool) -> Shape {
+        let border = if editing {
+            Stroke::new(1.5, self.accent)
+        } else {
+            Stroke::new(1.0, self.accent.gamma_multiply(0.35))
+        };
+        Shape::Rect(egui::epaint::RectShape::new(
             r,
             CornerRadius::same(6),
             self.fill,
-            Stroke::new(1.0, self.accent.gamma_multiply(0.35)),
+            border,
             StrokeKind::Inside,
-        );
+        ))
+    }
+
+    /// The small speech bubble in the card's top left corner.
+    fn paint_icon(&self, p: &egui::Painter, r: Rect) {
         // a small speech bubble
         let o = r.min + vec2(CARD_PAD, CARD_PAD + 1.0);
         let b = Rect::from_min_size(o, vec2(12.0, 9.0));
@@ -1767,7 +1877,6 @@ impl CardLook {
             [b.left_bottom() + vec2(2.5, 3.5), b.left_bottom() + vec2(6.0, 0.0)],
             stroke,
         );
-        p.galley(r.min + vec2(CARD_PAD + CARD_ICON, CARD_PAD), galley, self.text);
     }
 }
 

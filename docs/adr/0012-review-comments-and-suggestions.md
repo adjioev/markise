@@ -65,13 +65,14 @@ also has `~>` as its middle marker). `markise_doc::review` finds marks through t
 (`all_marks`, `marks_near`, `mark_at`); a document without marks costs one byte scan for the
 openers, and only leaves holding an opener are parsed. Planner ids `review.addComment`,
 `review.accept`, `review.reject`, `review.acceptAll`, `review.rejectAll`,
-`review.deleteComment`, `review.cleanCopy`.
+`review.deleteComment`, `review.editComment` (planner only: the card editor), `review.cleanCopy`.
 
 ### 3. Commands (`markise-md` planners; one patch set each = one undo step)
 
 - **Add Comment** (⌥⌘M / Ctrl+Alt+M, Edit → Comments & Suggestions, the document's context
-  menu): a selection becomes `{==selection==}{>><<}`, a caret gets `{>><<}`; the caret goes into
-  the comment, which is revealed as source, so the user types the comment in place. Selection
+  menu): a selection becomes `{==selection==}{>><<}`, a caret gets `{>><<}`. In the rendered
+  view the new comment then opens in its card for its text (issue #87, §4 "Editing in the
+  card"); in Source mode the caret goes into the comment and the user types it in place. Selection
   ends that cut through a styled span are widened to the whole span; selections over several
   blocks, inside code or math, or touching an existing mark are refused. The formatting
   toolbar has a Comment button (speech bubble) for the same command, shown only while
@@ -153,8 +154,28 @@ Show comments, and a switch in the comments panel header):
   (same look) that stays while the pointer is on the glyph or the card and closes when it
   leaves. The popover opens below the glyph and flips left or up near the visible area's
   edges, so it always stays on screen.
-- A click on the glyph or the card puts the caret at the end of the comment's text (its source
-  is revealed for editing); in bubbles mode the popover stays pinned until Esc.
+- A click on the glyph or the card opens the comment's text for editing in the card (below); on
+  a read-only surface (Side by Side's rendered pane) it puts the caret at the end of the
+  comment's text, where the source pane shows it. In bubbles mode the popover stays pinned
+  while the comment is edited (or until Esc).
+- **Editing in the card** (issue #87, Google Docs style): the card's text becomes a
+  multi-line field with the text as written (the `@name:` author shown above it, written back
+  unchanged); the document caret waits after the comment, so its source is never revealed.
+  ⌘Enter / Ctrl+Enter saves, a click anywhere outside the field saves, Esc cancels; Enter is a
+  line break in a paragraph's comment and saves in a heading's or table row's (one-line)
+  comment. Saving runs the `review.editComment` planner as one undo step ("Edit Comment"):
+  lines are trimmed, blank lines dropped (no blank line inside a mark), line breaks get the
+  paragraph's continuation prefix as Enter inside a comment does, one-line blocks and lines
+  that would start block syntax are joined with spaces, a `<<}` in the text is written `<< }`
+  (CriticMarkup has no escapes); an unchanged text writes nothing. An emptied comment is
+  removed with its highlight. A comment Add Comment has just created is folded into Add
+  Comment's undo step (one undo removes it with its text); cancelled or saved empty, it leaves
+  no trace (no undo step). While the field has the focus the document's commands are not
+  available in the menus (their shortcuts do not act behind the field); undo, redo and select
+  all act in the field. The edit is saved before a save, closing, a view-mode switch or another
+  command on the document, and when its card stops being drawn (scrolled far away, its page
+  evicted in a paged model, ADR 0016); the comment is followed through edits made meanwhile
+  (Side by Side, menus) by source position and the edit is dropped only if the comment is gone.
 - Only the visible items' comments are looked at and only shown cards are shaped (layout
   reports glyph positions per item, `BlockLayout::comments`).
 

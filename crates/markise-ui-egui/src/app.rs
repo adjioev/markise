@@ -1642,6 +1642,8 @@ impl MarkiseApp {
     // ------------------------------------------------------------------ saving
 
     fn start_save(&mut self, req: SaveRequest) {
+        // a comment being written in its card is part of what is saved (issue #87)
+        self.commit_card_edit();
         // progressive open (issue #126): the session holds only the first part of the file;
         // the save runs once the whole document is in (status bar: "saving when done")
         let req = match self.defer_save(req) {
@@ -1710,6 +1712,14 @@ impl MarkiseApp {
             target: req.target,
             path,
         });
+    }
+
+    /// Saves a comment being edited in its card (issue #87) before the document is saved,
+    /// closed or shown in another view mode, where the card is not drawn.
+    fn commit_card_edit(&mut self) {
+        if let Some(d) = self.doc.as_mut() {
+            d.viewer.commit_card_edit();
+        }
     }
 
     /// Saves the document (Cmd/Ctrl+S).
@@ -1857,6 +1867,7 @@ impl MarkiseApp {
     /// The window is about to close; returns `true` if it may (no unsaved edits). Otherwise
     /// the Save / Discard / Cancel question is shown.
     pub fn request_close(&mut self) -> bool {
+        self.commit_card_edit();
         if let Some(d) = &mut self.doc {
             d.sync();
         }
@@ -1879,6 +1890,7 @@ impl MarkiseApp {
     /// Toggles source-code mode, mapping the viewport middle and the caret in both directions
     /// (spec 02 §12.1). Full Source mode keeps its own undo history (ADR 0006 §4.3).
     pub fn toggle_source(&mut self) {
+        self.commit_card_edit();
         if self.side_by_side {
             // ⌘/ from Side by Side → Source, full width (spec 04 §3.3)
             self.set_view_mode(ViewMode::Source);
@@ -1921,6 +1933,7 @@ impl MarkiseApp {
     /// ⌃⌘/ (spec 04 §3.3): Rendered or Source → Side by Side, remembering that mode; again →
     /// back to the remembered mode.
     pub fn toggle_side_by_side(&mut self) {
+        self.commit_card_edit();
         if self.side_by_side {
             let back = if self.sbs_return_source {
                 ViewMode::Source
@@ -1940,6 +1953,7 @@ impl MarkiseApp {
         if self.doc.is_none() {
             return;
         }
+        self.commit_card_edit();
         match m {
             ViewMode::SideBySide => {
                 if !self.side_by_side {
