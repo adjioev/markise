@@ -1674,6 +1674,8 @@ impl Document {
                     Some(Selection::caret(caret)),
                 ));
             }
+            // the end of a table's last row: the virtual paragraph after it (issue #166)
+            LeafKind::Table { .. } => return self.table_enter(at).map_or(nothing, Ok),
             _ => return nothing,
         }
         // a caret inside the block's own syntax (ATX marker / closing sequence, setext
@@ -1814,6 +1816,9 @@ impl Document {
                         | LeafKind::Heading { .. }
                         | LeafKind::CodeBlock { .. }
                         | LeafKind::ThematicBreak
+                        | LeafKind::Table { .. }
+                        | LeafKind::Math
+                        | LeafKind::RawBlock
                 )
             {
                 return Ok(Plan::single(
@@ -1964,12 +1969,32 @@ impl Document {
             }
         } else {
             match self.owner_leaf_view(gap, markise_doc::Affinity::Upstream) {
-                Some(l) => self.line_prefix(&l, gap),
+                Some(l) if matches!(l.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) => {
+                    self.line_prefix(&l, gap)
+                }
+                // other blocks (code, tables…): the containers' prefix of the block's first
+                // line; indented code's own 4 columns are not a container's (issue #166)
+                Some(l) => {
+                    let mut prefix =
+                        crate::edit::blocks::cont_prefix(text, line_start(text, l.span.start), l.span.start);
+                    if matches!(l.kind, LeafKind::CodeBlock { .. }) && self.code_fence(l.span.start).is_none() {
+                        let keep = prefix.trim_end_matches([' ', '\t']).len();
+                        let ws = prefix.len() - keep;
+                        prefix.truncate(keep + ws.saturating_sub(4));
+                    }
+                    prefix
+                }
                 None => String::new(),
             }
         };
         let blank = prefix.trim_end();
-        let ins = format!("{eol}{blank}{eol}{prefix}{typed}");
+        // a block whose span ends with its line (front matter): the gap is a line start
+        let at_line_start = gap > 0 && text.as_bytes()[gap - 1] == b'\n';
+        let mut ins = if at_line_start {
+            format!("{blank}{eol}{prefix}{typed}")
+        } else {
+            format!("{eol}{blank}{eol}{prefix}{typed}")
+        };
         // a separator of two blank lines after the gap (C45 list split) gives one of them
         // to the new paragraph: `- a⏎⏎⏎- c` → `- a⏎⏎x⏎⏎- c`
         let triple = format!("{eol}{blank}{eol}{blank}{eol}");
@@ -1988,6 +2013,23 @@ impl Document {
             (gap, end)
         };
         let caret = gap + ins.len();
+        // the next block starts on the very next line: a blank line ends the new paragraph
+        // before it, so neither absorbs the other (a table row, lazy continuation, a setext
+        // underline; issue #166)
+        let (le, next) = line_end(text, end);
+        let blank_line = |ls: usize| {
+            let (e, _) = line_end(text, ls);
+            text[ls..e].bytes().all(|b| matches!(b, b'>' | b' ' | b'\t'))
+        };
+        if at_line_start && !blank_line(end) {
+            // the next block starts on the gap's own line
+            ins.push_str(eol);
+            ins.push_str(blank);
+            ins.push_str(eol);
+        } else if text[end..le].trim().is_empty() && next > le && next < text.len() && !blank_line(next) {
+            ins.push_str(eol);
+            ins.push_str(blank);
+        }
         TypingPlan {
             step: PlanStep::patches(PatchSet::single_verbatim(gap..end, ins)),
             selection_after: Some(Selection::caret(caret)),
@@ -2284,6 +2326,10 @@ impl EditBehavior for Document {
             p
         };
         Some(PatchSet::single_verbatim(from + at..from + at, "\\"))
+    }
+
+    fn gap_virt(&self, end: usize) -> Option<u16> {
+        self.gap_slot(end)
     }
 
     fn continuation_prefix(&self, at: usize) -> String {

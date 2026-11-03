@@ -486,7 +486,9 @@ const HEADINGS: &[(&str, &[Key], usize, &str, &str)] = &[
         &[Key::End],
         7,
         "# Title x\nPara\n",
-        "# Title\n\nx\nPara\n",
+        // the typed paragraph stays apart from the next one (issue #166: it used to be
+        // absorbed as `x⏎Para`)
+        "# Title\n\nx\n\nPara\n",
     ),
     (
         "## Title\n\nPara\n",
@@ -542,7 +544,7 @@ const HEADINGS: &[(&str, &[Key], usize, &str, &str)] = &[
         &[Key::End],
         5,
         "Title x\n-----\nPara\n",
-        "Title\n-----\n\nx\nPara\n",
+        "Title\n-----\n\nx\n\nPara\n",
     ),
     (
         "Para\n\n# Title\n",

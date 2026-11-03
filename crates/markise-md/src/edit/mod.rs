@@ -3,6 +3,7 @@
 //! is pure (document in, [`markise_doc::Plan`] out); the engine applies and records it.
 
 pub(crate) mod blocks;
+pub(crate) mod gap;
 pub(crate) mod inline_fmt;
 pub(crate) mod review;
 pub(crate) mod rules;

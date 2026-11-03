@@ -1610,6 +1610,48 @@ numbered M2d-n (proposed for `99-open-questions.md`).
   special blocks with both Side by Side panes editable; later: IME preedit display, multiple
   carets, folding, a horizontal scrollbar.
 
+## 17. Implementation notes: the caret between adjacent blocks (issue #166, 2026-11-03)
+
+The virtual empty paragraph (§2.2) also stands in the **gap between two blocks** where no
+empty line could be reached otherwise (two tables, code, math, diagrams, image-only paragraphs,
+rules, HTML blocks, front matter, the end of a quote or list before another block). It is the
+same slot as before — `DocPos { offset: end of the first leaf, virt: 1 + levels }`, drawn by the
+first block's layout (`ItemFocus::virtual_after` / `virtual_exit`) — so typing, undo, Backspace
+and Enter on it behave as on any virtual paragraph, and nothing is written until a character is
+typed.
+
+- **Which gaps** is the format's decision, asked through the neutral
+  `EditBehavior::gap_virt(end) -> Option<u16>` (default `None`). Markdown
+  (`markise-md/src/edit/gap.rs`): the gap after the leaf ending at `end` and before the next
+  shown block (link reference definitions skipped); the paragraph goes into the innermost
+  container both share, leaving the first block's other containers (`levels`). No slot between
+  two items of one list, before a block without a text leaf at its edge, after the last block
+  (C53's slot), or where a paragraph or heading stands next to the gap at its level (Enter at
+  its end or typing at its start reaches that line already; a paragraph of only images counts
+  as a block).
+- **Caret geometry** (`markise-layout/src/caret.rs`, format-neutral): ↓ from the last row of an
+  item and ↑ from the first row of the next one stop on the slot (`Geometry::gap_after`), as do
+  → at an item's end and ← at the next one's start (character moves only; Backspace / Delete
+  keep their old stops past it). A click in the gap above an item's content
+  (`BlockLayout::gap`) hits the slot after the shown item before it. Items without stops
+  (rules), hidden items (definitions, HTML comments) and placeholders of a paged model are
+  passed over; a slot follows the last segment of a segmented block. A virtual position the
+  format offers counts as a caret stop before the focus shows it (the press of a click freezes
+  the focus).
+- **Enter** at the end of a table's last row (or the header of a table without body rows) goes
+  to the slot after the table; elsewhere in a table Enter still does nothing and Cmd+Enter adds a
+  row. Enter at the start of a paragraph after a table, math or HTML opens the slot above it, as
+  after code and rules.
+- **Typing** (`Document::typing_virtual`): the paragraph gets the blank line before it as
+  before and now also one after it when the next block starts on the very next line (a table
+  would take it as a row, a rule as a setext underline, indented code as lazy text; after `# Title⏎Para`, Enter and `x` used to give
+  `x⏎Para`, one paragraph, and now give two). After
+  indented code the code's own four columns are not repeated as a container prefix.
+- Tests: `markise-engine` `block_gaps` (every block pair both ways, quote/list ends, no-slot
+  cases, horizontal moves, Enter in tables, page boundaries against a full model, undo),
+  `markise-ui-egui` `block_gaps` (click between tables and between rules, arrows, file
+  byte-identical when leaving, saved file after typing, Side by Side).
+
 ## Consequences
 
 - One new L1 crate (`markise-doc`) and one Testkit crate (`markise-testfmt`); new third-party

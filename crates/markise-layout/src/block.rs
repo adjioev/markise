@@ -231,6 +231,9 @@ pub struct CommentHit {
 pub struct BlockLayout {
     /// Total height including the gap above the item.
     pub height: f32,
+    /// The gap above the item's content (part of [`BlockLayout::height`]): a click there is
+    /// between this item and the one before it (issue #166).
+    pub gap: f32,
     pub prims: Vec<Prim>,
     pub links: Vec<LinkHit>,
     /// Clickable header of a collapsible block (front matter).
@@ -2661,6 +2664,7 @@ pub fn layout_item(
     }
     BlockLayout {
         height,
+        gap,
         prims,
         links,
         toggle,

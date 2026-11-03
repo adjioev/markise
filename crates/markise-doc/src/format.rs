@@ -502,6 +502,16 @@ pub trait EditBehavior {
         let _ = slot;
         None
     }
+    /// The editor-only empty paragraph in the gap after the leaf block ending at `end`
+    /// (ADR 0006 §2.2, issue #166): `Some(virt)` when the format offers a caret position
+    /// `DocPos { offset: end, virt }` between that block and the next one — the caret could
+    /// not reach an empty line there otherwise (no paragraph or heading stands next to the
+    /// gap at its level, e.g. between two tables) — else `None`. Asking changes nothing;
+    /// typing there materialises a paragraph like on any virtual paragraph. Default: none.
+    fn gap_virt(&self, end: usize) -> Option<u16> {
+        let _ = end;
+        None
+    }
     /// Container prefix to repeat on a new line at `at` (e.g. `> `).
     fn continuation_prefix(&self, at: usize) -> String {
         let _ = at;
