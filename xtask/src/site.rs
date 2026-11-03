@@ -25,7 +25,9 @@ usage: cargo xtask site [--out <dir>]
 Builds the website: site/ plus the user guide docs/user/*.md rendered to docs/*.html,
 then checks every local link, image and #fragment (fails on any broken one).
 
-  --out   output folder (default: target/site/); it is replaced
+  --out   output folder (default: target/site/); it is replaced, so it must be under the
+          workspace's target/ folder, or outside the workspace and either new or a folder
+          an earlier run built (it holds the .markise-site marker)
 ";
 
 /// The guide in navigation order: file stem in `docs/user/`, navigation label. Every published
@@ -52,6 +54,10 @@ const INTERNAL: &[&str] = &["CLAIMS.md"];
 
 const REPO_URL: &str = "https://github.com/adjioev/markise";
 
+/// Written into every built site: an existing folder outside `target/` is only replaced when
+/// it carries this marker (an earlier build), never an arbitrary folder.
+const MARKER: &str = ".markise-site";
+
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let mut out = root.join("target").join("site");
     let mut it = args.iter();
@@ -70,6 +76,10 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             other => return Err(format!("unexpected argument `{other}`\n\n{USAGE}")),
         }
     }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let out = check_out_dir(root, home.as_deref(), &out)?;
     build(root, &out)?;
     let broken = check_links(&out)?;
     if !broken.is_empty() {
@@ -83,11 +93,87 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `p` made absolute with symlinks resolved: `.`/`..` are applied lexically, then the longest
+/// existing ancestor is canonicalized and the rest appended.
+fn resolve(p: &Path) -> Result<PathBuf, String> {
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("current dir: {e}"))?
+            .join(p)
+    };
+    let mut lexical = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                lexical.pop();
+            }
+            c => lexical.push(c),
+        }
+    }
+    let mut existing = lexical;
+    let mut rest = Vec::new();
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .ok_or_else(|| format!("cannot resolve {}", p.display()))?
+            .to_os_string();
+        rest.push(name);
+        if !existing.pop() {
+            return Err(format!("cannot resolve {}", p.display()));
+        }
+    }
+    let mut out = std::fs::canonicalize(&existing).map_err(|e| format!("{}: {e}", existing.display()))?;
+    for part in rest.iter().rev() {
+        out.push(part);
+    }
+    Ok(out)
+}
+
+/// The output folder, resolved, if the generator may replace it (it deletes it first):
+/// under the workspace's `target/`, or outside the workspace and either missing or marked
+/// by an earlier build ([`MARKER`]). Never the workspace, `site/`, `docs/`, the home folder or
+/// a folder that contains one of them.
+fn check_out_dir(root: &Path, home: Option<&Path>, out: &Path) -> Result<PathBuf, String> {
+    let root = resolve(root)?;
+    let out = resolve(out)?;
+    let refuse = |why: &str| Err(format!("refusing to use {} as the site output: {why}", out.display()));
+    let mut protected = vec![root.clone(), root.join("site"), root.join("docs")];
+    if let Some(h) = home {
+        protected.push(resolve(h)?);
+    }
+    for p in &protected {
+        if p.starts_with(&out) {
+            return refuse(&format!("it is or contains {}", p.display()));
+        }
+    }
+    let target = root.join("target");
+    if out.starts_with(&target) {
+        return Ok(out);
+    }
+    if out.starts_with(&root) {
+        return refuse("inside the workspace, only folders under target/ may be replaced");
+    }
+    if out.exists() && !out.join(MARKER).is_file() {
+        return refuse(&format!(
+            "the folder exists and was not built by `cargo xtask site` (no {MARKER} file)"
+        ));
+    }
+    Ok(out)
+}
+
 fn build(root: &Path, out: &Path) -> Result<(), String> {
     if out.exists() {
         std::fs::remove_dir_all(out).map_err(|e| format!("remove {}: {e}", out.display()))?;
     }
     copy_dir(&root.join("site"), out)?;
+    std::fs::write(
+        out.join(MARKER),
+        "Built by `cargo xtask site`; the folder is replaced by the next build.\n",
+    )
+    .map_err(|e| format!("{}: {e}", out.display()))?;
 
     let src = root.join("docs").join("user");
     let listed: BTreeSet<String> = PAGES.iter().map(|(s, _)| format!("{s}.md")).collect();
@@ -466,6 +552,41 @@ mod tests {
                 "index.html: gone.webp (missing file)",
             ]
         );
+    }
+
+    #[test]
+    fn output_folder_guard() {
+        let base = std::env::temp_dir().join(format!("markise-site-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("repo");
+        let home = base.join("home");
+        for d in ["site", "docs/user", "target", "src"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(&home).unwrap();
+        let other = base.join("elsewhere");
+        std::fs::create_dir_all(other.join("built")).unwrap();
+        std::fs::write(other.join("built").join(MARKER), "").unwrap();
+        std::fs::create_dir_all(other.join("photos")).unwrap();
+        let ok = |p: &Path| check_out_dir(&root, Some(&home), p).is_ok();
+
+        assert!(ok(&root.join("target/site")));
+        assert!(ok(&root.join("target/a/../site")));
+        assert!(ok(&other.join("new-folder")));
+        assert!(ok(&other.join("built")));
+        // the sources, the workspace, its parents and the home folder are never replaced
+        assert!(!ok(&root));
+        assert!(!ok(&root.join("site")));
+        assert!(!ok(&root.join("docs")));
+        assert!(!ok(&root.join("docs/user")));
+        assert!(!ok(&root.join("src")));
+        assert!(!ok(&root.join("new-out")));
+        assert!(!ok(&root.join("target/../site")));
+        assert!(!ok(&base));
+        assert!(!ok(&home));
+        // an existing folder that an earlier build did not mark
+        assert!(!ok(&other.join("photos")));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

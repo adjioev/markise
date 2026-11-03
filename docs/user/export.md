@@ -48,6 +48,10 @@ and on Windows `%LOCALAPPDATA%\Pandoc` or `C:\Program Files\Pandoc`). If Pandoc 
 the export fails with a message and a link to the Pandoc installation page. A Pandoc export is
 stopped after 120 seconds.
 
+Local images are handed to Pandoc as file paths. Remote images (`https://…`) are passed on as
+written, and Pandoc may download them while it builds the file (for example for EPUB or Word);
+that request comes from Pandoc, not from Markise.
+
 ## Limitations in the beta
 
 - **No export settings.** Each format uses its built-in options; **Preferences → Export** has no

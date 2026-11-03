@@ -1,8 +1,15 @@
 # Updates and privacy
 
 Markise works offline. Your documents, settings, drafts and logs stay on your computer. There
-is no account, no telemetry and no analytics. The only network requests the app makes are the
-update checks described here — and only when you agree to them or ask for one.
+is no account, no telemetry and no analytics. Markise itself makes only one kind of network
+request: the update checks described here, and only when you agree to them or ask for one.
+
+Two things you start yourself can reach the network through other programs:
+
+- **Links:** <kbd>Cmd</kbd>/<kbd>Ctrl</kbd>-clicking a web link opens it in your browser.
+- **Pandoc exports:** Markise passes remote image addresses (`https://…`) to Pandoc unchanged,
+  and Pandoc may download them for some formats (for example EPUB or Word). See
+  [Export](export.md#pandoc-formats).
 
 ## Automatic update checks are opt-in
 
@@ -71,5 +78,6 @@ debug mode never check unless `MARKISE_UPDATE_CHECK=1` is set.
 - **Recent files** are remembered locally unless you turn that off in **Preferences → Files &
   Images**.
 
-Remote images in your documents (`https://…`) are not downloaded, neither for display nor
-for export. Links open in your browser only when you <kbd>Cmd</kbd>/<kbd>Ctrl</kbd>-click them.
+Markise does not download remote images in your documents (`https://…`): not to show them,
+and not in its own HTML, PDF and PNG exports (HTML keeps the address as written). Pandoc
+exports are the exception described at the top of this page.
