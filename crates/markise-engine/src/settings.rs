@@ -30,7 +30,7 @@
 //! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`), `font_size` (points, `8`–`40`; omitted = automatic, matched to the body text — issue #130) — source editor display (spec 02 §12.1.1; Preferences → Source Mode) | defaults |
 //! | `keyBinding` | object: command label (menu title) or id → accelerator (`"Ctrl+Shift+K"`), `""` unbinds (spec 05 §4.7); read only, kept verbatim | none |
 //! | `images` | object: `location` (`"note_folder"`: a folder next to the note, `"root_folder"`: a folder below the vault / opened folder root, `"same_folder"`: the note's own folder; default `"note_folder"`), `folder` (the folder for the first two, default `"assets"`), `obsidian` (use an Obsidian vault's `attachmentFolderPath` when set, `true`), `relative_paths` (`true`), `copy_images` (copy dropped image files into the image folder, `true`), `copy_files` (also copy other dropped files, `false`), `paste_urls` (a pasted image URL becomes an image, `true`) — pasted and dropped images (spec 04 §7, spec 05 §4.4; Preferences → Files & Images) | defaults |
-//! | `markdown` | object: `wikilinks` (default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`), `commentDisplay` (`"margin"` cards, default, or `"bubbles"` with hover popovers) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
+//! | `markdown` | object: `wikilinks` (default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`), `commentDisplay` (`"margin"` cards, default, or `"bubbles"` with hover popovers), `commentView` (`"all"` markup, default, `"simple"`, `"final"` or `"original"`; display only, issue #88) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
 //! | `side_by_side_split` | Side by Side divider position: fraction of the editor width given to the source pane, `0.15`–`0.85` (spec 04 §3.3); omitted until the divider is moved | `0.5` |
 //! | `tutorialShown` | `true` once the welcome tutorial was opened at first launch (issue #63); omitted until then | `false` |
 //! | `updates.autoCheck` | `true` / `false`: check GitHub for a newer release at launch, at most once a day (Preferences → General; issue #70); omitted until the user answered the first-launch question — omitted means off | none |
@@ -401,6 +401,50 @@ impl CommentDisplay {
     }
 }
 
+/// How review marks are shown in the rendered view (setting `markdown.commentView`, issue #88).
+/// Display only: the text is never changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommentView {
+    /// Highlights, comment glyphs and cards, coloured suggestions.
+    #[default]
+    All,
+    /// Comment glyphs and coloured suggestions; no cards, no highlight tint.
+    Simple,
+    /// The text as if every suggestion were accepted; comments hidden (read-only).
+    Final,
+    /// The text as if every suggestion were rejected; comments hidden (read-only).
+    Original,
+}
+
+impl CommentView {
+    pub const ALL: [CommentView; 4] = [
+        CommentView::All,
+        CommentView::Simple,
+        CommentView::Final,
+        CommentView::Original,
+    ];
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommentView::All => "all",
+            CommentView::Simple => "simple",
+            CommentView::Final => "final",
+            CommentView::Original => "original",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+    /// The menu / status bar label.
+    pub fn label(self) -> &'static str {
+        match self {
+            CommentView::All => "All Markup",
+            CommentView::Simple => "Simple Markup",
+            CommentView::Final => "No Markup (Final)",
+            CommentView::Original => "Original",
+        }
+    }
+}
+
 /// Where pasted and dropped images go (spec 04 §7.3, spec 05 §4.4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ImageLocation {
@@ -518,6 +562,8 @@ pub struct MarkdownSettings {
     pub export_comments: bool,
     /// How comments are shown in the editor.
     pub comment_display: CommentDisplay,
+    /// How review marks are shown (issue #88).
+    pub comment_view: CommentView,
 }
 
 impl Default for MarkdownSettings {
@@ -527,6 +573,7 @@ impl Default for MarkdownSettings {
             critic_markup: true,
             export_comments: true,
             comment_display: CommentDisplay::Margin,
+            comment_view: CommentView::All,
         }
     }
 }
@@ -538,6 +585,7 @@ impl MarkdownSettings {
         m.insert("criticMarkup".into(), Value::from(self.critic_markup));
         m.insert("exportComments".into(), Value::from(self.export_comments));
         m.insert("commentDisplay".into(), Value::from(self.comment_display.as_str()));
+        m.insert("commentView".into(), Value::from(self.comment_view.as_str()));
         Value::Object(m)
     }
     fn from_json(v: &Value) -> Option<Self> {
@@ -558,6 +606,11 @@ impl MarkdownSettings {
                 .and_then(Value::as_str)
                 .and_then(CommentDisplay::parse)
                 .unwrap_or(d.comment_display),
+            comment_view: m
+                .get("commentView")
+                .and_then(Value::as_str)
+                .and_then(CommentView::parse)
+                .unwrap_or(d.comment_view),
         })
     }
 }
@@ -1785,6 +1838,16 @@ mod tests {
         );
         let bad = Settings::from_json(r#"{"version": 2, "markdown": {"commentDisplay": "x"}}"#).unwrap();
         assert_eq!(bad.markdown.comment_display, CommentDisplay::Margin);
+        // issue #88: the review view
+        assert_eq!(d.markdown.comment_view, CommentView::All);
+        for v in CommentView::ALL {
+            let mut s = Settings::default();
+            s.markdown.comment_view = v;
+            let back = Settings::from_json(&s.to_json()).unwrap();
+            assert_eq!(back.markdown.comment_view, v);
+        }
+        let bad = Settings::from_json(r#"{"version": 2, "markdown": {"commentView": "x"}}"#).unwrap();
+        assert_eq!(bad.markdown.comment_view, CommentView::All);
     }
 
     #[test]

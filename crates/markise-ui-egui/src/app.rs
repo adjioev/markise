@@ -2782,8 +2782,37 @@ impl MarkiseApp {
                     ));
                 }
                 self.word_count_label(ui);
+                self.comment_view_switch(ui);
             });
         });
+    }
+
+    /// The status bar's review-view switch (issue #88): the current view, a click picks
+    /// another. Shown while a document is open and CriticMarkup is on.
+    fn comment_view_switch(&mut self, ui: &mut egui::Ui) {
+        use markise_engine::settings::CommentView;
+        if self.doc.is_none() || !self.critic_markup() {
+            return;
+        }
+        let cur = self.comment_view();
+        let label = match cur {
+            CommentView::Final | CommentView::Original => format!("{} · read-only", cur.label()),
+            _ => cur.label().to_string(),
+        };
+        let mut picked = None;
+        let r = ui.menu_button(egui::RichText::new(label).weak(), |ui| {
+            for v in CommentView::ALL {
+                if ui.radio(v == cur, v.label()).clicked() {
+                    picked = Some(v);
+                    ui.close();
+                }
+            }
+        });
+        r.response
+            .on_hover_text("How comments and suggestions are shown (View → Comments)");
+        if let Some(v) = picked {
+            self.set_comment_view(v);
+        }
     }
 
     /// The status bar's word count (issue #53): click cycles words / characters / characters

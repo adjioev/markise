@@ -327,6 +327,11 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     // CriticMarkup comments and suggestions (ADR 0012; setting `markdown.criticMarkup`; shown
     // in Preferences → Markdown, like Wikilinks)
     app("view.criticMarkup", "Comments & Suggestions", &[]),
+    // View → Comments (issue #88; setting `markdown.commentView`): how review marks show
+    app("view.commentsAll", "All Markup", &[]),
+    app("view.commentsSimple", "Simple Markup", &[]),
+    app("view.commentsFinal", "No Markup (Final)", &[]),
+    app("view.commentsOriginal", "Original", &[]),
     app("file.saveCopyClean", "Save Copy Without Comments…", &[]),
     app("export.comments", "Include Comments", &[]),
     // Back / Forward between opened notes (spec 06 §2.7): ⌥⌘← / ⌥⌘→ on macOS (⌘[ / ⌘] are

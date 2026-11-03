@@ -311,6 +311,30 @@ pub struct LayoutParams<'a> {
     pub ppp: f32,
     /// Which wikilink targets exist (unresolved links are styled apart).
     pub links: &'a dyn crate::links::LinkTargets,
+    /// How review marks are shown (issue #88).
+    pub review: ReviewView,
+}
+
+/// How review marks (CriticMarkup, ADR 0012) are shown in the rendered view (issue #88). Display
+/// only: the text is never changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ReviewView {
+    /// Highlights, comment glyphs (with cards in the UI) and coloured suggestions.
+    #[default]
+    All,
+    /// Comment glyphs and coloured suggestions; no highlight tint (and no cards in the UI).
+    Simple,
+    /// The text as if every suggestion were accepted; comments and highlights hidden.
+    Final,
+    /// The text as if every suggestion were rejected; comments and highlights hidden.
+    Original,
+}
+
+impl ReviewView {
+    /// A clean preview of the text (Final, Original): the marks are not shown at all.
+    pub fn is_clean(self) -> bool {
+        matches!(self, ReviewView::Final | ReviewView::Original)
+    }
 }
 
 /// Layout input of the item holding the caret (ADR 0006 §2.4): part of that item's cache key
@@ -668,6 +692,8 @@ struct InlineBuilder<'a> {
     measure: bool,
     /// Which wikilink targets exist (`None`: all shown resolved).
     link_targets: Option<&'a dyn crate::links::LinkTargets>,
+    /// How review marks are shown (issue #88).
+    review: ReviewView,
 }
 
 impl<'a> InlineBuilder<'a> {
@@ -691,7 +717,14 @@ impl<'a> InlineBuilder<'a> {
             math_width: f32::INFINITY,
             measure: false,
             link_targets: None,
+            review: ReviewView::All,
         }
+    }
+
+    /// Shows review marks as `v` says (issue #88).
+    fn review_view(mut self, v: ReviewView) -> Self {
+        self.review = v;
+        self
     }
 
     /// Styles wikilinks by whether their target exists.
@@ -1011,6 +1044,11 @@ impl<'a> InlineBuilder<'a> {
             return;
         }
         if let InlineKind::Critic(k) = n.kind {
+            if self.review.is_clean() {
+                // Final / Original (issue #88): the text as if resolved, no marks, no reveal
+                self.critic_clean(r, n, k, st);
+                return;
+            }
             let revealed = !self.reveal.is_empty() && !n.markers.is_empty() && self.reveal.contains(&n.source);
             self.critic(r, n, k, st, revealed);
             return;
@@ -1044,6 +1082,27 @@ impl<'a> InlineBuilder<'a> {
     /// through, a substitution as both, highlights on the highlight colour, a comment as a
     /// small bubble with its text (one caret stop); the caret inside shows the raw source
     /// (spec 02 inline reveal), styled the same.
+    /// A review mark in the Final or Original view (issue #88): the text it resolves to, plain
+    /// (insertions and new text kept in Final, deletions and old text in Original; highlights
+    /// keep their text; comments vanish). Hidden source has no rendered piece (like an HTML
+    /// comment), so the caret steps over it.
+    fn critic_clean(&mut self, r: &RichInline, n: &InlineNode, k: CriticKind, st: &Style) {
+        let fin = self.review == ReviewView::Final;
+        match k {
+            CriticKind::Insert | CriticKind::New if fin => self.nodes(r, &n.children, st, false),
+            CriticKind::Delete | CriticKind::Old if !fin => self.nodes(r, &n.children, st, false),
+            CriticKind::Highlight => self.nodes(r, &n.children, st, false),
+            CriticKind::Substitute => {
+                for c in &n.children {
+                    if let InlineKind::Critic(ck) = c.kind {
+                        self.critic_clean(r, c, ck, st);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn critic(&mut self, r: &RichInline, n: &InlineNode, k: CriticKind, st: &Style, revealed: bool) {
         let rc = self.theme.review_colors();
         if revealed {
@@ -1084,6 +1143,10 @@ impl<'a> InlineBuilder<'a> {
                 if let Some(new) = n.children.get(1) {
                     self.critic(r, new, CriticKind::New, st, false);
                 }
+            }
+            CriticKind::Highlight if self.review == ReviewView::Simple && !revealed => {
+                // Simple (issue #88): no highlight tint
+                self.nodes(r, &n.children, st, false);
             }
             CriticKind::Highlight => {
                 let start = self.job.text.len();
@@ -2011,6 +2074,7 @@ pub fn layout_item(
                 let mut b = InlineBuilder::new(t, model, true)
                     .with_math(images, p.ppp, width)
                     .with_links(p.links)
+                    .review_view(p.review)
                     .reveal(&text[origin..], p.focus);
                 if quote_prefix_here
                     && item.segment.as_ref().is_none_or(BlockSegment::first)
@@ -2090,6 +2154,7 @@ pub fn layout_item(
             let mut b = InlineBuilder::new(t, model, false)
                 .with_math(images, p.ppp, width)
                 .with_links(p.links)
+                .review_view(p.review)
                 .reveal(&text[origin..], p.focus);
             let head_font = st.text_style();
             if let Some(pre) = d
@@ -2321,6 +2386,7 @@ pub fn layout_item(
                 p.ppp,
                 p.focus,
                 p.links,
+                p.review,
             );
         }
         ItemKind::Rule => {
@@ -3120,6 +3186,7 @@ fn layout_table(
     ppp: f32,
     focus: Option<&ItemFocus>,
     links: &dyn crate::links::LinkTargets,
+    review: ReviewView,
 ) -> f32 {
     let src = doc.text().get(origin..).unwrap_or("");
     let Some(table) = doc.table(origin) else {
@@ -3166,6 +3233,7 @@ fn layout_table(
                 let mut b = InlineBuilder::new(t, model, false)
                     .with_math(images, ppp, mw)
                     .with_links(links)
+                    .review_view(review)
                     .measuring(measure)
                     .reveal(src, focus);
                 b.nodes(&rich, &rich.nodes, &st, true);

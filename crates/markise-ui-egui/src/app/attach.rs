@@ -178,8 +178,10 @@ impl MarkiseApp {
         if d.viewer.ed.source.is_some() && d.source_ui.has_focus(ctx) {
             return true;
         }
+        // (not the read-only No Markup / Original preview, issue #88)
         !self.side_by_side
             && !self.source_visible
+            && !d.viewer.review_preview()
             && d.viewer.surface_id().is_some_and(|id| ctx.memory(|m| m.has_focus(id)))
     }
 
@@ -317,6 +319,13 @@ impl MarkiseApp {
             if let Some(p) = files.into_iter().find(|p| markise_engine::tree::is_markdown(p)) {
                 self.open(p);
             }
+            return;
+        }
+        if !self.source_visible && !self.side_by_side && self.doc.as_ref().is_some_and(|d| d.viewer.review_preview()) {
+            // the No Markup / Original preview is read-only (issue #88)
+            self.banner = Some(Banner::Info(
+                "The document is read-only while comments show as No Markup or Original (View → Comments).".into(),
+            ));
             return;
         }
         let pos = ctx.input(|i| i.pointer.latest_pos());

@@ -1713,3 +1713,116 @@ fn new_document_asks_about_an_open_draft() {
     assert_eq!(std::fs::read_to_string(&p).unwrap(), "Note {>>cd<<} end.\n");
     assert_eq!(text(&h), "");
 }
+
+// ---------------------------------------------------------------- review views (#88)
+
+fn set_view(h: &mut H, id: &'static str) {
+    let ctx = h.ctx.clone();
+    h.state_mut().menu_action(&ctx, &MenuAction::Command(id));
+    h.run_steps(4);
+    settle(h);
+}
+
+/// Issue #88: View → Comments switches how marks show — display only. Final and Original show
+/// the text as if every suggestion were accepted / rejected, with no comments, no gutter and
+/// a read-only document (typing, document commands and saves change nothing); Simple shows
+/// glyphs and coloured suggestions without cards (a click on a glyph still edits the comment);
+/// All brings the cards back. The file never changes, and the choice is persisted.
+#[test]
+fn comment_views_change_the_display_not_the_file() {
+    use markise_engine::settings::CommentView;
+    let dir = tmpdir("comment-views");
+    let doc = dir.join("note.md");
+    std::fs::write(&doc, REVIEWED).unwrap();
+    let cfg = dir.join("config");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 760.0))
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| app.ui(ui),
+            MarkiseApp::new(AppOptions {
+                open: vec![doc.clone()],
+                config: markise_ui_egui::ConfigDir::Dir(cfg.clone()),
+                ..common::no_watch()
+            }),
+        );
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+    h.run_steps(4);
+    settle(&mut h);
+    assert_eq!(h.state().comment_view(), CommentView::All);
+    assert!(h.state_mut().viewer().unwrap().comment_gutter());
+    assert_eq!(comments(&mut h).len(), 2);
+    let radio = |h: &H, id: &str| h.state().menu_model().item(id).unwrap().check;
+    assert_eq!(radio(&h, "view.commentsAll"), markise_ui_egui::menu::Check::Radio(true));
+
+    // No Markup (Final)
+    set_view(&mut h, "view.commentsFinal");
+    assert_eq!(h.state().comment_view(), CommentView::Final);
+    let t = visible_text(&mut h);
+    assert!(t.contains("We ship the beta on Friday."), "{t}");
+    assert!(t.contains("The team likes it."), "{t}");
+    assert!(t.contains("It was fine. Costs stay low."), "{t}");
+    assert!(comments(&mut h).is_empty());
+    assert!(!h.state_mut().viewer().unwrap().comment_gutter(), "no gutter");
+    // read-only: typing, document commands and the hover bar change nothing
+    caret_at(&mut h, 10);
+    typ(&mut h, "x");
+    h.key_press(Key::Backspace);
+    h.run_steps(2);
+    assert_eq!(text(&h), REVIEWED);
+    assert!(!h.state().menu_model().item("format.strong").unwrap().enabled);
+    assert!(!h.state().menu_model().item("review.acceptAll").unwrap().enabled);
+    let ctx = h.ctx.clone();
+    assert!(!h.state_mut().run_review(&ctx, "review.acceptAll", None));
+    assert_eq!(text(&h), REVIEWED);
+    assert!(!h.state().is_dirty());
+
+    // Original
+    set_view(&mut h, "view.commentsOriginal");
+    let t = visible_text(&mut h);
+    assert!(t.contains("We ship on Friday."), "{t}");
+    assert!(t.contains("The team really likes it."), "{t}");
+    assert!(t.contains("It is fine. Costs stay low."), "{t}");
+    assert!(comments(&mut h).is_empty());
+
+    // Simple: glyphs, no cards, no gutter; a click on a glyph edits the comment
+    set_view(&mut h, "view.commentsSimple");
+    let cs = comments(&mut h);
+    assert_eq!(cs.len(), 2);
+    assert!(cs.iter().all(|c| c.card.is_none()), "no cards");
+    assert!(!h.state_mut().viewer().unwrap().comment_gutter());
+    open_card(&mut h, cs[1].source.start);
+    typ(&mut h, "!");
+    save_card(&mut h);
+    assert!(text(&h).contains("{>>numbers?!<<}"));
+    undo(&mut h);
+    assert_eq!(text(&h), REVIEWED);
+
+    // All: cards again; the file was never written; the choice is persisted
+    set_view(&mut h, "view.commentsAll");
+    assert!(comments(&mut h).iter().all(|c| c.card.is_some()));
+    assert_eq!(std::fs::read_to_string(&doc).unwrap(), REVIEWED);
+    set_view(&mut h, "view.commentsFinal");
+    let settings = cfg.join("markise").join("settings.json");
+    common::assert_settings(&mut h, &settings, |s| s.contains("\"commentView\": \"final\""));
+}
+
+/// Switching to a clean view saves a comment being edited in its card first (the preview is
+/// read-only), and the status bar shows the view.
+#[test]
+fn clean_view_saves_an_open_card_and_shows_in_the_status_bar() {
+    let (mut h, _p) = open_roomy("view-card", NOTE);
+    let key = NOTE.find("{>>").unwrap();
+    open_card(&mut h, key);
+    typ(&mut h, "!");
+    set_view(&mut h, "view.commentsOriginal");
+    assert_eq!(edited(&mut h), None);
+    assert_eq!(text(&h), "Note {==this==}{>>check **this** `x`!<<} end.\n");
+    assert!(has_text(&mut h, "Original · read-only"), "status bar");
+    set_view(&mut h, "view.commentsAll");
+    assert!(has_text(&mut h, "All Markup"));
+}

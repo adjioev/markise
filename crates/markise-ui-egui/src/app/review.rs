@@ -19,7 +19,7 @@ use egui::{Context, RichText, Ui};
 use markise_doc::review::{self, ReviewMark};
 use markise_doc::{CriticKind, Params, Selection, planners};
 use markise_engine::save::{Expect, SaveError, SaveOutcome};
-use markise_engine::settings::CommentDisplay;
+use markise_engine::settings::{CommentDisplay, CommentView};
 use markise_layout::block::color;
 
 use super::{Ask, Banner, MarkiseApp};
@@ -202,9 +202,39 @@ impl MarkiseApp {
         }
         self.poll_clean_copy();
         let display = self.themes.comment_display();
+        // (with CriticMarkup off there are no marks: the plain view, editable)
+        let view = if self.parse.critic_markup {
+            self.themes.comment_view()
+        } else {
+            CommentView::All
+        };
         if let Some(d) = self.doc.as_mut() {
             d.viewer.set_comment_display(display);
+            d.viewer.set_comment_view(view);
         }
+    }
+
+    /// How review marks are shown (setting `markdown.commentView`, issue #88).
+    pub fn comment_view(&self) -> CommentView {
+        self.themes.comment_view()
+    }
+
+    /// View → Comments, the status bar's switch (persisted). Display only: the text is never
+    /// changed. Final and Original are read-only previews, so a comment being edited in its
+    /// card is saved first (refused: the view stays, with the reason in a banner).
+    pub fn set_comment_view(&mut self, v: CommentView) {
+        if v == self.themes.comment_view() {
+            return;
+        }
+        if matches!(v, CommentView::Final | CommentView::Original | CommentView::Simple)
+            && let Some(d) = self.doc.as_mut()
+            && let Err(e) = d.viewer.commit_card_edit()
+        {
+            self.banner = Some(Banner::Error(e));
+            return;
+        }
+        self.themes.set_comment_view(v);
+        self.review_poll_setting();
     }
 
     /// How comments are shown in the document (setting `markdown.commentDisplay`).

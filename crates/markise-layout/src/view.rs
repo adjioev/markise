@@ -71,6 +71,8 @@ pub struct View {
     diagrams: Arc<dyn Diagrams + Send + Sync>,
     /// Which wikilink targets exist ([`AllResolved`] = all shown resolved).
     links: Arc<dyn LinkTargets + Send + Sync>,
+    /// How review marks are shown (issue #88; part of every cache key).
+    review: crate::block::ReviewView,
     /// Reference labels per item hash ([`DocModel::item_references`]), computed when an item's
     /// key is first needed: reference definitions enter only the keys of items that may use
     /// them (ADR 0006 §7.4) without a document-wide scan when the model is built.
@@ -113,6 +115,7 @@ impl View {
             highlights: Arc::new(NoHighlights),
             diagrams: Arc::new(NoDiagrams),
             links: Arc::new(AllResolved),
+            review: crate::block::ReviewView::All,
             refs: Default::default(),
             focus: None,
             caret_item: None,
@@ -570,6 +573,22 @@ impl View {
         self.anchor_off = frac * self.height(self.anchor);
     }
 
+    /// How review marks are shown (issue #88). A change re-estimates all heights (cached
+    /// layouts for the old view stop matching their keys).
+    pub fn set_review_view(&mut self, v: crate::block::ReviewView) {
+        if v != self.review {
+            let frac = self.anchor_frac();
+            self.review = v;
+            self.reset_heights();
+            self.anchor_off = frac * self.height(self.anchor);
+        }
+    }
+
+    /// How review marks are shown.
+    pub fn review_view(&self) -> crate::block::ReviewView {
+        self.review
+    }
+
     /// Fonts changed (e.g. a fallback font was installed): every cached layout is stale.
     pub fn set_font_generation(&mut self, generation: u64) {
         if generation != self.font_gen {
@@ -938,7 +957,7 @@ impl View {
 
     /// `dtag`: for a diagram item, its [`DiagramState::tag`].
     fn key_for(&self, i: usize, it: &Item, ready: Option<bool>, dtag: Option<u64>) -> CacheKey {
-        let mut extra = 0u64;
+        let mut extra = (self.review as u64).wrapping_mul(0x2545_f491_4f6c_dd1d).rotate_left(41);
         if self.expanded.contains(&i) {
             extra |= 1;
         }
@@ -1128,6 +1147,7 @@ impl View {
                     diagram: dstate.as_ref(),
                     ppp: self.ppp,
                     links: &*self.links,
+                    review: self.review,
                 };
                 let rec = Recording {
                     inner: images,
