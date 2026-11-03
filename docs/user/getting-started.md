@@ -3,7 +3,7 @@
 ## Download
 
 Markise is published on the [GitHub releases page](https://github.com/adjioev/markise/releases).
-The first beta is **0.1.0-beta.1**; until it is published, the releases page has no downloads.
+The current version is the first beta, [**0.1.0-beta.1**](https://github.com/adjioev/markise/releases/tag/v0.1.0-beta.1).
 
 | Platform | File | Requirements |
 |---|---|---|
