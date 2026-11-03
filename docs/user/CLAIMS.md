@@ -10,6 +10,7 @@ when a claim changes; `cargo xtask site` skips this file.
 |---|---|
 | Rendered, Source Code Mode, Side by Side editing; formatting shortcuts; Markdown typed by hand becomes formatting | `assets/tutorial/welcome.md` §1–6; `crates/markise-md/src/format.rs` (`MARKDOWN_COMMANDS`); `crates/markise-md/src/edit/rules.rs` (input rules) |
 | macOS, Windows, Linux builds | `docs/release/README.md`, `xtask/src/dist.rs` |
+| Linux AppImage and `.deb` (from the release after 0.1.0-beta.1), `.deb` dependencies, AppImage FUSE fallback | `scripts/package.sh` (`linux-*`), `.github/workflows/release.yml` (`linux-smoke`), `packaging/linux/` |
 | "written in Rust" (not "pure Rust": TLS uses `ring`, which compiles C/assembly) | `docs/features/update-check.md` ("Dependencies") |
 | "no browser engine inside" | egui/eframe UI (`crates/markise-ui-egui`); no webview crate in `Cargo.lock` (no `wry`/`webview`) |
 | Unchanged files are written back byte for byte | `docs/adr/0001-markdown-core.md` (byte-identical round-trip, tested over a corpus); `markise-cli roundtrip` |

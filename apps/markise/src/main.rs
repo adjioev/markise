@@ -110,7 +110,14 @@ fn main() -> eframe::Result {
     diag::install_panic_hook();
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     if args.iter().any(|a| a.as_os_str() == "--help" || a.as_os_str() == "-h") {
-        println!("usage: markise [<file|folder>…]");
+        println!("usage: markise [<file|folder>…]\n       markise --version");
+        return Ok(());
+    }
+    if args
+        .iter()
+        .any(|a| a.as_os_str() == "--version" || a.as_os_str() == "-V")
+    {
+        println!("markise {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     let timing = std::env::var_os("MARKISE_TIMING").is_some_and(|v| v != "0");

@@ -19,7 +19,8 @@ The beta covers everyday writing, but some things are not there yet:
 - **Shortcuts:** changed in `settings.json` only; file and view commands cannot be rebound
   ([Keyboard shortcuts](shortcuts.md#change-a-shortcut)).
 - **Updates:** Markise tells you about a new version but never installs it.
-- **Linux:** a tarball only; no AppImage, .deb or Flatpak.
+- **Linux:** 0.1.0-beta.1 is a tarball only; later releases add an AppImage and a `.deb`
+  package. No Flatpak and no apt repository.
 
 ## Is Markise free? Where is the source?
 
@@ -66,7 +67,13 @@ its messages, and check the log file (below).
 ### Linux: missing libraries
 
 Install the OpenGL/EGL, libxkbcommon and Wayland or X11 client libraries from your
-distribution. The build needs glibc 2.35 or later.
+distribution (the `.deb` package brings them in when installed with `apt install`). The build
+needs glibc 2.35 or later.
+
+### Linux: the AppImage does not start (FUSE)
+
+Install `fuse3` (`sudo apt install fuse3` on Debian and Ubuntu), or run
+`./markise-x86_64.AppImage --appimage-extract-and-run`.
 
 ## Something went wrong
 

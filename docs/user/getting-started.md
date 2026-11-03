@@ -9,7 +9,10 @@ The current version is the first beta, [**0.1.0-beta.1**](https://github.com/adj
 |---|---|---|
 | macOS | `markise-macos-universal.dmg` | macOS 11 Big Sur or later, Apple silicon or Intel |
 | Windows | `markise-windows-x86_64.zip` | Windows 10 or 11, x86_64, a graphics driver with OpenGL 3 |
-| Linux | `markise-linux-x86_64.tar.gz` | x86_64, glibc 2.35 or later (for example Ubuntu 22.04, Debian 12, Fedora 36 and newer), X11 or Wayland |
+| Linux | `markise-x86_64.AppImage`, `markise_<version>_amd64.deb` or `markise-linux-x86_64.tar.gz` | x86_64, glibc 2.35 or later (for example Ubuntu 22.04, Debian 12, Fedora 36 and newer), X11 or Wayland |
+
+The AppImage and the `.deb` package are published from the release after 0.1.0-beta.1 on;
+0.1.0-beta.1 has the `.tar.gz` only.
 
 Each download also contains `markise-cli` (a command-line tool for HTML export and round-trip
 checks), the licences, `NOTICE` and `THIRD_PARTY/`.
@@ -63,6 +66,35 @@ app** → browse to `markise.exe`.
 
 ### Linux
 
+There are three downloads with the same program; pick one.
+
+**AppImage** (any distribution): one file, nothing to install.
+
+```sh
+chmod +x markise-x86_64.AppImage
+./markise-x86_64.AppImage
+```
+
+The AppImage mounts itself with FUSE. If it stops with a message about FUSE, install the
+`fuse3` package (`sudo apt install fuse3` on Debian and Ubuntu), or start it with
+`./markise-x86_64.AppImage --appimage-extract-and-run`. To use `markise-cli` from the
+AppImage, make a link to it whose name starts with `markise-cli`:
+`ln -s ~/Applications/markise-x86_64.AppImage ~/.local/bin/markise-cli` (adjust the path).
+Tools such as AppImageLauncher or Gear Lever add the AppImage to your application menu.
+
+**Debian, Ubuntu and derivatives** (`.deb`): installs `markise` and `markise-cli` into
+`/usr/bin`, with a menu entry, an icon and "Open with" support for Markdown files. Install it
+with apt, which also installs the libraries Markise needs:
+
+```sh
+sudo apt install ./markise_*_amd64.deb
+```
+
+Remove it with `sudo apt remove markise`. The package does not add an apt repository, so
+updates are installed the same way from a newer download.
+
+**Archive** (`.tar.gz`, any distribution):
+
 ```sh
 tar xzf markise-linux-x86_64.tar.gz
 cd markise-*-linux-x86_64
@@ -76,8 +108,10 @@ mkdir -p ~/.local/bin && cp markise markise-cli ~/.local/bin/
 cp -r share ~/.local/
 ```
 
-Markise needs OpenGL or OpenGL ES 3, libxkbcommon, and the Wayland or X11 client libraries;
-desktop systems normally have them. There is no AppImage, .deb or Flatpak yet.
+The AppImage and the archive use the libraries of your system: OpenGL or OpenGL ES 3 (or
+Vulkan), libxkbcommon, and the Wayland or X11 client libraries; desktop systems normally have
+them (the `.deb` lists them as dependencies). The file dialogs use the XDG desktop portal.
+There is no Flatpak yet.
 
 ## First launch
 

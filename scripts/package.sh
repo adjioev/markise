@@ -20,6 +20,10 @@
 #   PACKAGE_STABLE_NAME  1 = name the archive markise-<platform>.<ext> (no label), so
 #                        https://github.com/<owner>/<repo>/releases/latest/download/… links work.
 #   MACOS_FORMAT         dmg (default) or zip.
+#   LINUX_FORMATS        Linux outputs, space-separated: any of tar.gz deb AppImage (default:
+#                        all three). deb needs dpkg-deb and dpkg-shlibdeps (dpkg-dev); AppImage
+#                        downloads the pinned appimagetool and runtime
+#                        (scripts/fetch-appimage-tools.sh).
 #
 # Output (prints the archive path on stdout), each with README.md, LICENSE-MIT, LICENSE-APACHE,
 # NOTICE, THIRD_PARTY/ (full license texts of bundled third-party data, e.g. syntax
@@ -28,14 +32,28 @@
 #            licences also in Contents/Resources), an /Applications link, markise-cli
 #            (or .zip with MACOS_FORMAT=zip)
 #   Windows  markise-<label>-<platform>.zip: markise.exe (icon embedded), markise-cli.exe
-#   Linux    markise-<label>-<platform>.tar.gz: markise, markise-cli and share/ (desktop entry
-#            and hicolor icons; `cp -r share ~/.local/` installs them for the current user)
+#   Linux    markise-<label>-<platform>.tar.gz: markise, markise-cli and share/ (desktop entry,
+#            hicolor icons, AppStream metainfo; `cp -r share ~/.local/` installs them for the
+#            current user)
+#            markise_<label>_<arch>.deb (always this name, e.g. markise_0.1.0-beta.1_amd64.deb;
+#            the package Version is the label with every "-" turned into "~", 0.1.0~beta.1, so
+#            it sorts before 0.1.0; GitHub would rewrite "~" in an asset name): /usr/bin/markise and
+#            markise-cli, the same share/ files under /usr/share, licences and a Debian
+#            copyright file in /usr/share/doc/markise; Depends from dpkg-shlibdeps plus the
+#            dlopen()ed X11/Wayland/EGL/GL libraries
+#            markise-<label>-<arch>.AppImage (markise-<arch>.AppImage with
+#            PACKAGE_STABLE_NAME=1): the same files in an AppDir, built by appimagetool with
+#            the pinned type 2 runtime; no libraries bundled (see docs/release/README.md)
+#            Linux prints one path per line.
 #
 # Reproducibility: entries are sorted (C locale), all timestamps are SOURCE_DATE_EPOCH,
 # permissions are normalised (755 executables/dirs, 644 files), tar records owner/group 0 and
 # gzip stores no name/time; zip entries carry no extra attributes. Remaining limits: the
 # binaries themselves are only as reproducible as the toolchain and runner image (recorded in
-# BUILD-INFO.txt; GitHub's macOS/Windows images float), Windows archives are made with 7-Zip
+# BUILD-INFO.txt; GitHub's macOS/Windows images float), the .deb carries the same normalised
+# tree (dpkg-deb sorts entries; ar times come from SOURCE_DATE_EPOCH; xz), the AppImage is a
+# squashfs made by the mksquashfs inside the pinned appimagetool (see docs/release/README.md for
+# what was checked), Windows archives are made with 7-Zip
 # when `zip` is missing (its version is recorded), and ZIP stores DOS local time (the script
 # forces TZ=UTC). The .dmg (hdiutil, UDZO) is not byte-reproducible: HFS+/APFS images carry
 # creation dates and UUIDs; its contents are. macOS bundles are ad-hoc signed only (no Developer ID, no notarization yet —
@@ -207,18 +225,175 @@ PLIST
     esac
     ;;
   linux-*)
-    cp "$bin_dir/markise" "$bin_dir/markise-cli" "$dest/"
     app_id=io.github.adjioev.markise
-    mkdir -p "$dest/share/applications"
-    cp "$root/packaging/linux/$app_id.desktop" "$dest/share/applications/"
-    for size in 16 32 48 64 128 256 512; do
-      mkdir -p "$dest/share/icons/hicolor/${size}x${size}/apps"
-      cp "$root/assets/brand/png/markise-$size.png" "$dest/share/icons/hicolor/${size}x${size}/apps/$app_id.png"
-    done
+    # deb architecture / AppImage architecture for the platform
+    case "$platform" in
+      linux-x86_64) deb_arch=amd64 appimage_arch=x86_64 ;;
+      *) deb_arch="" appimage_arch="" ;;
+    esac
+    formats="${LINUX_FORMATS:-tar.gz deb AppImage}"
+    # desktop entry, hicolor icons and AppStream metadata into <prefix>/share
+    install_share() {
+      local share="$1/share"
+      mkdir -p "$share/applications" "$share/metainfo"
+      cp "$root/packaging/linux/$app_id.desktop" "$share/applications/"
+      sed -e "s/@VERSION@/$label/" -e "s/@DATE@/$(date -u -r "$SOURCE_DATE_EPOCH" +%F 2>/dev/null || date -u -d "@$SOURCE_DATE_EPOCH" +%F)/" \
+        "$root/packaging/linux/$app_id.metainfo.xml" > "$share/metainfo/$app_id.metainfo.xml"
+      local size
+      for size in 16 32 48 64 128 256 512; do
+        mkdir -p "$share/icons/hicolor/${size}x${size}/apps"
+        cp "$root/assets/brand/png/markise-$size.png" "$share/icons/hicolor/${size}x${size}/apps/$app_id.png"
+      done
+    }
+    # licences and build info into a doc folder
+    install_docs() {
+      mkdir -p "$1"
+      cp "$dest/README.md" "$dest/LICENSE-MIT" "$dest/LICENSE-APACHE" "$dest/NOTICE" "$dest/BUILD-INFO.txt" "$1/"
+      cp -R "$dest/THIRD_PARTY" "$1/THIRD_PARTY"
+    }
+    # like normalise, for another tree: 755 dirs and the given executables, 644 files
+    normalise_tree() {
+      local tree="$1"; shift
+      find "$tree" -type d -exec chmod 755 {} +
+      find "$tree" -type f -exec chmod 644 {} +
+      local exe
+      for exe in "$@"; do chmod 755 "$tree/$exe"; done
+      find "$tree" -exec touch -h -t "$stamp" {} +
+    }
+
+    cp "$bin_dir/markise" "$bin_dir/markise-cli" "$dest/"
+    install_share "$dest"
     normalise markise markise-cli
-    archive="$out_dir/$archive_name.tar.gz"
-    tar -C "$stage" --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" \
-      --format=gnu -cf - "$name" | gzip -n -9 > "$archive"
+    for format in $formats; do
+      case "$format" in
+        tar.gz)
+          archive="$out_dir/$archive_name.tar.gz"
+          tar -C "$stage" --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" \
+            --format=gnu -cf - "$name" | gzip -n -9 > "$archive"
+          echo "$archive"
+          ;;
+        deb)
+          [[ -n "$deb_arch" ]] || { echo "no .deb architecture for $platform" >&2; exit 2; }
+          # Debian version: every "-" of the label becomes "~", which sorts before anything, so
+          # 0.1.0~beta.1~dryrun.abc1234 < 0.1.0~beta.1 < 0.1.0 (SemVer prerelease order). "+build"
+          # stays. No Debian revision: the package is built from upstream directly.
+          deb_version="$(printf '%s' "$label" | tr '-' '~')"
+          [[ "$deb_version" =~ ^[0-9][A-Za-z0-9.+~]*$ ]] || { echo "label '$label' gives no valid Debian version" >&2; exit 2; }
+          pkg="$stage/deb/markise"
+          mkdir -p "$pkg/DEBIAN" "$pkg/usr/bin"
+          cp "$bin_dir/markise" "$bin_dir/markise-cli" "$pkg/usr/bin/"
+          install_share "$pkg/usr"
+          install_docs "$pkg/usr/share/doc/markise"
+          cat > "$pkg/usr/share/doc/markise/copyright" <<COPYRIGHT
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Markise
+Upstream-Contact: https://github.com/adjioev/markise/issues
+Source: https://github.com/adjioev/markise
+
+Files: *
+Copyright: 2026 The Markise contributors
+License: MIT or Apache-2.0
+Comment: Third-party components compiled into the programs (syntax definitions, fonts) and
+ their licences are listed in /usr/share/doc/markise/NOTICE; full licence texts are in
+ /usr/share/doc/markise/THIRD_PARTY/, LICENSE-MIT and LICENSE-APACHE.
+
+License: MIT
+ See /usr/share/doc/markise/LICENSE-MIT.
+
+License: Apache-2.0
+ See /usr/share/common-licenses/Apache-2.0 (also /usr/share/doc/markise/LICENSE-APACHE).
+COPYRIGHT
+          printf '%s\n' "Markise $label. Release notes: https://github.com/adjioev/markise/releases" \
+            "(docs/release/ in the source repository)." | gzip -n -9 > "$pkg/usr/share/doc/markise/changelog.gz"
+          # Shared-library dependencies of the ELF files (libc6, libgcc-s1), from dpkg-shlibdeps.
+          shlibs="$(cd "$stage/deb" && mkdir -p debian && printf 'Source: markise\n\nPackage: markise\nArchitecture: any\n' > debian/control \
+            && dpkg-shlibdeps -O markise/usr/bin/markise markise/usr/bin/markise-cli | sed -n 's/^shlibs:Depends=//p')"
+          rm -rf "$stage/deb/debian"
+          [[ -n "$shlibs" ]] || { echo "dpkg-shlibdeps found no dependencies" >&2; exit 1; }
+          # The windowing and GL libraries are loaded with dlopen (winit, glutin, wgpu), so
+          # dpkg-shlibdeps cannot see them: X11 (libX11, libX11-xcb, Xcursor, Xrandr, Xi,
+          # xkbcommon-x11), Wayland (client, cursor, egl, xkbcommon) and EGL/GLX. Vulkan (wgpu's
+          # first choice; glow over GL takes over without it) and the file-dialog portal (rfd uses
+          # xdg-desktop-portal over D-Bus) are recommended.
+          depends="$shlibs, libx11-6, libx11-xcb1, libxcursor1, libxrandr2, libxi6, libxkbcommon-x11-0, libxkbcommon0, libwayland-client0, libwayland-cursor0, libwayland-egl1, libegl1, libgl1"
+          installed_kb="$(du -sk "$pkg/usr" | cut -f1)"
+          cat > "$pkg/DEBIAN/control" <<CONTROL
+Package: markise
+Version: $deb_version
+Architecture: $deb_arch
+Maintainer: The Markise contributors <4410+adjioev@users.noreply.github.com>
+Installed-Size: $installed_kb
+Depends: $depends
+Recommends: libvulkan1, xdg-desktop-portal
+Section: editors
+Priority: optional
+Homepage: https://adjioev.github.io/markise-site/
+Description: live-preview Markdown editor
+ Markise shows the formatted page while you type; Markdown markers appear
+ around the caret and the file stays plain Markdown. Tables, task lists, TeX
+ math, Mermaid diagrams, highlighted code, Obsidian vaults with wikilinks,
+ CriticMarkup comments, themes, HTML and PDF export.
+ .
+ Also contains markise-cli, a command-line tool for HTML export and Markdown
+ round-trip checks.
+CONTROL
+          normalise_tree "$pkg" usr/bin/markise usr/bin/markise-cli
+          chmod 755 "$pkg/DEBIAN"
+          # file name with the label, not the Debian version: GitHub rewrites "~" in asset names
+          archive="$out_dir/markise_${label}_${deb_arch}.deb"
+          # xz, not dpkg's zstd default on Ubuntu: Debian 12's dpkg cannot read zstd members.
+          # dpkg-deb sorts entries and takes the ar timestamps from SOURCE_DATE_EPOCH.
+          SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" dpkg-deb --root-owner-group -Zxz -z9 --build "$pkg" "$archive" >/dev/null
+          echo "$archive"
+          ;;
+        AppImage)
+          [[ -n "$appimage_arch" ]] || { echo "no AppImage architecture for $platform" >&2; exit 2; }
+          tools="$("$root/scripts/fetch-appimage-tools.sh")"
+          appdir="$stage/AppDir"
+          mkdir -p "$appdir/usr/bin"
+          cp "$bin_dir/markise" "$bin_dir/markise-cli" "$appdir/usr/bin/"
+          install_share "$appdir/usr"
+          # appimagetool looks for (and validates) the AppStream file under its older name
+          mv "$appdir/usr/share/metainfo/$app_id.metainfo.xml" "$appdir/usr/share/metainfo/$app_id.appdata.xml"
+          install_docs "$appdir/usr/share/doc/markise"
+          cp -R "$root/packaging/linux/appimage-runtime" "$appdir/usr/share/doc/markise/appimage-runtime"
+          cp "$root/packaging/linux/$app_id.desktop" "$appdir/"
+          cp "$root/assets/brand/png/markise-256.png" "$appdir/$app_id.png"
+          ln -s "$app_id.png" "$appdir/.DirIcon"
+          # AppRun: the app, or markise-cli when the AppImage is started through a link or copy
+          # whose name starts with markise-cli (the runtime passes that name in ARGV0).
+          cat > "$appdir/AppRun" <<'APPRUN'
+#!/bin/sh
+here="$(dirname "$(readlink -f "$0")")"
+case "${ARGV0##*/}" in
+  markise-cli*) exec "$here/usr/bin/markise-cli" "$@" ;;
+esac
+exec "$here/usr/bin/markise" "$@"
+APPRUN
+          normalise_tree "$appdir" AppRun usr/bin/markise usr/bin/markise-cli
+          if [[ "${PACKAGE_STABLE_NAME:-0}" == 1 ]]; then
+            archive="$out_dir/markise-$appimage_arch.AppImage"
+          else
+            archive="$out_dir/markise-$label-$appimage_arch.AppImage"
+          fi
+          rm -f "$archive"
+          # --appimage-extract-and-run: no FUSE needed on the build host. appimagetool checks
+          # the desktop entry (desktop-file-validate) and the AppStream file (appstreamcli)
+          # when those tools are installed. No update information is embedded.
+          ARCH="$appimage_arch" VERSION="$label" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+            "$tools/appimagetool-x86_64.AppImage" --appimage-extract-and-run \
+            --runtime-file "$tools/runtime-$appimage_arch" --comp zstd \
+            "$appdir" "$archive" >&2
+          chmod 755 "$archive"
+          echo "$archive"
+          ;;
+        *)
+          echo "unknown Linux format '$format' (LINUX_FORMATS: tar.gz deb AppImage)" >&2
+          exit 2
+          ;;
+      esac
+    done
+    exit 0
     ;;
   windows-*)
     cp "$bin_dir/markise.exe" "$bin_dir/markise-cli.exe" "$dest/"

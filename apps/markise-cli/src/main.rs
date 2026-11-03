@@ -23,6 +23,7 @@ const USAGE: &str = "usage:
   markise-cli html <file> [-o <out.html>] [--trusted] [--no-highlight | --inline-colors] [--no-diagrams]
                     [--max-size <size>]
   markise-cli theme-import <theme.css> [--json]
+  markise-cli --version
 
   --trusted         keep raw HTML and all URL schemes (default: sanitized, safe schemes only)
   --no-highlight    plain code blocks (default: token spans with cm-* classes)
@@ -186,6 +187,10 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
                 }
             }
             theme::import(file.ok_or(USAGE)?, json)
+        }
+        [flag] if flag == "-V" || flag == "--version" => {
+            println!("markise-cli {}", env!("CARGO_PKG_VERSION"));
+            Ok(ExitCode::SUCCESS)
         }
         [flag] if flag == "-h" || flag == "--help" => {
             println!("{USAGE}");
