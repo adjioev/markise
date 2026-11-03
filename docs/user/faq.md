@@ -38,11 +38,6 @@ Yes. Markise reads the vault's link and attachment settings and leaves everythin
 see [Folders and vaults](folders-and-vaults.md#obsidian-vaults). Obsidian plugins, canvases and
 embeds are not supported in Markise.
 
-## Does it work with themes written for Typora?
-
-Many community CSS themes can be imported, within the supported CSS subset; the Theme Report
-shows what was not applied. See [Themes](themes.md#import-a-css-theme).
-
 ## Installation troubleshooting
 
 ### macOS says Markise is damaged or cannot be opened
