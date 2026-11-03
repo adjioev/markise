@@ -17,6 +17,8 @@ Apache-2.0, see `LICENSE-MIT` / `LICENSE-APACHE`). Checked by `cargo xtask asset
 
 ## Screenshots of Markise (`shots/`)
 
+### Theme gallery
+
 Rendered headlessly from the Markise app with the `theme_shots` example (branch
 `themes-builtin`, 2026-10-27). They show Markise's own UI and sample text, drawn with egui's
 bundled fonts or installed system fonts (no font files here). Themes shown: the vendored
@@ -37,3 +39,31 @@ Catppuccin, Dracula, Gruvbox, Nord, Rosé Pine and Tokyo Night (see NOTICE and
 | `shots/palette-gruvbox-light.jpg`, `shots/palette-gruvbox-light.webp` | Gruvbox light palette |
 | `shots/palette-nord.jpg`, `shots/palette-nord.webp` | Nord palette |
 | `shots/palette-rose-pine-moon.jpg`, `shots/palette-rose-pine-moon.webp` | Rosé Pine Moon palette |
+
+### Feature screenshots (issue #62)
+
+Rendered headlessly from the real app with the `site-*` scenes of
+`crates/markise-ui-egui/examples/dialog_shots.rs` (branch `task/62-site-docs`, 2026-11-03,
+macOS 26 on Apple silicon, installed system fonts and egui's bundled fonts, default Markise
+theme, isolated empty configuration). All text is synthetic and defined in that example
+(`VAULT_NOTES`, `SIDE_DOC`, `MATH_DOC`, `REVIEW_DOC`); no personal notes. The in-window menu bar
+is the one Markise draws on Linux and in headless runs. Command (960 × 680 pt at 2×; the
+review scene at 960 × 480 pt):
+
+```sh
+MARKISE_SHOTS=site-vault,site-side-by-side,site-math-diagrams MARKISE_SHOT_WIDTH=960 \
+  MARKISE_SHOT_HEIGHT=680 MARKISE_SHOT_SCALE=2 \
+  cargo run -p markise-ui-egui --release --example dialog_shots -- .screenshots/site site
+MARKISE_SHOTS=site-review MARKISE_SHOT_WIDTH=960 MARKISE_SHOT_HEIGHT=480 MARKISE_SHOT_SCALE=2 \
+  cargo run -p markise-ui-egui --release --example dialog_shots -- .screenshots/site site
+```
+
+The 1920 px PNGs were converted with ImageMagick and cwebp: `-2x.webp` at full size (cwebp
+`-q 78`), `.webp` and `.jpg` resized to 1080 px wide (cwebp `-q 80`, JPEG quality 82).
+
+| File | Scene and appearance |
+|---|---|
+| `shots/side-by-side.jpg`, `shots/side-by-side.webp`, `shots/side-by-side-2x.webp` | `site-side-by-side`, light |
+| `shots/vault.jpg`, `shots/vault.webp`, `shots/vault-2x.webp` | `site-vault`, light |
+| `shots/math-diagrams.jpg`, `shots/math-diagrams.webp`, `shots/math-diagrams-2x.webp` | `site-math-diagrams`, dark |
+| `shots/review.jpg`, `shots/review.webp`, `shots/review-2x.webp` | `site-review`, light |
