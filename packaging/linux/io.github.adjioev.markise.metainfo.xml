@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata (software centres, AppImage tools). scripts/package.sh replaces
+     @VERSION@ and @DATE@ (from SOURCE_DATE_EPOCH) when it installs this file. -->
+<component type="desktop-application">
+  <id>io.github.adjioev.markise</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>Markise</name>
+  <summary>Live-preview Markdown editor</summary>
+  <developer_name>The Markise contributors</developer_name>
+  <description>
+    <p>
+      Markise is a Markdown editor that shows the formatted page while you type. The Markdown
+      markers appear around the caret and the file on disk stays plain Markdown.
+    </p>
+    <ul>
+      <li>Rendered page, source code mode and side by side view</li>
+      <li>Tables, task lists, TeX math, Mermaid diagrams and highlighted code blocks</li>
+      <li>Folders and Obsidian vaults with wikilinks and quick open</li>
+      <li>Comments and suggestions (CriticMarkup)</li>
+      <li>Themes, colour schemes and import of CSS themes</li>
+      <li>Export to HTML and PDF; fast with very large files</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.adjioev.markise.desktop</launchable>
+  <icon type="stock">io.github.adjioev.markise</icon>
+  <url type="homepage">https://adjioev.github.io/markise-site/</url>
+  <url type="bugtracker">https://github.com/adjioev/markise/issues</url>
+  <url type="help">https://github.com/adjioev/markise/tree/main/docs/user</url>
+  <categories>
+    <category>Utility</category>
+    <category>TextEditor</category>
+  </categories>
+  <keywords>
+    <keyword>Markdown</keyword>
+    <keyword>Editor</keyword>
+    <keyword>Notes</keyword>
+  </keywords>
+  <provides>
+    <binary>markise</binary>
+    <binary>markise-cli</binary>
+    <mediatype>text/markdown</mediatype>
+  </provides>
+  <screenshots>
+    <screenshot type="default">
+      <caption>A document in the rendered view</caption>
+      <image>https://adjioev.github.io/markise-site/assets/shots/markise-light.jpg</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

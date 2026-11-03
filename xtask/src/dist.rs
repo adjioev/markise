@@ -3,7 +3,8 @@
 //! Builds `markise` and `markise-cli` with the `dist` profile (release + thin LTO + strip) for
 //! the platform's Rust target(s), joins the two macOS architectures with `lipo` for
 //! `macos-universal`, then packages them with `scripts/package.sh` (archive layout, Info.plist,
-//! .dmg, desktop entry, licences, reproducibility rules: see that script). The release workflow
+//! .dmg, Linux .tar.gz/.deb/.AppImage, desktop entry, licences, reproducibility rules: see that
+//! script). The release workflow
 //! (`.github/workflows/release.yml`) runs exactly this command, so a local run produces the same
 //! artifact layout as CI.
 
@@ -18,12 +19,13 @@ platforms (the Rust target must be installed: `rustup target add <target>`):
   macos-aarch64     aarch64-apple-darwin                         -> .dmg   (macOS host)
   macos-x86_64      x86_64-apple-darwin                          -> .dmg   (macOS host)
   windows-x86_64    x86_64-pc-windows-msvc                       -> .zip   (Windows host)
-  linux-x86_64      x86_64-unknown-linux-gnu                     -> .tar.gz (Linux host)
+  linux-x86_64      x86_64-unknown-linux-gnu                     -> .tar.gz, .deb, .AppImage
+                                                                    (Linux host; dpkg-dev)
 
   --label   archive label (default: the workspace version, e.g. 0.1.0-beta.1)
   --out     output folder (default: dist/)
-Environment: SOURCE_DATE_EPOCH, PACKAGE_STABLE_NAME, MACOS_FORMAT, BUILD_NUMBER (see
-scripts/package.sh); XTASK_BASH = bash executable for scripts/package.sh (default `bash`).
+Environment: SOURCE_DATE_EPOCH, PACKAGE_STABLE_NAME, MACOS_FORMAT, BUILD_NUMBER, LINUX_FORMATS
+(see scripts/package.sh); XTASK_BASH = bash executable for scripts/package.sh (default `bash`).
 ";
 
 /// Oldest macOS the bundle supports; matches `LSMinimumSystemVersion` in scripts/package.sh.

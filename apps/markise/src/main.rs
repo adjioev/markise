@@ -103,16 +103,53 @@ impl markise_ui_egui::clipboard::ClipboardFiles for SystemClipboardFiles {
     }
 }
 
+/// What the command line asks for.
+#[derive(Debug, PartialEq)]
+enum Cli {
+    Help,
+    Version,
+    /// Files and folders to open.
+    Open(Vec<PathBuf>),
+}
+
+/// `--help`/`-h` and `--version`/`-V` count only as the first argument, so a file opened next
+/// to them (`markise notes.md --version`) is still opened; the first `--` ends the options and
+/// is dropped, everything else is a path (`markise -- --version` opens a file `--version`).
+fn parse_cli(args: impl IntoIterator<Item = std::ffi::OsString>) -> Cli {
+    let args: Vec<_> = args.into_iter().collect();
+    match args.first().and_then(|a| a.to_str()) {
+        Some("--help" | "-h") => return Cli::Help,
+        Some("--version" | "-V") => return Cli::Version,
+        _ => {}
+    }
+    let mut files = Vec::with_capacity(args.len());
+    let mut options_ended = false;
+    for a in args {
+        if !options_ended && a == "--" {
+            options_ended = true;
+        } else {
+            files.push(PathBuf::from(a));
+        }
+    }
+    Cli::Open(files)
+}
+
 fn main() -> eframe::Result {
     let start = Instant::now();
     #[cfg(windows)]
     diag::attach_parent_console();
     diag::install_panic_hook();
-    let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
-    if args.iter().any(|a| a.as_os_str() == "--help" || a.as_os_str() == "-h") {
-        println!("usage: markise [<file|folder>…]");
-        return Ok(());
-    }
+    let args = match parse_cli(std::env::args_os().skip(1)) {
+        Cli::Help => {
+            println!("usage: markise [--] [<file|folder>…]\n       markise --version");
+            return Ok(());
+        }
+        Cli::Version => {
+            println!("markise {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Cli::Open(files) => files,
+    };
     let timing = std::env::var_os("MARKISE_TIMING").is_some_and(|v| v != "0");
     let exit_after_idle = std::env::var("MARKISE_TIMING_EXIT").ok().and_then(|v| v.parse().ok());
     let opts = AppOptions {
@@ -260,5 +297,39 @@ mod tests {
         let icon = super::app_icon().expect("embedded icon PNG decodes");
         assert_eq!((icon.width, icon.height), (256, 256));
         assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::{Cli, parse_cli};
+    use std::path::PathBuf;
+
+    fn parse(args: &[&str]) -> Cli {
+        parse_cli(args.iter().map(std::ffi::OsString::from))
+    }
+
+    fn open(files: &[&str]) -> Cli {
+        Cli::Open(files.iter().map(PathBuf::from).collect())
+    }
+
+    #[test]
+    fn version_and_help_only_as_the_first_argument() {
+        assert_eq!(parse(&["--version"]), Cli::Version);
+        assert_eq!(parse(&["-V"]), Cli::Version);
+        assert_eq!(parse(&["--help"]), Cli::Help);
+        assert_eq!(parse(&["-h", "notes.md"]), Cli::Help);
+        // a file before the flag is opened, the flag is then just another path
+        assert_eq!(parse(&["notes.md", "--version"]), open(&["notes.md", "--version"]));
+        assert_eq!(parse(&["notes.md", "-h"]), open(&["notes.md", "-h"]));
+    }
+
+    #[test]
+    fn double_dash_ends_options() {
+        assert_eq!(parse(&["--", "--version"]), open(&["--version"]));
+        assert_eq!(parse(&["a.md", "--", "b.md"]), open(&["a.md", "b.md"]));
+        // only the first `--` is a terminator
+        assert_eq!(parse(&["--", "--"]), open(&["--"]));
+        assert_eq!(parse(&[]), open(&[]));
     }
 }
