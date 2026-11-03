@@ -172,10 +172,19 @@ Show comments, and a switch in the comments panel header):
   Comment's undo step (one undo removes it with its text); cancelled or saved empty, it leaves
   no trace (no undo step). While the field has the focus the document's commands are not
   available in the menus (their shortcuts do not act behind the field); undo, redo and select
-  all act in the field. The edit is saved before a save, closing, a view-mode switch or another
-  command on the document, and when its card stops being drawn (scrolled far away, its page
-  evicted in a paged model, ADR 0016); the comment is followed through edits made meanwhile
-  (Side by Side, menus) by source position and the edit is dropped only if the comment is gone.
+  all act in the field. In a table cell a `|` in the text is written `\|` (GFM's escape; the
+  comment shows `|`), and every edit is checked to keep the surrounding blocks' shape (leaf
+  kinds, table cell counts). **An open draft is unsaved document state** (Codex review of
+  #158): the document counts as dirty, so Close, Quit, New, Open, the tutorial and external
+  changes ask or report a conflict instead of discarding it, and the crash-recovery backup
+  holds the document with the draft applied (the open document and its undo history are not
+  touched). The draft is written before a save, a view-mode switch or another command on the
+  document, and when its card stops being drawn (scrolled far away, its page evicted in a
+  paged model, ADR 0016); autosave does not write it (the user is still typing). A refused
+  write keeps the draft open with its reason, and the operation that asked (Save, the view
+  switch, the command) stops with that reason. The comment is followed by source position
+  through edits made meanwhile; after a reload or re-parse the draft stays only if the exact
+  comment source is still at its place (never written over another comment).
 - Only the visible items' comments are looked at and only shown cards are shaped (layout
   reports glyph positions per item, `BlockLayout::comments`).
 

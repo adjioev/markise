@@ -427,3 +427,35 @@ fn edit_comment_multi_line_comment_is_replaced_whole() {
         "> a{>>just one<<} b\n"
     );
 }
+
+/// Edit Comment on the comment at byte `at` of `src` (tables: `|` cannot mark the caret).
+fn edit_comment_at(src: &str, at: usize, new: &str) -> Result<String, String> {
+    let params = Params::new()
+        .with("at", ParamValue::Int(at as i64))
+        .with("text", ParamValue::Text(new.into()));
+    run(src, planners::REVIEW_EDIT_COMMENT, Selection::caret(0), params).map(|(t, _)| t)
+}
+
+/// Codex review of #158: a `|` in a table cell's comment would add a column (the table
+/// becomes a paragraph while the comment survives): it is written `\|`, which the comment
+/// shows as `|`; the table keeps its shape.
+#[test]
+fn edit_comment_in_a_table_cell_escapes_pipes() {
+    let src = "| A{>>old<<} | B |\n| --- | --- |\n";
+    let at = src.find("old").unwrap();
+    let t = edit_comment_at(src, at, "x|y").unwrap();
+    assert_eq!(t, "| A{>>x\\|y<<} | B |\n| --- | --- |\n");
+    let doc = Document::parse(t.as_str(), ParseOptions::default());
+    let marks = markise_doc::review::all_marks(&doc);
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].text, "x|y");
+    assert!(matches!(
+        markise_doc::FormatDoc::leaf(&doc, 0).unwrap().kind,
+        markise_doc::LeafKind::Table { .. }
+    ));
+    // lines are joined in a table row
+    assert_eq!(
+        edit_comment_at(src, at, "a\nb").unwrap(),
+        "| A{>>a b<<} | B |\n| --- | --- |\n"
+    );
+}

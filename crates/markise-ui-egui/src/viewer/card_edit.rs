@@ -44,6 +44,9 @@ pub(super) struct CardEdit {
     pub want_focus: bool,
     /// The field held the keyboard focus at some frame (a later loss of it saves).
     pub had_focus: bool,
+    /// Frames since a pointer press or release (a focus loss right after one is a click
+    /// outside: saved).
+    pub recent_click: u8,
     /// The card was drawn at some frame; frames it was not drawn since.
     pub seen: bool,
     pub unseen: u32,
@@ -51,6 +54,10 @@ pub(super) struct CardEdit {
     pub error: Option<String>,
     /// The editor's document change count when `key` was last brought up to date.
     pub changes: u64,
+    /// The comment's source (`{>>…<<}`) when the edit started: the edit applies only while
+    /// the text at `key` is still exactly this (a reload or other replacement that changed it
+    /// drops the edit instead of writing over another comment; Codex review of #158).
+    pub source: String,
 }
 
 /// How an edit ends.
@@ -86,9 +93,12 @@ impl DocViewer {
         {
             return;
         }
-        // another comment's edit is saved first
+        // another comment's edit is saved first (refused: it stays open, nothing else opens)
         if self.card_edit.is_some() {
             self.finish_card_edit(Finish::Save, false);
+            if self.card_edit.is_some() {
+                return;
+            }
         }
         let doc = self.ed.session.doc();
         let Some(m) = review::mark_at(doc, key + 1, |k| k == CriticKind::Comment).filter(|m| m.range.start == key)
@@ -100,6 +110,7 @@ impl DocViewer {
             .is_some_and(|l| matches!(l.kind, markise_doc::LeafKind::Paragraph));
         let (author, body) = review::split_author(text.unwrap_or(&m.text));
         let end = m.range.end;
+        let source = doc.text()[m.range.clone()].to_string();
         self.card_edit = Some(CardEdit {
             key,
             author: author.map(str::to_string),
@@ -109,10 +120,12 @@ impl DocViewer {
             multiline,
             want_focus: true,
             had_focus: false,
+            recent_click: 0,
             seen: false,
             unseen: 0,
             error: None,
             changes: self.ed.changes(),
+            source,
         });
         self.ed.set_selection(Selection::caret(end));
         self.ed.refresh_focus();
@@ -136,17 +149,86 @@ impl DocViewer {
         }
         // (the recent edits may include ones from before the edit started in the same frame:
         // the check below drops an edit whose key no longer names its comment)
-        let Some(key) = self.ed.map_recent(e.key) else {
-            self.card_edit = None;
-            return;
-        };
-        e.key = key;
+        match self.ed.map_recent(e.key) {
+            Some(key) => {
+                e.key = key;
+                e.changes = self.ed.changes();
+                self.revalidate_card_edit();
+            }
+            None => self.card_edit = None,
+        }
+    }
+
+    /// After the document was replaced (reload, re-parse, progressive open's continuation) or
+    /// edited elsewhere: the edit stays only while its comment's source is still at its key.
+    pub(super) fn revalidate_card_edit(&mut self) {
+        let Some(e) = self.card_edit.as_mut() else { return };
         e.changes = self.ed.changes();
-        let doc = self.ed.session.doc();
-        let ok = key < doc.text().len()
-            && review::mark_at(doc, key + 1, |k| k == CriticKind::Comment).is_some_and(|m| m.range.start == key);
-        if !ok {
+        let text = self.ed.session.text();
+        if text.get(e.key..e.key + e.source.len()) != Some(e.source.as_str()) {
             self.card_edit = None;
+        }
+    }
+
+    /// An unsaved draft is open in a card (changed text, a new comment, or a refused save):
+    /// the document counts as having unsaved changes (Codex review of #158).
+    pub fn has_card_draft(&self) -> bool {
+        self.card_edit
+            .as_ref()
+            .is_some_and(|e| e.fresh.is_some() || e.error.is_some() || e.text.trim() != e.original.trim())
+    }
+
+    /// The full comment text a save of the draft writes (author prefix included; empty:
+    /// the comment is removed).
+    fn draft_text(e: &CardEdit) -> String {
+        let body = e.text.trim();
+        match (&e.author, body.is_empty()) {
+            (_, true) => String::new(),
+            (Some(a), false) => format!("@{a}: {body}"),
+            (None, false) => body.to_string(),
+        }
+    }
+
+    /// The patches that write the open draft into the document's current text, without
+    /// applying them (crash-recovery backups include the draft); `None`: no draft, or it
+    /// cannot be written.
+    pub fn card_draft_patches(&self) -> Option<Vec<markise_doc::Patch>> {
+        if !self.has_card_draft() {
+            return None;
+        }
+        let e = self.card_edit.as_ref()?;
+        let params = Params::new()
+            .with("at", ParamValue::Int((e.key + 3) as i64))
+            .with("text", ParamValue::Text(Self::draft_text(e)));
+        let req = self.ed.session.request(params);
+        let plan = self.ed.session.doc().plan(planners::REVIEW_EDIT_COMMENT, &req).ok()?;
+        Some(
+            plan.steps
+                .into_iter()
+                .flat_map(|s| s.patches.patches().to_vec())
+                .collect(),
+        )
+    }
+
+    /// An identity of the open draft (its comment and text), so a backup is refreshed when it
+    /// changes; 0 without a draft.
+    pub fn card_draft_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let Some(e) = self.card_edit.as_ref().filter(|_| self.has_card_draft()) else {
+            return 0;
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (e.key, &e.text).hash(&mut h);
+        h.finish() | 1
+    }
+
+    /// Test hook: opens the card editor for the comment starting at `key` with `text` in the
+    /// field (as typed).
+    #[doc(hidden)]
+    pub fn edit_card_for_test(&mut self, key: usize, text: &str) {
+        self.start_card_edit(key, None, false);
+        if let Some(e) = self.card_edit.as_mut() {
+            e.text = text.to_string();
         }
     }
 
@@ -254,7 +336,7 @@ impl DocViewer {
         let resp = child.add(te);
         if let Some(err) = &e.error {
             child.label(
-                egui::RichText::new(err)
+                egui::RichText::new(format!("Not saved: {err}"))
                     .font(egui::FontId::proportional(look.size * 0.9))
                     .color(egui::Color32::from_rgb(200, 60, 50)),
             );
@@ -285,8 +367,20 @@ impl DocViewer {
         } else if resp.has_focus() {
             e.had_focus = true;
         } else if e.had_focus || resp.lost_focus() {
-            // focus went elsewhere (a click outside, another widget): saved
-            finish = Some(Finish::Save);
+            // the focus went to another widget, or a click outside took it: saved. Taken away
+            // with nothing focused and no click (a question dialog opening: the app gives the
+            // focus back after the answer) the edit simply goes on.
+            let elsewhere = ctx.memory(|m| m.focused()).is_some_and(|f| f != id);
+            if elsewhere || e.recent_click > 0 {
+                finish = Some(Finish::Save);
+            } else {
+                e.had_focus = false;
+            }
+        }
+        if clicking {
+            e.recent_click = 3;
+        } else {
+            e.recent_click = e.recent_click.saturating_sub(1);
         }
         if resp.has_focus() {
             e.had_focus = true;
@@ -299,12 +393,20 @@ impl DocViewer {
 
     /// The edited comment's card was not drawn this frame: after it had been shown (scrolled
     /// away, its page evicted), or when a new one never appears, the edit is saved.
-    pub(super) fn card_edit_unseen(&mut self) {
-        let Some(e) = self.card_edit.as_mut() else { return };
+    ///
+    /// A refused draft is not retried here (it stays pending: the document has unsaved
+    /// changes, and Save reports why); returns whether anything happened.
+    pub(super) fn card_edit_unseen(&mut self) -> bool {
+        let Some(e) = self.card_edit.as_mut() else { return false };
+        if e.error.is_some() {
+            return false;
+        }
         e.unseen += 1;
         if e.seen || e.unseen > UNSEEN_LIMIT {
             self.finish_card_edit(Finish::Save, false);
+            return true;
         }
+        true
     }
 
     /// Ends the edit: writes the text (one undo step) or cancels. `refocus`: the document
@@ -322,16 +424,10 @@ impl DocViewer {
                 }
             }
             Finish::Save => {
-                let body = e.text.trim();
-                if e.fresh.is_none() && body == e.original.trim() {
+                if e.fresh.is_none() && e.text.trim() == e.original.trim() {
                     Ok(())
-                } else if body.is_empty() {
-                    self.write_comment(&e, "")
                 } else {
-                    let full = match &e.author {
-                        Some(a) => format!("@{a}: {body}"),
-                        None => body.to_string(),
-                    };
+                    let full = Self::draft_text(&e);
                     self.write_comment(&e, &full)
                 }
             }
@@ -415,7 +511,7 @@ impl DocViewer {
                 self.ed.refresh_focus();
                 Ok(())
             }
-            Err(msg) => Err(format!("Not saved: {msg}")),
+            Err(msg) => Err(msg),
         }
     }
 
@@ -432,16 +528,20 @@ impl DocViewer {
         self.card_edit.as_ref().is_some_and(|e| e.key == key)
     }
 
-    /// Saves an open card edit (before the document is saved, closed or replaced).
-    pub fn commit_card_edit(&mut self) {
+    /// Saves an open card edit (before the document is saved, shown in another view mode or
+    /// changed by another command). A refused save keeps the draft open (with its reason in
+    /// the card) and returns the reason: the operation that asked must stop (Codex review of
+    /// #158: a draft is never discarded silently).
+    pub fn commit_card_edit(&mut self) -> Result<(), String> {
         if self.card_edit.is_some() {
             self.finish_card_edit(Finish::Save, false);
-            if let Some(e) = &self.card_edit
-                && e.error.is_some()
-            {
-                // refused: keep the document as it is
-                self.card_edit = None;
+            if let Some(e) = &self.card_edit {
+                return Err(format!(
+                    "The comment being edited was not saved: {}",
+                    e.error.as_deref().unwrap_or("it is still open")
+                ));
             }
         }
+        Ok(())
     }
 }

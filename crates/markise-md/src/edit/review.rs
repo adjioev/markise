@@ -366,9 +366,13 @@ impl Document {
         block.push_str(&text[range.end..b]);
         let doc = Document::parse(block, self.options().clone());
         let (s, e) = (m.range.start - a, m.range.end - a + insert.len() - range.len());
-        review::all_marks(&doc)
+        let same_comment = review::all_marks(&doc)
             .iter()
-            .any(|c| c.kind == CriticKind::Comment && c.range.start == s && c.range.end == e)
+            .any(|c| c.kind == CriticKind::Comment && c.range.start == s && c.range.end == e);
+        // the blocks around it must keep their shape too (a `|` in a table cell's comment
+        // would add a column and turn the table into a paragraph; Codex review of #158)
+        same_comment
+            && block_shape(&doc) == block_shape(&Document::parse(text[a..b].to_string(), self.options().clone()))
     }
 
     // ---------------------------------------------------------------- edit comment
@@ -389,16 +393,22 @@ impl Document {
         let m = review::mark_at(self, at, |k| k == CriticKind::Comment)
             .filter(|m| m.content.start <= at && at <= m.content.end)
             .ok_or(PlanError::NotApplicable("no comment here"))?;
+        let leaf = self.leaf(m.content.start).ok_or(PlanError::NotApplicable("no block"))?;
+        // in a table cell a `|` would end the cell: written `\|` (GFM's escape; the comment's
+        // text shows `|`)
+        let table = matches!(leaf.kind, LeafKind::Table { .. });
         let lines: Vec<String> = new
             .lines()
-            .map(|l| l.trim().replace("<<}", "<< }"))
+            .map(|l| {
+                let l = l.trim().replace("<<}", "<< }");
+                if table { l.replace('|', "\\|") } else { l }
+            })
             .filter(|l| !l.is_empty())
             .collect();
         if lines.is_empty() {
             return self.plan_delete_comment(req);
         }
         let text = self.text();
-        let leaf = self.leaf(m.content.start).ok_or(PlanError::NotApplicable("no block"))?;
         let joined = lines.join(" ");
         let mut body = joined.clone();
         if matches!(leaf.kind, LeafKind::Paragraph) && lines.len() > 1 {
@@ -453,6 +463,32 @@ impl Document {
         let ch = remove_comment_change(text, &marks, i);
         single_change_plan(text, ch)
     }
+}
+
+/// The leaves of `doc` (a block parsed alone) by kind, with every table row's cell count:
+/// an edit inside a comment must not change them.
+fn block_shape(doc: &Document) -> Vec<String> {
+    let text = doc.text();
+    let mut out = Vec::new();
+    let mut at = 0;
+    let mut last = None;
+    while at < text.len() {
+        match doc.leaf(at) {
+            Some(l) if last != Some(l.span.start) => {
+                last = Some(l.span.start);
+                let mut s = format!("{:?}", l.kind);
+                if matches!(l.kind, LeafKind::Table { .. }) {
+                    for line in &l.lines {
+                        s.push_str(&format!(" {}", doc.table_row_cells(*line).len()));
+                    }
+                }
+                out.push(s);
+                at = l.span.end.max(at + 1);
+            }
+            _ => at += 1,
+        }
+    }
+    out
 }
 
 /// The plan of one change, the caret after its result.

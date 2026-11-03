@@ -30,6 +30,24 @@ impl Default for Workflow {
         }
     }
 }
+/// A backup of the document as the user sees it: its text with the literal-hint escapes and a
+/// comment draft open in a card applied (the draft's patches join the escape patches, so the
+/// open document and its undo history are not touched; Codex review of #158).
+fn backup_request(id: u64, name: String, viewer: &crate::viewer::DocViewer) -> Request {
+    let mut req = Request::backup(id, name, viewer.ed.session.doc());
+    if let (Request::Backup { literal, .. }, Some(draft)) = (&mut req, viewer.card_draft_patches()) {
+        // escapes inside the draft's range are replaced by it
+        literal.retain(|p| {
+            draft
+                .iter()
+                .all(|d| p.range.end <= d.range.start || p.range.start >= d.range.end)
+        });
+        literal.extend(draft);
+        literal.sort_by_key(|p| (p.range.start, p.range.end));
+    }
+    req
+}
+
 impl MarkiseApp {
     pub(super) fn remember_path(&mut self, path: &Path) {
         if !self.themes.file_settings().record_recent {
@@ -142,10 +160,11 @@ impl MarkiseApp {
             {
                 if now.duration_since(self.workflow.backup_at) >= backup_delay && self.workflow.pending.is_none() {
                     let d = self.doc.as_ref().unwrap();
-                    let key = (d.id, d.viewer.ed.session.revision().counter);
+                    // (a comment draft open in a card changes the key as it is typed)
+                    let key = (d.id, d.viewer.ed.session.revision().counter ^ d.viewer.card_draft_key());
                     if self.workflow.backed != Some(key) {
                         // a text snapshot, not a copy of the parsed document (issue #29)
-                        let req = Request::backup(d.id, d.display_name(), d.viewer.ed.session.doc());
+                        let req = backup_request(d.id, d.display_name(), &d.viewer);
                         if worker.tx.send(req).is_ok() {
                             self.workflow.pending = Some(key);
                         }
@@ -162,7 +181,7 @@ impl MarkiseApp {
                         && self.ask.is_none()
                         && !matches!(self.banner, Some(Banner::Conflict(_) | Banner::SaveConflict { .. }))
                     {
-                        self.save();
+                        self.autosave_now();
                     }
                     self.workflow.save_at = now;
                 }
@@ -343,5 +362,46 @@ mod tests {
             .collect();
         assert_eq!(drafts.len(), 1);
         assert!(drafts[0].file_name().to_string_lossy().contains("barrier"));
+    }
+
+    /// Codex review of #158: a comment draft open in a card makes the document dirty and is
+    /// in the crash-recovery backup (the open document and its history stay untouched), and
+    /// a changed draft is backed up again.
+    #[test]
+    fn backup_includes_an_open_card_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = MarkiseApp::new(AppOptions::default());
+        app.workflow.started = true;
+        app.workflow.worker = Some(Worker::new(dir.path().to_owned(), Arc::new(|| {})).unwrap());
+        app.install_untitled("Note {>>old<<} end.\n".into(), "note.md");
+        assert!(!app.is_dirty());
+        let backup = |app: &mut MarkiseApp| -> String {
+            app.workflow.backup_at = Instant::now() - Duration::from_secs(31);
+            app.workflow_poll(&Context::default());
+            assert!(app.workflow.pending.is_some(), "a backup was requested");
+            wait(app, |a| a.workflow.pending.is_none());
+            let files: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .flat_map(|e| std::fs::read_dir(e.path()).unwrap().flatten())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+                .collect();
+            assert_eq!(files.len(), 1);
+            std::fs::read_to_string(files[0].path()).unwrap()
+        };
+        let v = &mut app.doc.as_mut().unwrap().viewer;
+        v.edit_card_for_test(5, "new text");
+        assert!(app.is_dirty(), "an open draft is unsaved");
+        assert_eq!(backup(&mut app), "Note {>>new text<<} end.\n");
+        let v = &mut app.doc.as_mut().unwrap().viewer;
+        assert_eq!(
+            v.ed.session.text(),
+            "Note {>>old<<} end.\n",
+            "the document is untouched"
+        );
+        assert!(!v.ed.session.history().can_undo());
+        v.edit_card_for_test(5, "newer");
+        assert_eq!(backup(&mut app), "Note {>>newer<<} end.\n");
     }
 }

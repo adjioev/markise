@@ -342,6 +342,8 @@ impl DocViewer {
         view.set_model(doc, model);
         self.ed = EditorView::new(session, view, path);
         self.code = Default::default();
+        // a new document: no card edit of the old one carries over
+        self.card_edit = None;
     }
 
     /// Installs `doc`/`model` as one undoable transaction `label` (reload from disk, a
@@ -373,6 +375,8 @@ impl DocViewer {
             p.view.rebuild(self.ed.session.text());
         }
         self.ed.source_load_selection();
+        // a card edit stays only on its own unchanged comment (Codex review of #158)
+        self.revalidate_card_edit();
         r
     }
 
@@ -385,7 +389,9 @@ impl DocViewer {
         model: Arc<DocModel>,
         cut: usize,
     ) -> Result<markise_engine::editor::Continued, String> {
-        self.ed.continue_with(doc, model, cut)
+        let r = self.ed.continue_with(doc, model, cut);
+        self.revalidate_card_edit();
+        r
     }
 
     /// Font generation the view was last told about.
@@ -459,8 +465,13 @@ impl DocViewer {
                 "available once the whole file has loaded",
             ));
         }
-        // an open card edit is saved before another command acts on the document
-        self.commit_card_edit();
+        // an open card edit is saved before another command acts on the document; refused,
+        // the command does not run (the draft stays)
+        if self.commit_card_edit().is_err() {
+            return Err(markise_engine::editor::command::CommandError::Disabled(
+                "the comment being edited could not be saved",
+            ));
+        }
         let images = markise_layout::block::NoImages;
         let r = with_shaper(ctx, parley, |sh| self.ed.execute(id, params, sh, &images, 600.0));
         self.ed.refresh_focus();
@@ -485,8 +496,9 @@ impl DocViewer {
         let mut out = ViewerOutput::default();
         self.editable = editable;
         if !editable {
-            // a read-only surface (Side by Side's rendered pane) edits no comment
-            self.commit_card_edit();
+            // a read-only surface (Side by Side's rendered pane) edits no comment (refused: the
+            // draft stays pending, the document unsaved)
+            let _ = self.commit_card_edit();
         }
         let rect = ui.available_rect_before_wrap();
         let id = ui.scope_id().with("markise-viewer");
@@ -1388,8 +1400,7 @@ impl DocViewer {
             // the field lost the focus to a click elsewhere: that click placed its own caret
             self.finish_card_edit(f, false);
             ctx.request_repaint();
-        } else if self.card_edit.is_some() && !edited_drawn {
-            self.card_edit_unseen();
+        } else if self.card_edit.is_some() && !edited_drawn && self.card_edit_unseen() {
             ctx.request_repaint();
         }
         if let Some(i) = clicked {

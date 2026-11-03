@@ -622,7 +622,11 @@ use markise_engine::settings::CommentDisplay;
 
 /// A document whose column leaves room for margin cards (sidebar hidden, narrow column).
 fn open_roomy(name: &str, text: &str) -> (H, PathBuf) {
-    let (mut h, p) = open(name, text);
+    open_roomy_opts(name, text, None, false)
+}
+
+fn open_roomy_opts(name: &str, text: &str, confirm: Option<&Arc<Scripted>>, watch: bool) -> (H, PathBuf) {
+    let (mut h, p) = open_opts(name, text, confirm, watch);
     let ctx = h.ctx.clone();
     h.state_mut()
         .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
@@ -1626,4 +1630,86 @@ fn card_edit_follows_edits_elsewhere() {
     assert_eq!(edited(&mut h), Some((7, "cd".into())));
     save_card(&mut h);
     assert_eq!(text(&h), "A Note {>>cd<<} end.\n");
+}
+
+// ---------------------------------------------------------------- card drafts (Codex review of #158)
+
+/// A save of the card that the planner refuses (here: Comments & Suggestions switched off
+/// while the card is open) keeps the draft: ⌘S stops with the reason and writes nothing, the
+/// document counts as unsaved (Close asks), and the draft is saved once it can be.
+#[test]
+fn refused_card_save_keeps_the_draft_and_stops_save_and_close() {
+    let src = "Note {>>c<<} end.\n";
+    let (mut h, p) = open_roomy("card-refused", src);
+    open_card(&mut h, 5);
+    typ(&mut h, "d");
+    assert!(h.state().is_dirty(), "an open draft is an unsaved change");
+    h.state_mut().set_critic_markup(false);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), Some((5, "cd".into())), "kept, not drawn");
+    h.key_press_modifiers(cmd(), Key::S);
+    h.run_steps(3);
+    let banner = h.state().banner_text().unwrap_or_default();
+    assert!(banner.contains("not saved"), "{banner}");
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), src, "nothing written");
+    assert_eq!(edited(&mut h), Some((5, "cd".into())));
+    assert!(h.state().is_dirty());
+    assert!(!h.state_mut().request_close(), "Close asks");
+    h.state_mut().answer_question(Choice::Cancel);
+    h.run_steps(2);
+    // on again: the card is back and saves
+    h.state_mut().set_critic_markup(true);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    h.run_steps(4);
+    save_card(&mut h);
+    assert_eq!(edited(&mut h), None);
+    assert_eq!(save_and_read(&mut h, &p), "Note {>>cd<<} end.\n");
+}
+
+/// An open draft makes an external change a conflict (no silent reload over it); reloading
+/// anyway drops the draft instead of writing it over a different comment at the same place.
+#[test]
+fn external_change_with_an_open_draft_is_a_conflict() {
+    let src = "Note {>>c<<} end.\n";
+    let (mut h, p) = open_roomy_opts("card-reload", src, None, true);
+    open_card(&mut h, 5);
+    typ(&mut h, "d");
+    let theirs = "Note {>>zz<<} end.\n";
+    std::fs::write(&p, theirs).unwrap();
+    wait_until(&mut h, "conflict", |a| {
+        a.banner_text().is_some_and(|b| b.starts_with("conflict"))
+    });
+    assert_eq!(text(&h), src, "not reloaded");
+    assert_eq!(edited(&mut h), Some((5, "cd".into())));
+    h.state_mut().resolve_conflict_reload();
+    wait_until(&mut h, "reload", |a| {
+        a.document_text().as_deref() == Some(theirs) && !a.is_busy()
+    });
+    h.run_steps(2);
+    assert_eq!(edited(&mut h), None, "the draft named another comment");
+    save_card(&mut h);
+    assert_eq!(text(&h), theirs);
+}
+
+/// File → New with an open draft asks; Cancel keeps the draft, Save writes it first.
+#[test]
+fn new_document_asks_about_an_open_draft() {
+    let s = Scripted::new();
+    let src = "Note {>>c<<} end.\n";
+    let (mut h, p) = open_roomy_opts("card-new-doc", src, Some(&s), false);
+    open_card(&mut h, 5);
+    typ(&mut h, "d");
+    s.answer(Choice::Cancel);
+    h.state_mut().new_document();
+    h.run_steps(3);
+    assert_eq!(s.last().unwrap().kind, Kind::UnsavedChanges);
+    assert_eq!(text(&h), src);
+    assert_eq!(edited(&mut h), Some((5, "cd".into())));
+    s.answer(Choice::Save);
+    h.state_mut().new_document();
+    h.run_steps(3);
+    wait_until(&mut h, "new document", |a| a.is_untitled() && !a.is_busy());
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "Note {>>cd<<} end.\n");
+    assert_eq!(text(&h), "");
 }
