@@ -310,12 +310,13 @@ COPYRIGHT
             && dpkg-shlibdeps -O markise/usr/bin/markise markise/usr/bin/markise-cli | sed -n 's/^shlibs:Depends=//p')"
           rm -rf "$stage/deb/debian"
           [[ -n "$shlibs" ]] || { echo "dpkg-shlibdeps found no dependencies" >&2; exit 1; }
-          # The windowing and GL libraries are loaded with dlopen (winit, glutin, wgpu), so
-          # dpkg-shlibdeps cannot see them: X11 (libX11, libX11-xcb, Xcursor, Xrandr, Xi,
-          # xkbcommon-x11), Wayland (client, cursor, egl, xkbcommon) and EGL/GLX. Vulkan (wgpu's
-          # first choice; glow over GL takes over without it) and the file-dialog portal (rfd uses
-          # xdg-desktop-portal over D-Bus) are recommended.
-          depends="$shlibs, libx11-6, libx11-xcb1, libxcursor1, libxrandr2, libxi6, libxkbcommon-x11-0, libxkbcommon0, libwayland-client0, libwayland-cursor0, libwayland-egl1, libegl1, libgl1"
+          # Libraries loaded with dlopen, which dpkg-shlibdeps cannot see (the sonames found in
+          # the binary; the release build job prints them): X11 (libX11, libX11-xcb, libxcb,
+          # Xcursor, Xi, Xrender, xkbcommon-x11) and Wayland (client, egl, xkbcommon) for winit,
+          # EGL/GL for glutin and wgpu, fontconfig for system fonts, libdbus for the file dialogs
+          # (rfd talks to xdg-desktop-portal through it). Vulkan (wgpu's first choice; glow over
+          # OpenGL takes over without it) and the portal itself are recommended.
+          depends="$shlibs, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrender1, libxkbcommon-x11-0, libxkbcommon0, libwayland-client0, libwayland-egl1, libegl1, libgl1, libfontconfig1, libdbus-1-3"
           installed_kb="$(du -sk "$pkg/usr" | cut -f1)"
           cat > "$pkg/DEBIAN/control" <<CONTROL
 Package: markise

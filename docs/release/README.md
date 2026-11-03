@@ -29,19 +29,23 @@ on clean ubuntu-22.04 and ubuntu-24.04 runners (`dpkg -i`, `apt-get -f install`)
 package, then starts the AppImage with `--appimage-extract-and-run` the same way (and through
 a `markise-cli` link). The draft release waits for it.
 
-**Libraries.** winit, glutin and wgpu load the windowing and graphics libraries with `dlopen`
-(X11: libX11, libX11-xcb, libXcursor, libXrandr, libXi, libxkbcommon-x11; Wayland:
-libwayland-client/-cursor/-egl, libxkbcommon; libEGL/libGL; libvulkan). The AppImage bundles
-**none** of them: the GL/EGL/Vulkan loaders must match the host's drivers (AppImage practice is
-never to bundle them), and the X11/Wayland/xkbcommon client libraries are present on every
-desktop that has a display server and are on the AppImage project's exclude list or ABI-stable.
+**Libraries.** The binary links only libc, libm, libgcc_s and the dynamic loader (`NEEDED`) and
+needs glibc symbols up to 2.35. Everything else is loaded with `dlopen` (sonames found in the
+dry-run binary): X11 (libX11, libX11-xcb, libxcb, libXcursor, libXi, libXrender,
+libxkbcommon-x11) and Wayland (libwayland-client, libwayland-egl, libxkbcommon) for winit,
+libEGL/libGL/libvulkan for glutin and wgpu, libfontconfig for system fonts (yeslogic-fontconfig),
+libdbus-1 for the file dialogs (rfd's xdg-desktop-portal backend). The AppImage bundles **none**
+of them: the GL/EGL/Vulkan loaders must match the host's drivers (AppImage practice is never to
+bundle them), and the others are stable-ABI libraries present on every desktop with a display
+server (most are on the AppImage exclude list for that reason).
 The AppImage therefore has the same requirements as the tarball, and NOTICE/THIRD_PARTY
 cover its contents, plus the runtime below.
 
-**.deb dependencies.** `Depends` = the `dpkg-shlibdeps` result (libc6) plus the `dlopen`ed
-libraries above by their Debian/Ubuntu package names (`libx11-6, libx11-xcb1, libxcursor1,
-libxrandr2, libxi6, libxkbcommon-x11-0, libxkbcommon0, libwayland-client0, libwayland-cursor0,
-libwayland-egl1, libegl1, libgl1`), which dpkg-shlibdeps cannot see. `Recommends: libvulkan1`
+**.deb dependencies.** `Depends` = the `dpkg-shlibdeps` result (`libc6 (>= 2.35), libgcc-s1`)
+plus the `dlopen`ed libraries above by their Debian/Ubuntu package names (`libx11-6,
+libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrender1, libxkbcommon-x11-0, libxkbcommon0,
+libwayland-client0, libwayland-egl1, libegl1, libgl1, libfontconfig1, libdbus-1-3`), which
+dpkg-shlibdeps cannot see. `Recommends: libvulkan1`
 (wgpu's Vulkan backend; glow over OpenGL takes over without it) and `xdg-desktop-portal` (file
 dialogs). Version: the label with every `-` turned into `~` (`0.1.0~beta.1`, dry runs
 `0.1.0~beta.1~dryrun.<sha7>`), so prereleases sort before the final `0.1.0`. No maintainer
