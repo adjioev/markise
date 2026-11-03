@@ -674,6 +674,12 @@ impl EditorSession {
         }
     }
 
+    /// Forgets the redo stack (an undo that the caller treats as never having happened, e.g.
+    /// a new comment cancelled before it was written).
+    pub fn clear_redo(&mut self) {
+        self.history.clear_redo();
+    }
+
     /// Closes the open typing group (undo boundary).
     pub fn close_typing(&mut self) {
         self.open = None;

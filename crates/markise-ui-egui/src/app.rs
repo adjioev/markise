@@ -279,7 +279,15 @@ impl DocState {
     /// state now, so there is nothing to fold.
     fn sync(&mut self) {}
 
+    /// Unsaved changes: the text differs from the saved one, or a comment draft is open in a
+    /// card (issue #87; it counts for every workflow that asks before discarding: close,
+    /// New, Open, reload, recovery backups — Codex review of #158).
     fn dirty(&self) -> bool {
+        self.viewer.has_card_draft() || self.dirty_text()
+    }
+
+    /// The session's text differs from the saved text (a card draft not counted).
+    fn dirty_text(&self) -> bool {
         let s = &self.viewer.ed.session;
         if !s.is_dirty() {
             // the saved state itself (StateId, ADR 0006 §4.3)
@@ -1642,6 +1650,18 @@ impl MarkiseApp {
     // ------------------------------------------------------------------ saving
 
     fn start_save(&mut self, req: SaveRequest) {
+        self.start_save_with(req, true);
+    }
+
+    /// `commit`: a comment being written in its card is saved into the document first
+    /// (issue #87); refused, nothing is saved and the draft stays. Autosave does not commit
+    /// (the user is still writing): it saves the document text as it is.
+    fn start_save_with(&mut self, req: SaveRequest, commit: bool) {
+        if commit && let Err(e) = self.commit_card_edit() {
+            self.queued_save = None;
+            self.banner = Some(Banner::Error(e));
+            return;
+        }
         // progressive open (issue #126): the session holds only the first part of the file;
         // the save runs once the whole document is in (status bar: "saving when done")
         let req = match self.defer_save(req) {
@@ -1687,7 +1707,7 @@ impl MarkiseApp {
             self.banner = Some(Banner::Error("Saving is disabled for a lossily decoded file.".into()));
             return;
         }
-        if !doc.dirty() && !doc.deleted && req.expect.is_none() && req.target.is_none() {
+        if !doc.dirty_text() && !doc.deleted && req.expect.is_none() && req.target.is_none() {
             // the file already holds exactly this text
             self.finish_then(req.then);
             return;
@@ -1710,6 +1730,40 @@ impl MarkiseApp {
             target: req.target,
             path,
         });
+    }
+
+    /// Saves a comment being edited in its card (issue #87) before the document is saved,
+    /// closed or shown in another view mode, where the card is not drawn.
+    fn commit_card_edit(&mut self) -> Result<(), String> {
+        match self.doc.as_mut() {
+            Some(d) => d.viewer.commit_card_edit(),
+            None => Ok(()),
+        }
+    }
+
+    /// [`Self::commit_card_edit`] for operations that stop when it is refused: the reason is
+    /// shown in a banner; `false`: stop.
+    fn card_edit_saved(&mut self) -> bool {
+        match self.commit_card_edit() {
+            Ok(()) => true,
+            Err(e) => {
+                self.banner = Some(Banner::Error(e));
+                false
+            }
+        }
+    }
+
+    /// Autosave: the document's text as it is; a comment draft open in a card is not
+    /// committed (it is in the crash-recovery backup instead).
+    pub(super) fn autosave_now(&mut self) {
+        self.start_save_with(
+            SaveRequest {
+                expect: None,
+                target: None,
+                then: Then::Nothing,
+            },
+            false,
+        );
     }
 
     /// Saves the document (Cmd/Ctrl+S).
@@ -1857,6 +1911,7 @@ impl MarkiseApp {
     /// The window is about to close; returns `true` if it may (no unsaved edits). Otherwise
     /// the Save / Discard / Cancel question is shown.
     pub fn request_close(&mut self) -> bool {
+        // (an open comment draft makes the document dirty: Save / Discard / Cancel is asked)
         if let Some(d) = &mut self.doc {
             d.sync();
         }
@@ -1879,6 +1934,9 @@ impl MarkiseApp {
     /// Toggles source-code mode, mapping the viewport middle and the caret in both directions
     /// (spec 02 §12.1). Full Source mode keeps its own undo history (ADR 0006 §4.3).
     pub fn toggle_source(&mut self) {
+        if !self.card_edit_saved() {
+            return;
+        }
         if self.side_by_side {
             // ⌘/ from Side by Side → Source, full width (spec 04 §3.3)
             self.set_view_mode(ViewMode::Source);
@@ -1921,6 +1979,9 @@ impl MarkiseApp {
     /// ⌃⌘/ (spec 04 §3.3): Rendered or Source → Side by Side, remembering that mode; again →
     /// back to the remembered mode.
     pub fn toggle_side_by_side(&mut self) {
+        if !self.card_edit_saved() {
+            return;
+        }
         if self.side_by_side {
             let back = if self.sbs_return_source {
                 ViewMode::Source
@@ -1938,6 +1999,9 @@ impl MarkiseApp {
     /// mode ⌃⌘/ returns to.
     pub fn set_view_mode(&mut self, m: ViewMode) {
         if self.doc.is_none() {
+            return;
+        }
+        if !self.card_edit_saved() {
             return;
         }
         match m {

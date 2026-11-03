@@ -41,6 +41,7 @@ impl Document {
             planners::REVIEW_ACCEPT_ALL => self.plan_resolve_all(Resolve::Accept, false),
             planners::REVIEW_REJECT_ALL => self.plan_resolve_all(Resolve::Reject, false),
             planners::REVIEW_DELETE_COMMENT => self.plan_delete_comment(req),
+            planners::REVIEW_EDIT_COMMENT => self.plan_edit_comment(req),
             planners::REVIEW_CLEAN_COPY => {
                 let how = if req.params.get_bool("reject") == Some(true) {
                     Resolve::Reject
@@ -64,7 +65,8 @@ impl Document {
             planners::REVIEW_ADD_COMMENT
             | planners::REVIEW_ACCEPT
             | planners::REVIEW_REJECT
-            | planners::REVIEW_DELETE_COMMENT => Some(self.plan_review(id, req).is_some_and(|r| r.is_ok())),
+            | planners::REVIEW_DELETE_COMMENT
+            | planners::REVIEW_EDIT_COMMENT => Some(self.plan_review(id, req).is_some_and(|r| r.is_ok())),
             _ => None,
         }
     }
@@ -299,29 +301,7 @@ impl Document {
         if blank(before) || blank(after) {
             return ignore();
         }
-        // the continuation prefix: a continuation line repeats its own prefix; the first line
-        // of a list item gives quote markers plus the item's content indent (marker and its
-        // spaces, a task box not included); a quote gives its markers
-        let ls = crate::line_start(text, line.start);
-        let first = leaf.lines.first().is_some_and(|f| f.start == line.start);
-        let prefix: String = if !first {
-            text[ls..line.start].to_string()
-        } else {
-            let item = self
-                .containers_at(at)
-                .into_iter()
-                .rev()
-                .find(|c| matches!(c.kind, markise_doc::ContainerKind::ListItem { .. }))
-                .filter(|c| c.span.start >= ls && c.span.start <= line.start);
-            let upto = match item {
-                Some(c) => item_content_start(text.as_bytes(), c.span.start, line.start),
-                None => line.start,
-            };
-            text[ls..upto]
-                .chars()
-                .map(|c| if c == '>' || c == '\t' { c } else { ' ' })
-                .collect()
-        };
+        let prefix = self.continuation_prefix(&leaf, line.start, at);
         let insert = format!("{}{prefix}", self.line_ending().as_str());
         // the general check (review round 3): the block re-parsed with the line break must
         // still hold the same comment over both lines — text after the caret that starts block
@@ -334,27 +314,124 @@ impl Document {
         Some(Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(caret)))))
     }
 
+    /// The prefix a new line inside the paragraph `leaf` needs after a line break on the line
+    /// starting at `line_start` (at offset `at`): a continuation line repeats its own prefix;
+    /// the first line of a list item gives quote markers plus the item's content indent
+    /// (marker and its spaces, a task box not included); a quote gives its markers.
+    fn continuation_prefix(&self, leaf: &markise_doc::LeafView, line_start: usize, at: usize) -> String {
+        let text = self.text();
+        let ls = crate::line_start(text, line_start);
+        let first = leaf.lines.first().is_some_and(|f| f.start == line_start);
+        if !first {
+            return text[ls..line_start].to_string();
+        }
+        let item = self
+            .containers_at(at)
+            .into_iter()
+            .rev()
+            .find(|c| matches!(c.kind, markise_doc::ContainerKind::ListItem { .. }))
+            .filter(|c| c.span.start >= ls && c.span.start <= line_start);
+        let upto = match item {
+            Some(c) => item_content_start(text.as_bytes(), c.span.start, line_start),
+            None => line_start,
+        };
+        text[ls..upto]
+            .chars()
+            .map(|c| if c == '>' || c == '\t' { c } else { ' ' })
+            .collect()
+    }
+
     /// Whether inserting `insert` at `at` keeps comment `m` one comment: the top-level block
     /// holding `at` (whole lines) is parsed alone with the insertion and must contain a
     /// comment at the same place, grown by the insertion.
     fn comment_survives_break(&self, at: usize, insert: &str, m: &ReviewMark) -> bool {
+        self.comment_survives(at..at, insert, m)
+    }
+
+    /// Whether replacing `range` (inside comment `m`) with `insert` keeps `m` one comment over
+    /// exactly the new text: the top-level block holding it (whole lines) is parsed alone with
+    /// the replacement and must contain a comment at the same place with the new length.
+    fn comment_survives(&self, range: std::ops::Range<usize>, insert: &str, m: &ReviewMark) -> bool {
         let text = self.text();
-        let i = self.top_partition_point(|t| t.end() < at);
+        let i = self.top_partition_point(|t| t.end() < range.start);
         let Some(top) = self.top(i) else { return false };
-        let a = crate::line_start(text, top.start().min(at));
-        let (b, _) = crate::text::line_end(text, top.end().max(at));
+        let a = crate::line_start(text, top.start().min(range.start));
+        let (b, _) = crate::text::line_end(text, top.end().max(range.end));
         if !(a <= m.range.start && m.range.end <= b) {
             return false;
         }
         let mut block = String::with_capacity(b - a + insert.len());
-        block.push_str(&text[a..at]);
+        block.push_str(&text[a..range.start]);
         block.push_str(insert);
-        block.push_str(&text[at..b]);
+        block.push_str(&text[range.end..b]);
         let doc = Document::parse(block, self.options().clone());
-        let (s, e) = (m.range.start - a, m.range.end - a + insert.len());
-        review::all_marks(&doc)
+        let (s, e) = (m.range.start - a, m.range.end - a + insert.len() - range.len());
+        let same_comment = review::all_marks(&doc)
             .iter()
-            .any(|c| c.kind == CriticKind::Comment && c.range.start == s && c.range.end == e)
+            .any(|c| c.kind == CriticKind::Comment && c.range.start == s && c.range.end == e);
+        // the blocks around it must keep their shape too (a `|` in a table cell's comment
+        // would add a column and turn the table into a paragraph; Codex review of #158)
+        same_comment
+            && block_shape(&doc) == block_shape(&Document::parse(text[a..b].to_string(), self.options().clone()))
+    }
+
+    // ---------------------------------------------------------------- edit comment
+
+    /// Edit Comment (issue #87): the text of the comment at `at` becomes the `text` parameter.
+    /// Lines are trimmed and blank ones dropped (a blank line would end the paragraph); in a
+    /// paragraph each line break is the document's line ending plus the paragraph's
+    /// continuation prefix (as Enter inside a comment inserts), in headings and table rows the
+    /// lines are joined with spaces. CriticMarkup has no escapes, so a `<<}` in the text (it
+    /// would close the comment early) is written `<< }`. When the lines would start block
+    /// syntax (`# `, `- `…) and end the paragraph they are joined with spaces; if even that
+    /// does not keep the comment whole the edit is refused. An empty text deletes the comment
+    /// (with its highlight). The caret is not moved.
+    fn plan_edit_comment(&self, req: &PlanRequest) -> Result<Plan, PlanError> {
+        self.review_on()?;
+        let at = Self::review_at(req);
+        let new = req.params.get_text("text").unwrap_or_default();
+        let m = review::mark_at(self, at, |k| k == CriticKind::Comment)
+            .filter(|m| m.content.start <= at && at <= m.content.end)
+            .ok_or(PlanError::NotApplicable("no comment here"))?;
+        let leaf = self.leaf(m.content.start).ok_or(PlanError::NotApplicable("no block"))?;
+        // in a table cell a `|` would end the cell: written `\|` (GFM's escape; the comment's
+        // text shows `|`)
+        let table = matches!(leaf.kind, LeafKind::Table { .. });
+        let lines: Vec<String> = new
+            .lines()
+            .map(|l| {
+                let l = l.trim().replace("<<}", "<< }");
+                if table { l.replace('|', "\\|") } else { l }
+            })
+            .filter(|l| !l.is_empty())
+            .collect();
+        if lines.is_empty() {
+            return self.plan_delete_comment(req);
+        }
+        let text = self.text();
+        let joined = lines.join(" ");
+        let mut body = joined.clone();
+        if matches!(leaf.kind, LeafKind::Paragraph) && lines.len() > 1 {
+            let line = leaf
+                .lines
+                .iter()
+                .find(|l| l.start <= m.content.start && m.content.start <= l.end)
+                .ok_or(PlanError::NotApplicable("no line"))?;
+            let prefix = self.continuation_prefix(&leaf, line.start, m.content.start);
+            let sep = format!("{}{prefix}", self.line_ending().as_str());
+            body = lines.join(&sep);
+        }
+        if !self.comment_survives(m.content.clone(), &body, &m) {
+            body = joined;
+            if !self.comment_survives(m.content.clone(), &body, &m) {
+                return Err(PlanError::NotApplicable("the text would break the comment"));
+            }
+        }
+        if text[m.content.clone()] == body {
+            return Ok(Plan::select(req.selection.clone()));
+        }
+        let ps = markise_doc::PatchSet::single_verbatim(m.content.clone(), body);
+        Ok(Plan::single(PlanStep::patches(ps), None))
     }
 
     // ---------------------------------------------------------------- delete comment
@@ -386,6 +463,32 @@ impl Document {
         let ch = remove_comment_change(text, &marks, i);
         single_change_plan(text, ch)
     }
+}
+
+/// The leaves of `doc` (a block parsed alone) by kind, with every table row's cell count:
+/// an edit inside a comment must not change them.
+fn block_shape(doc: &Document) -> Vec<String> {
+    let text = doc.text();
+    let mut out = Vec::new();
+    let mut at = 0;
+    let mut last = None;
+    while at < text.len() {
+        match doc.leaf(at) {
+            Some(l) if last != Some(l.span.start) => {
+                last = Some(l.span.start);
+                let mut s = format!("{:?}", l.kind);
+                if matches!(l.kind, LeafKind::Table { .. }) {
+                    for line in &l.lines {
+                        s.push_str(&format!(" {}", doc.table_row_cells(*line).len()));
+                    }
+                }
+                out.push(s);
+                at = l.span.end.max(at + 1);
+            }
+            _ => at += 1,
+        }
+    }
+    out
 }
 
 /// The plan of one change, the caret after its result.

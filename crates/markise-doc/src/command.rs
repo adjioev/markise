@@ -82,6 +82,13 @@ pub mod planners {
     /// Delete the comment (or highlight) at the caret (or at `at`): a highlight and the
     /// comment attached to it go together, the highlighted text stays.
     pub const REVIEW_DELETE_COMMENT: PlannerId = PlannerId("review.deleteComment");
+    /// Replace the text of the comment at `at` (a source offset inside it) with the `text`
+    /// parameter (issue #87: editing in the comment's card). Line breaks become the
+    /// paragraph's own line breaks with its continuation prefix, blank lines are dropped, and
+    /// in single-line blocks (headings, table rows) lines are joined with spaces; an empty
+    /// text deletes the comment as [`REVIEW_DELETE_COMMENT`] does. Not a command: the card
+    /// editor plans it directly.
+    pub const REVIEW_EDIT_COMMENT: PlannerId = PlannerId("review.editComment");
     /// The patches that turn the document into a clean copy (every comment and highlight
     /// removed, every suggestion accepted — or rejected with the `reject` parameter). Only
     /// for building a copy: the plan is not meant to be applied to the open document.

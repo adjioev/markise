@@ -101,6 +101,11 @@ impl MarkiseApp {
         if text_field && TEXT_FIELD_KEYS.iter().any(|(k, ..)| *k == id) {
             return true;
         }
+        // a comment being written in its card (issue #87): document commands wait (a menu
+        // shortcut such as ⌘B must not act on the document behind the field)
+        if d.viewer.card_edit().is_some() {
+            return false;
+        }
         // the source editor (full Source mode, or focused in Side by Side) runs only its own
         // commands; format and block commands come to it in M2d slice 2
         if self.source_focused() && !markise_engine::editor::source::source_command_available(id) {

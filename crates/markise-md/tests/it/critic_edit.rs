@@ -335,3 +335,127 @@ fn enter_inside_a_comment_breaks_the_line_and_keeps_the_paragraph() {
     let (t, _) = at_caret("A {>>x<<} b|c\n", planners::NEWLINE).unwrap();
     assert!(t.contains("\n\n"), "{t:?}");
 }
+
+/// Edit Comment (issue #87) with the comment at the `|` in `src` (removed first) and `new` as
+/// its text.
+fn edit_comment(src: &str, new: &str) -> Result<String, String> {
+    let at = src.find('|').expect("caret mark");
+    let src = src.replacen('|', "", 1);
+    let params = Params::new()
+        .with("at", ParamValue::Int(at as i64))
+        .with("text", ParamValue::Text(new.into()));
+    run(&src, planners::REVIEW_EDIT_COMMENT, Selection::caret(0), params).map(|(t, _)| t)
+}
+
+#[test]
+fn edit_comment_replaces_the_text() {
+    assert_eq!(
+        edit_comment("a {==b==}{>>|old<<} c\n", "new text").unwrap(),
+        "a {==b==}{>>new text<<} c\n"
+    );
+    // the author prefix is part of the text the card writes back
+    assert_eq!(
+        edit_comment("a{>>|@ai: old<<} c\n", "@ai: new").unwrap(),
+        "a{>>@ai: new<<} c\n"
+    );
+    // an empty comment (as Add Comment makes it) gets its text
+    assert_eq!(edit_comment("a{>>|<<} c\n", "hi").unwrap(), "a{>>hi<<} c\n");
+    // unchanged: no patch
+    assert_eq!(edit_comment("a{>>|same<<} c\n", "same").unwrap(), "a{>>same<<} c\n");
+    // no escapes in CriticMarkup: a closer in the text is kept apart
+    assert_eq!(
+        edit_comment("a{>>|x<<} c\n", "use <<} here").unwrap(),
+        "a{>>use << } here<<} c\n"
+    );
+    // not on a comment
+    assert!(edit_comment("a {++|x++} c\n", "t").is_err());
+}
+
+#[test]
+fn edit_comment_empty_deletes_the_comment_and_its_highlight() {
+    assert_eq!(edit_comment("a {==b==}{>>|x<<} c\n", "  \n ").unwrap(), "a b c\n");
+    assert_eq!(edit_comment("a {>>|x<<} c\n", "").unwrap(), "a c\n");
+}
+
+#[test]
+fn edit_comment_lines_follow_the_paragraph() {
+    // a paragraph: line breaks, blank lines dropped, lines trimmed
+    assert_eq!(
+        edit_comment("a{>>|x<<} b\n", "one\n\n  two  \nthree").unwrap(),
+        "a{>>one\ntwo\nthree<<} b\n"
+    );
+    // CRLF documents keep their line ending
+    assert_eq!(
+        edit_comment("a{>>|x<<} b\r\n", "one\ntwo").unwrap(),
+        "a{>>one\r\ntwo<<} b\r\n"
+    );
+    // quotes and list items: the continuation prefix
+    assert_eq!(
+        edit_comment("> a{>>|x<<} b\n", "one\ntwo").unwrap(),
+        "> a{>>one\n> two<<} b\n"
+    );
+    assert_eq!(
+        edit_comment("- a{>>|x<<} b\n- c\n", "one\ntwo").unwrap(),
+        "- a{>>one\n  two<<} b\n- c\n"
+    );
+    assert_eq!(
+        edit_comment("> 1. a{>>|x<<} b\n", "one\ntwo").unwrap(),
+        "> 1. a{>>one\n>    two<<} b\n"
+    );
+    // a continuation line repeats its own prefix
+    assert_eq!(
+        edit_comment("- a\n  b{>>|x<<}\n", "one\ntwo").unwrap(),
+        "- a\n  b{>>one\n  two<<}\n"
+    );
+    // single-line blocks: joined with spaces
+    assert_eq!(edit_comment("# T{>>|x<<}\n", "one\ntwo").unwrap(), "# T{>>one two<<}\n");
+    // a line that would start block syntax ends the paragraph: joined instead
+    assert_eq!(
+        edit_comment("a{>>|x<<} b\n", "one\n# two").unwrap(),
+        "a{>>one # two<<} b\n"
+    );
+    assert_eq!(
+        edit_comment("a{>>|x<<} b\n", "one\n- two").unwrap(),
+        "a{>>one - two<<} b\n"
+    );
+}
+
+#[test]
+fn edit_comment_multi_line_comment_is_replaced_whole() {
+    assert_eq!(
+        edit_comment("> a{>>|one\n> two<<} b\n", "just one").unwrap(),
+        "> a{>>just one<<} b\n"
+    );
+}
+
+/// Edit Comment on the comment at byte `at` of `src` (tables: `|` cannot mark the caret).
+fn edit_comment_at(src: &str, at: usize, new: &str) -> Result<String, String> {
+    let params = Params::new()
+        .with("at", ParamValue::Int(at as i64))
+        .with("text", ParamValue::Text(new.into()));
+    run(src, planners::REVIEW_EDIT_COMMENT, Selection::caret(0), params).map(|(t, _)| t)
+}
+
+/// Codex review of #158: a `|` in a table cell's comment would add a column (the table
+/// becomes a paragraph while the comment survives): it is written `\|`, which the comment
+/// shows as `|`; the table keeps its shape.
+#[test]
+fn edit_comment_in_a_table_cell_escapes_pipes() {
+    let src = "| A{>>old<<} | B |\n| --- | --- |\n";
+    let at = src.find("old").unwrap();
+    let t = edit_comment_at(src, at, "x|y").unwrap();
+    assert_eq!(t, "| A{>>x\\|y<<} | B |\n| --- | --- |\n");
+    let doc = Document::parse(t.as_str(), ParseOptions::default());
+    let marks = markise_doc::review::all_marks(&doc);
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].text, "x|y");
+    assert!(matches!(
+        markise_doc::FormatDoc::leaf(&doc, 0).unwrap().kind,
+        markise_doc::LeafKind::Table { .. }
+    ));
+    // lines are joined in a table row
+    assert_eq!(
+        edit_comment_at(src, at, "a\nb").unwrap(),
+        "| A{>>a b<<} | B |\n| --- | --- |\n"
+    );
+}
