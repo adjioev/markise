@@ -60,7 +60,7 @@ pub const MORE_IDS: &[Option<&str>] = &[
     None,
     Some("block.codeFence"),
     Some("block.mathBlock"),
-    Some("insert.table"),
+    Some("table.insert"),
     Some("block.insertRule"),
     Some("insert.rule"),
     Some("markdown.insertFootnote"),

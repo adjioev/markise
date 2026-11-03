@@ -55,6 +55,7 @@ mod attach;
 mod files;
 mod find;
 mod help;
+mod insert_table;
 mod menus;
 mod prefs;
 mod progressive;
@@ -497,6 +498,11 @@ pub struct MarkiseApp {
     theme_report: bool,
     /// The "Font & size" window is open.
     font_window: bool,
+    /// The Insert Table dialog is open, with its size (issue #164).
+    insert_table: Option<insert_table::InsertTable>,
+    /// A command the document view handed over this frame (its shortcut or context menu item
+    /// opens a dialog first), run like its menu item after the view.
+    pending_command: Option<&'static str>,
     /// The Preferences window (issue #50).
     prefs: crate::prefs::PrefsState,
     /// Colours of the Preferences theme cards (refreshed while the window is open).
@@ -627,6 +633,8 @@ impl MarkiseApp {
             themes,
             theme_report: false,
             font_window: false,
+            insert_table: None,
+            pending_command: None,
             prefs: Default::default(),
             swatches: Vec::new(),
             installed: None,
@@ -2409,6 +2417,10 @@ impl MarkiseApp {
         self.complete_ui(ctx);
         self.theme_report_window(ctx);
         self.font_window(ctx);
+        if let Some(id) = self.pending_command.take() {
+            self.menu_command(ctx, id, crate::menu::Trigger::Shortcut);
+        }
+        self.insert_table_window(ctx);
         self.preferences_window(ctx);
         self.recovery_window(ctx);
         self.about.show(ctx, self.commit.as_deref());
@@ -3063,6 +3075,10 @@ impl MarkiseApp {
                         let out = d.viewer.show(ui, &mut self.images, &t, self.parley.as_mut(), true);
                         if let Some(n) = d.viewer.take_notice() {
                             self.banner = Some(Banner::Info(n));
+                        }
+                        // a shortcut or context menu item of a command that asks first
+                        if let Some(id) = d.viewer.take_app_command() {
+                            self.pending_command = Some(id);
                         }
                         if d.viewer.comment_gutter() != gutter {
                             // MARKISE_TIMING: when the comment gutter appears or goes (issue

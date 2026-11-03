@@ -228,3 +228,107 @@ fn added_rows_in_side_by_side_issue_163() {
     typ(&mut h, "s");
     assert_eq!(row(&h, 3), ["", "s"], "{}", text(&h));
 }
+
+fn insert_table_chord() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers::MAC_CMD | Modifiers::COMMAND | Modifiers::ALT
+    } else {
+        Modifiers::CTRL | Modifiers::COMMAND | Modifiers::SHIFT
+    }
+}
+
+/// Issue #164: Paragraph → Table → Insert Table… asks for the size (3 × 3 by default);
+/// Enter inserts a header, the delimiter row and the body rows after the caret's block, the
+/// caret in the first header cell; typing goes there; one undo step removes the table.
+#[test]
+fn insert_table_from_the_menu_issue_164() {
+    let src = "Intro\n\nAfter\n";
+    let mut h = open("insert-menu", src);
+    click(&mut h, egui::pos2(600.0, 200.0));
+    set_caret(&mut h, 2);
+    // the menus: in Paragraph → Table (first), not on Paragraph itself
+    let bar = h.state().menu_model();
+    let para = bar.menu("Paragraph").unwrap();
+    let table = para
+        .entries
+        .iter()
+        .find_map(|e| match e {
+            markise_ui_egui::menu::Entry::Submenu(m) if m.title == "Table" => Some(m),
+            _ => None,
+        })
+        .unwrap();
+    let markise_ui_egui::menu::Entry::Item(first) = &table.entries[0] else {
+        panic!("an item first")
+    };
+    assert_eq!(
+        (first.key.as_str(), first.label.as_str()),
+        ("table.insert", "Insert Table…")
+    );
+    assert!(first.enabled);
+    assert!(
+        para.entries
+            .iter()
+            .all(|e| !matches!(e, markise_ui_egui::menu::Entry::Item(i) if i.key == "table.insert"))
+    );
+    menu(&mut h, "table.insert");
+    let size = h.state().insert_table_dialog().expect("the dialog is open");
+    assert_eq!((size.columns, size.rows), (3, 3));
+    assert_eq!(text(&h), src, "nothing inserted yet");
+    h.state_mut().set_insert_table_size(2, 2);
+    key(&mut h, Modifiers::NONE, Key::Enter);
+    assert!(h.state().insert_table_dialog().is_none(), "closed");
+    assert_eq!(
+        text(&h),
+        "Intro\n\n|      |      |\n| ---- | ---- |\n|      |      |\n|      |      |\n\nAfter\n"
+    );
+    assert_eq!(caret(&mut h), cell_start(&h, 0, 0), "caret in the first header cell");
+    let inserted = text(&h);
+    key(&mut h, cmd(), Key::Z);
+    assert_eq!(text(&h), src, "one undo step");
+    key(&mut h, cmd() | Modifiers::SHIFT, Key::Z);
+    assert_eq!(text(&h), inserted);
+    // typing and Tab fill the header
+    let at = cell_start(&h, 0, 0);
+    set_caret(&mut h, at);
+    typ(&mut h, "Name");
+    key(&mut h, Modifiers::NONE, Key::Tab);
+    typ(&mut h, "Age");
+    assert_eq!(row(&h, 0), ["Name", "Age"], "{}", text(&h));
+}
+
+/// Issue #164: the shortcut (⌥⌘T, Ctrl+Shift+T) opens the dialog too; Esc cancels it; the
+/// toolbar's More menu and the cheat sheet have the command.
+#[test]
+fn insert_table_shortcut_toolbar_and_cheat_sheet_issue_164() {
+    let src = "Intro\n";
+    let mut h = open("insert-key", src);
+    click(&mut h, egui::pos2(600.0, 200.0));
+    set_caret(&mut h, 2);
+    key(&mut h, insert_table_chord(), Key::T);
+    assert!(
+        h.state().insert_table_dialog().is_some(),
+        "the shortcut opens the dialog"
+    );
+    key(&mut h, Modifiers::NONE, Key::Escape);
+    assert!(h.state().insert_table_dialog().is_none(), "Esc closes it");
+    assert_eq!(text(&h), src, "nothing inserted");
+    // the Insert button inserts the default 3 × 3
+    key(&mut h, insert_table_chord(), Key::T);
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().confirm_insert_table(&ctx));
+    h.run_steps(2);
+    assert_eq!(row(&h, 0).len(), 3);
+    assert_eq!(
+        text(&h).lines().filter(|l| l.starts_with('|')).count(),
+        5,
+        "{}",
+        text(&h)
+    );
+    assert!(
+        h.state().toolbar_state().unwrap().get("table.insert").is_some(),
+        "in the toolbar"
+    );
+    let sheet = h.state().shortcut_groups();
+    let table = sheet.iter().find(|g| g.title == "Table").unwrap();
+    assert!(table.rows.iter().any(|r| r.id == "table.insert"), "{table:?}");
+}

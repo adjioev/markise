@@ -733,6 +733,8 @@ impl MarkiseApp {
                 self.themes.set_editing(e);
             }
             "theme.fontAndSize" => self.font_window = true,
+            // issue #164: asks for the size first
+            "table.insert" => return self.open_insert_table(),
             "view.themeSettings" => self.open_preferences_at(crate::prefs::Section::Appearance),
             "theme.import" => self.import_theme_dialog(),
             "theme.openFolder" => self.open_theme_folder(),
