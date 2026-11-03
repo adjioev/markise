@@ -1921,3 +1921,29 @@ fn source_mode_from_a_clean_view_escapes_literal_syntax() {
         h.state_mut().set_comment_view(CommentView::All);
     }
 }
+
+/// Codex final check of #160: navigating a clean (read-only) preview never changes the
+/// document — an empty nested list item (a pending block hint) is not materialized or
+/// removed when the caret leaves it.
+#[test]
+fn caret_moves_in_a_clean_view_leave_pending_hints_alone() {
+    use markise_engine::settings::CommentView;
+    let src = "- a {++b++}\n\nPara text here.\n";
+    let (mut h, _p) = open_roomy("view-hints", src);
+    caret_at(&mut h, src.find("\n").unwrap());
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    h.key_press(Key::Tab);
+    h.run_steps(2);
+    let before = text(&h);
+    assert_ne!(before, src, "an empty nested item");
+    h.state_mut().set_comment_view(CommentView::Final);
+    h.run_steps(3);
+    let at = before.find("Para").unwrap() + 2;
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(at).unwrap();
+    click_at(&mut h, r.left_center() + egui::vec2(20.0, 0.0));
+    h.run_steps(3);
+    assert_eq!(text(&h), before, "read-only: nothing materialized or removed");
+    h.state_mut().set_comment_view(CommentView::All);
+    h.run_steps(2);
+}
