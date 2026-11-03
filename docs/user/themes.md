@@ -41,7 +41,7 @@ Zoom In / Zoom Out / Actual Size**) scales the whole window between 50 % and 300
 
 ## Import a CSS theme
 
-Markise can import community CSS themes written for Typora:
+Markise can import community CSS themes:
 
 1. **Preferences → Appearance → Import Theme…** and choose the theme's `.css` file.
 2. Markise copies the CSS file and the files next to it into its themes folder. If a theme with
@@ -84,6 +84,4 @@ declarations were used and how many were ignored, unsupported properties, values
 at-rules, fonts that are not installed, and the files copied by an import. Use it when a theme
 does not look as expected.
 
-Typora is a trademark of its respective owner. Markise is an independent project and is not
-affiliated with or endorsed by Typora; importing a theme does not imply any endorsement by its
-author.
+Importing a theme does not imply any endorsement by its author.

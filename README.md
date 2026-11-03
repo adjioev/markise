@@ -3,8 +3,7 @@
 *The marquise of Markdown editors.*
 
 Markise (pronounced like *marquise*, mar-KEEZ) is a fast, cross-platform live-preview Markdown
-editor written in Rust, in the spirit of Typora. It is an independent clean-room
-implementation; some editing behaviours were informed by MarkText.
+editor written in Rust. It is an independent implementation; some editing behaviours were informed by MarkText.
 
 **Status: beta.** Viewer, themes (styles × colour schemes, CSS theme import), code highlighting,
 math (TeX), Mermaid diagrams, export (HTML, PDF, PNG, Pandoc formats), side-by-side source editing
