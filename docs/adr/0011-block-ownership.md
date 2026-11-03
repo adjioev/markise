@@ -94,7 +94,7 @@ methods; S12 uses `block_owner`; S13 uses `BlockOwner::trailing_ws`; S14 / S15 u
 ## Behaviour changes
 
 None intended except four cross-block fixes (Codex review of #18), each with a regression test
-(`markise-engine/tests/block_ownership.rs`, kittest `cross_block_risks_block_ownership`):
+(`markise-engine/tests/it/block_ownership.rs`, kittest `cross_block_risks_block_ownership`):
 
 1. **Hinted-heading Enter** (C43 on `## ` typed as paragraph text, emptied): the empty
    paragraph stays in the line's own containers. After a block of the same innermost container

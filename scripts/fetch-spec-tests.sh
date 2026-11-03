@@ -1,6 +1,6 @@
 #!/bin/sh
 # Downloads the CommonMark 0.31.2 and GFM spec examples (public standards, CC-BY-SA, not
-# committed) into .spec-cache/ for crates/markise-export/tests/conformance.rs.
+# committed) into .spec-cache/ for crates/markise-export/tests/it/conformance.rs.
 set -eu
 cd "$(dirname "$0")/.."
 mkdir -p .spec-cache

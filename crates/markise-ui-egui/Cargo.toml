@@ -37,7 +37,7 @@ embed-resource.workspace = true
 
 [dev-dependencies]
 libc.workspace = true
-# settings file assertions (tests/updates.rs)
+# settings file assertions (tests/it/updates.rs)
 serde_json.workspace = true
 markise-theme.workspace = true
 egui_kittest.workspace = true

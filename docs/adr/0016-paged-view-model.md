@@ -35,8 +35,8 @@ Code that needs a position that survives paging uses source positions
 **Invariant.** Every real item of a paged model equals the item a full build has at the same
 source position; placeholders cover exactly the full build's items between their neighbours;
 the outline and the `[toc]` runs agree (`DocModel::check_against_full`, differential tests
-after random edits, materializations and evictions: `crates/markise-layout/tests/paging.rs`,
-editing at page edges against a full model: `crates/markise-engine/tests/paging.rs`).
+after random edits, materializations and evictions: `crates/markise-layout/tests/it/paging.rs`,
+editing at page edges against a full model: `crates/markise-engine/tests/it/paging.rs`).
 
 **Who decides what is materialized.** The view, before each frame (`view/paging.rs`): the
 first and the last page stay (document edges; a document of at most two pages is a full

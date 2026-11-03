@@ -113,6 +113,12 @@ keystroke latency p99 < 16 ms, idle CPU ~0%.
   Performance budgets belong in `benches/`; preserve event/deadlock hang guards in tests.
   Measure per-test runtime before adding costly coverage (`scripts/test-times.py`), avoid
   duplicate cases, and distinguish warm execution from compilation and local from CI timings.
+- Integration tests: one test binary per crate (issue #116). In a crate with `tests/it/`, add
+  a module `tests/it/<topic>.rs` and its `mod` line in `tests/it/main.rs` (shared helpers in
+  `tests/it/common.rs`), never a new `tests/*.rs` file — each of those links its own
+  executable. Run one module with `cargo test -p <crate> --test it <topic>::`. UI tests that do
+  not exercise file watching build the app with `common::no_watch()` and check settings.json
+  with `common::assert_settings` (settle, then read once), never by polling it (issue #151).
 - Spec test cases become tests; reference the spec ID in the test name or comment (e.g. `T26`).
 - Work on task branches; commit honest checkpoints (`WIP:` when unfinished, list checks run and
   known failures). Merges to `main`, releases and pushes to new remotes need owner approval.

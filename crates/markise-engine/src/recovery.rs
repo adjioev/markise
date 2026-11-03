@@ -249,7 +249,9 @@ fn atomic_write(p: &Path, b: &[u8]) -> std::io::Result<()> {
     let mut t = tempfile::NamedTempFile::new_in(dir)?;
     t.write_all(b)?;
     t.as_file().sync_all()?;
-    t.persist(p).map_err(|e| e.error)?;
+    // replaced like a document or the settings file: Windows sharing conflicts (a scanner or
+    // reader holding the backup open) are retried (issues #65, #151)
+    crate::save::persist_replacing(t, p)?;
     #[cfg(unix)]
     File::open(dir)?.sync_all()?;
     Ok(())
