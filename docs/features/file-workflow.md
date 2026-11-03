@@ -28,6 +28,17 @@ lossily decoded and deleted files are not automatically written. An external-cha
 conflict pauses automatic attempts until the user resolves it. Save-on-close uses the
 normal save path, including Save As for untitled documents.
 
+## Opening large files
+
+A file of 4 MiB or more opens progressively (ADR 0017): its first ~200 KB is shown at once
+and can be read, scrolled and edited while the rest is parsed in the background; then the
+whole document takes its place without moving the text on screen, keeping the edits, undo
+history and selection. Meanwhile the status bar says "Loading the rest of the file…"; find
+and the outline cover the loaded part (and say so); the word count waits; Save waits and
+runs when the file is complete ("saving when done"); autosave and draft backups pause;
+export, Save Copy Without Comments, Replace All and Accept/Reject All are unavailable.
+`MARKISE_PROGRESSIVE_OPEN=0` switches it off.
+
 ## Open Recent and Quick Open
 
 File → Open Recent remembers the latest 30 opened files/folders across launches; Clear
@@ -64,5 +75,9 @@ move column ⌃⌘←/→. Other platforms use Ctrl+Enter, Ctrl+Shift+Backspace,
 - Reopen the app: Open Recent retains files/folders. Clear Items removes the list.
 - Use ⌘P with duplicate filenames in nested folders; test typing, arrows, Enter, Escape,
   and opening while the current document has unsaved edits.
+- Open a 100 MB Markdown file: the first screen appears at once, the status bar shows the
+  loading note, nothing above the document moves. Scroll and type before it completes; press
+  ⌘S while loading ("saving when done") and confirm the saved file is complete. Repeat with
+  a change made by another editor while loading, and with Quit while loading.
 - Exercise table operations through menus and shortcuts, then undo/redo. Include escaped
   pipes, a quoted table, and CRLF source.

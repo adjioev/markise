@@ -103,7 +103,7 @@ impl MarkiseApp {
         if self.source_focused() && !markise_engine::editor::source::source_command_available(id) {
             return false;
         }
-        d.viewer.ed.registry.enabled(&d.viewer.ed.session, id).is_ok()
+        d.viewer.command_enabled(id)
     }
 
     /// Format and block-style toggles show whether the selection has them (spec 04 §3.2).
@@ -283,7 +283,8 @@ impl MarkiseApp {
             Entry::Separator,
             self.item(MenuAction::Command("file.save"), "Save", has_doc, Check::None),
             self.item(MenuAction::Command("file.saveAs"), "Save As…", has_doc, Check::None),
-            self.app_item("file.saveCopyClean", has_doc, Check::None),
+            // (not from the first part of a progressively opened file, issue #126)
+            self.app_item("file.saveCopyClean", has_doc && !self.is_partial(), Check::None),
             Entry::Separator,
             self.app_item("file.rename", has_file, Check::None),
             self.item(
@@ -427,7 +428,7 @@ impl MarkiseApp {
         v.push(self.app_item("export.overwritePrevious", prev.is_some(), Check::None));
         v.push(Entry::Separator);
         v.push(self.app_item("export.comments", true, Check::Toggle(self.export_comments())));
-        Menu::new("Export", v).enabled(self.doc.is_some() && !self.export.is_running())
+        Menu::new("Export", v).enabled(self.doc.is_some() && !self.is_partial() && !self.export.is_running())
     }
 
     fn view_menu(&self) -> Menu {
@@ -639,7 +640,7 @@ impl MarkiseApp {
             "view.diagrams" => self.set_diagrams(!self.diagrams),
             "view.wikilinks" => self.set_wikilinks(!self.wikilinks()),
             "view.criticMarkup" => self.set_critic_markup(!self.critic_markup()),
-            "file.saveCopyClean" if self.doc.is_some() => self.save_copy_without_comments(),
+            "file.saveCopyClean" if self.doc.is_some() && !self.is_partial() => self.save_copy_without_comments(),
             "export.comments" => self.set_export_comments(!self.export_comments()),
             "go.back" => self.go_back(),
             "go.forward" => self.go_forward(),

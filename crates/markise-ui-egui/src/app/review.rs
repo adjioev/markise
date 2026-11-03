@@ -460,7 +460,8 @@ impl MarkiseApp {
     /// whether the copy accepts or rejects them, then for the copy's file, and writes it
     /// through the checked save path. The open document and its file are not changed.
     pub fn save_copy_without_comments(&mut self) {
-        if self.doc.is_none() || self.review.copy.is_some() {
+        // (not from the first part of a progressively opened file, issue #126)
+        if self.doc.is_none() || self.review.copy.is_some() || self.is_partial() {
             return;
         }
         let n = self
@@ -474,7 +475,13 @@ impl MarkiseApp {
             })
             .unwrap_or(0);
         if n > 0 && self.parse.critic_markup {
-            self.set_ask(Ask::CleanCopy { suggestions: n });
+            let d = self.doc.as_ref().expect("doc");
+            let (doc, counter) = (d.id, d.viewer.ed.session.revision().counter);
+            self.set_ask(Ask::CleanCopy {
+                suggestions: n,
+                doc,
+                counter,
+            });
         } else {
             self.write_clean_copy(false);
         }
@@ -504,6 +511,9 @@ impl MarkiseApp {
 
     /// Asks for the copy's file and starts writing it.
     pub(super) fn write_clean_copy(&mut self, reject: bool) {
+        if self.is_partial() {
+            return; // never a copy of the first part of a file (issue #126)
+        }
         let Some(text) = self.clean_copy_text(reject) else {
             return;
         };

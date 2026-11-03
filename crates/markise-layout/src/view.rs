@@ -156,6 +156,69 @@ impl View {
         self.set_model_at(doc, model, (anchor_pos, 0, 0.0));
     }
 
+    /// Installs the model of a document that continues the current one: the text shown so far
+    /// is the start of `doc`'s text (progressive open, issue #126). The content on screen does
+    /// not move: the scroll anchor stays on the item at the same source position with the same
+    /// offset into it (a paged model materializes its page at once), and the reader's choices
+    /// (open/closed disclosures, expanded blocks) are kept for the items at the same positions.
+    /// A disclosure that starts in the text shown so far (`shown` bytes) and ends after it was
+    /// shown open (it had no end); it stays open when the scroll anchor or one of `keep` (the
+    /// caret, selection ends) lies inside it, so what the reader is looking at stays.
+    pub fn set_model_keep(&mut self, doc: Arc<dyn FormatDoc>, mut model: Arc<DocModel>, shown: usize, keep: &[usize]) {
+        if self.is_empty() {
+            self.set_model(doc, model);
+            return;
+        }
+        let (start, nth, off) = self.source_anchor();
+        let expanded: Vec<(usize, usize)> = self.expanded.iter().map(|&i| self.source_of(i)).collect();
+        {
+            let m = Arc::make_mut(&mut model);
+            m.cross.adopt_choices(&self.model.cross);
+            for g in m.cross.disclosures() {
+                let inside = |p: usize| g.start <= p && p <= g.end;
+                if !g.open && g.start < shown && g.end >= shown && (inside(start) || keep.iter().any(|&p| inside(p))) {
+                    m.cross.set_open(g.start, true);
+                }
+            }
+        }
+        self.set_model_at(doc, model, (start, nth, 0.0));
+        if self.model.item_start(self.anchor) == start {
+            self.anchor_off = off;
+        } else if off > 0.0 {
+            self.scroll_by(off);
+        }
+        for (s, n) in expanded {
+            self.ensure_offset(s);
+            if let Some(i) = self.item_by_source(s, n) {
+                self.expanded.insert(i);
+                if i < self.exact.len() {
+                    self.exact[i] = false;
+                }
+            }
+        }
+    }
+
+    /// Item `i` by source: its start and its ordinal among the items starting there.
+    fn source_of(&self, i: usize) -> (usize, usize) {
+        let start = self.model.item_start(i);
+        let first = self.model.items.partition_point_start(start);
+        (start, i - first.min(i))
+    }
+
+    /// The `nth` item starting at `start` (`None`: no item starts there).
+    fn item_by_source(&self, start: usize, nth: usize) -> Option<usize> {
+        let n = self.len();
+        let first = self.model.items.partition_point_start(start);
+        if first >= n || self.model.item_start(first) != start {
+            return None;
+        }
+        let mut i = first;
+        while i < first + nth && i + 1 < n && self.model.item_start(i + 1) == start {
+            i += 1;
+        }
+        Some(i)
+    }
+
     /// [`View::set_model`] with the scroll position at `anchor` (by source:
     /// [`View::source_anchor`]).
     fn set_model_at(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>, anchor: (usize, usize, f32)) {

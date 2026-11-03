@@ -269,6 +269,17 @@ impl CrossBlockIndex {
         true
     }
 
+    /// Takes over the reader's open/closed choices of `from` (an index of a document this one
+    /// continues: progressive open, issue #126) for the disclosures starting at the same
+    /// positions here.
+    pub fn adopt_choices(&mut self, from: &CrossBlockIndex) {
+        for m in from.markers() {
+            if let Some(open) = m.toggled {
+                self.set_open(m.start, open);
+            }
+        }
+    }
+
     /// Pairs the markers document-wide: a start opens a group in its container scope, an end
     /// closing `count` details closes that many open ones of its scope (ignored when fewer are
     /// open), a summary block right after a start in the same container gives the title of a

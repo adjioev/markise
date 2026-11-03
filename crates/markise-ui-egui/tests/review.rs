@@ -1240,7 +1240,13 @@ fn check_typing_ordinary_text_in_a_10_mb_document_never_scans(size: usize) {
     let v = h.state_mut().viewer().unwrap();
     let (scans, bytes) = v.comment_scans();
     let copies = v.ed.session.copies;
-    assert_eq!(scans, 1, "one initial scan");
+    // a progressive open (issue #126) scans the first part, then the whole document once
+    let progressive = src.len() >= markise_engine::load::ProgressiveOpts::default().min_bytes;
+    assert_eq!(
+        scans,
+        if progressive { 2 } else { 1 },
+        "one initial scan per document shown"
+    );
     assert!(bytes < 4096, "it stopped at the first comment: {bytes} bytes");
     // type in the middle of the document
     let mid = src.len() / 2;

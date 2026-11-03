@@ -354,6 +354,10 @@ impl MarkiseApp {
     pub(super) fn reparse_document(&mut self, label: &'static str) {
         // later loads parse with the new options
         self.loader = None;
+        // a progressively opened document re-parses once the whole file is in (issue #126)
+        if self.defer_reparse(label) {
+            return;
+        }
         let wake = self.wake_handle();
         let Some(d) = self.doc.as_mut() else { return };
         let format: Arc<dyn markise_doc::DocumentFormat> = Arc::new(MarkdownFormat {

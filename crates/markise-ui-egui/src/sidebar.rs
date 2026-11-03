@@ -1417,17 +1417,38 @@ fn virtual_rows(
     .inner
 }
 
-/// Returns the index of the clicked entry.
-pub fn outline(ui: &mut Ui, entries: &[OutlineEntry], current: Option<usize>, look: &SideLook) -> Option<usize> {
+/// Returns the index of the clicked entry. `partial`: the document holds only the first part
+/// of its file (progressive open, issue #126): a last row says the rest is loading (below the
+/// entries, so they do not move when it goes).
+pub fn outline(
+    ui: &mut Ui,
+    entries: &[OutlineEntry],
+    current: Option<usize>,
+    look: &SideLook,
+    partial: bool,
+) -> Option<usize> {
     if entries.is_empty() {
-        ui.label(RichText::new("No headings").font(look.font.clone()).color(look.icon));
+        let note = if partial {
+            "No headings in the loaded part"
+        } else {
+            "No headings"
+        };
+        ui.label(RichText::new(note).font(look.font.clone()).color(look.icon));
         return None;
     }
     let min_level = entries.iter().map(|e| e.level).min().unwrap_or(1);
     let mut clicked = None;
-    virtual_rows(ui, "markise-outline", look.row_h, entries.len(), None, |ui, range| {
+    let rows = entries.len() + usize::from(partial);
+    virtual_rows(ui, "markise-outline", look.row_h, rows, None, |ui, range| {
         for i in range {
-            let e = &entries[i];
+            let Some(e) = entries.get(i) else {
+                ui.label(
+                    RichText::new("More headings when the file has loaded…")
+                        .font(look.font.clone())
+                        .color(look.icon),
+                );
+                continue;
+            };
             let level = e.level - min_level + 1;
             let text = if e.text.is_empty() { "(empty heading)" } else { &e.text };
             let r = look.row(

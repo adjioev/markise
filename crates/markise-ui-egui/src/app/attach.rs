@@ -127,6 +127,22 @@ impl AttachState {
 }
 
 impl MarkiseApp {
+    /// The document `doc_id` took the rest of its file (progressive open, issue #126): its
+    /// revision moved from `from` to `to` without moving any position, so pastes and drops
+    /// being resolved still apply.
+    pub(super) fn attach_continued(&mut self, doc_id: u64, from: u64, to: u64) {
+        if !self.attach.queue.is_empty() {
+            self.attach.own_edits.push(OwnEdit {
+                doc_id,
+                from,
+                to,
+                pos: usize::MAX,
+                removed: 0,
+                inserted: 0,
+            });
+        }
+    }
+
     /// Test hook ([`MarkiseApp::background_settled`]): no paste or drop is being resolved.
     pub(super) fn attach_settled(&self) -> bool {
         self.attach.queue.is_empty()

@@ -25,7 +25,7 @@ use crate::sidebar::{EditEnd, InlineEdit, Tab, TreeAction};
 #[derive(Default)]
 pub(crate) struct FileOps {
     /// Answers handed out instead of showing the native save dialog (tests).
-    save_answers: VecDeque<Option<PathBuf>>,
+    pub(super) save_answers: VecDeque<Option<PathBuf>>,
     /// The tree row whose name is being edited.
     pub(crate) rename: Option<InlineEdit>,
 }
@@ -411,7 +411,7 @@ impl MarkiseApp {
     }
 
     /// `from` was renamed to `to`: the document (in it, or it) follows.
-    fn renamed(&mut self, from: &Path, to: &Path) {
+    pub(super) fn renamed(&mut self, from: &Path, to: &Path) {
         self.side.renamed(from, to);
         if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
             t.renamed(from, to, w);
@@ -422,6 +422,29 @@ impl MarkiseApp {
         {
             let reason = l.reason;
             self.start_load(p, reason);
+        }
+        // an open waiting for an answer or for its whole document follows too (issue #126
+        // review): it installs, watches and later saves the new path
+        if let Some(w) = self.progressive_waiting.as_mut()
+            && let Some(p) = fsops::rebase(&w.path, from, to)
+        {
+            w.path = p;
+        }
+        if let Some(Ask::Unsaved(then)) = self.ask.as_mut() {
+            rebase_then(then, from, to);
+        }
+        for then in [
+            self.queued_save.as_mut().map(|q| &mut q.then),
+            self.saving.as_mut().map(|s| &mut s.then),
+            self.progressive
+                .as_mut()
+                .and_then(|p| p.save.as_mut())
+                .map(|q| &mut q.then),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            rebase_then(then, from, to);
         }
         let moved = self
             .doc
@@ -464,5 +487,22 @@ impl MarkiseApp {
             Some(Ask::Trash(p)) => Some(p),
             _ => None,
         }
+    }
+}
+
+/// A continuation opening or installing a file under `from` follows its rename to `to`.
+fn rebase_then(then: &mut Then, from: &Path, to: &Path) {
+    match then {
+        Then::Open(p) => {
+            if let Some(q) = fsops::rebase(p, from, to) {
+                *p = q;
+            }
+        }
+        Then::Install(l) => {
+            if let Some(q) = fsops::rebase(&l.path, from, to) {
+                l.path = q;
+            }
+        }
+        _ => {}
     }
 }
