@@ -93,6 +93,9 @@ jobs:
       # fails on a broken local link, image or #fragment. Deployment is manual (pages.yml).
       - name: Website and user guide
         run: cargo run --locked --package xtask -- site
+      # Debian version mapping of the .deb (SemVer precedence under dpkg --compare-versions)
+      - name: Debian version order
+        run: ./scripts/test-deb-version.sh
 
   test:
     name: test + build (${{ matrix.name }})

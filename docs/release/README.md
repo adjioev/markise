@@ -47,8 +47,12 @@ libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrender1, libxkbcommon-x11-0, libx
 libwayland-client0, libwayland-egl1, libegl1, libgl1, libfontconfig1, libdbus-1-3`), which
 dpkg-shlibdeps cannot see. `Recommends: libvulkan1`
 (wgpu's Vulkan backend; glow over OpenGL takes over without it) and `xdg-desktop-portal` (file
-dialogs). Version: the label with every `-` turned into `~` (`0.1.0~beta.1`, dry runs
-`0.1.0~beta.1~dryrun.<sha7>`), so prereleases sort before the final `0.1.0`. No maintainer
+dialogs). Version (`scripts/deb-version.sh`): the first `-` of the label (the SemVer prerelease
+separator) becomes `~` and the Debian revision `-1` is appended (`0.1.0~beta.1-1`, dry runs
+`0.1.0~beta.1-dryrun.<sha7>-1`), so prereleases sort before the final `0.1.0-1`; later hyphens
+stay, which keeps SemVer order for the supported forms. `scripts/test-deb-version.sh` (CI lint
+job) checks a table of SemVer pairs with `dpkg --compare-versions`; the script's header lists
+the one known gap (hyphens inside prerelease identifiers compared with letters or dots). No maintainer
 scripts: the desktop and icon caches are refreshed by the dpkg triggers of
 desktop-file-utils and the icon theme. `text/markdown` comes from shared-mime-info, so no MIME
 definition is shipped.

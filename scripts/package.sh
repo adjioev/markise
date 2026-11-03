@@ -36,8 +36,8 @@
 #            hicolor icons, AppStream metainfo; `cp -r share ~/.local/` installs them for the
 #            current user)
 #            markise_<label>_<arch>.deb (always this name, e.g. markise_0.1.0-beta.1_amd64.deb;
-#            the package Version is the label with every "-" turned into "~", 0.1.0~beta.1, so
-#            it sorts before 0.1.0; GitHub would rewrite "~" in an asset name): /usr/bin/markise and
+#            the package Version comes from scripts/deb-version.sh, 0.1.0~beta.1-1, which sorts
+#            before 0.1.0-1; GitHub would rewrite "~" in an asset name): /usr/bin/markise and
 #            markise-cli, the same share/ files under /usr/share, licences and a Debian
 #            copyright file in /usr/share/doc/markise; Depends from dpkg-shlibdeps plus the
 #            dlopen()ed X11/Wayland/EGL/GL libraries
@@ -274,11 +274,9 @@ PLIST
           ;;
         deb)
           [[ -n "$deb_arch" ]] || { echo "no .deb architecture for $platform" >&2; exit 2; }
-          # Debian version: every "-" of the label becomes "~", which sorts before anything, so
-          # 0.1.0~beta.1~dryrun.abc1234 < 0.1.0~beta.1 < 0.1.0 (SemVer prerelease order). "+build"
-          # stays. No Debian revision: the package is built from upstream directly.
-          deb_version="$(printf '%s' "$label" | tr '-' '~')"
-          [[ "$deb_version" =~ ^[0-9][A-Za-z0-9.+~]*$ ]] || { echo "label '$label' gives no valid Debian version" >&2; exit 2; }
+          # Debian version (scripts/deb-version.sh): the first "-" becomes "~" so prereleases
+          # sort before the release (0.1.0~beta.1-1 < 0.1.0-1), Debian revision "-1".
+          deb_version="$("$root/scripts/deb-version.sh" "$label")"
           pkg="$stage/deb/markise"
           mkdir -p "$pkg/DEBIAN" "$pkg/usr/bin"
           cp "$bin_dir/markise" "$bin_dir/markise-cli" "$pkg/usr/bin/"
@@ -303,8 +301,11 @@ License: MIT
 License: Apache-2.0
  See /usr/share/common-licenses/Apache-2.0 (also /usr/share/doc/markise/LICENSE-APACHE).
 COPYRIGHT
-          printf '%s\n' "Markise $label. Release notes: https://github.com/adjioev/markise/releases" \
-            "(docs/release/ in the source repository)." | gzip -n -9 > "$pkg/usr/share/doc/markise/changelog.gz"
+          maintainer="The Markise contributors <4410+adjioev@users.noreply.github.com>"
+          changelog_date="$(date -u -R -r "$SOURCE_DATE_EPOCH" 2>/dev/null || date -u -R -d "@$SOURCE_DATE_EPOCH")"
+          printf '%s\n' "markise ($deb_version) unstable; urgency=medium" "" \
+            "  * Markise $label." "  * Release notes: https://github.com/adjioev/markise/releases" "" \
+            " -- $maintainer  $changelog_date" | gzip -n -9 > "$pkg/usr/share/doc/markise/changelog.Debian.gz"
           # Shared-library dependencies of the ELF files (libc6, libgcc-s1), from dpkg-shlibdeps.
           shlibs="$(cd "$stage/deb" && mkdir -p debian && printf 'Source: markise\n\nPackage: markise\nArchitecture: any\n' > debian/control \
             && dpkg-shlibdeps -O markise/usr/bin/markise markise/usr/bin/markise-cli | sed -n 's/^shlibs:Depends=//p')"
@@ -322,7 +323,7 @@ COPYRIGHT
 Package: markise
 Version: $deb_version
 Architecture: $deb_arch
-Maintainer: The Markise contributors <4410+adjioev@users.noreply.github.com>
+Maintainer: $maintainer
 Installed-Size: $installed_kb
 Depends: $depends
 Recommends: libvulkan1, xdg-desktop-portal
