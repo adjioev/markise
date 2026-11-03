@@ -464,6 +464,21 @@ impl DocViewer {
         self.notice.take()
     }
 
+    /// After Add Comment ran (shortcut, menu, toolbar, context menu): the new comment opens
+    /// in its card (issue #87); refused when it ran (a check enablement does not make, Codex
+    /// review of #161), the reason becomes a notice instead of nothing happening.
+    fn after_add_comment_result(&mut self, r: &Result<(), markise_engine::editor::command::CommandError>) {
+        use markise_engine::editor::command::CommandError;
+        match r {
+            Ok(()) => self.after_add_comment(),
+            Err(CommandError::Plan(markise_doc::PlanError::NotApplicable(why))) => {
+                self.notice = Some(format!("Cannot add a comment here: {why}."));
+            }
+            Err(CommandError::Disabled(_)) => self.notice = Some(self.add_comment_refusal()),
+            Err(e) => self.notice = Some(format!("Cannot add a comment here: {e}.")),
+        }
+    }
+
     /// Why Add Comment cannot run at the selection (the planner's reason).
     fn add_comment_refusal(&self) -> String {
         if self.review_preview() {
@@ -515,8 +530,8 @@ impl DocViewer {
         let r = with_shaper(ctx, parley, |sh| self.ed.execute(id, params, sh, &images, 600.0));
         self.ed.refresh_focus();
         self.blink_from = ctx.input(|i| i.time);
-        if r.is_ok() && id == "review.addComment" {
-            self.after_add_comment();
+        if id == "review.addComment" {
+            self.after_add_comment_result(&r);
         }
         r
     }
@@ -1849,9 +1864,8 @@ impl DocViewer {
         let r = self.ed.execute(id, params, sh, images, vh);
         // each command sees the reveal state of the previous one's caret
         self.ed.refresh_focus();
-        if r.is_ok() && id == "review.addComment" {
-            // the new comment is written in its card (issue #87)
-            self.after_add_comment();
+        if id == "review.addComment" {
+            self.after_add_comment_result(&r);
         }
         r.is_ok() || matches!(r, Err(markise_engine::editor::command::CommandError::Disabled(_)))
     }

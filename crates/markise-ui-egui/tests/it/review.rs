@@ -2004,3 +2004,31 @@ fn add_comment_shortcut_explains_a_refusal() {
     let banner = h.state().banner_text().unwrap_or_default();
     assert!(banner.contains("one table cell"), "{banner}");
 }
+
+/// Codex review 2 of #161: a refusal only the run-time check finds (enabled, but the marks
+/// would not come out as intended: `==}` in the selection closes the highlight early) is shown
+/// too — from the shortcut and from the menu — instead of nothing happening.
+#[test]
+fn add_comment_refused_when_it_runs_says_why() {
+    let src = "| H | I |\n| --- | --- |\n| x | a ==} b |\n";
+    for menu in [false, true] {
+        let (mut h, _p) = open_roomy(if menu { "late-menu" } else { "late-key" }, src);
+        let a = src.find("a ==}").unwrap();
+        select(&mut h, a, a + "a ==} b".len());
+        assert!(
+            h.state().menu_model().item("review.addComment").unwrap().enabled,
+            "enabled"
+        );
+        if menu {
+            let ctx = h.ctx.clone();
+            h.state_mut()
+                .menu_action(&ctx, &MenuAction::Command("review.addComment"));
+        } else {
+            h.key_press_modifiers(add_comment_chord(), Key::M);
+        }
+        h.run_steps(3);
+        assert_eq!(text(&h), src);
+        let banner = h.state().banner_text().unwrap_or_default();
+        assert!(banner.contains("Cannot add a comment here"), "menu {menu}: {banner}");
+    }
+}
