@@ -1,11 +1,12 @@
 //! Workspace tooling: `cargo xtask <command>` (alias in `.cargo/config.toml`).
 //!
-//! Pure Rust (std, serde_json, toml). External tools (`cargo`, `git`) are invoked through
+//! Pure Rust (std, serde_json, toml; `site` renders Markdown with markise-md and markise-export). External tools (`cargo`, `git`) are invoked through
 //! `std::process::Command`. The command structure follows WordCraft's xtask (see NOTICE).
 
 mod assets;
 mod dist;
 mod layers;
+mod site;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -16,9 +17,10 @@ usage: cargo xtask <command>
 commands:
   layers   enforce the crate layering (layers.toml, which must match the AGENTS.md table)
   assets   check that every committed asset has an attribution record (SOURCE.md or NOTICE)
-  ci       fmt --check, clippy -D warnings, test, assets, layers (stops at the first failure)
+  ci       fmt --check, clippy -D warnings, test, assets, layers, site (stops at the first failure)
   heavy    heavy tests (release) and 3000-case incremental properties; excludes known bugs
   dist     build and package release artifacts: `cargo xtask dist --help`
+  site     build the website and user guide into target/site/ and check its links
   version  print the workspace version (the release tag is `v` + this)
 ";
 
@@ -30,6 +32,7 @@ fn main() -> ExitCode {
         Some("ci") => cmd_ci(),
         Some("heavy") => cmd_heavy(),
         Some("dist") => dist::run(&root(), &args[1..]),
+        Some("site") => site::run(&root(), &args[1..]),
         Some("version") => dist::workspace_version(&root()).map(|v| println!("{v}")),
         Some("-h" | "--help" | "help") | None => {
             print!("{USAGE}");
@@ -95,7 +98,9 @@ fn cmd_ci() -> Result<(), String> {
     println!("==> assets");
     assets::run(&root())?;
     println!("==> layers");
-    cmd_layers()
+    cmd_layers()?;
+    println!("==> site");
+    site::run(&root(), &[])
 }
 
 /// The name filter is mandatory: bare `--ignored` also runs known-bug tests.

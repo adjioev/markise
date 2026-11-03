@@ -10,7 +10,8 @@
 # macOS minutes are billed at 10x and Windows at 2x the Linux rate on private repositories, which is why they do not run on every PR push.
 #
 # Superseded runs of the same PR/branch are cancelled (never on main). Docs-only changes
-# (Markdown under docs/, README/CLAUDE.md, the site page) do not trigger CI (`paths`).
+# (Markdown under docs/, README/CLAUDE.md) do not trigger CI (`paths`); the website and the
+# user guide (site/, docs/user/) do, because `cargo xtask site` builds and link-checks them.
 #
 # Linux system packages: the egui/eframe stack (winit, glutin, wayland/x11 via dlopen) and rfd
 # (xdg-desktop-portal via zbus, pure Rust) need no -dev packages to build or test; the list in
@@ -25,15 +26,15 @@ on:
     branches: [main]
     paths: &paths
       - "**"
-      # Narrow docs-only ignores (Markdown prose and the static site page; nothing a build, a
-      # test or an xtask check reads) ...
+      # Narrow docs-only ignores (Markdown prose; nothing a build, a test or an xtask check
+      # reads) ...
       - "!docs/**/*.md"
       - "!README.md"
       - "!CLAUDE.md"
-      - "!site/*.html"
-      - "!site/*.css"
-      # ... minus attribution records and test fixtures, should any ever live there
-      # (`cargo xtask assets`). Anything else, e.g. images under docs/, triggers CI.
+      # ... minus the user guide (rendered and link-checked by `cargo xtask site`), attribution
+      # records and test fixtures, should any ever live there (`cargo xtask assets`). Anything
+      # else, e.g. images under docs/ or the website in site/, triggers CI.
+      - "docs/user/**"
       - "**/SOURCE.md"
       - "**/SOURCES.md"
       - "**/tests/fixtures/**"
@@ -88,6 +89,10 @@ jobs:
         run: cargo run --locked --package xtask -- layers
       - name: Asset attribution
         run: cargo run --locked --package xtask -- assets
+      # The website and user guide (site/, docs/user/): rendered with markise-md/markise-export,
+      # fails on a broken local link, image or #fragment. Deployment is manual (pages.yml).
+      - name: Website and user guide
+        run: cargo run --locked --package xtask -- site
 
   test:
     name: test + build (${{ matrix.name }})

@@ -3,7 +3,7 @@
 *The marquise of Markdown editors.*
 
 Markise (pronounced like *marquise*, mar-KEEZ) is a fast, cross-platform live-preview Markdown
-editor written in pure Rust, in the spirit of Typora. It is an independent clean-room
+editor written in Rust, in the spirit of Typora. It is an independent clean-room
 implementation; some editing behaviours were informed by MarkText.
 
 **Status: beta.** Viewer, themes (styles × colour schemes, CSS theme import), code highlighting,
@@ -17,6 +17,7 @@ cargo run -p markise-cli -- roundtrip FILE.md            # byte-identical round-
 cargo xtask ci                                           # fmt, clippy, tests, layer and asset checks
 ```
 
+User guide: [`docs/user/`](docs/user/index.md) (published with the website, `cargo xtask site`).
 Design decisions live in [`docs/adr/`](docs/adr/), CI policy in [`docs/ci.md`](docs/ci.md), release
 process in [`docs/release/`](docs/release/). Contributor and agent instructions: [AGENTS.md](AGENTS.md).
 

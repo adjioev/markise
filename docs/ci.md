@@ -14,10 +14,10 @@ every PR update and the macOS + Windows matrix only on demand and after merge.
 | Push to `main` (after a merge) | yes | yes | no |
 | `workflow_dispatch` (manual; not shown in PR checks) | yes | yes | yes |
 | Nightly `main` (schedule, 16:23 UTC) | yes | no | yes |
-| Docs-only change (Markdown under `docs/`, `README.md`, `CLAUDE.md`, `site/*.html`, `site/*.css`) | not triggered | not triggered | not triggered |
+| Docs-only change (Markdown under `docs/` except `docs/user/`, `README.md`, `CLAUDE.md`) | not triggered | not triggered | not triggered |
 
 The Linux jobs are: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
-`cargo xtask layers` and `cargo xtask assets` (job `fmt + clippy (Linux)`), and the workspace
+`cargo xtask layers`, `cargo xtask assets` and `cargo xtask site` (website and user guide build with a link check; job `fmt + clippy (Linux)`), and the workspace
 fast correctness tests (job `test + build (linux-x86_64)`). The full matrix also runs the tests on macOS (Apple Silicon) and
 Windows and builds and packages release binaries on all three OSes; each OS also starts the
 release app once on a document (`scripts/smoke-start.sh`: it must start a renderer — wgpu, or
@@ -25,8 +25,9 @@ glow after a fallback — and quit by itself; Linux under Xvfb). The packaged bi
 uploaded as artifacts (`markise-<os>`, kept 3 days) **only from pushes to `main`**; `full-ci` PR
 runs and manual runs build and package but upload nothing.
 
-The docs-only filter is deliberately narrow: only prose and the static site page are ignored.
-Everything else triggers CI, including `AGENTS.md` (its crate table is checked by
+The docs-only filter is deliberately narrow: only prose is ignored. Everything else triggers CI,
+including the website (`site/`) and the user guide (`docs/user/`, rendered and link-checked by
+`cargo xtask site`), `AGENTS.md` (its crate table is checked by
 `cargo xtask layers`), images or media under `docs/` and `site/assets/` (`cargo xtask assets`),
 Markdown test fixtures under `crates/`, and any `SOURCE.md`/`SOURCES.md`, `tests/fixtures/` or
 `testdata/` file even under `docs/`.
