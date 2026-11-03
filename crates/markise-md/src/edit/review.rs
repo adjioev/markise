@@ -9,6 +9,7 @@
 //! its line, otherwise the space before it when the mark is followed by punctuation or the
 //! end of the line.
 
+use crate::text::Span;
 use markise_doc::review::{self, ReviewMark};
 use markise_doc::{
     CriticKind, FormatDoc, InlineKind as NK, InlineNode, LeafKind, Plan, PlanError, PlanRequest, PlanStep, PlannerId,
@@ -17,6 +18,9 @@ use markise_doc::{
 
 use super::Edits;
 use crate::Document;
+
+/// Why Add Comment refuses outside text that can hold one.
+const NOT_IN_TEXT: &str = "comments can be added in paragraphs, headings and table cells";
 
 /// What to do with the suggestions while building a result.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -62,8 +66,9 @@ impl Document {
             planners::REVIEW_ACCEPT_ALL | planners::REVIEW_REJECT_ALL | planners::REVIEW_CLEAN_COPY => {
                 Some(self.options().critic_markup)
             }
-            planners::REVIEW_ADD_COMMENT
-            | planners::REVIEW_ACCEPT
+            // (enablement: no verifying parse, Codex review of #161)
+            planners::REVIEW_ADD_COMMENT => Some(self.add_comment(req, false).is_ok()),
+            planners::REVIEW_ACCEPT
             | planners::REVIEW_REJECT
             | planners::REVIEW_DELETE_COMMENT
             | planners::REVIEW_EDIT_COMMENT => Some(self.plan_review(id, req).is_some_and(|r| r.is_ok())),
@@ -92,8 +97,18 @@ impl Document {
     /// Add Comment: a selection becomes `{==selection==}{>><<}`, a caret gets `{>><<}`; the
     /// caret goes into the empty comment. Selection ends that cut through a styled span are
     /// widened to the whole span; selections over several blocks, inside code, math or raw
-    /// HTML, or touching an existing mark are refused (marks do not nest).
+    /// HTML, touching an existing mark, or right after a backslash (it would escape the
+    /// opener) are refused (marks do not nest). In a table (issue #90) the selection stays in
+    /// one cell of a header or body row.
     fn plan_add_comment(&self, req: &PlanRequest) -> Result<Plan, PlanError> {
+        self.add_comment(req, true)
+    }
+
+    /// Add Comment's plan; `exact`: the result is verified by parsing the affected block part
+    /// (the paragraph or heading, or the table's header, delimiter and the affected row) —
+    /// done when the command runs, not for menu enablement, which stays cheap on huge tables
+    /// (Codex review of #161).
+    pub(crate) fn add_comment(&self, req: &PlanRequest, exact: bool) -> Result<Plan, PlanError> {
         self.review_on()?;
         let sel = req.selection.primary();
         if sel.focus.virt > 0 || sel.anchor.virt > 0 {
@@ -114,16 +129,59 @@ impl Document {
             a = sel.focus.offset;
             b = a;
         }
-        let leaf = self.leaf(a).ok_or(PlanError::NotApplicable("no block"))?;
-        if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) {
-            return Err(PlanError::NotApplicable("not in text"));
-        }
-        let content = leaf.content();
-        if a < content.start || b > content.end {
-            return Err(PlanError::NotApplicable("selection spans blocks"));
-        }
-        let base = content.start;
-        let rich = self.inlines(&leaf);
+        // a table row is found without copying the table's lines (huge tables)
+        let row = self.table_row_at(a);
+        let mut lines: Vec<Span> = Vec::new();
+        let (base, rich) = match row {
+            // issue #90: within one table cell (header or body), never across cells
+            Some(tr) => {
+                if b > tr.row.end {
+                    return Err(PlanError::NotApplicable("the selection spans several table rows"));
+                }
+                if tr.index == 1 {
+                    return Err(PlanError::NotApplicable("the table's delimiter row has no text"));
+                }
+                let cells = self.table_row_cells(tr.row);
+                // a caret in a cell's padding (an empty cell: only spaces between its pipes)
+                // belongs to that cell
+                let blank = |x: usize, y: usize| text[x.min(y)..x.max(y)].bytes().all(|c| c == b' ' || c == b'\t');
+                let cell = cells
+                    .iter()
+                    .find(|c| c.start <= a && b <= c.end)
+                    .or_else(|| {
+                        cells
+                            .iter()
+                            .find(|c| collapsed && (blank(a, c.start) || blank(c.end, a)))
+                    })
+                    .copied()
+                    .ok_or(PlanError::NotApplicable(
+                        "the selection must stay inside one table cell",
+                    ))?;
+                let rich = self.inline(
+                    markise_doc::InlineSource::Cell {
+                        span: cell,
+                        cap: cell.len().max(1),
+                    },
+                    cell.start,
+                );
+                (cell.start, rich)
+            }
+            None => {
+                let leaf = self.leaf(a).ok_or(PlanError::NotApplicable(NOT_IN_TEXT))?;
+                if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) {
+                    return Err(PlanError::NotApplicable(NOT_IN_TEXT));
+                }
+                let content = leaf.content();
+                if a < content.start || b > content.end {
+                    return Err(PlanError::NotApplicable("the selection spans several blocks"));
+                }
+                let rich = self.inlines(&leaf);
+                if exact {
+                    lines = leaf.lines.clone();
+                }
+                (content.start, rich)
+            }
+        };
         // widen through styled spans the selection cuts (`**a|b**` → the whole strong span)
         let mut nodes = Vec::new();
         flat(&rich.nodes, &mut nodes);
@@ -153,27 +211,110 @@ impl Document {
             let inside = |p: usize| s < p && p < e;
             let critic = matches!(n.kind, NK::Critic(_));
             if critic && (inside(a) || inside(b) || (!collapsed && a <= s && e <= b)) {
-                return Err(PlanError::NotApplicable("inside a comment or suggestion"));
+                return Err(PlanError::NotApplicable(
+                    "comments cannot overlap another comment or suggestion",
+                ));
             }
             let literal = matches!(
                 n.kind,
                 NK::Code | NK::Math { .. } | NK::RawInline | NK::Atom | NK::Image { .. }
             );
             if literal && (inside(a) || inside(b)) {
-                return Err(PlanError::NotApplicable("inside code or math"));
+                return Err(PlanError::NotApplicable("comments cannot go inside code, math or HTML"));
+            }
+        }
+        // `\{` is a literal brace: a backslash right before the opener would hide the mark
+        // (Codex review of #161)
+        let slashes = text.as_bytes()[..a].iter().rev().take_while(|&&c| c == b'\\').count();
+        if slashes % 2 == 1 {
+            return Err(PlanError::NotApplicable(
+                "a backslash right before it would turn the comment into plain text",
+            ));
+        }
+        let inserts: Vec<(usize, &str)> = if collapsed {
+            vec![(a, "{>><<}")]
+        } else {
+            vec![(a, "{=="), (b, "==}{>><<}")]
+        };
+        let caret = if collapsed { a + 3 } else { b + 3 + 6 };
+        if exact {
+            let ok = match row {
+                Some(tr) => self.add_keeps_table_row(tr, &inserts, collapsed),
+                None => self.add_makes_marks(&lines, &inserts, collapsed),
+            };
+            if !ok {
+                return Err(PlanError::NotApplicable(if row.is_some() {
+                    "a comment here would change the table"
+                } else {
+                    "a comment here would not be recognised"
+                }));
             }
         }
         let mut ed = Edits::new();
-        let caret = if collapsed {
-            ed.insert(a, "{>><<}");
-            a + 3
-        } else {
-            ed.insert(a, "{==");
-            ed.insert(b, "==}{>><<}");
-            b + 3 + 6
-        };
+        for &(p, s) in &inserts {
+            ed.insert(p, s);
+        }
         let ps = ed.build().ok_or(PlanError::NotApplicable("overlap"))?;
         Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(caret))))
+    }
+
+    /// `lines` (absolute spans, in order) joined with `\n`, `inserts` (absolute offsets inside
+    /// them) applied; and where each insert landed in the result.
+    fn lines_with_inserts(&self, lines: &[Span], inserts: &[(usize, &str)]) -> Option<(String, Vec<usize>)> {
+        let text = self.text();
+        let mut out = String::new();
+        let mut at = Vec::with_capacity(inserts.len());
+        let mut k = 0;
+        for (i, l) in lines.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            let mut pos = l.start;
+            while k < inserts.len() && inserts[k].0 >= l.start && inserts[k].0 <= l.end {
+                out.push_str(&text[pos..inserts[k].0]);
+                at.push(out.len());
+                out.push_str(inserts[k].1);
+                pos = inserts[k].0;
+                k += 1;
+            }
+            out.push_str(&text[pos..l.end]);
+        }
+        out.push('\n');
+        (k == inserts.len()).then_some((out, at))
+    }
+
+    /// Whether the marks Add Comment inserts into a paragraph or heading (`lines`) are
+    /// recognised: the highlight where it starts and the comment attached to it (or the lone
+    /// comment of a caret). The leaf is parsed alone.
+    fn add_makes_marks(&self, lines: &[Span], inserts: &[(usize, &str)], collapsed: bool) -> bool {
+        let Some((t, at)) = self.lines_with_inserts(lines, inserts) else {
+            return false;
+        };
+        #[cfg(test)]
+        tests::PARSED.with(|v| v.set(v.get() + t.len()));
+        intended_marks(&Document::parse(t, self.options().clone()), &at, collapsed)
+    }
+
+    /// Whether the marks Add Comment inserts into table row `tr` are recognised and the row
+    /// keeps its cells: the header, the delimiter and the row alone are parsed (bounded by one
+    /// row, whatever the table's size).
+    fn add_keeps_table_row(&self, tr: crate::owner::TableRowAt, inserts: &[(usize, &str)], collapsed: bool) -> bool {
+        let rows: Vec<Span> = if tr.index == 0 {
+            vec![tr.header, tr.delimiter]
+        } else {
+            vec![tr.header, tr.delimiter, tr.row]
+        };
+        let Some((before, _)) = self.lines_with_inserts(&rows, &[]) else {
+            return false;
+        };
+        let Some((after, at)) = self.lines_with_inserts(&rows, inserts) else {
+            return false;
+        };
+        #[cfg(test)]
+        tests::PARSED.with(|v| v.set(v.get() + before.len() + after.len()));
+        let new = Document::parse(after, self.options().clone());
+        intended_marks(&new, &at, collapsed)
+            && block_shape(&new) == block_shape(&Document::parse(before, self.options().clone()))
     }
 
     // ---------------------------------------------------------------- accept / reject
@@ -465,6 +606,27 @@ impl Document {
     }
 }
 
+/// Whether `doc` (a block part parsed alone, Add Comment's inserts at offsets `at`) has the
+/// intended marks: a comment at the insert (a caret), or a highlight at the first insert with
+/// a comment attached right after its closer.
+fn intended_marks(doc: &Document, at: &[usize], collapsed: bool) -> bool {
+    let marks = review::all_marks(doc);
+    if collapsed {
+        return marks
+            .iter()
+            .any(|m| m.kind == CriticKind::Comment && Some(&m.range.start) == at.first());
+    }
+    let (Some(&h), Some(&c)) = (at.first(), at.get(1)) else {
+        return false;
+    };
+    marks
+        .iter()
+        .any(|m| m.kind == CriticKind::Highlight && m.range.start == h)
+        && marks
+            .iter()
+            .any(|m| m.kind == CriticKind::Comment && m.attached && m.range.start == c + 3)
+}
+
 /// The leaves of `doc` (a block parsed alone) by kind, with every table row's cell count:
 /// an edit inside a comment must not change them.
 fn block_shape(doc: &Document) -> Vec<String> {
@@ -637,4 +799,42 @@ fn apply_in_order(text: &str, changes: &[Change]) -> (Vec<(std::ops::Range<usize
         i = j;
     }
     (patches, carets)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use markise_doc::{EditBehavior, PlanRequest, Selection, planners};
+
+    thread_local! {
+        /// Bytes Add Comment's verification parsed on this thread.
+        pub(super) static PARSED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn parsed(f: impl FnOnce()) -> usize {
+        PARSED.with(|v| v.set(0));
+        f();
+        PARSED.with(|v| v.get())
+    }
+
+    /// Codex review of #161: Add Comment's enablement in a huge table parses nothing, and
+    /// running it parses only the header, the delimiter and the affected row — whatever the
+    /// table's size.
+    #[test]
+    fn add_comment_in_a_huge_table_stays_bounded() {
+        for rows in [100, 50_000] {
+            let mut text = String::from("| Head | Other |\n| --- | --- |\n");
+            for i in 0..rows {
+                text.push_str(&format!("| cell {i} | value {i} |\n"));
+            }
+            let d = crate::parse(&text);
+            let at = text.find(&format!("cell {}", rows / 2)).unwrap();
+            let req = PlanRequest::at(Selection::range(at, at + 4));
+            let n = parsed(|| assert!(d.can_plan(planners::REVIEW_ADD_COMMENT, &req)));
+            assert_eq!(n, 0, "{rows} rows: enablement parsed {n} bytes");
+            let n = parsed(|| assert!(d.plan(planners::REVIEW_ADD_COMMENT, &req).is_ok()));
+            assert!(n > 0 && n < 300, "{rows} rows: the command parsed {n} bytes");
+        }
+    }
 }

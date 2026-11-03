@@ -10,6 +10,15 @@ use crate::format::{container_kind, leaf_kind_at};
 use crate::line_start;
 use crate::text::Span;
 
+/// A table row and the rows that give it its structure ([`Document::table_row_at`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TableRowAt {
+    pub header: Span,
+    pub delimiter: Span,
+    pub row: Span,
+    pub index: usize,
+}
+
 impl Document {
     /// The leaf at block path `path` (which must end at a leaf) without its lines, with the
     /// block (spans relative to the returned origin). O(depth); the block's lines are not
@@ -39,6 +48,30 @@ impl Document {
             b,
             origin,
         ))
+    }
+
+    /// The table row holding `at` (issue #90), found by binary search over the table's lines
+    /// (none copied): the header row, the delimiter row, the row itself (content spans,
+    /// absolute) and its index (0 header, 1 delimiter, then the body). `None` outside a table.
+    pub(crate) fn table_row_at(&self, at: usize) -> Option<TableRowAt> {
+        let path = self.block_path_at(at);
+        let depth = (1..=path.len()).find(|&d| {
+            self.block_at_path_rel(&path[..d])
+                .is_some_and(|(b, _)| !b.is_container())
+        })?;
+        let (head, b, origin) = self.leaf_head_at_path(&path[..depth])?;
+        if !matches!(head.kind, markise_doc::LeafKind::Table { .. }) || b.lines.len() < 2 {
+            return None;
+        }
+        let abs = |l: &Span| Span::new(l.start + origin, l.end + origin);
+        let i = b.lines.partition_point(|l| l.end + origin < at);
+        let row = b.lines.get(i).filter(|l| l.start + origin <= at)?;
+        Some(TableRowAt {
+            header: abs(&b.lines[0]),
+            delimiter: abs(&b.lines[1]),
+            row: abs(row),
+            index: i,
+        })
     }
 
     /// The leaf at block path `path` (which must end at a leaf), as a full neutral view (its
