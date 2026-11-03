@@ -392,6 +392,8 @@ pub struct ThemeManager {
     /// Watches the user theme folder (live reload); registered by the worker.
     watcher: Option<FileWatcher>,
     watch_requested: bool,
+    /// Watch the user theme folder for live reload ([`ThemeManager::set_watch`]).
+    watch: bool,
     /// Fallback fonts (CJK) were asked for by the document; loaded with the next font job.
     want_fallback: bool,
     /// Preview colours of theme variants (Preferences' theme cards): a few colours per
@@ -467,11 +469,24 @@ impl ThemeManager {
             last_fonts: None,
             watcher: None,
             watch_requested: false,
+            watch: true,
             want_fallback: false,
             previews: Vec::new(),
             previews_pending: Vec::new(),
             jobs_out: std::cell::Cell::new(0),
         }
+    }
+
+    /// Whether the user theme folder is watched for live reload (default: on; off for tests
+    /// that do not exercise it, [`crate::AppOptions::watch`]). Set before [`ThemeManager::start`].
+    pub fn set_watch(&mut self, on: bool) {
+        self.watch = on;
+    }
+
+    /// The folder watch should be requested now: wanted, not yet requested, and the folder and
+    /// the worker exist.
+    fn watch_due(&self) -> bool {
+        self.watch && !self.watch_requested && self.settings_loaded && self.has_user_dir() && self.worker.is_some()
     }
 
     /// Starts the worker (settings, built-ins, user themes, then the selected theme).
@@ -504,10 +519,9 @@ impl ThemeManager {
     /// or wakes the UI from here on until something new is asked.
     #[doc(hidden)]
     pub fn is_idle(&self) -> bool {
-        let watch_due = !self.watch_requested && self.settings_loaded && self.has_user_dir() && self.worker.is_some();
         self.jobs_out.get() == 0
             && self.save_at.is_none()
-            && !watch_due
+            && !self.watch_due()
             && self.watcher.as_ref().is_none_or(FileWatcher::is_synced)
     }
 
@@ -1594,7 +1608,7 @@ impl ThemeManager {
     /// Asks the worker to watch the user theme folder once it is known (after the first theme
     /// import was requested, so that import is not delayed).
     fn request_watch(&mut self) {
-        if !self.watch_requested && self.settings_loaded && self.has_user_dir() && self.worker.is_some() {
+        if self.watch_due() {
             self.watch_requested = true;
             self.send(Job::Watch);
         }

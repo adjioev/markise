@@ -1282,9 +1282,9 @@ siblings, see below).
   `Resume` ("decorations spent") only when the innermost container produced an item before the
   region and no list opened after it; otherwise (e.g. `- >` with an empty quote) it flattens the
   whole block.
-- **Tests.** `markise-md/tests/nested.rs` (incremental == fresh parse and lossless round-trip on
+- **Tests.** `markise-md/tests/it/nested.rs` (incremental == fresh parse and lossless round-trip on
   container-heavy documents, 10k cases; deterministic Enter/typing/Backspace edits that must
-  take the nested path; tightness transitions), `markise-layout/tests/incremental.rs`
+  take the nested path; tightness transitions), `markise-layout/tests/it/incremental.rs`
   (`DocModel::apply` == full build in containers, 10k cases; locality of the model update in a
   list, a quote and a nested list). The generators include empty containers (`- >`, `> -`,
   `> >`, `-`), adjacent HTML blocks, setext/lazy/definition/table/adjacent-list cases. The
@@ -1430,11 +1430,11 @@ below and proposed for `99-open-questions.md`):
   indent/outdent, Horizontal Line), Edit menu (selection/delete/move commands, editing prefs).
 - **Fixed on the way**: MD-INC-1 — the nested incremental restart rebuilt a list opened on a task
   item's marker line without consuming the task box (property test at 30 000 cases).
-- **Tests**: Markdown planner tests (`markise-md/tests/edit_format.rs`), engine surface suites with
+- **Tests**: Markdown planner tests (`markise-md/tests/it/edit_format.rs`), engine surface suites with
   caret-drawable, on-stops and incremental == full checks after every key (`lists.rs`,
   `input_rules.rs`, `structure.rs`), the property test extended with the new commands and rule
   triggers, hint property test with column / ForceBlock hints, and an `egui_kittest` end-to-end list
-  suite driving the real app with platform-like key events (`markise-ui-egui/tests/lists_e2e.rs`).
+  suite driving the real app with platform-like key events (`markise-ui-egui/tests/it/lists_e2e.rs`).
 - **Measured** (`cargo bench -p markise-engine --bench typing`, script extended with bullet rule,
   list Enter/Tab/Shift+Tab/exit, heading rule, auto-pair, Select Word + Strong; headless G3, CPU test
   fonts, Apple M-series under parallel load):
@@ -1514,7 +1514,7 @@ numbered M2d-n (proposed for `99-open-questions.md`).
   over the document. An edit re-chunks only the items it touches (a small last item merges
   with the next); chunk boundaries are an implementation detail, so "incremental == full
   rebuild" is defined on what users see — the physical lines, the line ↔ offset mapping and
-  the shaped text and styles of every line (property test `markise-layout/tests/source_view.rs`).
+  the shaped text and styles of every line (property test `markise-layout/tests/it/source_view.rs`).
   Tab stops are measured from the start of the line, or of the piece of an over-long line.
 - **M2d-3 — layout per line, cached by content.** Each unit is shaped on its own; shaped lines
   are cached by (text, token runs, code runs, wrap width, tab width, theme, fonts), so a
@@ -1583,7 +1583,7 @@ numbered M2d-n (proposed for `99-open-questions.md`).
   source.rs` (verbatim typing, CRLF, caret commands, Tab, disabled format commands, source
   session collapse with saved boundaries, Side by Side live history, 300 random keystrokes
   with incremental == full checks of both views), real-app kittests
-  `markise-ui-egui/tests/source_editor.rs` (typing and saved bytes, keyboard/mouse selection,
+  `markise-ui-egui/tests/it/source_editor.rs` (typing and saved bytes, keyboard/mouse selection,
   wrap and gutter toggles, undo across mode switches, mapping in/out, 10 MB open/scroll/edit)
   and the ported Side by Side, lifecycle, safety and smoke suites.
 - **Measured** (release, Apple M-series under heavy parallel load — load average ≈ 115 on 10

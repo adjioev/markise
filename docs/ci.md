@@ -83,6 +83,31 @@ to a PR and does not report into PR checks; look at it under Actions.
 - Test binaries use line-tables-only debug info (keeps the Linux runner's disk from filling up).
 
 
+## Integration-test binaries (#116, #151)
+
+Every file in `crates/*/tests/` used to build and link its own executable, each one linking
+the full UI stack; most of the test time was compiling and linking them. Each crate now has a
+single integration-test target: `tests/it/main.rs` declares one module per topic
+(`tests/it/<topic>.rs`), shared helpers live in `tests/it/common.rs`, and fixtures and data
+files stay where they were (`tests/fixtures/`, `tests/corpus/`, `tests/snapshots/`, …). Crates
+with a single integration-test file keep it (`tests/<name>.rs`) until they get a second one.
+New integration tests are modules, never a new `tests/*.rs` file. Test names carry the module
+(`qa_sweep::l12_…`); select one module with `cargo test -p <crate> --test it <topic>::`.
+`cargo xtask heavy` filters by name as before (`heavy_suite_`), and its 3000-case property
+step selects the `nested::`, `fastpath::`, `hints::` (markise-md) and `incremental::`
+(markise-layout) modules of the `it` targets.
+
+All tests of a crate now share one process. No test sets environment variables or the current
+directory, and the allocator setting of the heavy run (`GLIBC_TUNABLES`, #109) is per process
+as before. The one shared resource that mattered is the macOS file watcher: every watcher is
+an FSEvents registration, serialized system-wide, so the UI suite opening one per test spent
+minutes waiting for registrations once all its tests ran together. `AppOptions::watch` turns
+the watchers off; UI tests that do not exercise watching use `common::no_watch()`, and only
+tests of reloads, conflicts with external writes and live updates (`watch_gaps`, `idle`,
+`open_latency`, `safety`, plus single tests in `smoke`, `source_editor`, `review`, `themes`,
+`qa_sweep`, `vault` and `sidebar`) keep it on. Settings-file assertions settle the background
+and read the file once (`common::assert_settings`) instead of polling it.
+
 ## Fast and heavy coverage (#98)
 
 `cargo test --workspace` and `cargo xtask ci` run the fast suite. The target is a few minutes

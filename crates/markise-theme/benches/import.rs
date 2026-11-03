@@ -3,7 +3,7 @@
 //! Theme import runs off the UI thread when a theme is selected or a theme file changes; the
 //! budget is "well below a frame" for typical themes so switching feels instant. Uses an
 //! original synthetic theme; the community corpus (if fetched into `.theme-cache/`) is timed by
-//! `cargo test -p markise-theme --release --test corpus -- --nocapture`.
+//! `cargo test -p markise-theme --release --test it corpus:: -- --nocapture`.
 
 use std::path::Path;
 

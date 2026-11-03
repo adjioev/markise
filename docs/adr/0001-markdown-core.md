@@ -79,7 +79,7 @@ punctuation remapping (R4.5.2), and list separation by two blank lines (R3.4.7, 
 
 ## Consequences
 
-- We own CommonMark/GFM conformance. `crates/markise-export/tests/conformance.rs` renders the
+- We own CommonMark/GFM conformance. `crates/markise-export/tests/it/conformance.rs` renders the
   CommonMark 0.31.2 examples and the GFM extension examples through the production export
   (`render_body`, `trusted` so raw HTML is kept as the spec expects) and compares after a
   normalisation that only strips the spec 03 presentation (classes, ids, `lang`, table
@@ -90,7 +90,7 @@ punctuation remapping (R4.5.2), and list separation by two blank lines (R3.4.7, 
   R3.10, spec 01 §4, C40, C41) or a named gap. With the untrusted (sanitized) default, 606/676
   examples render identically.
 - Robustness: nesting is capped (C39) and every look-ahead/delimiter search that can fail is
-  memoised, so adversarial inputs stay linear (`tests/adversarial.rs`, bench group
+  memoised, so adversarial inputs stay linear (`tests/it/adversarial.rs`, bench group
   `md-adversarial`).
 - Shifting spans after an edit is O(blocks after the edit); `String::replace_range` is O(n).
   Both are ~1–2 ms on 10 MB; if NFR-4 measurements in M2 show pressure, move to relative spans

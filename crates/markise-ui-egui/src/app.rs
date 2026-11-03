@@ -131,6 +131,12 @@ pub struct AppOptions {
     /// Update checks (issue #70): the desktop app passes its HTTP client; the default (tests,
     /// tools) is [`crate::updates::UpdateSource::Off`]: nothing ever contacts the network.
     pub updates: crate::updates::UpdateSource,
+    /// Watch the open document, its folder and the user theme folder for changes on disk
+    /// (default: on). Tests that do not exercise watching turn it off: on macOS every watcher
+    /// is an FSEvents registration, and those are serialized system-wide, so a suite opening
+    /// one per test slows down and flakes under load (issue #151). Off, changes on disk are
+    /// not noticed until the file is opened again.
+    pub watch: bool,
 }
 
 impl Default for AppOptions {
@@ -153,6 +159,7 @@ impl Default for AppOptions {
             clipboard_files: Arc::new(crate::clipboard::NoFiles),
             welcome: false,
             updates: Default::default(),
+            watch: true,
         }
     }
 }
@@ -553,6 +560,8 @@ pub struct MarkiseApp {
     attach: attach::AttachState,
     /// How long the first frame waits for the selected theme ([`FIRST_THEME_WAIT`]; tests).
     first_theme_wait: Duration,
+    /// [`AppOptions::watch`]: create the document/folder watcher on the first frame.
+    watch: bool,
     /// First launch: open the tutorial once the settings are read ([`AppOptions::welcome`]).
     welcome_pending: bool,
     /// Help → Keyboard Shortcuts.
@@ -563,7 +572,8 @@ pub struct MarkiseApp {
 
 impl MarkiseApp {
     pub fn new(mut opts: AppOptions) -> Self {
-        let themes = ThemeManager::new(opts.config, opts.system_fonts);
+        let mut themes = ThemeManager::new(opts.config, opts.system_fonts);
+        themes.set_watch(opts.watch);
         let diagrams = themes.diagrams();
         let vault = vault::VaultState::new(opts.parse.wikilinks);
         opts.parse.wikilinks &= themes.wikilinks();
@@ -579,6 +589,7 @@ impl MarkiseApp {
             ctx: None,
             wake: None,
             hooks: opts.hooks,
+            watch: opts.watch,
             load_hook: opts.load_hook,
             doc: None,
             next_doc_id: 1,
@@ -2146,7 +2157,9 @@ impl MarkiseApp {
                 }
             }
             if let Some(w) = self.wake.clone() {
-                self.watcher = FileWatcher::with_hooks(w.clone(), self.hooks.clone()).ok();
+                if self.watch {
+                    self.watcher = FileWatcher::with_hooks(w.clone(), self.hooks.clone()).ok();
+                }
                 self.themes.start(w);
             }
             // first frame: wait briefly for the settings and the selected theme (no flash of

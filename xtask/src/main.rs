@@ -134,16 +134,18 @@ fn cmd_heavy() -> Result<(), String> {
             "--locked",
             "-p",
             "markise-md",
-            "--test",
-            "nested",
-            "--test",
-            "fastpath",
-            "--test",
-            "hints",
             "-p",
             "markise-layout",
+            // one integration-test binary per crate (issue #116): the property modules are
+            // selected by name (`nested`, `fastpath`, `hints` in markise-md, `incremental` in
+            // markise-layout)
             "--test",
-            "incremental",
+            "it",
+            "--",
+            "nested::",
+            "fastpath::",
+            "hints::",
+            "incremental::",
         ])
         .status()
         .map_err(|e| format!("stress properties: {e}"))?;
