@@ -496,6 +496,36 @@ fn save_copy_without_comments_asks_and_writes_a_new_file() {
     assert!(!dir.join("never.md").exists());
 }
 
+/// With CriticMarkup off the marks are plain text: Save Copy Without Comments is disabled and
+/// says why, and running it anyway writes nothing (it used to write the comments unchanged).
+#[test]
+fn save_copy_without_comments_is_disabled_while_critic_markup_is_off() {
+    let (mut h, p) = open("copy-off", REVIEWED);
+    let dir = p.parent().unwrap().to_path_buf();
+    let item = h.state().menu_model().item("file.saveCopyClean").unwrap().clone();
+    assert!(item.enabled);
+    assert_eq!(item.label, "Save Copy Without Comments…");
+    h.state_mut().set_critic_markup(false);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    let item = h.state().menu_model().item("file.saveCopyClean").unwrap().clone();
+    assert!(!item.enabled);
+    assert!(item.label.contains("Comments & Suggestions"), "{}", item.label);
+    h.state_mut().queue_save_dialog_answer(Some(dir.join("copy.md")));
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("file.saveCopyClean"));
+    h.run_steps(3);
+    assert!(!h.state().is_saving_copy());
+    assert!(!dir.join("copy.md").exists());
+    let banner = h.state().banner_text().unwrap_or_default();
+    assert!(banner.contains("Comments & Suggestions are off"), "{banner}");
+    assert_eq!(text(&h), REVIEWED);
+    // on again: the copy works
+    h.state_mut().set_critic_markup(true);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    assert!(h.state().menu_model().item("file.saveCopyClean").unwrap().enabled);
+}
+
 /// The motivating flow of issue #69, end to end: an AI tool writes a Markdown file; the user
 /// opens it in Markise and comments on passages; the file goes back to the AI tool, which
 /// answers with CriticMarkup suggestions (and comments of its own); the user accepts some,

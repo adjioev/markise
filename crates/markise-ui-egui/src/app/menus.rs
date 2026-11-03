@@ -48,6 +48,9 @@ fn defaults(platform: Platform) -> &'static (Registry, Keymap) {
     })
 }
 
+/// Why Save Copy Without Comments is disabled while CriticMarkup is off (menu label suffix).
+pub(crate) const CLEAN_COPY_OFF_HINT: &str = "turn on View → Comments & Suggestions";
+
 /// Commands that a focused text field (the source editor) performs itself: with one focused,
 /// the menu item sends the shortcut to it instead of running the registry command.
 const TEXT_FIELD_KEYS: [(&str, Modifiers, Key); 3] = [
@@ -196,6 +199,20 @@ impl MarkiseApp {
     }
 
     /// An application command item.
+    /// File → Save Copy Without Comments…: disabled while there is no document, while only
+    /// the first part of a file is open (issue #126) and while CriticMarkup is off — then the
+    /// label says why (marks are plain text and a copy would keep them).
+    fn clean_copy_item(&self) -> Entry {
+        let label = app_command("file.saveCopyClean").map_or("file.saveCopyClean", |d| d.label);
+        if self.critic_markup() {
+            let enabled = self.doc.is_some() && !self.is_partial();
+            self.item(MenuAction::Command("file.saveCopyClean"), label, enabled, Check::None)
+        } else {
+            let label = format!("{label} ({CLEAN_COPY_OFF_HINT})");
+            self.item(MenuAction::Command("file.saveCopyClean"), label, false, Check::None)
+        }
+    }
+
     fn app_item(&self, id: &'static str, enabled: bool, check: Check) -> Entry {
         let label = app_command(id).map_or(id, |d| d.label);
         self.item(MenuAction::Command(id), label, enabled, check)
@@ -283,8 +300,9 @@ impl MarkiseApp {
             Entry::Separator,
             self.item(MenuAction::Command("file.save"), "Save", has_doc, Check::None),
             self.item(MenuAction::Command("file.saveAs"), "Save As…", has_doc, Check::None),
-            // (not from the first part of a progressively opened file, issue #126)
-            self.app_item("file.saveCopyClean", has_doc && !self.is_partial(), Check::None),
+            // (not from the first part of a progressively opened file, issue #126; not while
+            // CriticMarkup is off: the marks are then plain text, there is nothing to remove)
+            self.clean_copy_item(),
             Entry::Separator,
             self.app_item("file.rename", has_file, Check::None),
             self.item(
@@ -640,7 +658,7 @@ impl MarkiseApp {
             "view.diagrams" => self.set_diagrams(!self.diagrams),
             "view.wikilinks" => self.set_wikilinks(!self.wikilinks()),
             "view.criticMarkup" => self.set_critic_markup(!self.critic_markup()),
-            "file.saveCopyClean" if self.doc.is_some() && !self.is_partial() => self.save_copy_without_comments(),
+            "file.saveCopyClean" if self.doc.is_some() => self.save_copy_without_comments(),
             "export.comments" => self.set_export_comments(!self.export_comments()),
             "go.back" => self.go_back(),
             "go.forward" => self.go_forward(),

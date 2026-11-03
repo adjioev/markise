@@ -25,6 +25,10 @@ use markise_layout::block::color;
 use super::{Ask, Banner, MarkiseApp};
 use crate::sidebar::SideLook;
 
+/// Why no clean copy is written while CriticMarkup is off.
+const CLEAN_COPY_OFF: &str = "Comments & Suggestions are off, so comments are plain text and cannot be removed. \
+     Turn on View → Comments & Suggestions to save a copy without comments.";
+
 /// The panel's list is refreshed this long after the last edit.
 pub const PANEL_DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -459,9 +463,16 @@ impl MarkiseApp {
     /// File → Save Copy Without Comments…: asks (when the document has pending suggestions)
     /// whether the copy accepts or rejects them, then for the copy's file, and writes it
     /// through the checked save path. The open document and its file are not changed.
+    ///
+    /// With CriticMarkup off the marks are plain text: nothing is written and a banner says
+    /// how to turn them on (the menu item is disabled then; this covers other callers).
     pub fn save_copy_without_comments(&mut self) {
         // (not from the first part of a progressively opened file, issue #126)
         if self.doc.is_none() || self.review.copy.is_some() || self.is_partial() {
+            return;
+        }
+        if !self.clean_copy_available() {
+            self.banner = Some(Banner::Info(CLEAN_COPY_OFF.into()));
             return;
         }
         let n = self
@@ -487,10 +498,27 @@ impl MarkiseApp {
         }
     }
 
+    /// The open document can be cleaned: CriticMarkup is on, also in the document's own parse
+    /// (not only switched on with the background re-parse still running).
+    fn clean_copy_available(&self) -> bool {
+        self.parse.critic_markup
+            && self.doc.as_ref().is_some_and(|d| {
+                d.viewer
+                    .ed
+                    .session
+                    .doc()
+                    .can_plan(planners::REVIEW_CLEAN_COPY, &markise_doc::PlanRequest::default())
+            })
+    }
+
     /// The clean copy's text: comments and highlights removed, suggestions accepted (or
-    /// rejected); the document text itself when there is nothing to remove.
-    pub fn clean_copy_text(&self, reject: bool) -> Option<String> {
-        let d = self.doc.as_ref()?;
+    /// rejected); the document text itself when there is nothing to remove. An error (the
+    /// banner's text) when the document cannot be cleaned — never the text with its marks.
+    pub fn clean_copy_text(&self, reject: bool) -> Result<String, String> {
+        let d = self.doc.as_ref().ok_or_else(|| "No document is open.".to_string())?;
+        if !self.clean_copy_available() {
+            return Err(CLEAN_COPY_OFF.into());
+        }
         let doc = d.viewer.ed.session.doc();
         let text = doc.text().to_string();
         let req = markise_doc::PlanRequest {
@@ -503,9 +531,11 @@ impl MarkiseApp {
                 for step in plan.steps {
                     t = step.patches.apply_to(&t);
                 }
-                Some(t)
+                Ok(t)
             }
-            Err(_) => Some(text),
+            // nothing to remove: the copy is the text itself
+            Err(_) if review::first_mark_from(doc, 0, |_| true).is_none() => Ok(text),
+            Err(e) => Err(format!("The copy was not saved: {e}")),
         }
     }
 
@@ -514,8 +544,12 @@ impl MarkiseApp {
         if self.is_partial() {
             return; // never a copy of the first part of a file (issue #126)
         }
-        let Some(text) = self.clean_copy_text(reject) else {
-            return;
+        let text = match self.clean_copy_text(reject) {
+            Ok(t) => t,
+            Err(e) => {
+                self.banner = Some(Banner::Error(e));
+                return;
+            }
         };
         let Some(d) = self.doc.as_ref() else { return };
         let stem = d
