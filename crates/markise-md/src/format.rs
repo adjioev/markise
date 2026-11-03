@@ -123,6 +123,20 @@ const fn link_cmd(id: &'static str, label: &'static str, keys: &'static [Default
     }
 }
 
+/// Insert Table's size: `columns` and body `rows` (issue #164).
+const TABLE_SIZE_PARAMS: ParamSchema = ParamSchema(&[
+    markise_doc::ParamSpec {
+        name: "columns",
+        kind: markise_doc::ParamKind::Int,
+        required: false,
+    },
+    markise_doc::ParamSpec {
+        name: "rows",
+        kind: markise_doc::ParamKind::Int,
+        required: false,
+    },
+]);
+
 const AT_PARAM: ParamSchema = ParamSchema(&[markise_doc::ParamSpec {
     name: "at",
     kind: markise_doc::ParamKind::Int,
@@ -152,7 +166,12 @@ const fn review_cmd(
 }
 
 /// Commands implemented by the Markdown planners (spec 02 §10, §15; ADR 0006 §3.2).
-pub static MARKDOWN_COMMANDS: [CommandDescriptor; 58] = [
+pub static MARKDOWN_COMMANDS: [CommandDescriptor; 59] = [
+    // issue #164: the app asks for the size first (a dialog); without params 3 × 3
+    CommandDescriptor {
+        params: TABLE_SIZE_PARAMS,
+        ..cmd("table.insert", "Insert Table…", &[key("Opt+Cmd+T", "Ctrl+Shift+T")], S)
+    },
     cmd("table.addRowAbove", "Add Row Above", &[], S),
     cmd(
         "table.addRowBelow",

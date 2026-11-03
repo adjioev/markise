@@ -116,6 +116,10 @@ pub const CONTEXT_COMMANDS: &[Option<&str>] = &[
     Some("review.rejectAll"),
 ];
 
+/// Commands that ask for input in an app dialog before they run (issue #164): their shortcut
+/// and context menu item hand them to the app ([`DocViewer::take_app_command`]).
+pub const ASKING_COMMANDS: &[&str] = &["table.insert"];
+
 /// Commands that act on the whole document: unavailable while it holds only the first part of
 /// its file (progressive open, issue #126; they would leave the rest unchanged).
 pub const WHOLE_DOCUMENT_COMMANDS: &[&str] = &["review.acceptAll", "review.rejectAll"];
@@ -194,6 +198,9 @@ pub struct DocViewer {
     popover: Option<Popover>,
     /// A message for the app to show (a refused Add Comment shortcut, issue #90).
     notice: Option<String>,
+    /// A command the app runs like its menu item (taken once): one that asks first, e.g.
+    /// Insert Table… opens its size dialog (issue #164).
+    app_command: Option<&'static str>,
     /// The comment whose text is being edited in its card (issue #87).
     card_edit: Option<card_edit::CardEdit>,
     /// The bubble popover editor's size at its last frame (placement).
@@ -261,6 +268,7 @@ impl DocViewer {
             popover: None,
             card_edit: None,
             notice: None,
+            app_command: None,
             comment_view: Default::default(),
             card_edit_size: None,
             editable: false,
@@ -457,6 +465,12 @@ impl DocViewer {
         !(self.partial && WHOLE_DOCUMENT_COMMANDS.contains(&id))
             && !(self.review_preview() && self.mutates(id))
             && self.ed.registry.enabled(&self.ed.session, id).is_ok()
+    }
+
+    /// A command for the app to run like its menu item (shortcut or context menu of a
+    /// command that opens a dialog first, [`ASKING_COMMANDS`]); taken once.
+    pub fn take_app_command(&mut self) -> Option<&'static str> {
+        self.app_command.take()
     }
 
     /// A message from the last frames for the app to show (taken once).
@@ -1596,9 +1610,24 @@ impl DocViewer {
         let mut chosen = None;
         resp.context_menu(|ui| {
             let enabled = |id: &str| self.command_enabled(id);
+            // outside a table: Insert Table… (issue #164); in one: the Table submenu (it has it)
+            if !enabled("table.addRowBelow")
+                && enabled("table.insert")
+                && let Some(spec) = self.ed.registry.get("table.insert")
+            {
+                if ui.button(spec.desc.label).clicked() {
+                    chosen = Some(spec.desc.id);
+                    ui.close();
+                }
+                ui.separator();
+            }
             if enabled("table.addRowBelow") {
                 ui.menu_button("Table", |ui| {
-                    for id in crate::menu::TABLE_COMMANDS.iter().flatten() {
+                    for e in crate::menu::TABLE_COMMANDS {
+                        let Some(id) = e else {
+                            ui.separator();
+                            continue;
+                        };
                         let Some(spec) = self.ed.registry.get(id) else { continue };
                         if ui
                             .add_enabled(enabled(id), egui::Button::new(spec.desc.label))
@@ -1631,7 +1660,11 @@ impl DocViewer {
             }
         });
         if let Some(id) = chosen {
-            out.review = Some((id, None));
+            if ASKING_COMMANDS.contains(&id) {
+                self.app_command = Some(id);
+            } else {
+                out.review = Some((id, None));
+            }
         }
         // hover bar: any edit hides it (review round 5: never act on an obsolete or a
         // different mark); it comes back with fresh data on the next pointer move over a mark
@@ -1844,6 +1877,10 @@ impl DocViewer {
                             self.notice = Some(self.add_comment_refusal());
                         }
                         continue;
+                    }
+                    if ASKING_COMMANDS.contains(&id) {
+                        self.app_command = Some(spec.desc.id);
+                        return true;
                     }
                     return self.exec(id, &Params::new(), sh, images, vh);
                 }

@@ -40,6 +40,7 @@ use std::sync::{Arc, OnceLock};
 
 pub use block::{AlertKind, Align, Block, BlockKind, MathDelim};
 pub use edit::inline_fmt::{EXACT_QUERY_LIMIT, FORMAT_SELECTION_LIMIT};
+pub use edit::tables::{INSERT_TABLE_DEFAULT, INSERT_TABLE_MAX};
 pub use format::MarkdownFormat;
 pub use markise_doc::{DepChange, HintOrigin, HintSet, LiteralHint, Patch, PatchSet};
 pub use options::{HeadingStyle, IndentSize, OrderedStyle, ParseOptions, WriteOptions};

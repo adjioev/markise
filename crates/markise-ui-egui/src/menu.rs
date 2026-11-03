@@ -465,7 +465,6 @@ pub const PARAGRAPH_ORDER: &[Option<&str>] = &[
     Some("block.headingUp"),
     Some("block.headingDown"),
     None,
-    Some("insert.table"),
     Some("block.codeFence"),
     Some("block.mathBlock"),
     None,
@@ -702,8 +701,11 @@ fn entries_egui(ui: &mut egui::Ui, entries: &[Entry], platform: Platform, chosen
     }
 }
 
-/// Table operations in the Paragraph and document context menus (spec 02 §6).
+/// Table commands in the Paragraph → Table menu and the document context menu (spec 02 §6):
+/// Insert Table… (issue #164), then the operations on the caret's table.
 pub const TABLE_COMMANDS: &[Option<&str>] = &[
+    Some("table.insert"),
+    None,
     Some("table.addRowAbove"),
     Some("table.addRowBelow"),
     Some("table.deleteRow"),

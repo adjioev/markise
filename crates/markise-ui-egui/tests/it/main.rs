@@ -31,6 +31,7 @@ mod side_by_side;
 mod sidebar;
 mod smoke;
 mod source_editor;
+mod tables;
 mod tasks_e2e;
 mod themes;
 mod toolbar;

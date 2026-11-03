@@ -622,6 +622,15 @@ impl MarkiseApp {
     }
 
     pub(super) fn menu_command(&mut self, ctx: &Context, id: &str, trigger: Trigger) -> bool {
+        // the Insert Table dialog is modal: no other command (menu, toolbar, shortcut) runs
+        // under it (PR #165 review: File → New would have received the table)
+        if self.insert_table_dialog().is_some() {
+            if !matches!(id, "file.close" | "app.quit" | "app.exit") {
+                return false;
+            }
+            // Close / Quit still work: the dialog goes first (PR #165 review 2)
+            self.cancel_insert_table();
+        }
         // any other command (Preferences, About, Quick Open, a dialog…) takes over from the
         // cheat sheet, which would otherwise keep the keyboard focus (Codex review of #120)
         // cheat sheet, which would otherwise keep the keyboard focus (Codex review of #120);
@@ -733,6 +742,8 @@ impl MarkiseApp {
                 self.themes.set_editing(e);
             }
             "theme.fontAndSize" => self.font_window = true,
+            // issue #164: asks for the size first
+            "table.insert" => return self.open_insert_table(),
             "view.themeSettings" => self.open_preferences_at(crate::prefs::Section::Appearance),
             "theme.import" => self.import_theme_dialog(),
             "theme.openFolder" => self.open_theme_folder(),

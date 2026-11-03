@@ -44,8 +44,17 @@ The formatting toolbar above the page offers the same commands; **View → Toolb
 
 ## Tables
 
-Click into a cell and type; <kbd>Tab</kbd> moves to the next cell. **Paragraph → Table** adds and
-deletes rows and columns, moves them, and aligns a column. **Add Row Below** is
+**Paragraph → Table → Insert Table…** (<kbd>Opt+Cmd+T</kbd>, <kbd>Ctrl+Shift+T</kbd> on Windows
+and Linux) asks for the size: point at the grid to pick up to 6 columns and 9 rows, or type the
+numbers for a larger table, then press <kbd>Enter</kbd> or click **Insert** (<kbd>Esc</kbd>
+cancels). The size counts the rows below the header; a header row is always added. The new table
+goes after the block the caret is in (inside a list item or quote, it stays there), and the caret
+waits in the first header cell. The same command is in the toolbar's **More** menu and in the
+document's context menu. Undo removes the whole table in one step.
+
+Click into a cell and type; <kbd>Tab</kbd> moves to the next cell, empty cells included.
+**Paragraph → Table** also adds and deletes rows and columns, moves them, and aligns a column.
+A new row or column starts empty, with the caret in it, ready for typing. **Add Row Below** is
 <kbd>Cmd+Enter</kbd> (<kbd>Ctrl+Enter</kbd>).
 
 ## Code blocks

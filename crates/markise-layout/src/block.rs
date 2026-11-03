@@ -3239,6 +3239,12 @@ fn layout_table(
                 b.nodes(&rich, &rich.nodes, &st, true);
                 if let Some(&span) = spans.get(ci) {
                     b.trailing_ws(span.end.saturating_sub(origin) as u32, &st);
+                    // issue #163: an empty cell is one caret stop at its (empty) span, so it
+                    // can be clicked, tabbed into and typed in
+                    if b.job.text.is_empty() {
+                        let at = span.start.saturating_sub(origin) as u32;
+                        b.push_src(" ", &st, &(at..at), false);
+                    }
                 }
                 let (mut job, links) = b.take();
                 if job.text.is_empty() {
