@@ -4,15 +4,15 @@ use markise_engine::recovery::{Event, Request, Worker};
 
 pub(super) struct Workflow {
     pub worker: Option<Worker>,
-    started: bool,
+    pub(super) started: bool,
     pub recent: Vec<PathBuf>,
     pub drafts: Vec<PathBuf>,
     pub show_recovery: bool,
     pub recovered: Option<PathBuf>,
-    backup_at: Instant,
-    save_at: Instant,
+    pub(super) backup_at: Instant,
+    pub(super) save_at: Instant,
     backed: Option<(u64, u64)>,
-    pending: Option<(u64, u64)>,
+    pub(super) pending: Option<(u64, u64)>,
 }
 impl Default for Workflow {
     fn default() -> Self {
@@ -129,6 +129,11 @@ impl MarkiseApp {
             }
         }
         let prefs = self.themes.file_settings();
+        // (a progressively opened document holding only the first part of its file is neither
+        // backed up nor autosaved: the timers run on once the whole document is in, issue #126)
+        if self.is_partial() {
+            return;
+        }
         if self.doc.as_ref().is_some_and(|d| d.dirty() && !d.lossy) {
             let now = Instant::now();
             let backup_delay = Duration::from_secs(30);

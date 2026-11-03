@@ -67,6 +67,17 @@ impl CaretGeometry for ViewCaret<'_> {
     }
 }
 
+/// What [`EditorView::continue_with`] did (timing log, tests).
+#[derive(Clone, Copy, Debug)]
+pub struct Continued {
+    /// Edits made in the first part were carried over.
+    pub edited: bool,
+    /// Time spent carrying the edits over …
+    pub merge: std::time::Duration,
+    /// … and in all.
+    pub total: std::time::Duration,
+}
+
 /// A session and the view showing it.
 pub struct EditorView {
     pub session: EditorSession,
@@ -183,6 +194,70 @@ impl EditorView {
             }
         }
         self.pin_caret();
+    }
+
+    /// Progressive open (issue #126): the session holds the first `cut` bytes of a file's
+    /// text (and the edits made since); `doc` / `model` are the whole file as read. The edits
+    /// are applied to `doc` — one verbatim patch set, the diff of the session's text against
+    /// the original part, with the session's literal hints; `model` follows incrementally —
+    /// and the result replaces the session's document without an undo step
+    /// ([`EditorSession::adopt_continuation`]) and the view's model without moving the content
+    /// on screen ([`View::set_model_keep`]).
+    pub fn continue_with(
+        &mut self,
+        mut doc: Arc<dyn FormatDoc>,
+        mut model: Arc<DocModel>,
+        cut: usize,
+    ) -> Result<Continued, String> {
+        let t = std::time::Instant::now();
+        let text = doc.text();
+        if cut > text.len() || !text.is_char_boundary(cut) {
+            return Err(format!("the first part ({cut} bytes) is not a prefix of the file"));
+        }
+        let cur = self.session.doc_arc().clone();
+        let edited = cur.text() != &text[..cut];
+        let hints = cur.hints().clone();
+        if edited || !hints.is_empty() {
+            let patches: Vec<markise_doc::Patch> = crate::edit::patches(&text[..cut], cur.text())
+                .into_iter()
+                .map(|p| markise_doc::Patch::verbatim(p.start..p.end, p.insert))
+                .collect();
+            let ps = markise_doc::PatchSet::new(patches).map_err(|e| e.to_string())?;
+            if Arc::get_mut(&mut doc).is_none() {
+                doc = Arc::from(doc.clone_box());
+            }
+            let d = Arc::get_mut(&mut doc).expect("unique document");
+            let e = if edited {
+                d.apply_with_hints(&ps, (!hints.is_empty()).then_some(&hints))
+            } else {
+                d.set_hints(&hints)
+            };
+            Arc::make_mut(&mut model).apply(&*doc, &e);
+        }
+        let shown = cur.text().len();
+        drop(cur);
+        let merge = t.elapsed();
+        let sel = self.session.selection();
+        let keep: Vec<usize> = sel
+            .ranges()
+            .iter()
+            .flat_map(|r| [r.anchor.offset, r.focus.offset])
+            .collect();
+        self.release();
+        self.session.adopt_continuation(doc.clone());
+        self.view.set_model_keep(doc, model, shown, &keep);
+        if let Some(p) = self.source.as_mut() {
+            p.view.rebuild(self.session.doc().text());
+        }
+        // (positions in the text shown so far stay valid: `recent` and `changes` are kept, so
+        // hit tests from the last frame and a pressed checkbox survive)
+        self.source_load_selection();
+        self.pin_caret();
+        Ok(Continued {
+            edited,
+            merge,
+            total: t.elapsed(),
+        })
     }
 
     /// Document changes so far (edits, replacements).

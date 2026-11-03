@@ -130,6 +130,9 @@ impl MarkiseApp {
         self.replace_find(self.find.replacement.clone(), false);
     }
     pub fn replace_find(&mut self, replacement: String, all: bool) {
+        if all && self.is_partial() {
+            return; // Replace All waits for the whole file (progressive open, issue #126)
+        }
         if !self
             .find_results()
             .is_some_and(|r| r.error.is_none() && !r.matches.is_empty())
@@ -291,6 +294,15 @@ impl MarkiseApp {
             }
         }
         let ready = self.find_results().is_some_and(|r| !r.matches.is_empty());
+        // progressive open (issue #126): results cover the part loaded so far; Replace All
+        // would leave the rest unchanged
+        let partial = self.is_partial();
+        let ready_all = ready && !partial;
+        let all_tip = if partial {
+            "Available once the whole file has loaded"
+        } else {
+            "Replace every match"
+        };
         let status = if self.find.query.text.is_empty() {
             String::new()
         } else if self.find.error.is_some() {
@@ -369,13 +381,13 @@ impl MarkiseApp {
                             .on_hover_text(if self.find.query.regex { "Regex captures: $1, ${name}. Use $$ for a literal $." } else { "Leave empty to delete matching text." });
                         if !narrow {
                             if ui.add_enabled(ready, egui::Button::new("Replace")).clicked() { replace = Some(false); }
-                            if ui.add_enabled(ready, egui::Button::new("Replace All")).clicked() { replace = Some(true); }
+                            if ui.add_enabled(ready_all, egui::Button::new("Replace All")).on_hover_text(all_tip).on_disabled_hover_text(all_tip).clicked() { replace = Some(true); }
                         }
                     });
                     if narrow {
                         ui.horizontal_wrapped(|ui| {
                             if ui.add_enabled(ready, egui::Button::new("Replace")).clicked() { replace = Some(false); }
-                            if ui.add_enabled(ready, egui::Button::new("Replace All")).clicked() { replace = Some(true); }
+                            if ui.add_enabled(ready_all, egui::Button::new("Replace All")).on_hover_text(all_tip).on_disabled_hover_text(all_tip).clicked() { replace = Some(true); }
                         });
                     }
                 }
@@ -385,7 +397,11 @@ impl MarkiseApp {
                     ui.toggle_value(&mut self.find.query.regex, ".*").on_hover_text("Use a regular expression");
                     ui.separator();
                     ui.toggle_value(&mut self.find.replace, "Replace…").on_hover_text("Show or hide replacement controls");
-                    ui.weak("Current document").on_hover_text("Searches this file’s Markdown source, including formatting and link URLs. Other files are not searched.");
+                    if partial {
+                        ui.weak("Loaded part").on_hover_text("The rest of the file is still loading: matches cover the part loaded so far and are updated when the whole file is in.");
+                    } else {
+                        ui.weak("Current document").on_hover_text("Searches this file’s Markdown source, including formatting and link URLs. Other files are not searched.");
+                    }
                     if self.find.active.is_some() && !self.source_visible && ui.small_button("Show in Source").on_hover_text("Inspect a match hidden by Markdown formatting").clicked() {
                         show_source = true;
                     }

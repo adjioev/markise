@@ -460,7 +460,8 @@ impl MarkiseApp {
     /// whether the copy accepts or rejects them, then for the copy's file, and writes it
     /// through the checked save path. The open document and its file are not changed.
     pub fn save_copy_without_comments(&mut self) {
-        if self.doc.is_none() || self.review.copy.is_some() {
+        // (not from the first part of a progressively opened file, issue #126)
+        if self.doc.is_none() || self.review.copy.is_some() || self.is_partial() {
             return;
         }
         let n = self

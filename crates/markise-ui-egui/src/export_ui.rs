@@ -192,6 +192,9 @@ fn default_output(doc: Option<&Path>, ext: &str) -> PathBuf {
 impl MarkiseApp {
     /// Runs a menu action (save dialog on the UI thread, export on a worker).
     pub(crate) fn export_action(&mut self, a: ExportAction) {
+        if self.is_partial() {
+            return; // only the first part of the file is loaded (issue #126; the menu is disabled)
+        }
         let Some(text) = self.document_text() else { return };
         let doc_path = self.document_path().map(Path::to_path_buf);
         let theme = self.theme().clone();

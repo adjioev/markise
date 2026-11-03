@@ -23,6 +23,7 @@ pub mod ops;
 pub mod options;
 mod owner;
 mod parser;
+mod prefix;
 mod scan;
 pub mod slug;
 mod source_tokens;
@@ -43,6 +44,7 @@ pub use format::MarkdownFormat;
 pub use markise_doc::{DepChange, HintOrigin, HintSet, LiteralHint, Patch, PatchSet};
 pub use options::{HeadingStyle, IndentSize, OrderedStyle, ParseOptions, WriteOptions};
 pub use parser::{MAX_NESTING, MAX_QUOTE_DEPTH, bom_len};
+pub use prefix::progressive_prefix;
 pub use text::{LineEnding, Span};
 pub use tops::Top;
 

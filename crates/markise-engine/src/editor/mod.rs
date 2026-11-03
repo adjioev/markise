@@ -25,7 +25,7 @@ use markise_doc::{
 
 pub use history::{History, HistoryLimits, StateId, Step, Transaction, TxKind, TypingDir};
 pub use source::{SourceCaret, SourcePane};
-pub use surface::{CaretGeometry, EditorView, ViewCaret};
+pub use surface::{CaretGeometry, Continued, EditorView, ViewCaret};
 
 /// Time source for typing-group pauses (C13); injectable for tests.
 pub trait Clock: Send {
@@ -1648,6 +1648,29 @@ impl EditorSession {
     pub fn mark_current_saved(&mut self) {
         self.saved_state = Some(self.rev.state);
         self.saved_ever.insert(self.rev.state);
+    }
+
+    /// Replaces the document by `doc`, whose text continues the current one (progressive open,
+    /// issue #126: the rest of the file arrived and the edits made meanwhile were applied to
+    /// it). Not an edit: the history, the selection, live marks and the saved state stay valid
+    /// (they all lie in the current text, which `doc`'s text starts with). The revision
+    /// counter moves on (results computed for the shorter text are stale), background readers
+    /// and the word count start over; the caller installs `doc`'s view model.
+    pub fn adopt_continuation(&mut self, doc: Arc<dyn FormatDoc>) {
+        debug_assert!(
+            doc.text().starts_with(self.doc.text()),
+            "a continuation of the current text"
+        );
+        self.close_typing();
+        self.forget_plan_queries();
+        self.revoke_lease();
+        self.doc = doc;
+        self.change = DocChange::None;
+        self.log.replaced();
+        self.steps = None;
+        self.review.replaced += 1;
+        self.rev.counter += 1;
+        self.changed();
     }
 
     /// Replaces the document object with `doc` (reload from disk, a rebuilt source-mode

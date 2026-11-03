@@ -114,6 +114,10 @@ pub const CONTEXT_COMMANDS: &[Option<&str>] = &[
     Some("review.rejectAll"),
 ];
 
+/// Commands that act on the whole document: unavailable while it holds only the first part of
+/// its file (progressive open, issue #126; they would leave the rest unchanged).
+pub const WHOLE_DOCUMENT_COMMANDS: &[&str] = &["review.acceptAll", "review.rejectAll"];
+
 /// Selection granularity of a pointer drag (single, double, triple click).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Unit {
@@ -194,6 +198,9 @@ pub struct DocViewer {
     thumb_drag: scrollbar::ThumbDrag,
     /// Wheel / trackpad smoothing (issue #86).
     smooth: SmoothScroll,
+    /// The document holds only the first part of its file (progressive open, issue #126):
+    /// [`WHOLE_DOCUMENT_COMMANDS`] are unavailable.
+    pub partial: bool,
 }
 
 impl DocViewer {
@@ -245,6 +252,7 @@ impl DocViewer {
             code: Default::default(),
             thumb_drag: Default::default(),
             smooth: Default::default(),
+            partial: false,
         }
     }
 
@@ -357,6 +365,18 @@ impl DocViewer {
         r
     }
 
+    /// Progressive open (issue #126): installs the whole document of the file whose first
+    /// `cut` bytes this viewer shows, carrying the edits made meanwhile over
+    /// ([`EditorView::continue_with`]); the content on screen does not move.
+    pub fn continue_with(
+        &mut self,
+        doc: Arc<dyn FormatDoc>,
+        model: Arc<DocModel>,
+        cut: usize,
+    ) -> Result<markise_engine::editor::Continued, String> {
+        self.ed.continue_with(doc, model, cut)
+    }
+
     /// Font generation the view was last told about.
     pub fn font_generation(&self) -> u64 {
         self.font_gen
@@ -408,6 +428,13 @@ impl DocViewer {
         }
     }
 
+    /// Command `id` can run now (registry enablement; [`WHOLE_DOCUMENT_COMMANDS`] not while
+    /// the document is partial).
+    pub fn command_enabled(&self, id: &str) -> bool {
+        !(self.partial && WHOLE_DOCUMENT_COMMANDS.contains(&id))
+            && self.ed.registry.enabled(&self.ed.session, id).is_ok()
+    }
+
     /// Runs command `id` through the editor (menus, tests). `page`: viewport height.
     pub fn run(
         &mut self,
@@ -416,6 +443,11 @@ impl DocViewer {
         id: &str,
         params: &Params,
     ) -> Result<(), markise_engine::editor::command::CommandError> {
+        if self.partial && WHOLE_DOCUMENT_COMMANDS.contains(&id) {
+            return Err(markise_engine::editor::command::CommandError::Disabled(
+                "available once the whole file has loaded",
+            ));
+        }
         let images = markise_layout::block::NoImages;
         let r = with_shaper(ctx, parley, |sh| self.ed.execute(id, params, sh, &images, 600.0));
         self.ed.refresh_focus();
@@ -1077,6 +1109,13 @@ impl DocViewer {
     }
 
     /// The items shown at the last frame with their tops, at their current indices.
+    /// The items painted in the last frame by source position ((start, ordinal among the items
+    /// starting there), top relative to the surface): tests and measurements check that the
+    /// content on screen does not move.
+    pub fn painted(&self) -> &[((usize, usize), f32)] {
+        &self.last_visible
+    }
+
     fn shown(&self) -> Vec<(usize, f32)> {
         let m = self.ed.view.model();
         self.last_visible
@@ -1366,7 +1405,7 @@ impl DocViewer {
         }
         let mut chosen = None;
         resp.context_menu(|ui| {
-            let enabled = |id: &str| self.ed.registry.enabled(&self.ed.session, id).is_ok();
+            let enabled = |id: &str| self.command_enabled(id);
             if enabled("table.addRowBelow") {
                 ui.menu_button("Table", |ui| {
                     for id in crate::menu::TABLE_COMMANDS.iter().flatten() {
@@ -1599,7 +1638,7 @@ impl DocViewer {
                     if !editable && matches!(spec.desc.effect, markise_doc::Effect::Mutates { .. }) {
                         continue;
                     }
-                    if self.ed.registry.enabled(&self.ed.session, id).is_err() {
+                    if !self.command_enabled(id) {
                         continue;
                     }
                     return self.exec(id, &Params::new(), sh, images, vh);

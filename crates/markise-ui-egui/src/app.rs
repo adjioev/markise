@@ -54,6 +54,7 @@ mod find;
 mod help;
 mod menus;
 mod prefs;
+mod progressive;
 mod quick_open;
 mod review;
 mod vault;
@@ -98,6 +99,9 @@ pub struct AppOptions {
     pub hooks: Hooks,
     /// Loader stage hook (tests).
     pub load_hook: Option<StageHook>,
+    /// Progressive open of large files (issue #126; `None`: off). Default: on with the
+    /// default sizes unless `MARKISE_PROGRESSIVE_OPEN=0`.
+    pub progressive: Option<markise_engine::load::ProgressiveOpts>,
     /// Settings file, user themes (`ConfigDir::None` in tests: nothing is read or written in
     /// the user's config folder).
     pub config: ConfigDir,
@@ -132,6 +136,7 @@ impl Default for AppOptions {
             system_fonts: false,
             hooks: Hooks::default(),
             load_hook: None,
+            progressive: markise_engine::load::ProgressiveOpts::from_env(),
             config: ConfigDir::None,
             parse: ParseOptions::default(),
             highlight_code: true,
@@ -213,6 +218,9 @@ struct DocState {
     saved_fp: Option<TextFp>,
     /// Content identity of the current text, cached per session revision counter.
     fp_cache: std::cell::Cell<Option<(u64, TextFp)>>,
+    /// Progressive open (issue #126): the session holds only the first part of the file
+    /// (the rest is loading, or failed to load). Never saved, backed up or exported as is.
+    partial: bool,
 }
 
 /// Content identity of a document text: length and hash — the same identity the load and
@@ -425,6 +433,10 @@ pub struct MarkiseApp {
     next_doc_id: u64,
     loader: Option<Loader>,
     load: Option<LoadInfo>,
+    /// Progressive open settings (issue #126; `None`: off).
+    progressive_opts: Option<markise_engine::load::ProgressiveOpts>,
+    /// A progressive open waiting for the whole document ([`progressive`]).
+    progressive: Option<progressive::Progressive>,
     /// A watcher event arrived while a load / save was running: check again afterwards.
     reload_pending: bool,
     saving: Option<Saving>,
@@ -555,6 +567,8 @@ impl MarkiseApp {
             next_doc_id: 1,
             loader: None,
             load: None,
+            progressive_opts: opts.progressive,
+            progressive: None,
             reload_pending: false,
             saving: None,
             queued_save: None,
@@ -655,13 +669,15 @@ impl MarkiseApp {
         self.doc.as_ref().map(|d| d.viewer.ed.session.text())
     }
 
+    /// A load is running (also while a progressively opened document waits for the rest of
+    /// its file).
     pub fn is_loading(&self) -> bool {
-        self.load.is_some()
+        self.load.is_some() || self.progressive.is_some()
     }
 
     /// A load or save job is running.
     pub fn is_busy(&self) -> bool {
-        self.saving.is_some() || self.load.is_some()
+        self.saving.is_some() || self.is_loading()
     }
 
     /// A save job is running.
@@ -1038,7 +1054,7 @@ impl MarkiseApp {
             return;
         };
         if self.loader.is_none() {
-            match Loader::new(self.parse.clone(), wake, self.load_hook.clone()) {
+            match Loader::with_progressive(self.parse.clone(), wake, self.load_hook.clone(), self.progressive_opts) {
                 Ok(l) => self.loader = Some(l),
                 Err(e) => {
                     self.banner = Some(Banner::Error(e));
@@ -1066,9 +1082,11 @@ impl MarkiseApp {
         };
         // the single loader worker cancels whatever it was doing for an older request
         let loader = self.loader.as_ref().expect("loader");
-        let generation = match known {
-            Some(v) => loader.request_unless(path.clone(), v),
-            None => loader.request(path.clone()),
+        let generation = match (known, reason) {
+            (Some(v), _) => loader.request_unless(path.clone(), v),
+            // opens may show the first part of a large file first (issue #126)
+            (None, LoadReason::Open | LoadReason::OpenDiscarding) => loader.request_open(path.clone()),
+            (None, _) => loader.request(path.clone()),
         };
         self.load = Some(LoadInfo {
             path,
@@ -1105,18 +1123,9 @@ impl MarkiseApp {
                 ));
                 self.disk_unchanged(&path, version);
             }
+            Ok(Outcome::Partial(part)) => self.partial_arrived(*part, l.reason, l.started),
             Ok(Outcome::Loaded(loaded)) => {
-                let t = loaded.timings;
-                self.timing.log(&format!(
-                    "loaded path={} bytes={} items={} read={:.1}ms parse={:.1}ms model={:.1}ms wall={:.1}ms",
-                    loaded.path.display(),
-                    loaded.bytes,
-                    loaded.model.items.len(),
-                    t.read.as_secs_f64() * 1e3,
-                    t.parse.as_secs_f64() * 1e3,
-                    t.model.as_secs_f64() * 1e3,
-                    l.started.elapsed().as_secs_f64() * 1e3
-                ));
+                self.log_loaded(&loaded, l.started);
                 match l.reason {
                     LoadReason::Open => {
                         if self.is_dirty() {
@@ -1135,6 +1144,20 @@ impl MarkiseApp {
         if std::mem::take(&mut self.reload_pending) {
             self.request_reload();
         }
+    }
+
+    fn log_loaded(&self, loaded: &Loaded, started: Instant) {
+        let t = loaded.timings;
+        self.timing.log(&format!(
+            "loaded path={} bytes={} items={} read={:.1}ms parse={:.1}ms model={:.1}ms wall={:.1}ms",
+            loaded.path.display(),
+            loaded.bytes,
+            loaded.model.items.len(),
+            t.read.as_secs_f64() * 1e3,
+            t.parse.as_secs_f64() * 1e3,
+            t.model.as_secs_f64() * 1e3,
+            started.elapsed().as_secs_f64() * 1e3
+        ));
     }
 
     /// The highlight source views use: the highlighter when highlighting is on.
@@ -1305,9 +1328,21 @@ impl MarkiseApp {
         self.install_doc(loaded, false);
     }
 
+    /// Installs the first part of a progressively opened file (issue #126): `loaded.doc` is
+    /// the part, its version and decoding describe the whole file.
+    fn install_partial(&mut self, loaded: Loaded) {
+        self.install_doc_as(loaded, false, true);
+    }
+
     /// Replaces the document; `untitled`: a new document without a file (`loaded.path` is
     /// its placeholder, not watched).
     fn install_doc(&mut self, loaded: Loaded, untitled: bool) {
+        self.install_doc_as(loaded, untitled, false);
+    }
+
+    fn install_doc_as(&mut self, loaded: Loaded, untitled: bool, partial: bool) {
+        // a progressive open still loading belongs to the document being replaced
+        self.progressive = None;
         let recovered = self.workflow.drafts.contains(&loaded.path);
         self.forget_backup();
         let untitled = untitled || recovered;
@@ -1346,8 +1381,14 @@ impl MarkiseApp {
         let format: Arc<dyn markise_doc::DocumentFormat> = Arc::new(MarkdownFormat {
             opts: self.parse.clone(),
         });
-        let saved_fp = Some(loaded_fp(&loaded));
+        let saved_fp = if partial {
+            // the whole file's identity (a lossily decoded one is hashed when it is complete)
+            (!loaded.lossy).then(|| loaded.version.text_identity())
+        } else {
+            Some(loaded_fp(&loaded))
+        };
         let mut viewer = DocViewer::new(format, loaded.doc, loaded.model, &self.theme, Some(loaded.path.clone()));
+        viewer.partial = partial;
         viewer.set_font_generation(self.font_gen);
         self.document_changed(&mut viewer);
         let id = self.next_doc_id;
@@ -1365,6 +1406,7 @@ impl MarkiseApp {
             saved_rev: 0,
             saved_fp,
             fp_cache: std::cell::Cell::new(None),
+            partial,
         });
         if recovered {
             let d = self.doc.as_mut().unwrap();
@@ -1379,7 +1421,7 @@ impl MarkiseApp {
 
     /// Watcher event for the open file (spec 04 §11).
     fn request_reload(&mut self) {
-        if self.load.is_some() || self.saving.is_some() {
+        if self.is_loading() || self.saving.is_some() {
             self.reload_pending = true;
             return;
         }
@@ -1551,6 +1593,18 @@ impl MarkiseApp {
     // ------------------------------------------------------------------ saving
 
     fn start_save(&mut self, req: SaveRequest) {
+        // progressive open (issue #126): the session holds only the first part of the file;
+        // the save runs once the whole document is in (status bar: "saving when done")
+        let req = match self.defer_save(req) {
+            Ok(()) => return,
+            Err(req) => req,
+        };
+        if self.is_partial() {
+            self.banner = Some(Banner::Error(
+                "Only the first part of the file could be loaded; saving is disabled.".into(),
+            ));
+            return;
+        }
         if self.saving.is_some() {
             // latest request wins, but a pending continuation is not forgotten
             let then = match (&req.then, self.queued_save.take()) {
@@ -2104,6 +2158,7 @@ impl MarkiseApp {
             self.open(p);
         }
         self.poll_loading();
+        self.poll_progressive();
         self.poll_save();
         self.poll_watcher();
         self.poll_themes(ctx);
@@ -2563,6 +2618,15 @@ impl MarkiseApp {
                         "Loading {}…",
                         l.path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
                     ));
+                } else if let Some(p) = &self.progressive {
+                    // progressive open (issue #126): only here, never above the document
+                    ui.spinner();
+                    let name = p.path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+                    ui.label(match (p.shown.is_some(), p.save.is_some()) {
+                        (false, _) => format!("Loading {name}…"),
+                        (true, false) => "Loading the rest of the file…".to_string(),
+                        (true, true) => "Loading the rest of the file… (saving when done)".to_string(),
+                    });
                 }
                 if self.saving.is_some() {
                     ui.label("Saving…");
@@ -2603,6 +2667,11 @@ impl MarkiseApp {
             self.word_count = None;
             return;
         };
+        if d.partial {
+            // progressive open (issue #126): counted once the whole document is in (the rest
+            // loading is shown instead)
+            return;
+        }
         if self.word_count.as_ref().is_none_or(|(id, _)| *id != d.id) {
             self.word_count = Some((d.id, Default::default()));
         }
@@ -2706,7 +2775,7 @@ impl MarkiseApp {
                             let clicked = {
                                 let model = d.viewer.model().clone();
                                 let cur = model.current_heading(d.viewer.ed.view.anchor().0);
-                                outline(ui, &model.outline, cur, &look)
+                                outline(ui, &model.outline, cur, &look, d.partial)
                             };
                             // a paged model materializes the heading's page first
                             if let Some(item) = clicked.and_then(|k| d.viewer.ed.view.ensure_heading(k)) {
