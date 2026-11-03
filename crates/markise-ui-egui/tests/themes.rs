@@ -49,6 +49,23 @@ fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&Mark
     }
 }
 
+/// Waits until the debounced settings write has been answered (the app's background settled,
+/// an event, not a time), then checks the file once. Issue #147: on Windows the write (a
+/// replacing rename) failed with "access denied" while something held the file open — a
+/// virus scanner, or this test polling it — and was never retried, so the poll ran into the
+/// hang guard. The write now waits such conflicts out, the test reads the file only after the
+/// write was answered, and a failed write shows here with the app's banner.
+fn assert_settings(h: &mut Harness<'static, MarkiseApp>, settings: &Path, ok: impl Fn(&str) -> bool) {
+    common::settle(h);
+    let s = std::fs::read_to_string(settings).unwrap_or_else(|e| format!("<unreadable: {e}>"));
+    assert!(
+        ok(&s),
+        "settings written: {s}\n(theme: {}, banner: {:?})",
+        h.state().theme().name,
+        h.state().banner_text()
+    );
+}
+
 /// Opens View → Theme in the egui menu bar.
 fn open_view_theme_menu(h: &mut Harness<'static, MarkiseApp>) {
     h.get_by_label("View").click();
@@ -87,8 +104,8 @@ fn builtin_theme_and_appearance_are_selected_and_persisted() {
         h.state_mut().set_theme_choice(Appearance::Light);
         wait_until(&mut h, "Phycat Sky", |a| a.theme().name == "Phycat Sky");
         let settings = cfg.join("markise").join("settings.json");
-        wait_until(&mut h, "settings written", |_| {
-            std::fs::read_to_string(&settings).is_ok_and(|s| s.contains("builtin:phycat") && s.contains("\"light\""))
+        assert_settings(&mut h, &settings, |s| {
+            s.contains("builtin:phycat") && s.contains("\"light\"")
         });
     }
     // a new session starts with the saved theme on its first frame (no default flash)
@@ -249,15 +266,13 @@ fn style_colors_and_overrides_are_independent_and_persisted() {
         h.run_steps(2);
         assert!(h.query_all_by_label("Font & size").count() >= 1);
         h.get_by_role_and_label(egui::Role::Slider, "Line height");
-        wait_until(&mut h, "settings written", |_| {
-            std::fs::read_to_string(&settings).is_ok_and(|s| {
-                s.contains("\"version\": 2")
-                    && s.contains("\"style\": \"theme:builtin:drake\"")
-                    && s.contains("\"colors\": \"palette:nord\"")
-                    && s.contains("\"line_height\": 2.0")
-                    && s.contains("\"future\": 1")
-                    && s.contains("\"theme\": \"palette:nord\"") // for older builds
-            })
+        assert_settings(&mut h, &settings, |s| {
+            s.contains("\"version\": 2")
+                && s.contains("\"style\": \"theme:builtin:drake\"")
+                && s.contains("\"colors\": \"palette:nord\"")
+                && s.contains("\"line_height\": 2.0")
+                && s.contains("\"future\": 1")
+                && s.contains("\"theme\": \"palette:nord\"") // for older builds
         });
     }
     // a new session restores the composition

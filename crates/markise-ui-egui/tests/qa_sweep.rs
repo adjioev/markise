@@ -1884,18 +1884,16 @@ fn l12_caret_after_external_reload_shrinks_document() {
     // the file is rewritten shorter on disk while the caret is at the end (clean document)
     let mut e = Ed::open("l12", "first paragraph\n\nsecond paragraph here\n");
     e.at(38);
+    // the file watch is registered off the UI thread (ADR 0010); wait until it is in effect
+    // (an event: the watcher's sync), so the rewrite below is an ordinary reported change.
+    // Starting FSEvents streams is serialized system-wide and was measured at over a minute
+    // while the whole suite runs (issue #147); a change made *during* the registration is
+    // covered by the catch-up tests (watch_gaps.rs, markise-engine watch tests).
+    common::sync_watches(e.h.state(), Instant::now());
     std::fs::write(&e.p, "ab\n").unwrap();
-    let t = Instant::now();
-    while e.text() != "ab\n" {
-        // the file watch is registered off the UI thread (ADR 0010) and this write lands
-        // right after the open, on purpose: it is seen by the catch-up once the registration
-        // is in effect, which can take long while the whole suite starts FSEvents streams in
-        // parallel (the bound is only a hang guard)
-        assert!(t.elapsed() < common::HANG_GUARD, "reload not picked up");
-        e.h.step();
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    e.h.step();
+    common::wait_until(&mut e.h, "the external rewrite to be reloaded", |a| {
+        a.document_text().as_deref() == Some("ab\n")
+    });
     e.check_model("after reload");
     let c = e.caret();
     assert!(c.offset <= 3, "caret clamped: {c:?}");

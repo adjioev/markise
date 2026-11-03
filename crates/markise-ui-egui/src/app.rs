@@ -857,6 +857,15 @@ impl MarkiseApp {
         Some(doc.and(themes))
     }
 
+    /// Test hook (issue #147): file-system events the app's watchers (open document and
+    /// folder, theme folder) passed on so far. Such an event can arrive at any time — the file
+    /// system reports with a delay, on macOS even changes made just before a watch started —
+    /// so no "settled" state excludes it; quiet checks compare this count before and after.
+    #[doc(hidden)]
+    pub fn watch_fs_events(&self) -> u64 {
+        self.watcher.as_ref().map_or(0, FileWatcher::fs_events) + self.themes.watch_fs_events()
+    }
+
     /// Test hook ("background settled", issue #42): no background job is outstanding — no
     /// load or save, the theme worker, vault scanner, file tree lister, image decoders and
     /// the highlight / diagram / math workers have nothing queued or unapplied, and every

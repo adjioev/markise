@@ -1434,7 +1434,8 @@ impl Settings {
         let dir = path.parent().unwrap_or(Path::new("."));
         let mut tmp = tempfile::Builder::new().prefix(".settings-").tempfile_in(dir)?;
         std::io::Write::write_all(&mut tmp, self.to_json().as_bytes())?;
-        tmp.persist(path).map(|_| ()).map_err(|e| e.error)
+        // replaced like a document (retrying Windows sharing conflicts, issue #147)
+        crate::save::persist_replacing(tmp, path)
     }
 }
 
@@ -1648,6 +1649,35 @@ mod tests {
         let mut pending = SettingsPatch::default();
         pending.merge(patch.clone());
         assert_eq!(pending.files, patch.files);
+    }
+
+    /// Issue #147: the settings file is replaced by a rename, which another process holding
+    /// it open without delete sharing (a virus scanner, an indexer, a reader) makes fail with
+    /// access denied on Windows; the write waits that out like a document save (#65).
+    #[cfg(windows)]
+    #[test]
+    fn settings_save_waits_out_a_briefly_held_file_147() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join(FILE_NAME);
+        Settings::default().save(&p).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&p)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(held);
+        });
+        let patch = SettingsPatch {
+            colors: Some("palette:nord".into()),
+            ..Default::default()
+        };
+        update_file(&p, &patch).unwrap();
+        release.join().unwrap();
+        assert_eq!(Settings::load(&p).colors, "palette:nord");
     }
 
     #[test]

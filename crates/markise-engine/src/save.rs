@@ -310,6 +310,18 @@ pub fn save_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     if let Ok(meta) = std::fs::metadata(path) {
         let _ = std::fs::set_permissions(tmp.path(), meta.permissions());
     }
+    persist_replacing(tmp, path)?;
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
+/// Renames `tmp` over `path`, retrying the transient Windows sharing conflicts of
+/// [`rename_error_is_transient`] for about a second (issue #65; issue #147: the settings file is
+/// replaced the same way, and a reader or virus scanner holding it open made a write fail).
+pub(crate) fn persist_replacing(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
     persist_retrying(
         tmp,
         path,
@@ -318,12 +330,7 @@ pub fn save_atomic(path: &Path, text: &str) -> std::io::Result<()> {
             Ok(())
         },
         |e| e,
-    )?;
-    #[cfg(unix)]
-    if let Ok(d) = std::fs::File::open(dir) {
-        let _ = d.sync_all();
-    }
-    Ok(())
+    )
 }
 
 /// Pauses before each retry of the final rename (issue #65): about one second in total.

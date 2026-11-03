@@ -511,6 +511,13 @@ impl ThemeManager {
             && self.watcher.as_ref().is_none_or(FileWatcher::is_synced)
     }
 
+    /// Test hook: file-system events the theme folder watch passed on so far
+    /// ([`FileWatcher::fs_events`]).
+    #[doc(hidden)]
+    pub fn watch_fs_events(&self) -> u64 {
+        self.watcher.as_ref().map_or(0, FileWatcher::fs_events)
+    }
+
     /// Test hook: blocks (at most `timeout`) until the theme folder watch has applied every
     /// request, so its catch-up event is queued for the next [`ThemeManager::poll`] (never on
     /// a real UI thread). `None`: no answer in time; `Err` names a watch that is not in effect.

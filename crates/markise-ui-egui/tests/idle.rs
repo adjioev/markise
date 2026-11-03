@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use egui::{Context, RawInput, ViewportId};
 use markise_ui_egui::{AppOptions, MarkiseApp};
@@ -25,22 +25,10 @@ fn frame(ctx: &Context, app: &mut MarkiseApp) -> Duration {
 /// Runs frames until the document is loaded and every background job (theme worker, vault
 /// scan, loader, image decodes, word count, comment-presence scans, watch catch-ups) has
 /// finished — the app's signal, not a time (issue #42); then a few frames for egui's own
-/// layout passes, returning their repaint delays.
+/// layout passes, returning their repaint delays (repeated when a late file-system event
+/// disturbed them: [`common::idle_delays`], issue #147).
 fn settle_and_measure(ctx: &Context, app: &mut MarkiseApp) -> Vec<Duration> {
-    let t = Instant::now();
-    loop {
-        common::sync_watches(app, t);
-        frame(ctx, app);
-        if app.model().is_some() && !app.is_loading() && app.background_settled() {
-            break;
-        }
-        assert!(
-            t.elapsed() < common::HANG_GUARD,
-            "document load / background never settled"
-        );
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    (0..6).map(|_| frame(ctx, app)).collect()
+    common::idle_delays(app, |app| frame(ctx, app), 6)
 }
 
 fn assert_idle(delays: &[Duration], when: &str) {

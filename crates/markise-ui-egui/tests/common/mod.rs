@@ -63,3 +63,41 @@ pub fn run(h: &mut Harness<'static, MarkiseApp>) {
     settle(h);
     h.run();
 }
+
+/// The measurement of an idle check (NFR-10): runs `frame` until the document is loaded and
+/// the background has settled, then `n` more frames, returning their repaint delays.
+///
+/// A file-system event can still arrive at any time after that (the file system reports with
+/// a delay; on macOS FSEvents even reports a change made just before the watch started, such
+/// as writing the test's own fixture — issue #147), wake the UI and start a reload. A
+/// measurement such an event disturbed says nothing about idleness, so it is repeated; one that
+/// asked for a repaint without any file-system event is returned as it is (the caller's
+/// assertion fails). Bounded by [`HANG_GUARD`].
+pub fn idle_delays(
+    app: &mut MarkiseApp,
+    mut frame: impl FnMut(&mut MarkiseApp) -> Duration,
+    n: usize,
+) -> Vec<Duration> {
+    let t = Instant::now();
+    loop {
+        let events = app.watch_fs_events();
+        loop {
+            sync_watches(app, t);
+            frame(app);
+            if app.model().is_some() && !app.is_loading() && app.background_settled() {
+                break;
+            }
+            assert!(t.elapsed() < HANG_GUARD, "document load / background never settled");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let delays: Vec<Duration> = (0..n).map(|_| frame(app)).collect();
+        if *delays.last().unwrap() == Duration::MAX || app.watch_fs_events() == events {
+            return delays;
+        }
+        assert!(
+            t.elapsed() < HANG_GUARD,
+            "file-system events kept arriving during the idle check: {delays:?}"
+        );
+        eprintln!("idle check repeated: a file-system event arrived during it ({delays:?})");
+    }
+}
