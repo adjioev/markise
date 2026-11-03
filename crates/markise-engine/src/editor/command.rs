@@ -566,15 +566,26 @@ fn run_shift_tab(s: &mut EditorSession, _: &Params) -> Result<(), CommandError> 
 
 fn caret_backspace(s: &mut EditorSession, g: &mut dyn CaretGeometry, _: &Params) -> Result<(), CommandError> {
     let p = s.selection().primary();
-    let stop = (p.is_caret() && p.focus.virt == 0).then(|| g.horizontal(p.focus, false, false).offset);
+    let stop = (p.is_caret() && p.focus.virt == 0).then(|| real_stop(g, p.focus, false));
     g.release_doc();
     Ok(s.delete_backward_to(stop)?)
 }
 fn caret_delete(s: &mut EditorSession, g: &mut dyn CaretGeometry, _: &Params) -> Result<(), CommandError> {
     let p = s.selection().primary();
-    let stop = (p.is_caret() && p.focus.virt == 0).then(|| g.horizontal(p.focus, true, false).offset);
+    let stop = (p.is_caret() && p.focus.virt == 0).then(|| real_stop(g, p.focus, true));
     g.release_doc();
     Ok(s.delete_forward_to(stop)?)
+}
+
+/// The next caret stop in the source for Backspace / Delete: the virtual paragraph in a gap
+/// between blocks (issue #166) is passed over, as before it existed.
+fn real_stop(g: &mut dyn CaretGeometry, from: markise_doc::DocPos, forward: bool) -> usize {
+    let d = g.horizontal(from, forward, false);
+    if d.virt > 0 && d != from {
+        g.horizontal(d, forward, false).offset
+    } else {
+        d.offset
+    }
 }
 fn caret_delete_word_back(s: &mut EditorSession, g: &mut dyn CaretGeometry, _: &Params) -> Result<(), CommandError> {
     generated_delete(s, g, true, |g, p| g.horizontal(p, false, true))

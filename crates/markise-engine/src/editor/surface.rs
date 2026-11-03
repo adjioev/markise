@@ -412,7 +412,14 @@ impl EditorView {
             m.is_paged() && m.is_page(m.item_at_offset(p.offset))
         };
         let ok = |g: &mut Geometry<'_>, p: DocPos| {
-            in_page(g, p) || in_trailing_ws(g, p) || (g.caret_rect(p).is_some() && g.normalize(p).offset == p.offset)
+            in_page(g, p)
+                || in_trailing_ws(g, p)
+                || if p.virt > 0 {
+                    // a virtual paragraph (its line is laid out once the focus is on it)
+                    g.normalize(p) == p
+                } else {
+                    g.caret_rect(p).is_some() && g.normalize(p).offset == p.offset
+                }
         };
         if ok(&mut g, sel.focus) && (sel.is_caret() || ok(&mut g, sel.anchor)) {
             return false;

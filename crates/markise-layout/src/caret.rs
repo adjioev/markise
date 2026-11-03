@@ -538,6 +538,15 @@ pub fn item_pos(view: &View, pos: DocPos) -> Option<(usize, ItemPos)> {
     {
         i -= 1;
     }
+    // the virtual paragraph after a segmented block follows its last segment
+    if pos.virt > 0 {
+        while i + 1 < model.items.len()
+            && model.item_start(i + 1) == model.item_start(i)
+            && model.items.get(i + 1).map(|it| it.len) == model.items.get(i).map(|it| it.len)
+        {
+            i += 1;
+        }
+    }
     let start = model.item_start(i);
     Some((
         i,
@@ -634,9 +643,14 @@ impl Geometry<'_> {
     fn doc_pos(&self, i: usize, p: ItemPos) -> DocPos {
         let start = self.view.model().item_start(i);
         if p.virt {
-            // the virtual paragraph sits at the end of its item's leaf (the source gap)
+            // the virtual paragraph sits at the end of its item's leaf (the source gap), at the
+            // level it is shown at
             let span = self.view.model().item_span(i);
-            return DocPos::with_virt(span.end, 1);
+            let virt = match self.view.focus() {
+                Some((fi, f)) if fi == i && f.virtual_after => f.virtual_exit + 1,
+                _ => 1,
+            };
+            return DocPos::with_virt(span.end, virt);
         }
         DocPos {
             offset: start + p.rel as usize,
@@ -655,6 +669,13 @@ impl Geometry<'_> {
     /// The document position at item-local point `pt` of item `i`.
     pub fn hit(&mut self, i: usize, pt: Pos2) -> Option<DocPos> {
         let l = self.layout(i);
+        // the gap above the item's content: the virtual paragraph between it and the block
+        // before it, where the format offers one (issue #166)
+        if pt.y < l.gap
+            && let Some(d) = self.gap_before(i)
+        {
+            return Some(d);
+        }
         if let Some(p) = hit(&l, pt) {
             return Some(self.doc_pos(i, p));
         }
@@ -686,7 +707,11 @@ impl Geometry<'_> {
         let Some((i, p)) = self.item_pos(pos) else { return pos };
         let l = self.layout(i);
         if p.virt {
-            return if l.virtual_caret.is_some() || self.view.focus().is_some_and(|(fi, _)| fi == i) {
+            // shown, or about to be (the focus follows the selection; frozen during a click)
+            return if l.virtual_caret.is_some()
+                || self.view.focus().is_some_and(|(fi, _)| fi == i)
+                || self.gap_after(i) == Some(DocPos::with_virt(pos.offset, pos.virt))
+            {
                 pos
             } else {
                 DocPos::new(pos.offset)
@@ -708,30 +733,89 @@ impl Geometry<'_> {
     pub fn horizontal(&mut self, pos: DocPos, forward: bool, word: bool) -> DocPos {
         let Some((i, p)) = self.item_pos(pos) else { return pos };
         if p.virt {
-            // leaving the virtual paragraph backwards returns to the end of its block
+            // leaving the virtual paragraph backwards returns to the end of its block,
+            // forwards to the start of the next one (or the next gap, issue #166)
             return if forward {
-                pos
+                self.walk_horizontal(i, true, !word).unwrap_or(pos)
             } else {
-                self.edge_of(i, true).unwrap_or(pos)
+                self.edge_of(i, true)
+                    .or_else(|| self.walk_horizontal(i, false, !word))
+                    .unwrap_or(pos)
             };
         }
         let l = self.layout(i);
         if let Some(q) = step(&l, p, forward, word) {
             return self.doc_pos(i, q);
         }
+        // past the end of the item: the virtual paragraph in the gap after it, if any
+        if forward
+            && !word
+            && let Some(d) = self.gap_after(i)
+        {
+            return d;
+        }
+        match self.walk_horizontal(i, forward, !word) {
+            Some(d) => d,
+            None if forward => self.past_last_block().unwrap_or(pos),
+            None => pos,
+        }
+    }
+
+    /// The first caret stop beyond item `i` (forward: the first stop of a following item,
+    /// else the last stop of a preceding one); with `gaps`, a virtual paragraph in a gap on
+    /// the way counts (issue #166).
+    fn walk_horizontal(&mut self, i: usize, forward: bool, gaps: bool) -> Option<DocPos> {
         let mut j = i;
         loop {
-            let Some(next) = self.view.adjacent_visible(j, forward) else {
-                return if forward {
-                    self.past_last_block().unwrap_or(pos)
-                } else {
-                    pos
-                };
-            };
-            j = next;
-            if let Some(d) = self.edge_of(j, !forward) {
-                return d;
+            j = self.view.adjacent_visible(j, forward)?;
+            if !forward
+                && gaps
+                && let Some(d) = self.gap_after(j)
+            {
+                return Some(d);
             }
+            if let Some(d) = self.edge_of(j, !forward) {
+                return Some(d);
+            }
+            if forward
+                && gaps
+                && let Some(d) = self.gap_after(j)
+            {
+                return Some(d);
+            }
+        }
+    }
+
+    /// The virtual paragraph in the gap after item `j` (issue #166): after the last part of a
+    /// shown block, where the format offers one ([`markise_doc::EditBehavior::gap_virt`]).
+    pub fn gap_after(&self, j: usize) -> Option<DocPos> {
+        let model = self.view.model();
+        let it = model.items.get(j)?;
+        if model.is_page(j)
+            || matches!(it.kind, ItemKind::Hidden | ItemKind::Page(_))
+            || it.raw.as_deref() == Some(&markise_doc::RawPresentation::Comment)
+            || it.segment.as_ref().is_some_and(|s| !s.last())
+        {
+            return None;
+        }
+        let end = model.item_span(j).end;
+        let virt = self.view.doc().gap_virt(end)?;
+        Some(DocPos::with_virt(end, virt))
+    }
+
+    /// The virtual paragraph in the gap before item `i` (after the shown item before it).
+    fn gap_before(&self, i: usize) -> Option<DocPos> {
+        let mut j = i;
+        loop {
+            j = self.view.adjacent_visible(j, false)?;
+            let model = self.view.model();
+            let it = model.items.get(j)?;
+            // not shown: the gap is after the block before it
+            if matches!(it.kind, ItemKind::Hidden) || it.raw.as_deref() == Some(&markise_doc::RawPresentation::Comment)
+            {
+                continue;
+            }
+            return self.gap_after(j);
         }
     }
 
@@ -798,8 +882,17 @@ impl Geometry<'_> {
         if let Some(q) = adjacent_row(&l, caret, x, down) {
             return (self.doc_pos(i, q), x);
         }
+        // the virtual paragraph in the gap after an item is a row between it and the next
+        // one (issue #166); the caret on a virtual paragraph of item `i` is past its gap
         let mut j = i;
+        let mut past_gap = p.virt;
         loop {
+            if down
+                && !past_gap
+                && let Some(d) = self.gap_after(j)
+            {
+                return (d, x);
+            }
             let Some(next) = self.view.adjacent_visible(j, down) else {
                 let d = if down {
                     self.past_last_block().or_else(|| self.edge_of(i, true))
@@ -809,6 +902,10 @@ impl Geometry<'_> {
                 return (d.unwrap_or(pos), x);
             };
             j = next;
+            past_gap = false;
+            if !down && let Some(d) = self.gap_after(j) {
+                return (d, x);
+            }
             let lj = self.layout(j);
             if let Some(q) = edge_row(&lj, x, down) {
                 return (self.doc_pos(j, q), x);

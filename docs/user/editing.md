@@ -57,6 +57,17 @@ Click into a cell and type; <kbd>Tab</kbd> moves to the next cell, empty cells i
 A new row or column starts empty, with the caret in it, ready for typing. **Add Row Below** is
 <kbd>Cmd+Enter</kbd> (<kbd>Ctrl+Enter</kbd>).
 
+## Between blocks
+
+To write a paragraph between two blocks that sit next to each other without one — two tables,
+a table and a code block, a formula, a diagram, an image, a horizontal line, an HTML block, or
+the end of a quote or list — click in the space between them, or press <kbd>↓</kbd> on the last
+line of the first block or <kbd>↑</kbd> on the first line of the second (<kbd>←</kbd> and
+<kbd>→</kbd> stop there too). The caret waits on an empty line; nothing is written to the file
+until you type, and moving away leaves the file unchanged. <kbd>Enter</kbd> at the end of a
+table's last row also goes there. What you type becomes a paragraph of its own, with blank
+lines around it so neither neighbour takes it in.
+
 ## Code blocks
 
 Fenced code blocks (three backticks and a language name) are syntax-highlighted. Click the
