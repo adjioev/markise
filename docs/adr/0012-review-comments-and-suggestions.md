@@ -188,6 +188,31 @@ Show comments, and a switch in the comments panel header):
 - Only the visible items' comments are looked at and only shown cards are shaped (layout
   reports glyph positions per item, `BlockLayout::comments`).
 
+**Review views** (issue #88; setting `markdown.commentView`, View → Comments and the status
+bar's switch; display only — the text is never changed, exports and clean copies keep their
+own options):
+
+- `all` (default): everything above.
+- `simple`: comment glyphs and coloured suggestions; no highlight tint, no margin cards (no
+  gutter) and no hover popovers — a click on a glyph opens its card (to read or edit).
+- `final` ("No Markup"): the text as if every suggestion were accepted — insertions and new
+  text plain, deletions and old text hidden, highlights plain, comments hidden.
+- `original`: the text as if every suggestion were rejected.
+- In `final` and `original` the rendered view is a **read-only preview**: hidden marks would
+  make edits ambiguous (where does typing at the edge of a hidden deletion go?), so typing,
+  pasting, dropping, document commands and the hover bar are unavailable there, and the
+  status bar says "read-only"; Source mode (and the source pane of Side by Side) edit the raw
+  text as always. The rule is enforced at one choke point (Codex review of #160): the editor
+  session is read-only (`EditorSession::set_read_only`) while a clean view is shown in the
+  rendered view, so every mutation — commands, typing, IME, Find & Replace (also one queued
+  before the switch), undo / redo, pastes and attachments that finish late (the file stays
+  written, its link goes to the clipboard) — is refused there; reloads and re-parses still
+  apply. Copy takes the text shown (`review::visible_text`: accepted or rejected). Switching
+  to another view saves a comment being edited in its card first.
+- Layout: `LayoutParams::review` / `View::set_review_view` (part of every cache key and of the
+  key of evicted pages' measured heights); hidden
+  source has no rendered piece, so the caret steps over it as over an HTML comment.
+
 The source editor colours marks with the existing token classes (inserted text as link text,
 deleted text struck, highlights marked, comments as metadata).
 

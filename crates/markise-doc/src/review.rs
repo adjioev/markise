@@ -216,6 +216,55 @@ pub fn mark_at(doc: &dyn FormatDoc, at: usize, want: impl Fn(CriticKind) -> bool
         .find(|m| m.range.start <= at && at <= m.range.end && want(m.kind))
 }
 
+/// The text of `range` as a clean review view shows it (issue #88): `accept` — as if every
+/// suggestion were accepted (insertions and new text kept, deletions and old text dropped),
+/// otherwise as if every one were rejected; highlights keep their text, comments vanish.
+/// Marks cut by the range contribute the part of their shown text inside it. What Copy takes
+/// in those views.
+pub fn visible_text(doc: &dyn FormatDoc, range: Range<usize>, accept: bool) -> String {
+    let text = doc.text();
+    let range = range.start.min(text.len())..range.end.min(text.len());
+    // marks overlapping the range, in order: those starting before it (its first leaf), then
+    // the rest
+    let mut marks: Vec<ReviewMark> = marks_near(doc, range.start)
+        .into_iter()
+        .filter(|m| m.range.start < range.start && m.range.end > range.start)
+        .collect();
+    let mut from = range.start;
+    while let Some(m) = first_mark_from(doc, from, |_| true) {
+        if m.range.start >= range.end {
+            break;
+        }
+        from = m.range.end.max(from + 1);
+        marks.push(m);
+    }
+    let mut out = String::new();
+    let mut pos = range.start;
+    let push = |out: &mut String, r: Range<usize>| {
+        let (a, b) = (r.start.max(range.start), r.end.min(range.end));
+        if a < b {
+            out.push_str(&text[a..b]);
+        }
+    };
+    for m in marks {
+        push(&mut out, pos..m.range.start);
+        let kept: Option<Range<usize>> = match (m.kind, accept) {
+            (CriticKind::Insert, true) | (CriticKind::Delete, false) | (CriticKind::Highlight, _) => {
+                Some(m.content.clone())
+            }
+            (CriticKind::Substitute, true) => m.new.clone(),
+            (CriticKind::Substitute, false) => m.old.clone(),
+            _ => None,
+        };
+        if let Some(k) = kept {
+            push(&mut out, k);
+        }
+        pos = m.range.end.max(pos);
+    }
+    push(&mut out, pos..range.end);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

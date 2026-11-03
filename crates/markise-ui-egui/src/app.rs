@@ -1934,6 +1934,17 @@ impl MarkiseApp {
     /// Toggles source-code mode, mapping the viewport middle and the caret in both directions
     /// (spec 02 §12.1). Full Source mode keeps its own undo history (ADR 0006 §4.3).
     pub fn toggle_source(&mut self) {
+        // the clean review previews are read-only only in the rendered view (issue #88):
+        // cleared before the switch (opening the source pane materializes literal hints),
+        // set again after it when the rendered view is shown
+        if let Some(d) = self.doc.as_mut() {
+            d.viewer.ed.session.set_read_only(None);
+        }
+        self.toggle_source_now();
+        self.apply_review_read_only();
+    }
+
+    fn toggle_source_now(&mut self) {
         if !self.card_edit_saved() {
             return;
         }
@@ -1979,6 +1990,17 @@ impl MarkiseApp {
     /// ⌃⌘/ (spec 04 §3.3): Rendered or Source → Side by Side, remembering that mode; again →
     /// back to the remembered mode.
     pub fn toggle_side_by_side(&mut self) {
+        // the clean review previews are read-only only in the rendered view (issue #88):
+        // cleared before the switch (opening the source pane materializes literal hints),
+        // set again after it when the rendered view is shown
+        if let Some(d) = self.doc.as_mut() {
+            d.viewer.ed.session.set_read_only(None);
+        }
+        self.toggle_side_by_side_now();
+        self.apply_review_read_only();
+    }
+
+    fn toggle_side_by_side_now(&mut self) {
         if !self.card_edit_saved() {
             return;
         }
@@ -1998,6 +2020,17 @@ impl MarkiseApp {
     /// Sets the view mode directly (View menu radio items); Rendered and Source become the
     /// mode ⌃⌘/ returns to.
     pub fn set_view_mode(&mut self, m: ViewMode) {
+        // the clean review previews are read-only only in the rendered view (issue #88):
+        // cleared before the switch (opening the source pane materializes literal hints),
+        // set again after it when the rendered view is shown
+        if let Some(d) = self.doc.as_mut() {
+            d.viewer.ed.session.set_read_only(None);
+        }
+        self.set_view_mode_now(m);
+        self.apply_review_read_only();
+    }
+
+    fn set_view_mode_now(&mut self, m: ViewMode) {
         if self.doc.is_none() {
             return;
         }
@@ -2782,8 +2815,37 @@ impl MarkiseApp {
                     ));
                 }
                 self.word_count_label(ui);
+                self.comment_view_switch(ui);
             });
         });
+    }
+
+    /// The status bar's review-view switch (issue #88): the current view, a click picks
+    /// another. Shown while a document is open and CriticMarkup is on.
+    fn comment_view_switch(&mut self, ui: &mut egui::Ui) {
+        use markise_engine::settings::CommentView;
+        if self.doc.is_none() || !self.critic_markup() {
+            return;
+        }
+        let cur = self.comment_view();
+        let label = match cur {
+            CommentView::Final | CommentView::Original => format!("{} · read-only", cur.label()),
+            _ => cur.label().to_string(),
+        };
+        let mut picked = None;
+        let r = ui.menu_button(egui::RichText::new(label).weak(), |ui| {
+            for v in CommentView::ALL {
+                if ui.radio(v == cur, v.label()).clicked() {
+                    picked = Some(v);
+                    ui.close();
+                }
+            }
+        });
+        r.response
+            .on_hover_text("How comments and suggestions are shown (View → Comments)");
+        if let Some(v) = picked {
+            self.set_comment_view(v);
+        }
     }
 
     /// The status bar's word count (issue #53): click cycles words / characters / characters

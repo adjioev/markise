@@ -99,9 +99,13 @@ impl View {
         h
     }
 
-    /// Key of the parameters a measured page height is valid for (theme, fonts, ppp).
+    /// Key of the parameters a measured page height is valid for (theme, fonts, ppp, the
+    /// review view: issue #88, Codex review of #160).
     fn paging_key(&self) -> u64 {
-        self.theme_fp ^ self.font_gen.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ ((self.ppp * 100.0) as u64) << 48
+        self.theme_fp
+            ^ self.font_gen.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ ((self.ppp * 100.0) as u64) << 48
+            ^ (self.review as u64).wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
 
     /// Sets the source offset of the caret (`None`: no caret): its page and the items right

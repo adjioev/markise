@@ -622,3 +622,52 @@ fn review_marks_render_styled_and_reveal_at_the_caret() {
     assert_eq!(shown, "a new old xy{>>@ai: why<<} b");
     assert!(l.comments[0].revealed);
 }
+
+/// Issue #88: the review views. Final shows the text as if every suggestion were accepted,
+/// Original as if every one were rejected (comments and highlights hidden, no comment for a
+/// card, the marks' own text unstyled); Simple keeps glyphs and coloured suggestions but drops
+/// the highlight tint. Switching re-lays out (part of the cache key); the source is never
+/// changed.
+#[test]
+fn review_views_show_final_original_and_simple() {
+    use markise_layout::ReviewView;
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let src = "a {++new ++}{--old --}{~~x~>y~~}{>>why<<} {==hi==}{>>c<<} b\n\n| {++p++} | {--q--} |\n| --- | --- |\n";
+    let mut v = view(src, 900.0);
+    fn shown(v: &mut View, f: &mut dyn markise_layout::TextShaper, i: usize) -> (Vec<String>, usize, usize) {
+        let l = v.layout(i, f, &NoImages);
+        let texts = l
+            .prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Text { text, .. } => Some(text.text().trim().to_string()),
+                _ => None,
+            })
+            .collect();
+        let boxes = l.prims.iter().filter(|p| matches!(p, Prim::Rect { .. })).count();
+        (texts, l.comments.len(), boxes)
+    }
+    let (all, comments, all_boxes) = shown(&mut v, &mut f, 0);
+    assert_eq!(all, ["a new old xy\u{1F4AC} hi\u{1F4AC} b"]);
+    assert_eq!(comments, 2);
+    v.set_review_view(ReviewView::Final);
+    let (t, comments, _) = shown(&mut v, &mut f, 0);
+    assert_eq!(t, ["a new y hi b"]);
+    assert_eq!(comments, 0);
+    let (t, _, _) = shown(&mut v, &mut f, 1);
+    assert_eq!(t, ["p", ""], "table cells too");
+    v.set_review_view(ReviewView::Original);
+    let (t, comments, _) = shown(&mut v, &mut f, 0);
+    assert_eq!(t, ["a old x hi b"]);
+    assert_eq!(comments, 0);
+    let (t, _, _) = shown(&mut v, &mut f, 1);
+    assert_eq!(t, ["", "q"]);
+    v.set_review_view(ReviewView::Simple);
+    let (t, comments, boxes) = shown(&mut v, &mut f, 0);
+    assert_eq!(t, ["a new old xy\u{1F4AC} hi\u{1F4AC} b"]);
+    assert_eq!(comments, 2);
+    assert!(boxes < all_boxes, "no highlight tint: {boxes} < {all_boxes}");
+    v.set_review_view(ReviewView::All);
+    assert_eq!(shown(&mut v, &mut f, 0).0, all);
+}

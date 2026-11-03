@@ -26,7 +26,9 @@ pub mod source;
 pub mod text;
 pub mod view;
 
-pub use block::{BlockLayout, FontSet, ImageState, Images, ItemFocus, LinkHit, Prim, RoleFaces, reveal_set};
+pub use block::{
+    BlockLayout, FontSet, ImageState, Images, ItemFocus, LinkHit, Prim, ReviewView, RoleFaces, reveal_set,
+};
 pub use cache::{CacheKey, LayoutCache};
 pub use diagram::{DiagramQuery, DiagramState, Diagrams, NoDiagrams};
 pub use highlight::{CodeQuery, Highlights, NoHighlights};

@@ -10,7 +10,7 @@ use egui::{Context, Key, Modifiers};
 use markise_engine::editor::command::Registry;
 use markise_engine::editor::keymap::{Keymap, Platform};
 use markise_engine::export::ExportKind;
-use markise_engine::settings::{ToolbarPosition, ZOOM_RANGE};
+use markise_engine::settings::{CommentView, ToolbarPosition, ZOOM_RANGE};
 use markise_export::pandoc::PandocFormat;
 use markise_md::MarkdownFormat;
 use markise_theme::catalog::{Origin, Selection, ThemeId};
@@ -47,6 +47,14 @@ fn defaults(platform: Platform) -> &'static (Registry, Keymap) {
         (r, k)
     })
 }
+
+/// View → Comments items and the review view each one picks (issue #88).
+const COMMENT_VIEWS: [(&str, CommentView); 4] = [
+    ("view.commentsAll", CommentView::All),
+    ("view.commentsSimple", CommentView::Simple),
+    ("view.commentsFinal", CommentView::Final),
+    ("view.commentsOriginal", CommentView::Original),
+];
 
 /// Why Save Copy Without Comments is disabled while CriticMarkup is off (menu label suffix).
 pub(crate) const CLEAN_COPY_OFF_HINT: &str = "turn on View → Comments & Suggestions";
@@ -482,6 +490,7 @@ impl MarkiseApp {
             Entry::Separator,
             self.app_item("view.highlightCode", true, Check::Toggle(self.highlight_code)),
             Entry::Submenu(self.theme_menu()),
+            Entry::Submenu(self.comments_view_menu()),
             Entry::Separator,
             self.app_item("view.zoomIn", self.zoom() < ZOOM_RANGE.1, Check::None),
             self.app_item("view.zoomOut", self.zoom() > ZOOM_RANGE.0, Check::None),
@@ -506,6 +515,20 @@ impl MarkiseApp {
             ));
         }
         Menu::new("View", entries)
+    }
+
+    /// View → Comments (issue #88): how review marks are shown; disabled while CriticMarkup
+    /// is off (there are none).
+    fn comments_view_menu(&self) -> Menu {
+        let on = self.critic_markup();
+        let cur = self.comment_view();
+        Menu::new(
+            "Comments",
+            COMMENT_VIEWS
+                .iter()
+                .map(|(id, v)| self.app_item(id, on, Check::Radio(cur == *v)))
+                .collect(),
+        )
     }
 
     /// View → Theme: a quick switcher between the installed complete themes (Markise, the
@@ -663,6 +686,11 @@ impl MarkiseApp {
             "view.diagrams" => self.set_diagrams(!self.diagrams),
             "view.wikilinks" => self.set_wikilinks(!self.wikilinks()),
             "view.criticMarkup" => self.set_critic_markup(!self.critic_markup()),
+            id if COMMENT_VIEWS.iter().any(|(c, _)| *c == id) => {
+                if let Some((_, v)) = COMMENT_VIEWS.iter().find(|(c, _)| *c == id) {
+                    self.set_comment_view(*v);
+                }
+            }
             "file.saveCopyClean" if self.doc.is_some() => self.save_copy_without_comments(),
             "export.comments" => self.set_export_comments(!self.export_comments()),
             "go.back" => self.go_back(),

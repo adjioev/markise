@@ -896,3 +896,42 @@ fn save_as_during_a_pending_job_links_the_written_file() {
     let _ = std::fs::remove_dir_all(&a);
     let _ = std::fs::remove_dir_all(&b);
 }
+
+/// Issue #88 (Codex review of #160): an image paste still being written when the view switches
+/// to a clean (read-only) review preview is not inserted when it finishes; the file stays
+/// written and the banner says so (its link goes to the clipboard).
+#[test]
+fn attachment_finishing_in_a_read_only_preview_is_not_inserted() {
+    use markise_engine::settings::CommentView;
+    let d = tmpdir("paste-preview");
+    let note = d.join("note.md");
+    std::fs::write(&note, NOTE).unwrap();
+    let mut h = open(vec![note.clone()], &note, common::no_watch());
+    focus_end(&mut h);
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let g = gate.clone();
+    let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let (m, cv) = &*g;
+        let mut open = m.lock().unwrap();
+        while !*open {
+            open = cv.wait(open).unwrap();
+        }
+    });
+    h.state_mut().set_attach_job_test(common::HANG_GUARD, Some(hook));
+    h.event(Event::PasteImage(image()));
+    h.step();
+    h.state_mut().set_comment_view(CommentView::Final);
+    h.step();
+    {
+        let (m, cv) = &*gate;
+        *m.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    wait_until(&mut h, "attachment finished", |a| !a.is_attaching());
+    assert_eq!(text(&h), NOTE, "nothing inserted");
+    assert!(is_png(&d.join("assets").join(PASTED)), "the file stays written");
+    let b = h.state().banner_text().unwrap_or_default();
+    assert!(b.contains("not inserted"), "{b}");
+    h.state_mut().set_comment_view(CommentView::All);
+    let _ = std::fs::remove_dir_all(&d);
+}

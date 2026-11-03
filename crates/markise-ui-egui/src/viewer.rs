@@ -187,6 +187,8 @@ pub struct DocViewer {
     hover_key: Option<(Pos2, u64)>,
     /// How comments are shown (setting `markdown.commentDisplay`).
     comment_display: markise_engine::settings::CommentDisplay,
+    /// How review marks are shown (setting `markdown.commentView`, issue #88).
+    comment_view: markise_engine::settings::CommentView,
     /// Comments of the visible items at the last frame, with their cards.
     comments: Vec<ShownComment>,
     popover: Option<Popover>,
@@ -256,6 +258,7 @@ impl DocViewer {
             comments: Vec::new(),
             popover: None,
             card_edit: None,
+            comment_view: Default::default(),
             card_edit_size: None,
             editable: false,
             comment_presence: Default::default(),
@@ -449,7 +452,16 @@ impl DocViewer {
     /// the document is partial).
     pub fn command_enabled(&self, id: &str) -> bool {
         !(self.partial && WHOLE_DOCUMENT_COMMANDS.contains(&id))
+            && !(self.review_preview() && self.mutates(id))
             && self.ed.registry.enabled(&self.ed.session, id).is_ok()
+    }
+
+    /// Command `id` changes the document.
+    fn mutates(&self, id: &str) -> bool {
+        self.ed
+            .registry
+            .get(id)
+            .is_some_and(|c| matches!(c.desc.effect, markise_doc::Effect::Mutates { .. }))
     }
 
     /// Runs command `id` through the editor (menus, tests). `page`: viewport height.
@@ -463,6 +475,11 @@ impl DocViewer {
         if self.partial && WHOLE_DOCUMENT_COMMANDS.contains(&id) {
             return Err(markise_engine::editor::command::CommandError::Disabled(
                 "available once the whole file has loaded",
+            ));
+        }
+        if self.review_preview() && self.mutates(id) {
+            return Err(markise_engine::editor::command::CommandError::Disabled(
+                "read-only while comments show as No Markup or Original",
             ));
         }
         // an open card edit is saved before another command acts on the document; refused,
@@ -494,6 +511,8 @@ impl DocViewer {
         editable: bool,
     ) -> ViewerOutput {
         let mut out = ViewerOutput::default();
+        // No Markup / Original (issue #88): a read-only preview
+        let editable = editable && !self.review_preview();
         self.editable = editable;
         if !editable {
             // a read-only surface (Side by Side's rendered pane) edits no comment (refused: the
@@ -520,7 +539,9 @@ impl DocViewer {
         // after review-relevant edits (comment_presence); a gutter change waits for a frame
         // without pointer presses so clicks are hit-tested against one geometry (Codex review
         // of #94).
-        let margin_mode = self.comment_display == markise_engine::settings::CommentDisplay::Margin;
+        // (margin cards only with all markup shown; Simple shows glyphs only, issue #88)
+        let margin_mode = self.comment_display == markise_engine::settings::CommentDisplay::Margin
+            && self.comment_view == markise_engine::settings::CommentView::All;
         let has = margin_mode && {
             let (has, more) = self.comment_presence.poll(&mut self.ed.session, now, &ctx);
             match more {
@@ -1093,6 +1114,32 @@ impl DocViewer {
         self.comment_display = d;
     }
 
+    /// Sets how review marks are shown (setting `markdown.commentView`, issue #88): the layout
+    /// renders them accordingly (display only; the text is never changed).
+    pub fn set_comment_view(&mut self, v: markise_engine::settings::CommentView) {
+        use markise_engine::settings::CommentView as C;
+        use markise_layout::ReviewView as R;
+        if v == self.comment_view {
+            return;
+        }
+        self.comment_view = v;
+        self.ed.view.set_review_view(match v {
+            C::All => R::All,
+            C::Simple => R::Simple,
+            C::Final => R::Final,
+            C::Original => R::Original,
+        });
+        self.hover = None;
+        self.popover = None;
+    }
+
+    /// The view is a clean preview of the text (No Markup / Original, issue #88): the rendered
+    /// view is read-only, its hidden marks would make edits ambiguous.
+    pub fn review_preview(&self) -> bool {
+        use markise_engine::settings::CommentView as C;
+        matches!(self.comment_view, C::Final | C::Original)
+    }
+
     /// The comments of the visible items at the last frame, with their cards (tests).
     pub fn shown_comments(&self) -> &[ShownComment] {
         &self.comments
@@ -1328,8 +1375,13 @@ impl DocViewer {
                     .find(|c| !c.revealed && c.glyph.expand(2.0).contains(p))
                     .map(|c| c.source.start)
             });
+            let simple = self.comment_view != markise_engine::settings::CommentView::All;
             match (hovered, self.popover) {
                 _ if self.card_edit.is_some() => {}
+                // Simple (issue #88): no popover on hover, only a clicked (pinned) one
+                _ if simple && !self.popover.is_some_and(|p| p.pinned) => self.popover = None,
+                (Some(k), Some(pop)) if simple && pop.key != k => {}
+                (None, Some(_)) if simple => {}
                 (Some(k), Some(pop)) if pop.key == k => {}
                 (Some(k), Some(pop)) if pop.pinned && pop.key != k => {
                     self.popover = Some(Popover {
@@ -1712,8 +1764,18 @@ impl DocViewer {
             Event::Copy | Event::Cut => {
                 let r = self.ed.session.selection().primary().range();
                 if !r.is_empty() {
-                    // copied after the shaper closure (the context is locked inside it)
-                    self.pending_copy = Some(self.ed.session.text()[r].to_string());
+                    // copied after the shaper closure (the context is locked inside it); in a
+                    // clean review view what is shown (issue #88: accepted / rejected text)
+                    let shown = match self.comment_view {
+                        markise_engine::settings::CommentView::Final => {
+                            markise_doc::review::visible_text(self.ed.session.doc(), r, true)
+                        }
+                        markise_engine::settings::CommentView::Original => {
+                            markise_doc::review::visible_text(self.ed.session.doc(), r, false)
+                        }
+                        _ => self.ed.session.text()[r].to_string(),
+                    };
+                    self.pending_copy = Some(shown);
                     if matches!(e, Event::Cut) && editable {
                         self.ed.session.close_typing();
                         return self.exec("edit.deleteBackward", &Params::new(), sh, images, vh);

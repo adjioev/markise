@@ -815,6 +815,21 @@ impl ThemeManager {
         }
     }
 
+    /// How review marks are shown (settings key `markdown.commentView`, issue #88).
+    pub fn comment_view(&self) -> markise_engine::settings::CommentView {
+        self.settings.markdown.comment_view
+    }
+
+    /// View → Comments, the status bar's switch; persisted.
+    pub fn set_comment_view(&mut self, v: markise_engine::settings::CommentView) {
+        self.chose_markdown = true;
+        if v != self.settings.markdown.comment_view {
+            self.settings.markdown.comment_view = v;
+            self.dirty.markdown = Some(self.settings.markdown);
+            self.schedule_save();
+        }
+    }
+
     /// Whether exports keep review comments (settings key `markdown.exportComments`).
     pub fn export_comments(&self) -> bool {
         self.settings.markdown.export_comments
