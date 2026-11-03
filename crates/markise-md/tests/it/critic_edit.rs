@@ -459,3 +459,78 @@ fn edit_comment_in_a_table_cell_escapes_pipes() {
         "| A{>>a b<<} | B |\n| --- | --- |\n"
     );
 }
+
+const TABLE: &str = "| Head one | Head two |\n| --- | --- |\n| cell text | a\\|b |\n";
+
+fn sel_in(src: &str, needle: &str) -> Selection {
+    let a = src.find(needle).unwrap();
+    Selection::range(a, a + needle.len())
+}
+
+/// Issue #90: Add Comment in a table cell — a selection inside one cell (header or body) is
+/// highlighted, a caret gets an empty comment; escaped pipes stay; selections across cells or
+/// rows, and the delimiter row, are refused with a reason.
+#[test]
+fn add_comment_in_table_cells() {
+    let add = |sel: Selection| {
+        run(TABLE, planners::REVIEW_ADD_COMMENT, sel, Params::new())
+            .map(|(t, s)| (t, s.unwrap().primary().focus.offset))
+    };
+    let (t, c) = add(sel_in(TABLE, "cell")).unwrap();
+    assert_eq!(
+        t,
+        "| Head one | Head two |\n| --- | --- |\n| {==cell==}{>><<} text | a\\|b |\n"
+    );
+    assert_eq!(&t[c - 3..c + 3], "{>><<}", "the caret in the comment");
+    let (t, _) = add(sel_in(TABLE, "Head two")).unwrap();
+    assert!(t.starts_with("| Head one | {==Head two==}{>><<} |\n"), "{t}");
+    let (t, _) = add(sel_in(TABLE, "a\\|b")).unwrap();
+    assert!(t.ends_with("| cell text | {==a\\|b==}{>><<} |\n"), "{t}");
+    let at = TABLE.find("text").unwrap() + 4;
+    let (t, _) = add(Selection::caret(at)).unwrap();
+    assert!(t.ends_with("| cell text{>><<} | a\\|b |\n"), "{t}");
+    // the result is still a table with the same cells and the comment in its cell
+    let doc = Document::parse(t.as_str(), ParseOptions::default());
+    let marks = markise_doc::review::all_marks(&doc);
+    assert_eq!(marks.len(), 1);
+    // refused: across cells, across rows, in the delimiter row
+    let a = TABLE.find("text").unwrap();
+    let b = TABLE.find("a\\|b").unwrap() + 1;
+    let err = add(Selection::range(a, b)).unwrap_err();
+    assert!(err.contains("one table cell"), "{err}");
+    let a = TABLE.find("one").unwrap();
+    assert!(add(Selection::range(a, TABLE.find("cell").unwrap() + 2)).is_err());
+    let d = TABLE.find("---").unwrap() + 1;
+    let err = add(Selection::caret(d)).unwrap_err();
+    assert!(err.contains("delimiter"), "{err}");
+}
+
+/// Issue #90: accept / reject / delete inside cells keep the table, and unchanged documents
+/// round-trip.
+#[test]
+fn resolve_marks_in_table_cells() {
+    let src = "| A | B |\n| --- | --- |\n| {++new++} x | {--old--} y |\n| {~~p~>q~~}{>>why<<} | {==h==}{>>c<<} z |\n";
+    let doc = Document::parse(src, ParseOptions::default());
+    assert_eq!(markise_doc::FormatDoc::text(&doc), src, "round trip");
+    assert_eq!(markise_doc::review::all_marks(&doc).len(), 6);
+    let at = |n: &str| Selection::caret(src.find(n).unwrap() + 3);
+    let (t, _) = run(src, planners::REVIEW_ACCEPT, at("{++new"), Params::new()).unwrap();
+    assert!(t.contains("| new x | {--old--} y |"), "{t}");
+    let (t, _) = run(src, planners::REVIEW_REJECT, at("{--old"), Params::new()).unwrap();
+    assert!(t.contains("| {++new++} x | old y |"), "{t}");
+    let (t, _) = run(src, planners::REVIEW_ACCEPT, at("{~~p"), Params::new()).unwrap();
+    assert!(t.contains("| q | {==h==}{>>c<<} z |"), "{t}");
+    let (t, _) = run(src, planners::REVIEW_DELETE_COMMENT, at("{==h"), Params::new()).unwrap();
+    assert!(t.contains("| h z |"), "{t}");
+    let (t, _) = run(src, planners::REVIEW_ACCEPT_ALL, Selection::caret(0), Params::new()).unwrap();
+    assert_eq!(
+        t,
+        "| A | B |\n| --- | --- |\n| new x | y |\n| q{>>why<<} | {==h==}{>>c<<} z |\n".replace("q{>>why<<}", "q")
+    );
+    // still a table with two columns in every row
+    let d = Document::parse(t.as_str(), ParseOptions::default());
+    let tv = markise_doc::FormatDoc::table(&d, 0).expect("a table");
+    for r in &tv.rows {
+        assert_eq!(markise_doc::FormatDoc::table_row_cells(&d, *r).len(), 2, "{t}");
+    }
+}

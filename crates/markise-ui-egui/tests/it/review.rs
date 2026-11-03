@@ -1947,3 +1947,60 @@ fn caret_moves_in_a_clean_view_leave_pending_hints_alone() {
     h.state_mut().set_comment_view(CommentView::All);
     h.run_steps(2);
 }
+
+// ---------------------------------------------------------------- table cells (#90)
+
+const TABLE_DOC: &str = "Intro.\n\n| Head | Other |\n| --- | --- |\n| cell text | x {++y++} |\n";
+
+/// Issue #90: Add Comment in a table cell opens the card; Enter saves (one-line comment), a
+/// `|` is written `\|` and shows as `|`; the table keeps its shape; one undo step; the comment
+/// has a card and the panel lists the cell's marks; Accept works in the cell.
+#[test]
+fn comments_in_table_cells() {
+    let (mut h, p) = open_roomy("table-comment", TABLE_DOC);
+    let a = TABLE_DOC.find("cell").unwrap();
+    select(&mut h, a, a + 4);
+    h.key_press_modifiers(add_comment_chord(), Key::M);
+    h.run_steps(3);
+    let key = a + 4 + 6;
+    assert_eq!(edited(&mut h).map(|e| e.0), Some(key), "the card opens");
+    typ(&mut h, "a|b");
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), None, "Enter saves a cell's comment");
+    let t = text(&h);
+    assert_eq!(
+        t,
+        "Intro.\n\n| Head | Other |\n| --- | --- |\n| {==cell==}{>>a\\|b<<} text | x {++y++} |\n"
+    );
+    settle(&mut h);
+    let cs = comments(&mut h);
+    assert_eq!(cs.len(), 1, "{cs:#?}");
+    assert_eq!(&*cs[0].text, "a|b");
+    assert!(cs[0].card.is_some(), "a margin card");
+    assert_eq!(h.state().review_marks().len(), 3, "highlight, comment, insertion");
+    // Accept in the cell
+    let ctx = h.ctx.clone();
+    let at = t.find("{++y").unwrap() + 3;
+    assert!(h.state_mut().run_review(&ctx, "review.accept", Some(at)));
+    h.run_steps(2);
+    assert!(text(&h).ends_with("| x y |\n"), "{}", text(&h));
+    undo(&mut h);
+    undo(&mut h);
+    assert_eq!(text(&h), TABLE_DOC, "one undo step each");
+    assert_eq!(save_and_read(&mut h, &p), TABLE_DOC);
+}
+
+/// Issue #90: the Add Comment shortcut says why it does nothing (here: across table cells).
+#[test]
+fn add_comment_shortcut_explains_a_refusal() {
+    let (mut h, _p) = open_roomy("table-refused", TABLE_DOC);
+    let a = TABLE_DOC.find("text").unwrap();
+    let b = TABLE_DOC.find("x {++").unwrap() + 1;
+    select(&mut h, a, b);
+    h.key_press_modifiers(add_comment_chord(), Key::M);
+    h.run_steps(3);
+    assert_eq!(text(&h), TABLE_DOC);
+    let banner = h.state().banner_text().unwrap_or_default();
+    assert!(banner.contains("one table cell"), "{banner}");
+}

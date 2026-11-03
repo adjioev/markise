@@ -18,6 +18,9 @@ use markise_doc::{
 use super::Edits;
 use crate::Document;
 
+/// Why Add Comment refuses outside text that can hold one.
+const NOT_IN_TEXT: &str = "comments can be added in paragraphs, headings and table cells";
+
 /// What to do with the suggestions while building a result.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Resolve {
@@ -114,16 +117,48 @@ impl Document {
             a = sel.focus.offset;
             b = a;
         }
-        let leaf = self.leaf(a).ok_or(PlanError::NotApplicable("no block"))?;
-        if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) {
-            return Err(PlanError::NotApplicable("not in text"));
-        }
-        let content = leaf.content();
-        if a < content.start || b > content.end {
-            return Err(PlanError::NotApplicable("selection spans blocks"));
-        }
-        let base = content.start;
-        let rich = self.inlines(&leaf);
+        let leaf = self.leaf(a).ok_or(PlanError::NotApplicable(NOT_IN_TEXT))?;
+        let table = matches!(leaf.kind, LeafKind::Table { .. });
+        let (base, rich) = match leaf.kind {
+            LeafKind::Paragraph | LeafKind::Heading { .. } => {
+                let content = leaf.content();
+                if a < content.start || b > content.end {
+                    return Err(PlanError::NotApplicable("the selection spans several blocks"));
+                }
+                (content.start, self.inlines(&leaf))
+            }
+            // issue #90: within one table cell (header or body), never across cells
+            LeafKind::Table { .. } => {
+                let row = *leaf
+                    .lines
+                    .iter()
+                    .find(|l| l.start <= a && a <= l.end)
+                    .ok_or(PlanError::NotApplicable(NOT_IN_TEXT))?;
+                if b > row.end {
+                    return Err(PlanError::NotApplicable("the selection spans several table rows"));
+                }
+                let raw = &text[row.start..row.end];
+                if raw.trim().chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t')) {
+                    return Err(PlanError::NotApplicable("the table's delimiter row has no text"));
+                }
+                let cell = self
+                    .table_row_cells(row)
+                    .into_iter()
+                    .find(|c| c.start <= a && b <= c.end)
+                    .ok_or(PlanError::NotApplicable(
+                        "the selection must stay inside one table cell",
+                    ))?;
+                let rich = self.inline(
+                    markise_doc::InlineSource::Cell {
+                        span: cell,
+                        cap: cell.len().max(1),
+                    },
+                    cell.start,
+                );
+                (cell.start, rich)
+            }
+            _ => return Err(PlanError::NotApplicable(NOT_IN_TEXT)),
+        };
         // widen through styled spans the selection cuts (`**a|b**` → the whole strong span)
         let mut nodes = Vec::new();
         flat(&rich.nodes, &mut nodes);
@@ -153,14 +188,16 @@ impl Document {
             let inside = |p: usize| s < p && p < e;
             let critic = matches!(n.kind, NK::Critic(_));
             if critic && (inside(a) || inside(b) || (!collapsed && a <= s && e <= b)) {
-                return Err(PlanError::NotApplicable("inside a comment or suggestion"));
+                return Err(PlanError::NotApplicable(
+                    "comments cannot overlap another comment or suggestion",
+                ));
             }
             let literal = matches!(
                 n.kind,
                 NK::Code | NK::Math { .. } | NK::RawInline | NK::Atom | NK::Image { .. }
             );
             if literal && (inside(a) || inside(b)) {
-                return Err(PlanError::NotApplicable("inside code or math"));
+                return Err(PlanError::NotApplicable("comments cannot go inside code, math or HTML"));
             }
         }
         let mut ed = Edits::new();
@@ -172,6 +209,18 @@ impl Document {
             ed.insert(b, "==}{>><<}");
             b + 3 + 6
         };
+        // in a table the inserted marks must keep the row's cells and make a comment where
+        // intended (a backslash before the closer, …: Codex review of #158's shape check)
+        if table {
+            let inserts: Vec<(usize, &str)> = if collapsed {
+                vec![(a, "{>><<}")]
+            } else {
+                vec![(a, "{=="), (b, "==}{>><<}")]
+            };
+            if !self.inserts_keep_block(a, &inserts, caret - 3) {
+                return Err(PlanError::NotApplicable("a comment here would change the table"));
+            }
+        }
         let ps = ed.build().ok_or(PlanError::NotApplicable("overlap"))?;
         Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(caret))))
     }
@@ -312,6 +361,33 @@ impl Document {
         let caret = at + insert.len();
         let ps = markise_doc::PatchSet::single_verbatim(at..at, insert);
         Some(Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(caret)))))
+    }
+
+    /// Whether inserting `inserts` (absolute offsets, in order, inside the top-level block at
+    /// `at`) keeps that block's shape (leaf kinds, table cell counts) and makes a comment start
+    /// at `comment` (an offset in the new text).
+    fn inserts_keep_block(&self, at: usize, inserts: &[(usize, &str)], comment: usize) -> bool {
+        let text = self.text();
+        let i = self.top_partition_point(|t| t.end() < at);
+        let Some(top) = self.top(i) else { return false };
+        let a = crate::line_start(text, top.start().min(at));
+        let (b, _) = crate::text::line_end(text, top.end().max(at));
+        if inserts.iter().any(|&(p, _)| p < a || p > b) {
+            return false;
+        }
+        let mut block = String::new();
+        let mut pos = a;
+        for &(p, s) in inserts {
+            block.push_str(&text[pos..p]);
+            block.push_str(s);
+            pos = p;
+        }
+        block.push_str(&text[pos..b]);
+        let doc = Document::parse(block, self.options().clone());
+        let made = review::all_marks(&doc)
+            .iter()
+            .any(|m| m.kind == CriticKind::Comment && m.range.start + a == comment);
+        made && block_shape(&doc) == block_shape(&Document::parse(text[a..b].to_string(), self.options().clone()))
     }
 
     /// The prefix a new line inside the paragraph `leaf` needs after a line break on the line

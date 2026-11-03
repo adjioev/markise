@@ -3061,6 +3061,9 @@ impl MarkiseApp {
                         d.viewer.set_font_generation(self.font_gen);
                         let gutter = d.viewer.comment_gutter();
                         let out = d.viewer.show(ui, &mut self.images, &t, self.parley.as_mut(), true);
+                        if let Some(n) = d.viewer.take_notice() {
+                            self.banner = Some(Banner::Info(n));
+                        }
                         if d.viewer.comment_gutter() != gutter {
                             // MARKISE_TIMING: when the comment gutter appears or goes (issue
                             // #138 measurements)

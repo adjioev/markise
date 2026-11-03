@@ -192,6 +192,8 @@ pub struct DocViewer {
     /// Comments of the visible items at the last frame, with their cards.
     comments: Vec<ShownComment>,
     popover: Option<Popover>,
+    /// A message for the app to show (a refused Add Comment shortcut, issue #90).
+    notice: Option<String>,
     /// The comment whose text is being edited in its card (issue #87).
     card_edit: Option<card_edit::CardEdit>,
     /// The bubble popover editor's size at its last frame (placement).
@@ -258,6 +260,7 @@ impl DocViewer {
             comments: Vec::new(),
             popover: None,
             card_edit: None,
+            notice: None,
             comment_view: Default::default(),
             card_edit_size: None,
             editable: false,
@@ -454,6 +457,25 @@ impl DocViewer {
         !(self.partial && WHOLE_DOCUMENT_COMMANDS.contains(&id))
             && !(self.review_preview() && self.mutates(id))
             && self.ed.registry.enabled(&self.ed.session, id).is_ok()
+    }
+
+    /// A message from the last frames for the app to show (taken once).
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
+    }
+
+    /// Why Add Comment cannot run at the selection (the planner's reason).
+    fn add_comment_refusal(&self) -> String {
+        if self.review_preview() {
+            return "The document is read-only while comments show as No Markup or Original.".into();
+        }
+        let req = self.ed.session.request(Params::new());
+        let why = match self.ed.session.doc().plan(planners::REVIEW_ADD_COMMENT, &req) {
+            Err(markise_doc::PlanError::NotApplicable(r)) => r.to_string(),
+            Err(e) => e.to_string(),
+            Ok(_) => "not available here".into(),
+        };
+        format!("Cannot add a comment here: {why}.")
     }
 
     /// Command `id` changes the document.
@@ -1802,6 +1824,10 @@ impl DocViewer {
                         continue;
                     }
                     if !self.command_enabled(id) {
+                        if id == "review.addComment" {
+                            // the shortcut says why instead of doing nothing (issue #90)
+                            self.notice = Some(self.add_comment_refusal());
+                        }
                         continue;
                     }
                     return self.exec(id, &Params::new(), sh, images, vh);

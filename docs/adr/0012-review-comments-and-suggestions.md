@@ -74,7 +74,12 @@ openers, and only leaves holding an opener are parsed. Planner ids `review.addCo
   view the new comment then opens in its card for its text (issue #87, §4 "Editing in the
   card"); in Source mode the caret goes into the comment and the user types it in place. Selection
   ends that cut through a styled span are widened to the whole span; selections over several
-  blocks, inside code or math, or touching an existing mark are refused. The formatting
+  blocks, inside code or math, or touching an existing mark are refused. **Table cells**
+  (issue #90): a selection inside one cell (header or body) or a caret in it works the same;
+  selections across cells or rows and the delimiter row are refused, and the result is checked
+  to keep the row's cells (the block is re-parsed). A comment's text in a cell is one line
+  (Enter in its card saves) and a `|` in it is written `\|`. A refused shortcut shows why in
+  a banner instead of doing nothing (menu items and the toolbar button are disabled there). The formatting
   toolbar has a Comment button (speech bubble) for the same command, shown only while
   CriticMarkup is on. **Shortcut:** Apple documents ⌥⌘M as Minimize All; Markise deliberately
   overrides it in-app for Add Comment, as Google Docs does, so it is taken off the
