@@ -248,6 +248,14 @@ impl MarkiseApp {
         if self.export.job.is_some() {
             return;
         }
+        if self.is_partial() {
+            // a request (or an answered overwrite question) arriving while the first part of a
+            // file is shown is not run (issue #126 review: every write boundary checks)
+            self.export.message = Some(ExportMessage::Failed(
+                "Export is available once the whole file has loaded.".into(),
+            ));
+            return;
+        }
         req.wikilinks = self.wikilinks();
         req.vault = self.vault_index().cloned();
         // comments and suggestions (ADR 0012): parsed as in the editor, comments kept or

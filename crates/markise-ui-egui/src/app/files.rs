@@ -25,7 +25,7 @@ use crate::sidebar::{EditEnd, InlineEdit, Tab, TreeAction};
 #[derive(Default)]
 pub(crate) struct FileOps {
     /// Answers handed out instead of showing the native save dialog (tests).
-    save_answers: VecDeque<Option<PathBuf>>,
+    pub(super) save_answers: VecDeque<Option<PathBuf>>,
     /// The tree row whose name is being edited.
     pub(crate) rename: Option<InlineEdit>,
 }

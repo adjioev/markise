@@ -70,7 +70,14 @@ remain valid (nothing before the cut moved).
   queued as during any load): a clean document reloads, an edited one gets the conflict
   banner.
 - Opening another file replaces the partial document when it loads (the rest is cancelled);
-  if that open fails, the partial document stays and completes. Close and Quit of a clean
+  if that open fails, the partial document stays and completes. If the partial document has
+  unsaved edits when the other file's first part arrives, that part is not shown: the other
+  file's whole document goes through the usual Save / Don't Save / Cancel question, and the
+  current document keeps its own rest until the other file actually replaces it.
+- Every write boundary checks the document is complete: saving (deferred), autosave and
+  backups (paused), exports and Save Copy Without Comments (refused, also when a request or
+  question from before the part was installed is answered). The clean-copy question is bound
+  to the document and revision it was asked for and goes when the document is replaced. Close and Quit of a clean
   document close at once; with unsaved edits they ask as usual (Save waits for the rest).
 - A recovered draft opens progressively as an unsaved copy. A lossily decoded file stays
   unsaveable. A re-parse with new options (a dialect switch) waits for the whole document.

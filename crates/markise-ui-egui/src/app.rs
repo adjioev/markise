@@ -376,7 +376,9 @@ enum Ask {
     /// Create the note `rel` (vault path) for an unresolved link (spec 06 V2.8).
     CreateNote { rel: String },
     /// Save Copy Without Comments: accept or reject the pending suggestions in the copy?
-    CleanCopy { suggestions: usize },
+    /// `doc` / `counter`: the document and revision it was asked for (a copy is written only
+    /// of that state; the question goes when the document is replaced).
+    CleanCopy { suggestions: usize, doc: u64, counter: u64 },
     /// Preferences → Reset to Defaults for this section.
     ResetPrefs(crate::prefs::Section),
 }
@@ -438,8 +440,13 @@ pub struct MarkiseApp {
     load: Option<LoadInfo>,
     /// Progressive open settings (issue #126; `None`: off).
     progressive_opts: Option<markise_engine::load::ProgressiveOpts>,
-    /// A progressive open waiting for the whole document ([`progressive`]).
+    /// The progressive open of the document shown, waiting for its whole document
+    /// ([`progressive`]).
     progressive: Option<progressive::Progressive>,
+    /// A progressive open whose first part was not shown (the current document had unsaved
+    /// edits): its whole document goes through the usual question; the current document's
+    /// own continuation (`progressive`) stays until it is replaced.
+    progressive_waiting: Option<progressive::Progressive>,
     /// A watcher event arrived while a load / save was running: check again afterwards.
     reload_pending: bool,
     saving: Option<Saving>,
@@ -572,6 +579,7 @@ impl MarkiseApp {
             load: None,
             progressive_opts: opts.progressive,
             progressive: None,
+            progressive_waiting: None,
             reload_pending: false,
             saving: None,
             queued_save: None,
@@ -675,7 +683,7 @@ impl MarkiseApp {
     /// A load is running (also while a progressively opened document waits for the rest of
     /// its file).
     pub fn is_loading(&self) -> bool {
-        self.load.is_some() || self.progressive.is_some()
+        self.load.is_some() || self.progressive.is_some() || self.progressive_waiting.is_some()
     }
 
     /// A load or save job is running.
@@ -1083,7 +1091,9 @@ impl MarkiseApp {
                 .and_then(|d| d.disk),
             _ => None,
         };
-        // the single loader worker cancels whatever it was doing for an older request
+        // the single loader worker cancels whatever it was doing for an older request (and a
+        // newer request supersedes an open waiting to be shown)
+        self.progressive_waiting = None;
         let loader = self.loader.as_ref().expect("loader");
         let generation = match (known, reason) {
             (Some(v), _) => loader.request_unless(path.clone(), v),
@@ -1344,8 +1354,15 @@ impl MarkiseApp {
     }
 
     fn install_doc_as(&mut self, loaded: Loaded, untitled: bool, partial: bool) {
-        // a progressive open still loading belongs to the document being replaced
+        // a progressive open still loading belongs to the document being replaced (and one
+        // waiting to be shown is superseded by this install)
         self.progressive = None;
+        self.progressive_waiting = None;
+        // a question about the replaced document's content goes with it
+        if matches!(self.ask, Some(Ask::CleanCopy { .. })) {
+            self.ask = None;
+            self.question_id += 1;
+        }
         let recovered = self.workflow.drafts.contains(&loaded.path);
         self.forget_backup();
         let untitled = untitled || recovered;
@@ -2305,7 +2322,7 @@ impl MarkiseApp {
                 let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
                 Question::create_note(name, dir)
             }
-            Some(Ask::CleanCopy { suggestions }) => Question::clean_copy(*suggestions),
+            Some(Ask::CleanCopy { suggestions, .. }) => Question::clean_copy(*suggestions),
             Some(Ask::ResetPrefs(s)) => Question::reset_settings(s.label()),
             None => match self.export.pending_large() {
                 Some((_, est)) => Question::large_export(&est.human(), est.tocs),
@@ -2357,8 +2374,17 @@ impl MarkiseApp {
             }),
             (Choice::MoveToTrash, Some(Ask::Trash(p))) => self.move_to_trash(&p),
             (Choice::Create, Some(Ask::CreateNote { rel })) => self.create_note(rel),
-            (Choice::AcceptAll, Some(Ask::CleanCopy { .. })) => self.write_clean_copy(false),
-            (Choice::RejectAll, Some(Ask::CleanCopy { .. })) => self.write_clean_copy(true),
+            (Choice::AcceptAll | Choice::RejectAll, Some(Ask::CleanCopy { doc, counter, .. })) => {
+                // only of the state it was asked for (issue #126 review: never of another
+                // document, e.g. the first part of a file opened meanwhile)
+                if self
+                    .doc
+                    .as_ref()
+                    .is_some_and(|d| d.id == doc && d.viewer.ed.session.revision().counter == counter)
+                {
+                    self.write_clean_copy(c == Choice::RejectAll);
+                }
+            }
             (Choice::Reset, Some(Ask::ResetPrefs(s))) => self.reset_preferences(s),
             (_, Some(_)) => {} // Cancel (or a choice the question does not offer)
             (c, None) if self.export.is_asking_large() => {
@@ -2621,7 +2647,7 @@ impl MarkiseApp {
                         "Loading {}…",
                         l.path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
                     ));
-                } else if let Some(p) = &self.progressive {
+                } else if let Some(p) = self.progressive_waiting.as_ref().or(self.progressive.as_ref()) {
                     // progressive open (issue #126): only here, never above the document
                     ui.spinner();
                     let name = p.path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();

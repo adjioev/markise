@@ -70,14 +70,8 @@ impl MarkiseApp {
             LoadReason::OpenDiscarding => true,
             LoadReason::Reload | LoadReason::AcceptReload => false,
         };
-        let shown = if show {
-            self.install_partial(loaded);
-            self.doc.as_ref().map(|d| d.id)
-        } else {
-            None
-        };
-        self.progressive = Some(Progressive {
-            shown,
+        let mut p = Progressive {
+            shown: None,
             cut,
             rest,
             path,
@@ -85,38 +79,59 @@ impl MarkiseApp {
             started,
             save: None,
             reparse: None,
-        });
+        };
+        if show {
+            // replaces the current document (and with it its own continuation, if any)
+            self.install_partial(loaded);
+            p.shown = self.doc.as_ref().map(|d| d.id);
+            self.progressive = Some(p);
+        } else {
+            // the current document stays, its own continuation too (issue #126 review: a
+            // partial document with unsaved edits must still complete)
+            self.progressive_waiting = Some(p);
+        }
     }
 
     /// Takes the whole document of a progressive open when it has arrived.
     pub(super) fn poll_progressive(&mut self) {
-        let Some(p) = &self.progressive else { return };
-        let Some(r) = p.rest.try_recv() else { return };
-        let p = self.progressive.take().expect("progressive");
-        match (r, p.shown) {
-            (Err(e), Some(id)) => {
-                // the part stays; it can never be saved
-                if self.doc.as_ref().is_some_and(|d| d.id == id) {
-                    self.banner = Some(Banner::Error(format!(
-                        "The rest of the file could not be loaded ({e}); only the first part is shown and saving is disabled."
-                    )));
+        let mut any = false;
+        if let Some(r) = self.progressive.as_ref().and_then(|p| p.rest.try_recv()) {
+            let p = self.progressive.take().expect("progressive");
+            any = true;
+            match (r, p.shown) {
+                (Ok(full), Some(id)) => self.complete(p, full, id),
+                (Err(e), _) => {
+                    // the part stays; it can never be saved
+                    if p.shown.is_some() && self.doc.as_ref().map(|d| d.id) == p.shown {
+                        self.banner = Some(Banner::Error(format!(
+                            "The rest of the file could not be loaded ({e}); only the first part is shown and saving is disabled."
+                        )));
+                    }
                 }
+                (Ok(_), None) => {}
             }
-            (Err(e), None) => {
-                self.side.forget(&p.path);
-                self.banner = Some(Banner::Error(e));
-            }
-            (Ok(full), Some(id)) => self.complete(p, full, id),
-            (Ok(full), None) => {
-                self.log_loaded(&full, p.started);
-                if p.reason == LoadReason::Open && self.is_dirty() {
-                    self.set_ask(Ask::Unsaved(Then::Install(Box::new(full))));
-                } else {
-                    self.install(full);
+        }
+        if let Some(r) = self.progressive_waiting.as_ref().and_then(|p| p.rest.try_recv()) {
+            let p = self.progressive_waiting.take().expect("waiting");
+            any = true;
+            match r {
+                Err(e) => {
+                    self.side.forget(&p.path);
+                    self.banner = Some(Banner::Error(e));
+                }
+                Ok(full) => {
+                    self.log_loaded(&full, p.started);
+                    if p.reason == LoadReason::Open && self.is_dirty() {
+                        // installing it (Discard, or after a covering save) replaces the
+                        // current document and only then drops its continuation
+                        self.set_ask(Ask::Unsaved(Then::Install(Box::new(full))));
+                    } else {
+                        self.install(full);
+                    }
                 }
             }
         }
-        if std::mem::take(&mut self.reload_pending) {
+        if any && std::mem::take(&mut self.reload_pending) {
             self.request_reload();
         }
     }
@@ -471,6 +486,96 @@ mod tests {
         assert_eq!(std::fs::read(&lossy).unwrap(), bytes, "never written");
         assert_eq!(app.document_text().unwrap(), String::from_utf8_lossy(&bytes));
         assert!(matches!(app.banner, Some(Banner::Error(_))), "the save was refused");
+    }
+
+    /// Review of #152, P1: a second large open that cannot be shown (the current partial
+    /// document got edits before its first part arrived) must not drop the current document's
+    /// continuation; it only goes when the other file actually replaces it.
+    #[test]
+    fn a_waiting_open_keeps_the_current_documents_rest() {
+        use crate::confirm::Choice;
+        let dir = tempfile::tempdir().unwrap();
+        let (a, text_a) = big_file(dir.path(), "a.md");
+        let (b, text_b) = big_file(dir.path(), "b.md");
+        let gate = Arc::new(Gate::default());
+        gate.hold();
+        let mut app = app_with(&gate);
+        open_partial(&mut app, &a);
+        // B is requested while A is clean; A is edited before B's first part is handled
+        app.open(b.clone());
+        type_at(&mut app, 0, "MINE ");
+        pump(&mut app, "b's first part, not shown", |a| {
+            a.progressive_waiting.is_some()
+        });
+        assert!(app.is_partial() && app.progressive.is_some(), "A keeps its rest");
+        gate.release();
+        pump(&mut app, "both complete", |a| {
+            a.progressive.is_none() && a.progressive_waiting.is_none()
+        });
+        assert!(!app.is_partial(), "A is complete");
+        assert_eq!(app.document_text().unwrap(), format!("MINE {text_a}"));
+        assert!(matches!(app.ask, Some(Ask::Unsaved(Then::Install(_)))), "B asks first");
+        // Cancel: A stays and can be saved
+        app.answer_question(Choice::Cancel);
+        app.save();
+        pump(&mut app, "saved", |a| a.saving.is_none() && !a.is_dirty());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), format!("MINE {text_a}"));
+        // and the other way: B replaces an edited partial A after Don't Save
+        gate.hold();
+        let (c, _) = big_file(dir.path(), "c.md");
+        app.open(c.clone());
+        pump(&mut app, "c partial", |a| a.is_partial());
+        app.open(b.clone());
+        type_at(&mut app, 0, "X");
+        pump(&mut app, "b waiting", |a| a.progressive_waiting.is_some());
+        gate.release();
+        pump(&mut app, "question", |a| {
+            a.progressive_waiting.is_none() && a.ask.is_some()
+        });
+        app.answer_question(Choice::DontSave);
+        assert_eq!(app.document_text().unwrap(), text_b);
+        assert!(!app.is_partial() && app.progressive.is_none());
+    }
+
+    /// Review of #152, P2: a clean-copy question asked about one document never writes
+    /// another (the first part of a file opened meanwhile); every write path refuses a partial
+    /// document.
+    #[test]
+    fn writes_never_take_the_first_part() {
+        use crate::confirm::Choice;
+        let dir = tempfile::tempdir().unwrap();
+        let small = dir.path().join("small.md");
+        std::fs::write(&small, "Text {++added++} here.\n").unwrap();
+        let (big, _) = big_file(dir.path(), "big.md");
+        let gate = Arc::new(Gate::default());
+        gate.hold();
+        let mut app = app_with(&gate);
+        app.open(small.clone());
+        pump(&mut app, "small", |a| a.doc.is_some() && !a.is_loading());
+        app.save_copy_without_comments();
+        assert!(matches!(app.ask, Some(Ask::CleanCopy { .. })));
+        // a large file is opened before the question is answered: the question goes
+        app.open(big.clone());
+        pump(&mut app, "big partial", |a| a.is_partial());
+        assert!(app.ask.is_none(), "the question went with its document");
+        let copy = dir.path().join("copy.md");
+        app.queue_save_dialog_answer(Some(copy.clone()));
+        app.answer_question(Choice::AcceptAll);
+        app.write_clean_copy(false);
+        assert_eq!(app.files.save_answers.len(), 1, "no copy of the first part was started");
+        // exports refuse it too
+        let req = markise_engine::export::ExportRequest::new(
+            markise_engine::export::ExportKind::Html,
+            app.document_text().unwrap(),
+            Some(big.clone()),
+            dir.path().join("out.html"),
+            app.theme().clone(),
+        );
+        app.start_export(req);
+        assert!(!app.export.is_running());
+        gate.release();
+        pump(&mut app, "complete", |a| !a.is_loading());
+        assert!(!copy.exists() && !dir.path().join("out.html").exists());
     }
 
     #[test]

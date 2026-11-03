@@ -475,7 +475,13 @@ impl MarkiseApp {
             })
             .unwrap_or(0);
         if n > 0 && self.parse.critic_markup {
-            self.set_ask(Ask::CleanCopy { suggestions: n });
+            let d = self.doc.as_ref().expect("doc");
+            let (doc, counter) = (d.id, d.viewer.ed.session.revision().counter);
+            self.set_ask(Ask::CleanCopy {
+                suggestions: n,
+                doc,
+                counter,
+            });
         } else {
             self.write_clean_copy(false);
         }
@@ -505,6 +511,9 @@ impl MarkiseApp {
 
     /// Asks for the copy's file and starts writing it.
     pub(super) fn write_clean_copy(&mut self, reject: bool) {
+        if self.is_partial() {
+            return; // never a copy of the first part of a file (issue #126)
+        }
         let Some(text) = self.clean_copy_text(reject) else {
             return;
         };
