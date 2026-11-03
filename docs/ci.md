@@ -89,7 +89,10 @@ Every file in `crates/*/tests/` used to build and link its own executable, each 
 the full UI stack; most of the test time was compiling and linking them. Each crate now has a
 single integration-test target: `tests/it/main.rs` declares one module per topic
 (`tests/it/<topic>.rs`), shared helpers live in `tests/it/common.rs`, and fixtures and data
-files stay where they were (`tests/fixtures/`, `tests/corpus/`, `tests/snapshots/`, …). Crates
+files stay where they were (`tests/fixtures/`, `tests/corpus/`, `tests/snapshots/`, …).
+Saved proptest failures live in `tests/proptest-regressions/<topic>.txt`: with a `main.rs` in
+`tests/it/`, that is where proptest's default `SourceParallel` persistence reads and writes
+them (a `tests/it/<topic>.proptest-regressions` file would be silently ignored). Crates
 with a single integration-test file keep it (`tests/<name>.rs`) until they get a second one.
 New integration tests are modules, never a new `tests/*.rs` file. Test names carry the module
 (`qa_sweep::l12_…`); select one module with `cargo test -p <crate> --test it <topic>::`.
