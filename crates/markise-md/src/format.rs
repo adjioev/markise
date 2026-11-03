@@ -1978,9 +1978,7 @@ impl Document {
                     let mut prefix =
                         crate::edit::blocks::cont_prefix(text, line_start(text, l.span.start), l.span.start);
                     if matches!(l.kind, LeafKind::CodeBlock { .. }) && self.code_fence(l.span.start).is_none() {
-                        let keep = prefix.trim_end_matches([' ', '\t']).len();
-                        let ws = prefix.len() - keep;
-                        prefix.truncate(keep + ws.saturating_sub(4));
+                        prefix = crate::edit::blocks::strip_code_indent(&prefix);
                     }
                     prefix
                 }

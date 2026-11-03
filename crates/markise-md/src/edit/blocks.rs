@@ -86,6 +86,20 @@ pub(crate) fn cont_prefix(text: &str, ls: usize, upto: usize) -> String {
         .collect()
 }
 
+/// The containers' prefix of an indented code block's first line, from `prefix` (up to the
+/// code's content, as [`cont_prefix`] gives it): without the code's own four columns of
+/// indentation, measured in columns (a tab advances to the next multiple of four), the
+/// remaining indentation as spaces (Codex review of PR #167).
+pub(crate) fn strip_code_indent(prefix: &str) -> String {
+    let col = |s: &str| {
+        s.chars()
+            .fold(0usize, |c, ch| if ch == '\t' { c + 4 - c % 4 } else { c + 1 })
+    };
+    let head = prefix.trim_end_matches([' ', '\t']);
+    let keep = col(prefix).saturating_sub(4).max(col(head));
+    format!("{head}{}", " ".repeat(keep - col(head)))
+}
+
 impl Document {
     fn item_of(&self, b: &Block, o: usize, path: Vec<usize>) -> Option<Item> {
         let BlockKind::ListItem {

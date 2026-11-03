@@ -383,3 +383,28 @@ fn gap_in_a_crlf_file_issue_166() {
     t.typ("x");
     assert_eq!(t.text(), "| a |\r\n|---|\r\n| 1 |\r\n\r\nx\r\n\r\n```\r\nc\r\n```\r\n");
 }
+
+/// Codex review of PR #167: indented code whose indentation holds a tab, inside a list item —
+/// the typed paragraph takes the item's two columns (the code's four are measured in
+/// columns), so it and the rule after it stay in the item.
+#[test]
+fn gap_after_tab_indented_code_in_a_list_item() {
+    let src = "- a\n\n  \t  code\n\n  ***\n";
+    let mut t = T::new(src);
+    t.set(src.find("code").unwrap() + 1);
+    t.run("caret.down");
+    let end = src.find("code").unwrap() + 4;
+    assert_eq!(t.caret(), DocPos::with_virt(end, 1), "{}", t.shown());
+    t.typ("x");
+    assert_eq!(t.text(), "- a\n\n  \t  code\n\n  x\n\n  ***\n");
+    let doc = t.ed.session.doc();
+    for (what, at) in [("x", src.len() - 4), ("rule", t.text().find("***").unwrap())] {
+        let leaf = doc.leaf(at).unwrap();
+        assert_eq!(
+            leaf.containers.len(),
+            2,
+            "{what} stays in the item: {}",
+            doc.debug_tree()
+        );
+    }
+}

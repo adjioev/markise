@@ -50,6 +50,17 @@ impl Document {
         ))
     }
 
+    /// The leaf holding (or nearest before) `at` without its lines (`FormatDoc::leaf` without
+    /// the O(lines) copy), with its block and origin.
+    pub(crate) fn leaf_head_at(&self, at: usize) -> Option<(BlockLeaf, &Block, usize)> {
+        let path = self.block_path_at(at);
+        let depth = (1..=path.len()).find(|&d| {
+            self.block_at_path_rel(&path[..d])
+                .is_some_and(|(b, _)| !b.is_container())
+        })?;
+        self.leaf_head_at_path(&path[..depth])
+    }
+
     /// The table row holding `at` (issue #90), found by binary search over the table's lines
     /// (none copied): the header row, the delimiter row, the row itself (content spans,
     /// absolute) and its index (0 header, 1 delimiter, then the body). `None` outside a table.
