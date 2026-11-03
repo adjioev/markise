@@ -332,3 +332,37 @@ fn insert_table_shortcut_toolbar_and_cheat_sheet_issue_164() {
     let table = sheet.iter().find(|g| g.title == "Table").unwrap();
     assert!(table.rows.iter().any(|r| r.id == "table.insert"), "{table:?}");
 }
+
+/// PR #165 review: the Insert Table dialog is modal — File → New does not run under it —
+/// and it never inserts into another document than the one it was opened for (or after the
+/// document changed).
+#[test]
+fn insert_table_dialog_stays_with_its_document() {
+    let src = "Intro\n";
+    let mut h = open("insert-origin", src);
+    click(&mut h, egui::pos2(600.0, 200.0));
+    set_caret(&mut h, 2);
+    menu(&mut h, "table.insert");
+    assert!(h.state().insert_table_dialog().is_some());
+    let ctx = h.ctx.clone();
+    assert!(
+        !h.state_mut().menu_action(&ctx, &MenuAction::Command("file.new")),
+        "no command under the dialog"
+    );
+    assert_eq!(text(&h), src);
+    // another document anyway (e.g. a reload): the dialog closes, nothing is inserted
+    h.state_mut().new_document();
+    h.run_steps(2);
+    assert!(h.state().insert_table_dialog().is_none(), "closed for another document");
+    assert!(!h.state_mut().confirm_insert_table(&ctx));
+    assert_eq!(text(&h), "", "the new document stays empty");
+    // an edit of its own document while it is open closes it too
+    let mut h = open("insert-edit", src);
+    click(&mut h, egui::pos2(600.0, 200.0));
+    set_caret(&mut h, 2);
+    menu(&mut h, "table.insert");
+    h.state_mut().viewer().unwrap().ed.session.insert_text("x").unwrap();
+    h.run_steps(2);
+    assert!(h.state().insert_table_dialog().is_none(), "closed after an edit");
+    assert_eq!(text(&h), "Inxtro\n");
+}

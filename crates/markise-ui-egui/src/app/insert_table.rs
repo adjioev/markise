@@ -23,15 +23,9 @@ pub struct InsertTable {
     pub columns: usize,
     /// Body rows (the header row is always added).
     pub rows: usize,
-}
-
-impl Default for InsertTable {
-    fn default() -> Self {
-        InsertTable {
-            columns: INSERT_TABLE_DEFAULT.0,
-            rows: INSERT_TABLE_DEFAULT.1,
-        }
-    }
+    /// The document (its id) and session revision the dialog was opened for: when either
+    /// changes (another document, a reload, an edit) the dialog closes without inserting.
+    origin: (u64, u64),
 }
 
 /// What the user did in the dialog this frame.
@@ -50,8 +44,21 @@ impl MarkiseApp {
         if d.viewer.card_edit().is_some() || !d.viewer.command_enabled("table.insert") {
             return false;
         }
-        self.insert_table = Some(InsertTable::default());
+        self.insert_table = Some(InsertTable {
+            columns: INSERT_TABLE_DEFAULT.0,
+            rows: INSERT_TABLE_DEFAULT.1,
+            origin: (d.id, d.viewer.ed.session.revision().counter),
+        });
         true
+    }
+
+    /// The open dialog still belongs to the current document at the revision it opened on.
+    fn insert_table_current(&self) -> bool {
+        self.insert_table.is_some_and(|t| {
+            self.doc
+                .as_ref()
+                .is_some_and(|d| t.origin == (d.id, d.viewer.ed.session.revision().counter))
+        })
     }
 
     /// The Insert Table dialog's size, while it is open (tests).
@@ -69,6 +76,10 @@ impl MarkiseApp {
 
     /// Inserts the table of the open dialog and closes it (its Insert button).
     pub fn confirm_insert_table(&mut self, ctx: &Context) -> bool {
+        if !self.insert_table_current() {
+            self.cancel_insert_table();
+            return false;
+        }
         let Some(t) = self.insert_table.take() else {
             return false;
         };
@@ -96,6 +107,9 @@ impl MarkiseApp {
 
     /// Draws the open dialog (a modal); Enter inserts, Esc or a click outside cancels.
     pub(super) fn insert_table_window(&mut self, ctx: &Context) {
+        if self.insert_table.is_some() && !self.insert_table_current() {
+            self.cancel_insert_table();
+        }
         let Some(mut t) = self.insert_table else { return };
         use crate::dialog::{Width, footer, modal, primary, secondary, title};
         let (act, dismissed) = modal(ctx, "markise-insert-table", Width::Narrow, |ui, look| {

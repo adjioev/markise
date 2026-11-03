@@ -3,7 +3,9 @@ use crate::{
     Align, Document,
     table::{self, PrettyStyle, TableModel},
 };
-use markise_doc::{ColumnAlign, FormatDoc, PatchSet, Plan, PlanError, PlanRequest, PlanStep, Selection, TableView};
+use markise_doc::{
+    ColumnAlign, FormatDoc, LeafKind, PatchSet, Plan, PlanError, PlanRequest, PlanStep, Selection, TableView,
+};
 
 impl Document {
     fn table_context(&self, req: &PlanRequest) -> Option<(TableView, usize, usize)> {
@@ -22,7 +24,7 @@ impl Document {
     }
     pub(crate) fn can_table_op(&self, id: &str, req: &PlanRequest) -> bool {
         if id == "table.insert" {
-            return true;
+            return self.insert_table_refusal(req).is_none();
         }
         let at = req.selection.primary().focus.offset;
         let Some((b, origin)) = self.leaf_rel(at) else {
@@ -172,7 +174,51 @@ impl Document {
     /// block after the caret's block (on a blank line: there), in the caret's containers;
     /// blank lines keep it apart from its neighbours. The caret goes into the first header
     /// cell. One patch, so one undo step.
+    /// Why Insert Table cannot run at the caret (PR #165 review): inside a code block, math
+    /// block, raw (HTML) block or front matter the table would be code, not a table; after
+    /// a fence that is never closed (it runs to the end of the document) the same. The
+    /// editor-only paragraph after a closed block is fine.
+    fn insert_table_refusal(&self, req: &PlanRequest) -> Option<&'static str> {
+        let focus = req.selection.primary().focus;
+        let leaf = self.leaf(focus.offset.min(self.text().len()))?;
+        let opaque = matches!(
+            leaf.kind,
+            LeafKind::CodeBlock { .. } | LeafKind::Math | LeafKind::RawBlock | LeafKind::Metadata
+        );
+        if !opaque {
+            return None;
+        }
+        if focus.virt == 0 {
+            return Some("a table cannot go inside a code, math or HTML block or the front matter");
+        }
+        if matches!(leaf.kind, LeafKind::CodeBlock { .. }) && self.unclosed_fence(&leaf) {
+            return Some("the code block is not closed: a table after it would be code");
+        }
+        None
+    }
+
+    /// `leaf` is a fenced code block without a closing fence.
+    fn unclosed_fence(&self, leaf: &markise_doc::LeafView) -> bool {
+        let Some(f) = self.code_fence(leaf.span.start) else {
+            return false; // indented code
+        };
+        let text = self.text();
+        let fence = &text[f.opener.start..f.opener.end];
+        let ch = fence.as_bytes()[0];
+        let n = fence.bytes().take_while(|&b| b == ch).count();
+        let last = text[..leaf.span.end].trim_end_matches(['\n', '\r']);
+        let ls = crate::line_start(last, last.len());
+        if ls <= f.opener.start {
+            return true; // only the opening line
+        }
+        let close = last[ls..].trim_start_matches(['>', ' ', '\t']).trim_end();
+        !(close.len() >= n && close.bytes().all(|b| b == ch))
+    }
+
     fn plan_insert_table(&self, req: &PlanRequest) -> Result<Plan, PlanError> {
+        if let Some(why) = self.insert_table_refusal(req) {
+            return Err(PlanError::NotApplicable(why));
+        }
         let size = |name: &str, default: usize, max: usize| {
             req.params
                 .get_int(name)
@@ -197,7 +243,14 @@ impl Document {
             Some(leaf) => {
                 // the containers' prefix of the block's first line (not a heading's marker)
                 let ls = crate::line_start(text, leaf.span.start);
-                let prefix = super::blocks::cont_prefix(text, ls, leaf.span.start);
+                let mut prefix = super::blocks::cont_prefix(text, ls, leaf.span.start);
+                // after indented code (the caret in the paragraph after it): its 4-column
+                // indentation is the code's, not a container's
+                if matches!(leaf.kind, LeafKind::CodeBlock { .. }) && self.code_fence(leaf.span.start).is_none() {
+                    let keep = prefix.trim_end_matches([' ', '\t']).len();
+                    let ws = prefix.len() - keep;
+                    prefix.truncate(keep + ws.saturating_sub(4));
+                }
                 let end = leaf.span.end;
                 (end..end, prefix.clone(), format!("{eol}{}{eol}", prefix.trim_end()))
             }

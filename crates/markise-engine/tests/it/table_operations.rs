@@ -313,3 +313,58 @@ fn insert_table_in_containers_issue_164() {
         t.check_model();
     }
 }
+
+/// PR #165 review: Insert Table is unavailable inside code (indented or fenced, also an
+/// unclosed fence), math, HTML blocks and front matter — the table would be code there.
+#[test]
+fn insert_table_refused_inside_opaque_blocks() {
+    for src in [
+        "    co‸de\n",
+        "```\nco‸de\n",
+        "```\nco‸de\n```\n",
+        "$$\nx‸ + 1\n$$\n",
+        "<div>\nh‸tml\n</div>\n",
+        "---\nti‸tle: x\n---\n\nBody\n",
+    ] {
+        let t = T::at(src);
+        assert!(
+            t.ed.registry.enabled(&t.ed.session, "table.insert").is_err(),
+            "{src:?}: disabled"
+        );
+    }
+}
+
+/// PR #165 review: from the editor-only paragraph after a closed code block the table goes
+/// after it as a table (indented code's indentation is not kept); after an unclosed fence
+/// it is refused.
+#[test]
+fn insert_table_after_code_blocks() {
+    for (src, want) in [
+        ("    code\n", "    code\n\n|      |\n| ---- |\n|      |\n"),
+        ("```\ncode\n```\n", "```\ncode\n```\n\n|      |\n| ---- |\n|      |\n"),
+        (
+            "> ```\n> code\n> ```\n",
+            "> ```\n> code\n> ```\n>\n> |      |\n> | ---- |\n> |      |\n",
+        ),
+    ] {
+        let mut t = T::new(src);
+        let end = t.ed.session.doc().leaf(src.find("code").unwrap()).unwrap().span.end;
+        t.ed.set_caret(markise_doc::DocPos::with_virt(end, 1), false);
+        t.frame();
+        insert_table(&mut t, 1, 1);
+        assert_eq!(t.text(), want, "{src:?}");
+        let leaf = t.ed.session.doc().leaf(t.caret().offset).unwrap();
+        assert!(
+            matches!(leaf.kind, markise_doc::LeafKind::Table { .. }),
+            "{src:?}: {}",
+            t.shown()
+        );
+    }
+    let mut t = T::new("```\ncode\n");
+    let end = t.ed.session.doc().leaf(5).unwrap().span.end;
+    t.ed.set_caret(markise_doc::DocPos::with_virt(end, 1), false);
+    assert!(
+        t.ed.registry.enabled(&t.ed.session, "table.insert").is_err(),
+        "unclosed fence"
+    );
+}
