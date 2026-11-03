@@ -219,7 +219,7 @@ fn read_file(
         return Ok(None);
     }
     let t0 = Instant::now();
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes = read_with_headroom(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     let n = bytes.len();
     let version = crate::save::DiskVersion::of_bytes(&bytes, mtime);
@@ -242,6 +242,22 @@ fn read_file(
         bytes: n,
         read: t0.elapsed(),
     })))
+}
+
+/// Spare capacity of a text read from disk: the first edits insert in place instead of
+/// reallocating (and copying) the whole text — on a 100 MiB file, ~30 ms and a second copy
+/// of the text on the UI thread for the first keystroke, or for the edits carried over by a
+/// progressive open (issue #126).
+const READ_HEADROOM: usize = 1 << 20;
+
+/// `std::fs::read` with [`READ_HEADROOM`] spare capacity.
+fn read_with_headroom(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut f = std::fs::File::open(path)?;
+    let size = f.metadata().map(|m| m.len() as usize).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(size + READ_HEADROOM);
+    f.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Parses and models a file read (`None`: cancelled).

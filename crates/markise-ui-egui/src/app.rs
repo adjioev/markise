@@ -20,6 +20,9 @@
 //!   changes (see `markise_engine::save`). Watcher events always trigger a reload check; a
 //!   file equal to the recorded version (our own save) is recognised by the loader right after
 //!   reading, without parsing it, and ignored; events during a load or save are queued. Loads run on one cancellable loader worker (latest request wins).
+//! - **Progressive open** (issue #126, ADR 0017): a large file shows its first part at once;
+//!   the whole document replaces it in place when parsed (`app/progressive.rs`). Until then
+//!   the document is *partial*: saves wait, nothing writes the part alone.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

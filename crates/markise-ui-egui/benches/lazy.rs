@@ -7,6 +7,11 @@
 //! each file and mode runs in a fresh child process (`MARKISE_FULL_VIEW=1` for the full one).
 //! `MARKISE_LAZY_STEPS` sets the steps of the whole-document traversal (default 3,000);
 //! `MARKISE_LAZY_END=1` runs the "reach the end of the document" probe instead.
+//! `MARKISE_LAZY_OPEN=1` measures progressive open instead (issue #126; modes `normal`
+//! (`MARKISE_PROGRESSIVE_OPEN=0`), `progressive`, `progressive-edit`, paged models): open →
+//! first painted frame → fully loaded, the slowest frame while loading and the frame that
+//! installs the whole document (with and without an edit made meanwhile), whether the content
+//! on screen stayed, the edit was kept with undo and the model equals a full build, memory.
 //!
 //! Reported per file and mode: memory after open, after jumps, typing and a traversal of the
 //! whole document (live heap from a counting allocator, macOS physical footprint, RSS); open to
@@ -733,6 +738,104 @@ fn end_child(src: &Path) {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Progressive open (issue #126): see the file header.
+fn open_child(src: &Path) {
+    let progressive = std::env::var("MARKISE_PROGRESSIVE_OPEN").is_ok_and(|v| v != "0")
+        || std::env::var_os("MARKISE_PROGRESSIVE_OPEN").is_none();
+    let edit = std::env::var_os("MARKISE_LAZY_OPEN_EDIT").is_some();
+    let path = src.with_extension("open-work.md");
+    std::fs::copy(src, &path).expect("copy corpus");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let ctx = Context::default();
+    let mut app = MarkiseApp::new(AppOptions {
+        timing: true,
+        ..Default::default()
+    });
+    frame(&ctx, &mut app, vec![]);
+    frame(&ctx, &mut app, vec![]);
+    mem("before open");
+    let t0 = Instant::now();
+    app.open(path.clone());
+    let mut first = None;
+    let (mut slowest, mut partial_frames, mut swap_ms) = (0.0f64, 0, f64::NAN);
+    let mut edited_at = None;
+    let mut before = None;
+    loop {
+        let was_partial = app.is_partial();
+        let ms = frame(&ctx, &mut app, vec![]);
+        if app.model().is_some() && first.is_none() {
+            first = Some((t0.elapsed().as_secs_f64() * 1e3, ms));
+        }
+        if was_partial && !app.is_partial() {
+            swap_ms = ms;
+        } else if app.is_partial() {
+            partial_frames += 1;
+            if partial_frames > 1 {
+                slowest = slowest.max(ms);
+            }
+            if partial_frames == 2 {
+                // read and edit while the rest loads: scroll a little, type in a paragraph
+                let r = app.viewer().unwrap().surface_rect().unwrap();
+                frame(&ctx, &mut app, vec![Event::PointerMoved(r.center())]);
+                for _ in 0..10 {
+                    slowest = slowest.max(frame(&ctx, &mut app, vec![wheel(-60.0)]));
+                }
+                if edit {
+                    let at = para_near(app.viewer().unwrap().ed.session.text(), 0.3);
+                    let v = app.viewer().unwrap();
+                    v.ed.set_caret(DocPos::new(at), false);
+                    let _ = v.ed.edit(|s| s.insert_text("XYZ"));
+                    edited_at = Some(at);
+                    slowest = slowest.max(frame(&ctx, &mut app, vec![]));
+                }
+            }
+            if partial_frames >= 2 {
+                before = app.viewer().unwrap().painted().first().copied();
+            }
+        }
+        if app.model().is_some() && !app.is_loading() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(t0.elapsed() < Duration::from_secs(600), "open timed out");
+    }
+    let full_ms = t0.elapsed().as_secs_f64() * 1e3;
+    frame(&ctx, &mut app, vec![]);
+    let after = app.viewer().unwrap().painted().first().copied();
+    let (first_ms, first_frame) = first.unwrap_or((f64::NAN, f64::NAN));
+    println!(
+        "  OPEN progressive={progressive} edit={edit}: first painted frame {first_ms:.0} ms (that frame {first_frame:.1} ms CPU) | fully loaded {full_ms:.0} ms"
+    );
+    if progressive {
+        println!(
+            "  OPEN frames while loading {partial_frames} (slowest {slowest:.1} ms CPU) | install frame {swap_ms:.1} ms CPU | content on screen before {before:?} after {after:?} (same: {})",
+            before == after
+        );
+    }
+    mem("fully loaded");
+    let v = app.viewer().unwrap();
+    if let Some(at) = edited_at {
+        let mut want = original.clone();
+        want.insert_str(at, "XYZ");
+        let kept = v.ed.session.text() == want;
+        drop(want);
+        let undone = v.ed.edit(|s| s.undo()) && v.ed.session.text() == original;
+        println!("  OPEN edit kept: {kept} | undo restores the file: {undone}");
+    } else {
+        println!("  OPEN text equals the file: {}", v.ed.session.text() == original);
+    }
+    drop(original);
+    let m = v.ed.view.model().clone();
+    let ok = if m.is_paged() {
+        m.check_against_full(&**v.ed.view.doc())
+    } else {
+        Ok(())
+    };
+    println!("  OPEN model equals a full build: {ok:?}");
+    drop(app);
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Whether this child runs with paged models (the default; `MARKISE_FULL_VIEW=1` switches them
 /// off).
 fn paged_mode() -> bool {
@@ -744,6 +847,10 @@ fn main() {
         return;
     }
     if let Ok(p) = std::env::var("MARKISE_LAZY_CHILD") {
+        if std::env::var_os("MARKISE_LAZY_OPEN").is_some() {
+            open_child(&PathBuf::from(p));
+            return;
+        }
         if std::env::var_os("MARKISE_LAZY_END").is_some() {
             end_child(&PathBuf::from(p));
             return;
@@ -756,7 +863,13 @@ fn main() {
         return;
     }
     let files = std::env::var("MARKISE_LAZY_FILES").expect("MARKISE_LAZY_FILES");
-    let modes = std::env::var("MARKISE_LAZY_MODES").unwrap_or_else(|_| "full,paged".into());
+    let open = std::env::var_os("MARKISE_LAZY_OPEN").is_some();
+    let default_modes = if open {
+        "normal,progressive,progressive-edit"
+    } else {
+        "full,paged"
+    };
+    let modes = std::env::var("MARKISE_LAZY_MODES").unwrap_or_else(|_| default_modes.into());
     for f in files.split(',').map(str::trim) {
         for m in modes.split(',').map(str::trim) {
             println!("\n== {f} — {m}");
@@ -765,9 +878,27 @@ fn main() {
             if m == "full" {
                 c.env("MARKISE_FULL_VIEW", "1");
             }
+            match m {
+                "normal" => {
+                    c.env("MARKISE_PROGRESSIVE_OPEN", "0");
+                }
+                "progressive" => {
+                    c.env_remove("MARKISE_PROGRESSIVE_OPEN");
+                }
+                "progressive-edit" => {
+                    c.env_remove("MARKISE_PROGRESSIVE_OPEN")
+                        .env("MARKISE_LAZY_OPEN_EDIT", "1");
+                }
+                _ => {}
+            }
             let out = c.stdout(std::process::Stdio::inherit()).output().unwrap();
             for l in String::from_utf8_lossy(&out.stderr).lines() {
-                if l.contains(" loaded ") || l.contains("panicked") || l.contains("paged") {
+                if l.contains(" loaded ")
+                    || l.contains(" partial ")
+                    || l.contains("loaded-rest")
+                    || l.contains("panicked")
+                    || l.contains("paged")
+                {
                     println!("  log: {l}");
                 }
             }

@@ -103,6 +103,9 @@ The UI keeps one authoritative state per open document (`crates/markise-ui-egui/
   preserved in a reported `.<name>.markise-backup-*` file. Watcher events always trigger a
   reload check on one cancellable loader worker (latest request wins); a reload equal to the
   recorded disk version (our own save) is ignored; events during a load or save are queued.
+- **Progressive open** (ADR 0017): an open of a large file installs its first part at once
+  and the whole document in place later; until then the document is partial (saves wait for
+  the rest, autosave and backups pause, whole-document commands are unavailable).
 
 Deterministic tests inject delays and failures through worker hooks (`JobHooks`,
 `SaveHooks`, the loader `StageHook`) instead of sleeping.
