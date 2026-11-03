@@ -1,15 +1,17 @@
 # Continuous integration. Policy (what runs when, how to request the full matrix): docs/ci.md.
 #
 # Default (every PR push, cheap): Linux only -- fmt + clippy + layering/asset checks (`lint`),
-# workspace tests + release-mode incremental property tests (`test`, linux-x86_64), and the
-# `CI result` gate. Full matrix (adds macOS Apple Silicon + Windows test + build and release
+# fast workspace tests (`test`, linux-x86_64), and the `CI result` gate. Full matrix (adds macOS Apple Silicon + Windows test + build and release
 # binaries on every OS): pushes to main, workflow_dispatch (manual; not reported into PR
 # checks), and PR runs while the PR carries the `full-ci` label. The binaries are uploaded as
 # artifacts (3 days) only from pushes to main, to keep Actions storage small.
+# Heavy suite (heavy.yml, Linux): nightly (schedule), workflow_dispatch, and PR runs while the PR
+# carries the separate `heavy` label. `full-ci` does not run it.
 # macOS minutes are billed at 10x and Windows at 2x the Linux rate on private repositories, which is why they do not run on every PR push.
 #
 # Superseded runs of the same PR/branch are cancelled (never on main). Docs-only changes
-# (Markdown under docs/, README/CLAUDE.md, the site page) do not trigger CI (`paths`).
+# (Markdown under docs/, README/CLAUDE.md) do not trigger CI (`paths`); the website and the
+# user guide (site/, docs/user/) do, because `cargo xtask site` builds and link-checks them.
 #
 # Linux system packages: the egui/eframe stack (winit, glutin, wayland/x11 via dlopen) and rfd
 # (xdg-desktop-portal via zbus, pure Rust) need no -dev packages to build or test; the list in
@@ -24,27 +26,32 @@ on:
     branches: [main]
     paths: &paths
       - "**"
-      # Narrow docs-only ignores (Markdown prose and the static site page; nothing a build, a
-      # test or an xtask check reads) ...
+      # Narrow docs-only ignores (Markdown prose; nothing a build, a test or an xtask check
+      # reads) ...
       - "!docs/**/*.md"
       - "!README.md"
       - "!CLAUDE.md"
-      - "!site/*.html"
-      - "!site/*.css"
-      # ... minus attribution records and test fixtures, should any ever live there
-      # (`cargo xtask assets`). Anything else, e.g. images under docs/, triggers CI.
+      # ... minus the user guide (rendered and link-checked by `cargo xtask site`), attribution
+      # records and test fixtures, should any ever live there (`cargo xtask assets`). Anything
+      # else, e.g. images under docs/ or the website in site/, triggers CI.
+      - "docs/user/**"
       - "**/SOURCE.md"
       - "**/SOURCES.md"
       - "**/tests/fixtures/**"
       - "**/testdata/**"
   pull_request:
     # No `labeled`: label events would start runs (unrelated labels: all jobs skipped, which
-    # reads as green). After adding `full-ci`, push a commit (an empty one is fine) or close and
-    # reopen the PR; every later PR run then includes macOS + Windows while the label is set.
+    # reads as green). After adding `full-ci` or `heavy`, push a commit (an empty one is fine)
+    # or close and reopen the PR; every later PR run then includes macOS + Windows (`full-ci`)
+    # or the heavy suite (`heavy`) while the label is set.
     types: [opened, synchronize, reopened, ready_for_review]
     paths: *paths
-  # Manual full-matrix run on main or any branch. It does not report into PR checks.
+  # Manual full-matrix + heavy run on main or any branch. It does not report into PR checks.
   workflow_dispatch:
+  schedule:
+    # Nightly on the default branch (main), 16:23 UTC: Linux fast checks + heavy suite. Failures
+    # e-mail the last editor of this cron and open/update a `nightly-failure` issue (below).
+    - cron: "23 16 * * *"
 
 # PR runs are keyed by PR number (a new push cancels the superseded run, pending or in
 # progress); every push to main gets its own group (run id), so no main run is ever cancelled
@@ -61,7 +68,7 @@ env:
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
   # 'true' for the full matrix (main, workflow_dispatch, PRs labeled `full-ci`).
-  FULL_CI: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+  FULL_CI: ${{ (github.event_name != 'pull_request' && github.event_name != 'schedule') || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
 
 jobs:
   lint:
@@ -82,6 +89,10 @@ jobs:
         run: cargo run --locked --package xtask -- layers
       - name: Asset attribution
         run: cargo run --locked --package xtask -- assets
+      # The website and user guide (site/, docs/user/): rendered with markise-md/markise-export,
+      # fails on a broken local link, image or #fragment. Deployment is manual (pages.yml).
+      - name: Website and user guide
+        run: cargo run --locked --package xtask -- site
 
   test:
     name: test + build (${{ matrix.name }})
@@ -93,7 +104,7 @@ jobs:
       # `env` context is not available here, so the condition is repeated). Entries left out
       # produce no check at all rather than a "skipped" one.
       matrix:
-        include: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '[{"name":"linux-x86_64","os":"ubuntu-latest"},{"name":"macos-aarch64","os":"macos-latest"},{"name":"windows-x86_64","os":"windows-latest"}]' || '[{"name":"linux-x86_64","os":"ubuntu-latest"}]') }}
+        include: ${{ fromJSON(((github.event_name != 'pull_request' && github.event_name != 'schedule') || contains(github.event.pull_request.labels.*.name, 'full-ci')) && '[{"name":"linux-x86_64","os":"ubuntu-latest"},{"name":"macos-aarch64","os":"macos-latest"},{"name":"windows-x86_64","os":"windows-latest"}]' || '[{"name":"linux-x86_64","os":"ubuntu-latest"}]') }}
     defaults:
       run:
         shell: bash
@@ -132,20 +143,26 @@ jobs:
             ./scripts/fetch-spec-tests.sh
           fi
           ./scripts/fetch-theme-corpus.sh
-      - name: Test
+      # Separate step durations distinguish compilation from warm execution.
+      - name: Build test binaries
+        run: cargo test --workspace --locked --no-run
+      - name: Test (warm)
         run: cargo test --workspace --locked
-      # Release binaries, packages and artifacts: full matrix only (the default PR run checks
-      # release-mode codegen through the property tests below).
+      # Release binaries, packages and artifacts: full matrix only. Release-profile stress
+      # property coverage runs on the separate heavy path.
       - name: Build release binaries
         if: env.FULL_CI == 'true'
         run: cargo build --release --locked -p markise -p markise-cli
-      # Incremental parse/model == fresh, with more cases than the debug-mode defaults
-      # (ADR 0006 §7.2, §14): nested restarts, fast path, layout model.
-      - name: Incremental property tests (release, 3000 cases)
-        if: runner.os == 'Linux'
-        env:
-          PROPTEST_CASES: "3000"
-        run: cargo test --release --locked -p markise-md --test nested --test fastpath --test hints -p markise-layout --test incremental
+      # The desktop app starts with its default renderer (wgpu: Metal / DX12 / Vulkan or GL), or
+      # falls back to glow, renders a document and quits by itself (issue #86). Linux runs it
+      # under Xvfb with Mesa's software Vulkan/GL drivers (and libxkbcommon-x11, which winit loads on X11).
+      - name: Smoke start (renderer)
+        if: env.FULL_CI == 'true'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get install -y --no-install-recommends xvfb xauth libxkbcommon-x11-0 mesa-vulkan-drivers libgl1-mesa-dri
+          fi
+          ./scripts/smoke-start.sh target/release/markise
       - name: Package
         if: env.FULL_CI == 'true'
         env:
@@ -168,15 +185,25 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+  # Heavy suite: nightly, manual, or PRs labeled `heavy` (not `full-ci`, not pushes to main).
+  # The condition is repeated as EXPECT_HEAVY in `CI result`; keep both in sync. On schedule,
+  # github.sha is the latest commit on the default branch (main).
+  heavy:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'heavy'))
+    uses: ./.github/workflows/heavy.yml
+    with:
+      sha: ${{ github.sha }}
+
   # Single merge gate: green only when every job of this run succeeded (any failure or
   # cancellation, including one matrix entry, fails it). On a PR run without `full-ci` the
-  # matrix is Linux only, so the gate then certifies Linux only.
+  # matrix is Linux only, so the gate then certifies Linux only; heavy must succeed when it
+  # was requested (EXPECT_HEAVY, same condition as the job) and be skipped otherwise.
   # Branch protection is not available for this private repository on the Free plan, so this is
   # the check to look at before merging (docs/ci.md).
   result:
     name: CI result
     if: always()
-    needs: [lint, test]
+    needs: [lint, test, heavy]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -184,10 +211,46 @@ jobs:
         env:
           LINT: ${{ needs.lint.result }}
           TEST: ${{ needs.test.result }}
+          HEAVY: ${{ needs.heavy.result }}
+          EXPECT_HEAVY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'heavy')) }}
           FULL: ${{ env.FULL_CI }}
         run: |
-          echo "lint=$LINT test=$TEST full-matrix=$FULL"
-          [ "$LINT" = success ] && [ "$TEST" = success ]
+          echo "lint=$LINT test=$TEST heavy=$HEAVY full-matrix=$FULL"
+          if [ "$LINT" != success ] || [ "$TEST" != success ]; then
+            exit 1
+          fi
+          if [ "$EXPECT_HEAVY" = true ]; then
+            [ "$HEAVY" = success ]
+          else
+            [ "$HEAVY" = skipped ]
+          fi
+
+  # A failing nightly run opens one issue labelled `nightly-failure` (or comments on the open one),
+  # in addition to GitHub's e-mail to the user who last edited the cron. Close the issue once
+  # main is fixed. Scheduled runs only; not part of `CI result`.
+  nightly-failure:
+    name: report nightly failure
+    needs: [result]
+    if: always() && github.event_name == 'schedule' && needs.result.result != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the nightly-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          body="Nightly CI failed on main at $SHA: $RUN_URL"
+          number="$(gh issue list --label nightly-failure --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "Nightly CI failure" --label nightly-failure --body "$body"
+          fi
 
   # Cargo caches are saved only from main (.github/actions/setup-rust), but rust-cache puts the
   # toolchain/env hash and the Cargo.lock/Cargo.toml hash into the key, so every dependency or

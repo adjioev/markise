@@ -8,8 +8,8 @@
 //!
 //! Implementations:
 //! - [`EpaintShaper`] (egui's `FontsView`): wraps epaint galleys. The conversion
-//!   [`StyledText`] → `LayoutJob` is exact, so the epaint path renders pixel-identically to the
-//!   M1 code that built `LayoutJob`s directly. This is the default and the runtime rollback.
+//!   [`StyledText`] → `LayoutJob` retains formatting and resolves mixed-script fallback
+//!   per ADR 0015. This is the default and the runtime rollback.
 //! - [`ParleyShaper`]: parley + fontique through `markise-text` (behind the `MARKISE_TEXT=parley`
 //!   developer switch in the UI; ADR 0005 T3 makes it a real backend).
 //!
@@ -33,6 +33,7 @@ pub use markise_doc::{MapPiece, PieceKind, SourceMap};
 pub use markise_text::{Affinity, LocalPos};
 
 pub mod epaint_backend;
+pub mod fallback;
 pub mod parley_backend;
 
 pub use epaint_backend::{EpaintBlock, EpaintShaper};

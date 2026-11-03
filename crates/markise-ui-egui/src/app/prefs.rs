@@ -58,6 +58,7 @@ impl MarkiseApp {
             font_size: th.font_size,
             line_height: th.line_height,
             content_width: th.column_max_width,
+            source_size: th.source_size(),
         }
     }
 
@@ -97,6 +98,11 @@ impl MarkiseApp {
             toolbar_position: self.toolbar_position(),
             show_recent: self.show_recent(),
             show_word_count: self.show_word_count(),
+            update_auto: self.update_auto(),
+            update_unavailable: match &self.updates.source {
+                crate::updates::UpdateSource::Off(why) => Some(why.clone()),
+                crate::updates::UpdateSource::Client(_) => None,
+            },
             zoom: self.zoom(),
             zoom_range: ZOOM_RANGE,
             settings_file: t.settings_file(),
@@ -104,6 +110,7 @@ impl MarkiseApp {
             has_theme_folder: t.has_user_dir(),
             key_bindings: self.key_bindings_override.clone().unwrap_or_else(|| t.key_bindings()),
             images: t.image_settings().clone(),
+            files: t.file_settings(),
         }
     }
 
@@ -145,6 +152,7 @@ impl MarkiseApp {
     /// Applies one change from the Preferences window exactly as the menu item would.
     pub fn apply_preference(&mut self, ctx: &Context, c: Change) {
         match c {
+            Change::Files(f) => self.themes.set_file_settings(f),
             Change::Editing(e) => self.themes.set_editing(e),
             Change::Source(s) => self.themes.set_source_prefs(s),
             Change::Diagrams(on) => self.set_diagrams(on),
@@ -166,6 +174,7 @@ impl MarkiseApp {
             Change::ToolbarPosition(p) => self.set_toolbar_position(p),
             Change::ShowRecent(on) => self.set_show_recent(on),
             Change::ShowWordCount(on) => self.set_show_word_count(on),
+            Change::UpdateAuto(on) => self.set_update_auto(on),
             Change::Zoom(z) => self.set_zoom(z),
             Change::Images(s) => self.themes.set_image_settings(s),
             Change::RevealSettingsFile => {
@@ -215,9 +224,11 @@ impl MarkiseApp {
                     self.set_zoom(1.0);
                 }
             }
-            Section::Files => self
-                .themes
-                .set_image_settings(markise_engine::settings::ImageSettings::default()),
+            Section::Files => {
+                self.themes
+                    .set_image_settings(markise_engine::settings::ImageSettings::default());
+                self.themes.set_file_settings(Default::default());
+            }
             Section::General | Section::Export => {}
         }
         if let Some(c) = &self.ctx {

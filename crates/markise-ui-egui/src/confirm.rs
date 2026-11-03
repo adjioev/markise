@@ -4,18 +4,19 @@
 //! The application describes a question as a [`Question`] and hands it to a [`Confirm`]
 //! implementation every frame until that returns the user's [`Choice`]. This is the seam:
 //!
-//! - [`Native`]: the platform's alert ([`rfd::MessageDialog`]: NSAlert on macOS, a message box
-//!   on Windows, zenity on Linux). The desktop app uses it (see [`native`]). Where the
-//!   platform's alert cannot make the question's default button its default (Cancel on
-//!   Windows and Linux), that question uses the in-app dialog instead ([`plan`]): Return never
-//!   confirms a destructive action.
+//! - [`Native`]: the platform's alert ([`rfd::MessageDialog`]: NSAlert on macOS, a task
+//!   dialog with labelled buttons on Windows (rfd's `common-controls-v6`; `markise.exe` and
+//!   the test binaries carry the manifest it needs, issue #40), zenity on Linux). The desktop
+//!   app uses it (see [`native`]). Where the platform's alert cannot make the question's
+//!   default button its default (Cancel on Linux), that question uses the in-app dialog
+//!   instead ([`plan`]): Return never confirms a destructive action.
 //! - [`InApp`]: the same question as an egui modal in the shared dialog style
 //!   ([`crate::dialog`]); the default of [`crate::AppOptions`] (no OS window in tests and
 //!   headless runs) and the Linux fallback when zenity is not installed.
 //! - [`Scripted`]: answers queued by a test, recording every question asked.
 //!
 //! Blocking: on macOS and Windows the native alert is application-modal and runs its own
-//! event loop on the UI thread (NSAlert `runModal`, `MessageBoxW`), like the native file
+//! event loop on the UI thread (NSAlert `runModal`, `TaskDialogIndirect`), like the native file
 //! dialogs the app already opens there; eframe simply does not get a frame until it closes.
 //! On Linux the alert is a separate process (zenity), so it runs on a helper thread and the
 //! window keeps repainting (a blocking call would make the compositor report the window as
@@ -485,11 +486,14 @@ pub enum Plan {
 /// - macOS (NSAlert): the first button is the default and a button titled "Cancel" answers
 ///   Esc, so any default can be honoured: destructive questions list Cancel first; unsaved
 ///   changes read Save · Cancel · Don't Save from the right.
-/// - Windows (stock message box; custom labels and default buttons need common controls 6,
-///   issue #40) and Linux (rfd's zenity call has no `--default-cancel`): the first button is
-///   always the default, so only questions whose default is their first action are native
-///   (unsaved changes → Save); Cancel-default questions (Move to Trash, Replace, Overwrite,
-///   Open Link) use the in-app dialog.
+/// - Windows (task dialog with labelled buttons, issue #40): rfd always makes the first
+///   button the default (`nDefaultButton: 0`) and Esc answers Cancel, so destructive
+///   questions list Cancel first (Cancel · Move to Recycle Bin) and unsaved changes read
+///   Save · Don't Save · Cancel.
+/// - Linux (rfd's zenity call has no `--default-cancel`): the first button is always the
+///   default and Cancel is not listed first there, so only questions whose default is their
+///   first action are native (unsaved changes → Save); Cancel-default questions (Move to
+///   Trash, Replace, Overwrite, Open Link) use the in-app dialog.
 pub fn plan(q: &Question, os: Os) -> Plan {
     let actions: Vec<&Button> = q.buttons.iter().filter(|b| b.choice != Choice::Cancel).collect();
     let Some(first) = actions.first() else {
@@ -505,18 +509,13 @@ pub fn plan(q: &Question, os: Os) -> Plan {
             cancel,
             actions[1].label.clone(),
         )),
-        Os::Mac if actions.len() == 1 && q.default == Choice::Cancel => {
+        Os::Mac | Os::Windows if actions.len() == 1 && q.default == Choice::Cancel => {
             Plan::Alert(AlertButtons::OkCancelCustom(cancel, first.label.clone()))
         }
-        Os::Mac if actions.len() == 1 && first_is_default => {
+        Os::Mac | Os::Windows if actions.len() == 1 && first_is_default => {
             Plan::Alert(AlertButtons::OkCancelCustom(first.label.clone(), cancel))
         }
-        Os::Windows if first_is_default => Plan::Alert(if actions.len() >= 2 {
-            AlertButtons::YesNoCancel
-        } else {
-            AlertButtons::OkCancel
-        }),
-        Os::Linux if first_is_default => Plan::Alert(if actions.len() >= 2 {
+        Os::Windows | Os::Linux if first_is_default => Plan::Alert(if actions.len() >= 2 {
             AlertButtons::YesNoCancelCustom(first.label.clone(), actions[1].label.clone(), cancel)
         } else {
             AlertButtons::OkCancelCustom(first.label.clone(), cancel)
@@ -648,7 +647,7 @@ mod tests {
                     // whatever is shown natively, Return picks the question's default
                     Plan::Alert(b) => assert_eq!(alert_default(q, &b), q.default, "{os:?} {:?}", q.kind),
                     Plan::InApp => {
-                        assert_ne!(os, Os::Mac, "macOS can honour every default");
+                        assert_eq!(os, Os::Linux, "macOS and Windows honour every default");
                         assert_eq!(q.default, Choice::Cancel, "{os:?} {:?}", q.kind);
                     }
                 }
@@ -659,9 +658,13 @@ mod tests {
         let label = trash.button(Choice::MoveToTrash).unwrap().label.clone();
         assert_eq!(
             plan(&trash, Os::Mac),
+            Plan::Alert(AlertButtons::OkCancelCustom("Cancel".into(), label.clone()))
+        );
+        // Windows (#40): Cancel first, so the task dialog's default button is Cancel
+        assert_eq!(
+            plan(&trash, Os::Windows),
             Plan::Alert(AlertButtons::OkCancelCustom("Cancel".into(), label))
         );
-        assert_eq!(plan(&trash, Os::Windows), Plan::InApp);
         assert_eq!(plan(&trash, Os::Linux), Plan::InApp);
         let unsaved = Question::unsaved("a.md");
         assert_eq!(
@@ -672,7 +675,29 @@ mod tests {
                 "Don’t Save".into()
             ))
         );
-        assert_eq!(plan(&unsaved, Os::Windows), Plan::Alert(AlertButtons::YesNoCancel));
+        assert_eq!(
+            plan(&unsaved, Os::Windows),
+            Plan::Alert(AlertButtons::YesNoCancelCustom(
+                "Save".into(),
+                "Don’t Save".into(),
+                "Cancel".into()
+            ))
+        );
+        // every Windows question gets labelled buttons (no stock Yes / No / OK)
+        for q in &all {
+            if let Plan::Alert(b) = plan(q, Os::Windows) {
+                assert!(
+                    matches!(
+                        b,
+                        AlertButtons::OkCancelCustom(..) | AlertButtons::YesNoCancelCustom(..)
+                    ),
+                    "{:?}: {b:?}",
+                    q.kind
+                );
+            } else {
+                panic!("{:?} is native on Windows", q.kind);
+            }
+        }
         assert_eq!(
             plan(&unsaved, Os::Linux),
             Plan::Alert(AlertButtons::YesNoCancelCustom(

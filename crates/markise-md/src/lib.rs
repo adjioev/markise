@@ -16,12 +16,14 @@ pub mod block;
 mod edit;
 pub mod format;
 pub mod frontmatter;
+mod html_view;
 pub mod inline;
 mod nested;
 pub mod ops;
 pub mod options;
 mod owner;
 mod parser;
+mod prefix;
 mod scan;
 pub mod slug;
 mod source_tokens;
@@ -37,10 +39,13 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 pub use block::{AlertKind, Align, Block, BlockKind, MathDelim};
+pub use edit::inline_fmt::{EXACT_QUERY_LIMIT, FORMAT_SELECTION_LIMIT};
+pub use edit::tables::{INSERT_TABLE_DEFAULT, INSERT_TABLE_MAX};
 pub use format::MarkdownFormat;
 pub use markise_doc::{DepChange, HintOrigin, HintSet, LiteralHint, Patch, PatchSet};
 pub use options::{HeadingStyle, IndentSize, OrderedStyle, ParseOptions, WriteOptions};
 pub use parser::{MAX_NESTING, MAX_QUOTE_DEPTH, bom_len};
+pub use prefix::progressive_prefix;
 pub use text::{LineEnding, Span};
 pub use tops::Top;
 

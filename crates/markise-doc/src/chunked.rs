@@ -14,6 +14,9 @@ use std::ops::Range;
 
 use crate::text::Span;
 
+/// `(absolute origin, element relative to it)` pairs.
+type Entries<T> = Vec<(usize, T)>;
+
 /// Maximum number of elements per chunk.
 pub const CHUNK: usize = 256;
 
@@ -34,6 +37,16 @@ struct Chunk<T> {
     rel: Vec<usize>,
     /// Elements with every offset relative to their own origin.
     items: Vec<T>,
+}
+
+impl<T> Default for Chunk<T> {
+    fn default() -> Self {
+        Chunk {
+            base: 0,
+            rel: Vec::new(),
+            items: Vec::new(),
+        }
+    }
 }
 
 /// See the module docs.
@@ -164,9 +177,17 @@ impl<T: Relative> RelChunks<T> {
             self.reindex(0);
             return;
         }
+        let new = match self.splice_in_place(&range, new, delta) {
+            Ok(Some(k)) => {
+                self.reindex(k);
+                return;
+            }
+            Ok(None) => return,
+            Err(new) => new,
+        };
+        let last = self.chunks.len() - 1;
         // the group of chunks to rebuild: from the chunk holding `range.start` to the chunk
         // holding the last replaced element (or the element after the range for an insertion)
-        let last = self.chunks.len() - 1;
         let pos_chunk = |i: usize| -> usize { if i >= self.len { last } else { self.locate(i).0 } };
         let ka = pos_chunk(range.start);
         let mut kb = pos_chunk(range.end.saturating_sub(1).max(range.start)).max(ka);
@@ -177,7 +198,9 @@ impl<T: Relative> RelChunks<T> {
         }
         let first = self.firsts[ka];
         let (lo, hi) = (range.start - first, range.end - first);
-        let old: Vec<Chunk<T>> = self.chunks.drain(ka..=kb).collect();
+        // taken out in place: the chunk list is spliced once below (no tail move when the group
+        // keeps its chunk count)
+        let old: Vec<Chunk<T>> = self.chunks[ka..=kb].iter_mut().map(std::mem::take).collect();
         let total = old.iter().map(|c| c.items.len()).sum::<usize>() - range.len() + new.len();
         let mut entries: Vec<(usize, T)> = Vec::with_capacity(total);
         let mut idx = 0usize;
@@ -204,13 +227,164 @@ impl<T: Relative> RelChunks<T> {
         let n = entries.len();
         let rebuilt = chunk_entries(entries.into_iter(), n);
         let count = rebuilt.len();
-        self.chunks.splice(ka..ka, rebuilt);
+        self.chunks.splice(ka..=kb, rebuilt);
         if delta != 0 {
             for c in &mut self.chunks[ka + count..] {
                 c.base = (c.base as isize + delta) as usize;
             }
         }
         self.reindex(ka);
+    }
+
+    /// A few elements inside one chunk that keeps a sound size are edited in place (no chunk
+    /// rebuilt or moved). `Ok(Some(k))`: done, the element count changed, `firsts` from chunk
+    /// `k + 1` on (and `len`) are stale until reindexed; `Ok(None)`: done, nothing stale;
+    /// `Err(new)`: not applicable.
+    fn splice_in_place(
+        &mut self,
+        range: &Range<usize>,
+        new: Entries<T>,
+        delta: isize,
+    ) -> Result<Option<usize>, Entries<T>> {
+        let last = self.chunks.len() - 1;
+        let (k0, lo0) = if range.start < self.len {
+            self.locate(range.start)
+        } else {
+            (last, self.chunks[last].items.len())
+        };
+        let c = &self.chunks[k0];
+        let hi0 = lo0 + range.len();
+        if lo0 == 0 || hi0 > c.items.len() {
+            return Err(new);
+        }
+        let size = c.items.len() + new.len() - range.len();
+        if !(CHUNK / 4..=CHUNK).contains(&size) || new.iter().any(|(o, _)| *o < c.base) {
+            return Err(new);
+        }
+        let base = c.base;
+        let resized = new.len() != range.len();
+        let c = &mut self.chunks[k0];
+        for r in &mut c.rel[hi0..] {
+            *r = (*r as isize + delta) as usize;
+        }
+        let (rels, items): (Vec<usize>, Vec<T>) = new.into_iter().map(|(o, b)| (o - base, b)).unzip();
+        c.rel.splice(lo0..hi0, rels);
+        c.items.splice(lo0..hi0, items);
+        if delta != 0 {
+            for c in &mut self.chunks[k0 + 1..] {
+                c.base = (c.base as isize + delta) as usize;
+            }
+        }
+        Ok(resized.then_some(k0))
+    }
+
+    /// Several splices that leave byte offsets alone (`delta` 0): `splices` ascending and
+    /// disjoint, numbered before any of them. One pass over the chunk list: untouched chunks
+    /// move as they are, touched ones are edited in place (or rebuilt when they would grow too
+    /// large or lose their first element), and the index is rebuilt once — O(splices ×
+    /// `CHUNK` + len / `CHUNK`), not a chunk-list pass per splice.
+    pub fn splice_many(&mut self, splices: Vec<(Range<usize>, Vec<T>)>) {
+        if self.chunks.is_empty() {
+            for (range, new) in splices.into_iter().rev() {
+                self.splice(range, new, 0);
+            }
+            return;
+        }
+        // the edits of each chunk: (chunk, range in it, new entries); a removal across chunks
+        // is cut at their boundaries (the new entries go with its first piece)
+        let last = self.chunks.len() - 1;
+        let mut per: Vec<(usize, Range<usize>, Entries<T>)> = Vec::with_capacity(splices.len());
+        for (range, new) in splices {
+            assert!(
+                range.start <= range.end && range.end <= self.len,
+                "splice out of bounds"
+            );
+            let mut entries: Vec<(usize, T)> = new.into_iter().map(to_rel).collect();
+            let mut at = range.start;
+            loop {
+                let (k, lo) = if at < self.len {
+                    self.locate(at)
+                } else {
+                    (last, self.chunks[last].items.len())
+                };
+                let end = range.end.min(self.firsts[k] + self.chunks[k].items.len());
+                per.push((k, lo..lo + (end - at), std::mem::take(&mut entries)));
+                if end >= range.end {
+                    break;
+                }
+                at = end;
+            }
+        }
+        let old = std::mem::take(&mut self.chunks);
+        let mut out: Vec<Chunk<T>> = Vec::with_capacity(old.len() + per.len() / 8 + 1);
+        let mut per = per.into_iter().peekable();
+        for (k, mut c) in old.into_iter().enumerate() {
+            let mut edits: Vec<(Range<usize>, Entries<T>)> = Vec::new();
+            while let Some((_, r, new)) = per.next_if(|(pk, _, _)| *pk == k) {
+                edits.push((r, new));
+            }
+            if edits.is_empty() {
+                out.push(c);
+                continue;
+            }
+            let size = edits.iter().fold(c.items.len() as isize, |n, (r, new)| {
+                n + new.len() as isize - r.len() as isize
+            });
+            let in_place = edits[0].0.start > 0
+                && (CHUNK / 4..=2 * CHUNK).contains(&(size as usize))
+                && edits.iter().all(|(_, new)| new.iter().all(|(o, _)| *o >= c.base));
+            if in_place {
+                // from the last edit to the first: earlier ranges stay valid
+                for (r, new) in edits.into_iter().rev() {
+                    let (rels, items): (Vec<usize>, Vec<T>) = new.into_iter().map(|(o, b)| (o - c.base, b)).unzip();
+                    c.rel.splice(r.clone(), rels);
+                    c.items.splice(r, items);
+                }
+                if c.items.len() > CHUNK {
+                    // grown too large: split in two halves
+                    let mid = c.items.len() / 2;
+                    let items = c.items.split_off(mid);
+                    let mut rel = c.rel.split_off(mid);
+                    let first = rel[0];
+                    for r in &mut rel {
+                        *r -= first;
+                    }
+                    let base = c.base + first;
+                    out.push(c);
+                    out.push(Chunk { base, rel, items });
+                } else {
+                    out.push(c);
+                }
+                continue;
+            }
+            let mut entries: Vec<(usize, T)> = Vec::with_capacity(size.max(0) as usize);
+            let mut edits = edits;
+            let mut ei = 0;
+            for (j, (r, b)) in c.rel.into_iter().zip(c.items).enumerate() {
+                let mut removed = false;
+                while ei < edits.len() && edits[ei].0.start <= j {
+                    if edits[ei].0.start == j {
+                        entries.append(&mut edits[ei].1);
+                    }
+                    if j < edits[ei].0.end {
+                        removed = true;
+                        break;
+                    }
+                    ei += 1;
+                }
+                if !removed {
+                    entries.push((c.base + r, b));
+                }
+            }
+            // insertions at the chunk's end
+            for (_, new) in &mut edits[ei..] {
+                entries.append(new);
+            }
+            let n = entries.len();
+            out.extend(chunk_entries(entries.into_iter(), n));
+        }
+        self.chunks = out;
+        self.reindex(0);
     }
 }
 
@@ -315,6 +489,26 @@ impl<T> RelChunks<T> {
                     origin: c.base + r,
                     item: b,
                 })
+            })
+            .take(n)
+    }
+
+    /// Mutable elements `range` in order (relative offsets; origins cannot change). O(log) to
+    /// start, then sequential.
+    pub fn range_mut(&mut self, range: Range<usize>) -> impl Iterator<Item = &mut T> + '_ {
+        let n = range.end.min(self.len).saturating_sub(range.start);
+        let start = if range.start < self.len {
+            self.locate(range.start)
+        } else {
+            (self.chunks.len(), 0)
+        };
+        let from = start.0.min(self.chunks.len());
+        self.chunks[from..]
+            .iter_mut()
+            .enumerate()
+            .flat_map(move |(ci, c)| {
+                let skip = if ci == 0 { start.1 } else { 0 };
+                c.items[skip..].iter_mut()
             })
             .take(n)
     }
@@ -525,6 +719,82 @@ mod tests {
             flat.extend(tail);
             t.splice(a..b, new, delta);
             assert_eq!(t.to_abs_vec(), flat);
+            assert_eq!(t.len(), flat.len());
+            for i in [0, a, b, flat.len() / 2, flat.len().saturating_sub(1)] {
+                if i < flat.len() {
+                    assert_eq!(t.origin(i), Some(flat[i].0.start), "element {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn splice_many_matches_one_splice_at_a_time() {
+        // insertions and removals at many places at once, byte offsets unchanged (as `[toc]`
+        // blocks gaining or losing trailing segments that share their block's origin)
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = |m: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % m.max(1)
+        };
+        for round in 0..40 {
+            let n = 50 + rnd(3000);
+            let flat: Vec<E> = (0..n).map(|i| e(i * 4, i * 4 + 3)).collect();
+            let mut t = RelChunks::from_abs(flat.clone());
+            if round % 2 == 1 {
+                // uneven chunks
+                t.splice(n / 3..n / 3 + n / 5, Vec::new(), 0);
+                t.splice(
+                    n / 7..n / 7,
+                    (0..CHUNK / 2).map(|_| e(4 * (n / 7), 4 * (n / 7) + 1)).collect(),
+                    0,
+                );
+            }
+            let len = t.len();
+            let abs = t.to_abs_vec();
+            let mut splices: Vec<(Range<usize>, Vec<E>)> = Vec::new();
+            let mut a = rnd(40);
+            while a <= len && splices.len() < 60 {
+                let b = (a + if rnd(2) == 0 { 0 } else { rnd(6) }).min(len);
+                // new elements share the origin of the element before (or the next one's)
+                let o = if a > 0 {
+                    abs[a - 1].0.start
+                } else {
+                    abs.first().map_or(0, |x| x.0.start)
+                };
+                let k = if b == a { 1 + rnd(6) } else { rnd(3) };
+                splices.push((a..b, (0..k).map(|_| e(o, o + 1)).collect()));
+                a = b + rnd(400);
+            }
+            let mut one = t.clone();
+            for (r, v) in splices.iter().rev() {
+                one.splice(r.clone(), v.clone(), 0);
+            }
+            t.splice_many(splices);
+            assert_eq!(t.len(), one.len(), "round {round}");
+            assert_eq!(t.to_abs_vec(), one.to_abs_vec(), "round {round}");
+            for i in 0..t.len() {
+                assert_eq!(t.origin(i), one.origin(i), "round {round}, element {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn range_mut_visits_exactly_the_range_across_chunks() {
+        let t = RelChunks::from_abs((0..1000).map(|i| e(i * 10, i * 10 + 5)).collect());
+        for r in [0..0, 0..1, 250..770, 255..257, 990..1000, 999..1200, 1000..1000] {
+            let mut u = t.clone();
+            let mut seen = 0;
+            for x in u.range_mut(r.clone()) {
+                x.1.push(Span::new(0, 1)); // relative offsets: the origin is untouched
+                seen += 1;
+            }
+            assert_eq!(seen, r.end.min(1000).saturating_sub(r.start), "{r:?}");
+            for i in 0..1000 {
+                let marked = u.get(i).unwrap().item.1.len() == 2;
+                assert_eq!(marked, r.contains(&i), "{r:?} at {i}");
+                assert_eq!(u.origin(i), t.origin(i));
+            }
         }
     }
 }

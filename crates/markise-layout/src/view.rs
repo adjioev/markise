@@ -5,20 +5,24 @@
 //! anchor is laid out and its height changes, the content on screen does not move (no scroll
 //! jumps). Absolute positions (scrollbar) come from a Fenwick tree of heights in `f64`.
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use markise_doc::FormatDoc;
 use markise_theme::Theme;
 
-use crate::block::{BlockLayout, Images, ItemFocus, LayoutParams, layout_item};
+use crate::block::{BlockLayout, ImageState, Images, ItemFocus, LayoutParams, layout_item};
 use crate::cache::{CacheKey, LayoutCache};
 use crate::diagram::{DiagramQuery, DiagramState, Diagrams, NoDiagrams};
 use crate::fenwick::Fenwick;
 use crate::highlight::{CodeQuery, Highlights, NoHighlights, item_range};
 use crate::links::{AllResolved, LinkTargets};
-use crate::model::{DocModel, Item, ItemKind, ModelChange};
+use crate::model::{DocModel, Item, ItemKind, ModelChange, Segment};
 use crate::text::TextShaper;
+
+mod paging;
+pub use paging::PagingStats;
 
 /// An item to paint this frame.
 #[derive(Clone, Debug)]
@@ -42,9 +46,16 @@ pub struct View {
     anchor: usize,
     anchor_off: f32,
     expanded: HashSet<usize>,
-    image_epoch: u64,
-    /// Bumped when rendered math arrives ([`View::math_changed`]).
-    math_epoch: u64,
+    disclosures: crate::disclosure::Disclosures,
+    /// Cached layouts that showed a formula still rendering ([`View::math_changed`] drops
+    /// them) …
+    pending_math: Vec<CacheKey>,
+    /// Cached layouts that showed each image (loading or loaded): [`View::images_changed_for`]
+    /// drops those of the images whose state changed (a size arrived, or a re-decode after a
+    /// texture eviction found a different size).
+    image_layouts: std::collections::HashMap<Box<str>, Vec<CacheKey>>,
+    /// Entries of `image_layouts` (pruned against the cache when it outgrows it).
+    image_keys: usize,
     font_gen: u64,
     pub cache: LayoutCache,
     /// Items laid out (cache misses) during the last [`View::frame`] call.
@@ -60,20 +71,30 @@ pub struct View {
     diagrams: Arc<dyn Diagrams + Send + Sync>,
     /// Which wikilink targets exist ([`AllResolved`] = all shown resolved).
     links: Arc<dyn LinkTargets + Send + Sync>,
+    /// How review marks are shown (issue #88; part of every cache key).
+    review: crate::block::ReviewView,
     /// Reference labels per item hash ([`DocModel::item_references`]), computed when an item's
     /// key is first needed: reference definitions enter only the keys of items that may use
     /// them (ADR 0006 §7.4) without a document-wide scan when the model is built.
     refs: std::cell::RefCell<std::collections::HashMap<u64, Box<[u64]>>>,
     /// Editing state of the item holding the caret (ADR 0006 §2.4): part of that item's key.
     focus: Option<(usize, ItemFocus, u64)>,
-    /// PROTOTYPE (block snapshots): items whose layout height is replaced (item → height
-    /// without the column padding); the UI paints them itself.
+    /// PROTOTYPE (block snapshots): items whose layout height is replaced (the item's source
+    /// start → height without the column padding); the UI paints them itself. By source
+    /// position: item indices shift whenever a page is materialized or evicted (ADR 0016).
     overrides: std::collections::HashMap<usize, f32>,
+    caret_item: Option<usize>,
+    /// What a paged model keeps materialized ([`paging`]).
+    paging: paging::PagingState,
+    /// The scroll position by source when the model was handed out for an in-place update
+    /// ([`View::model_mut`]): a full replacement keeps it.
+    pre_edit_anchor: Option<(usize, usize, f32)>,
 }
 
 impl View {
     pub fn new(doc: Arc<dyn FormatDoc>, model: Arc<DocModel>, theme: Theme, width: f32, ppp: f32) -> View {
         let theme_fp = theme.fingerprint();
+        let disclosures = crate::disclosure::Disclosures::new(&model);
         let mut v = View {
             doc,
             model,
@@ -86,8 +107,10 @@ impl View {
             anchor: 0,
             anchor_off: 0.0,
             expanded: HashSet::new(),
-            image_epoch: 0,
-            math_epoch: 0,
+            disclosures,
+            pending_math: Vec::new(),
+            image_layouts: Default::default(),
+            image_keys: 0,
             font_gen: 0,
             cache: LayoutCache::default(),
             laid_out: Vec::new(),
@@ -96,9 +119,13 @@ impl View {
             highlights: Arc::new(NoHighlights),
             diagrams: Arc::new(NoDiagrams),
             links: Arc::new(AllResolved),
+            review: crate::block::ReviewView::All,
             refs: Default::default(),
             focus: None,
             overrides: Default::default(),
+            caret_item: None,
+            paging: Default::default(),
+            pre_edit_anchor: None,
         };
         v.reset_heights();
         v
@@ -133,19 +160,117 @@ impl View {
     /// byte offset; layouts of unchanged items are reused from the cache (their keys are
     /// item-relative, so items below a change keep them).
     pub fn set_model(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>) {
-        self.focus = None;
         let anchor_pos = self.model.items.start(self.anchor).unwrap_or(0);
+        self.set_model_at(doc, model, (anchor_pos, 0, 0.0));
+    }
+
+    /// Installs the model of a document that continues the current one: the text shown so far
+    /// is the start of `doc`'s text (progressive open, issue #126). The content on screen does
+    /// not move: the scroll anchor stays on the item at the same source position with the same
+    /// offset into it (a paged model materializes its page at once), and the reader's choices
+    /// (open/closed disclosures, expanded blocks) are kept for the items at the same positions.
+    /// A disclosure that starts in the text shown so far (`shown` bytes) and ends after it was
+    /// shown open (it had no end); it stays open when the scroll anchor or one of `keep` (the
+    /// caret, selection ends) lies inside it, so what the reader is looking at stays.
+    pub fn set_model_keep(&mut self, doc: Arc<dyn FormatDoc>, mut model: Arc<DocModel>, shown: usize, keep: &[usize]) {
+        if self.is_empty() {
+            self.set_model(doc, model);
+            return;
+        }
+        let (start, nth, off) = self.source_anchor();
+        let expanded: Vec<(usize, usize)> = self.expanded.iter().map(|&i| self.source_of(i)).collect();
+        {
+            let m = Arc::make_mut(&mut model);
+            m.cross.adopt_choices(&self.model.cross);
+            for g in m.cross.disclosures() {
+                let inside = |p: usize| g.start <= p && p <= g.end;
+                if !g.open && g.start < shown && g.end >= shown && (inside(start) || keep.iter().any(|&p| inside(p))) {
+                    m.cross.set_open(g.start, true);
+                }
+            }
+        }
+        self.set_model_at(doc, model, (start, nth, 0.0));
+        if self.model.item_start(self.anchor) == start {
+            self.anchor_off = off;
+        } else if off > 0.0 {
+            self.scroll_by(off);
+        }
+        for (s, n) in expanded {
+            self.ensure_offset(s);
+            if let Some(i) = self.item_by_source(s, n) {
+                self.expanded.insert(i);
+                if i < self.exact.len() {
+                    self.exact[i] = false;
+                }
+            }
+        }
+    }
+
+    /// Item `i` by source: its start and its ordinal among the items starting there.
+    fn source_of(&self, i: usize) -> (usize, usize) {
+        let start = self.model.item_start(i);
+        let first = self.model.items.partition_point_start(start);
+        (start, i - first.min(i))
+    }
+
+    /// The `nth` item starting at `start` (`None`: no item starts there).
+    fn item_by_source(&self, start: usize, nth: usize) -> Option<usize> {
+        let n = self.len();
+        let first = self.model.items.partition_point_start(start);
+        if first >= n || self.model.item_start(first) != start {
+            return None;
+        }
+        let mut i = first;
+        while i < first + nth && i + 1 < n && self.model.item_start(i + 1) == start {
+            i += 1;
+        }
+        Some(i)
+    }
+
+    /// [`View::set_model`] with the scroll position at `anchor` (by source:
+    /// [`View::source_anchor`]).
+    fn set_model_at(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>, anchor: (usize, usize, f32)) {
+        self.focus = None;
+        self.caret_item = None;
         self.doc = doc;
         self.model = model;
+        self.disclosures = crate::disclosure::Disclosures::new(&self.model);
         self.prune_refs();
         self.expanded.clear();
         self.anchor = if self.model.items.is_empty() {
             0
         } else {
-            self.model.item_at_offset(anchor_pos)
+            self.model.item_at_offset(anchor.0)
         };
         self.anchor_off = 0.0;
         self.reset_heights();
+        self.anchor_at_source(anchor);
+    }
+
+    /// Puts the scroll anchor at `(start, nth, off)` ([`View::source_anchor`]): the `nth` item
+    /// starting at `start` (segments of a large block share their start), else the item holding
+    /// `start`; `off` points into it. A paged model materializes its page first.
+    fn anchor_at_source(&mut self, (start, nth, off): (usize, usize, f32)) {
+        if self.is_empty() {
+            return;
+        }
+        self.ensure_offset(start);
+        let n = self.len();
+        let first = self.model.items.partition_point_start(start);
+        let i = if first < n && self.model.item_start(first) == start {
+            let mut i = first;
+            while i < first + nth && i + 1 < n && self.model.item_start(i + 1) == start {
+                i += 1;
+            }
+            i
+        } else {
+            self.model.item_at_offset(start)
+        };
+        self.anchor = i.min(n - 1);
+        self.anchor_off = 0.0;
+        if off > 0.0 {
+            self.scroll_by(off);
+        }
     }
 
     /// Installs a model updated incrementally ([`DocModel::apply`]) for `doc`: heights of the
@@ -158,9 +283,12 @@ impl View {
             self.set_model(doc, model);
             return;
         }
-        let shift = change.inserted.len() as isize - change.replaced.len() as isize;
-        let r = change.replaced.clone();
-        if r.end > self.exact.len() || self.exact.len() as isize + shift != model.items.len() as isize {
+        let net: isize = change
+            .splices()
+            .iter()
+            .map(|(o, i)| i.len() as isize - o.len() as isize)
+            .sum();
+        if change.replaced.end > self.exact.len() || self.exact.len() as isize + net != model.items.len() as isize {
             // the change does not describe the transition from the current model (defensive)
             self.set_model(doc, model);
             return;
@@ -172,6 +300,8 @@ impl View {
     /// The model, for an in-place incremental update ([`DocModel::apply`]) followed by
     /// [`View::apply_change`]. Clones the model only if someone else holds it.
     pub fn model_mut(&mut self) -> &mut DocModel {
+        // the scroll position by source, in case the update replaces the whole model
+        self.pre_edit_anchor = Some(self.source_anchor());
         Arc::make_mut(&mut self.model)
     }
 
@@ -187,46 +317,99 @@ impl View {
     pub fn apply_change(&mut self, doc: Arc<dyn FormatDoc>, change: &ModelChange) {
         self.doc = doc;
         let old_focus = self.focus.take().map(|f| f.0);
+        self.caret_item = None;
+        let pre = self.pre_edit_anchor.take();
         if change.full {
             let m = self.model.clone();
-            self.set_model(self.doc.clone(), m);
+            match pre {
+                // the model was updated in place: the anchor index named the old items, its
+                // source position (taken before the update) moves with the edit
+                Some(a) => {
+                    let a = change.moved.as_ref().map_or(a, |m| m.anchor(a));
+                    self.set_model_at(self.doc.clone(), m, a);
+                }
+                None => self.set_model(self.doc.clone(), m),
+            }
             return;
         }
-        let shift = change.inserted.len() as isize - change.replaced.len() as isize;
-        let r = change.replaced.clone();
-        if r.end > self.exact.len() || self.exact.len() as isize + shift != self.model.items.len() as isize {
+        let splices = change.splices();
+        let n = self.model.items.len();
+        let net: isize = splices.iter().map(|(o, i)| i.len() as isize - o.len() as isize).sum();
+        if splices.iter().any(|(o, i)| o.end > self.exact.len() || i.end > n)
+            || self.exact.len() as isize + net != n as isize
+        {
             let m = self.model.clone();
             self.set_model(self.doc.clone(), m);
             return;
         }
-        // anchor
-        if self.anchor >= r.end {
-            self.anchor = (self.anchor as isize + shift).max(0) as usize;
-        } else if self.anchor >= r.start && self.anchor < r.end {
-            self.anchor = change.inserted.start;
-            self.anchor_off = 0.0;
+        let disclosure_changed = if change.disclosures {
+            self.disclosures.update(&self.model)
+        } else {
+            self.disclosures.follow(&splices);
+            false
+        };
+        // anchor: on its item, or on the first item of the splice that replaced it
+        let map = |i: usize| ModelChange::map_index(&splices, i);
+        // (its item replaced by placeholders of a re-paged region: kept by source position
+        // below, once the heights are in place)
+        let mut keep_at: Option<(usize, usize, f32)> = None;
+        match map(self.anchor) {
+            Some(i) => self.anchor = i,
+            None => {
+                let k = splices.partition_point(|(o, _)| o.end <= self.anchor);
+                self.anchor = splices.get(k).map_or(0, |(_, i)| i.start);
+                self.anchor_off = 0.0;
+                if let (Some(a), Some(m)) = (pre, change.moved.as_ref()) {
+                    keep_at = Some(m.anchor(a));
+                }
+            }
         }
         // expanded blocks
         if !self.expanded.is_empty() {
-            self.expanded = self
-                .expanded
-                .iter()
-                .filter(|&&i| i < r.start || i >= r.end)
-                .map(|&i| if i >= r.end { (i as isize + shift) as usize } else { i })
-                .collect();
+            self.expanded = self.expanded.iter().filter_map(|&i| map(i)).collect();
         }
         // heights of the inserted items: cached layouts (same keys) or estimates
-        let n = self.model.items.len();
-        let mut values = Vec::with_capacity(change.inserted.len());
-        let mut exact = Vec::with_capacity(change.inserted.len());
-        for i in change.inserted.clone() {
-            let (v, e) = self.initial_height(i);
-            values.push(v);
-            exact.push(e);
+        if let [(r, ins)] = splices.as_slice() {
+            let mut values = Vec::with_capacity(ins.len());
+            let mut exact = Vec::with_capacity(ins.len());
+            for i in ins.clone() {
+                let (v, e) = self.initial_height(i);
+                values.push(v);
+                exact.push(e);
+            }
+            self.heights.splice(r.clone(), values);
+            self.exact.splice(r.clone(), exact);
+        } else {
+            // several splices (`[toc]` blocks resized elsewhere): one pass over the heights,
+            // copying the others (no key computed for them)
+            let mut values = Vec::with_capacity(n);
+            let mut exact = Vec::with_capacity(n);
+            let mut old = self.heights.values().zip(self.exact.iter().copied());
+            let mut pos = 0;
+            for (r, ins) in &splices {
+                for _ in pos..r.start {
+                    let (v, e) = old.next().expect("old height");
+                    values.push(v);
+                    exact.push(e);
+                }
+                for _ in r.clone() {
+                    old.next();
+                }
+                for i in ins.clone() {
+                    let (v, e) = self.initial_height(i);
+                    values.push(v);
+                    exact.push(e);
+                }
+                pos = r.end;
+            }
+            for (v, e) in old {
+                values.push(v);
+                exact.push(e);
+            }
+            self.heights = Fenwick::from_values(values);
+            self.exact = exact;
         }
-        self.heights.splice(r.clone(), values);
-        self.exact.splice(r, exact);
-        if self.heights.len() != n {
+        if self.heights.len() != n || self.exact.len() != n {
             // the change does not describe the item list (defensive): start over
             self.reset_heights();
             return;
@@ -235,26 +418,35 @@ impl View {
         // the last item carries the bottom padding: re-estimate around the ends
         let mut again: Vec<usize> = change.rehashed.clone();
         // the formerly focused item is now laid out without its focus
-        if let Some(f) = old_focus {
-            if f < change.replaced.start {
-                again.push(f);
-            } else if f >= change.replaced.end {
-                again.push((f as isize + shift) as usize);
-            }
+        if let Some(f) = old_focus.and_then(map) {
+            again.push(f);
         }
-        // items that may use a changed reference definition get new keys: re-estimate them
+        // items that may use a changed reference definition get new keys: only laid-out ones
+        // need a new height (an estimate does not read references; keys are computed when
+        // needed)
         if !change.labels.is_empty() {
             let memo = self.refs.borrow();
-            for (i, it) in self.model.items.iter().enumerate() {
-                if memo
-                    .get(&it.hash)
-                    .is_some_and(|l| l.iter().any(|x| change.labels.contains(x)))
+            for (i, _) in self.exact.iter().enumerate().filter(|(_, e)| **e) {
+                if let Some(it) = self.model.items.get(i)
+                    && memo
+                        .get(&it.hash)
+                        .is_some_and(|l| l.iter().any(|x| change.labels.contains(x)))
                 {
                     again.push(i);
                 }
             }
         }
+        // re-keyed items: their estimates did not change, so only laid-out ones (few: they were
+        // shown) need their new key looked up
+        again.extend(
+            change
+                .rekeyed
+                .iter()
+                .copied()
+                .filter(|&i| self.exact.get(i) == Some(&true)),
+        );
         again.extend([0, n.saturating_sub(1), n.saturating_sub(2)]);
+
         for i in again {
             if i < n {
                 let (v, e) = self.initial_height(i);
@@ -263,10 +455,106 @@ impl View {
             }
         }
         self.anchor = self.anchor.min(n.saturating_sub(1));
+        if disclosure_changed {
+            self.reset_heights();
+        }
+        self.refresh_page_heights();
+        if let Some(a) = keep_at {
+            self.anchor_at_source(a);
+        }
     }
 
-    /// Height of item `i` before this frame's layout: cached layout or estimate.
+    /// Adjacent visible item, jumping whole collapsed ranges for caret navigation.
+    pub fn adjacent_visible(&self, from: usize, forward: bool) -> Option<usize> {
+        let mut i = if forward {
+            from.checked_add(1)?
+        } else {
+            from.checked_sub(1)?
+        };
+        loop {
+            if i >= self.len() {
+                return None;
+            }
+            if let Some(range) = self.disclosures.closed_range(i) {
+                i = if forward {
+                    range.end
+                } else {
+                    range.start.checked_sub(1)?
+                };
+                continue;
+            }
+            if !self.disclosure_hidden(i) {
+                return Some(i);
+            }
+            i = if forward { i.checked_add(1)? } else { i.checked_sub(1)? };
+        }
+    }
+
+    /// Full derivations of the disclosure state so far (tests: typing derives nothing).
+    pub fn disclosure_derivations(&self) -> u64 {
+        self.disclosures.derived
+    }
+
+    /// Disclosure state of item `i` (tests, diagnostics): hidden by a closed disclosure (or a
+    /// control of one), nesting depth of open ones, and `(title, open)` when it starts one.
+    pub fn disclosure_of(&self, i: usize) -> (bool, usize, Option<(String, bool)>) {
+        (
+            self.disclosures.hidden(i),
+            self.disclosures.depth(i),
+            self.disclosures.groups.get(&i).map(|g| (g.title.clone(), g.open)),
+        )
+    }
+
+    /// Opens the closed disclosures around item `i` (the caret or a jump went there); `true`
+    /// when one opened.
+    fn reveal_item(&mut self, i: usize) -> bool {
+        let Some(o) = self.model.items.start(i) else {
+            return false;
+        };
+        let starts: Vec<usize> = self
+            .model
+            .cross
+            .disclosures()
+            .iter()
+            .filter(|g| !g.open && g.start < o && o <= g.end)
+            .map(|g| g.start)
+            .collect();
+        if starts.is_empty() {
+            return false;
+        }
+        let cross = &mut Arc::make_mut(&mut self.model).cross;
+        for s in starts {
+            cross.set_open(s, true);
+        }
+        self.disclosures.update(&self.model);
+        true
+    }
+
+    fn disclosure_hidden(&self, i: usize) -> bool {
+        let focused = self.focus.as_ref().is_some_and(|(idx, _, _)| *idx == i);
+        if focused {
+            return false;
+        }
+        self.disclosures.hidden(i)
+            || self
+                .model
+                .items
+                .get(i)
+                .is_some_and(|it| it.raw.as_deref() == Some(&markise_doc::RawPresentation::Comment))
+    }
+
+    /// Height before this frame: cached layout or estimate.
     fn initial_height(&self, i: usize) -> (f64, bool) {
+        if self.disclosure_hidden(i) {
+            return (0.0, true);
+        }
+        if let Some(v) = self.override_height(i) {
+            return (v, true);
+        }
+        // nothing cached for this item: no key to compute
+        if self.model.items.get(i).is_some_and(|it| !self.cache.has_item(it.hash)) {
+            return (self.estimate(i) as f64, false);
+        }
         match self.cache.peek(&self.key(i)) {
             Some(l) => {
                 let (a, b) = self.item_pad(i);
@@ -293,6 +581,22 @@ impl View {
         self.anchor_off = frac * self.height(self.anchor);
     }
 
+    /// How review marks are shown (issue #88). A change re-estimates all heights (cached
+    /// layouts for the old view stop matching their keys).
+    pub fn set_review_view(&mut self, v: crate::block::ReviewView) {
+        if v != self.review {
+            let frac = self.anchor_frac();
+            self.review = v;
+            self.reset_heights();
+            self.anchor_off = frac * self.height(self.anchor);
+        }
+    }
+
+    /// How review marks are shown.
+    pub fn review_view(&self) -> crate::block::ReviewView {
+        self.review
+    }
+
     /// Fonts changed (e.g. a fallback font was installed): every cached layout is stale.
     pub fn set_font_generation(&mut self, generation: u64) {
         if generation != self.font_gen {
@@ -304,24 +608,67 @@ impl View {
         }
     }
 
-    /// Bumps the math epoch: items that may show math get new cache keys and are laid out
-    /// again with the formulas rendered since (see [`crate::math`]).
+    /// Formulas finished rendering: the cached layouts that showed a formula as pending are
+    /// dropped, so those items (only they) are laid out again when shown (see
+    /// [`crate::math`]). O(such layouts), not O(items).
     pub fn math_changed(&mut self) {
-        self.math_epoch += 1;
-        for (i, it) in self.model.items.iter().enumerate() {
-            if it.has_math {
-                self.exact[i] = false;
+        for k in std::mem::take(&mut self.pending_math) {
+            self.cache.remove(&k);
+        }
+    }
+
+    /// The state of images `srcs` changed (a size arrived, a load failed, a re-decode found a
+    /// different size): the cached layouts that showed them, loading or loaded, are dropped and
+    /// laid out again when shown. O(such layouts), not O(items).
+    pub fn images_changed_for<S: AsRef<str>>(&mut self, srcs: &[S]) {
+        for s in srcs {
+            if let Some(keys) = self.image_layouts.remove(s.as_ref()) {
+                self.image_keys -= keys.len();
+                for k in keys {
+                    self.cache.remove(&k);
+                }
             }
         }
     }
 
-    /// Bumps the image epoch: items that mention images get new cache keys and are laid out
-    /// again with the new image sizes.
+    /// Some image changed state (unknown which): every cached layout showing an image is
+    /// dropped. O(such layouts), not O(items).
     pub fn images_changed(&mut self) {
-        self.image_epoch += 1;
-        for (i, it) in self.model.items.iter().enumerate() {
-            if it.has_image {
-                self.exact[i] = false;
+        for (_, keys) in std::mem::take(&mut self.image_layouts) {
+            for k in keys {
+                self.cache.remove(&k);
+            }
+        }
+        self.image_keys = 0;
+    }
+
+    /// Remembers that the layout cached under `key` showed a pending formula (`math`) and the
+    /// images `images`.
+    fn note_media(&mut self, key: CacheKey, math: bool, images: Vec<String>) {
+        // layouts the cache evicted meanwhile are forgotten once the lists outgrow it
+        let cap = 2 * self.cache.len() + 1024;
+        if math {
+            if self.pending_math.len() > cap {
+                self.pending_math.retain(|k| self.cache.contains(k));
+            }
+            self.pending_math.push(key);
+        }
+        if images.is_empty() {
+            return;
+        }
+        if self.image_keys > cap {
+            let cache = &self.cache;
+            self.image_layouts.retain(|_, keys| {
+                keys.retain(|k| cache.contains(k));
+                !keys.is_empty()
+            });
+            self.image_keys = self.image_layouts.values().map(Vec::len).sum();
+        }
+        for src in images {
+            let keys = self.image_layouts.entry(src.into_boxed_str()).or_default();
+            if !keys.contains(&key) {
+                keys.push(key);
+                self.image_keys += 1;
             }
         }
     }
@@ -371,12 +718,12 @@ impl View {
         let ItemKind::Diagram { lang } = &it.kind else {
             return None;
         };
-        let code = it.code?;
+        let code = *it.code.as_deref()?;
         let lang = markise_blocks::diagram::DiagramLang::from_info(lang)?;
         Some(DiagramQuery {
             lang,
             code,
-            doc: &self.doc,
+            doc: &*self.doc,
             start: start(),
             item: i,
         })
@@ -394,20 +741,31 @@ impl View {
     }
 
     fn code_query_of<'a>(&'a self, i: usize, it: &'a Item, start: impl FnOnce() -> usize) -> Option<CodeQuery<'a>> {
-        let code = it.code?;
+        let code = *it.code.as_deref()?;
         let ItemKind::Code { lang } = &it.kind else { return None };
         Some(CodeQuery {
             code,
             lang,
             range: item_range(it, &code),
-            doc: &self.doc,
+            doc: &*self.doc,
             start: start(),
             item: i,
         })
     }
 
-    /// Toggles a collapsible block (front matter).
+    /// Toggles a collapsible block (front matter or disclosure).
     pub fn toggle_expanded(&mut self, idx: usize) {
+        if let Some(group) = self.disclosures.groups.get(&idx).cloned() {
+            let open = !group.open;
+            let at = self.model.item_start(idx);
+            Arc::make_mut(&mut self.model).cross.set_open(at, open);
+            if !open && self.focus.as_ref().is_some_and(|(i, _, _)| idx < *i && *i <= group.end) {
+                self.focus = None;
+            }
+            self.disclosures.update(&self.model);
+            self.reset_heights();
+            return;
+        }
         if !self.expanded.remove(&idx) {
             self.expanded.insert(idx);
         }
@@ -449,8 +807,22 @@ impl View {
         // a fresh view has no cached layouts: skip the key computation
         let peek = !self.cache.is_empty();
         for (i, (start, it)) in model.items.iter_with_start().enumerate() {
+            if self.disclosure_hidden(i) {
+                values.push(0.0);
+                exact.push(true);
+                continue;
+            }
+            if !self.overrides.is_empty()
+                && !it.is_page()
+                && let Some(&h) = self.overrides.get(&start)
+            {
+                let (a, b) = self.item_pad(i);
+                values.push((h + a + b) as f64);
+                exact.push(true);
+                continue;
+            }
             // layouts of unchanged items survive reloads and parameter round-trips
-            let cached = if peek {
+            let cached = if peek && self.cache.has_item(it.hash) {
                 let ready = self.code_query_of(i, it, || start).map(|q| self.highlights.ready(&q));
                 let dtag = self.diagram_state_of(i, it, || start).map(|d| d.tag());
                 self.cache.peek(&self.key_for(i, it, ready, dtag))
@@ -472,11 +844,15 @@ impl View {
         self.heights = Fenwick::from_values(values);
         self.exact = exact;
         self.anchor = self.anchor.min(n.saturating_sub(1));
+        self.paging.gens = self.model.cross.gens;
     }
 
     /// Sets the editing state of item `i` (marker reveal, virtual paragraph; ADR 0006 §2.4) or
     /// clears it. Only that item's cache key changes; returns `true` when the focus changed.
     pub fn set_focus(&mut self, focus: Option<(usize, ItemFocus)>) -> bool {
+        let caret_item = focus.as_ref().map(|(i, _)| *i);
+        let opened = caret_item != self.caret_item && caret_item.is_some_and(|i| self.reveal_item(i));
+        self.caret_item = caret_item;
         let focus = focus.filter(|(i, f)| *i < self.len() && !f.is_empty());
         let same = match (&self.focus, &focus) {
             (None, None) => true,
@@ -484,7 +860,10 @@ impl View {
             _ => false,
         };
         if same {
-            return false;
+            if opened {
+                self.reset_heights();
+            }
+            return opened;
         }
         let old = self.focus.take().map(|f| f.0);
         self.focus = focus.map(|(i, f)| {
@@ -498,6 +877,9 @@ impl View {
                 self.heights.set(i, v);
                 self.exact[i] = e;
             }
+        }
+        if opened {
+            self.reset_heights();
         }
         true
     }
@@ -533,6 +915,9 @@ impl View {
     }
 
     fn estimate_item(&self, i: usize, it: &Item) -> f32 {
+        if self.disclosure_hidden(i) {
+            return 0.0;
+        }
         let t = &self.theme;
         let (pa, pb) = self.item_pad(i);
         let line = t.line_px();
@@ -541,6 +926,7 @@ impl View {
         let wrapped = |chars: u32, lines: u32| -> f32 { (lines as f32).max(chars as f32 / per_line).ceil() };
         let h = match &it.kind {
             ItemKind::Hidden => return pa + pb,
+            ItemKind::Page(st) => return self.page_estimate(st) + pa + pb,
             ItemKind::Heading { level } => {
                 let li = (*level as usize - 1).min(5);
                 let hs = &t.headings[li];
@@ -556,7 +942,14 @@ impl View {
                 t.block_spacing + rows * (line + 2.0 * t.table_cell_padding)
             }
             ItemKind::FrontMatter => t.block_spacing + line + 2.0 * t.meta_block.padding,
-            ItemKind::Rule | ItemKind::Empty | ItemKind::Toc => t.block_spacing + line,
+            // one line per outline entry (issue #124); later segments of a long TOC have no gap
+            ItemKind::Toc => match &it.segment {
+                Some(Segment::Toc { start, end, first, .. }) => {
+                    (if *first { t.block_spacing } else { 0.0 }) + end.saturating_sub(*start).max(1) as f32 * line
+                }
+                _ => t.block_spacing + self.model.outline.len().max(1) as f32 * line,
+            },
+            ItemKind::Rule | ItemKind::Empty => t.block_spacing + line,
             ItemKind::Paragraph => t.block_spacing + wrapped(it.est_chars, it.est_lines) * line,
         };
         h + pa + pb
@@ -581,10 +974,7 @@ impl View {
 
     /// `dtag`: for a diagram item, its [`DiagramState::tag`].
     fn key_for(&self, i: usize, it: &Item, ready: Option<bool>, dtag: Option<u64>) -> CacheKey {
-        let mut extra = 0u64;
-        if it.has_image {
-            extra = self.image_epoch << 1;
-        }
+        let mut extra = (self.review as u64).wrapping_mul(0x2545_f491_4f6c_dd1d).rotate_left(41);
         if self.expanded.contains(&i) {
             extra |= 1;
         }
@@ -592,9 +982,6 @@ impl View {
             && *fi == i
         {
             extra ^= fh.rotate_left(7) | (1 << 62);
-        }
-        if it.has_math {
-            extra ^= self.math_epoch.wrapping_mul(0x2545_f491_4f6c_dd1d);
         }
         if it.has_wikilink {
             extra ^= self
@@ -604,6 +991,14 @@ impl View {
                 .wrapping_mul(0x5851_f42d_4c95_7f2d)
                 .rotate_left(29);
         }
+        if let Some(group) = self.disclosures.groups.get(&i) {
+            use std::hash::{Hash, Hasher};
+            let mut h = crate::model::hasher();
+            group.title.hash(&mut h);
+            group.open.hash(&mut h);
+            extra ^= h.finish().rotate_left(13);
+        }
+        extra ^= (self.disclosures.depth(i) as u64).wrapping_mul(0x71d8_1e65_9a13_451d);
         // code: highlighter generation and whether this item's range is highlighted yet
         let mut code_ident = 0;
         if let Some(ready) = ready {
@@ -624,7 +1019,11 @@ impl View {
         // those by the block's content key too (an edit in a later segment changes the scene
         // drawn by an unchanged first segment)
         let diagram = dtag.map_or(0, |tag| {
-            let block = if tag >= 2 { it.code.map_or(0, |c| c.key) } else { 0 };
+            let block = if tag >= 2 {
+                it.code.as_ref().map_or(0, |c| c.key)
+            } else {
+                0
+            };
             let mut h = std::collections::hash_map::DefaultHasher::new();
             std::hash::Hash::hash(&(self.diagrams.generation(), tag, block, 0xd1a6_u32), &mut h);
             std::hash::Hasher::finish(&h)
@@ -698,6 +1097,17 @@ impl View {
 
     /// Layout of item `i` (cached or computed now).
     pub fn layout(&mut self, i: usize, shaper: &mut dyn TextShaper, images: &dyn Images) -> Arc<BlockLayout> {
+        if self.model.is_page(i) {
+            // a placeholder is never shown (the view materializes it first); hit testing next
+            // to items without caret stops may still ask
+            self.paging.stats.placeholder_layouts += 1;
+            return Arc::new(BlockLayout::default());
+        }
+        if self.disclosure_hidden(i) {
+            self.heights.set(i, 0.0);
+            self.exact[i] = true;
+            return Arc::new(BlockLayout::default());
+        }
         let ready = self.code_query(i).map(|q| {
             let r = self.highlights.ready(&q);
             if !r {
@@ -746,63 +1156,117 @@ impl View {
                 let params = LayoutParams {
                     theme: &self.theme,
                     width: self.width,
+                    disclosure: self.disclosures.groups.get(&i).map(|g| (g.title.as_str(), g.open)),
+                    disclosure_depth: self.disclosures.depth(i),
                     expanded: self.expanded.contains(&i),
                     code_runs: runs.as_deref(),
                     focus: self.focus.as_ref().filter(|f| f.0 == i).map(|f| &f.1),
                     diagram: dstate.as_ref(),
                     ppp: self.ppp,
                     links: &*self.links,
+                    review: self.review,
                 };
-                let l = Arc::new(layout_item(&*self.doc, &self.model, i, &params, shaper, images));
+                let rec = Recording {
+                    inner: images,
+                    math: Cell::new(false),
+                    images: RefCell::new(Vec::new()),
+                };
+                let l = Arc::new(layout_item(&*self.doc, &self.model, i, &params, shaper, &rec));
                 if !self.missing_glyphs {
                     self.missing_glyphs = lacks_glyphs(&l, shaper);
                 }
                 if cacheable {
                     self.cache.insert(key, l.clone());
+                    self.note_media(key, rec.math.get(), rec.images.into_inner());
                 }
                 self.laid_out.push(i);
                 l
             }
         };
         let (a, b) = self.item_pad(i);
-        let lh = self.overrides.get(&i).copied().unwrap_or(l.height);
+        let lh = if self.overrides.is_empty() {
+            l.height
+        } else {
+            self.overrides.get(&self.model.item_start(i)).copied().unwrap_or(l.height)
+        };
         self.heights.set(i, (lh + a + b) as f64);
         self.exact[i] = true;
         l
     }
 
-    /// PROTOTYPE (block snapshots): replaces the layout heights of some items (item → height
-    /// without column padding); items no longer listed get their own heights back. The caller
-    /// passes the full set every frame, with indices of the current model.
+    /// PROTOTYPE (block snapshots): the height (with padding) override of real item `i`.
+    fn override_height(&self, i: usize) -> Option<f64> {
+        if self.overrides.is_empty() || self.model.is_page(i) {
+            return None;
+        }
+        let h = *self.overrides.get(&self.model.item_start(i))?;
+        let (a, b) = self.item_pad(i);
+        Some((h + a + b) as f64)
+    }
+
+    /// PROTOTYPE (block snapshots): the real items starting at source offset `start` (segments
+    /// of one block share their start). A placeholder starting there is not one of them.
+    fn items_at_start(&self, start: usize) -> std::ops::Range<usize> {
+        let n = self.len();
+        let first = self.model.items.partition_point_start(start).min(n);
+        let mut end = first;
+        while end < n && self.model.item_start(end) == start && !self.model.is_page(end) {
+            end += 1;
+        }
+        first..end
+    }
+
+    /// PROTOTYPE (block snapshots): replaces the layout heights of some items (source start of
+    /// the item → height without column padding); items no longer listed get their own heights
+    /// back. The caller passes the full set every frame. What a page held when it is evicted
+    /// stays in its measured height (ADR 0016), so the placeholder keeps the snapshot heights.
     pub fn set_height_overrides(&mut self, map: std::collections::HashMap<usize, f32>) {
         if map.is_empty() && self.overrides.is_empty() {
             return;
         }
         let frac = self.anchor_frac();
         let old = std::mem::replace(&mut self.overrides, map);
-        let n = self.len();
         let mut changed = false;
-        for (&i, _) in old.iter().filter(|(i, _)| !self.overrides.contains_key(i)) {
-            if i < n {
+        for &start in old.keys().filter(|s| !self.overrides.contains_key(s)) {
+            for i in self.items_at_start(start) {
                 let (v, e) = self.initial_height(i);
                 self.heights.set(i, v);
                 self.exact[i] = e;
                 changed = true;
             }
         }
-        for (&i, &h) in &self.overrides {
-            if i < n {
+        let new: Vec<(usize, f32)> = self.overrides.iter().map(|(s, h)| (*s, *h)).collect();
+        for (start, h) in new {
+            for i in self.items_at_start(start) {
+                if self.disclosure_hidden(i) {
+                    continue;
+                }
                 let (a, b) = self.item_pad(i);
                 let v = (h + a + b) as f64;
                 if self.heights.get(i) != v {
                     self.heights.set(i, v);
                     changed = true;
                 }
+                self.exact[i] = true;
             }
         }
         if changed {
             self.anchor_off = frac * self.height(self.anchor);
         }
+    }
+
+    /// PROTOTYPE (block snapshots): materializes and evicts for this viewport now (the same step
+    /// [`View::frame`] starts with), so the block scan before layout sees the frame's items.
+    pub fn prepare_for_frame(&mut self, viewport_h: f32) {
+        if self.model.is_paged() {
+            self.paging.last_vh = viewport_h;
+            self.prepare_pages(viewport_h);
+        }
+    }
+
+    /// PROTOTYPE (block snapshots): changes whenever pages come and go (item indices shift).
+    pub fn paging_generation(&self) -> u64 {
+        self.paging.stats.materialized + self.paging.stats.evicted
     }
 
     /// Whether a laid-out item needed glyphs the fonts lack (since the last font change).
@@ -837,6 +1301,9 @@ impl View {
     /// Puts item `i` at the top of the viewport (outline click).
     pub fn scroll_to_item(&mut self, i: usize) {
         if i < self.len() {
+            if self.reveal_item(i) {
+                self.reset_heights();
+            }
             self.anchor = i;
             self.anchor_off = 0.0;
         }
@@ -873,7 +1340,11 @@ impl View {
     ) -> Vec<Visible> {
         self.cache.tick();
         self.laid_out.clear();
-        let n = self.len();
+        if self.model.is_paged() {
+            self.paging.last_vh = viewport_h;
+            self.prepare_pages(viewport_h);
+        }
+        let mut n = self.len();
         if n == 0 {
             self.last_visible.clear();
             return Vec::new();
@@ -883,6 +1354,15 @@ impl View {
             out.clear();
             // the anchor offset may exceed the anchor's height once it is laid out
             loop {
+                if let Some(end) = self.disclosures.closed_end(self.anchor) {
+                    self.anchor = (end + 1).min(n - 1);
+                }
+                if self.model.is_page(self.anchor) {
+                    // the item after a closed disclosure is in a page not materialized yet
+                    self.materialize_at(self.anchor);
+                    n = self.len();
+                    continue;
+                }
                 self.layout(self.anchor, shaper, images);
                 let h = self.height(self.anchor);
                 if self.anchor_off >= h && self.anchor + 1 < n {
@@ -895,6 +1375,17 @@ impl View {
             let mut y = -self.anchor_off;
             let mut i = self.anchor;
             while i < n && y < viewport_h + margin {
+                if let Some(end) = self.disclosures.closed_end(i) {
+                    i = end + 1;
+                    continue;
+                }
+                if self.model.is_page(i) {
+                    // laid-out heights fell short of the estimates around the viewport: the
+                    // page comes in now (later indices only shift)
+                    self.materialize_at(i);
+                    n = self.len();
+                    continue;
+                }
                 let l = self.layout(i, shaper, images);
                 let h = self.height(i);
                 if y + h > 0.0 && y < viewport_h {
@@ -920,11 +1411,49 @@ impl View {
         let mut i = self.anchor;
         while i > 0 && y > -margin {
             i -= 1;
+            if self.model.is_page(i) {
+                break; // not materialized while indices of this frame are handed out
+            }
+            // a closed disclosure: on to its start marker
+            if let Some(r) = self.disclosures.closed_range(i) {
+                i = r.start.saturating_sub(1);
+                if self.model.is_page(i) {
+                    break;
+                }
+            }
             self.layout(i, shaper, images);
             y -= self.height(i);
         }
         self.last_visible = out.iter().map(|v| v.idx).collect();
         out
+    }
+}
+
+/// An [`Images`] provider that notes whether a layout asked for a formula not ready yet and
+/// which images it showed (the layout is dropped from the cache when they change:
+/// [`View::math_changed`], [`View::images_changed_for`]).
+struct Recording<'a> {
+    inner: &'a dyn Images,
+    math: Cell<bool>,
+    images: RefCell<Vec<String>>,
+}
+
+impl Images for Recording<'_> {
+    fn state(&self, src: &str) -> ImageState {
+        let mut seen = self.images.borrow_mut();
+        if !seen.iter().any(|s| s == src) {
+            seen.push(src.to_string());
+        }
+        self.inner.state(src)
+    }
+
+    fn math(&self, q: &crate::math::MathQuery) -> crate::math::MathState {
+        let s = self.inner.math(q);
+        // "unavailable" until the renderer has started
+        if matches!(s, crate::math::MathState::Pending | crate::math::MathState::Unavailable) {
+            self.math.set(true);
+        }
+        s
     }
 }
 

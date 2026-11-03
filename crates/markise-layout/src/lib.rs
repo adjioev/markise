@@ -26,13 +26,18 @@ pub mod source;
 pub mod text;
 pub mod view;
 
-pub use block::{BlockLayout, FontSet, ImageState, Images, ItemFocus, LinkHit, Prim, RoleFaces, reveal_set};
+pub use block::{
+    BlockLayout, FontSet, ImageState, Images, ItemFocus, LinkHit, Prim, ReviewView, RoleFaces, reveal_set,
+};
 pub use cache::{CacheKey, LayoutCache};
 pub use diagram::{DiagramQuery, DiagramState, Diagrams, NoDiagrams};
 pub use highlight::{CodeQuery, Highlights, NoHighlights};
 pub use links::{AllResolved, LinkTargets};
 pub use math::{MATH_SCALE, MathBox, MathQuery, MathState};
-pub use model::{CodeRef, Container, DocModel, Gap, Item, ItemKind, Items, Marker, ModelChange, OutlineEntry};
+pub use model::{
+    CodeRef, Container, DocModel, Gap, Item, ItemKind, Items, Marker, ModelChange, Moved, OutlineEntry, PAGE_TOPS,
+    PageStats, Paging, PagingCounters, paging_counters,
+};
 pub use source::{SourceCtx, SourceLayout, SourceLine, SourceParams, SourceView, SourceVisible};
 pub use text::{
     EpaintShaper, FontRole, FragmentId, FragmentKind, MapPiece, ParleyShaper, PieceKind, SourceMap, StyledText,
@@ -71,8 +76,16 @@ pub mod testing {
     }
 
     impl Shown {
+        /// With the default model ([`crate::Paging::from_env`]: paged).
         pub fn new(doc: Arc<dyn FormatDoc>) -> Self {
             let model = DocModel::build(&*doc, None);
+            Shown { doc, model }
+        }
+
+        /// With a full model (one item per leaf: tests that address items by index across the
+        /// whole document).
+        pub fn full(doc: Arc<dyn FormatDoc>) -> Self {
+            let model = Arc::new(DocModel::build_with(&*doc, None, crate::Paging::Full));
             Shown { doc, model }
         }
 
@@ -113,3 +126,5 @@ pub mod testing {
         crate::ParleyShaper::from_font_definitions(&font_definitions())
     }
 }
+
+mod disclosure;

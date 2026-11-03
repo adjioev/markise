@@ -143,7 +143,7 @@ const fn nav(id: &'static str, label: &'static str, keys: &'static [DefaultKey])
 /// The engine's own commands (spec 02 §5.4, §15; ADR 0006 §3.2 table) with how they run.
 /// Caret and selection commands need the caret geometry of a laid-out view ([`Run::Caret`]);
 /// `file.*` / `view.*` commands are performed by the host (I/O, UI state).
-pub static ENGINE_COMMANDS: [(CommandDescriptor, Run); 43] = [
+pub static ENGINE_COMMANDS: [(CommandDescriptor, Run); 48] = [
     (
         engine(
             "edit.undo",
@@ -483,6 +483,61 @@ pub static ENGINE_COMMANDS: [(CommandDescriptor, Run); 43] = [
         ),
         Run::Host,
     ),
+    (
+        engine(
+            "find.open",
+            "Find…",
+            &[key("Cmd+F", "Ctrl+F")],
+            Scope::Global,
+            VIEW,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
+    (
+        engine(
+            "find.next",
+            "Find Next",
+            &[key("Cmd+G", "F3")],
+            Scope::Global,
+            VIEW,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
+    (
+        engine(
+            "find.prev",
+            "Find Previous",
+            &[key("Shift+Cmd+G", "Shift+F3")],
+            Scope::Global,
+            VIEW,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
+    (
+        engine(
+            "find.replace",
+            "Find and Replace…",
+            &[key("Opt+Cmd+F", "Ctrl+H")],
+            Scope::Global,
+            VIEW,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
+    (
+        engine(
+            "find.replaceNext",
+            "Replace Next",
+            &[key("Opt+Cmd+E", "Alt+Ctrl+E")],
+            Scope::Global,
+            VIEW,
+            ParamSchema::NONE,
+        ),
+        Run::Host,
+    ),
 ];
 
 fn run_undo(s: &mut EditorSession, _: &Params) -> Result<(), CommandError> {
@@ -511,15 +566,26 @@ fn run_shift_tab(s: &mut EditorSession, _: &Params) -> Result<(), CommandError> 
 
 fn caret_backspace(s: &mut EditorSession, g: &mut dyn CaretGeometry, _: &Params) -> Result<(), CommandError> {
     let p = s.selection().primary();
-    let stop = (p.is_caret() && p.focus.virt == 0).then(|| g.horizontal(p.focus, false, false).offset);
+    let stop = (p.is_caret() && p.focus.virt == 0).then(|| real_stop(g, p.focus, false));
     g.release_doc();
     Ok(s.delete_backward_to(stop)?)
 }
 fn caret_delete(s: &mut EditorSession, g: &mut dyn CaretGeometry, _: &Params) -> Result<(), CommandError> {
     let p = s.selection().primary();
-    let stop = (p.is_caret() && p.focus.virt == 0).then(|| g.horizontal(p.focus, true, false).offset);
+    let stop = (p.is_caret() && p.focus.virt == 0).then(|| real_stop(g, p.focus, true));
     g.release_doc();
     Ok(s.delete_forward_to(stop)?)
+}
+
+/// The next caret stop in the source for Backspace / Delete: the virtual paragraph in a gap
+/// between blocks (issue #166) is passed over, as before it existed.
+fn real_stop(g: &mut dyn CaretGeometry, from: markise_doc::DocPos, forward: bool) -> usize {
+    let d = g.horizontal(from, forward, false);
+    if d.virt > 0 && d != from {
+        g.horizontal(d, forward, false).offset
+    } else {
+        d.offset
+    }
 }
 fn caret_delete_word_back(s: &mut EditorSession, g: &mut dyn CaretGeometry, _: &Params) -> Result<(), CommandError> {
     generated_delete(s, g, true, |g, p| g.horizontal(p, false, true))
@@ -738,7 +804,8 @@ impl Registry {
         let spec = self.get(id).ok_or_else(|| CommandError::Unknown(id.to_string()))?;
         match spec.run {
             Run::Planner(pid) => {
-                if s.doc().can_plan(pid, &s.request(Params::new())) {
+                // memoised per (document, selection) state: menus ask every frame (issue #133)
+                if s.can_plan(pid) {
                     Ok(())
                 } else {
                     Err(CommandError::Disabled("not applicable here"))
@@ -755,7 +822,7 @@ impl Registry {
     /// Whether toggle command `id` is active at the selection (menu check marks, toolbar).
     pub fn checked(&self, s: &EditorSession, id: &str) -> bool {
         match self.get(id).map(|c| c.run) {
-            Some(Run::Planner(pid)) => s.doc().plan_checked(pid, &s.request(Params::new())),
+            Some(Run::Planner(pid)) => s.plan_checked(pid),
             _ => false,
         }
     }

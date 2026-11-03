@@ -231,6 +231,9 @@ pub struct CommentHit {
 pub struct BlockLayout {
     /// Total height including the gap above the item.
     pub height: f32,
+    /// The gap above the item's content (part of [`BlockLayout::height`]): a click there is
+    /// between this item and the one before it (issue #166).
+    pub gap: f32,
     pub prims: Vec<Prim>,
     pub links: Vec<LinkHit>,
     /// Clickable header of a collapsible block (front matter).
@@ -294,6 +297,9 @@ pub struct LayoutParams<'a> {
     pub theme: &'a Theme,
     /// Width of the content column in points.
     pub width: f32,
+    /// Paired disclosure header and child indentation, supplied by the view.
+    pub disclosure: Option<(&'a str, bool)>,
+    pub disclosure_depth: usize,
     /// Collapsible block (front matter) expanded.
     pub expanded: bool,
     /// Highlight runs of a code item (content offsets, see [`crate::highlight`]); `None` =
@@ -308,6 +314,30 @@ pub struct LayoutParams<'a> {
     pub ppp: f32,
     /// Which wikilink targets exist (unresolved links are styled apart).
     pub links: &'a dyn crate::links::LinkTargets,
+    /// How review marks are shown (issue #88).
+    pub review: ReviewView,
+}
+
+/// How review marks (CriticMarkup, ADR 0012) are shown in the rendered view (issue #88). Display
+/// only: the text is never changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ReviewView {
+    /// Highlights, comment glyphs (with cards in the UI) and coloured suggestions.
+    #[default]
+    All,
+    /// Comment glyphs and coloured suggestions; no highlight tint (and no cards in the UI).
+    Simple,
+    /// The text as if every suggestion were accepted; comments and highlights hidden.
+    Final,
+    /// The text as if every suggestion were rejected; comments and highlights hidden.
+    Original,
+}
+
+impl ReviewView {
+    /// A clean preview of the text (Final, Original): the marks are not shown at all.
+    pub fn is_clean(self) -> bool {
+        matches!(self, ReviewView::Final | ReviewView::Original)
+    }
 }
 
 /// Layout input of the item holding the caret (ADR 0006 §2.4): part of that item's cache key
@@ -317,6 +347,7 @@ pub struct ItemFocus {
     /// Item-relative source ranges of the inline nodes whose markers are shown
     /// ([`reveal_set`]).
     pub reveal: Vec<Range<u32>>,
+    pub raw_source: bool,
     /// Show the editor-only empty paragraph after the item (the caret is in it).
     pub virtual_after: bool,
     /// Containers around the item the virtual paragraph has left (a list counts as two
@@ -335,7 +366,7 @@ pub struct ItemFocus {
 
 impl ItemFocus {
     pub fn is_empty(&self) -> bool {
-        self.reveal.is_empty() && !self.virtual_after && self.trailing_ws.is_none()
+        self.reveal.is_empty() && !self.raw_source && !self.virtual_after && self.trailing_ws.is_none()
     }
 }
 
@@ -424,6 +455,8 @@ pub struct RoleFaces {
 /// bundled fonts; a missing bold face falls back to the regular face (no synthetic bold).
 #[derive(Clone, Default)]
 pub struct FontSet {
+    /// Optional prose faces selected for a script in Preferences.
+    pub scripts: std::collections::BTreeMap<String, RoleFaces>,
     pub body: RoleFaces,
     /// Headings; `None` = same as `body`.
     pub heading: Option<RoleFaces>,
@@ -491,6 +524,39 @@ pub fn register_families(defs: &mut FontDefinitions, set: &FontSet) {
     ] {
         defs.families.insert(FontFamily::Name(fam.into()), list);
     }
+    for (script, faces) in &set.scripts {
+        for role in [FontRole::Body, FontRole::Bold, FontRole::Heading, FontRole::HeadingBold] {
+            let bold = matches!(role, FontRole::Bold | FontRole::HeadingBold);
+            let selected = if bold && !faces.bold.is_empty() {
+                &faces.bold
+            } else {
+                &faces.regular
+            };
+            let base = role.family_name();
+            let mut names = Vec::new();
+            for (name, data) in selected {
+                defs.font_data.entry(name.clone()).or_insert_with(|| data.clone());
+                names.push(name.clone());
+            }
+            if !names.is_empty() {
+                let tail = defs
+                    .families
+                    .get(&FontFamily::Name(base.into()))
+                    .cloned()
+                    .unwrap_or_default();
+                for name in tail {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                defs.families.insert(
+                    FontFamily::Name(crate::text::fallback::script_family(base, script).into()),
+                    names,
+                );
+            }
+        }
+    }
+    crate::text::fallback::register_variants(defs);
 }
 
 #[derive(Clone)]
@@ -565,6 +631,7 @@ enum Mark {
     /// The padding is part of the run's advance (neighbours keep their distance).
     /// `stretch`: spaces inside may be widened by justification (not inside code).
     Box {
+        stroke: Stroke,
         fill: Color32,
         pad: f32,
         radius: f32,
@@ -628,6 +695,8 @@ struct InlineBuilder<'a> {
     measure: bool,
     /// Which wikilink targets exist (`None`: all shown resolved).
     link_targets: Option<&'a dyn crate::links::LinkTargets>,
+    /// How review marks are shown (issue #88).
+    review: ReviewView,
 }
 
 impl<'a> InlineBuilder<'a> {
@@ -651,7 +720,14 @@ impl<'a> InlineBuilder<'a> {
             math_width: f32::INFINITY,
             measure: false,
             link_targets: None,
+            review: ReviewView::All,
         }
+    }
+
+    /// Shows review marks as `v` says (issue #88).
+    fn review_view(mut self, v: ReviewView) -> Self {
+        self.review = v;
+        self
     }
 
     /// Styles wikilinks by whether their target exists.
@@ -962,7 +1038,20 @@ impl<'a> InlineBuilder<'a> {
     }
 
     fn node(&mut self, r: &RichInline, n: &InlineNode, st: &Style, top: bool) {
+        if n.kind == InlineKind::Comment {
+            if self.reveal.contains(&n.source) {
+                let mut muted = st.clone();
+                muted.color = color(self.theme.meta_text);
+                self.push_src(r.value(n), &muted, &n.source, true);
+            }
+            return;
+        }
         if let InlineKind::Critic(k) = n.kind {
+            if self.review.is_clean() {
+                // Final / Original (issue #88): the text as if resolved, no marks, no reveal
+                self.critic_clean(r, n, k, st);
+                return;
+            }
             let revealed = !self.reveal.is_empty() && !n.markers.is_empty() && self.reveal.contains(&n.source);
             self.critic(r, n, k, st, revealed);
             return;
@@ -996,6 +1085,27 @@ impl<'a> InlineBuilder<'a> {
     /// through, a substitution as both, highlights on the highlight colour, a comment as a
     /// small bubble with its text (one caret stop); the caret inside shows the raw source
     /// (spec 02 inline reveal), styled the same.
+    /// A review mark in the Final or Original view (issue #88): the text it resolves to, plain
+    /// (insertions and new text kept in Final, deletions and old text in Original; highlights
+    /// keep their text; comments vanish). Hidden source has no rendered piece (like an HTML
+    /// comment), so the caret steps over it.
+    fn critic_clean(&mut self, r: &RichInline, n: &InlineNode, k: CriticKind, st: &Style) {
+        let fin = self.review == ReviewView::Final;
+        match k {
+            CriticKind::Insert | CriticKind::New if fin => self.nodes(r, &n.children, st, false),
+            CriticKind::Delete | CriticKind::Old if !fin => self.nodes(r, &n.children, st, false),
+            CriticKind::Highlight => self.nodes(r, &n.children, st, false),
+            CriticKind::Substitute => {
+                for c in &n.children {
+                    if let InlineKind::Critic(ck) = c.kind {
+                        self.critic_clean(r, c, ck, st);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn critic(&mut self, r: &RichInline, n: &InlineNode, k: CriticKind, st: &Style, revealed: bool) {
         let rc = self.theme.review_colors();
         if revealed {
@@ -1037,6 +1147,10 @@ impl<'a> InlineBuilder<'a> {
                     self.critic(r, new, CriticKind::New, st, false);
                 }
             }
+            CriticKind::Highlight if self.review == ReviewView::Simple && !revealed => {
+                // Simple (issue #88): no highlight tint
+                self.nodes(r, &n.children, st, false);
+            }
             CriticKind::Highlight => {
                 let start = self.job.text.len();
                 self.pending_lead += 1.0;
@@ -1045,6 +1159,7 @@ impl<'a> InlineBuilder<'a> {
                 self.links.push((
                     start..self.job.text.len(),
                     Mark::Box {
+                        stroke: Stroke::NONE,
                         fill: color(rc.highlight_bg),
                         pad: 1.0,
                         radius: 2.0,
@@ -1083,6 +1198,7 @@ impl<'a> InlineBuilder<'a> {
                         self.links.push((
                             start..end,
                             Mark::Box {
+                                stroke: Stroke::NONE,
                                 fill: color(rc.comment_bg),
                                 pad: 2.0,
                                 radius: 3.0,
@@ -1114,6 +1230,28 @@ impl<'a> InlineBuilder<'a> {
         match &n.kind {
             InlineKind::Text => self.push_src(r.value(n), st, &n.source, st.transform == TextTransform::None),
             InlineKind::Atom => self.push_src(r.value(n), st, &n.source, false),
+            InlineKind::Comment => {} // handled before generic marker reveal
+            InlineKind::Keyboard => {
+                let mut key = st.clone();
+                key.fam = st.fam.mono();
+                key.size = (st.size * t.mono_scale).round();
+                key.color = color(t.inline_code.text);
+                key.transform = TextTransform::None;
+                let start = self.job.text.len();
+                self.pending_lead += 3.0;
+                self.nodes(r, &n.children, &key, false);
+                self.pending_lead += 3.0;
+                self.links.push((
+                    start..self.job.text.len(),
+                    Mark::Box {
+                        fill: color(t.inline_code.background),
+                        stroke: Stroke::new(1.0, color(t.rule)),
+                        pad: 3.0,
+                        radius: 3.0,
+                        stretch: false,
+                    },
+                ));
+            }
             InlineKind::Code => {
                 let c = r.value(n);
                 let mut cs = st.clone();
@@ -1136,6 +1274,7 @@ impl<'a> InlineBuilder<'a> {
                 self.links.push((
                     start..self.job.text.len(),
                     Mark::Box {
+                        stroke: Stroke::NONE,
                         fill: color(t.inline_code.background),
                         pad,
                         radius: t.inline_code.radius,
@@ -1186,6 +1325,7 @@ impl<'a> InlineBuilder<'a> {
                 self.links.push((
                     start..self.job.text.len(),
                     Mark::Box {
+                        stroke: Stroke::NONE,
                         fill: color(t.highlight_bg),
                         pad: 1.0,
                         radius: 2.0,
@@ -1329,7 +1469,13 @@ impl Out {
         for (range, mark) in &marks {
             let spans = text.ink_spans(range);
             match mark {
-                Mark::Box { fill, pad, radius, .. } => {
+                Mark::Box {
+                    fill,
+                    pad,
+                    radius,
+                    stroke,
+                    ..
+                } => {
                     for sp in spans {
                         let (c0, c1) = (self.col.0 - pos.x, self.col.1 - pos.x);
                         let rect = Rect::from_min_max(
@@ -1339,7 +1485,7 @@ impl Out {
                         self.prims.push(Prim::Rect {
                             rect: rect.translate(pos.to_vec2()),
                             fill: *fill,
-                            stroke: Stroke::NONE,
+                            stroke: *stroke,
                             radius: *radius,
                         });
                     }
@@ -1747,7 +1893,10 @@ pub fn layout_item(
     let Some(item) = model.items.get(idx) else {
         return BlockLayout::default();
     };
-    if item.kind == ItemKind::Hidden {
+    if item.kind == ItemKind::Hidden
+        || (item.raw.as_deref() == Some(&markise_doc::RawPresentation::Comment)
+            && !p.focus.is_some_and(|f| f.raw_source))
+    {
         return BlockLayout::default();
     }
     let origin = model.item_start(idx);
@@ -1768,12 +1917,15 @@ pub fn layout_item(
     };
 
     // ---- containers: indentation, quote bars, markers
-    let mut x = 0.0f32;
+    let mut x = (p.disclosure_depth.min(16) as f32 * 16.0).min(p.width * 0.4);
     let mut text_color = color(t.text);
     let mut deco: Vec<Prim> = Vec::new();
     // (x, marker) drawn after the content height is known
     let mut markers: Vec<(f32, f32, MarkerKind)> = Vec::new();
     let mut quote_bars: Vec<(f32, Color32, bool)> = Vec::new();
+    if p.disclosure_depth > 0 {
+        quote_bars.push(((x - 8.0).max(0.0), color(t.rule), false));
+    }
     let mut quote_bgs: Vec<(f32, bool)> = Vec::new();
     let mut alert_title: Option<(usize, String)> = None;
     let mut in_alert_first = false;
@@ -1854,6 +2006,56 @@ pub fn layout_item(
     // whether the first line is text (not a block image): markers centre on its glyphs
     let mut first_is_text = true;
     match &item.kind {
+        _ if item.raw.is_some() && p.focus.is_some_and(|f| f.raw_source) => {
+            y = code_box(
+                &mut out,
+                shaper,
+                t,
+                &t.meta_block,
+                &lines,
+                origin,
+                item.segment.as_ref(),
+                text,
+                "html",
+                x,
+                y,
+                width,
+            );
+        }
+        _ if p.disclosure.is_some() => {
+            let (title, open) = p.disclosure.unwrap();
+            let mut st = Style::base(t.font_size, line_px, text_color);
+            st.fam = FontRole::Bold;
+            let mut job = StyledText::single(title.to_owned(), st.text_style());
+            let mut map = SourceMap::default();
+            map.push(0..job.text.len() as u32, 0..0, PieceKind::Synthetic);
+            job.source_map = Some(Arc::new(map));
+            let g = shaper.shape(&job, wrapped((width - 36.0).max(1.0)));
+            let h = g.size().y + 12.0;
+            let rect = Rect::from_min_size(pos2(x, y), vec2(width, h));
+            out.prims.push(Prim::Rect {
+                rect,
+                fill: color(t.meta_block.background),
+                stroke: Stroke::new(1.0, color(t.rule)),
+                radius: 4.0,
+            });
+            let center = pos2(x + 14.0, y + h / 2.0);
+            let offsets = if open {
+                [[-4.0, -2.0], [4.0, -2.0], [0.0, 3.0]]
+            } else {
+                [[-2.0, -4.0], [-2.0, 4.0], [3.0, 0.0]]
+            };
+            out.prims.push(Prim::Path {
+                points: offsets.into_iter().map(|[dx, dy]| center + vec2(dx, dy)).collect(),
+                closed: true,
+                fill: text_color,
+                stroke: Stroke::NONE,
+                dash: None,
+            });
+            out.text(pos2(x + 28.0, y + 6.0), g, Vec::new(), FragmentId::label());
+            toggle = Some(rect);
+            y += h;
+        }
         ItemKind::Paragraph => {
             // a segment of a very large paragraph shows its line pieces: inline markup
             // spanning segment borders is not matched (documented approximation)
@@ -1875,6 +2077,7 @@ pub fn layout_item(
                 let mut b = InlineBuilder::new(t, model, true)
                     .with_math(images, p.ppp, width)
                     .with_links(p.links)
+                    .review_view(p.review)
                     .reveal(&text[origin..], p.focus);
                 if quote_prefix_here
                     && item.segment.as_ref().is_none_or(BlockSegment::first)
@@ -1954,6 +2157,7 @@ pub fn layout_item(
             let mut b = InlineBuilder::new(t, model, false)
                 .with_math(images, p.ppp, width)
                 .with_links(p.links)
+                .review_view(p.review)
                 .reveal(&text[origin..], p.focus);
             let head_font = st.text_style();
             if let Some(pre) = d
@@ -2185,6 +2389,7 @@ pub fn layout_item(
                 p.ppp,
                 p.focus,
                 p.links,
+                p.review,
             );
         }
         ItemKind::Rule => {
@@ -2245,7 +2450,7 @@ pub fn layout_item(
         }
         ItemKind::Toc => {
             let st = Style::base(t.font_size, line_px, color(t.link));
-            let min_level = model.outline.iter().map(|o| o.level).min().unwrap_or(1);
+            let min_level = model.outline_min_level();
             if model.outline.is_empty() {
                 let mut e = st.clone();
                 e.color = color(t.meta_text);
@@ -2298,7 +2503,7 @@ pub fn layout_item(
             empty_anchor = Some((Rect::from_min_size(pos2(x, y), vec2(0.0, line_px)), rel));
             y += line_px;
         }
-        ItemKind::Hidden => {}
+        ItemKind::Hidden | ItemKind::Page(_) => {}
     }
     let content_bottom = y;
 
@@ -2459,6 +2664,7 @@ pub fn layout_item(
     }
     BlockLayout {
         height,
+        gap,
         prims,
         links,
         toggle,
@@ -2984,6 +3190,7 @@ fn layout_table(
     ppp: f32,
     focus: Option<&ItemFocus>,
     links: &dyn crate::links::LinkTargets,
+    review: ReviewView,
 ) -> f32 {
     let src = doc.text().get(origin..).unwrap_or("");
     let Some(table) = doc.table(origin) else {
@@ -3030,11 +3237,18 @@ fn layout_table(
                 let mut b = InlineBuilder::new(t, model, false)
                     .with_math(images, ppp, mw)
                     .with_links(links)
+                    .review_view(review)
                     .measuring(measure)
                     .reveal(src, focus);
                 b.nodes(&rich, &rich.nodes, &st, true);
                 if let Some(&span) = spans.get(ci) {
                     b.trailing_ws(span.end.saturating_sub(origin) as u32, &st);
+                    // issue #163: an empty cell is one caret stop at its (empty) span, so it
+                    // can be clicked, tabbed into and typed in
+                    if b.job.text.is_empty() {
+                        let at = span.start.saturating_sub(origin) as u32;
+                        b.push_src(" ", &st, &(at..at), false);
+                    }
                 }
                 let (mut job, links) = b.take();
                 if job.text.is_empty() {
@@ -3045,7 +3259,7 @@ fn layout_table(
             .collect()
     };
     let estimated: Option<&[u32]> = match seg {
-        Some(BlockSegment::Rows { col_chars, .. }) => Some(col_chars),
+        Some(BlockSegment::Rows { data, .. }) => Some(&data.col_chars),
         _ => None,
     };
     // small tables: shape every row for natural widths; segmented: the model's estimate

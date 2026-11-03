@@ -1,34 +1,38 @@
 //! "Does the document contain a review comment?" for the comment gutter (ADR 0012, issue #91),
 //! tracked incrementally and without copying the text.
 //!
-//! - When the document object is new (open, reload, re-parse) the text is scanned in place, in
-//!   chunks of at most [`CHUNK_BYTES`] or [`CHUNK_TIME`] per frame, from the start until the
-//!   first comment is found.
+//! - When the document object is new (open, reload, re-parse) the text is scanned in place
+//!   from the start until the first comment is found. The first step (about
+//!   [`STEP_BYTES`] or [`STEP_TIME`]) runs at once on the UI thread, so a small document, or
+//!   one with a comment near its start, is answered in the same frame; the rest of a larger
+//!   document is scanned by a [`CommentScanner`] thread (issue #138), which borrows the
+//!   session's document through a lease (the session takes it back before every edit, so the
+//!   scan never copies the document and an edit waits at most one step) and wakes the UI once
+//!   when it has the answer. No frame is requested while it scans.
 //! - After an edit nothing is looked at unless the edit was review-relevant (the session's
 //!   [`ReviewEdits`]: the edit's removed or inserted text, with a few bytes around it, holds a
 //!   comment delimiter or block syntax that could turn a comment into code). Then the leaf of
 //!   the edit is checked first (inserting a comment flips the answer to "yes" without a scan);
-//!   only otherwise is the chunked scan run again (e.g. after deleting a comment: was it the
-//!   last one?).
+//!   only otherwise is the scan run again (e.g. after deleting a comment: was it the last
+//!   one?).
 //! - Evaluations start at most every [`RECHECK`] seconds, so the layout does not jump per
 //!   keystroke; between them the last answer stands.
-//! - Any edit drops a running scan (its byte position means nothing in the new text); it
-//!   starts over from the beginning.
+//! - Any edit drops a running scan (its document is gone; the edit took the scanner's loan
+//!   back); it starts over from the beginning.
 //! - Safety net for what the triggers miss (e.g. unindenting a code line that holds a
 //!   comment): once the document has been idle for [`IDLE_RESCAN`] seconds and was edited
-//!   since its last full scan, the chunked scan runs again. Staleness is thus bounded to a few
+//!   since its last full scan, the scan runs again. Staleness is thus bounded to a few
 //!   seconds in every case.
+//! - If the scanner thread cannot be started, the rest of the scan runs here, one step per
+//!   frame (the behaviour before #138).
 
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use markise_doc::review::marks_near;
 use markise_doc::{CriticKind, FormatDoc};
-use markise_engine::editor::ReviewEdits;
+use markise_engine::comment_scan::{CommentScanner, STEP_BYTES, STEP_TIME, Step, floor, scan_step};
+use markise_engine::editor::{EditorSession, ReviewEdits};
 
-/// Most text bytes scanned in one frame.
-pub const CHUNK_BYTES: usize = 256 * 1024;
-/// Most time spent scanning in one frame.
-pub const CHUNK_TIME: Duration = Duration::from_millis(2);
 /// Evaluations start at most this often (seconds).
 pub const RECHECK: f64 = 0.4;
 /// Safety net: after this long without edits (seconds), a document edited since its last full
@@ -42,13 +46,21 @@ fn key_of(r: &ReviewEdits) -> Key {
     (r.relevant, r.replaced)
 }
 
-/// A chunked scan in progress, valid only for the text revision it started on.
+/// Where the rest of a scan runs.
+#[derive(Debug, Clone, Copy)]
+enum Rest {
+    /// On the scanner thread, as this job.
+    Scanner(u64),
+    /// Here, one step per frame, from this byte (the thread could not be started).
+    Here(usize),
+}
+
+/// A scan in progress, valid only for the text revision it started on.
 #[derive(Debug, Clone, Copy)]
 struct Scan {
     key: Key,
     rev: u64,
-    /// Next byte to look at.
-    pos: usize,
+    rest: Rest,
 }
 
 #[derive(Debug, Default)]
@@ -66,24 +78,42 @@ pub struct CommentPresence {
     last_edit: f64,
     /// The text revision the last full scan completed on.
     scanned_rev: Option<u64>,
-    /// Full (chunked) scans started (test seam).
+    /// The scanner thread (started at the first scan that needs it; `Err` when it could not
+    /// start).
+    scanner: Option<Result<CommentScanner, ()>>,
+    /// The last job given to the scanner.
+    job: u64,
+    /// Full scans started (test seam).
     pub scans: u64,
-    /// Text bytes scanned by them (test seam).
+    /// Text bytes read by them (test seam; the scanner's share once it has answered).
     pub scanned: u64,
 }
 
-/// What one scan step found.
-enum Step {
-    Found,
-    None,
-    More(usize),
-}
-
 impl CommentPresence {
-    /// The answer for the document `doc` at text revision `rev`, whose session reports
-    /// `review`, at time `now`; and, when more work is due, the seconds until the next frame
-    /// should run.
-    pub fn poll(&mut self, doc: &dyn FormatDoc, review: ReviewEdits, rev: u64, now: f64) -> (bool, Option<f64>) {
+    /// The answer for the document of `session` at time `now`; and, when more work is due on
+    /// this thread, the seconds until the next frame should run. A scan running on the
+    /// scanner thread wakes `ctx` once when it has the answer.
+    pub fn poll(&mut self, session: &mut EditorSession, now: f64, ctx: &egui::Context) -> (bool, Option<f64>) {
+        let doc = session.doc_arc().clone();
+        let out = self.poll_doc(&doc, session.review_edits(), session.revision().counter, now, ctx);
+        drop(doc);
+        if let Some(Ok(s)) = &self.scanner {
+            // before the next edit: the session takes the scanner's loan back first
+            session.add_doc_lease(s.lease().clone());
+        }
+        out
+    }
+
+    /// [`CommentPresence::poll`] for the document `doc` at text revision `rev`, whose session
+    /// reports `review`.
+    fn poll_doc(
+        &mut self,
+        doc: &Arc<dyn FormatDoc>,
+        review: ReviewEdits,
+        rev: u64,
+        now: f64,
+        ctx: &egui::Context,
+    ) -> (bool, Option<f64>) {
         let key = key_of(&review);
         self.wanted = Some(key);
         if self.rev != Some(rev) {
@@ -94,11 +124,11 @@ impl CommentPresence {
         }
         if let Some(s) = self.scan {
             if s.rev == rev && s.key == key {
-                return self.step(doc, s);
+                return self.resume(doc.as_ref(), s);
             }
-            // any edit, relevant or not, moves text under the scan's position: drop it; it
-            // starts over below (debounced), or, if it was the idle safety net's, after the
-            // next idle period
+            // any edit, relevant or not, replaced the document under the scan (and took the
+            // scanner's loan back): drop it; it starts over below (debounced), or, if it was
+            // the idle safety net's, after the next idle period
             self.scan = None;
         }
         if self.seen != Some(key) {
@@ -111,14 +141,16 @@ impl CommentPresence {
             if !replaced {
                 // an edit that could add or remove a comment: its own leaf first
                 let at = floor(doc.text(), review.last_at);
-                if marks_near(doc, at).iter().any(|m| m.kind == CriticKind::Comment) {
+                if marks_near(doc.as_ref(), at)
+                    .iter()
+                    .any(|m| m.kind == CriticKind::Comment)
+                {
                     self.has = true;
                     self.seen = Some(key);
                     return (true, None);
                 }
             }
-            self.scans += 1;
-            return self.step(doc, Scan { key, rev, pos: 0 });
+            return self.start(doc, key, rev, ctx);
         }
         // up to date as far as the triggers know; the safety net for what they miss
         if self.scanned_rev != Some(rev) {
@@ -126,8 +158,7 @@ impl CommentPresence {
             if idle > 0.0 {
                 return (self.has, Some(idle));
             }
-            self.scans += 1;
-            return self.step(doc, Scan { key, rev, pos: 0 });
+            return self.start(doc, key, rev, ctx);
         }
         (self.has, None)
     }
@@ -144,79 +175,65 @@ impl CommentPresence {
         !self.pending() && self.scanned_rev == self.rev
     }
 
-    fn step(&mut self, doc: &dyn FormatDoc, s: Scan) -> (bool, Option<f64>) {
-        match scan_chunk(doc, s.pos, &mut self.scanned) {
-            Step::Found => self.finish(s, true),
-            Step::None => self.finish(s, false),
-            Step::More(pos) => {
-                self.scan = Some(Scan { pos, ..s });
-                (self.has, Some(0.0))
+    /// Starts a full scan: its first step here, the rest on the scanner thread.
+    fn start(&mut self, doc: &Arc<dyn FormatDoc>, key: Key, rev: u64, ctx: &egui::Context) -> (bool, Option<f64>) {
+        self.scans += 1;
+        let pos = match scan_step(doc.as_ref(), 0, STEP_BYTES, STEP_TIME, &mut self.scanned) {
+            Step::Found => return self.finish(key, rev, true),
+            Step::None => return self.finish(key, rev, false),
+            Step::More(pos) => pos,
+        };
+        if self.scanner.is_none() {
+            let c = ctx.clone();
+            self.scanner = Some(CommentScanner::spawn(Arc::new(move || c.request_repaint())).map_err(|_| ()));
+        }
+        let rest = match &self.scanner {
+            Some(Ok(s)) => {
+                self.job += 1;
+                s.scan(self.job, pos, doc.clone());
+                Rest::Scanner(self.job)
             }
+            _ => Rest::Here(pos),
+        };
+        self.scan = Some(Scan { key, rev, rest });
+        (self.has, matches!(rest, Rest::Here(_)).then_some(0.0))
+    }
+
+    /// Continues the scan `s` of `doc`: picks up the scanner's answer, or runs a step here.
+    fn resume(&mut self, doc: &dyn FormatDoc, s: Scan) -> (bool, Option<f64>) {
+        match s.rest {
+            Rest::Scanner(job) => {
+                let r = match &self.scanner {
+                    Some(Ok(w)) => w.report(),
+                    _ => Default::default(),
+                };
+                if r.job != job {
+                    // still scanning: the scanner wakes the UI when it has the answer
+                    return (self.has, None);
+                }
+                self.scanned += r.scanned;
+                self.finish(s.key, s.rev, r.found)
+            }
+            Rest::Here(pos) => match scan_step(doc, pos, STEP_BYTES, STEP_TIME, &mut self.scanned) {
+                Step::Found => self.finish(s.key, s.rev, true),
+                Step::None => self.finish(s.key, s.rev, false),
+                Step::More(pos) => {
+                    self.scan = Some(Scan {
+                        rest: Rest::Here(pos),
+                        ..s
+                    });
+                    (self.has, Some(0.0))
+                }
+            },
         }
     }
 
-    fn finish(&mut self, s: Scan, has: bool) -> (bool, Option<f64>) {
+    fn finish(&mut self, key: Key, rev: u64, has: bool) -> (bool, Option<f64>) {
         self.has = has;
-        self.seen = Some(s.key);
-        self.scanned_rev = Some(s.rev);
+        self.seen = Some(key);
+        self.scanned_rev = Some(rev);
         self.scan = None;
         (has, None)
-    }
-}
-
-/// The char boundary at or before `i` (clamped to the text).
-fn floor(text: &str, i: usize) -> usize {
-    let mut i = i.min(text.len());
-    while !text.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-/// The char boundary at or after `i` (clamped to the text).
-fn ceil(text: &str, i: usize) -> usize {
-    let mut i = i.min(text.len());
-    while !text.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
-
-/// Scans `doc`'s text in place from `pos` for a comment, within one frame's budget.
-fn scan_chunk(doc: &dyn FormatDoc, pos: usize, scanned: &mut u64) -> Step {
-    let text = doc.text();
-    let started = Instant::now();
-    let pos = floor(text, pos);
-    let end = ceil(text, pos + CHUNK_BYTES);
-    // openers starting before `end` (the window reaches two bytes past it)
-    let win_end = ceil(text, end + 2);
-    let mut from = pos;
-    while from < end {
-        let Some(rel) = text[from..win_end].find("{>>") else {
-            break;
-        };
-        let at = from + rel;
-        if at >= end {
-            break;
-        }
-        if marks_near(doc, at).iter().any(|m| m.kind == CriticKind::Comment) {
-            *scanned += (at - pos) as u64;
-            return Step::Found;
-        }
-        // the rest of that leaf has been looked at
-        let next = doc.leaf(at).map_or(at + 3, |l| l.span.end.max(at + 3));
-        from = ceil(text, next);
-        if started.elapsed() >= CHUNK_TIME && from < end {
-            *scanned += (from - pos) as u64;
-            return Step::More(from);
-        }
-    }
-    let done = end.max(from);
-    *scanned += (done.min(text.len()) - pos) as u64;
-    if done >= text.len() {
-        Step::None
-    } else {
-        Step::More(done)
     }
 }
 
@@ -224,13 +241,20 @@ fn scan_chunk(doc: &dyn FormatDoc, pos: usize, scanned: &mut u64) -> Step {
 mod tests {
     use super::*;
     use markise_doc::{DocumentFormat, FormatOptions};
+    use markise_engine::comment_scan::has_comment;
+    use std::time::{Duration, Instant};
 
-    fn doc(text: &str) -> Box<dyn FormatDoc> {
-        let opts = markise_md::ParseOptions {
-            critic_markup: true,
-            ..Default::default()
-        };
-        markise_md::MarkdownFormat { opts }.parse(text.to_string(), &FormatOptions::default())
+    fn format() -> markise_md::MarkdownFormat {
+        markise_md::MarkdownFormat {
+            opts: markise_md::ParseOptions {
+                critic_markup: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn doc(text: &str) -> Arc<dyn FormatDoc> {
+        Arc::from(format().parse(text.to_string(), &FormatOptions::default()))
     }
 
     fn rev(relevant: u64, replaced: u64, last_at: usize) -> ReviewEdits {
@@ -241,17 +265,27 @@ mod tests {
         }
     }
 
-    /// Polls frame after frame (16 ms apart) until no work is due right now; returns the
-    /// answer and the time reached. Idle-net waits (> 0.1 s) end the loop.
-    fn run(p: &mut CommentPresence, d: &dyn FormatDoc, r: ReviewEdits, text_rev: u64, mut now: f64) -> (bool, f64) {
-        for _ in 0..100_000 {
-            let (has, more) = p.poll(d, r, text_rev, now);
+    /// Polls frame after frame (16 ms apart) until no work is due right now, waiting (in real
+    /// time, egui time standing still) while the scanner thread works; returns the answer and
+    /// the time reached. Idle-net waits (> 0.1 s) end the loop.
+    fn run(
+        p: &mut CommentPresence,
+        d: &Arc<dyn FormatDoc>,
+        r: ReviewEdits,
+        text_rev: u64,
+        mut now: f64,
+    ) -> (bool, f64) {
+        let ctx = egui::Context::default();
+        let t = Instant::now();
+        loop {
+            let (has, more) = p.poll_doc(d, r, text_rev, now, &ctx);
             match more {
                 Some(w) if w <= RECHECK + 1e-9 => now += w.max(0.016),
+                None if p.scan.is_some() => std::thread::sleep(Duration::from_millis(1)),
                 _ => return (has, now),
             }
+            assert!(t.elapsed() < Duration::from_secs(60), "no answer");
         }
-        panic!("no answer")
     }
 
     #[test]
@@ -267,73 +301,109 @@ mod tests {
         ] {
             let d = doc(src);
             let mut p = CommentPresence::default();
-            assert_eq!(run(&mut p, d.as_ref(), rev(0, 0, 0), 0, 0.0).0, want, "{src:?}");
+            assert_eq!(run(&mut p, &d, rev(0, 0, 0), 0, 0.0).0, want, "{src:?}");
         }
     }
 
+    /// Issue #138: the first step of a scan runs at once here; the rest of a large document is
+    /// scanned by the scanner thread, with no frame requested meanwhile, and the scanner
+    /// wakes the UI once when it has the answer.
     #[test]
-    fn large_documents_are_scanned_in_chunks() {
+    fn large_documents_are_scanned_off_the_ui_thread_without_repaints() {
         let para = "Some ordinary words in a paragraph of the document.\n\n";
-        let mut src = para.repeat(3 * CHUNK_BYTES / para.len());
+        let mut src = para.repeat(12 * STEP_BYTES / para.len());
         src.push_str("End {>>last<<}.\n");
         let d = doc(&src);
+        let ctx = egui::Context::default();
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let w = wakes.clone();
+        ctx.set_request_repaint_callback(move |_| {
+            w.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
         let mut p = CommentPresence::default();
-        let (has, more) = p.poll(d.as_ref(), rev(0, 0, 0), 0, 0.0);
-        assert!(!has && more.is_some(), "not all in one frame");
-        assert!(p.scanned as usize <= CHUNK_BYTES + 8);
-        assert!(run(&mut p, d.as_ref(), rev(0, 0, 0), 0, 0.0).0);
+        assert_eq!(
+            p.poll_doc(&d, rev(0, 0, 0), 0, 0.0, &ctx),
+            (false, None),
+            "no frame asked for"
+        );
+        assert!(p.pending());
+        assert!(p.scanned as usize <= STEP_BYTES + 8, "one step here: {}", p.scanned);
+        let t = Instant::now();
+        let mut frames = 0;
+        while p.pending() {
+            // frames for other reasons (input) while the scanner works: none asks for another
+            let (_, more) = p.poll_doc(&d, rev(0, 0, 0), 0, 0.0, &ctx);
+            assert_eq!(more, None, "frame {frames} asked for a repaint while scanning");
+            frames += 1;
+            assert!(t.elapsed() < Duration::from_secs(60), "no answer");
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        assert!(p.poll_doc(&d, rev(0, 0, 0), 0, 0.0, &ctx).0);
+        // the report is published just before the wake: wait for the wake itself
+        let t = Instant::now();
+        while wakes.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(t.elapsed() < Duration::from_secs(10), "no wake for the answer");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            wakes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one wake: the answer"
+        );
         assert_eq!(p.scans, 1);
+        assert!(p.scanned as usize >= src.len() - 32, "{} of {}", p.scanned, src.len());
+        assert_eq!(
+            p.poll_doc(&d, rev(0, 0, 0), 0, 9.0, &ctx),
+            (true, None),
+            "idle afterwards"
+        );
     }
 
-    /// Codex round 3: an edit during a scan (here an ASCII insert before its position in
-    /// Cyrillic text, which shifts every later byte by one) must not slice inside a character;
-    /// the scan starts over and still finds the comment.
+    /// Codex round 3 of #94: an edit during a scan (here an ASCII insert before its position
+    /// in Cyrillic text, which shifts every later byte by one) drops it; the scan starts over
+    /// and still finds the comment.
     #[test]
     fn an_edit_during_a_scan_restarts_it_safely_in_cyrillic_text() {
         let para = "Обычный абзац русского текста, достаточно длинный для переноса строки.\n\n";
-        let mut src = para.repeat(3 * CHUNK_BYTES / para.len());
+        let mut src = para.repeat(6 * STEP_BYTES / para.len());
         src.push_str("Конец {>>заметка<<}.\n");
         let d = doc(&src);
+        let ctx = egui::Context::default();
         let mut p = CommentPresence::default();
-        let (has, more) = p.poll(d.as_ref(), rev(0, 0, 0), 0, 0.0);
-        assert!(!has && more.is_some(), "mid-scan");
+        let (has, _) = p.poll_doc(&d, rev(0, 0, 0), 0, 0.0, &ctx);
+        assert!(!has && p.pending(), "mid-scan");
         // an ordinary (not review-relevant) edit: one ASCII byte at the start
-        let edited = format!("x{src}");
-        let d2 = doc(&edited);
+        let d2 = doc(&format!("x{src}"));
         for k in 0..4 {
             // a few frames right after the edit, then later: no panic, and the answer comes
-            let _ = p.poll(d2.as_ref(), rev(0, 0, 0), 1, 0.016 * k as f64);
+            let _ = p.poll_doc(&d2, rev(0, 0, 0), 1, 0.016 * k as f64, &ctx);
         }
-        assert!(run(&mut p, d2.as_ref(), rev(0, 0, 0), 1, 1.0).0);
-        // the scanner itself clamps any position to a character boundary
-        let mut n = 0;
-        for pos in 0..64 {
-            let _ = scan_chunk(d2.as_ref(), pos, &mut n);
-        }
+        assert!(run(&mut p, &d2, rev(0, 0, 0), 1, 1.0).0);
     }
 
     #[test]
     fn edits_reevaluate_only_when_relevant_and_debounced() {
+        let ctx = egui::Context::default();
         let d = doc("a {>>note<<} b\n");
         let mut p = CommentPresence::default();
-        assert!(run(&mut p, d.as_ref(), rev(0, 0, 0), 0, 0.0).0);
+        assert!(run(&mut p, &d, rev(0, 0, 0), 0, 0.0).0);
         assert_eq!(p.scans, 1);
         // no edits: no work at all, ever
         for t in 1..50 {
-            assert_eq!(p.poll(d.as_ref(), rev(0, 0, 0), 0, t as f64), (true, None));
+            assert_eq!(p.poll_doc(&d, rev(0, 0, 0), 0, t as f64, &ctx), (true, None));
         }
         assert_eq!(p.scans, 1);
         // a relevant edit inside the comment's leaf: answered by the local check, no scan
-        assert!(p.poll(d.as_ref(), rev(1, 0, 5), 1, 100.0).0);
+        assert!(p.poll_doc(&d, rev(1, 0, 5), 1, 100.0, &ctx).0);
         assert_eq!(p.scans, 1);
         // the comment deleted: the local check misses, a scan confirms none is left
         let d2 = doc("a b\n");
-        let (_, wait) = p.poll(d2.as_ref(), rev(2, 0, 2), 2, 100.1);
+        let (_, wait) = p.poll_doc(&d2, rev(2, 0, 2), 2, 100.1, &ctx);
         assert!(wait.is_some(), "debounced");
-        assert!(!run(&mut p, d2.as_ref(), rev(2, 0, 2), 2, 100.6).0);
+        assert!(!run(&mut p, &d2, rev(2, 0, 2), 2, 100.6).0);
         assert_eq!(p.scans, 2);
         // a replaced document: scanned again
-        assert!(run(&mut p, d.as_ref(), rev(2, 1, 0), 3, 200.0).0);
+        assert!(run(&mut p, &d, rev(2, 1, 0), 3, 200.0).0);
         assert_eq!(p.scans, 3);
     }
 
@@ -341,21 +411,92 @@ mod tests {
     /// relevance trigger; the idle safety net finds it a few seconds later.
     #[test]
     fn the_idle_rescan_catches_what_the_triggers_miss() {
+        let ctx = egui::Context::default();
         let d = doc("    Here is {>>note<<}\n");
         let mut p = CommentPresence::default();
-        assert!(!run(&mut p, d.as_ref(), rev(0, 0, 0), 0, 0.0).0, "code: no comment");
+        assert!(!run(&mut p, &d, rev(0, 0, 0), 0, 0.0).0, "code: no comment");
         assert_eq!(p.scans, 1);
         // unindented (an edit the triggers do not see): nothing changes while it is recent
         let d2 = doc("Here is {>>note<<}\n");
-        let (has, wait) = p.poll(d2.as_ref(), rev(0, 0, 0), 1, 10.0);
+        let (has, wait) = p.poll_doc(&d2, rev(0, 0, 0), 1, 10.0, &ctx);
         assert!(!has);
         assert!((wait.unwrap() - IDLE_RESCAN).abs() < 1e-9, "{wait:?}");
-        assert!(!p.poll(d2.as_ref(), rev(0, 0, 0), 1, 11.0).0);
+        assert!(!p.poll_doc(&d2, rev(0, 0, 0), 1, 11.0, &ctx).0);
         // idle long enough: rescanned, found
-        assert!(p.poll(d2.as_ref(), rev(0, 0, 0), 1, 12.1).0);
+        assert!(p.poll_doc(&d2, rev(0, 0, 0), 1, 12.1, &ctx).0);
         assert_eq!(p.scans, 2);
         // and not again while nothing changes
-        assert_eq!(p.poll(d2.as_ref(), rev(0, 0, 0), 1, 30.0), (true, None));
+        assert_eq!(p.poll_doc(&d2, rev(0, 0, 0), 1, 30.0, &ctx), (true, None));
         assert_eq!(p.scans, 2);
+    }
+
+    /// Issue #138: with a real session, after random edits (made while the scanner works on a
+    /// large document), the settled answer equals a full scan, and no edit copied the
+    /// document (the session took the scanner's loan back first).
+    #[test]
+    fn answers_equal_a_full_scan_after_random_session_edits() {
+        let para = "An ordinary paragraph with `code` and *emphasis* in it.\n\n";
+        let mut src = para.repeat(3 * STEP_BYTES / para.len());
+        src.push_str("Tail {>>the only comment<<} here.\n");
+        let mut s = EditorSession::new(Arc::new(format()), src);
+        let ctx = egui::Context::default();
+        let mut p = CommentPresence::default();
+        let mut now = 0.0;
+        let settle = |p: &mut CommentPresence, s: &mut EditorSession, now: &mut f64| {
+            let t = Instant::now();
+            loop {
+                let (has, more) = p.poll(s, *now, &ctx);
+                if p.settled() {
+                    return has;
+                }
+                match more {
+                    Some(w) => *now += w.max(0.016),
+                    None => std::thread::sleep(Duration::from_millis(1)),
+                }
+                assert!(t.elapsed() < Duration::from_secs(60), "never settled");
+            }
+        };
+        assert!(settle(&mut p, &mut s, &mut now));
+        let inserts = [
+            "{>>x<<}", "{>>", "<<}", "`", "\n```\n", "\n\n", "    ", " plain ", "\n~~~\n",
+        ];
+        let mut x = 41u64;
+        let mut next = || {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 33) as usize
+        };
+        let (mut yes, mut no) = (0, 0);
+        for round in 0..40 {
+            for _ in 0..1 + next() % 3 {
+                let text = s.doc().text();
+                let at = match next() % 3 {
+                    0 => text.find("{>>").unwrap_or(0),
+                    1 => text.rfind("<<}").unwrap_or(text.len()),
+                    _ => next() % (text.len() + 1),
+                };
+                let at = floor(text, at);
+                let end = floor(text, (at + next() % 12).min(text.len()));
+                let ins = inserts[next() % inserts.len()];
+                let range = if next() % 3 == 0 { at..end } else { at..at };
+                // now and then a fresh comment at the start, before anything that could hide it
+                let (range, ins) = if next() % 7 == 0 {
+                    (0..0, "Fresh {>>note<<} text.\n\n")
+                } else {
+                    (range, ins)
+                };
+                let ps = markise_doc::PatchSet::new(vec![markise_doc::Patch::verbatim(range, ins)]).unwrap();
+                s.apply_external(&ps, "edit", false).unwrap();
+                // a frame or two between edits: scans start and are dropped
+                now += 0.5;
+                let _ = p.poll(&mut s, now, &ctx);
+            }
+            if round % 2 == 0 {
+                let has = settle(&mut p, &mut s, &mut now);
+                assert_eq!(has, has_comment(s.doc()), "round {round}");
+                if has { yes += 1 } else { no += 1 }
+            }
+        }
+        assert!(yes > 0 && no > 0, "both answers were exercised: {yes} yes, {no} no");
+        assert_eq!(s.copies, 0, "no edit copied the document");
     }
 }

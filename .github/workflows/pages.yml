@@ -1,6 +1,12 @@
-# Deploy the static website in site/ to GitHub Pages. Manually triggered only: the repository is
-# private, and GitHub Pages for private repositories needs a paid plan (Pro/Team/Enterprise).
+# Build the website (site/ plus the user guide in docs/user/) with `cargo xtask site` and deploy
+# it to GitHub Pages. Manually triggered only (Actions > Pages > Run workflow): publishing the
+# public site is an owner decision. The generator renders the guide with Markise's own
+# Markdown/HTML crates and fails on any broken local link, image or #fragment, so a broken
+# site is never uploaded. CI runs the same build on pull requests (ci.yml, lint job).
 # Before the first run: Settings > Pages > Build and deployment > Source = "GitHub Actions".
+# The site currently lives at https://adjioev.github.io/markise-site/ (the canonical and Open
+# Graph URLs in site/index.html); deploying from this repository serves it under
+# https://adjioev.github.io/markise/ instead, so update those URLs when switching.
 # Required secrets: none.
 name: Pages
 
@@ -19,15 +25,22 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: pages
+      - name: Asset attribution
+        run: cargo run --locked --package xtask -- assets
+      - name: Build the site and check its links
+        run: cargo run --locked --package xtask -- site --out target/site
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: site
+          path: target/site
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

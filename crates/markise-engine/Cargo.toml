@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+regex = "1.12"
 markise-doc.workspace = true
 markise-md.workspace = true
 markise-layout.workspace = true
@@ -15,7 +16,11 @@ notify.workspace = true
 trash.workspace = true
 tempfile.workspace = true
 similar.workspace = true
+# content identity of texts and files (src/save.rs)
+ahash.workspace = true
 serde_json.workspace = true
+# update check: version precedence (src/update.rs)
+semver.workspace = true
 unicode-segmentation.workspace = true
 unicode-normalization.workspace = true
 epaint.workspace = true
@@ -61,4 +66,8 @@ harness = false
 
 [[bench]]
 name = "count"
+harness = false
+
+[[bench]]
+name = "search"
 harness = false

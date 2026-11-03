@@ -12,7 +12,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use egui::{
-    Color32, CornerRadius, CursorIcon, Event, EventFilter, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
+    Color32, CornerRadius, CursorIcon, Event, EventFilter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
+    pos2, vec2,
 };
 use markise_doc::{ContainerKind, DocPos, DocumentFormat, FormatDoc, Params, PatchSet, Selection, planners};
 use markise_engine::editor::keymap::{Chord, Keymap, Platform};
@@ -23,11 +24,14 @@ use markise_layout::{DocModel, TextShaper, View};
 use markise_theme::Theme;
 
 use crate::images::TextureStore;
+use crate::smooth_scroll::{self, SmoothScroll};
 use crate::text_paint::ParleyText;
 
+mod card_edit;
 mod code_tools;
 mod comment_place;
 mod comment_presence;
+mod scrollbar;
 pub use code_tools::{LangEdit, LangItem, ShownTools, lang_matches};
 
 const SCROLLBAR_W: f32 = 10.0;
@@ -57,6 +61,8 @@ pub struct ViewerOutput {
     pub review: Option<(&'static str, Option<usize>)>,
     /// PROTOTYPE (block snapshots): a block image was clicked; source offset of its `:::` line.
     pub goto_source: Option<usize>,
+    /// Wheel / trackpad scrolling moved the document this frame (smooth scrolling included).
+    pub wheel_scrolled: bool,
 }
 
 /// The suggestion under the pointer and its floating Accept / Reject bar (ADR 0012).
@@ -112,6 +118,14 @@ pub const CONTEXT_COMMANDS: &[Option<&str>] = &[
     Some("review.rejectAll"),
 ];
 
+/// Commands that ask for input in an app dialog before they run (issue #164): their shortcut
+/// and context menu item hand them to the app ([`DocViewer::take_app_command`]).
+pub const ASKING_COMMANDS: &[&str] = &["table.insert"];
+
+/// Commands that act on the whole document: unavailable while it holds only the first part of
+/// its file (progressive open, issue #126; they would leave the rest unchanged).
+pub const WHOLE_DOCUMENT_COMMANDS: &[&str] = &["review.acceptAll", "review.rejectAll"];
+
 /// Selection granularity of a pointer drag (single, double, triple click).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Unit {
@@ -127,7 +141,12 @@ struct Drag {
     unit: Unit,
 }
 
+pub(crate) type FindMatches = (u64, Arc<Vec<std::ops::Range<usize>>>, Option<usize>);
+
 pub struct DocViewer {
+    pub(crate) find_rects: Vec<Rect>,
+    pub(crate) find_matches: Option<FindMatches>,
+    pub(crate) find_reveal: bool,
     /// The editing session and its view.
     pub ed: EditorView,
     /// Font generation the view was last told about.
@@ -137,14 +156,24 @@ pub struct DocViewer {
     /// egui time of the last caret activity (blink phase, blink timeout).
     blink_from: f64,
     drag: Option<Drag>,
-    /// A press on a task checkbox (item, list item ordinal) waiting for its release.
-    task_press: Option<(usize, u16)>,
+    /// A press on a task checkbox waiting for its release: its item by source position
+    /// (start, ordinal among items starting there: indices shift when a paged model
+    /// materializes pages between frames), the list item ordinal and the document's change
+    /// count at the press (a press held while the document changed is cancelled).
+    task_press: Option<((usize, usize), u16, u64)>,
     /// Last primary press: time, position, click count.
     last_press: Option<(f64, Pos2, u32)>,
     /// Visible items of the last frame (index, top relative to the surface), for hit tests.
-    last_visible: Vec<(usize, f32)>,
+    /// (Kept by source position, [`DocViewer::item_key`]: a paged model may materialize pages
+    /// between frames, which shifts item indices; [`DocViewer::shown`] resolves them.)
+    /// Keys are handled before the pointer: positions are mapped through the edits since the
+    /// frame ([`EditorView::map_recent`]; an item whose text an edit changed is not hit).
+    last_visible: Vec<((usize, usize), f32)>,
     /// Column left edge of the last frame (screen x).
     last_left: f32,
+    /// Paged models: the document height when the scrollbar drag started (the scrollbar's
+    /// scale is frozen during a drag while page estimates refine, issue #125).
+    drag_total: Option<f64>,
     /// Surface top of the last frame (screen y).
     last_top: f32,
     /// Text to put on the clipboard after this frame's input handling.
@@ -164,15 +193,35 @@ pub struct DocViewer {
     hover_key: Option<(Pos2, u64)>,
     /// How comments are shown (setting `markdown.commentDisplay`).
     comment_display: markise_engine::settings::CommentDisplay,
+    /// How review marks are shown (setting `markdown.commentView`, issue #88).
+    comment_view: markise_engine::settings::CommentView,
     /// Comments of the visible items at the last frame, with their cards.
     comments: Vec<ShownComment>,
     popover: Option<Popover>,
+    /// A message for the app to show (a refused Add Comment shortcut, issue #90).
+    notice: Option<String>,
+    /// A command the app runs like its menu item (taken once): one that asks first, e.g.
+    /// Insert Table… opens its size dialog (issue #164).
+    app_command: Option<&'static str>,
+    /// The comment whose text is being edited in its card (issue #87).
+    card_edit: Option<card_edit::CardEdit>,
+    /// The bubble popover editor's size at its last frame (placement).
+    card_edit_size: Option<Vec2>,
+    /// The surface accepts edits (the last `show`).
+    editable: bool,
     /// Debounced "the document has comments" (the comment gutter, issue #91).
     comment_presence: comment_presence::CommentPresence,
     /// The comment gutter was reserved at the last frame.
     gutter: bool,
     /// Copy button and language field of fenced code blocks (issue #76).
     code: code_tools::CodeTools,
+    /// A press on the scrollbar (issue #123).
+    thumb_drag: scrollbar::ThumbDrag,
+    /// Wheel / trackpad smoothing (issue #86).
+    smooth: SmoothScroll,
+    /// The document holds only the first part of its file (progressive open, issue #126):
+    /// [`WHOLE_DOCUMENT_COMMANDS`] are unavailable.
+    pub partial: bool,
     /// PROTOTYPE (block snapshots): show `:::goals` / `:::question` as helper snapshots
     /// (set by Side by Side for its rendered pane).
     pub snap_blocks: bool,
@@ -198,9 +247,10 @@ pub struct DocViewer {
     pub gaps: Vec<(usize, f32)>,
     /// Column left edge and width of the last frame (insertion affordances).
     gap_col: (f32, f32),
-    /// PROTOTYPE (live preview): natural layout heights of the last frame's visible items.
+    /// PROTOTYPE (live preview): natural layout heights of the last frame's visible items (by
+    /// source start of the item).
     natural: std::collections::HashMap<usize, f32>,
-    /// PROTOTYPE (live preview): new-block preview this frame: (item, y offset in it, texture,
+    /// PROTOTYPE (live preview): new-block preview this frame: (item's source start, y offset in it, texture,
     /// size, replaces the item).
     draft_paint: Option<(usize, f32, egui::TextureId, Vec2, bool)>,
     /// PROTOTYPE (block move): scripted drag position (y in the pane) instead of the pointer.
@@ -260,7 +310,11 @@ impl DocViewer {
             task_press: None,
             last_press: None,
             last_visible: Vec::new(),
+            find_rects: Vec::new(),
+            find_matches: None,
+            find_reveal: false,
             last_left: 0.0,
+            drag_total: None,
             last_top: 0.0,
             pending_copy: None,
             last_surface: None,
@@ -272,6 +326,12 @@ impl DocViewer {
             comment_display: Default::default(),
             comments: Vec::new(),
             popover: None,
+            card_edit: None,
+            notice: None,
+            app_command: None,
+            comment_view: Default::default(),
+            card_edit_size: None,
+            editable: false,
             comment_presence: Default::default(),
             gutter: false,
             code: Default::default(),
@@ -290,7 +350,15 @@ impl DocViewer {
             natural: Default::default(),
             draft_paint: None,
             debug_drag_y: None,
+            thumb_drag: Default::default(),
+            smooth: Default::default(),
+            partial: false,
         }
+    }
+
+    /// Search highlight rectangles painted by the last rendered frame (screen coordinates).
+    pub fn search_highlights(&self) -> &[Rect] {
+        &self.find_rects
     }
 
     /// A viewer of a parsed Markdown document (tests, tools).
@@ -363,6 +431,8 @@ impl DocViewer {
         view.set_model(doc, model);
         self.ed = EditorView::new(session, view, path);
         self.code = Default::default();
+        // a new document: no card edit of the old one carries over
+        self.card_edit = None;
     }
 
     /// Installs `doc`/`model` as one undoable transaction `label` (reload from disk, a
@@ -381,6 +451,7 @@ impl DocViewer {
             .session
             .replace_doc(doc.clone(), label, markise_engine::editor::TxKind::Bulk, join);
         let _ = self.ed.session.take_change();
+        let _ = self.ed.session.take_steps();
         self.ed.view.set_model(doc, model);
         let caret = self.ed.session.selection().clone();
         let len = self.ed.session.text().len();
@@ -393,6 +464,22 @@ impl DocViewer {
             p.view.rebuild(self.ed.session.text());
         }
         self.ed.source_load_selection();
+        // a card edit stays only on its own unchanged comment (Codex review of #158)
+        self.revalidate_card_edit();
+        r
+    }
+
+    /// Progressive open (issue #126): installs the whole document of the file whose first
+    /// `cut` bytes this viewer shows, carrying the edits made meanwhile over
+    /// ([`EditorView::continue_with`]); the content on screen does not move.
+    pub fn continue_with(
+        &mut self,
+        doc: Arc<dyn FormatDoc>,
+        model: Arc<DocModel>,
+        cut: usize,
+    ) -> Result<markise_engine::editor::Continued, String> {
+        let r = self.ed.continue_with(doc, model, cut);
+        self.revalidate_card_edit();
         r
     }
 
@@ -412,7 +499,7 @@ impl DocViewer {
     /// Screen centre of the first visible link whose target is `target` (last frame's
     /// geometry; tests click it).
     pub fn link_center(&self, target: &str) -> Option<Pos2> {
-        for &(idx, y) in &self.last_visible {
+        for &(idx, y) in &self.shown() {
             let Some(l) = self.ed.view.cache_peek(idx) else {
                 continue;
             };
@@ -430,14 +517,77 @@ impl DocViewer {
         None
     }
 
+    /// Scrolls the caret into view on the next frame (benches, like a find match).
+    pub fn find_reveal_for_bench(&mut self) {
+        self.find_reveal = true;
+    }
+
     pub fn scroll_to_anchor(&mut self, anchor: &str) -> bool {
-        let item = self.model().heading_by_anchor(anchor).map(|e| e.item);
-        if let Some(i) = item {
+        let a = anchor.trim_start_matches('#');
+        let k = self.model().outline.iter().position(|o| o.anchor == a);
+        // a paged model materializes the heading's page first
+        if let Some(i) = k.and_then(|k| self.ed.view.ensure_heading(k)) {
             self.ed.view.scroll_to_item(i);
             true
         } else {
             false
         }
+    }
+
+    /// Command `id` can run now (registry enablement; [`WHOLE_DOCUMENT_COMMANDS`] not while
+    /// the document is partial).
+    pub fn command_enabled(&self, id: &str) -> bool {
+        !(self.partial && WHOLE_DOCUMENT_COMMANDS.contains(&id))
+            && !(self.review_preview() && self.mutates(id))
+            && self.ed.registry.enabled(&self.ed.session, id).is_ok()
+    }
+
+    /// A command for the app to run like its menu item (shortcut or context menu of a
+    /// command that opens a dialog first, [`ASKING_COMMANDS`]); taken once.
+    pub fn take_app_command(&mut self) -> Option<&'static str> {
+        self.app_command.take()
+    }
+
+    /// A message from the last frames for the app to show (taken once).
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
+    }
+
+    /// After Add Comment ran (shortcut, menu, toolbar, context menu): the new comment opens
+    /// in its card (issue #87); refused when it ran (a check enablement does not make, Codex
+    /// review of #161), the reason becomes a notice instead of nothing happening.
+    fn after_add_comment_result(&mut self, r: &Result<(), markise_engine::editor::command::CommandError>) {
+        use markise_engine::editor::command::CommandError;
+        match r {
+            Ok(()) => self.after_add_comment(),
+            Err(CommandError::Plan(markise_doc::PlanError::NotApplicable(why))) => {
+                self.notice = Some(format!("Cannot add a comment here: {why}."));
+            }
+            Err(CommandError::Disabled(_)) => self.notice = Some(self.add_comment_refusal()),
+            Err(e) => self.notice = Some(format!("Cannot add a comment here: {e}.")),
+        }
+    }
+
+    /// Why Add Comment cannot run at the selection (the planner's reason).
+    fn add_comment_refusal(&self) -> String {
+        if self.review_preview() {
+            return "The document is read-only while comments show as No Markup or Original.".into();
+        }
+        let req = self.ed.session.request(Params::new());
+        let why = match self.ed.session.doc().plan(planners::REVIEW_ADD_COMMENT, &req) {
+            Err(markise_doc::PlanError::NotApplicable(r)) => r.to_string(),
+            Err(e) => e.to_string(),
+            Ok(_) => "not available here".into(),
+        };
+        format!("Cannot add a comment here: {why}.")
+    }
+
+    /// Command `id` changes the document.
+    fn mutates(&self, id: &str) -> bool {
+        self.ed
+            .registry
+            .get(id)
+            .is_some_and(|c| matches!(c.desc.effect, markise_doc::Effect::Mutates { .. }))
     }
 
     /// Runs command `id` through the editor (menus, tests). `page`: viewport height.
@@ -448,10 +598,30 @@ impl DocViewer {
         id: &str,
         params: &Params,
     ) -> Result<(), markise_engine::editor::command::CommandError> {
+        if self.partial && WHOLE_DOCUMENT_COMMANDS.contains(&id) {
+            return Err(markise_engine::editor::command::CommandError::Disabled(
+                "available once the whole file has loaded",
+            ));
+        }
+        if self.review_preview() && self.mutates(id) {
+            return Err(markise_engine::editor::command::CommandError::Disabled(
+                "read-only while comments show as No Markup or Original",
+            ));
+        }
+        // an open card edit is saved before another command acts on the document; refused,
+        // the command does not run (the draft stays)
+        if self.commit_card_edit().is_err() {
+            return Err(markise_engine::editor::command::CommandError::Disabled(
+                "the comment being edited could not be saved",
+            ));
+        }
         let images = markise_layout::block::NoImages;
         let r = with_shaper(ctx, parley, |sh| self.ed.execute(id, params, sh, &images, 600.0));
         self.ed.refresh_focus();
         self.blink_from = ctx.input(|i| i.time);
+        if id == "review.addComment" {
+            self.after_add_comment_result(&r);
+        }
         r
     }
 
@@ -467,6 +637,14 @@ impl DocViewer {
         editable: bool,
     ) -> ViewerOutput {
         let mut out = ViewerOutput::default();
+        // No Markup / Original (issue #88): a read-only preview
+        let editable = editable && !self.review_preview();
+        self.editable = editable;
+        if !editable {
+            // a read-only surface (Side by Side's rendered pane) edits no comment (refused: the
+            // draft stays pending, the document unsaved)
+            let _ = self.commit_card_edit();
+        }
         let rect = ui.available_rect_before_wrap();
         let id = ui.scope_id().with("markise-viewer");
         let page_rect = Rect::from_min_max(rect.min, pos2(rect.right() - SCROLLBAR_W, rect.bottom()));
@@ -483,14 +661,15 @@ impl DocViewer {
         // margin mode with comments in the document: a comment gutter is reserved at the right
         // and the column lays out in the rest (owner decision on #91), unless the window is
         // too narrow for it (then bubbles). "Has comments" is tracked incrementally, reading
-        // the text in place in bounded chunks and only after review-relevant edits
-        // (comment_presence); a gutter change waits for a frame without pointer presses so
-        // clicks are hit-tested against one geometry (Codex review of #94).
-        let margin_mode = self.comment_display == markise_engine::settings::CommentDisplay::Margin;
+        // the text in place (beyond a first step, on a scanner thread, issue #138) and only
+        // after review-relevant edits (comment_presence); a gutter change waits for a frame
+        // without pointer presses so clicks are hit-tested against one geometry (Codex review
+        // of #94).
+        // (margin cards only with all markup shown; Simple shows glyphs only, issue #88)
+        let margin_mode = self.comment_display == markise_engine::settings::CommentDisplay::Margin
+            && self.comment_view == markise_engine::settings::CommentView::All;
         let has = margin_mode && {
-            let review = self.ed.session.review_edits();
-            let text_rev = self.ed.session.revision().counter;
-            let (has, more) = self.comment_presence.poll(self.ed.session.doc(), review, text_rev, now);
+            let (has, more) = self.comment_presence.poll(&mut self.ed.session, now, &ctx);
             match more {
                 Some(w) if w > 0.0 => ctx.request_repaint_after(std::time::Duration::from_secs_f64(w)),
                 Some(_) => ctx.request_repaint(),
@@ -514,11 +693,20 @@ impl DocViewer {
         let col_w = (content_w - 2.0 * theme.column_padding_x)
             .min(theme.column_max_width)
             .max(120.0);
-        let left = rect.left() + ((content_w - col_w) * 0.5).max(4.0);
+        let mut left = rect.left() + ((content_w - col_w) * 0.5).max(4.0);
+        let snap = smooth_scroll::snap_enabled();
+        if snap {
+            // the column edge on a device pixel (issue #86)
+            left = smooth_scroll::round_to_pixel(left, ppp);
+        }
         self.ed.view.set_params(col_w, theme, ppp);
         let vh = rect.height();
 
-        if resp.clicked() || resp.drag_started() || std::mem::take(&mut self.refocus) {
+        // (a click on a comment's bubble or card opens its card editor, which takes the focus)
+        let press_on_comment = ui
+            .input(|i| i.pointer.press_origin())
+            .is_some_and(|p| self.comment_at(p).is_some() || self.on_edited_card(p));
+        if ((resp.clicked() || resp.drag_started()) && !press_on_comment) || std::mem::take(&mut self.refocus) {
             resp.request_focus();
         }
         let focused = resp.has_focus();
@@ -536,13 +724,20 @@ impl DocViewer {
             });
         }
 
-        // ---- input: wheel / trackpad
-        if resp.hovered() || ui.rect_contains_pointer(rect) {
-            let d = ui.input(|i| i.smooth_scroll_delta);
+        // ---- input: wheel / trackpad (smooth scrolling, issue #86)
+        {
+            let hovered = resp.hovered() || ui.rect_contains_pointer(rect);
+            smooth_scroll::register_pane(&ctx, page_rect, ui.layer_id());
+            let line = theme.line_px() * smooth_scroll::LINES_PER_NOTCH;
+            // a programmatic scroll since the last frame (outline, anchor, find, Side by Side
+            // sync, edits) drops pending motion
+            self.smooth.follow(self.ed.view.source_anchor(), false);
+            let d = smooth_scroll::take_delta(ui, &mut self.smooth, hovered, line, vh);
             if d.y != 0.0 {
                 self.ed.view.scroll_by(-d.y);
-                ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+                out.wheel_scrolled = true;
             }
+            self.smooth.follow(self.ed.view.source_anchor(), true);
         }
         // ---- input: keyboard scrolling, only when no widget has focus
         if !focused && ui.memory(|m| m.focused().is_none()) {
@@ -579,12 +774,29 @@ impl DocViewer {
         // ---- input: scrollbar
         let bar = Rect::from_min_max(pos2(rect.right() - SCROLLBAR_W, rect.top()), rect.right_bottom());
         let bar_resp = ui.interact(bar, id.with("bar"), Sense::click_and_drag());
-        let total = self.ed.view.total_height().max(1.0);
+        let mut total = self.ed.view.total_height().max(1.0);
+        let paged = self.ed.view.model().is_paged();
+        if paged && bar_resp.dragged() {
+            total = *self.drag_total.get_or_insert(total);
+        } else {
+            self.drag_total = None;
+        }
         if (bar_resp.dragged() || bar_resp.clicked())
             && let Some(p) = bar_resp.interact_pointer_pos()
         {
-            let frac = ((p.y - rect.top()) / vh).clamp(0.0, 1.0) as f64;
-            self.ed.view.scroll_to_y(frac * (total - vh as f64).max(0.0));
+            self.smooth.stop();
+            let press = ui.input(|i| i.pointer.press_origin()).map_or(p.y, |o| o.y);
+            let y = self.ed.view.scroll_y();
+            match self
+                .thumb_drag
+                .target(press - rect.top(), p.y - rect.top(), vh, total, y)
+            {
+                scrollbar::Target::Y(y) => self.ed.view.scroll_to_y(y),
+                scrollbar::Target::End => self.ed.view.scroll_to_y(f64::MAX),
+            }
+        }
+        if !bar_resp.dragged() {
+            self.thumb_drag.release();
         }
 
         // ---- input: keyboard editing
@@ -596,7 +808,7 @@ impl DocViewer {
             // PROTOTYPE (live mode): Backspace after a block / Delete before it selects the
             // block; Backspace/Delete on a selected block deletes it whole (one undo step) —
             // never merges text into its `:::` lines
-            if editable && !self.snap_blocks && !self.atomic.is_empty() {
+            if editable && !self.snap_blocks && !self.atomic.is_empty() && self.ed.session.read_only().is_none() {
                 let sel = self.ed.session.selection().primary();
                 let caret = (sel.anchor == sel.focus).then_some(sel.focus.offset);
                 let mut consumed = false;
@@ -648,6 +860,7 @@ impl DocViewer {
             // PROTOTYPE (block move): ⌥⌘↑ / ⌥⌘↓ move the selected block past its neighbour
             if editable
                 && !self.snap_blocks
+                && self.ed.session.read_only().is_none()
                 && let Some(fb) = self.focused_block
             {
                 let mv = events.iter().find_map(|e| match e {
@@ -729,7 +942,7 @@ impl DocViewer {
 
         // ---- input: pointer (hit tests against the last frame's layout)
         let modifiers = ui.input(|i| i.modifiers);
-        let on_plus = if editable && !self.snap_blocks && self.snaps.is_some() {
+        let on_plus = if editable && !self.snap_blocks && self.snaps.is_some() && self.ed.session.read_only().is_none() {
             ui.input(|i| i.pointer.interact_pos()).and_then(|p| {
                 self.gaps
                     .iter()
@@ -749,7 +962,7 @@ impl DocViewer {
                 crate::block_palette::open_for(Some(crate::block_edit::InsertTarget::new(text, off, off, rev)));
             }
         }
-        let on_handle = if editable && !self.snap_blocks {
+        let on_handle = if editable && !self.snap_blocks && self.ed.session.read_only().is_none() {
             ui.input(|i| i.pointer.press_origin().or(i.pointer.interact_pos()))
                 .and_then(|p| {
                     self.snap_rects
@@ -809,8 +1022,8 @@ impl DocViewer {
         } else {
             None
         };
-        if task.is_some() {
-            self.task_press = task;
+        if let Some((i, ord)) = task {
+            self.task_press = Some((self.item_key(i), ord, self.ed.changes()));
         }
         if let Some(t) = self.task_press
             && ui.input(|i| i.pointer.primary_released())
@@ -819,12 +1032,23 @@ impl DocViewer {
             let over = ui
                 .input(|i| i.pointer.interact_pos())
                 .and_then(|p| self.task_box_at(p, rect.top()));
-            if editable && over == Some(t) && self.toggle_task(t.0, t.1) {
+            // (a press held while the document changed is cancelled: it named the old text)
+            if let Some((i, ord)) = over
+                && editable
+                && t.2 == self.ed.changes()
+                && (self.item_key(i), ord) == (t.0, t.1)
+                && self.toggle_task(i, ord)
+            {
                 out.edited = true;
             }
         }
-        // a press on a comment's bubble or card opens the comment for editing (ADR 0012)
-        let comment_press = if pressed && task.is_none() {
+        // a press on a comment's bubble or card opens the comment for editing in its card
+        // (issue #87); a press inside the card being edited is the field's
+        let on_edited = pressed
+            && ui
+                .input(|i| i.pointer.interact_pos())
+                .is_some_and(|p| self.on_edited_card(p));
+        let comment_press = if pressed && task.is_none() && !on_edited {
             ui.input(|i| i.pointer.interact_pos()).and_then(|p| self.comment_at(p))
         } else {
             None
@@ -837,6 +1061,7 @@ impl DocViewer {
         if pressed
             && task.is_none()
             && comment_press.is_none()
+            && !on_edited
             && let Some(p) = ui.input(|i| i.pointer.interact_pos())
             && !self.on_toggle_or_link(p, rect.top(), modifiers)
         {
@@ -918,7 +1143,7 @@ impl DocViewer {
             self.ed.refresh_focus();
             self.blink_from = now;
         }
-        if follow {
+        if follow || std::mem::take(&mut self.find_reveal) {
             with_shaper(&ctx, parley.as_deref_mut(), |sh| {
                 self.ed.scroll_to_caret(vh, sh, &*images)
             });
@@ -993,6 +1218,7 @@ impl DocViewer {
                     if editable
                         && !self.snap_blocks
                         && !s.form.is_open()
+                        && self.ed.session.read_only().is_none()
                         && let Some((preset, target)) = crate::block_palette::take_choice()
                     {
                         let text = self.ed.session.text();
@@ -1011,6 +1237,11 @@ impl DocViewer {
                         }
                         ctx.request_repaint();
                     }
+                    if let Some(why) = self.ed.session.read_only()
+                        && self.pending_edit.take().is_some()
+                    {
+                        s.form.error = Some((why.to_string(), Instant::now()));
+                    }
                     if let Some(off) = self.pending_edit.take() {
                         let tv = crate::block_snap::ThemeVars::from_theme(theme);
                         let rev = self.ed.session.revision().counter;
@@ -1020,9 +1251,12 @@ impl DocViewer {
                             s.form.error = Some((e, Instant::now()));
                         }
                     }
-                    let vis: Vec<usize> = self.last_visible.iter().map(|v| v.0).collect();
+                    // indices only hold from here on: pages come and go first (ADR 0016)
+                    self.ed.view.prepare_for_frame(vh);
+                    let vis: Vec<usize> = self.last_visible.iter().map(|v| v.0.0).collect();
                     let model = self.ed.view.model().clone();
                     let width = self.ed.view.width();
+                    let paging = self.ed.view.paging_generation();
                     let (mut over, placed) = s.frame(
                         &ctx,
                         &model,
@@ -1033,7 +1267,29 @@ impl DocViewer {
                         theme.block_spacing,
                         &vis,
                         &crate::block_snap::ThemeVars::from_theme(theme),
+                        paging,
                     );
+                    // a page boundary inside a block near the viewport: bring in the other part
+                    // (far ones stay cut, else this would cascade over the document)
+                    if !s.cut.is_empty() {
+                        let y = self.ed.view.scroll_y();
+                        let (lo, hi) = (y - 2.0 * vh as f64, y + 3.0 * vh as f64);
+                        let near: Vec<usize> = s
+                            .cut
+                            .iter()
+                            .copied()
+                            .filter(|&o| {
+                                let yi = self.ed.view.item_y(model.item_at_offset(o));
+                                yi >= lo && yi <= hi
+                            })
+                            .collect();
+                        if !near.is_empty() {
+                            for o in near {
+                                self.ed.view.ensure_offset(o);
+                            }
+                            ctx.request_repaint();
+                        }
+                    }
                     // live preview of a new block: extra height under the item before the point
                     // (or in place of the `/` line), painted after the layout
                     self.draft_paint = None;
@@ -1050,16 +1306,14 @@ impl DocViewer {
                             model.items.iter_with_start().map(|(a, it)| (a, it.len)).collect();
                         let spacing = theme.block_spacing;
                         if en > st {
-                            if let Some(k) = items.iter().position(|&(a, l)| a <= st && st < a + l.max(1)) {
+                            if let Some(k) = items.iter().find(|&&(a, l)| a <= st && st < a + l.max(1)).map(|x| x.0) {
                                 over.insert(k, spacing + size.y);
                                 self.draft_paint = Some((k, spacing, tex, size, true));
                             }
                         } else {
-                            let k = placed
-                                .iter()
-                                .find(|p| p.end == st)
-                                .map(|p| p.open)
-                                .or_else(|| items.iter().rposition(|&(a, l)| a + l <= st && l > 0));
+                            let k = placed.iter().find(|p| p.end == st).map(|p| p.offset).or_else(|| {
+                                items.iter().rfind(|&&(a, l)| a + l <= st && l > 0).map(|x| x.0)
+                            });
                             if let Some(k) = k {
                                 let base = over.get(&k).copied().or_else(|| self.natural.get(&k).copied());
                                 if let Some(base) = base {
@@ -1079,6 +1333,8 @@ impl DocViewer {
             Vec::new()
         };
 
+        // keyboard scrolling, the scrollbar or a caret / find reveal in this frame took over
+        self.smooth.follow(self.ed.view.source_anchor(), false);
         // ---- layout of the viewport (+ half a screen of margin)
         let mut visible = {
             let view = &mut self.ed.view;
@@ -1091,21 +1347,54 @@ impl DocViewer {
                 None => ctx.fonts_mut(|f| view.frame(vh, vh * 0.5, f, imgs)),
             }
         };
+        // (layout moves the anchor on once estimated heights become real)
+        self.smooth.follow(self.ed.view.source_anchor(), true);
         // the available caret stops may have changed under the selection (a diagram or
         // formula became rendered, front matter collapsed): move it to the nearest stop
         // (not on a read-only surface without the focus: in Side by Side the session's selection
         // may be the source pane's, which need not sit on a rendered caret stop)
-        if (focused || editable) && with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.fix_selection(sh, &*images)) {
+        let searching_selection = self.find_matches.as_ref().is_some_and(|(rev, matches, active)| {
+            *rev == self.ed.session.revision().counter
+                && active
+                    .and_then(|i| matches.get(i))
+                    .is_some_and(|r| *r == self.ed.session.selection().primary().range())
+        });
+        if !searching_selection
+            && (focused || editable)
+            && with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.fix_selection(sh, &*images))
+        {
             self.ed.refresh_focus();
             ctx.request_repaint();
         }
+        // pixel snap (issue #86): render at the scroll offset rounded to device pixels with item
+        // origins on device pixels, so every line moves by whole pixels and neighbouring lines
+        // never cross a pixel boundary on different frames; `tops` keep (unsnapped, snapped)
+        // for things placed inside an item (the caret)
+        let scroll_y = self.ed.view.scroll_y();
+        let mut tops = Vec::new();
+        if snap {
+            let shift = smooth_scroll::offset_shift(scroll_y, ppp);
+            tops.reserve(visible.len());
+            for v in &mut visible {
+                let y = smooth_scroll::snap_top(v.y, shift, rect.top(), ppp);
+                tops.push((v.y, y));
+                v.y = y;
+            }
+        }
+        if smooth_scroll::diag_enabled() {
+            let mut f = smooth_scroll::frame_diag();
+            f.scroll_y = scroll_y;
+            f.total = self.ed.view.total_height();
+        }
         out.painted = visible.len();
         out.laid_out = self.ed.view.laid_out.len();
-        self.last_visible = visible.iter().map(|v| (v.idx, v.y)).collect();
-        self.natural = visible.iter().map(|v| (v.idx, v.layout.height)).collect();
+        self.last_visible = visible.iter().map(|v| (self.item_key(v.idx), v.y)).collect();
+        self.track_card_edit();
+        self.ed.clear_recent_edits();
+        self.natural = visible.iter().map(|v| (self.ed.view.model().item_start(v.idx), v.layout.height)).collect();
         let draft_y = self
             .draft_paint
-            .and_then(|(k, ..)| visible.iter().find(|v| v.idx == k).map(|v| v.y));
+            .and_then(|(k, ..)| visible.iter().find(|v| self.ed.view.model().item_start(v.idx) == k).map(|v| v.y));
         self.last_left = left;
         self.last_top = rect.top();
         // PROTOTYPE (block packages): insertion points between top-level items (never inside a
@@ -1113,10 +1402,14 @@ impl DocViewer {
         self.gaps.clear();
         self.gap_col = (left, col_w);
         let mut do_move: Option<(usize, usize)> = None;
-        if editable && !self.snap_blocks && self.snaps.is_some() {
+        if editable && !self.snap_blocks && self.snaps.is_some() && self.ed.session.read_only().is_none() {
             let text = self.ed.session.text();
-            let ranges: Vec<std::ops::Range<usize>> = markise_engine::block_form::all_blocks(text)
-                .into_iter()
+            // the blocks of the materialized pages (every frame: no scan of the whole text)
+            let ranges: Vec<std::ops::Range<usize>> = self
+                .snaps
+                .iter()
+                .flat_map(|s| s.blocks.iter())
+                .filter_map(|b| markise_engine::block_form::block_at(text, b.offset))
                 .map(|b| b.range)
                 .collect();
             let model = self.ed.view.model().clone();
@@ -1256,32 +1549,43 @@ impl DocViewer {
         // block images: their items are not painted as Markdown
         self.snap_rects.clear();
         if !placed.is_empty() {
+            let model = self.ed.view.model().clone();
             for p in &placed {
-                if let Some(v) = visible.iter().find(|v| v.idx == p.open) {
+                if let Some(v) = visible.iter().find(|v| model.item_start(v.idx) == p.offset) {
                     let r = Rect::from_min_size(pos2(left, rect.top() + v.y + theme.block_spacing), p.size);
                     self.snap_rects.push((r, p.offset));
-                    painter.image(
-                        p.tex,
-                        r,
-                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
+                    match p.tex {
+                        Some(tex) => painter.image(
+                            tex,
+                            r,
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        ),
+                        // being rendered again (its texture was evicted with its page)
+                        None => painter.rect_filled(r, 8.0, theme_color(theme.meta_text).gamma_multiply(0.08)),
+                    };
                 }
             }
             // PROTOTYPE (live mode): atomic caret units and the selected block's outline
             {
                 let model = self.ed.view.model().clone();
-                let starts: Vec<(usize, usize)> = model.items.iter_with_start().map(|(st, it)| (st, it.len)).collect();
                 let text_len = self.ed.session.text().len();
                 self.atomic = placed
                     .iter()
                     .map(|p| {
-                        let before = if p.open > 0 {
-                            starts.get(p.open - 1).map_or(p.offset, |(st, l)| st + l)
+                        // by source position: pages may have come and gone since the scan
+                        let open = model.items.partition_point_start(p.offset);
+                        let before = if open > 0 {
+                            model.item_span(open - 1).end
                         } else {
                             p.offset
                         };
-                        let after = starts.get(p.close + 1).map_or(text_len, |(st, _)| *st);
+                        let next = model.items.partition_point_start(p.end);
+                        let after = if next < model.items.len() {
+                            model.item_start(next)
+                        } else {
+                            text_len
+                        };
                         (p.offset, p.end, before, after)
                     })
                     .collect();
@@ -1308,6 +1612,7 @@ impl DocViewer {
                 // ⠿ move handle (live mode)
                 if editable
                     && !self.snap_blocks
+                    && self.ed.session.read_only().is_none()
                     && (hover.is_some_and(|h| r.expand2(vec2(28.0, 0.0)).contains(h))
                         || self.force_edit_button == Some(i))
                 {
@@ -1332,7 +1637,9 @@ impl DocViewer {
                     }
                 }
                 let forced = self.force_edit_button == Some(i);
-                if !forced && !hover.is_some_and(|h| r.contains(h) && rect.contains(h)) {
+                if (!forced && !hover.is_some_and(|h| r.contains(h) && rect.contains(h)))
+                    || self.ed.session.read_only().is_some()
+                {
                     continue;
                 }
                 let b = edit_button_rect(*r);
@@ -1375,7 +1682,10 @@ impl DocViewer {
                 );
                 ctx.request_repaint_after(std::time::Duration::from_millis(500));
             }
-            visible.retain(|v| !placed.iter().any(|p| v.idx >= p.open && v.idx <= p.close));
+            visible.retain(|v| {
+                let st = model.item_start(v.idx);
+                !placed.iter().any(|p| st >= p.offset && st < p.end)
+            });
         }
         // PROTOTYPE (live preview): the new block's image at its insertion point
         if let Some((k, off, tex, size, replace)) = self.draft_paint
@@ -1395,7 +1705,8 @@ impl DocViewer {
                 StrokeKind::Outside,
             );
             if replace {
-                visible.retain(|v| v.idx != k);
+                let model = self.ed.view.model().clone();
+                visible.retain(|v| model.item_start(v.idx) != k);
             }
         }
 
@@ -1429,6 +1740,46 @@ impl DocViewer {
         // ---- review comments: margin cards or bubble popovers (visible items only)
         self.comment_cards(ui, &visible, rect, left, col_w, theme);
 
+        self.find_rects.clear();
+        // Search rectangles use the same source-to-rendered mapping as selections and
+        // touch only visible items. Hidden syntax has no invented rendered rectangle.
+        if let Some((rev, matches, active)) = self.find_matches.clone()
+            && rev == self.ed.session.revision().counter
+        {
+            let rects = with_shaper(&ctx, parley.as_deref_mut(), |sh| {
+                let model = self.ed.view.model().clone();
+                let mut out = Vec::new();
+                for v in &visible {
+                    let span = model.item_span(v.idx);
+                    let begin = matches.partition_point(|r| r.end < span.start);
+                    for (i, range) in matches
+                        .iter()
+                        .enumerate()
+                        .skip(begin)
+                        .take_while(|(_, r)| r.start <= span.end)
+                    {
+                        let mut g = self.ed.geometry(sh, &*images);
+                        for r in g.selection_rects(v.idx, range.clone()) {
+                            out.push((r.translate(vec2(left, rect.top() + v.y)), Some(i) == active));
+                        }
+                    }
+                }
+                out
+            });
+            for (r, active) in rects {
+                self.find_rects.push(r);
+                painter.rect_filled(
+                    r,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(
+                        255,
+                        if active { 145 } else { 220 },
+                        40,
+                        if active { 130 } else { 65 },
+                    ),
+                );
+            }
+        }
         // ---- selection and caret
         let sel = self.ed.session.selection().primary();
         if !sel.is_caret() {
@@ -1460,7 +1811,8 @@ impl DocViewer {
             let caret = with_shaper(&ctx, parley.as_deref_mut(), |sh| self.ed.caret_rect(sh, &*images));
             self.caret_screen = None;
             if let Some(c) = caret {
-                let y = c.min.y - self.ed.view.scroll_y() as f32 + rect.top();
+                let y0 = c.min.y - scroll_y as f32;
+                let y = y0 + smooth_scroll::shift_at(&tops, y0) + rect.top();
                 let r = Rect::from_min_size(pos2(left + c.min.x - 0.75, y), vec2(1.5, c.height().max(4.0)));
                 self.caret_screen = Some(r);
                 if on && r.intersects(rect) {
@@ -1529,12 +1881,10 @@ impl DocViewer {
         }
 
         // ---- scrollbar
-        let total = self.ed.view.total_height().max(1.0);
+        let total = self.drag_total.unwrap_or_else(|| self.ed.view.total_height()).max(1.0);
         if total > vh as f64 + 1.0 {
-            let y = self.ed.view.scroll_y();
-            let thumb_h = ((vh as f64 / total) * vh as f64).max(24.0) as f32;
-            let frac = (y / (total - vh as f64).max(1.0)).clamp(0.0, 1.0) as f32;
-            let top = rect.top() + frac * (vh - thumb_h);
+            let (thumb_h, _) = scrollbar::thumb_geometry(vh, total);
+            let top = rect.top() + scrollbar::thumb_top(vh, total, self.ed.view.scroll_y());
             let thumb = Rect::from_min_size(pos2(bar.left() + 2.0, top), vec2(SCROLLBAR_W - 4.0, thumb_h));
             let c = color(theme.meta_text).gamma_multiply(if bar_resp.hovered() || bar_resp.dragged() {
                 0.8
@@ -1554,7 +1904,7 @@ impl DocViewer {
     pub fn item_screen_rect(&self, offset: usize) -> Option<Rect> {
         let model = self.ed.view.model();
         let i = model.item_at_offset(offset);
-        let &(_, y) = self.last_visible.iter().find(|(idx, _)| *idx == i)?;
+        let &(_, y) = self.shown().iter().find(|(idx, _)| *idx == i)?;
         let l = self.ed.view.cache_peek(i)?;
         Some(Rect::from_min_size(
             pos2(self.last_left, self.last_top + y),
@@ -1584,6 +1934,32 @@ impl DocViewer {
     /// Sets how comments are shown (setting `markdown.commentDisplay`).
     pub fn set_comment_display(&mut self, d: markise_engine::settings::CommentDisplay) {
         self.comment_display = d;
+    }
+
+    /// Sets how review marks are shown (setting `markdown.commentView`, issue #88): the layout
+    /// renders them accordingly (display only; the text is never changed).
+    pub fn set_comment_view(&mut self, v: markise_engine::settings::CommentView) {
+        use markise_engine::settings::CommentView as C;
+        use markise_layout::ReviewView as R;
+        if v == self.comment_view {
+            return;
+        }
+        self.comment_view = v;
+        self.ed.view.set_review_view(match v {
+            C::All => R::All,
+            C::Simple => R::Simple,
+            C::Final => R::Final,
+            C::Original => R::Original,
+        });
+        self.hover = None;
+        self.popover = None;
+    }
+
+    /// The view is a clean preview of the text (No Markup / Original, issue #88): the rendered
+    /// view is read-only, its hidden marks would make edits ambiguous.
+    pub fn review_preview(&self) -> bool {
+        use markise_engine::settings::CommentView as C;
+        matches!(self.comment_view, C::Final | C::Original)
     }
 
     /// The comments of the visible items at the last frame, with their cards (tests).
@@ -1632,7 +2008,7 @@ impl DocViewer {
     /// The text of the visible items at the last frame, item after item (tests).
     pub fn visible_text(&self) -> String {
         let mut out = String::new();
-        for &(idx, _) in &self.last_visible {
+        for &(idx, _) in &self.shown() {
             if let Some(l) = self.ed.view.cache_peek(idx) {
                 for p in &l.prims {
                     if let markise_layout::Prim::Text { text, .. } = p {
@@ -1645,6 +2021,35 @@ impl DocViewer {
         out
     }
 
+    /// The items shown at the last frame with their tops, at their current indices.
+    /// The items painted in the last frame by source position ((start, ordinal among the items
+    /// starting there), top relative to the surface): tests and measurements check that the
+    /// content on screen does not move.
+    pub fn painted(&self) -> &[((usize, usize), f32)] {
+        &self.last_visible
+    }
+
+    fn shown(&self) -> Vec<(usize, f32)> {
+        let m = self.ed.view.model();
+        self.last_visible
+            .iter()
+            .filter_map(|&((start, nth), y)| {
+                // moved by the edits since the frame (keys come before the pointer)
+                let start = self.ed.map_recent(start)?;
+                let i = m.items.partition_point_start(start) + nth;
+                (i < m.items.len() && m.item_start(i) == start && !m.is_page(i)).then_some((i, y))
+            })
+            .collect()
+    }
+
+    /// Item `i` by source position: its start and its ordinal among the items starting there
+    /// (segments of a large block), stable while a paged model materializes or evicts pages.
+    fn item_key(&self, i: usize) -> (usize, usize) {
+        let m = self.ed.view.model();
+        let start = m.item_start(i);
+        (start, i - m.items.partition_point_start(start).min(i))
+    }
+
     /// The shown comment whose bubble or card is under screen point `p`.
     fn comment_at(&self, p: Pos2) -> Option<usize> {
         self.comments
@@ -1652,13 +2057,19 @@ impl DocViewer {
             .position(|c| (!c.revealed && c.glyph.expand(2.0).contains(p)) || c.card.is_some_and(|r| r.contains(p)))
     }
 
-    /// Puts the caret at the end of comment `i`'s text (its source is then revealed for
-    /// editing); `pin`: its popover stays open.
+    /// Opens comment `i` for editing in its card (issue #87; the caret goes after it);
+    /// `pin`: its popover stays open. On a read-only surface the caret goes after the comment.
     fn open_comment(&mut self, i: usize, pin: bool) {
         let Some(c) = self.comments.get(i).cloned() else { return };
-        self.ed.set_selection(Selection::caret(c.content.end));
-        self.ed.refresh_focus();
-        self.refocus = true;
+        if self.editable {
+            self.start_card_edit(c.source.start, Some(&c.text), false);
+        } else {
+            // read-only (Side by Side): the caret goes to the end of its text, where the
+            // source pane shows it for editing
+            self.ed.set_selection(Selection::caret(c.content.end));
+            self.ed.refresh_focus();
+            self.refocus = true;
+        }
         if pin {
             self.popover = Some(Popover {
                 key: c.source.start,
@@ -1712,6 +2123,13 @@ impl DocViewer {
         let look = CardLook::new(theme, &ctx);
         let painter = ui.painter_at(vis);
         let mut clicked = None;
+        // the card editor's keys come out of the input before anything reads them (issue #87)
+        if let Some(f) = self.card_edit_keys(&ctx) {
+            self.finish_card_edit(f, true);
+            ctx.request_repaint();
+        }
+        let mut finish = None;
+        let mut edited_drawn = false;
         if let Some((x, w)) = slot {
             self.popover = None;
             let mut next_y = rect.top();
@@ -1722,8 +2140,18 @@ impl DocViewer {
                 if y > vis.bottom() {
                     break;
                 }
-                let galley = look.galley(&ctx, &c.text, w);
-                let card = Rect::from_min_size(pos2(x, y), look.size(&galley, w));
+                let editing = self.editing(c.source.start);
+                let card = if editing {
+                    let (card, f) = self.card_editor(ui, &look, pos2(x, y), w, vis);
+                    edited_drawn = true;
+                    finish = finish.or(f);
+                    card
+                } else {
+                    let galley = look.galley(&ctx, &c.text, w);
+                    let card = Rect::from_min_size(pos2(x, y), look.size(&galley, w));
+                    look.paint(&painter, card, galley);
+                    card
+                };
                 next_y = card.bottom() + 6.0;
                 // the connector from the bubble's line to its card, in the margin only (it never
                 // crosses text), starting with a dot at the column edge
@@ -1732,22 +2160,30 @@ impl DocViewer {
                 let line = Stroke::new(1.0, look.accent.gamma_multiply(0.5));
                 painter.circle_filled(from, 2.0, look.accent.gamma_multiply(0.7));
                 painter.line_segment([from, to], line);
-                look.paint(&painter, card, galley);
-                let r = ui.interact(
-                    card,
-                    ui.scope_id().with(("markise-comment-card", c.source.start)),
-                    Sense::click(),
-                );
-                let r = r.on_hover_cursor(CursorIcon::PointingHand);
-                if r.clicked() {
-                    clicked = Some(i);
+                if !editing {
+                    let r = ui.interact(
+                        card,
+                        ui.scope_id().with(("markise-comment-card", c.source.start)),
+                        Sense::click(),
+                    );
+                    let r = r.on_hover_cursor(CursorIcon::PointingHand);
+                    if r.clicked() {
+                        clicked = Some(i);
+                    }
                 }
                 c.card = Some(card);
             }
         } else {
-            // bubbles: a popover over the hovered (after a short rest) or pinned bubble
+            // bubbles: a popover over the hovered (after a short rest) or pinned bubble; the
+            // comment being edited keeps its popover open
             let pointer = ctx.input(|i| i.pointer.hover_pos());
-            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if let Some(e) = &self.card_edit {
+                self.popover = Some(Popover {
+                    key: e.key,
+                    since: 0.0,
+                    pinned: true,
+                });
+            } else if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.popover = None;
             }
             let over_card = |p: Pos2| {
@@ -1761,7 +2197,13 @@ impl DocViewer {
                     .find(|c| !c.revealed && c.glyph.expand(2.0).contains(p))
                     .map(|c| c.source.start)
             });
+            let simple = self.comment_view != markise_engine::settings::CommentView::All;
             match (hovered, self.popover) {
+                _ if self.card_edit.is_some() => {}
+                // Simple (issue #88): no popover on hover, only a clicked (pinned) one
+                _ if simple && !self.popover.is_some_and(|p| p.pinned) => self.popover = None,
+                (Some(k), Some(pop)) if simple && pop.key != k => {}
+                (None, Some(_)) if simple => {}
                 (Some(k), Some(pop)) if pop.key == k => {}
                 (Some(k), Some(pop)) if pop.pinned && pop.key != k => {
                     self.popover = Some(Popover {
@@ -1787,29 +2229,54 @@ impl DocViewer {
                 if pop.pinned || wait <= 0.0 {
                     let c = &shown[i];
                     let w = comment_place::popover_width(vis);
-                    let galley = look.galley(&ctx, &c.text, w);
-                    let size = look.size(&galley, w);
-                    // below the bubble, flipped left / up near the visible area's edges
-                    let at = comment_place::popover_pos(c.glyph, size, vis);
-                    let area = egui::Area::new(egui::Id::unique(("markise-comment-popover", pop.key)))
-                        .order(egui::Order::Foreground)
-                        .constrain_to(vis)
-                        .fixed_pos(at)
-                        .show(&ctx, |ui| {
-                            let (r, resp) = ui.allocate_exact_size(size, Sense::click());
-                            look.paint(ui.painter(), r, galley);
-                            resp.on_hover_cursor(CursorIcon::PointingHand)
-                        });
-                    if area.inner.clicked() {
-                        clicked = Some(i);
+                    let editing = self.editing(c.source.start);
+                    if editing {
+                        // the editor's height is known only once drawn: placed with the size
+                        // of its last frame (first frame: one line)
+                        let est = self.card_edit_size.unwrap_or(vec2(w, CARD_ICON + 2.0 * CARD_PAD + 8.0));
+                        let at = comment_place::popover_pos(c.glyph, est, vis);
+                        let area = egui::Area::new(egui::Id::unique(("markise-comment-popover-edit", pop.key)))
+                            .order(egui::Order::Foreground)
+                            .constrain_to(vis)
+                            .fixed_pos(at)
+                            .show(&ctx, |ui| self.card_editor(ui, &look, ui.max_rect().min, w, vis));
+                        let (card, f) = area.inner;
+                        self.card_edit_size = Some(card.size());
+                        edited_drawn = true;
+                        finish = finish.or(f);
+                        shown[i].card = Some(card);
+                    } else {
+                        let galley = look.galley(&ctx, &c.text, w);
+                        let size = look.size(&galley, w);
+                        // below the bubble, flipped left / up near the visible area's edges
+                        let at = comment_place::popover_pos(c.glyph, size, vis);
+                        let area = egui::Area::new(egui::Id::unique(("markise-comment-popover", pop.key)))
+                            .order(egui::Order::Foreground)
+                            .constrain_to(vis)
+                            .fixed_pos(at)
+                            .show(&ctx, |ui| {
+                                let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+                                look.paint(ui.painter(), r, galley);
+                                resp.on_hover_cursor(CursorIcon::PointingHand)
+                            });
+                        if area.inner.clicked() {
+                            clicked = Some(i);
+                        }
+                        shown[i].card = Some(area.response.rect);
                     }
-                    shown[i].card = Some(area.response.rect);
                 } else {
                     ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait.max(0.01)));
                 }
             }
         }
         self.comments = shown;
+        if let Some(f) = finish {
+            // the field lost the focus to a click elsewhere: that click placed its own caret
+            self.finish_card_edit(f, false);
+            ctx.request_repaint();
+        } else if self.card_edit.is_some() && !edited_drawn && self.card_edit_unseen() {
+            ctx.request_repaint();
+        }
         if let Some(i) = clicked {
             self.open_comment(i, !use_margin);
             ctx.request_repaint();
@@ -1817,7 +2284,7 @@ impl DocViewer {
     }
 
     fn on_toggle_or_link(&self, p: Pos2, top: f32, m: egui::Modifiers) -> bool {
-        for &(idx, y) in &self.last_visible {
+        for &(idx, y) in &self.shown() {
             let Some(l) = self.ed.view.cache_peek(idx) else {
                 continue;
             };
@@ -1833,7 +2300,7 @@ impl DocViewer {
     /// The task checkbox under screen point `p` (last frame's geometry): the visible item and
     /// the box's list item ordinal ([`BlockLayout::tasks`]).
     fn task_box_at(&self, p: Pos2, top: f32) -> Option<(usize, u16)> {
-        for &(idx, y) in &self.last_visible {
+        for &(idx, y) in &self.shown() {
             let Some(l) = self.ed.view.cache_peek(idx) else {
                 continue;
             };
@@ -1913,7 +2380,37 @@ impl DocViewer {
         }
         let mut chosen = None;
         resp.context_menu(|ui| {
-            let enabled = |id: &str| self.ed.registry.enabled(&self.ed.session, id).is_ok();
+            let enabled = |id: &str| self.command_enabled(id);
+            // outside a table: Insert Table… (issue #164); in one: the Table submenu (it has it)
+            if !enabled("table.addRowBelow")
+                && enabled("table.insert")
+                && let Some(spec) = self.ed.registry.get("table.insert")
+            {
+                if ui.button(spec.desc.label).clicked() {
+                    chosen = Some(spec.desc.id);
+                    ui.close();
+                }
+                ui.separator();
+            }
+            if enabled("table.addRowBelow") {
+                ui.menu_button("Table", |ui| {
+                    for e in crate::menu::TABLE_COMMANDS {
+                        let Some(id) = e else {
+                            ui.separator();
+                            continue;
+                        };
+                        let Some(spec) = self.ed.registry.get(id) else { continue };
+                        if ui
+                            .add_enabled(enabled(id), egui::Button::new(spec.desc.label))
+                            .clicked()
+                        {
+                            chosen = Some(spec.desc.id);
+                            ui.close();
+                        }
+                    }
+                });
+                ui.separator();
+            }
             for e in CONTEXT_COMMANDS {
                 match e {
                     None => {
@@ -1934,7 +2431,11 @@ impl DocViewer {
             }
         });
         if let Some(id) = chosen {
-            out.review = Some((id, None));
+            if ASKING_COMMANDS.contains(&id) {
+                self.app_command = Some(id);
+            } else {
+                out.review = Some((id, None));
+            }
         }
         // hover bar: any edit hides it (review round 5: never act on an obsolete or a
         // different mark); it comes back with fresh data on the next pointer move over a mark
@@ -2021,9 +2522,10 @@ impl DocViewer {
         sh: &mut dyn TextShaper,
         images: &dyn markise_layout::Images,
     ) -> Option<DocPos> {
-        let (&(first, fy), &(last, _)) = (self.last_visible.first()?, self.last_visible.last()?);
+        let shown = self.shown();
+        let (&(first, fy), &(last, _)) = (shown.first()?, shown.last()?);
         let mut target = None;
-        for &(idx, y) in &self.last_visible {
+        for &(idx, y) in &self.shown() {
             if p.y >= top + y {
                 target = Some((idx, y));
             }
@@ -2103,8 +2605,18 @@ impl DocViewer {
             Event::Copy | Event::Cut => {
                 let r = self.ed.session.selection().primary().range();
                 if !r.is_empty() {
-                    // copied after the shaper closure (the context is locked inside it)
-                    self.pending_copy = Some(self.ed.session.text()[r].to_string());
+                    // copied after the shaper closure (the context is locked inside it); in a
+                    // clean review view what is shown (issue #88: accepted / rejected text)
+                    let shown = match self.comment_view {
+                        markise_engine::settings::CommentView::Final => {
+                            markise_doc::review::visible_text(self.ed.session.doc(), r, true)
+                        }
+                        markise_engine::settings::CommentView::Original => {
+                            markise_doc::review::visible_text(self.ed.session.doc(), r, false)
+                        }
+                        _ => self.ed.session.text()[r].to_string(),
+                    };
+                    self.pending_copy = Some(shown);
                     if matches!(e, Event::Cut) && editable {
                         self.ed.session.close_typing();
                         return self.exec("edit.deleteBackward", &Params::new(), sh, images, vh);
@@ -2130,8 +2642,16 @@ impl DocViewer {
                     if !editable && matches!(spec.desc.effect, markise_doc::Effect::Mutates { .. }) {
                         continue;
                     }
-                    if self.ed.registry.enabled(&self.ed.session, id).is_err() {
+                    if !self.command_enabled(id) {
+                        if id == "review.addComment" {
+                            // the shortcut says why instead of doing nothing (issue #90)
+                            self.notice = Some(self.add_comment_refusal());
+                        }
                         continue;
+                    }
+                    if ASKING_COMMANDS.contains(&id) {
+                        self.app_command = Some(spec.desc.id);
+                        return true;
                     }
                     return self.exec(id, &Params::new(), sh, images, vh);
                 }
@@ -2152,6 +2672,9 @@ impl DocViewer {
         let r = self.ed.execute(id, params, sh, images, vh);
         // each command sees the reveal state of the previous one's caret
         self.ed.refresh_focus();
+        if id == "review.addComment" {
+            self.after_add_comment_result(&r);
+        }
         r.is_ok() || matches!(r, Err(markise_engine::editor::command::CommandError::Disabled(_)))
     }
 }
@@ -2239,13 +2762,29 @@ impl CardLook {
     }
 
     fn paint(&self, p: &egui::Painter, r: Rect, galley: Arc<egui::Galley>) {
-        p.rect(
+        p.add(self.background(r, false));
+        self.paint_icon(p, r);
+        p.galley(r.min + vec2(CARD_PAD + CARD_ICON, CARD_PAD), galley, self.text);
+    }
+
+    /// The card's rounded background; `editing`: a stronger border (its text is a field).
+    fn background(&self, r: Rect, editing: bool) -> Shape {
+        let border = if editing {
+            Stroke::new(1.5, self.accent)
+        } else {
+            Stroke::new(1.0, self.accent.gamma_multiply(0.35))
+        };
+        Shape::Rect(egui::epaint::RectShape::new(
             r,
             CornerRadius::same(6),
             self.fill,
-            Stroke::new(1.0, self.accent.gamma_multiply(0.35)),
+            border,
             StrokeKind::Inside,
-        );
+        ))
+    }
+
+    /// The small speech bubble in the card's top left corner.
+    fn paint_icon(&self, p: &egui::Painter, r: Rect) {
         // a small speech bubble
         let o = r.min + vec2(CARD_PAD, CARD_PAD + 1.0);
         let b = Rect::from_min_size(o, vec2(12.0, 9.0));
@@ -2259,7 +2798,6 @@ impl CardLook {
             [b.left_bottom() + vec2(2.5, 3.5), b.left_bottom() + vec2(6.0, 0.0)],
             stroke,
         );
-        p.galley(r.min + vec2(CARD_PAD + CARD_ICON, CARD_PAD), galley, self.text);
     }
 }
 

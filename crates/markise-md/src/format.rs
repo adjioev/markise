@@ -123,6 +123,20 @@ const fn link_cmd(id: &'static str, label: &'static str, keys: &'static [Default
     }
 }
 
+/// Insert Table's size: `columns` and body `rows` (issue #164).
+const TABLE_SIZE_PARAMS: ParamSchema = ParamSchema(&[
+    markise_doc::ParamSpec {
+        name: "columns",
+        kind: markise_doc::ParamKind::Int,
+        required: false,
+    },
+    markise_doc::ParamSpec {
+        name: "rows",
+        kind: markise_doc::ParamKind::Int,
+        required: false,
+    },
+]);
+
 const AT_PARAM: ParamSchema = ParamSchema(&[markise_doc::ParamSpec {
     name: "at",
     kind: markise_doc::ParamKind::Int,
@@ -152,7 +166,55 @@ const fn review_cmd(
 }
 
 /// Commands implemented by the Markdown planners (spec 02 §10, §15; ADR 0006 §3.2).
-pub static MARKDOWN_COMMANDS: [CommandDescriptor; 45] = [
+pub static MARKDOWN_COMMANDS: [CommandDescriptor; 59] = [
+    // issue #164: the app asks for the size first (a dialog); without params 3 × 3
+    CommandDescriptor {
+        params: TABLE_SIZE_PARAMS,
+        ..cmd("table.insert", "Insert Table…", &[key("Opt+Cmd+T", "Ctrl+Shift+T")], S)
+    },
+    cmd("table.addRowAbove", "Add Row Above", &[], S),
+    cmd(
+        "table.addRowBelow",
+        "Add Row Below",
+        &[key("Cmd+Enter", "Ctrl+Enter")],
+        S,
+    ),
+    cmd(
+        "table.deleteRow",
+        "Delete Row",
+        &[key("Shift+Cmd+Backspace", "Ctrl+Shift+Backspace")],
+        S,
+    ),
+    cmd("table.addColumnBefore", "Add Column Before", &[], S),
+    cmd("table.addColumnAfter", "Add Column After", &[], S),
+    cmd("table.deleteColumn", "Delete Column", &[], S),
+    cmd(
+        "table.moveRowUp",
+        "Move Table Row Up",
+        &[key("Ctrl+Cmd+Up", "Ctrl+Alt+Up")],
+        S,
+    ),
+    cmd(
+        "table.moveRowDown",
+        "Move Table Row Down",
+        &[key("Ctrl+Cmd+Down", "Ctrl+Alt+Down")],
+        S,
+    ),
+    cmd(
+        "table.moveColumnLeft",
+        "Move Table Column Left",
+        &[key("Ctrl+Cmd+Left", "Ctrl+Alt+Left")],
+        S,
+    ),
+    cmd(
+        "table.moveColumnRight",
+        "Move Table Column Right",
+        &[key("Ctrl+Cmd+Right", "Ctrl+Alt+Right")],
+        S,
+    ),
+    cmd("table.alignLeft", "Align Column Left", &[], S),
+    cmd("table.alignCenter", "Align Column Center", &[], S),
+    cmd("table.alignRight", "Align Column Right", &[], S),
     cmd("block.toggleTask", "Toggle Task Status", &[mac_only("Ctrl+X")], S),
     cmd("block.paragraph", "Paragraph", &[key("Cmd+0", "Ctrl+0")], S),
     cmd("block.heading1", "Heading 1", &[key("Cmd+1", "Ctrl+1")], S),
@@ -318,6 +380,28 @@ fn summary(r: EditResult, changed: std::ops::Range<usize>, delta: isize) -> Edit
 }
 
 impl FormatDoc for Document {
+    fn raw_presentation(&self, span: Span) -> Option<markise_doc::RawPresentation> {
+        let source = span.slice(self.text());
+        if !source.trim_start().starts_with('<') {
+            return None;
+        }
+        if let Some(leaf) = self.leaf(span.start)
+            && !leaf.containers.is_empty()
+        {
+            if source.len() > 32 * 1024 {
+                return None;
+            }
+            let content = leaf
+                .lines
+                .iter()
+                .map(|line| line.slice(self.text()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            crate::html_view::presentation(&content)
+        } else {
+            crate::html_view::presentation(source)
+        }
+    }
     fn format_id(&self) -> &'static str {
         "markdown"
     }
@@ -465,6 +549,12 @@ impl FormatDoc for Document {
     fn top_count(&self) -> usize {
         self.top_len()
     }
+    fn top_span(&self, t: usize) -> Option<Span> {
+        self.top(t).map(|t| t.span())
+    }
+    fn top_at(&self, offset: usize) -> Option<usize> {
+        Some(self.top_partition_point(|t| t.start() <= offset).saturating_sub(1))
+    }
     fn flatten(&self, tops: Range<usize>, sink: &mut dyn FnMut(FlatEvent<'_>)) {
         let text = self.text();
         for (k, t) in self.tops_range(tops.clone()).enumerate() {
@@ -584,6 +674,12 @@ impl FormatDoc for Document {
     fn reference_candidates(&self, lines: &[crate::Span], out: &mut Vec<u64>) {
         reference_labels(self.text(), lines, out)
     }
+    fn may_reference(&self, span: crate::Span) -> bool {
+        // the first check of `reference_labels`, over a superset of the lines
+        let text = self.text().as_bytes();
+        let whole = &text[span.start.min(text.len())..span.end.min(text.len())];
+        memchr::memchr(b'[', whole).is_some() || (memchr::memchr(0xE3, whole).is_some() && has_wide_bracket(whole))
+    }
     fn reference_fingerprint(&self, key: u64) -> Option<u64> {
         self.ref_context().fingerprints.get(&key).copied()
     }
@@ -667,11 +763,60 @@ fn cap_str(s: &str, cap: usize) -> (&str, bool) {
 /// base-relative source offsets.
 fn neutral_tree(content: &str, nodes: &[Inline], map: &dyn Fn(usize) -> u32) -> RichInline {
     let mut text = String::new();
-    let nodes = nodes
-        .iter()
-        .map(|n| neutral_inline(content, n, map, &mut text))
-        .collect();
+    let nodes = neutral_nodes(content, nodes, map, &mut text);
     RichInline { nodes, text }
+}
+
+// Pair keyboard tags in one sibling sequence. Unpaired tags retain raw display.
+fn neutral_nodes(s: &str, nodes: &[Inline], map: &dyn Fn(usize) -> u32, pool: &mut String) -> Vec<InlineNode> {
+    neutral_nodes_depth(s, nodes, map, pool, 0)
+}
+fn neutral_nodes_depth(
+    s: &str,
+    nodes: &[Inline],
+    map: &dyn Fn(usize) -> u32,
+    pool: &mut String,
+    depth: usize,
+) -> Vec<InlineNode> {
+    if depth >= 32 {
+        return nodes.iter().map(|n| neutral_inline(s, n, map, pool)).collect();
+    }
+    let mut stack = Vec::new();
+    let mut pairs = std::collections::HashMap::new();
+    for (i, n) in nodes.iter().enumerate() {
+        if n.kind == InlineKind::Html {
+            match crate::html_view::keyboard_tag(n.span.slice(s)) {
+                Some(false) => stack.push(i),
+                Some(true) => {
+                    if let Some(a) = stack.pop() {
+                        pairs.insert(a, i);
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < nodes.len() {
+        if let Some(&end) = pairs.get(&i) {
+            let a = &nodes[i];
+            let z = &nodes[end];
+            out.push(InlineNode {
+                kind: NK::Keyboard,
+                source: map(a.span.start)..map(z.span.end),
+                content: map(a.span.end)..map(z.span.start),
+                markers: vec![map(a.span.start)..map(a.span.end), map(z.span.start)..map(z.span.end)],
+                children: neutral_nodes_depth(s, &nodes[i + 1..end], map, pool, depth + 1),
+                text: 0..0,
+            });
+            i = end + 1;
+        } else {
+            out.push(neutral_inline(s, &nodes[i], map, pool));
+            i += 1;
+        }
+    }
+    out
 }
 
 fn push_value(pool: &mut String, v: &str) -> Range<u32> {
@@ -833,6 +978,15 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
             let raw = n.span.slice(s);
             if matches!(raw.to_ascii_lowercase().as_str(), "<br>" | "<br/>" | "<br />") {
                 (NK::Break { hard: true }, None)
+            } else if raw.starts_with("<!--") && raw.ends_with("-->") {
+                return InlineNode {
+                    kind: NK::Comment,
+                    source: map(n.span.start)..map(n.span.end),
+                    content: map(n.span.start)..map(n.span.end),
+                    markers: std::iter::once(map(n.span.start)..map(n.span.end)).collect(),
+                    children: Vec::new(),
+                    text: push_value(pool, raw),
+                };
             } else {
                 (NK::RawInline, Some(raw.to_string()))
             }
@@ -878,7 +1032,7 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
         source: map(n.span.start)..map(n.span.end),
         content: map(inner.start)..map(inner.end),
         markers,
-        children: n.children.iter().map(|c| neutral_inline(s, c, map, pool)).collect(),
+        children: neutral_nodes(s, &n.children, map, pool),
         text,
     }
 }
@@ -1314,7 +1468,7 @@ impl Document {
     }
 
     /// The leaf block starting at (or containing) absolute offset `at`, relative to its origin.
-    fn leaf_rel(&self, at: usize) -> Option<(&Block, usize)> {
+    pub(crate) fn leaf_rel(&self, at: usize) -> Option<(&Block, usize)> {
         let path = self.block_path_at(at);
         for depth in 1..=path.len() {
             let (b, origin) = self.block_at_path_rel(&path[..depth])?;
@@ -1520,6 +1674,8 @@ impl Document {
                     Some(Selection::caret(caret)),
                 ));
             }
+            // the end of a table's last row: the virtual paragraph after it (issue #166)
+            LeafKind::Table { .. } => return self.table_enter(at).map_or(nothing, Ok),
             _ => return nothing,
         }
         // a caret inside the block's own syntax (ATX marker / closing sequence, setext
@@ -1660,6 +1816,9 @@ impl Document {
                         | LeafKind::Heading { .. }
                         | LeafKind::CodeBlock { .. }
                         | LeafKind::ThematicBreak
+                        | LeafKind::Table { .. }
+                        | LeafKind::Math
+                        | LeafKind::RawBlock
                 )
             {
                 return Ok(Plan::single(
@@ -1785,7 +1944,7 @@ impl Document {
 
     /// The typing step on the virtual empty paragraph (ADR 0006 §2.2): materialises the
     /// paragraph after the block at `gap` with the separator and the container prefix.
-    fn typing_virtual(&self, gap: usize, virt: u16, typed: &str) -> TypingPlan {
+    pub(crate) fn typing_virtual(&self, gap: usize, virt: u16, typed: &str) -> TypingPlan {
         let eol = self.line_ending().as_str();
         let text = self.text();
         let levels = virt.saturating_sub(1) as usize;
@@ -1810,12 +1969,24 @@ impl Document {
             }
         } else {
             match self.owner_leaf_view(gap, markise_doc::Affinity::Upstream) {
-                Some(l) => self.line_prefix(&l, gap),
+                Some(l) if matches!(l.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) => {
+                    self.line_prefix(&l, gap)
+                }
+                // other blocks (code, tables…): the prefix of the block's containers, from the
+                // containers themselves (not the block's line: indented code's own columns,
+                // tabs included, are not a container's; issue #166)
+                Some(l) => self.container_prefix(l.span.start, usize::MAX),
                 None => String::new(),
             }
         };
         let blank = prefix.trim_end();
-        let ins = format!("{eol}{blank}{eol}{prefix}{typed}");
+        // a block whose span ends with its line (front matter): the gap is a line start
+        let at_line_start = gap > 0 && text.as_bytes()[gap - 1] == b'\n';
+        let mut ins = if at_line_start {
+            format!("{blank}{eol}{prefix}{typed}")
+        } else {
+            format!("{eol}{blank}{eol}{prefix}{typed}")
+        };
         // a separator of two blank lines after the gap (C45 list split) gives one of them
         // to the new paragraph: `- a⏎⏎⏎- c` → `- a⏎⏎x⏎⏎- c`
         let triple = format!("{eol}{blank}{eol}{blank}{eol}");
@@ -1834,6 +2005,23 @@ impl Document {
             (gap, end)
         };
         let caret = gap + ins.len();
+        // the next block starts on the very next line: a blank line ends the new paragraph
+        // before it, so neither absorbs the other (a table row, lazy continuation, a setext
+        // underline; issue #166)
+        let (le, next) = line_end(text, end);
+        let blank_line = |ls: usize| {
+            let (e, _) = line_end(text, ls);
+            text[ls..e].bytes().all(|b| matches!(b, b'>' | b' ' | b'\t'))
+        };
+        if at_line_start && !blank_line(end) {
+            // the next block starts on the gap's own line
+            ins.push_str(eol);
+            ins.push_str(blank);
+            ins.push_str(eol);
+        } else if text[end..le].trim().is_empty() && next > le && next < text.len() && !blank_line(next) {
+            ins.push_str(eol);
+            ins.push_str(blank);
+        }
         TypingPlan {
             step: PlanStep::patches(PatchSet::single_verbatim(gap..end, ins)),
             selection_after: Some(Selection::caret(caret)),
@@ -1963,8 +2151,21 @@ impl Document {
 
 impl EditBehavior for Document {
     fn can_plan(&self, id: PlannerId, req: &PlanRequest) -> bool {
+        if id.0.starts_with("table.") {
+            return self.can_table_op(id.0, req);
+        }
         if let Some(ok) = self.can_plan_review(id, req) {
             return ok;
+        }
+        // format commands over a large selection decide without planning (issue #133)
+        if let Some(st) = style_of(id) {
+            return self.can_format(st, req);
+        }
+        if id == planners::CLEAR_FORMAT {
+            return self.can_clear_format(req);
+        }
+        if id == planners::LINK || id == planners::IMAGE {
+            return self.can_link(id == planners::IMAGE, req);
         }
         self.plan(id, req).is_ok()
     }
@@ -1978,6 +2179,9 @@ impl EditBehavior for Document {
     }
 
     fn plan(&self, id: PlannerId, req: &PlanRequest) -> Result<Plan, PlanError> {
+        if id.0.starts_with("table.") {
+            return self.plan_table_op(id.0, req);
+        }
         if let Some(r) = self.heading_block_request(id, req) {
             // the caret stays where it was (after the whitespace), mapped through the patches
             let mut plan = self.plan(id, &r)?;
@@ -2114,6 +2318,10 @@ impl EditBehavior for Document {
             p
         };
         Some(PatchSet::single_verbatim(from + at..from + at, "\\"))
+    }
+
+    fn gap_virt(&self, end: usize) -> Option<u16> {
+        self.gap_slot(end)
     }
 
     fn continuation_prefix(&self, at: usize) -> String {

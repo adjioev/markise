@@ -379,11 +379,15 @@ fn image_budget() -> usize {
 const Z_DECO: i32 = 0;
 const Z_CONTENT: i32 = 1000;
 
+/// The theme's stack, a generic family when it names none, then the bundled keyboard-symbol
+/// face (registered by [`crate::register_bundled`]) so ⌘ ⇧ ⌥ ⌃ … never come out as boxes when no
+/// installed font has them (issue #131).
 fn families(stack: &[String], generic: Generic) -> Vec<Family> {
     let mut v: Vec<Family> = stack.iter().map(|s| Family::parse(s)).collect();
     if !v.iter().any(|f| matches!(f, Family::Generic(_))) {
         v.push(Family::Generic(generic));
     }
+    v.push(Family::Named(markise_text::keys::FAMILY.into()));
     v
 }
 

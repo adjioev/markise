@@ -1282,9 +1282,9 @@ siblings, see below).
   `Resume` ("decorations spent") only when the innermost container produced an item before the
   region and no list opened after it; otherwise (e.g. `- >` with an empty quote) it flattens the
   whole block.
-- **Tests.** `markise-md/tests/nested.rs` (incremental == fresh parse and lossless round-trip on
+- **Tests.** `markise-md/tests/it/nested.rs` (incremental == fresh parse and lossless round-trip on
   container-heavy documents, 10k cases; deterministic Enter/typing/Backspace edits that must
-  take the nested path; tightness transitions), `markise-layout/tests/incremental.rs`
+  take the nested path; tightness transitions), `markise-layout/tests/it/incremental.rs`
   (`DocModel::apply` == full build in containers, 10k cases; locality of the model update in a
   list, a quote and a nested list). The generators include empty containers (`- >`, `> -`,
   `> >`, `-`), adjacent HTML blocks, setext/lazy/definition/table/adjacent-list cases. The
@@ -1430,11 +1430,11 @@ below and proposed for `99-open-questions.md`):
   indent/outdent, Horizontal Line), Edit menu (selection/delete/move commands, editing prefs).
 - **Fixed on the way**: MD-INC-1 — the nested incremental restart rebuilt a list opened on a task
   item's marker line without consuming the task box (property test at 30 000 cases).
-- **Tests**: Markdown planner tests (`markise-md/tests/edit_format.rs`), engine surface suites with
+- **Tests**: Markdown planner tests (`markise-md/tests/it/edit_format.rs`), engine surface suites with
   caret-drawable, on-stops and incremental == full checks after every key (`lists.rs`,
   `input_rules.rs`, `structure.rs`), the property test extended with the new commands and rule
   triggers, hint property test with column / ForceBlock hints, and an `egui_kittest` end-to-end list
-  suite driving the real app with platform-like key events (`markise-ui-egui/tests/lists_e2e.rs`).
+  suite driving the real app with platform-like key events (`markise-ui-egui/tests/it/lists_e2e.rs`).
 - **Measured** (`cargo bench -p markise-engine --bench typing`, script extended with bullet rule,
   list Enter/Tab/Shift+Tab/exit, heading rule, auto-pair, Select Word + Strong; headless G3, CPU test
   fonts, Apple M-series under parallel load):
@@ -1514,7 +1514,7 @@ numbered M2d-n (proposed for `99-open-questions.md`).
   over the document. An edit re-chunks only the items it touches (a small last item merges
   with the next); chunk boundaries are an implementation detail, so "incremental == full
   rebuild" is defined on what users see — the physical lines, the line ↔ offset mapping and
-  the shaped text and styles of every line (property test `markise-layout/tests/source_view.rs`).
+  the shaped text and styles of every line (property test `markise-layout/tests/it/source_view.rs`).
   Tab stops are measured from the start of the line, or of the piece of an over-long line.
 - **M2d-3 — layout per line, cached by content.** Each unit is shaped on its own; shaped lines
   are cached by (text, token runs, code runs, wrap width, tab width, theme, fonts), so a
@@ -1583,7 +1583,7 @@ numbered M2d-n (proposed for `99-open-questions.md`).
   source.rs` (verbatim typing, CRLF, caret commands, Tab, disabled format commands, source
   session collapse with saved boundaries, Side by Side live history, 300 random keystrokes
   with incremental == full checks of both views), real-app kittests
-  `markise-ui-egui/tests/source_editor.rs` (typing and saved bytes, keyboard/mouse selection,
+  `markise-ui-egui/tests/it/source_editor.rs` (typing and saved bytes, keyboard/mouse selection,
   wrap and gutter toggles, undo across mode switches, mapping in/out, 10 MB open/scroll/edit)
   and the ported Side by Side, lifecycle, safety and smoke suites.
 - **Measured** (release, Apple M-series under heavy parallel load — load average ≈ 115 on 10
@@ -1609,6 +1609,55 @@ numbered M2d-n (proposed for `99-open-questions.md`).
   matching brackets, Move Line, Delete Line, smart Home; (→ slice 3) rich-view tables and
   special blocks with both Side by Side panes editable; later: IME preedit display, multiple
   carets, folding, a horizontal scrollbar.
+
+## 17. Implementation notes: the caret between adjacent blocks (issue #166, 2026-11-03)
+
+The virtual empty paragraph (§2.2) also stands in the **gap between two blocks** where no
+empty line could be reached otherwise (two tables, code, math, diagrams, image-only paragraphs,
+rules, HTML blocks, front matter, the end of a quote or list before another block). It is the
+same slot as before — `DocPos { offset: end of the first leaf, virt: 1 + levels }`, drawn by the
+first block's layout (`ItemFocus::virtual_after` / `virtual_exit`) — so typing, undo, Backspace
+and Enter on it behave as on any virtual paragraph, and nothing is written until a character is
+typed.
+
+- **Which gaps** is the format's decision, asked through the neutral
+  `EditBehavior::gap_virt(end) -> Option<u16>` (default `None`). Markdown
+  (`markise-md/src/edit/gap.rs`): the gap after the leaf ending at `end` and before the next
+  shown block (link reference definitions skipped); the paragraph goes into the innermost
+  container both share, leaving the first block's other containers (`levels`). No slot between
+  two items of one list, before a block without a text leaf at its edge, after the last block
+  (C53's slot), or where a paragraph or heading stands next to the gap at its level (Enter at
+  its end or typing at its start reaches that line already; a paragraph of only images counts
+  as a block).
+- **Caret geometry** (`markise-layout/src/caret.rs`, format-neutral): ↓ from the last row of an
+  item and ↑ from the first row of the next one stop on the slot (`Geometry::gap_after`), as do
+  → at an item's end and ← at the next one's start (character moves only; Backspace / Delete
+  keep their old stops past it). A click in the gap above an item's content
+  (`BlockLayout::gap`) hits the slot after the shown item before it. Items without stops
+  (rules), hidden items (definitions, HTML comments) and placeholders of a paged model are
+  passed over; a slot follows the last segment of a segmented block. A virtual position the
+  format offers counts as a caret stop before the focus shows it (the press of a click freezes
+  the focus).
+- **Enter** at the end of a table's last row (or the header of a table without body rows) goes
+  to the slot after the table; elsewhere in a table Enter still does nothing and Cmd+Enter adds a
+  row. Enter at the start of a paragraph after a table, math or HTML opens the slot above it, as
+  after code and rules.
+- **Typing** (`Document::typing_virtual`): the paragraph gets the blank line before it as
+  before and now also one after it when the next block starts on the very next line (a table
+  would take it as a row, a rule as a setext underline, indented code as lazy text; after `# Title⏎Para`, Enter and `x` used to give
+  `x⏎Para`, one paragraph, and now give two). After
+  a block other than a paragraph or heading the prefix comes from the containers the parser
+  recorded (`Document::container_prefix`: quote markers, list items' content columns, written
+  with spaces), never from the block's own line — indented code's columns, tabs partially
+  consumed by the containers included. As a safety net a gap inside or after containers is
+  offered only when the typed paragraph, parsed again with its region (up to 64 KiB), lands in
+  the intended container with both neighbours unchanged; Insert Table after indented code uses
+  the same prefix. The gap check reads leaf heads only and parses a paragraph (for being
+  image-only) only when it starts with `!` or `[` and is at most 2 KiB.
+- Tests: `markise-engine` `block_gaps` (every block pair both ways, quote/list ends, no-slot
+  cases, horizontal moves, Enter in tables, page boundaries against a full model, undo),
+  `markise-ui-egui` `block_gaps` (click between tables and between rules, arrows, file
+  byte-identical when leaving, saved file after typing, Side by Side).
 
 ## Consequences
 

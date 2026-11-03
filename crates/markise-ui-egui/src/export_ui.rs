@@ -192,6 +192,9 @@ fn default_output(doc: Option<&Path>, ext: &str) -> PathBuf {
 impl MarkiseApp {
     /// Runs a menu action (save dialog on the UI thread, export on a worker).
     pub(crate) fn export_action(&mut self, a: ExportAction) {
+        if self.is_partial() {
+            return; // only the first part of the file is loaded (issue #126; the menu is disabled)
+        }
         let Some(text) = self.document_text() else { return };
         let doc_path = self.document_path().map(Path::to_path_buf);
         let theme = self.theme().clone();
@@ -243,6 +246,14 @@ impl MarkiseApp {
     /// setting and resolves wikilinks against the current vault (spec 06 Q-V11).
     pub fn start_export(&mut self, mut req: ExportRequest) {
         if self.export.job.is_some() {
+            return;
+        }
+        if self.is_partial() {
+            // a request (or an answered overwrite question) arriving while the first part of a
+            // file is shown is not run (issue #126 review: every write boundary checks)
+            self.export.message = Some(ExportMessage::Failed(
+                "Export is available once the whole file has loaded.".into(),
+            ));
             return;
         }
         req.wikilinks = self.wikilinks();

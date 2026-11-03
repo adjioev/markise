@@ -25,13 +25,17 @@
 //! | `statusBar.count` | `"words"`, `"characters"`, `"charactersNoSpaces"`: the count the status bar shows (click it to cycle; issue #53) | `"words"` |
 //! | `toolbarPosition` | `"top"` / `"bottom"`: where the formatting toolbar sits (Preferences → Appearance) | `"top"` |
 //! | `consumed_pending` | names of recovery files already merged into this file (written with the merge; see [`update_file`]); omitted when empty | none |
-//! | `overrides` | object with optional `font_family` (string), `font_size`, `line_height`, `content_width` (numbers); omitted when empty | none |
+//! | `overrides` | object with optional `font_family`, `cyrillic_font`, `greek_font`, `cjk_font` (strings), `font_size`, `line_height`, `content_width` (numbers); omitted when empty | none |
 //! | `editing` | object: `auto_pair_brackets` (default `true`), `auto_pair_markdown` (`false`), `smart_punctuation` (convert on input, `false`), `smart_dashes_em` (`--` → em dash, `false`) (spec 02 §4, §13, §16; Preferences → Editor) | defaults |
-//! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`) — source editor display (spec 02 §12.1.1; Preferences → Source Mode) | defaults |
+//! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`), `font_size` (points, `8`–`40`; omitted = automatic, matched to the body text — issue #130) — source editor display (spec 02 §12.1.1; Preferences → Source Mode) | defaults |
 //! | `keyBinding` | object: command label (menu title) or id → accelerator (`"Ctrl+Shift+K"`), `""` unbinds (spec 05 §4.7); read only, kept verbatim | none |
 //! | `images` | object: `location` (`"note_folder"`: a folder next to the note, `"root_folder"`: a folder below the vault / opened folder root, `"same_folder"`: the note's own folder; default `"note_folder"`), `folder` (the folder for the first two, default `"assets"`), `obsidian` (use an Obsidian vault's `attachmentFolderPath` when set, `true`), `relative_paths` (`true`), `copy_images` (copy dropped image files into the image folder, `true`), `copy_files` (also copy other dropped files, `false`), `paste_urls` (a pasted image URL becomes an image, `true`) — pasted and dropped images (spec 04 §7, spec 05 §4.4; Preferences → Files & Images) | defaults |
-//! | `markdown` | object: `wikilinks` (default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`), `commentDisplay` (`"margin"` cards, default, or `"bubbles"` with hover popovers) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
+//! | `markdown` | object: `wikilinks` (default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`), `commentDisplay` (`"margin"` cards, default, or `"bubbles"` with hover popovers), `commentView` (`"all"` markup, default, `"simple"`, `"final"` or `"original"`; display only, issue #88) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
 //! | `side_by_side_split` | Side by Side divider position: fraction of the editor width given to the source pane, `0.15`–`0.85` (spec 04 §3.3); omitted until the divider is moved | `0.5` |
+//! | `tutorialShown` | `true` once the welcome tutorial was opened at first launch (issue #63); omitted until then | `false` |
+//! | `updates.autoCheck` | `true` / `false`: check GitHub for a newer release at launch, at most once a day (Preferences → General; issue #70); omitted until the user answered the first-launch question — omitted means off | none |
+//! | `updates.lastCheck` | Unix time (seconds) of the last update check that got an answer from GitHub (throttling); omitted until then | none |
+//! | `updates.dismissed` | the version (`"0.2.0"`) whose update notice the user dismissed; a newer version is shown again | none |
 //! | `zoom` | whole-window zoom factor, `0.5`–`3.0` (View → Zoom In / Zoom Out / Actual Size, issue #43); omitted until zoomed | `1.0` |
 //!
 //! **Versions.** A version-1 file (or one without `version`) stores one `theme` id; it migrates
@@ -158,6 +162,9 @@ impl CountMode {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FontOverrides {
     pub font_family: Option<String>,
+    pub cyrillic_font: Option<String>,
+    pub greek_font: Option<String>,
+    pub cjk_font: Option<String>,
     pub font_size: Option<f32>,
     pub line_height: Option<f32>,
     pub content_width: Option<f32>,
@@ -180,7 +187,15 @@ impl FontOverrides {
         (o, m)
     }
 
-    const KEYS: [&'static str; 4] = ["font_family", "font_size", "line_height", "content_width"];
+    const KEYS: [&'static str; 7] = [
+        "font_family",
+        "font_size",
+        "line_height",
+        "content_width",
+        "cyrillic_font",
+        "greek_font",
+        "cjk_font",
+    ];
 
     fn from_json(v: &Value) -> FontOverrides {
         let num = |k: &str| {
@@ -189,7 +204,17 @@ impl FontOverrides {
                 .map(|n| n as f32)
                 .filter(|n| n.is_finite() && *n > 0.0)
         };
+        let font = |key: &str| {
+            v.get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && s.len() <= 200)
+                .map(str::to_string)
+        };
         FontOverrides {
+            cyrillic_font: font("cyrillic_font"),
+            greek_font: font("greek_font"),
+            cjk_font: font("cjk_font"),
             font_family: v
                 .get("font_family")
                 .and_then(Value::as_str)
@@ -204,6 +229,15 @@ impl FontOverrides {
 
     fn to_json(&self, extra: &Map<String, Value>) -> Value {
         let mut m = extra.clone();
+        for (key, font) in [
+            ("cyrillic_font", &self.cyrillic_font),
+            ("greek_font", &self.greek_font),
+            ("cjk_font", &self.cjk_font),
+        ] {
+            if let Some(font) = font {
+                m.insert(key.into(), Value::from(font.clone()));
+            }
+        }
         if let Some(f) = &self.font_family {
             m.insert("font_family".into(), Value::from(f.clone()));
         }
@@ -285,12 +319,14 @@ impl EditingSettings {
 
 /// Source editor display preferences (spec 02 §12.1.1 display defaults), settings key
 /// `source`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SourceSettings {
     pub line_numbers: bool,
     pub soft_wrap: bool,
     pub current_line: bool,
     pub whitespace_marks: bool,
+    /// Source editor font size in points (`None`: automatic, from the theme's body size).
+    pub font_size: Option<f32>,
 }
 
 impl Default for SourceSettings {
@@ -300,17 +336,24 @@ impl Default for SourceSettings {
             soft_wrap: true,
             current_line: true,
             whitespace_marks: false,
+            font_size: None,
         }
     }
 }
 
 impl SourceSettings {
+    /// Accepted `font_size` values (points).
+    pub const FONT_SIZE: (f32, f32) = (8.0, 40.0);
+
     fn to_json(self) -> Value {
         let mut m = Map::new();
         m.insert("line_numbers".into(), Value::from(self.line_numbers));
         m.insert("soft_wrap".into(), Value::from(self.soft_wrap));
         m.insert("current_line".into(), Value::from(self.current_line));
         m.insert("whitespace_marks".into(), Value::from(self.whitespace_marks));
+        if let Some(v) = self.font_size {
+            m.insert("font_size".into(), Value::from(f64::from(v)));
+        }
         Value::Object(m)
     }
     fn from_json(v: &Value) -> Option<Self> {
@@ -322,6 +365,12 @@ impl SourceSettings {
             soft_wrap: b("soft_wrap", d.soft_wrap),
             current_line: b("current_line", d.current_line),
             whitespace_marks: b("whitespace_marks", d.whitespace_marks),
+            font_size: m
+                .get("font_size")
+                .and_then(Value::as_f64)
+                .map(|v| v as f32)
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(Self::FONT_SIZE.0, Self::FONT_SIZE.1)),
         })
     }
 }
@@ -348,6 +397,50 @@ impl CommentDisplay {
             "margin" => Some(CommentDisplay::Margin),
             "bubbles" => Some(CommentDisplay::Bubbles),
             _ => None,
+        }
+    }
+}
+
+/// How review marks are shown in the rendered view (setting `markdown.commentView`, issue #88).
+/// Display only: the text is never changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommentView {
+    /// Highlights, comment glyphs and cards, coloured suggestions.
+    #[default]
+    All,
+    /// Comment glyphs and coloured suggestions; no cards, no highlight tint.
+    Simple,
+    /// The text as if every suggestion were accepted; comments hidden (read-only).
+    Final,
+    /// The text as if every suggestion were rejected; comments hidden (read-only).
+    Original,
+}
+
+impl CommentView {
+    pub const ALL: [CommentView; 4] = [
+        CommentView::All,
+        CommentView::Simple,
+        CommentView::Final,
+        CommentView::Original,
+    ];
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CommentView::All => "all",
+            CommentView::Simple => "simple",
+            CommentView::Final => "final",
+            CommentView::Original => "original",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+    /// The menu / status bar label.
+    pub fn label(self) -> &'static str {
+        match self {
+            CommentView::All => "All Markup",
+            CommentView::Simple => "Simple Markup",
+            CommentView::Final => "No Markup (Final)",
+            CommentView::Original => "Original",
         }
     }
 }
@@ -469,6 +562,8 @@ pub struct MarkdownSettings {
     pub export_comments: bool,
     /// How comments are shown in the editor.
     pub comment_display: CommentDisplay,
+    /// How review marks are shown (issue #88).
+    pub comment_view: CommentView,
 }
 
 impl Default for MarkdownSettings {
@@ -478,6 +573,7 @@ impl Default for MarkdownSettings {
             critic_markup: true,
             export_comments: true,
             comment_display: CommentDisplay::Margin,
+            comment_view: CommentView::All,
         }
     }
 }
@@ -489,6 +585,7 @@ impl MarkdownSettings {
         m.insert("criticMarkup".into(), Value::from(self.critic_markup));
         m.insert("exportComments".into(), Value::from(self.export_comments));
         m.insert("commentDisplay".into(), Value::from(self.comment_display.as_str()));
+        m.insert("commentView".into(), Value::from(self.comment_view.as_str()));
         Value::Object(m)
     }
     fn from_json(v: &Value) -> Option<Self> {
@@ -509,6 +606,51 @@ impl MarkdownSettings {
                 .and_then(Value::as_str)
                 .and_then(CommentDisplay::parse)
                 .unwrap_or(d.comment_display),
+            comment_view: m
+                .get("commentView")
+                .and_then(Value::as_str)
+                .and_then(CommentView::parse)
+                .unwrap_or(d.comment_view),
+        })
+    }
+}
+
+/// Saving preferences (issues #49/#52). Backups are independent of autosave-to-file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileSettings {
+    pub autosave: bool,
+    pub autosave_minutes: u32,
+    pub backups: bool,
+    pub save_on_close: bool,
+    pub record_recent: bool,
+}
+impl Default for FileSettings {
+    fn default() -> Self {
+        Self {
+            autosave: false,
+            autosave_minutes: 5,
+            backups: true,
+            save_on_close: false,
+            record_recent: true,
+        }
+    }
+}
+impl FileSettings {
+    fn to_json(self) -> Value {
+        serde_json::json!({"enableAutoSave":self.autosave,"autoSaveTimer":self.autosave_minutes,"noUnsavedDraftsBackup":!self.backups,"saveOnClose":self.save_on_close,"noRecentFiles":!self.record_recent})
+    }
+    fn from_json(v: &Value) -> Option<Self> {
+        let m = v.as_object()?;
+        Some(Self {
+            autosave: m.get("enableAutoSave").and_then(Value::as_bool).unwrap_or(false),
+            autosave_minutes: m
+                .get("autoSaveTimer")
+                .and_then(Value::as_u64)
+                .unwrap_or(5)
+                .clamp(1, 1440) as u32,
+            backups: !m.get("noUnsavedDraftsBackup").and_then(Value::as_bool).unwrap_or(false),
+            save_on_close: m.get("saveOnClose").and_then(Value::as_bool).unwrap_or(false),
+            record_recent: !m.get("noRecentFiles").and_then(Value::as_bool).unwrap_or(false),
         })
     }
 }
@@ -542,6 +684,7 @@ pub struct Settings {
     pub markdown: MarkdownSettings,
     /// Pasted and dropped images (key `images`).
     pub images: ImageSettings,
+    pub files: FileSettings,
     pub overrides: FontOverrides,
     /// Members of `overrides` this version does not know, kept verbatim.
     pub overrides_extra: Map<String, Value>,
@@ -553,6 +696,15 @@ pub struct Settings {
     pub side_by_side_split: Option<f32>,
     /// Whole-window zoom factor (View → Zoom), [`ZOOM_RANGE`]; `None`: 100 %.
     pub zoom: Option<f32>,
+    /// The welcome tutorial was opened at first launch (key `tutorialShown`, issue #63).
+    pub tutorial_shown: bool,
+    /// Automatic update checks (key `updates.autoCheck`, issue #70): `None` until the user
+    /// answered the first-launch question (off until then).
+    pub update_auto: Option<bool>,
+    /// Unix time of the last update check GitHub answered (key `updates.lastCheck`).
+    pub update_last_check: Option<u64>,
+    /// The version whose update notice was dismissed (key `updates.dismissed`).
+    pub update_dismissed: Option<String>,
     /// The file's schema version (written back as [`VERSION`]; a newer file is not written).
     pub version: u64,
     /// Keys this version does not know, kept verbatim.
@@ -593,11 +745,16 @@ impl Default for Settings {
             source: SourceSettings::default(),
             markdown: MarkdownSettings::default(),
             images: ImageSettings::default(),
+            files: FileSettings::default(),
             overrides: FontOverrides::default(),
             overrides_extra: Map::new(),
             consumed_pending: Vec::new(),
             side_by_side_split: None,
             zoom: None,
+            tutorial_shown: false,
+            update_auto: None,
+            update_last_check: None,
+            update_dismissed: None,
             version: VERSION,
             extra: Map::new(),
         }
@@ -610,6 +767,9 @@ impl Default for Settings {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OverridesPatch {
     pub font_family: Option<Option<String>>,
+    pub cyrillic_font: Option<Option<String>>,
+    pub greek_font: Option<Option<String>>,
+    pub cjk_font: Option<Option<String>>,
     pub font_size: Option<Option<f32>>,
     pub line_height: Option<Option<f32>>,
     pub content_width: Option<Option<f32>>,
@@ -623,6 +783,9 @@ impl OverridesPatch {
         }
         OverridesPatch {
             font_family: d(&old.font_family, &new.font_family),
+            cyrillic_font: d(&old.cyrillic_font, &new.cyrillic_font),
+            greek_font: d(&old.greek_font, &new.greek_font),
+            cjk_font: d(&old.cjk_font, &new.cjk_font),
             font_size: d(&old.font_size, &new.font_size),
             line_height: d(&old.line_height, &new.line_height),
             content_width: d(&old.content_width, &new.content_width),
@@ -635,6 +798,15 @@ impl OverridesPatch {
 
     /// `later` wins member by member.
     pub fn merge(&mut self, later: OverridesPatch) {
+        if later.cyrillic_font.is_some() {
+            self.cyrillic_font = later.cyrillic_font;
+        }
+        if later.greek_font.is_some() {
+            self.greek_font = later.greek_font;
+        }
+        if later.cjk_font.is_some() {
+            self.cjk_font = later.cjk_font;
+        }
         if later.font_family.is_some() {
             self.font_family = later.font_family;
         }
@@ -650,6 +822,15 @@ impl OverridesPatch {
     }
 
     pub fn apply(&self, o: &mut FontOverrides) {
+        if let Some(v) = &self.cyrillic_font {
+            o.cyrillic_font = v.clone();
+        }
+        if let Some(v) = &self.greek_font {
+            o.greek_font = v.clone();
+        }
+        if let Some(v) = &self.cjk_font {
+            o.cjk_font = v.clone();
+        }
         if let Some(v) = &self.font_family {
             o.font_family = v.clone();
         }
@@ -681,9 +862,14 @@ pub struct SettingsPatch {
     pub source: Option<SourceSettings>,
     pub markdown: Option<MarkdownSettings>,
     pub images: Option<ImageSettings>,
+    pub files: Option<FileSettings>,
     pub overrides: OverridesPatch,
     pub side_by_side_split: Option<f32>,
     pub zoom: Option<f32>,
+    pub tutorial_shown: Option<bool>,
+    pub update_auto: Option<bool>,
+    pub update_last_check: Option<u64>,
+    pub update_dismissed: Option<String>,
 }
 
 /// Valid whole-window zoom factors (issue #43: 50–300 %).
@@ -756,6 +942,9 @@ impl SettingsPatch {
         if let Some(v) = self.markdown {
             s.markdown = v;
         }
+        if let Some(v) = self.files {
+            s.files = v;
+        }
         if let Some(v) = &self.images {
             s.images = v.clone();
         }
@@ -765,6 +954,18 @@ impl SettingsPatch {
         }
         if let Some(v) = self.zoom {
             s.zoom = Some(v);
+        }
+        if let Some(v) = self.tutorial_shown {
+            s.tutorial_shown = v;
+        }
+        if let Some(v) = self.update_auto {
+            s.update_auto = Some(v);
+        }
+        if let Some(v) = self.update_last_check {
+            s.update_last_check = Some(v);
+        }
+        if let Some(v) = &self.update_dismissed {
+            s.update_dismissed = Some(v.clone());
         }
     }
 
@@ -785,6 +986,18 @@ impl SettingsPatch {
         }
         if saved.zoom.is_some() {
             self.zoom = None;
+        }
+        if saved.tutorial_shown.is_some() {
+            self.tutorial_shown = None;
+        }
+        if saved.update_auto.is_some() {
+            self.update_auto = None;
+        }
+        if saved.update_last_check.is_some() {
+            self.update_last_check = None;
+        }
+        if saved.update_dismissed.is_some() {
+            self.update_dismissed = None;
         }
         if saved.diagrams.is_some() {
             self.diagrams = None;
@@ -813,10 +1026,22 @@ impl SettingsPatch {
         if saved.markdown.is_some() {
             self.markdown = None;
         }
+        if saved.files.is_some() {
+            self.files = None;
+        }
         if saved.images.is_some() {
             self.images = None;
         }
         let (o, so) = (&mut self.overrides, &saved.overrides);
+        if so.cyrillic_font.is_some() {
+            o.cyrillic_font = None;
+        }
+        if so.greek_font.is_some() {
+            o.greek_font = None;
+        }
+        if so.cjk_font.is_some() {
+            o.cjk_font = None;
+        }
         if so.font_family.is_some() {
             o.font_family = None;
         }
@@ -869,6 +1094,9 @@ impl SettingsPatch {
         if later.markdown.is_some() {
             self.markdown = later.markdown;
         }
+        if later.files.is_some() {
+            self.files = later.files;
+        }
         if later.images.is_some() {
             self.images = later.images;
         }
@@ -878,6 +1106,18 @@ impl SettingsPatch {
         }
         if later.zoom.is_some() {
             self.zoom = later.zoom;
+        }
+        if later.tutorial_shown.is_some() {
+            self.tutorial_shown = later.tutorial_shown;
+        }
+        if later.update_auto.is_some() {
+            self.update_auto = later.update_auto;
+        }
+        if later.update_last_check.is_some() {
+            self.update_last_check = later.update_last_check;
+        }
+        if later.update_dismissed.is_some() {
+            self.update_dismissed = later.update_dismissed;
         }
     }
 
@@ -898,6 +1138,18 @@ impl SettingsPatch {
         }
         if let Some(v) = self.zoom {
             m.insert("zoom".into(), round_zoom(v));
+        }
+        if let Some(v) = self.tutorial_shown {
+            m.insert(TUTORIAL_SHOWN_KEY.into(), Value::from(v));
+        }
+        if let Some(v) = self.update_auto {
+            m.insert(UPDATE_AUTO_KEY.into(), Value::from(v));
+        }
+        if let Some(v) = self.update_last_check {
+            m.insert(UPDATE_LAST_CHECK_KEY.into(), Value::from(v));
+        }
+        if let Some(v) = &self.update_dismissed {
+            m.insert(UPDATE_DISMISSED_KEY.into(), Value::from(v.clone()));
         }
         if let Some(v) = self.diagrams {
             m.insert("diagrams".into(), Value::from(v));
@@ -926,11 +1178,23 @@ impl SettingsPatch {
         if let Some(v) = self.markdown {
             m.insert("markdown".into(), v.to_json());
         }
+        if let Some(v) = self.files {
+            m.insert("files".into(), v.to_json());
+        }
         if let Some(v) = &self.images {
             m.insert("images".into(), v.to_json());
         }
         let mut o = Map::new();
         let op = &self.overrides;
+        for (key, value) in [
+            ("cyrillic_font", &op.cyrillic_font),
+            ("greek_font", &op.greek_font),
+            ("cjk_font", &op.cjk_font),
+        ] {
+            if let Some(v) = value {
+                o.insert(key.into(), v.clone().map_or(Value::Null, Value::from));
+            }
+        }
         if let Some(v) = &op.font_family {
             o.insert("font_family".into(), v.clone().map_or(Value::Null, Value::from));
         }
@@ -960,6 +1224,10 @@ impl SettingsPatch {
             appearance: m.get("appearance").and_then(Value::as_str).and_then(Appearance::parse),
             side_by_side_split: m.get("side_by_side_split").and_then(valid_split),
             zoom: m.get("zoom").and_then(valid_zoom),
+            tutorial_shown: m.get(TUTORIAL_SHOWN_KEY).and_then(Value::as_bool),
+            update_auto: m.get(UPDATE_AUTO_KEY).and_then(Value::as_bool),
+            update_last_check: m.get(UPDATE_LAST_CHECK_KEY).and_then(Value::as_u64),
+            update_dismissed: m.get(UPDATE_DISMISSED_KEY).and_then(valid_dismissed),
             diagrams: m.get("diagrams").and_then(Value::as_bool),
             show_toolbar: m.get("showToolbar").and_then(Value::as_bool),
             show_recent: m.get(SHOW_RECENT_KEY).and_then(Value::as_bool),
@@ -973,6 +1241,7 @@ impl SettingsPatch {
             source: m.get("source").and_then(SourceSettings::from_json),
             markdown: m.get("markdown").and_then(MarkdownSettings::from_json),
             images: m.get("images").and_then(ImageSettings::from_json),
+            files: m.get("files").and_then(FileSettings::from_json),
             ..Default::default()
         };
         if let Some(Value::Object(o)) = m.get("overrides") {
@@ -982,6 +1251,9 @@ impl SettingsPatch {
             };
             p.overrides = OverridesPatch {
                 font_family: o.get("font_family").map(|v| v.as_str().map(str::to_string)),
+                cyrillic_font: o.get("cyrillic_font").map(|v| v.as_str().map(str::to_string)),
+                greek_font: o.get("greek_font").map(|v| v.as_str().map(str::to_string)),
+                cjk_font: o.get("cjk_font").map(|v| v.as_str().map(str::to_string)),
                 font_size: num("font_size"),
                 line_height: num("line_height"),
                 content_width: num("content_width"),
@@ -1009,6 +1281,22 @@ pub const SHOW_RECENT_KEY: &str = "sidebar.showRecent";
 pub const SHOW_WORD_COUNT_KEY: &str = "statusBar.showWordCount";
 /// Settings key of [`Settings::count_mode`].
 pub const COUNT_MODE_KEY: &str = "statusBar.count";
+/// Settings key of [`Settings::tutorial_shown`].
+pub const TUTORIAL_SHOWN_KEY: &str = "tutorialShown";
+/// Settings key of [`Settings::update_auto`].
+pub const UPDATE_AUTO_KEY: &str = "updates.autoCheck";
+/// Settings key of [`Settings::update_last_check`].
+pub const UPDATE_LAST_CHECK_KEY: &str = "updates.lastCheck";
+/// Settings key of [`Settings::update_dismissed`].
+pub const UPDATE_DISMISSED_KEY: &str = "updates.dismissed";
+
+/// A dismissed version: a short version-like string (anything else is ignored).
+fn valid_dismissed(v: &Value) -> Option<String> {
+    v.as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && t.len() <= 64 && t.bytes().all(|b| b.is_ascii_graphic()))
+        .map(str::to_string)
+}
 const MAX_BYTES: u64 = 1 << 20;
 
 impl Settings {
@@ -1072,6 +1360,14 @@ impl Settings {
         if let Some(Value::Bool(b)) = map.remove(SHOW_WORD_COUNT_KEY) {
             s.show_word_count = b;
         }
+        if let Some(Value::Bool(b)) = map.remove(TUTORIAL_SHOWN_KEY) {
+            s.tutorial_shown = b;
+        }
+        if let Some(Value::Bool(b)) = map.remove(UPDATE_AUTO_KEY) {
+            s.update_auto = Some(b);
+        }
+        s.update_last_check = map.remove(UPDATE_LAST_CHECK_KEY).as_ref().and_then(Value::as_u64);
+        s.update_dismissed = map.remove(UPDATE_DISMISSED_KEY).as_ref().and_then(valid_dismissed);
         if let Some(m) = map
             .remove(COUNT_MODE_KEY)
             .as_ref()
@@ -1096,6 +1392,9 @@ impl Settings {
         }
         if let Some(e) = map.remove("markdown").as_ref().and_then(MarkdownSettings::from_json) {
             s.markdown = e;
+        }
+        if let Some(e) = map.remove("files").as_ref().and_then(FileSettings::from_json) {
+            s.files = e;
         }
         if let Some(e) = map.remove("images").as_ref().and_then(ImageSettings::from_json) {
             s.images = e;
@@ -1122,6 +1421,7 @@ impl Settings {
         map.insert("source".into(), self.source.to_json());
         map.insert("markdown".into(), self.markdown.to_json());
         map.insert("images".into(), self.images.to_json());
+        map.insert("files".into(), self.files.to_json());
         if !self.consumed_pending.is_empty() {
             map.insert("consumed_pending".into(), Value::from(self.consumed_pending.clone()));
         }
@@ -1131,6 +1431,20 @@ impl Settings {
         // 100 % is the default: not written (Actual Size leaves no `zoom` behind)
         if let Some(v) = self.zoom.filter(|v| (v - 1.0).abs() > 1e-4) {
             map.insert("zoom".into(), round_zoom(v));
+        }
+        // the default (not shown yet) is not written
+        if self.tutorial_shown {
+            map.insert(TUTORIAL_SHOWN_KEY.into(), Value::from(true));
+        }
+        // update check state: omitted until set
+        if let Some(v) = self.update_auto {
+            map.insert(UPDATE_AUTO_KEY.into(), Value::from(v));
+        }
+        if let Some(v) = self.update_last_check {
+            map.insert(UPDATE_LAST_CHECK_KEY.into(), Value::from(v));
+        }
+        if let Some(v) = &self.update_dismissed {
+            map.insert(UPDATE_DISMISSED_KEY.into(), Value::from(v.clone()));
         }
         let o = self.overrides.to_json(&self.overrides_extra);
         if o.as_object().is_some_and(|m| !m.is_empty()) {
@@ -1173,7 +1487,8 @@ impl Settings {
         let dir = path.parent().unwrap_or(Path::new("."));
         let mut tmp = tempfile::Builder::new().prefix(".settings-").tempfile_in(dir)?;
         std::io::Write::write_all(&mut tmp, self.to_json().as_bytes())?;
-        tmp.persist(path).map(|_| ()).map_err(|e| e.error)
+        // replaced like a document (retrying Windows sharing conflicts, issue #147)
+        crate::save::persist_replacing(tmp, path)
     }
 }
 
@@ -1364,6 +1679,61 @@ mod tests {
 
     /// DG-2/DG-7: `diagrams` defaults to on, round-trips, and patches carry it.
     #[test]
+    fn file_preferences_patch_roundtrip_and_timer_bounds() {
+        let settings = Settings::from_json(
+            r#"{"version":2,"files":{"enableAutoSave":true,"autoSaveTimer":0,"saveOnClose":true},"unrelated":"kept"}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.files.autosave_minutes, 1);
+        assert!(settings.files.autosave && settings.files.backups && settings.files.save_on_close);
+        let patch = SettingsPatch {
+            files: Some(FileSettings {
+                record_recent: false,
+                ..settings.files
+            }),
+            ..Default::default()
+        };
+        let patch = SettingsPatch::from_json(&patch.to_json()).unwrap();
+        let mut changed = settings;
+        patch.apply(&mut changed);
+        let changed = Settings::from_json(&changed.to_json()).unwrap();
+        assert!(!changed.files.record_recent);
+        assert_eq!(changed.extra["unrelated"], "kept");
+        let mut pending = SettingsPatch::default();
+        pending.merge(patch.clone());
+        assert_eq!(pending.files, patch.files);
+    }
+
+    /// Issue #147: the settings file is replaced by a rename, which another process holding
+    /// it open without delete sharing (a virus scanner, an indexer, a reader) makes fail with
+    /// access denied on Windows; the write waits that out like a document save (#65).
+    #[cfg(windows)]
+    #[test]
+    fn settings_save_waits_out_a_briefly_held_file_147() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join(FILE_NAME);
+        Settings::default().save(&p).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&p)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(held);
+        });
+        let patch = SettingsPatch {
+            colors: Some("palette:nord".into()),
+            ..Default::default()
+        };
+        update_file(&p, &patch).unwrap();
+        release.join().unwrap();
+        assert_eq!(Settings::load(&p).colors, "palette:nord");
+    }
+
+    #[test]
     fn markdown_settings_default_on_and_round_trip() {
         assert!(Settings::default().markdown.wikilinks);
         assert!(Settings::from_json(r#"{"version": 2}"#).unwrap().markdown.wikilinks);
@@ -1381,6 +1751,69 @@ mod tests {
         let mut s = Settings::default();
         p.apply(&mut s);
         assert!(!s.markdown.wikilinks);
+    }
+
+    /// Issue #63: the first-launch tutorial flag defaults off, is not written until set, and
+    /// round-trips through the file and a settings patch.
+    #[test]
+    fn tutorial_shown_flag_round_trip() {
+        let d = Settings::default();
+        assert!(!d.tutorial_shown);
+        assert!(!d.to_json().contains(TUTORIAL_SHOWN_KEY));
+        let s = Settings {
+            tutorial_shown: true,
+            ..Settings::default()
+        };
+        assert!(Settings::from_json(&s.to_json()).unwrap().tutorial_shown);
+        let p = SettingsPatch {
+            tutorial_shown: Some(true),
+            ..Default::default()
+        };
+        let q = SettingsPatch::from_json(&p.to_json()).unwrap();
+        assert_eq!(q, p);
+        let mut t = Settings::default();
+        q.apply(&mut t);
+        assert!(t.tutorial_shown);
+    }
+
+    #[test]
+    fn update_check_state_round_trips_and_patches_member_by_member() {
+        let d = Settings::default();
+        assert_eq!(
+            (d.update_auto, d.update_last_check, d.update_dismissed.as_deref()),
+            (None, None, None)
+        );
+        assert!(!d.to_json().contains("updates."), "defaults are not written");
+        let s = Settings {
+            update_auto: Some(true),
+            update_last_check: Some(1_800_000_000),
+            update_dismissed: Some("0.2.0".into()),
+            ..Settings::default()
+        };
+        let back = Settings::from_json(&s.to_json()).unwrap();
+        assert_eq!(back.update_auto, Some(true));
+        assert_eq!(back.update_last_check, Some(1_800_000_000));
+        assert_eq!(back.update_dismissed.as_deref(), Some("0.2.0"));
+        // invalid values are ignored
+        let bad =
+            Settings::from_json(r#"{"updates.autoCheck":"yes","updates.lastCheck":-5,"updates.dismissed":"a b"}"#)
+                .unwrap();
+        assert_eq!(
+            (bad.update_auto, bad.update_last_check, bad.update_dismissed),
+            (None, None, None)
+        );
+        // a patch carries only its members (two instances do not overwrite each other)
+        let p = SettingsPatch {
+            update_last_check: Some(5),
+            ..Default::default()
+        };
+        let p2 = SettingsPatch::from_json(&p.to_json()).unwrap();
+        assert_eq!(p2, p);
+        let mut t = s.clone();
+        p2.apply(&mut t);
+        assert_eq!(t.update_last_check, Some(5));
+        assert_eq!(t.update_auto, Some(true));
+        assert_eq!(t.update_dismissed.as_deref(), Some("0.2.0"));
     }
 
     /// ADR 0012: CriticMarkup and kept export comments default on, round-trip, and an older
@@ -1405,6 +1838,16 @@ mod tests {
         );
         let bad = Settings::from_json(r#"{"version": 2, "markdown": {"commentDisplay": "x"}}"#).unwrap();
         assert_eq!(bad.markdown.comment_display, CommentDisplay::Margin);
+        // issue #88: the review view
+        assert_eq!(d.markdown.comment_view, CommentView::All);
+        for v in CommentView::ALL {
+            let mut s = Settings::default();
+            s.markdown.comment_view = v;
+            let back = Settings::from_json(&s.to_json()).unwrap();
+            assert_eq!(back.markdown.comment_view, v);
+        }
+        let bad = Settings::from_json(r#"{"version": 2, "markdown": {"commentView": "x"}}"#).unwrap();
+        assert_eq!(bad.markdown.comment_view, CommentView::All);
     }
 
     #[test]
@@ -1455,6 +1898,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(SettingsPatch::from_json(&p.to_json()).unwrap().source, p.source);
+    }
+
+    /// Issue #130: the source editor font size is automatic until set, round-trips, and is
+    /// clamped / ignored when out of range or not a number.
+    #[test]
+    fn source_font_size_round_trips_and_is_clamped() {
+        assert_eq!(Settings::default().source.font_size, None);
+        assert!(
+            !Settings::default().to_json().contains("font_size"),
+            "omitted while automatic"
+        );
+        let s = Settings::from_json(r#"{"version": 2, "source": {"font_size": 13.5}}"#).unwrap();
+        assert_eq!(s.source.font_size, Some(13.5));
+        assert_eq!(Settings::from_json(&s.to_json()).unwrap().source, s.source);
+        let big = Settings::from_json(r#"{"version": 2, "source": {"font_size": 400}}"#).unwrap();
+        assert_eq!(big.source.font_size, Some(SourceSettings::FONT_SIZE.1));
+        let bad = Settings::from_json(r#"{"version": 2, "source": {"font_size": "big"}}"#).unwrap();
+        assert_eq!(bad.source.font_size, None);
     }
 
     #[test]
@@ -1695,6 +2156,42 @@ mod tests {
     }
 
     #[test]
+    fn script_font_patches_merge_recover_and_clear_independently() {
+        let before = FontOverrides::default();
+        let cyrillic = FontOverrides {
+            cyrillic_font: Some("Arial".into()),
+            ..Default::default()
+        };
+        let mut patch = SettingsPatch {
+            overrides: OverridesPatch::diff(&before, &cyrillic),
+            ..Default::default()
+        };
+        let greek = FontOverrides {
+            greek_font: Some("Georgia".into()),
+            ..Default::default()
+        };
+        patch.overrides.merge(OverridesPatch::diff(&before, &greek));
+        assert_eq!(SettingsPatch::from_json(&patch.to_json()).unwrap(), patch);
+        let mut settings = Settings::default();
+        patch.apply(&mut settings);
+        assert_eq!(settings.overrides.cyrillic_font.as_deref(), Some("Arial"));
+        assert_eq!(settings.overrides.greek_font.as_deref(), Some("Georgia"));
+        let cleared = FontOverrides {
+            cyrillic_font: None,
+            ..settings.overrides.clone()
+        };
+        let reset = SettingsPatch {
+            overrides: OverridesPatch::diff(&settings.overrides, &cleared),
+            ..Default::default()
+        };
+        let reset = SettingsPatch::from_json(&reset.to_json()).unwrap();
+        reset.apply(&mut settings);
+        assert_eq!(settings.overrides, cleared);
+        patch.forget(&patch.clone());
+        assert!(patch.is_empty());
+    }
+
+    #[test]
     fn round_trip_preserves_unknown_keys() {
         let dir = std::env::temp_dir().join(format!("markise-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1707,6 +2204,9 @@ mod tests {
             appearance: Appearance::Dark,
             overrides: FontOverrides {
                 font_family: Some("Georgia".into()),
+                cyrillic_font: Some("Arial".into()),
+                greek_font: Some("Georgia".into()),
+                cjk_font: Some("Noto Sans CJK".into()),
                 font_size: Some(17.5),
                 line_height: None,
                 content_width: Some(900.0),

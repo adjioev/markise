@@ -25,7 +25,7 @@ use crate::sidebar::{EditEnd, InlineEdit, Tab, TreeAction};
 #[derive(Default)]
 pub(crate) struct FileOps {
     /// Answers handed out instead of showing the native save dialog (tests).
-    save_answers: VecDeque<Option<PathBuf>>,
+    pub(super) save_answers: VecDeque<Option<PathBuf>>,
     /// The tree row whose name is being edited.
     pub(crate) rename: Option<InlineEdit>,
 }
@@ -103,16 +103,25 @@ impl MarkiseApp {
     }
 
     pub(super) fn new_document_now(&mut self) {
+        // empty text: new lines are written with LF (spec 05 default line ending)
+        self.install_untitled(
+            String::new(),
+            &format!("{}.{}", fsops::UNTITLED, fsops::DEFAULT_EXTENSION),
+        );
+    }
+
+    /// Replaces the document with an untitled one holding `text` (clean: closing it without
+    /// edits asks nothing). `name`: the file name Save As proposes, in [`Self::untitled_dir`].
+    pub(super) fn install_untitled(&mut self, text: String, name: &str) {
         // a load still running would replace the new document when it lands
         if let Some(l) = &self.loader {
             l.cancel();
         }
         self.load = None;
-        let placeholder = self
-            .untitled_dir()
-            .join(format!("{}.{}", fsops::UNTITLED, fsops::DEFAULT_EXTENSION));
-        // empty text: new lines are written with LF (spec 05 default line ending)
-        let doc = Document::parse(String::new(), self.parse.clone());
+        let placeholder = self.untitled_dir().join(name);
+        let version = DiskVersion::of_bytes(text.as_bytes(), None);
+        let bytes = text.len();
+        let doc = Document::parse(text, self.parse.clone());
         let model = DocModel::build(&doc, Some(&placeholder));
         let loaded = Loaded {
             path: placeholder,
@@ -120,9 +129,9 @@ impl MarkiseApp {
             model,
             timings: LoadTimings::default(),
             mtime: None,
-            version: DiskVersion::of_bytes(b"", None),
+            version,
             lossy: false,
-            bytes: 0,
+            bytes,
         };
         self.install_doc(loaded, true);
     }
@@ -221,7 +230,10 @@ impl MarkiseApp {
     /// document now corresponds to (what Save As wrote; for a rename the unchanged content),
     /// the watcher's baseline for the new path (ADR 0010).
     pub(super) fn document_moved(&mut self, path: &Path, version: Option<DiskVersion>) {
-        self.side.opened(path);
+        if self.themes.file_settings().record_recent {
+            self.side.opened(path);
+        }
+        self.remember_path(path);
         if let Some(w) = self.watcher.as_mut() {
             w.watch_file(path, version);
         }
@@ -399,7 +411,7 @@ impl MarkiseApp {
     }
 
     /// `from` was renamed to `to`: the document (in it, or it) follows.
-    fn renamed(&mut self, from: &Path, to: &Path) {
+    pub(super) fn renamed(&mut self, from: &Path, to: &Path) {
         self.side.renamed(from, to);
         if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {
             t.renamed(from, to, w);
@@ -410,6 +422,29 @@ impl MarkiseApp {
         {
             let reason = l.reason;
             self.start_load(p, reason);
+        }
+        // an open waiting for an answer or for its whole document follows too (issue #126
+        // review): it installs, watches and later saves the new path
+        if let Some(w) = self.progressive_waiting.as_mut()
+            && let Some(p) = fsops::rebase(&w.path, from, to)
+        {
+            w.path = p;
+        }
+        if let Some(Ask::Unsaved(then)) = self.ask.as_mut() {
+            rebase_then(then, from, to);
+        }
+        for then in [
+            self.queued_save.as_mut().map(|q| &mut q.then),
+            self.saving.as_mut().map(|s| &mut s.then),
+            self.progressive
+                .as_mut()
+                .and_then(|p| p.save.as_mut())
+                .map(|q| &mut q.then),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            rebase_then(then, from, to);
         }
         let moved = self
             .doc
@@ -452,5 +487,22 @@ impl MarkiseApp {
             Some(Ask::Trash(p)) => Some(p),
             _ => None,
         }
+    }
+}
+
+/// A continuation opening or installing a file under `from` follows its rename to `to`.
+fn rebase_then(then: &mut Then, from: &Path, to: &Path) {
+    match then {
+        Then::Open(p) => {
+            if let Some(q) = fsops::rebase(p, from, to) {
+                *p = q;
+            }
+        }
+        Then::Install(l) => {
+            if let Some(q) = fsops::rebase(&l.path, from, to) {
+                l.path = q;
+            }
+        }
+        _ => {}
     }
 }

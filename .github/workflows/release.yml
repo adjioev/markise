@@ -27,7 +27,8 @@
 # TODO (not done yet, needs owner accounts/secrets):
 # - macOS: Developer ID signing + notarization (Apple developer account; secrets for the
 #   certificate .p12, its password, an App Store Connect API key). Today the .app is only
-#   ad-hoc signed: users must right-click > Open (or `xattr -dr com.apple.quarantine`).
+#   ad-hoc signed: users confirm the first launch in System Settings > Privacy & Security >
+#   Open Anyway (docs/user/getting-started.md).
 # - Windows: Authenticode signing (SmartScreen will warn until then).
 # - Linux: AppImage / .deb / Flatpak; the tarball is built on ubuntu-22.04 so it runs on
 #   glibc >= 2.35 distributions.
@@ -114,9 +115,15 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "version $version, label $label, commit $sha, dry run: $dry_run, prerelease: $prerelease"
 
+  heavy:
+    needs: prepare
+    uses: ./.github/workflows/heavy.yml
+    with:
+      sha: ${{ needs.prepare.outputs.sha }}
+
   build:
     name: build (${{ matrix.name }})
-    needs: prepare
+    needs: [prepare, heavy]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:

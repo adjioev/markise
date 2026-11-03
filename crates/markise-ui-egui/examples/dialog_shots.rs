@@ -7,6 +7,11 @@
 //! Yes/no questions are native OS alerts in the desktop app; here they are answered by the
 //! in-app fallback (shown where no native alert is available), so that is what the shots
 //! show. Default output: `<repo>/.screenshots/dialogs/` (gitignored).
+//!
+//! The `site-*` scenes are the website screenshots (issue #62; synthetic notes only, see
+//! `site/assets/SOURCE.md` for the exact command). Size: `MARKISE_SHOT_WIDTH` /
+//! `MARKISE_SHOT_HEIGHT` in points (default 900 × 600), `MARKISE_SHOT_SCALE` pixels per point
+//! (default 1).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,10 +47,132 @@ fn review_setup(app: &mut MarkiseApp) {
     app.set_sidebar_tab(markise_ui_egui::sidebar::Tab::Comments);
 }
 
+/// The linked notes of the `site-vault` scene: an Obsidian-style vault (a `.obsidian/` folder)
+/// with `[[wikilinks]]` to a note, a heading in a note, and a note that does not exist yet.
+const VAULT_NOTES: &[(&str, &str)] = &[
+    (
+        "Harbour handbook.md",
+        "# Harbour handbook\n\nStart here. Each topic has its own note, linked with wikilinks.\n\n\
+## Daily routine\n\n- Check the [[Tides]] table before the morning round.\n\
+- Trim the lamp as described in [[Lighthouse#The lamp]].\n\
+- Log the weather in [[Harbour log|the harbour log]].\n\n\
+## Still to write\n\n- [[Storm drills]] (no note yet: Cmd/Ctrl-click offers to create it)\n\n\
+> Notes stay plain Markdown files in this folder.\n",
+    ),
+    (
+        "Tides.md",
+        "# Tides\n\n| Day | High water | Low water |\n|---|---|---|\n| Mon | 06:12 | 12:30 |\n",
+    ),
+    (
+        "Lighthouse.md",
+        "# Lighthouse\n\n## The lamp\n\nTrim the wick at dusk.\n",
+    ),
+    ("Harbour log.md", "# Harbour log\n\nWind NW 4, visibility good.\n"),
+    ("crew/Ann.md", "# Ann\n\nWatch: mornings.\n"),
+    ("crew/Bo.md", "# Bo\n\nWatch: evenings.\n"),
+];
+
+/// The `site-side-by-side` document: source on the left, rendered on the right.
+const SIDE_DOC: &str = "# Passage plan\n\n\
+Leave on the **morning tide** and keep the *red buoys* to port.\n\n\
+## Checklist\n\n- [x] Charts updated\n- [x] Fuel: 80 l\n- [ ] Radio check on channel 16\n\n\
+## Waypoints\n\n| Waypoint | Bearing | Distance |\n|:---|:---:|---:|\n\
+| Harbour mouth | 270° | 0.4 nm |\n| North cardinal | 315° | 2.1 nm |\n| Anchorage | 350° | 5.8 nm |\n\n\
+> Turn back if the wind rises above force 6.\n\n\
+```rust\nfn eta(distance_nm: f32, speed_kn: f32) -> f32 {\n    distance_nm / speed_kn\n}\n```\n";
+
+/// The `site-math-diagrams` document: TeX math and a Mermaid flowchart.
+const MATH_DOC: &str = "# Tidal height\n\n\
+A cosine curve is a simple model of the tide: the height at time $t$ is about\n\n\
+$$\nh(t) = h_0 + \\frac{R}{2}\\left(1 - \\cos\\frac{\\pi t}{T}\\right)\n$$\n\n\
+where $R$ is the range and $T \\approx 6.2\\,\\text{h}$.\n\n\
+## Decision\n\n```mermaid\nflowchart LR\n    A[Check tide] --> B{Enough water?}\n\
+    B -->|yes| C[Sail]\n    B -->|no| D[Wait an hour]\n    D --> A\n```\n";
+
 type Setup = fn(&mut MarkiseApp, &Context, &Path);
+
+/// A canned GitHub for the update scene (issue #70): one newer stable release.
+struct ShotReleases;
+
+impl markise_engine::update::ReleaseClient for ShotReleases {
+    fn get(&self, url: &str) -> Result<markise_engine::update::Response, markise_engine::update::TransportError> {
+        let release = r#"{"tag_name":"v9.1.0","prerelease":false,"draft":false,"html_url":"https://github.com/adjioev/markise/releases/tag/v9.1.0"}"#;
+        Ok(markise_engine::update::Response::ok(
+            if url == markise_engine::update::LATEST_URL {
+                release.to_string()
+            } else {
+                format!("[{release}]")
+            },
+        ))
+    }
+}
 
 fn scenes() -> Vec<(&'static str, Setup)> {
     vec![
+        // the first-launch question above the notice of a manual check (issue #70)
+        ("update-card", |app, ctx, _| {
+            app.menu_action(ctx, &MenuAction::Command("app.checkUpdates"));
+        }),
+        ("quick-open", |app, ctx, _| {
+            app.menu_action(ctx, &MenuAction::Command("file.quickOpen"));
+        }),
+        ("recovery", |app, ctx, _| {
+            app.menu_action(ctx, &MenuAction::Command("file.recover"));
+        }),
+        // key symbol glyphs and spacing, source vs rendered size (issues #130, #131)
+        ("keys-side-by-side", |app, _, _| {
+            let text = markise_ui_egui::tutorial::TEXT;
+            let table = text.find("| Style |").unwrap();
+            let find = text.find("## 7.").unwrap();
+            let end = text.find("## 8.").unwrap();
+            let doc = format!(
+                "# Keys\n\n{}\n{}",
+                &text[table..text[table..].find("\n\n").unwrap() + table],
+                &text[find..end]
+            );
+            app.edit_source_text(|t| *t = doc);
+            app.set_view_mode(markise_ui_egui::ViewMode::SideBySide);
+        }),
+        ("cheat-sheet", |app, ctx, _| {
+            app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
+            app.menu_action(ctx, &MenuAction::Command("help.shortcuts"));
+        }),
+        ("common-html", |app, _, _| {
+            app.edit_source_text(|t| *t = "# HTML in your notes\n\nPress <kbd>⌘</kbd> + <kbd>S</kbd> to save.<!-- private note -->\n\n<details>\n<summary>Show the answer</summary>\n\nThis answer is hidden until you expand it.\n\n</details>\n\n<details open>\n<summary>Keyboard shortcuts</summary>\n\n- <kbd>⌘</kbd> + <kbd>F</kbd> finds text.\n- <kbd>Esc</kbd> closes the Find bar.\n\n</details>\n\nYour Markdown stays unchanged.\n".into());
+            app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
+            app.viewer().unwrap().ed.set_selection(markise_doc::Selection::caret(0));
+        }),
+        ("find", |app, _, _| {
+            app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
+            app.open_find(false);
+            app.set_find_query(markise_engine::search::Query {
+                text: "log".into(),
+                ..Default::default()
+            });
+        }),
+        ("find-replace", |app, _, _| {
+            app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
+            app.open_find(true);
+            app.set_find_query(markise_engine::search::Query {
+                text: "log".into(),
+                ..Default::default()
+            });
+        }),
+        ("find-no-matches", |app, _, _| {
+            app.open_find(false);
+            app.set_find_query(markise_engine::search::Query {
+                text: "compass".into(),
+                ..Default::default()
+            });
+        }),
+        ("find-invalid-regex", |app, _, _| {
+            app.open_find(false);
+            app.set_find_query(markise_engine::search::Query {
+                text: "[".into(),
+                regex: true,
+                ..Default::default()
+            });
+        }),
         ("unsaved-changes", |app, _, _| {
             app.edit_source_text(|t| t.push_str("\nAn unsaved line.\n"));
             app.request_close();
@@ -107,6 +234,10 @@ fn scenes() -> Vec<(&'static str, Setup)> {
         ("preferences-appearance", |app, _, _| {
             app.open_preferences_at(Section::Appearance)
         }),
+        ("preferences-script-fonts", |app, _, _| {
+            app.open_preferences_at(Section::Appearance);
+            app.preferences().query = "script".into();
+        }),
         ("preferences-source", |app, _, _| {
             app.open_preferences_at(Section::Source)
         }),
@@ -162,6 +293,29 @@ fn scenes() -> Vec<(&'static str, Setup)> {
             review_setup(app);
             app.save_copy_without_comments();
         }),
+        // website screenshots (issue #62)
+        ("site-vault", |app, _, _| {
+            app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
+            app.show_files_tab(true);
+        }),
+        ("site-side-by-side", |app, ctx, _| {
+            app.edit_source_text(|t| *t = SIDE_DOC.into());
+            app.set_view_mode(markise_ui_egui::ViewMode::SideBySide);
+            app.menu_action(ctx, &MenuAction::Command("view.toggleSidebar"));
+        }),
+        ("site-math-diagrams", |app, _, _| {
+            app.edit_source_text(|t| *t = MATH_DOC.into());
+            app.set_view_mode(markise_ui_egui::ViewMode::Rendered);
+            app.show_files_tab(false);
+        }),
+        ("site-review", |app, ctx, _| {
+            review_setup(app);
+            app.menu_action(ctx, &MenuAction::Command("view.toggleSidebar"));
+            app.set_overrides(markise_theme::Overrides {
+                content_width: Some(560.0),
+                ..Default::default()
+            });
+        }),
         ("sidebar-outline", |app, _, _| {
             app.show_files_tab(false);
         }),
@@ -178,7 +332,15 @@ fn scenes() -> Vec<(&'static str, Setup)> {
 }
 
 fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
-    let (w_pt, h_pt, ppp) = (900.0f32, 600.0f32, 1.0f32);
+    let w_pt = std::env::var("MARKISE_SHOT_WIDTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(900.0f32);
+    let env_f32 = |key: &str, default: f32| std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default);
+    let (h_pt, ppp) = (
+        env_f32("MARKISE_SHOT_HEIGHT", 600.0),
+        env_f32("MARKISE_SHOT_SCALE", 1.0),
+    );
     let work = std::env::temp_dir().join(format!("markise-dialog-shots-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     let dir = work.join("harbour");
@@ -195,12 +357,30 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
     .unwrap();
     std::fs::write(dir.join("drafts").join("storm warning.md"), "# Storm\n").unwrap();
     std::fs::create_dir_all(dir.join("drafts").join("old")).unwrap();
+    let open = if name == "site-vault" {
+        let vault = work.join("vault");
+        std::fs::create_dir_all(vault.join(".obsidian")).unwrap();
+        std::fs::write(vault.join(".obsidian").join("app.json"), "{}\n").unwrap();
+        for (rel, text) in VAULT_NOTES {
+            let p = vault.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        std::fs::canonicalize(&vault).unwrap().join(VAULT_NOTES[0].0)
+    } else {
+        dir.join("log.md")
+    };
     let config = work.join("config");
     std::fs::create_dir_all(&config).unwrap();
     let mut app = MarkiseApp::new(AppOptions {
-        open: vec![dir.join("log.md")],
+        open: vec![open],
         system_fonts: true,
         config: ConfigDir::Dir(config),
+        updates: if name.starts_with("update") {
+            markise_ui_egui::updates::UpdateSource::Client(std::sync::Arc::new(ShotReleases))
+        } else {
+            Default::default()
+        },
         ..Default::default()
     });
     app.set_theme_choice(appearance);
@@ -254,7 +434,9 @@ fn shoot(name: &str, setup: Setup, appearance: Appearance, out: &Path) {
             }
             stable += 1;
         }
-        if stable >= 12 || start.elapsed() > Duration::from_secs(20) {
+        // the website scenes wait longer: math, diagrams and the vault index settle
+        let settle = if name.starts_with("site-") { 60 } else { 12 };
+        if stable >= settle || start.elapsed() > Duration::from_secs(20) {
             let prims = ctx.tessellate(full.shapes, full.pixels_per_point);
             // the app's zoom raises pixels_per_point above the native scale: tessellated
             // coordinates are points × that factor, the image keeps the native pixel size

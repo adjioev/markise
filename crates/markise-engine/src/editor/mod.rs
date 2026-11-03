@@ -20,12 +20,12 @@ use std::time::Instant;
 
 use markise_doc::{
     Affinity, DocPos, DocumentFormat, EditPrefs, EditSummary, FormatDoc, FormatOptions, HintSet, LeafKind, Params,
-    Patch, PatchError, PatchSet, Plan, PlanError, PlanRequest, PlanStep, Selection, planners,
+    Patch, PatchError, PatchSet, Plan, PlanError, PlanRequest, PlanStep, PlannerId, Selection, planners,
 };
 
 pub use history::{History, HistoryLimits, StateId, Step, Transaction, TxKind, TypingDir};
 pub use source::{SourceCaret, SourcePane};
-pub use surface::{CaretGeometry, EditorView, ViewCaret};
+pub use surface::{CaretGeometry, Continued, EditorView, ViewCaret};
 
 /// Time source for typing-group pauses (C13); injectable for tests.
 pub trait Clock: Send {
@@ -71,6 +71,8 @@ pub enum EditError {
     Plan(PlanError),
     /// Raised by a transaction body.
     Aborted(String),
+    /// The session is read-only ([`EditorSession::set_read_only`]); the reason.
+    ReadOnly(&'static str),
 }
 
 impl fmt::Display for EditError {
@@ -79,6 +81,7 @@ impl fmt::Display for EditError {
             EditError::Patch(e) => write!(f, "{e}"),
             EditError::Plan(e) => write!(f, "{e}"),
             EditError::Aborted(why) => write!(f, "aborted: {why}"),
+            EditError::ReadOnly(why) => write!(f, "read-only: {why}"),
         }
     }
 }
@@ -165,6 +168,69 @@ impl DocChange {
     }
 }
 
+/// Memoised planner queries (issue #133): command enablement (`can_plan`) and check state
+/// (`plan_checked`) at the current selection, asked by the menus, the toolbar, the context
+/// menu and shortcut dispatch every frame. Answers hold for one (document, selection,
+/// preferences) state: any change to the document object clears them (`doc_mut`,
+/// `replace_doc`), and a different selection or preferences replaces them.
+#[derive(Default)]
+struct PlanQueries {
+    at: Option<(Selection, EditPrefs)>,
+    answers: std::collections::HashMap<(PlannerId, bool), bool>,
+    /// Queries that ran the planner (not answered from memory): diagnostics, tests.
+    asked: u64,
+}
+
+/// Document changes for a consumer besides the view (the status bar's word count): each
+/// edit's summary in the order the edits were made, or "start over".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChangeLog {
+    /// Each summary describes the change from the state after the one before it.
+    pub edits: Vec<EditSummary>,
+    /// The document was replaced, or more edits piled up than are kept: start over.
+    pub reset: bool,
+}
+
+impl ChangeLog {
+    /// Edits kept before the log turns into "start over".
+    const MAX: usize = 1024;
+
+    fn push(&mut self, e: EditSummary) {
+        if self.reset {
+            return;
+        }
+        if self.edits.len() >= Self::MAX {
+            self.replaced();
+        } else {
+            self.edits.push(e);
+        }
+    }
+
+    fn replaced(&mut self) {
+        self.edits.clear();
+        self.reset = true;
+    }
+
+    /// Nothing changed.
+    pub fn is_empty(&self) -> bool {
+        self.edits.is_empty() && !self.reset
+    }
+
+    /// Appends `later` (the changes made after these).
+    pub fn append(&mut self, later: ChangeLog) {
+        if later.reset {
+            *self = later;
+        } else {
+            for e in later.edits {
+                self.push(e);
+            }
+        }
+    }
+}
+
+/// Position steps kept between two [`EditorSession::take_steps`].
+const MAX_STEPS: usize = 256;
+
 /// One open document being edited.
 pub struct EditorSession {
     format: Arc<dyn DocumentFormat>,
@@ -172,6 +238,13 @@ pub struct EditorSession {
     /// (otherwise copied first — the caller should release other references before editing).
     doc: Arc<dyn FormatDoc>,
     change: DocChange,
+    /// The changes since [`EditorSession::take_log`] (word count).
+    log: ChangeLog,
+    /// The edits since [`EditorSession::take_change`] as position steps (`None`: more than
+    /// [`MAX_STEPS`], or the document was replaced): [`EditorSession::take_steps`].
+    steps: Option<Vec<(usize, usize, isize)>>,
+    /// Process-unique identity of the session (its document's history).
+    id: u64,
     /// Clones of a shared document made by [`EditorSession::doc_mut`] (diagnostics, tests).
     pub copies: u64,
     sel: Selection,
@@ -193,6 +266,14 @@ pub struct EditorSession {
     source: Option<source::SourceSession>,
     /// Review-relevance of the edits so far (see [`EditorSession::review_edits`]).
     review: ReviewEdits,
+    /// Memoised `can_plan` / `plan_checked` answers (see [`EditorSession::can_plan`]).
+    plan_queries: Mutex<PlanQueries>,
+    /// The leases lending the document to background readers (the word count, issue #132;
+    /// the comment presence scan, issue #138): taken back before every change of the
+    /// document, so an edit never finds it shared.
+    leases: Vec<Arc<crate::lease::DocLease>>,
+    /// Read-only, and why ([`EditorSession::set_read_only`]).
+    read_only: Option<&'static str>,
 }
 
 /// Counters for consumers that track review comments incrementally (the comment gutter,
@@ -289,6 +370,12 @@ impl EditorSession {
             format,
             doc,
             change: DocChange::None,
+            log: ChangeLog::default(),
+            steps: Some(Vec::new()),
+            id: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
             copies: 0,
             sel: Selection::caret(0),
             marks: Vec::new(),
@@ -303,7 +390,24 @@ impl EditorSession {
             prefs: EditPrefs::default(),
             source: None,
             review: ReviewEdits::default(),
+            plan_queries: Mutex::new(PlanQueries::default()),
+            leases: Vec::new(),
+            read_only: None,
         }
+    }
+
+    /// Makes the session read-only (`Some(reason)`) or editable again: every text change
+    /// through it — commands, typing, pastes, transactions, external patches, undo and redo —
+    /// is refused while set (one choke point: [`EditError::ReadOnly`] from the mutation path,
+    /// `false` from undo / redo). Replacing the document (reload, re-parse) and materializing
+    /// literal hints for a save still work. Used for the clean review previews (issue #88).
+    pub fn set_read_only(&mut self, reason: Option<&'static str>) {
+        self.read_only = reason;
+    }
+
+    /// Why the session is read-only, if it is.
+    pub fn read_only(&self) -> Option<&'static str> {
+        self.read_only
     }
 
     /// Editing preferences (spec 02 §4, §13, §16).
@@ -337,24 +441,132 @@ impl EditorSession {
     pub fn take_change(&mut self) -> DocChange {
         std::mem::take(&mut self.change)
     }
+    /// The edits since the last call as position steps `(start, end, delta)` in the order made,
+    /// each in the coordinates after the ones before it (`None`: too many, or the document was
+    /// replaced): the view keeps positions across the composed change with them.
+    pub fn take_steps(&mut self) -> Option<Vec<(usize, usize, isize)>> {
+        self.steps.replace(Vec::new())
+    }
+    /// The document changes since the last call, for a consumer besides the view (the word
+    /// count, issue #125): unlike [`EditorSession::take_change`] each edit is kept on its own.
+    pub fn take_log(&mut self) -> ChangeLog {
+        std::mem::take(&mut self.log)
+    }
+    /// Process-unique identity of this session.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+    /// Lets a background reader borrow the document through `lease` (issue #132): the
+    /// session revokes the loan before every change of the document
+    /// ([`crate::lease::DocLease`]), so the reader never makes an edit copy the document.
+    /// Several readers each have their own lease (the word count, the comment presence scan);
+    /// adding a lease that is already registered does nothing.
+    pub fn add_doc_lease(&mut self, lease: Arc<crate::lease::DocLease>) {
+        if !self.leases.iter().any(|l| Arc::ptr_eq(l, &lease)) {
+            self.leases.push(lease);
+        }
+    }
+    fn revoke_lease(&self) {
+        for l in &self.leases {
+            l.revoke();
+        }
+    }
     /// The document for an in-place edit: copied first when it is shared.
     fn doc_mut(&mut self) -> &mut dyn FormatDoc {
+        self.forget_plan_queries();
+        self.revoke_lease();
         if Arc::get_mut(&mut self.doc).is_none() {
             self.copies += 1;
             self.doc = Arc::from(self.doc.clone_box());
         }
         Arc::get_mut(&mut self.doc).expect("unique document")
     }
+    fn forget_plan_queries(&mut self) {
+        self.plan_queries.get_mut().unwrap_or_else(|e| e.into_inner()).at = None;
+    }
+
+    /// Whether planner `id` applies at the current selection (command enablement), memoised
+    /// per (document, selection, preferences) state: asking every frame costs a lookup, the
+    /// planner runs once per state (issue #133).
+    pub fn can_plan(&self, id: PlannerId) -> bool {
+        self.plan_query(id, false, || self.doc.can_plan(id, &self.request(Params::new())))
+    }
+
+    /// Whether toggle planner `id` is active at the current selection (check marks, toolbar
+    /// state), memoised like [`EditorSession::can_plan`].
+    pub fn plan_checked(&self, id: PlannerId) -> bool {
+        self.plan_query(id, true, || self.doc.plan_checked(id, &self.request(Params::new())))
+    }
+
+    /// How many `can_plan` / `plan_checked` queries ran their planner rather than being
+    /// answered from memory (diagnostics, tests).
+    pub fn plan_queries_run(&self) -> u64 {
+        self.plan_queries.lock().unwrap_or_else(|e| e.into_inner()).asked
+    }
+
+    fn plan_query(&self, id: PlannerId, checked: bool, ask: impl FnOnce() -> bool) -> bool {
+        let lock = || self.plan_queries.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let mut q = lock();
+            let here =
+                q.at.as_ref()
+                    .is_some_and(|(sel, prefs)| *sel == self.sel && *prefs == self.prefs);
+            if !here {
+                q.at = Some((self.sel.clone(), self.prefs));
+                q.answers.clear();
+            } else if let Some(&v) = q.answers.get(&(id, checked)) {
+                return v;
+            }
+        }
+        let v = ask();
+        let mut q = lock();
+        q.asked += 1;
+        // still the same state (another thread may have moved on: then just answer)
+        if q.at
+            .as_ref()
+            .is_some_and(|(sel, prefs)| *sel == self.sel && *prefs == self.prefs)
+        {
+            q.answers.insert((id, checked), v);
+        }
+        v
+    }
+
     fn doc_apply(&mut self, ps: &PatchSet, hints: Option<&HintSet>) {
         if let Some(at) = review_relevant(self.doc.text(), ps) {
             self.review.relevant += 1;
             self.review.last_at = at;
         }
         let e = self.doc_mut().apply_with_hints(ps, hints);
+        // the patches as position steps (each in the coordinates after the ones before it);
+        // the covering range when their lengths do not add up (line ending conversion)
+        if let Some(steps) = &mut self.steps {
+            let mut cum = 0isize;
+            let mut sum = 0isize;
+            let mut add: Vec<(usize, usize, isize)> = Vec::new();
+            for p in ps.patches() {
+                let d = p.insert.len() as isize - p.range.len() as isize;
+                let (a, b) = (
+                    (p.range.start as isize + cum) as usize,
+                    (p.range.end as isize + cum) as usize,
+                );
+                add.push((a, b, d));
+                cum += d;
+                sum += d;
+            }
+            if sum != e.delta {
+                add = vec![(e.changed.start, e.changed.end, e.delta)];
+            }
+            steps.extend(add);
+            if steps.len() > MAX_STEPS {
+                self.steps = None;
+            }
+        }
+        self.log.push(e.clone());
         self.change.push(e);
     }
     fn doc_set_hints(&mut self, hints: &HintSet) {
         let e = self.doc_mut().set_hints(hints);
+        self.log.push(e.clone());
         self.change.push(e);
     }
     pub fn text(&self) -> &str {
@@ -482,6 +694,12 @@ impl EditorSession {
         }
     }
 
+    /// Forgets the redo stack (an undo that the caller treats as never having happened, e.g.
+    /// a new comment cancelled before it was written).
+    pub fn clear_redo(&mut self) {
+        self.history.clear_redo();
+    }
+
     /// Closes the open typing group (undo boundary).
     pub fn close_typing(&mut self) {
         self.open = None;
@@ -528,6 +746,11 @@ impl EditorSession {
     /// The single mutation path: canonicalise, validate, apply, transform live marks, update
     /// hints, bump the counter. Nothing is changed when validation fails.
     fn apply_raw(&mut self, patches: &PatchSet, hints_after: Option<HintSet>) -> Result<Step, EditError> {
+        if let Some(why) = self.read_only
+            && !patches.is_empty()
+        {
+            return Err(EditError::ReadOnly(why));
+        }
         let forward = self.doc.canonicalize(patches);
         forward.validate(self.doc.text())?;
         let removed = forward.removed_from(self.doc.text());
@@ -1346,6 +1569,9 @@ impl EditorSession {
 
     /// Undoes the newest transaction: inverse steps in reverse, exact hints, `sel_before`.
     pub fn undo(&mut self) -> bool {
+        if self.read_only.is_some() {
+            return false;
+        }
         self.close_typing();
         if !self.can_undo() {
             return false;
@@ -1366,6 +1592,9 @@ impl EditorSession {
 
     /// Redoes: forward steps in order, exact hints, `sel_after`.
     pub fn redo(&mut self) -> bool {
+        if self.read_only.is_some() {
+            return false;
+        }
         self.close_typing();
         let Some(tx) = self.history.pop_redo() else {
             return false;
@@ -1421,7 +1650,12 @@ impl EditorSession {
     /// Prepares a save: materialises hints, closes the typing group (the saved state is a
     /// transaction boundary) and snapshots the hint-free text with its revision.
     pub fn prepare_save(&mut self) -> Result<SaveSnapshot, EditError> {
-        self.expire_hints()?;
+        // (materializing hints for a save writes what the user already sees: allowed while
+        // read-only; ordinary hint expiry, e.g. on caret moves, stays refused)
+        let ro = self.read_only.take();
+        let r = self.expire_hints();
+        self.read_only = ro;
+        r?;
         self.close_typing();
         // the state being written is a permanent boundary from the start of the save, so
         // edits made while the save runs never join its transaction; kept even if the save
@@ -1458,6 +1692,29 @@ impl EditorSession {
         self.saved_ever.insert(self.rev.state);
     }
 
+    /// Replaces the document by `doc`, whose text continues the current one (progressive open,
+    /// issue #126: the rest of the file arrived and the edits made meanwhile were applied to
+    /// it). Not an edit: the history, the selection, live marks and the saved state stay valid
+    /// (they all lie in the current text, which `doc`'s text starts with). The revision
+    /// counter moves on (results computed for the shorter text are stale), background readers
+    /// and the word count start over; the caller installs `doc`'s view model.
+    pub fn adopt_continuation(&mut self, doc: Arc<dyn FormatDoc>) {
+        debug_assert!(
+            doc.text().starts_with(self.doc.text()),
+            "a continuation of the current text"
+        );
+        self.close_typing();
+        self.forget_plan_queries();
+        self.revoke_lease();
+        self.doc = doc;
+        self.change = DocChange::None;
+        self.log.replaced();
+        self.steps = None;
+        self.review.replaced += 1;
+        self.rev.counter += 1;
+        self.changed();
+    }
+
     /// Replaces the document object with `doc` (reload from disk, a rebuilt source-mode
     /// edit; ADR 0006 §4.3): recorded as one undoable transaction of the minimal byte diff
     /// (verbatim patches), hints dropped, live marks and the selection transformed. With
@@ -1474,6 +1731,8 @@ impl EditorSession {
         join: bool,
     ) -> Result<(), EditError> {
         self.close_typing();
+        self.forget_plan_queries();
+        self.revoke_lease();
         let old = self.doc.text();
         let patches: Vec<Patch> = crate::edit::patches(old, doc.text())
             .into_iter()
@@ -1484,6 +1743,8 @@ impl EditorSession {
         if forward.is_empty() && hints_before.is_empty() {
             self.doc = doc;
             self.change = DocChange::Replaced;
+            self.log.replaced();
+            self.steps = None;
             self.review.replaced += 1;
             return Ok(());
         }
@@ -1495,6 +1756,8 @@ impl EditorSession {
             self.doc_mut().set_hints(&HintSet::new());
         }
         self.change = DocChange::Replaced;
+        self.log.replaced();
+        self.steps = None;
         self.review.replaced += 1;
         self.transform_live(&forward);
         self.rev.counter += 1;

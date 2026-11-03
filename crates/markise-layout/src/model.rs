@@ -62,7 +62,7 @@ pub enum ItemKind {
     },
     /// Fenced or indented code. `lang` is the first word of the info string.
     Code {
-        lang: String,
+        lang: Box<str>,
     },
     /// Display math, shown as styled TeX source in M1 (placeholder, like the HTML export C36).
     Math,
@@ -70,7 +70,7 @@ pub enum ItemKind {
     /// diagrams are on (the first segment draws the scene, later segments are empty), else
     /// styled source, segmented like code.
     Diagram {
-        lang: String,
+        lang: Box<str>,
     },
     /// Raw HTML block, shown as source (M1 placeholder).
     Html,
@@ -82,6 +82,9 @@ pub enum ItemKind {
     Hidden,
     /// An empty list item (`- `): only its marker is drawn.
     Empty,
+    /// A page of top-level blocks of a paged model that is not materialized (a placeholder,
+    /// see [`paged`]): never laid out or shown (the view materializes it first).
+    Page(Box<paged::PageStats>),
 }
 
 /// Vertical gap above an item, resolved to points by the layout.
@@ -127,12 +130,8 @@ pub enum Segment {
         end: u32,
         first: bool,
         last: bool,
-        widths_hash: u64,
-        /// Hash of this segment's row texts and their offsets in the table (cached layouts
-        /// carry table-relative source positions).
-        rows_hash: u64,
-        /// Estimated natural width of each column in characters (shared by all segments).
-        col_chars: Box<[u32]>,
+        /// Boxed: keeps [`Segment`] (and so every [`Item`]) small (issue #29, part 4).
+        data: Box<RowsData>,
     },
     /// Outline entries `start..end` of a `[toc]`.
     Toc {
@@ -141,6 +140,17 @@ pub enum Segment {
         first: bool,
         last: bool,
     },
+}
+
+/// The larger part of a [`Segment::Rows`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RowsData {
+    pub widths_hash: u64,
+    /// Hash of this segment's row texts and their offsets in the table (cached layouts
+    /// carry table-relative source positions).
+    pub rows_hash: u64,
+    /// Estimated natural width of each column in characters (shared by all segments).
+    pub col_chars: Box<[u32]>,
 }
 
 impl Segment {
@@ -177,6 +187,8 @@ pub struct CodeRef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     pub kind: ItemKind,
+    /// Boxed: rare, and the item record is per leaf (issue #29, part 4).
+    pub raw: Option<Box<markise_doc::RawPresentation>>,
     /// Byte length of the leaf block's span (all segments of a block share it).
     pub len: usize,
     pub containers: Box<[Container]>,
@@ -198,13 +210,12 @@ pub struct Item {
     /// The source contains `[[` (a possible wikilink): its style depends on which link targets
     /// exist ([`crate::links`]). Over-approximated; only costs a re-layout.
     pub has_wikilink: bool,
-    /// For a heading, its index in [`DocModel::outline`].
-    pub heading: Option<u32>,
     /// Set when this item is one part of a large block.
     pub segment: Option<Segment>,
     /// Set for fenced code with a language (highlighting input) and for diagram fences (diagram
     /// input; `key` identifies the whole block's content).
-    pub code: Option<CodeRef>,
+    /// Boxed: only code and diagram items have one (keeps [`Item`] small, issue #29, part 4).
+    pub code: Option<Box<CodeRef>>,
     /// Absolute start while the item is outside the model; 0 inside it (see [`Items`]).
     origin: usize,
 }
@@ -247,6 +258,10 @@ impl Items {
     fn get_mut(&mut self, i: usize) -> Option<&mut Item> {
         self.0.get_mut(i)
     }
+    /// Index of the first item starting at or after absolute offset `start`.
+    pub fn partition_point_start(&self, start: usize) -> usize {
+        self.0.partition_point(|r| r.origin < start)
+    }
     fn partition_point(&self, mut pred: impl FnMut(usize, &Item) -> bool) -> usize {
         self.0.partition_point(|r| pred(r.origin, r.item))
     }
@@ -286,7 +301,25 @@ pub struct DocModel {
     pub base_dir: Option<PathBuf>,
     /// Resource root of the document (Markdown: `typora-root-url`).
     pub root_url: Option<String>,
+    /// The `[toc]` blocks: `(first item, item count)` of each, in order (kept in step by
+    /// [`DocModel::apply`], so outline changes re-key TOC items without scanning the items).
+    toc_runs: Vec<(usize, usize)>,
+    /// Lowest heading level of the outline (TOC indentation base; 1 when empty).
+    min_level: u8,
+    /// Top-level blocks per page of a paged model ([`paged`]); 0: a full model.
+    page_tops: usize,
+    /// Cross-block facts for the whole document ([`cross`]): disclosures, dependency
+    /// generations.
+    pub cross: CrossBlockIndex,
+    /// Keys of the `[toc]` segments for the current outline (paged models materialize TOCs
+    /// often; `None`: computed when next needed). Dropped whenever the outline changes.
+    toc_keys: Option<Arc<[u64]>>,
 }
+
+mod cross;
+pub use cross::{CrossBlockIndex, DepGens, DisclosureGroup, DisclosureMarker};
+mod paged;
+pub use paged::{PAGE_TOPS, PageStats, Paging, PagingCounters, paging_counters};
 
 pub(crate) fn hasher() -> ahash::AHasher {
     // fixed keys: hashes must be stable within a process run (cache keys), not across runs
@@ -302,11 +335,101 @@ pub struct ModelChange {
     pub inserted: std::ops::Range<usize>,
     /// Other items whose hash changed (indices after the change; dependency invalidation).
     pub rehashed: Vec<usize>,
+    /// Items whose hash changed but nothing their height estimate reads (`[toc]` items whose
+    /// entries changed but not their number): the view keeps their heights and only marks laid-out ones for
+    /// a new layout, so a large re-keying costs O(1) per item.
+    pub rekeyed: Vec<usize>,
     /// Reference labels whose definitions changed: items that may use them get new cache keys
     /// (the view folds reference fingerprints into its keys, ADR 0006 §7.4).
     pub labels: Vec<u64>,
+    /// Further splices besides `replaced` → `inserted`: `[toc]` blocks outside the edit whose
+    /// number of segments followed the outline gain or lose segments. Each is `(old range, new
+    /// range)` like that pair: old ranges number the items before the change, new ranges (and
+    /// `inserted`, `rehashed`, `rekeyed`) after it. Together with `replaced` they are disjoint
+    /// and ascending ([`ModelChange::splices`]).
+    pub resized: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
     /// The whole model was rebuilt.
     pub full: bool,
+    /// The edit behind a change that replaced items wholesale (a re-paged region, a rebuild):
+    /// the view maps its scroll position through it ([`Moved::anchor`]).
+    pub moved: Option<Moved>,
+    /// The disclosures' markers or pairing changed, or items holding them came or went
+    /// (materialization, eviction): the view derives its disclosure state again. Without it
+    /// the derived state only follows the splices (ordinary typing).
+    pub disclosures: bool,
+}
+
+/// How an edit moved positions, for positions kept across it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Moved {
+    /// `(start, end, delta)` of each step in the order made, each in the coordinates after the
+    /// steps before it (one step: the edit's covering range).
+    pub steps: Vec<(usize, usize, isize)>,
+}
+
+impl Moved {
+    /// The edit as one step: its covering changed range.
+    pub fn of(e: &EditSummary) -> Moved {
+        Moved {
+            steps: vec![(e.changed.start, e.changed.end, e.delta)],
+        }
+    }
+
+    /// The edit as its individual steps (the patches of each edit composed into one summary:
+    /// a position between two of them only moves, it is not inside the covering range).
+    pub fn from_steps(steps: Vec<(usize, usize, isize)>) -> Moved {
+        Moved { steps }
+    }
+
+    /// A scroll position by source (`(item start, ordinal among the items starting there,
+    /// points into it)`) after the edit, step by step: before a step's changed range it
+    /// stays, after it it moves by the delta, inside it (deleted or replaced text) it goes to
+    /// the start of the replacement.
+    pub fn anchor(&self, a: (usize, usize, f32)) -> (usize, usize, f32) {
+        let (mut start, mut nth, mut off) = a;
+        for &(s, e, delta) in &self.steps {
+            if start < s {
+            } else if start >= e {
+                start = (start as isize + delta).max(0) as usize;
+            } else {
+                (start, nth, off) = (s, 0, 0.0);
+            }
+        }
+        (start, nth, off)
+    }
+}
+
+impl ModelChange {
+    /// Every splice of the change (`replaced` → `inserted` and [`ModelChange::resized`]) as
+    /// `(old range, new range)`, ascending and disjoint.
+    pub fn splices(&self) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+        let mut v = Vec::with_capacity(self.resized.len() + 1);
+        v.push((self.replaced.clone(), self.inserted.clone()));
+        v.extend(self.resized.iter().cloned());
+        // an insertion at the end of a `[toc]` block that ends where the edit starts comes first
+        v.sort_by_key(|(o, n)| (o.start, o.end, n.start));
+        v
+    }
+
+    /// The new index of old item `i` (`None` when it was replaced); `splices` as returned by
+    /// [`ModelChange::splices`].
+    pub fn map_index(splices: &[(std::ops::Range<usize>, std::ops::Range<usize>)], i: usize) -> Option<usize> {
+        // the last splice ending at or before `i` gives the shift (`new.end - old.end` is the
+        // total shift after it)
+        let k = splices.partition_point(|(o, _)| o.end <= i);
+        if let Some((o, _)) = splices.get(k)
+            && o.start <= i
+        {
+            return None;
+        }
+        Some(match k.checked_sub(1) {
+            Some(j) => {
+                let (o, n) = &splices[j];
+                (i as isize + n.end as isize - o.end as isize) as usize
+            }
+            None => i,
+        })
+    }
 }
 
 impl DocModel {
@@ -316,17 +439,36 @@ impl DocModel {
     }
 
     /// Like [`DocModel::build`], unshared (for owners that update it with [`DocModel::apply`]).
+    /// Paged by default ([`Paging::from_env`]).
     pub fn build_owned(doc: &dyn FormatDoc, path: Option<&Path>) -> DocModel {
+        Self::build_with(doc, path, Paging::from_env())
+    }
+
+    /// Like [`DocModel::build_owned`] with an explicit [`Paging`] (a format without
+    /// [`FormatDoc::top_at`] always gets a full model).
+    pub fn build_with(doc: &dyn FormatDoc, path: Option<&Path>, paging: Paging) -> DocModel {
+        match paging {
+            Paging::Paged { tops } if tops > 0 && doc.top_at(0).is_some() => Self::build_paged(doc, path, tops),
+            _ => Self::build_full(doc, path),
+        }
+    }
+
+    /// A full model: one item per leaf (segment) of the whole document.
+    fn build_full(doc: &dyn FormatDoc, path: Option<&Path>) -> DocModel {
         // flattened in batches straight into the chunked list (no full-size intermediate)
         let mut chunks = RelChunks::default();
+        let mut cross = CrossBlockIndex::default();
         let n = doc.top_count();
         let mut k = 0;
         while k < n {
             let end = (k + 512).min(n);
             let doc_start = chunks.is_empty();
-            chunks.extend_abs(flatten(doc, k..end, doc_start));
+            let batch = flatten(doc, k..end, doc_start);
+            cross.add_from(&batch);
+            chunks.extend_abs(batch);
             k = end;
         }
+        cross.pair(doc);
         let base_dir = path.and_then(|p| p.parent()).map(Path::to_path_buf);
         let root_url = doc.resource_root();
         let mut m = DocModel {
@@ -335,10 +477,44 @@ impl DocModel {
             ctx_hash: images_hash(&root_url, &base_dir),
             base_dir,
             root_url,
+            toc_runs: Vec::new(),
+            min_level: 1,
+            page_tops: 0,
+            cross,
+            toc_keys: None,
         };
         m.rebuild_outline(doc);
-        let _ = m.update_tocs(doc);
+        m.update_tocs(doc);
         m
+    }
+
+    /// A fresh model of `doc` replacing this one after edit `e` (a full rebuild): the document
+    /// folder, the reader's disclosure choices (for markers outside the edit) and newer
+    /// dependency generations carry over.
+    fn rebuilt(&mut self, doc: &dyn FormatDoc, e: &EditSummary) -> DocModel {
+        let base_dir = self.base_dir.clone();
+        let mut fresh = Self::build_with(doc, None, self.paging());
+        fresh.base_dir = base_dir;
+        fresh.ctx_hash = images_hash(&fresh.root_url, &fresh.base_dir);
+        let (lo, hi, delta) = (e.changed.start, e.changed.end, e.delta);
+        let toggles = self.cross.take_toggles(|at| {
+            if at < lo {
+                Some(at)
+            } else if at >= hi {
+                Some((at as isize + delta) as usize)
+            } else {
+                None
+            }
+        });
+        fresh.cross.restore_toggles(doc, &toggles);
+        let g = self.cross.gens;
+        fresh.cross.gens = DepGens {
+            outline: g.outline + 1,
+            resources: g.resources + 1,
+            refs: g.refs + 1,
+            disclosures: g.disclosures + 1,
+        };
+        fresh
     }
 
     /// Updates the model after `doc` changed by `e` (the summary of the edit that produced
@@ -352,26 +528,36 @@ impl DocModel {
     /// bytes `reparsed.start .. reparsed.end - delta` before the edit, the new ones cover
     /// `reparsed` after it.
     pub fn apply(&mut self, doc: &dyn FormatDoc, e: &EditSummary) -> ModelChange {
+        if self.is_paged() {
+            if e.deps.all {
+                return self.rebuild_paged(doc, e);
+            }
+            // an edit reaching a placeholder, or inserting more blocks than two pages hold:
+            // re-page the region it reaches (issue #125, phase 5)
+            if self.edit_touches_page(e) || e.new_top.len() > 2 * self.page_tops {
+                return self.apply_region(doc, e);
+            }
+        }
         if e.deps.all {
             let n = self.items.len();
-            let base_dir = self.base_dir.clone();
-            let mut fresh = Self::build_owned(doc, None);
-            fresh.base_dir = base_dir;
-            fresh.ctx_hash = images_hash(&fresh.root_url, &fresh.base_dir);
-            *self = fresh;
+            *self = self.rebuilt(doc, e);
             return ModelChange {
                 replaced: 0..n,
                 inserted: 0..self.items.len(),
-                rehashed: Vec::new(),
-                labels: Vec::new(),
                 full: true,
+                moved: Some(Moved::of(e)),
+                ..Default::default()
             };
         }
         let mut change = ModelChange::default();
-        // outline entries under construction (only when a heading may have changed)
-        let mut heads: Option<Vec<Head>> = None;
+        // the outline is updated in place: entries `at..at + added` replaced `old`
+        let mut edit: Option<OutlineEdit> = None;
         let mut affected: HashSet<String> = HashSet::new();
-        let mut toc_touched = false;
+        // the `[toc]` runs after the splice, each with its start before the change (`None`: a
+        // `[toc]` block the edit inserted, keyed in full below)
+        let mut run_old: Vec<Option<usize>> = self.toc_runs.iter().map(|r| Some(r.0)).collect();
+        // first index of the inserted items (before `[toc]` resizes elsewhere)
+        let mut lo_new = 0;
         if !(e.replaced_top.is_empty() && e.new_top.is_empty()) {
             // items of the replaced blocks: origins in [reparsed.start, old resume point)
             let lo_pos = e.reparsed.start;
@@ -410,15 +596,69 @@ impl DocModel {
                 }
                 (None, None) => flatten(doc, e.new_top.clone(), lo == 0),
             };
+            let is_head = |it: &Item| matches!(it.kind, ItemKind::Heading { .. });
+            let old_heads = self.items.0.range(lo..hi).any(|r| is_head(r.item));
+            let new_heads = new_items.iter().any(is_head);
+            // inserted `[toc]` blocks come segmented for the outline after the edit (keyed once
+            // the outline is final)
+            let mut new_items = new_items;
+            let mut new_runs: Vec<(usize, usize)> = Vec::new(); // (offset in `new_items`, count)
+            if new_items
+                .iter()
+                .any(|it| it.kind == ItemKind::Toc && it.segment.is_none())
+            {
+                let removed =
+                    self.outline.partition_point(|o| o.item < hi) - self.outline.partition_point(|o| o.item < lo);
+                let n = self.outline.len() - removed + new_items.iter().filter(|it| is_head(it)).count();
+                let groups = toc_groups(n);
+                let mut out = Vec::with_capacity(new_items.len());
+                for it in new_items {
+                    if it.kind == ItemKind::Toc && it.segment.is_none() {
+                        let seg = toc_block_items(&it, groups, n);
+                        new_runs.push((out.len(), seg.len()));
+                        out.extend(seg);
+                    } else {
+                        out.push(it);
+                    }
+                }
+                new_items = out;
+            }
             let n_new = new_items.len();
-            let old_heads = (lo..hi).any(|i| self.items[i].heading.is_some());
-            let new_heads = new_items.iter().any(|it| matches!(it.kind, ItemKind::Heading { .. }));
-            toc_touched = (lo..hi).any(|i| self.items[i].kind == ItemKind::Toc)
-                || new_items.iter().any(|it| it.kind == ItemKind::Toc);
+            // disclosure markers of the replaced items go, the new items' come in (the
+            // reader's choices of unchanged markers carry over); others shift in O(chunks)
+            let mut removed: Vec<usize> = self.items.0.range(lo..hi).map(|r| r.origin).collect();
+            removed.dedup();
+            if self
+                .cross
+                .replace(doc, &removed, e.reparsed.start, &new_items, e.changed.clone(), e.delta)
+            {
+                change.disclosures = true;
+            }
             self.items.0.splice(lo..hi, new_items, e.delta);
             change.replaced = lo..hi;
             change.inserted = lo..lo + n_new;
+            lo_new = lo;
             let shift = n_new as isize - (hi - lo) as isize;
+            // `[toc]` runs: the replaced ones go (a run lies wholly inside or outside the
+            // replaced items: its items share one origin), the inserted ones come in
+            let mut runs: Vec<(usize, usize)> = Vec::with_capacity(self.toc_runs.len() + new_runs.len());
+            run_old.clear();
+            let at = self.toc_runs.partition_point(|r| r.0 < lo);
+            for &r in &self.toc_runs[..at] {
+                runs.push(r);
+                run_old.push(Some(r.0));
+            }
+            for &(off, k) in &new_runs {
+                runs.push((lo + off, k));
+                run_old.push(None);
+            }
+            for &r in &self.toc_runs[at..] {
+                if r.0 >= hi {
+                    runs.push(((r.0 as isize + shift) as usize, r.1));
+                    run_old.push(Some(r.0));
+                }
+            }
+            self.toc_runs = runs;
             // the first item of the document has no gap: re-flatten the block after the
             // change when it became / stopped being the first one
             if lo == 0 && (hi == 0) != (n_new == 0) && e.new_top.end < doc.top_count() {
@@ -442,63 +682,54 @@ impl DocModel {
                     // a segmented block (e.g. a `[toc]`, segmented by the outline) does not map
                     // item for item: rebuild (rare: the document's first block changed status)
                     let n_before = (n_items as isize - shift) as usize;
-                    let base_dir = self.base_dir.clone();
-                    let mut fresh = Self::build_owned(doc, None);
-                    fresh.base_dir = base_dir;
-                    fresh.ctx_hash = images_hash(&fresh.root_url, &fresh.base_dir);
-                    *self = fresh;
+                    *self = self.rebuilt(doc, e);
                     return ModelChange {
                         replaced: 0..n_before,
                         inserted: 0..self.items.len(),
-                        rehashed: Vec::new(),
                         labels: e.deps.labels.clone(),
                         full: true,
+                        moved: Some(Moved::of(e)),
+                        ..Default::default()
                     };
                 }
-                let keep: Vec<Option<u32>> = (n_new..n_new + cnt)
-                    .map(|i| self.items.get(i).and_then(|it| it.heading))
-                    .collect();
                 self.items.0.splice(n_new..n_new + cnt, block_items, 0);
-                for (j, h) in keep.into_iter().enumerate() {
-                    if let Some(it) = self.items.get_mut(n_new + j) {
-                        it.heading = h;
-                    }
-                }
                 change.rehashed.extend(n_new..n_new + cnt);
             }
             if old_heads || new_heads {
-                let mut hs: Vec<Head> = Vec::with_capacity(self.outline.len() + 4);
-                for o in self.outline.iter().filter(|o| o.item < lo) {
-                    hs.push(Head::from(o));
+                // only the entries of the replaced items change; the others shift (O(headings)
+                // integer updates, no text copies)
+                let ka = self.outline.partition_point(|o| o.item < lo);
+                let kb = self.outline.partition_point(|o| o.item < hi);
+                for o in &self.outline[ka..kb] {
+                    affected.insert(o.key.clone());
                 }
-                for i in lo..lo + n_new {
-                    if let ItemKind::Heading { level } = self.items[i].kind {
-                        let info = doc.heading(self.item_start(i)).unwrap_or_default();
+                let mut fresh = Vec::new();
+                for (i, r) in (lo..).zip(self.items.0.range(lo..lo + n_new)) {
+                    if let ItemKind::Heading { level } = r.item.kind {
+                        let info = doc.heading(r.origin).unwrap_or_default();
                         let key = info.key.to_lowercase();
                         affected.insert(key.clone());
-                        hs.push(Head {
-                            item: i,
+                        fresh.push(OutlineEntry {
                             level,
                             text: info.text.trim().to_string(),
+                            anchor: String::new(), // numbered below (its key is affected)
+                            item: i,
                             key,
-                            anchor: None,
                         });
                     }
                 }
-                for o in self.outline.iter().filter(|o| o.item >= lo && o.item < hi) {
-                    affected.insert(o.key.clone());
-                }
-                for o in self.outline.iter().filter(|o| o.item >= hi) {
-                    let mut h = Head::from(o);
-                    h.item = (h.item as isize + shift) as usize;
-                    hs.push(h);
-                }
-                heads = Some(hs);
-            } else if shift != 0 {
-                for o in &mut self.outline {
-                    if o.item >= hi {
+                if shift != 0 {
+                    for o in &mut self.outline[kb..] {
                         o.item = (o.item as isize + shift) as usize;
                     }
+                }
+                let added = fresh.len();
+                let old: Vec<OutlineEntry> = self.outline.splice(ka..kb, fresh).collect();
+                edit = Some(OutlineEdit { at: ka, old, added });
+            } else if shift != 0 {
+                let k = self.outline.partition_point(|o| o.item < hi);
+                for o in &mut self.outline[k..] {
+                    o.item = (o.item as isize + shift) as usize;
                 }
             }
         }
@@ -507,6 +738,7 @@ impl DocModel {
             let h = images_hash(&self.root_url, &self.base_dir);
             if h != self.ctx_hash {
                 self.ctx_hash = h;
+                self.cross.gens.resources += 1;
                 // every item showing an image has a new cache key (the view folds `ctx_hash`
                 // into the keys of image items): report them so their heights are re-estimated
                 change.rehashed.extend(
@@ -518,51 +750,392 @@ impl DocModel {
                 );
             }
         }
+        // outline entries whose text, level or anchor may have changed
+        let mut touched: Vec<usize> = Vec::new();
         // reference definitions changed (§7.4): cache keys of the items that may use them change
         // in the view (it folds their fingerprints into the keys); here only heading texts
         // (outline, anchors) need refreshing — a scan over the headings
         if !e.deps.labels.is_empty() {
             change.labels = e.deps.labels.clone();
-            let changed: HashSet<u64> = e.deps.labels.iter().copied().collect();
-            let retext: Vec<usize> = self
-                .outline
-                .iter()
-                .map(|o| o.item)
-                .chain(heads.iter().flatten().map(|h| h.item))
-                .filter(|&i| self.item_references(doc, i).iter().any(|r| changed.contains(r)))
-                .collect();
-            if !retext.is_empty() {
-                let hs = heads.get_or_insert_with(|| self.outline.iter().map(Head::from).collect());
-                for h in hs.iter_mut().filter(|h| retext.contains(&h.item)) {
-                    let info = doc.heading(self.items.start(h.item).unwrap_or(0)).unwrap_or_default();
-                    let key = info.key.to_lowercase();
-                    if key != h.key {
-                        affected.insert(h.key.clone());
-                        affected.insert(key.clone());
-                        h.anchor = None;
+            self.cross.gens.refs += 1;
+            self.retext_headings(doc, &e.deps.labels, &mut affected, &mut touched);
+        }
+        // anchors of the affected keys are renumbered in document order (R7.2: only anchors
+        // sharing a key influence each other); the others are kept
+        if !affected.is_empty() {
+            touched.extend(self.renumber_anchors(doc, &affected));
+        }
+        let old_count = match &edit {
+            Some(ed) => {
+                // replaced entries that came back unchanged do not touch the outline
+                if ed.old.len() == ed.added {
+                    touched.extend(
+                        (ed.at..ed.at + ed.added).filter(|&k| !same_entry(&self.outline[k], &ed.old[k - ed.at])),
+                    );
+                } else {
+                    touched.extend(ed.at..ed.at + ed.added);
+                }
+                self.outline.len() - ed.added + ed.old.len()
+            }
+            None => self.outline.len(),
+        };
+        let count_changed = old_count != self.outline.len();
+        let mut min_changed = false;
+        if edit.is_some() || !touched.is_empty() {
+            let min_level = self.outline.iter().map(|o| o.level).min().unwrap_or(1);
+            min_changed = min_level != self.min_level;
+            self.min_level = min_level;
+        }
+        let outline_changed = count_changed || min_changed || !touched.is_empty();
+        if outline_changed {
+            self.cross.gens.outline += 1;
+            self.toc_keys = None;
+        }
+        if !self.toc_runs.is_empty() && (outline_changed || run_old.iter().any(Option::is_none)) {
+            // entries from here on moved (their indices shifted)
+            let moved = edit.as_ref().filter(|_| count_changed).map(|ed| ed.at);
+            let shape = TocChange {
+                old_count,
+                moved,
+                min_changed,
+                outline_changed,
+                touched: &touched,
+                run_old: &run_old,
+                lo: lo_new,
+            };
+            self.sync_tocs(doc, &shape, &mut change);
+        }
+        change
+    }
+
+    /// Reference definitions `labels` changed: refreshes the text and key of the outline
+    /// entries of headings that may use one (headings in page placeholders read from their
+    /// pages); changed keys go to `affected`, refreshed entries to `touched`.
+    fn retext_headings(
+        &mut self,
+        doc: &dyn FormatDoc,
+        labels: &[u64],
+        affected: &mut HashSet<String>,
+        touched: &mut Vec<usize>,
+    ) {
+        let changed: HashSet<u64> = labels.iter().copied().collect();
+        // (entry, heading start) of the headings using a changed label; the headings of
+        // a page placeholder are read from its blocks (paged models)
+        let mut retext: Vec<(usize, usize)> = Vec::new();
+        let mut k = 0;
+        while k < self.outline.len() {
+            let i = self.outline[k].item;
+            if let Some(ItemKind::Page(st)) = self.items.get(i).map(|it| &it.kind) {
+                let kb = self.outline.partition_point(|o| o.item <= i);
+                if st.heading_refs == 0 {
+                    k = kb;
+                    continue;
+                }
+                let heads = self
+                    .page_items(doc, i)
+                    .into_iter()
+                    .filter(|(_, it)| matches!(it.kind, ItemKind::Heading { .. }));
+                for (j, (start, it)) in (k..kb).zip(heads) {
+                    if references_of(doc, &it, start).iter().any(|r| changed.contains(r)) {
+                        retext.push((j, start));
                     }
-                    h.text = info.text.trim().to_string();
-                    h.key = key;
+                }
+                k = kb;
+                continue;
+            }
+            if self.item_references(doc, i).iter().any(|r| changed.contains(r)) {
+                retext.push((k, self.item_start(i)));
+            }
+            k += 1;
+        }
+        for (k, start) in retext {
+            let info = doc.heading(start).unwrap_or_default();
+            let key = info.key.to_lowercase();
+            let o = &mut self.outline[k];
+            if key != o.key {
+                affected.insert(std::mem::replace(&mut o.key, key.clone()));
+                affected.insert(key);
+            }
+            o.text = info.text.trim().to_string();
+            touched.push(k);
+        }
+    }
+
+    /// Brings the `[toc]` blocks in step with the outline after an edit (§7.4), without a scan
+    /// over the items: blocks outside the edit whose number of segments changed gain or lose
+    /// trailing segments ([`ModelChange::resized`]); their segments showing changed entries are
+    /// re-keyed in place; blocks the edit inserted are keyed in full.
+    fn sync_tocs(&mut self, doc: &dyn FormatDoc, c: &TocChange<'_>, change: &mut ModelChange) {
+        let n = self.outline.len();
+        let (g_old, g_new) = (toc_groups(c.old_count), toc_groups(n));
+        if g_old != g_new {
+            self.resize_tocs(doc, c, g_old, g_new, change);
+        }
+        let runs = self.toc_runs.clone();
+        let is_new = |ri: usize| c.run_old[ri].is_none();
+        if g_new == 0 {
+            // unsegmented TOCs (a small outline): each depends on the whole outline
+            let oh = self.outline_hash();
+            for (ri, &(a, _)) in runs.iter().enumerate() {
+                if !c.outline_changed && !is_new(ri) {
+                    continue;
+                }
+                if let Some(it) = self.items.get_mut(a) {
+                    it.hash = mix(it.content_hash, oh);
+                }
+                if is_new(ri) {
+                    continue;
+                }
+                // the estimate reads the number of entries (issue #124)
+                if c.old_count != n {
+                    change.rehashed.push(a);
+                } else {
+                    change.rekeyed.push(a);
+                }
+            }
+            return;
+        }
+        let groups = g_new;
+        let key_of = |m: &DocModel, gi: usize| -> (usize, Segment, u64, u32) {
+            let r = gi * SEG_UNITS..((gi + 1) * SEG_UNITS).min(n);
+            let seg = toc_segment(gi, groups, n);
+            let key = toc_segment_key(&seg, m.toc_group_hash(r.clone()));
+            (gi, seg, key, r.len() as u32)
+        };
+        // segments of the blocks the edit inserted: all
+        if runs.iter().enumerate().any(|(ri, _)| is_new(ri)) {
+            let all: Vec<(usize, Segment, u64, u32)> = (0..groups).map(|gi| key_of(self, gi)).collect();
+            for (ri, &(a, k)) in runs.iter().enumerate() {
+                if !is_new(ri) {
+                    continue;
+                }
+                debug_assert_eq!(k, groups, "new TOC run of {k} items for {groups} segments");
+                for (it, s) in self.items.0.range_mut(a..a + k).zip(&all) {
+                    it.hash = mix(it.content_hash, s.2);
                 }
             }
         }
-        if let Some(hs) = heads {
-            let before = std::mem::take(&mut self.outline);
-            self.set_outline(doc, hs, Some(&affected));
-            toc_touched |= before != self.outline;
+        if !c.outline_changed {
+            return;
         }
-        if toc_touched {
-            let (tocs, resized) = self.update_tocs(doc);
-            if resized {
-                // a `[toc]` crossed the segmentation threshold and changed its item count: the
-                // splices of this change no longer describe the item list (rare: the view
-                // resets its heights)
-                change.full = true;
-            } else {
-                change.rehashed.extend(tocs);
+        // dirty segments of the other blocks, ascending
+        let dirty: Vec<usize> = if c.min_changed || g_old == 0 {
+            (0..groups).collect()
+        } else if let Some(m) = c.moved.or((g_old != g_new).then_some(0)) {
+            // the last segment before a resize is no longer (or newly) the last one
+            let mut from = (m / SEG_UNITS).min(groups - 1);
+            if g_old != g_new {
+                from = from.min(g_old.min(g_new) - 1);
+            }
+            let mut d: Vec<usize> = c.touched.iter().map(|&k| k / SEG_UNITS).filter(|&x| x < from).collect();
+            d.extend(from..groups);
+            d.sort_unstable();
+            d.dedup();
+            d
+        } else {
+            let mut d: Vec<usize> = c
+                .touched
+                .iter()
+                .map(|&k| k / SEG_UNITS)
+                .filter(|&x| x < groups)
+                .collect();
+            d.sort_unstable();
+            d.dedup();
+            d
+        };
+        let segs: Vec<(usize, Segment, u64, u32)> = dirty.iter().map(|&gi| key_of(self, gi)).collect();
+        // many dirty segments (from `first` on, after a count or level change): walk each TOC's
+        // items in order instead of looking each one up
+        let first = segs.first().map_or(groups, |s| s.0);
+        change.rekeyed.reserve(segs.len() * runs.len());
+        let walk = segs.len() * 4 >= groups - first;
+        let mut by_seg: Vec<Option<usize>> = vec![None; if walk { groups } else { 0 }];
+        if walk {
+            for (j, s) in segs.iter().enumerate() {
+                by_seg[s.0] = Some(j);
             }
         }
-        change
+        for (ri, &(a, k)) in runs.iter().enumerate() {
+            if is_new(ri) {
+                continue;
+            }
+            debug_assert_eq!(k, groups, "TOC run of {k} items for {groups} segments");
+            let mut update = |i: usize, it: &mut Item, (_, seg, key, lines): &(usize, Segment, u64, u32)| {
+                it.hash = mix(it.content_hash, *key);
+                if it.est_lines != *lines || it.segment.as_ref() != Some(seg) {
+                    it.est_lines = *lines;
+                    it.segment = Some(seg.clone());
+                    change.rehashed.push(i);
+                } else {
+                    change.rekeyed.push(i);
+                }
+            };
+            if walk {
+                for ((gi, i), it) in (first..).zip(a + first..).zip(self.items.0.range_mut(a + first..a + k)) {
+                    if let Some(j) = by_seg[gi] {
+                        update(i, it, &segs[j]);
+                    }
+                }
+            } else {
+                for s in &segs {
+                    let i = a + s.0;
+                    if let Some(it) = self.items.get_mut(i) {
+                        update(i, it, s);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Gives every `[toc]` block outside the edit `g_new` segments instead of `g_old` (trailing
+    /// segments added or removed; the whole block rebuilt when it crosses the segmentation
+    /// threshold). Records the splices in `change.resized` and moves the indices of the change,
+    /// the outline and the runs to the final numbering. Segment keys are set by the caller.
+    fn resize_tocs(
+        &mut self,
+        doc: &dyn FormatDoc,
+        c: &TocChange<'_>,
+        g_old: usize,
+        g_new: usize,
+        change: &mut ModelChange,
+    ) {
+        let n = self.outline.len();
+        // (position after the primary splice, removed, added, position before the change)
+        let mut splices: Vec<(usize, usize, usize, usize)> = Vec::new();
+        let mut edits: Vec<(std::ops::Range<usize>, Vec<Item>)> = Vec::new();
+        for ri in 0..self.toc_runs.len() {
+            let Some(oa) = c.run_old[ri] else { continue };
+            let (a, k) = self.toc_runs[ri];
+            let base = self.toc_base(doc, a);
+            let (at, removed, items) = if g_old > 0 && g_new > 0 {
+                if g_new > g_old {
+                    let items: Vec<Item> = (g_old..g_new).map(|gi| toc_seg_item(&base, gi, g_new, n)).collect();
+                    (a + k, 0, items)
+                } else {
+                    (a + g_new, k - g_new, Vec::new())
+                }
+            } else {
+                (a, k, toc_block_items(&base, g_new, n))
+            };
+            splices.push((at, removed, items.len(), oa + (at - a)));
+            edits.push((at..at + removed, items));
+        }
+        // all at once: the chunk index is rebuilt once, not per block
+        self.items.0.splice_many(edits);
+        // positions after the primary splice → final positions
+        let mut acc: Vec<isize> = Vec::with_capacity(splices.len());
+        let mut sum = 0isize;
+        for &(_, r, ad, _) in &splices {
+            sum += ad as isize - r as isize;
+            acc.push(sum);
+        }
+        let map = |i: usize| -> Option<usize> {
+            let k = splices.partition_point(|&(at, r, _, _)| at + r <= i);
+            if let Some(&(at, _, _, _)) = splices.get(k)
+                && at <= i
+            {
+                return None; // a removed segment
+            }
+            Some(match k.checked_sub(1) {
+                Some(j) => (i as isize + acc[j]) as usize,
+                None => i,
+            })
+        };
+        // the splices of the blocks before a block shift it (one splice per old block, in order)
+        let k_new = g_new.max(1);
+        let mut shift = 0isize;
+        let mut si = 0;
+        for (ri, r) in self.toc_runs.iter_mut().enumerate() {
+            r.0 = (r.0 as isize + shift) as usize;
+            if c.run_old[ri].is_some() {
+                r.1 = k_new;
+                shift = acc[si];
+                si += 1;
+            }
+        }
+        for o in &mut self.outline {
+            o.item = map(o.item).expect("a heading is never a TOC segment");
+        }
+        change.rehashed = change.rehashed.iter().filter_map(|&i| map(i)).collect();
+        change.rekeyed = change.rekeyed.iter().filter_map(|&i| map(i)).collect();
+        let len = change.inserted.len();
+        let start = map(c.lo).unwrap_or(c.lo);
+        change.inserted = start..start + len;
+        let mut before = 0isize;
+        for (j, &(at, r, ad, oa)) in splices.iter().enumerate() {
+            let s = (at as isize + before) as usize;
+            change.resized.push((oa..oa + r, s..s + ad));
+            before = acc[j];
+        }
+    }
+
+    /// The unsegmented item of the `[toc]` block starting at item `a`, outside the model
+    /// (absolute origin).
+    fn toc_base(&self, doc: &dyn FormatDoc, a: usize) -> Item {
+        let start = self.items.start(a).unwrap_or(0);
+        let mut base = self.items[a].clone();
+        base.origin = start;
+        base.segment = None;
+        let src = &doc.text()[start..start + base.len];
+        base.est_lines = (src.bytes().filter(|&c| c == b'\n').count() + 1) as u32;
+        base.hash = base.content_hash;
+        base
+    }
+
+    /// Renumbers the anchors of the outline entries whose key is in `affected`, in document
+    /// order; returns the indices of the entries whose anchor changed. One pass over the
+    /// outline comparing keys (no allocation per entry).
+    fn renumber_anchors(&mut self, doc: &dyn FormatDoc, affected: &HashSet<String>) -> Vec<usize> {
+        let few: Vec<&str> = if affected.len() <= 8 {
+            affected.iter().map(String::as_str).collect()
+        } else {
+            Vec::new()
+        };
+        let hit = |k: &str| {
+            if affected.len() <= 8 {
+                few.iter().any(|a| a.len() == k.len() && *a == k)
+            } else {
+                affected.contains(k)
+            }
+        };
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut changed = Vec::new();
+        for (k, o) in self.outline.iter_mut().enumerate() {
+            if hit(&o.key) {
+                let n = counts.entry(o.key.clone()).or_default();
+                let a = doc.anchor_id(&o.key, *n);
+                *n += 1;
+                if a != o.anchor {
+                    o.anchor = a;
+                    changed.push(k);
+                }
+            }
+        }
+        changed
+    }
+
+    /// Hash of the whole outline as a TOC shows it.
+    fn outline_hash(&self) -> u64 {
+        let mut oh = hasher();
+        for o in &self.outline {
+            (o.level, &o.text, &o.anchor).hash(&mut oh);
+        }
+        oh.finish()
+    }
+
+    /// Hash of outline entries `r` as a TOC segment shows them (with the indentation base).
+    fn toc_group_hash(&self, r: std::ops::Range<usize>) -> u64 {
+        let mut h = hasher();
+        self.min_level.hash(&mut h);
+        for o in &self.outline[r] {
+            (o.level, &o.text, &o.anchor).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Lowest heading level of the outline (the indentation base of TOC entries).
+    pub fn outline_min_level(&self) -> u8 {
+        self.min_level
     }
 
     /// Intra-line edit in a segmented block (items `a..b`, leaf start `start`): when the edited
@@ -724,73 +1297,35 @@ impl DocModel {
 
     /// Builds the outline of a fresh model: heading text and anchors of every heading item.
     fn rebuild_outline(&mut self, doc: &dyn FormatDoc) {
-        let mut heads = Vec::new();
+        let mut outline = Vec::new();
+        let mut counts: HashMap<String, usize> = HashMap::new();
         for (idx, (start, item)) in self.items.iter_with_start().enumerate() {
             if let ItemKind::Heading { level } = item.kind {
                 let info = doc.heading(start).unwrap_or_default();
-                heads.push(Head {
-                    item: idx,
+                let key = info.key.to_lowercase();
+                let n = counts.entry(key.clone()).or_default();
+                let anchor = doc.anchor_id(&key, *n);
+                *n += 1;
+                outline.push(OutlineEntry {
                     level,
                     text: info.text.trim().to_string(),
-                    key: info.key.to_lowercase(),
-                    anchor: None,
+                    anchor,
+                    item: idx,
+                    key,
                 });
             }
         }
-        self.set_outline(doc, heads, None);
-    }
-
-    /// Installs outline entries: anchors of the entries whose key is in `affected` (or that
-    /// have none yet; all when `affected` is `None`) are renumbered in document order (R7.2:
-    /// only anchors sharing a key influence each other), the others are kept. Sets the items'
-    /// heading indices.
-    fn set_outline(&mut self, doc: &dyn FormatDoc, mut heads: Vec<Head>, affected: Option<&HashSet<String>>) {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for h in heads.iter_mut() {
-            if affected.is_none_or(|a| a.contains(&h.key)) || h.anchor.is_none() {
-                let n = counts.entry(h.key.clone()).or_default();
-                h.anchor = Some(doc.anchor_id(&h.key, *n));
-                *n += 1;
-            }
-        }
-        let mut outline = Vec::with_capacity(heads.len());
-        for (k, h) in heads.into_iter().enumerate() {
-            if let Some(it) = self.items.get_mut(h.item) {
-                it.heading = Some(k as u32);
-            }
-            outline.push(OutlineEntry {
-                level: h.level,
-                text: h.text,
-                anchor: h.anchor.unwrap_or_default(),
-                item: h.item,
-                key: h.key,
-            });
-        }
+        self.min_level = outline.iter().map(|o| o.level).min().unwrap_or(1);
         self.outline = outline;
     }
 
     /// (Re)segments every `[toc]` block by the current outline and keys its items with the
-    /// outline (the TOC's dependency, §7.4); returns the indices of the TOC items afterwards
-    /// and whether a TOC changed its number of items.
-    #[must_use]
-    fn update_tocs(&mut self, doc: &dyn FormatDoc) -> (Vec<usize>, bool) {
-        if !self.items.iter().any(|i| i.kind == ItemKind::Toc) {
-            return (Vec::new(), false);
-        }
-        let mut oh = hasher();
-        for o in &self.outline {
-            (o.level, &o.text, &o.anchor).hash(&mut oh);
-        }
-        let outline_hash = oh.finish();
-        let n_entries = self.outline.len();
-        let groups: Vec<std::ops::Range<usize>> = if n_entries > SEG_MIN_UNITS {
-            (0..n_entries)
-                .step_by(SEG_UNITS)
-                .map(|s| s..(s + SEG_UNITS).min(n_entries))
-                .collect()
-        } else {
-            Vec::new()
-        };
+    /// outline (the TOC's dependency, §7.4): an unsegmented TOC with the whole outline, a
+    /// segment with its own entries ([`DocModel::toc_group_hash`]), so that an outline change
+    /// re-keys only the segments showing changed entries ([`DocModel::sync_tocs`]). Scans the
+    /// items for the TOC blocks and records them (a fresh model; edits keep them in step
+    /// without a scan).
+    fn update_tocs(&mut self, doc: &dyn FormatDoc) {
         // runs of TOC items belonging to one block (same origin)
         let mut runs: Vec<(usize, usize)> = Vec::new();
         let mut cur: Option<(usize, usize, usize)> = None; // (first, end, origin)
@@ -810,43 +1345,38 @@ impl DocModel {
         if let Some((a, b, _)) = cur {
             runs.push((a, b));
         }
+        if runs.is_empty() {
+            self.toc_runs.clear();
+            return;
+        }
+        let outline_hash = self.outline_hash();
+        let n_entries = self.outline.len();
+        let groups: Vec<(std::ops::Range<usize>, u64)> = if n_entries > SEG_MIN_UNITS {
+            (0..n_entries)
+                .step_by(SEG_UNITS)
+                .map(|s| {
+                    let r = s..(s + SEG_UNITS).min(n_entries);
+                    let h = self.toc_group_hash(r.clone());
+                    (r, h)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         // runs are rebuilt from the last to the first (earlier indices stay valid); outline
         // indices are remapped once at the end
         let mut sizes: Vec<(usize, usize, usize)> = Vec::with_capacity(runs.len()); // (a, b, k)
         for &(a, b) in runs.iter().rev() {
-            let start = self.items.start(a).unwrap_or(0);
             // the run's first item keeps the block's markers and gap; `content_hash` of TOC
             // items is always the unsegmented one
-            let mut base = self.items[a].clone();
-            base.origin = start;
-            base.segment = None;
-            let src = &doc.text()[start..start + base.len];
-            base.est_lines = (src.bytes().filter(|&c| c == b'\n').count() + 1) as u32;
-            let mut new_items = Vec::new();
+            let base = self.toc_base(doc, a);
+            let mut new_items = toc_block_items(&base, groups.len(), n_entries);
             if groups.is_empty() {
-                let mut it = base.clone();
-                it.hash = mix(it.content_hash, outline_hash);
-                new_items.push(it);
+                new_items[0].hash = mix(base.content_hash, outline_hash);
             } else {
-                let n = groups.len();
-                for (gi, g) in groups.iter().enumerate() {
-                    let mut seg_item = base.clone();
-                    let seg = Segment::Toc {
-                        start: g.start as u32,
-                        end: g.end as u32,
-                        first: gi == 0,
-                        last: gi + 1 == n,
-                    };
-                    let mut sh = hasher();
-                    (base.content_hash, &seg, outline_hash).hash(&mut sh);
-                    seg_item.hash = sh.finish();
-                    seg_item.est_lines = (g.end - g.start) as u32;
-                    if gi > 0 {
-                        seg_item.gap = Gap::None;
-                        spend_markers(&mut seg_item.containers);
-                    }
-                    seg_item.segment = Some(seg);
-                    new_items.push(seg_item);
+                for (it, (_, gh)) in new_items.iter_mut().zip(&groups) {
+                    let seg = it.segment.as_ref().expect("a TOC segment");
+                    it.hash = mix(base.content_hash, toc_segment_key(seg, *gh));
                 }
             }
             let k = new_items.len();
@@ -865,30 +1395,23 @@ impl DocModel {
         }
         sizes.reverse();
         // final indices of the runs and the outline remap
-        let mut out = Vec::new();
         let mut shift: isize = 0;
         let mut bounds: Vec<(usize, isize)> = Vec::with_capacity(sizes.len()); // (old b, shift after)
+        self.toc_runs.clear();
         for &(a, b, k) in &sizes {
             let na = (a as isize + shift) as usize;
-            out.extend(na..na + k);
+            self.toc_runs.push((na, k));
             shift += k as isize - (b - a) as isize;
             bounds.push((b, shift));
         }
-        if shift != 0 || bounds.iter().any(|&(_, s)| s != 0) {
+        if bounds.iter().any(|&(_, s)| s != 0) {
             for o in &mut self.outline {
                 let j = bounds.partition_point(|&(b, _)| b <= o.item);
                 if j > 0 {
                     o.item = (o.item as isize + bounds[j - 1].1) as usize;
                 }
             }
-            for (k, o) in self.outline.iter().enumerate() {
-                if let Some(it) = self.items.get_mut(o.item) {
-                    it.heading = Some(k as u32);
-                }
-            }
         }
-        let resized = sizes.iter().any(|&(a, b, k)| k != b - a);
-        (out, resized)
     }
 
     /// Absolute start of item `i`.
@@ -918,31 +1441,10 @@ impl DocModel {
     /// without inline references): the dependency of its layout on reference definitions
     /// (ADR 0006 §7.4). Computed on demand (the view memoises it per item hash).
     pub fn item_references(&self, doc: &dyn FormatDoc, i: usize) -> Vec<u64> {
-        let Some(it) = self.items.get(i) else { return Vec::new() };
-        let mut out = Vec::new();
-        match (&it.kind, &it.segment) {
-            (ItemKind::Paragraph | ItemKind::Heading { .. }, _) => {
-                doc.reference_candidates(&self.item_lines(doc, i), &mut out);
-            }
-            (ItemKind::Table, seg) => {
-                let start = self.item_start(i);
-                if let Some(t) = doc.table(start) {
-                    let rows: Vec<Span> = match seg {
-                        Some(Segment::Rows { start, end, .. }) => std::iter::once(t.rows[0])
-                            .chain(
-                                t.rows[(*start as usize).min(t.rows.len())..(*end as usize).min(t.rows.len())]
-                                    .iter()
-                                    .copied(),
-                            )
-                            .collect(),
-                        _ => t.rows,
-                    };
-                    doc.reference_candidates(&rows, &mut out);
-                }
-            }
-            _ => {}
+        match self.items.get(i) {
+            Some(it) => references_of(doc, it, self.item_start(i)),
+            None => Vec::new(),
         }
-        out
     }
 
     /// Index of the item containing byte offset `pos` (or the next item after it).
@@ -994,11 +1496,69 @@ impl DocModel {
         if self.outline != other.outline {
             return Err(format!("outline {:?}\n  != {:?}", self.outline, other.outline));
         }
+        if (&self.toc_runs, self.min_level) != (&other.toc_runs, other.min_level) {
+            return Err(format!(
+                "TOC runs / lowest level {:?} {} != {:?} {}",
+                self.toc_runs, self.min_level, other.toc_runs, other.min_level
+            ));
+        }
         if (self.ctx_hash, &self.root_url) != (other.ctx_hash, &other.root_url) {
             return Err("context differs".into());
         }
+        if !self.cross.same_disclosures(&other.cross) {
+            return Err(format!(
+                "disclosures {:?}\n  != {:?}",
+                self.cross.disclosures(),
+                other.cross.disclosures()
+            ));
+        }
         Ok(())
     }
+}
+
+/// Reference labels item `it` (absolute start `start`) may look up (see
+/// [`DocModel::item_references`]).
+fn references_of(doc: &dyn FormatDoc, it: &Item, start: usize) -> Vec<u64> {
+    let mut out = Vec::new();
+    let span = Span::new(start, start + it.len);
+    // a whole leaf without anything that could be a reference: no lookup of its lines
+    if matches!(
+        it.kind,
+        ItemKind::Paragraph | ItemKind::Heading { .. } | ItemKind::Table
+    ) && it.segment.is_none()
+        && !doc.may_reference(span)
+    {
+        return out;
+    }
+    match (&it.kind, &it.segment) {
+        (ItemKind::Paragraph | ItemKind::Heading { .. }, seg) => {
+            let lines = match seg {
+                Some(Segment::Lines { spans, .. }) => spans
+                    .iter()
+                    .map(|s| Span::new(start + s.start, start + s.end))
+                    .collect(),
+                _ => doc.leaf(start).map(|l| l.lines).unwrap_or_default(),
+            };
+            doc.reference_candidates(&lines, &mut out);
+        }
+        (ItemKind::Table, seg) => {
+            if let Some(t) = doc.table(start) {
+                let rows: Vec<Span> = match seg {
+                    Some(Segment::Rows { start, end, .. }) => std::iter::once(t.rows[0])
+                        .chain(
+                            t.rows[(*start as usize).min(t.rows.len())..(*end as usize).min(t.rows.len())]
+                                .iter()
+                                .copied(),
+                        )
+                        .collect(),
+                    _ => t.rows,
+                };
+                doc.reference_candidates(&rows, &mut out);
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 fn images_hash(root_url: &Option<String>, base_dir: &Option<PathBuf>) -> u64 {
@@ -1014,26 +1574,81 @@ fn mix(a: u64, b: u64) -> u64 {
     h.finish()
 }
 
-/// An outline entry under construction.
-struct Head {
-    item: usize,
-    level: u8,
-    text: String,
-    /// Lower-cased anchor key.
-    key: String,
-    anchor: Option<String>,
+/// Key of a `[toc]` segment: the segment and its entries' hash (the same in every TOC).
+fn toc_segment_key(seg: &Segment, group_hash: u64) -> u64 {
+    let mut h = hasher();
+    (seg, group_hash).hash(&mut h);
+    h.finish()
 }
 
-impl From<&OutlineEntry> for Head {
-    fn from(o: &OutlineEntry) -> Self {
-        Head {
-            item: o.item,
-            level: o.level,
-            text: o.text.clone(),
-            key: o.key.clone(),
-            anchor: Some(o.anchor.clone()),
-        }
+/// Number of segments of a `[toc]` over `n` outline entries (0: one unsegmented item).
+fn toc_groups(n: usize) -> usize {
+    if n > SEG_MIN_UNITS { n.div_ceil(SEG_UNITS) } else { 0 }
+}
+
+/// Segment `gi` of `groups` of a `[toc]` over `n` outline entries.
+fn toc_segment(gi: usize, groups: usize, n: usize) -> Segment {
+    Segment::Toc {
+        start: (gi * SEG_UNITS) as u32,
+        end: ((gi + 1) * SEG_UNITS).min(n) as u32,
+        first: gi == 0,
+        last: gi + 1 == groups,
     }
+}
+
+/// Item `gi` of a `[toc]` block with `groups` segments over `n` entries, from the block's
+/// unsegmented item `base` (its hash is set when the segment is keyed).
+fn toc_seg_item(base: &Item, gi: usize, groups: usize, n: usize) -> Item {
+    let mut it = base.clone();
+    let seg = toc_segment(gi, groups, n);
+    if let Segment::Toc { start, end, .. } = seg {
+        it.est_lines = end - start;
+    }
+    if gi > 0 {
+        it.gap = Gap::None;
+        spend_markers(&mut it.containers);
+    }
+    it.segment = Some(seg);
+    it.hash = it.content_hash;
+    it
+}
+
+/// The items of a `[toc]` block with `groups` segments (0: unsegmented) over `n` entries.
+fn toc_block_items(base: &Item, groups: usize, n: usize) -> Vec<Item> {
+    if groups == 0 {
+        vec![base.clone()]
+    } else {
+        (0..groups).map(|gi| toc_seg_item(base, gi, groups, n)).collect()
+    }
+}
+
+/// What [`DocModel::sync_tocs`] needs to know about the outline change of an edit.
+struct TocChange<'a> {
+    /// Outline entries before the edit.
+    old_count: usize,
+    /// Entries from this one on moved (the count changed).
+    moved: Option<usize>,
+    min_changed: bool,
+    /// Any entry or the entry count changed.
+    outline_changed: bool,
+    /// Entries whose text, level or anchor changed.
+    touched: &'a [usize],
+    /// Per `[toc]` run: its first item before the edit (`None`: inserted by it).
+    run_old: &'a [Option<usize>],
+    /// First inserted item (before `[toc]` resizes elsewhere).
+    lo: usize,
+}
+
+/// An in-place outline update of [`DocModel::apply`]: entries `at..at + added` replaced `old`.
+struct OutlineEdit {
+    at: usize,
+    old: Vec<OutlineEntry>,
+    added: usize,
+}
+
+/// Whether two outline entries look the same in a TOC (the item index aside).
+fn same_entry(a: &OutlineEntry, b: &OutlineEntry) -> bool {
+    a.level == b.level && a.text == b.text && a.anchor == b.anchor && a.key == b.key
 }
 
 /// Markers / quote starts belong to a block's first item only.
@@ -1232,7 +1847,7 @@ impl Flattener<'_> {
                 if units.len() <= SEG_MIN_UNITS && bytes <= SEG_MIN_BYTES {
                     let code = lang.map(|lang| code_ref(self.text, &lang, lines));
                     self.push(kind, span, None);
-                    self.items.last_mut().expect("pushed").code = code;
+                    self.items.last_mut().expect("pushed").code = code.map(Box::new);
                     return;
                 }
                 let offsets = lang.as_ref().map(|_| unit_offsets(lines, &units));
@@ -1254,11 +1869,11 @@ impl Flattener<'_> {
                     };
                     self.push(kind.clone(), span, Some(seg));
                     if let Some(offs) = &offsets {
-                        self.items.last_mut().expect("pushed").code = Some(CodeRef {
+                        self.items.last_mut().expect("pushed").code = Some(Box::new(CodeRef {
                             key: 0,
                             offset: offs[first_unit],
                             len: content_len(lines),
-                        });
+                        }));
                     }
                 }
                 // a segmented block's highlight key: from its segments' text hashes
@@ -1319,9 +1934,11 @@ impl Flattener<'_> {
                         end: rows[g.end - 1] as u32 + 1,
                         first: gi == 0,
                         last: gi + 1 == n,
-                        widths_hash,
-                        rows_hash: rh.finish(),
-                        col_chars: col_chars.clone(),
+                        data: Box::new(RowsData {
+                            widths_hash,
+                            rows_hash: rh.finish(),
+                            col_chars: col_chars.clone(),
+                        }),
                     };
                     self.push(kind.clone(), span, Some(seg));
                 }
@@ -1388,7 +2005,13 @@ impl Flattener<'_> {
         // item-relative segment spans: offset-independent (C-18)
         segment.hash(&mut h);
         let content_hash = h.finish();
+        let raw = if matches!(kind, ItemKind::Html | ItemKind::Paragraph) {
+            self.doc.raw_presentation(span).map(Box::new)
+        } else {
+            None
+        };
         self.items.push(Item {
+            raw,
             kind,
             len: span.len(),
             containers: containers.into_boxed_slice(),
@@ -1400,7 +2023,6 @@ impl Flattener<'_> {
             has_image,
             has_math,
             has_wikilink,
-            heading: None,
             segment,
             code: None,
             origin: span.start,
@@ -1418,8 +2040,8 @@ fn item_kind(k: &LeafKind) -> ItemKind {
             let lang = info.split_whitespace().next().unwrap_or("").to_string();
             match lang.to_ascii_lowercase().as_str() {
                 "math" => ItemKind::Math,
-                "mermaid" | "flow" | "sequence" => ItemKind::Diagram { lang },
-                _ => ItemKind::Code { lang },
+                "mermaid" | "flow" | "sequence" => ItemKind::Diagram { lang: lang.into() },
+                _ => ItemKind::Code { lang: lang.into() },
             }
         }
         LeafKind::Math => ItemKind::Math,

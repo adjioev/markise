@@ -132,13 +132,71 @@ pub fn item_source_range(model: &DocModel, i: usize) -> Range<usize> {
     }
 }
 
-/// Where a source position lands in the rendered document.
+/// Where a source position lands in the rendered document, by source position (issue #125:
+/// item indices change when a paged model materializes or evicts pages).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Target {
-    /// Item index and the fraction of its height.
-    Item(usize, f32),
+    /// The item starting at source offset `start` (the `nth` of the items starting there:
+    /// segments of a large block) and the fraction of its height.
+    At { start: usize, nth: usize, frac: f32 },
     /// Past the last item (trailing source without a rendered counterpart).
     End,
+}
+
+/// The target of item `i` at `frac` of its height.
+fn at(model: &DocModel, i: usize, frac: f32) -> Target {
+    let start = model.item_start(i);
+    Target::At {
+        start,
+        nth: i - model.items.partition_point_start(start).min(i),
+        frac,
+    }
+}
+
+/// The item a [`Target::At`] names in `model` (`None`: not there, e.g. in a page placeholder).
+pub fn target_item(model: &DocModel, start: usize, nth: usize) -> Option<usize> {
+    let i = model.items.partition_point_start(start) + nth;
+    (i < model.items.len() && model.item_start(i) == start && !model.is_page(i)).then_some(i)
+}
+
+/// [`source_to_rendered`] on a view: the pages of the source line and of the item it maps to
+/// (past hidden source) are materialized first, so the target is a real item.
+pub fn rendered_target(view: &mut markise_layout::View, lines: &dyn LineMap, top: f32) -> Option<Target> {
+    if lines.is_empty() {
+        return None;
+    }
+    view.ensure_offset(lines.doc_start(top.max(0.0).floor() as usize));
+    let t = source_to_rendered(view.model(), lines, top)?;
+    let Target::At { start, nth, .. } = t else {
+        return Some(t);
+    };
+    if target_item(view.model(), start, nth).is_some() {
+        return Some(t);
+    }
+    // the source maps past hidden source to the top of the next rendered block, which is in
+    // a page not materialized: one walk forward from there (linear in the pages passed), over
+    // hidden items and pages holding nothing but hidden blocks (definitions: skipped from
+    // their statistics without materializing), materializing only the page that shows it
+    let mut j = view.model().items.partition_point_start(start);
+    loop {
+        let m = view.model();
+        let Some(it) = m.items.get(j) else {
+            return Some(Target::End);
+        };
+        match &it.kind {
+            ItemKind::Hidden => j += 1,
+            ItemKind::Page(st) if st.items == st.hidden => j += 1,
+            ItemKind::Page(_) => {
+                let at = m.item_start(j);
+                // (the page is replaced by its items from `j` on: continue from `j`)
+                view.ensure_offset(at);
+                if view.model().is_page(j) {
+                    return None; // could not materialize (defensive)
+                }
+            }
+            _ => return Some(at(view.model(), j, 0.0)),
+        }
+    }
 }
 
 /// Rendered target for the source line `top` (fractional: `3.5` = halfway through line 3).
@@ -164,7 +222,7 @@ pub fn source_to_rendered(model: &DocModel, lines: &dyn LineMap, top: f32) -> Op
     }
     let r = item_source_range(model, i);
     if hidden || pos < r.start {
-        return Some(Target::Item(i, 0.0));
+        return Some(at(model, i, 0.0));
     }
     if pos >= r.end && i + 1 >= n && pos > r.start {
         return Some(Target::End);
@@ -172,7 +230,7 @@ pub fn source_to_rendered(model: &DocModel, lines: &dyn LineMap, top: f32) -> Op
     let l0 = lines.line_of_doc(r.start) as f32;
     let l1 = (lines.line_of_doc(r.end.saturating_sub(1).max(r.start)) + 1) as f32;
     let t = ((top - l0) / (l1 - l0).max(1.0)).clamp(0.0, 1.0);
-    Some(Target::Item(i, t))
+    Some(at(model, i, t))
 }
 
 /// Source line (fractional) for the rendered position `frac` (0..1) of item `item`.
@@ -243,16 +301,20 @@ impl SideBySide {
             return false;
         };
         let top = p.view.line_at_y(p.view.scroll_y());
-        let model = viewer.model().clone();
-        let lines = ViewLines {
-            view: &p.view,
-            text: viewer.ed.session.text(),
+        let text = viewer.ed.session.text();
+        let target = {
+            let lines = ViewLines { view: &p.view, text };
+            // a paged model materializes the counterpart's page first
+            rendered_target(&mut viewer.ed.view, &lines, top)
         };
-        match source_to_rendered(&model, &lines, top) {
-            Some(Target::Item(i, t)) => {
+        match target {
+            Some(Target::At { start, nth, frac }) => {
+                let Some(i) = target_item(viewer.model(), start, nth) else {
+                    return false;
+                };
                 viewer.ed.view.scroll_to_item(i);
                 let h = viewer.ed.view.height(i);
-                viewer.ed.view.scroll_by(t * h);
+                viewer.ed.view.scroll_by(frac * h);
                 true
             }
             Some(Target::End) => {
@@ -283,6 +345,8 @@ impl SideBySide {
         let pos = p.sel.primary().focus.offset.min(text.len());
         let line = p.view.line_of(text, pos) as f32;
         let line_y = (p.view.y_of_line(text, line) - p.view.scroll_y()) as f32;
+        // a paged model materializes the caret's page first
+        viewer.ed.view.ensure_offset(pos);
         let model = viewer.model();
         if model.items.is_empty() {
             return false;
@@ -385,9 +449,11 @@ impl SideBySide {
         }
 
         // ---- right: the rendered document (read-only in this version)
-        let user_scrolls_rendered = ui.input(|i| {
+        // (wheel scrolling counts while the rendered pane's smooth scrolling moves it, also after
+        // the last wheel event, issue #86)
+        let mut user_scrolls_rendered = ui.input(|i| {
             let over = i.pointer.hover_pos().is_some_and(|p| right.contains(p));
-            over && (i.smooth_scroll_delta.y != 0.0 || i.pointer.primary_down())
+            over && i.pointer.primary_down()
         });
         {
             let mut rui = ui.new_child(UiBuilder::new().max_rect(right).id_salt("markise-sbs-right"));
@@ -410,6 +476,7 @@ impl SideBySide {
                 ui.ctx().request_repaint();
             }
             out.right = Some(pane);
+            user_scrolls_rendered |= vo.wheel_scrolled;
         }
         if user_scrolls_rendered || self.sync_source {
             self.sync_source = false;
@@ -429,7 +496,7 @@ mod tests {
 
     fn model(src: &str) -> (markise_md::Document, DocModel) {
         let d = markise_md::parse(src);
-        let m = DocModel::build_owned(&d, None);
+        let m = DocModel::build_with(&d, None, markise_layout::Paging::Full);
         (d, m)
     }
 
@@ -449,10 +516,10 @@ mod tests {
         let (_d, m) = model(src);
         let li = LineIndex::new(src);
         let title = m.item_at_offset(0);
-        assert_eq!(source_to_rendered(&m, &li, 0.0), Some(Target::Item(title, 0.0)));
+        assert_eq!(source_to_rendered(&m, &li, 0.0), Some(at(&m, title, 0.0)));
         // line 3 = second line of the paragraph: halfway into it
         let para = m.item_at_offset(src.find("para").unwrap());
-        assert_eq!(source_to_rendered(&m, &li, 3.0), Some(Target::Item(para, 0.5)));
+        assert_eq!(source_to_rendered(&m, &li, 3.0), Some(at(&m, para, 0.5)));
         assert_eq!(rendered_to_source(&m, &li, para, 0.0), 2.0);
         assert_eq!(rendered_to_source(&m, &li, para, 0.5), 3.0);
         let end = m.item_at_offset(src.find("end").unwrap());
@@ -467,8 +534,8 @@ mod tests {
         let li = LineIndex::new(src);
         let second = m.item_at_offset(src.find("second").unwrap());
         // the blank line and the definition before `second` map to its top
-        assert_eq!(source_to_rendered(&m, &li, 1.0), Some(Target::Item(second, 0.0)));
-        assert_eq!(source_to_rendered(&m, &li, 2.0), Some(Target::Item(second, 0.0)));
+        assert_eq!(source_to_rendered(&m, &li, 1.0), Some(at(&m, second, 0.0)));
+        assert_eq!(source_to_rendered(&m, &li, 2.0), Some(at(&m, second, 0.0)));
         // the trailing definition: end of the rendered document
         assert_eq!(source_to_rendered(&m, &li, 6.0), Some(Target::End));
     }
@@ -484,9 +551,10 @@ mod tests {
         assert!(m.items.len() > 1, "the block is segmented");
         let li = LineIndex::new(&src);
         // a line deep inside the block maps to a later segment, interpolated
-        let Some(Target::Item(i, t)) = source_to_rendered(&m, &li, 2000.0) else {
+        let Some(Target::At { start, nth, frac: t }) = source_to_rendered(&m, &li, 2000.0) else {
             panic!("no target")
         };
+        let i = target_item(&m, start, nth).unwrap();
         assert!(i > 0, "a later segment");
         let back = rendered_to_source(&m, &li, i, t);
         assert!((back - 2000.0).abs() < 1.0, "round trip: {back}");
@@ -504,5 +572,80 @@ mod tests {
             assert_eq!(vl.doc_start(l), li.doc_start(l));
             assert_eq!(vl.line_of_doc(li.doc_start(l) + 1), li.line_of_doc(li.doc_start(l) + 1));
         }
+    }
+
+    /// Issue #125 (phase 4): sync targets are source positions, and on a paged model (pages of
+    /// one block, most of them not materialized) every source line maps to the same rendered
+    /// position as on a full model, past hidden source into unloaded pages too; and back.
+    #[test]
+    fn paged_and_full_models_sync_alike() {
+        let mut src = String::from("---\ntitle: t\n---\n\n");
+        for i in 0..40 {
+            src.push_str(&format!("## Head {i}\n\npara {i}\nline two\n\n[d{i}]: http://x\n\n"));
+            if i % 9 == 4 {
+                src.push_str(&"```\ncode\n```\n\n".repeat(2));
+                src.push_str("| a |\n|---|\n| 1 |\n| 2 |\n\n");
+            }
+        }
+        src.push_str("[end]: http://x\n");
+        let doc: std::sync::Arc<dyn markise_doc::FormatDoc> = std::sync::Arc::new(markise_md::parse(&src));
+        let mk = |paging| {
+            let m = std::sync::Arc::new(DocModel::build_with(&*doc, None, paging));
+            markise_layout::View::new(doc.clone(), m, Theme::light(), 600.0, 1.0)
+        };
+        let mut full = mk(markise_layout::Paging::Full);
+        let mut paged = mk(markise_layout::Paging::Paged { tops: 1 });
+        assert!(paged.model().page_count() > 50);
+        let li = LineIndex::new(&src);
+        for line in 0..li.len() {
+            for frac in [0.0f32, 0.5] {
+                let top = line as f32 + frac;
+                let a = rendered_target(&mut full, &li, top);
+                let b = rendered_target(&mut paged, &li, top);
+                assert_eq!(a, b, "line {top}");
+                if let Some(Target::At { start, nth, frac }) = b {
+                    let i = target_item(paged.model(), start, nth).expect("a real item");
+                    let j = target_item(full.model(), start, nth).unwrap();
+                    // and back to the same source line
+                    let (x, y) = (
+                        rendered_to_source(paged.model(), &li, i, frac),
+                        rendered_to_source(full.model(), &li, j, frac),
+                    );
+                    assert_eq!(x, y, "line {top} back");
+                }
+            }
+        }
+    }
+
+    /// Review of #144: a source line in a long run of definition-only pages (more than any
+    /// fixed retry limit) still finds the next rendered block, loading page after page.
+    #[test]
+    fn sync_crosses_long_runs_of_definition_only_pages() {
+        let mut src = String::from("first\n\n");
+        for i in 0..40 {
+            src.push_str(&format!("[d{i}]: http://x/{i}\n\n"));
+        }
+        src.push_str("after\n\nmore\n\nend\n");
+        let doc: std::sync::Arc<dyn markise_doc::FormatDoc> = std::sync::Arc::new(markise_md::parse(&src));
+        let mk = |paging| {
+            let m = std::sync::Arc::new(DocModel::build_with(&*doc, None, paging));
+            markise_layout::View::new(doc.clone(), m, Theme::light(), 600.0, 1.0)
+        };
+        let mut full = mk(markise_layout::Paging::Full);
+        let mut paged = mk(markise_layout::Paging::Paged { tops: 1 });
+        let li = LineIndex::new(&src);
+        let line = li.line_of_doc(src.find("[d1]").unwrap()) as f32;
+        let before = paged.paging_stats().materialized;
+        let t = rendered_target(&mut paged, &li, line);
+        // review of #144 round 2: definition-only pages are skipped from their statistics,
+        // not materialized (linear, bounded work): only the line's and the target's pages
+        let loaded = paged.paging_stats().materialized - before;
+        assert!(loaded <= 6, "{loaded} pages materialized for one sync");
+        assert_eq!(t, rendered_target(&mut full, &li, line));
+        let Some(Target::At { start, nth, .. }) = t else {
+            panic!("{t:?}")
+        };
+        assert_eq!(start, src.find("after").unwrap(), "the block after the definitions");
+        assert!(target_item(paged.model(), start, nth).is_some(), "a real item");
     }
 }

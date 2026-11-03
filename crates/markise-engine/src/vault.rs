@@ -1136,7 +1136,12 @@ struct ScanState {
     root_dir: Option<Arc<cap_std::fs::Dir>>,
     /// The owning scanner was dropped: stop as soon as possible.
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Tests: called at the start of every rescan walk (counts them, can hold the worker).
+    on_rescan: Option<RescanHook>,
 }
+
+/// Test hook of [`ScanState::rescan`].
+type RescanHook = Arc<dyn Fn() + Send + Sync>;
 
 impl ScanState {
     /// Lists `dir` (vault path, `""` = root): its files and sub-folders (hidden entries
@@ -1215,6 +1220,9 @@ impl ScanState {
     /// Walks the mounted root again (the watch restarted), keeping its directory handle;
     /// publishes only if something differs.
     fn rescan(&mut self) {
+        if let Some(h) = &self.on_rescan {
+            h();
+        }
         let (files, dirs) = (std::mem::take(&mut self.files), std::mem::take(&mut self.dirs));
         let settings = VaultSettings::read(&self.root);
         let mut seen = HashSet::new();
@@ -1334,6 +1342,10 @@ impl ScanState {
 
 impl VaultScanner {
     pub fn new(wake: Wake) -> Result<VaultScanner, String> {
+        Self::with_rescan_hook(wake, None)
+    }
+
+    fn with_rescan_hook(wake: Wake, on_rescan: Option<RescanHook>) -> Result<VaultScanner, String> {
         let (tx, cmd_rx) = channel::<Cmd>();
         let (res_tx, rx) = channel();
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1352,6 +1364,7 @@ impl VaultScanner {
                     dirty: false,
                     root_dir: None,
                     cancel: worker_cancel,
+                    on_rescan,
                 };
                 while let Ok(first) = cmd_rx.recv() {
                     if st.cancelled() {
@@ -1371,6 +1384,13 @@ impl VaultScanner {
                     if let Some(i) = batch.iter().rposition(|c| matches!(c, Cmd::Mount(_))) {
                         batch.drain(..i);
                     }
+                    // rescans are coalesced (review of #150): a burst of "walk everything again"
+                    // notices (the folder watch restarted, the backend dropped events — FSEvents
+                    // repeats those under load) is one walk per batch, so notices arriving during
+                    // a walk cost at most one follow-up walk. A mount in the batch walks anyway,
+                    // and a rescan walk also covers the batch's single-path changes.
+                    let mounts = batch.iter().any(|c| matches!(c, Cmd::Mount(_)));
+                    let mut rescan = !mounts && batch.iter().any(|c| matches!(c, Cmd::Rescan));
                     let mut mounted = !st.root.as_os_str().is_empty();
                     for c in batch {
                         match c {
@@ -1378,8 +1398,8 @@ impl VaultScanner {
                                 st.mount(r);
                                 mounted = true;
                             }
-                            Cmd::Changed(p) if mounted => st.changed(&p),
-                            Cmd::Rescan if mounted => st.rescan(),
+                            Cmd::Changed(p) if mounted && !rescan => st.changed(&p),
+                            Cmd::Rescan if mounted && std::mem::take(&mut rescan) => st.rescan(),
                             _ => {}
                         }
                     }

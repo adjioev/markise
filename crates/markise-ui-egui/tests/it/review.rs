@@ -1,0 +1,2034 @@
+//! Review comments and suggestions in the real app (ADR 0012, issue #69): Add Comment with
+//! ⌥⌘M on a selection, the comments panel (list, jump, Accept / Reject / Accept All), the
+//! document's context menu, View → Comments & Suggestions off (plain text, bytes unchanged),
+//! File → Save Copy Without Comments, and the AI review loop end to end.
+
+use crate::common;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use egui::{Event, Key, Modifiers};
+use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
+use markise_doc::{CriticKind, Selection};
+use markise_ui_egui::confirm::{Choice, Confirm, Kind, Scripted};
+use markise_ui_egui::menu::MenuAction;
+use markise_ui_egui::prefs::Section;
+use markise_ui_egui::sidebar::Tab;
+use markise_ui_egui::{AppOptions, MarkiseApp};
+
+type H = Harness<'static, MarkiseApp>;
+
+fn tmpdir(name: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("markise-review-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::canonicalize(&d).unwrap()
+}
+
+fn open_with(name: &str, text: &str, confirm: Option<&Arc<Scripted>>) -> (H, PathBuf) {
+    open_opts(name, text, confirm, false)
+}
+
+/// `watch`: [`AppOptions::watch`] (only the test of another tool rewriting the file watches
+/// it, issue #151).
+fn open_opts(name: &str, text: &str, confirm: Option<&Arc<Scripted>>, watch: bool) -> (H, PathBuf) {
+    let dir = tmpdir(name);
+    let p = dir.join("draft.md");
+    std::fs::write(&p, text).unwrap();
+    let mut opts = AppOptions {
+        open: vec![p.clone()],
+        watch,
+        ..Default::default()
+    };
+    if let Some(s) = confirm {
+        opts.confirm = s.clone() as Arc<dyn Confirm>;
+    }
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 760.0))
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), MarkiseApp::new(opts));
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    (h, p)
+}
+
+fn open(name: &str, text: &str) -> (H, PathBuf) {
+    open_with(name, text, None)
+}
+
+fn wait_until(h: &mut H, what: &str, f: impl Fn(&MarkiseApp) -> bool) {
+    let t = Instant::now();
+    while !f(h.state()) {
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    h.step();
+}
+
+fn cmd() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers {
+            mac_cmd: true,
+            command: true,
+            ..Default::default()
+        }
+    } else {
+        Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        }
+    }
+}
+
+/// ⌥⌘M on macOS, Ctrl+Alt+M elsewhere.
+fn add_comment_chord() -> Modifiers {
+    Modifiers { alt: true, ..cmd() }
+}
+
+fn typ(h: &mut H, s: &str) {
+    for c in s.chars() {
+        let key = if c == ' ' {
+            Some(Key::Space)
+        } else {
+            Key::from_name(&c.to_string())
+        };
+        let ev = |k: Key, pressed: bool| Event::Key {
+            key: k,
+            physical_key: Some(k),
+            pressed,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        };
+        if let Some(k) = key {
+            h.event(ev(k, true));
+        }
+        h.event(Event::Text(c.to_string()));
+        if let Some(k) = key {
+            h.event(ev(k, false));
+        }
+        h.step();
+    }
+}
+
+fn text(h: &H) -> String {
+    h.state().document_text().unwrap()
+}
+
+fn select(h: &mut H, a: usize, b: usize) {
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| s.set_selection(Selection::range(a, b)));
+    v.request_refocus();
+    h.run_steps(2);
+}
+
+fn caret(h: &mut H) -> usize {
+    h.state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .session
+        .selection()
+        .primary()
+        .focus
+        .offset
+}
+
+fn save_and_read(h: &mut H, p: &Path) -> String {
+    h.key_press_modifiers(cmd(), Key::S);
+    wait_until(h, "save", |a| !a.is_busy() && !a.is_dirty());
+    std::fs::read_to_string(p).unwrap()
+}
+
+fn undo(h: &mut H) {
+    h.key_press_modifiers(cmd(), Key::Z);
+    h.step();
+}
+
+/// Clicks the first widget labelled `label` (panel buttons repeat per row).
+fn click_first(h: &mut H, label: &str) {
+    // panel rows act only on a current listing (older ones are disabled)
+    if h.state().sidebar_tab() == Tab::Comments {
+        wait_until(h, "panel list", |a| a.comments_panel_ready());
+        h.run_steps(2);
+    }
+    assert!(has_text(h, label), "{label}");
+    h.query_all_by_label(label)
+        .next()
+        .unwrap_or_else(|| panic!("no “{label}”"))
+        .click();
+    h.run_steps(3);
+}
+
+/// A widget or text with exactly this label or text (labels that label another widget too).
+/// Steps a few frames until it shows (fonts arriving on a busy machine re-layout the UI).
+fn has_text(h: &mut H, s: &str) -> bool {
+    let t = Instant::now();
+    loop {
+        if h.query_all_by(|n| text_is(n, s)).next().is_some() {
+            return true;
+        }
+        if t.elapsed() > common::HANG_GUARD {
+            return false;
+        }
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn text_is(n: &egui_kittest::kittest::AccessKitNode<'_>, s: &str) -> bool {
+    n.label().as_deref() == Some(s) || n.value().as_deref() == Some(s)
+}
+
+fn click_text(h: &mut H, s: &str) {
+    assert!(has_text(h, s), "{s}");
+    h.get_by(|n| text_is(n, s)).click();
+    h.run_steps(3);
+}
+
+fn show_panel(h: &mut H) {
+    h.state_mut().set_sidebar_tab(Tab::Comments);
+    h.run_steps(3);
+}
+
+const REVIEWED: &str = "# Plan\n\nWe ship {++the beta ++}on Friday.\n\nThe team {--really --}likes it.\n\n\
+It {~~is~>was~~}{>>@ai: past tense<<} fine. {==Costs==}{>>numbers?<<} stay low.\n";
+
+#[test]
+fn add_comment_on_a_selection_with_the_shortcut() {
+    let (mut h, p) = open("add", "The quick fox jumps.\n");
+    select(&mut h, 4, 13);
+    h.key_press_modifiers(add_comment_chord(), Key::M);
+    h.run_steps(3);
+    assert_eq!(text(&h), "The {==quick fox==}{>><<} jumps.\n");
+    // the comment is written in its card (issue #87); the caret waits after the comment
+    assert_eq!(edited(&mut h), Some((19, String::new())));
+    assert_eq!(caret(&mut h), 25);
+    typ(&mut h, "too vague");
+    assert_eq!(edited(&mut h), Some((19, "too vague".into())));
+    assert_eq!(
+        text(&h),
+        "The {==quick fox==}{>><<} jumps.\n",
+        "not written until saved"
+    );
+    save_card(&mut h);
+    assert_eq!(edited(&mut h), None);
+    assert_eq!(text(&h), "The {==quick fox==}{>>too vague<<} jumps.\n");
+    assert_eq!(save_and_read(&mut h, &p), "The {==quick fox==}{>>too vague<<} jumps.\n");
+    // the comment and its text are one undo step
+    undo(&mut h);
+    assert_eq!(text(&h), "The quick fox jumps.\n");
+    // the menu item is there with its shortcut
+    let bar = h.state().menu_model();
+    let item = bar
+        .item("review.addComment")
+        .expect("Edit → Comments & Suggestions → Add Comment");
+    assert!(item.chord.is_some());
+}
+
+#[test]
+fn panel_lists_marks_and_jumps_to_them() {
+    let (mut h, _p) = open("panel", REVIEWED);
+    show_panel(&mut h);
+    let marks = h.state().review_marks();
+    let kinds: Vec<CriticKind> = marks.iter().map(|m| m.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            CriticKind::Insert,
+            CriticKind::Delete,
+            CriticKind::Substitute,
+            CriticKind::Comment,
+            CriticKind::Highlight,
+            CriticKind::Comment
+        ]
+    );
+    assert!(has_text(&mut h, "2 comments · 3 suggestions"));
+    assert!(has_text(&mut h, "@ai"), "the author of a comment");
+    assert!(has_text(&mut h, "past tense"));
+    // a click on an item's text puts the caret at the mark
+    click_text(&mut h, "numbers?");
+    let hl = marks.iter().find(|m| m.kind == CriticKind::Highlight).unwrap();
+    assert_eq!(caret(&mut h), hl.range.start);
+}
+
+#[test]
+fn accept_reject_and_accept_all_from_the_panel() {
+    let (mut h, p) = open("accept", REVIEWED);
+    show_panel(&mut h);
+    click_first(&mut h, "Accept"); // the insertion
+    assert!(text(&h).contains("We ship the beta on Friday."), "{}", text(&h));
+    click_first(&mut h, "Reject"); // the deletion
+    assert!(text(&h).contains("The team really likes it."), "{}", text(&h));
+    click_first(&mut h, "Accept All"); // the substitution and its comment
+    assert_eq!(
+        text(&h),
+        "# Plan\n\nWe ship the beta on Friday.\n\nThe team really likes it.\n\n\
+It was fine. {==Costs==}{>>numbers?<<} stay low.\n"
+    );
+    // each command is one undo step
+    undo(&mut h);
+    assert!(text(&h).contains("It {~~is~>was~~}{>>@ai: past tense<<} fine."));
+    undo(&mut h);
+    assert!(text(&h).contains("The team {--really --}likes it."));
+    // Delete on the remaining comment thread keeps the highlighted text
+    for _ in 0..2 {
+        h.key_press_modifiers(Modifiers { shift: true, ..cmd() }, Key::Z);
+        h.step();
+    }
+    h.run_steps(2);
+    click_first(&mut h, "Delete");
+    let want = "# Plan\n\nWe ship the beta on Friday.\n\nThe team really likes it.\n\nIt was fine. Costs stay low.\n";
+    assert_eq!(text(&h), want);
+    assert_eq!(save_and_read(&mut h, &p), want);
+}
+
+/// Review rounds 1 and 4: a row listed at an older revision is disabled (no-op) until the
+/// next listing — with two identical `{++A++}` and the first deleted, the stale row must not
+/// act on the remaining one; after the new listing it does.
+#[test]
+fn stale_panel_rows_are_disabled_until_the_next_listing() {
+    let src = "{++A++} {++A++}\n";
+    let (mut h, _p) = open("stale", src);
+    // the list must stay old until the test releases it, however slow the machine
+    h.state_mut().set_comments_debounce(Duration::from_secs(3600));
+    show_panel(&mut h);
+    assert!(has_text(&mut h, "+ A"));
+    assert!(h.state().comments_panel_ready());
+    {
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.edit(|s| {
+            s.apply_external(&markise_doc::PatchSet::delete(0..8), "Test Edit", false)
+                .unwrap()
+        });
+    }
+    h.run_steps(2);
+    assert!(!h.state().comments_panel_ready(), "the list is still the old one");
+    let accept = h.query_all_by_label("Accept").next().expect("a stale row");
+    assert!(
+        egui_kittest::kittest::NodeT::accesskit_node(&accept).is_disabled(),
+        "stale rows are disabled"
+    );
+    accept.click();
+    h.run_steps(3);
+    assert_eq!(text(&h), "{++A++}\n", "a click on a stale row does nothing");
+    // the next listing arrives: the row acts on its mark
+    h.state_mut().set_comments_debounce(Duration::ZERO);
+    wait_until(&mut h, "panel list", |a| a.comments_panel_ready());
+    h.run_steps(2);
+    click_first(&mut h, "Accept");
+    assert_eq!(text(&h), "A\n");
+}
+
+/// Review rounds 4 and 5: the hover bar never acts on an obsolete or a different mark —
+/// hover `two`, move onto the bar, delete that mark so the adjacent `four` slides under the
+/// point, click Reject: nothing happens (any edit hides the bar).
+#[test]
+fn hover_bar_hides_after_an_edit() {
+    let src = "One {--two--}{--four--} end.\n";
+    let (mut h, _p) = open("hover-stale", src);
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(0).expect("visible");
+    h.hover_at(egui::pos2(r.left() + 48.0, r.top() + 10.0));
+    h.run_steps(3);
+    let bar = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .hover_bar_rect()
+        .expect("the bar over two");
+    // onto the bar (it stays), then the first mark goes away
+    h.hover_at(bar.center());
+    h.run_steps(2);
+    assert!(h.state_mut().viewer().unwrap().hover_bar_rect().is_some(), "on the bar");
+    {
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.edit(|s| {
+            s.apply_external(&markise_doc::PatchSet::delete(4..13), "Test Edit", false)
+                .unwrap()
+        });
+    }
+    h.run_steps(3);
+    assert_eq!(text(&h), "One {--four--} end.\n");
+    assert!(
+        h.state_mut().viewer().unwrap().hover_bar_rect().is_none(),
+        "any edit hides the bar"
+    );
+    if let Some(n) = h.query_all_by_label("Reject").next() {
+        n.click();
+    }
+    h.run_steps(3);
+    assert_eq!(text(&h), "One {--four--} end.\n", "four stays");
+}
+
+#[test]
+fn context_menu_accepts_the_suggestion_under_the_pointer() {
+    let (mut h, _p) = open("context", "One {++two ++}three.\n");
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(0).expect("visible");
+    // right-click into the inserted word
+    let p = egui::pos2(r.left() + 48.0, r.top() + 10.0);
+    h.hover_at(p);
+    h.run_steps(2);
+    h.event(Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Secondary,
+        pressed: true,
+        modifiers: Modifiers::default(),
+    });
+    h.step();
+    h.event(Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Secondary,
+        pressed: false,
+        modifiers: Modifiers::default(),
+    });
+    h.run_steps(3);
+    let c = caret(&mut h);
+    assert!(
+        (4..=14).contains(&c),
+        "the right click moved the caret into the mark: {c}"
+    );
+    h.get_by_label("Accept Suggestion").click();
+    h.run_steps(3);
+    assert_eq!(text(&h), "One two three.\n");
+}
+
+#[test]
+fn hover_bar_rejects_the_suggestion_under_the_pointer() {
+    let (mut h, _p) = open("hover", "One {--two --}three.\n");
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(0).expect("visible");
+    h.hover_at(egui::pos2(r.left() + 48.0, r.top() + 10.0));
+    h.run_steps(3);
+    // the bar shows Accept and Reject above the deleted word
+    assert!(h.query_by_label("Accept").is_some());
+    h.get_by_label("Reject").click();
+    h.run_steps(3);
+    assert_eq!(text(&h), "One two three.\n");
+    // the pointer over plain text: no bar
+    h.hover_at(egui::pos2(r.left() + 2.0, r.top() + 10.0));
+    h.run_steps(3);
+    assert!(h.query_by_label("Accept").is_none());
+}
+
+#[test]
+fn switching_off_shows_plain_text_and_keeps_the_bytes() {
+    let (mut h, _p) = open("toggle", REVIEWED);
+    show_panel(&mut h);
+    assert!(h.state().critic_markup());
+    // the switch lives in Preferences → Markdown
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("app.preferences")));
+    h.run_steps(3);
+    h.get_by_role_and_label(egui::Role::Button, Section::Markdown.label())
+        .click();
+    h.run_steps(2);
+    let label = "Comments & suggestions (CriticMarkup)";
+    h.get_by_role_and_label(egui::Role::Switch, label).focus();
+    h.run_steps(1);
+    h.key_press(Key::Space);
+    h.run_steps(2);
+    h.key_press(Key::Escape);
+    h.run_steps(2);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    h.run_steps(3);
+    assert!(!h.state().critic_markup());
+    assert!(!h.state().preference_values().critic_markup);
+    assert!(h.state().review_marks().is_empty(), "no marks: plain text");
+    assert!(has_text(&mut h, "Comments and suggestions are off."));
+    assert_eq!(text(&h), REVIEWED, "byte-identical");
+    assert!(!h.state().is_dirty());
+    // Add Comment is not available while off
+    select(&mut h, 2, 6);
+    h.key_press_modifiers(add_comment_chord(), Key::M);
+    h.run_steps(2);
+    assert_eq!(text(&h), REVIEWED);
+    h.state_mut().set_critic_markup(true);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    h.run_steps(2);
+    assert_eq!(h.state().review_marks().len(), 6);
+    assert!(!h.state().is_dirty());
+}
+
+#[test]
+fn save_copy_without_comments_asks_and_writes_a_new_file() {
+    let s = Scripted::new();
+    let (mut h, p) = open_with("copy", REVIEWED, Some(&s));
+    let dir = p.parent().unwrap().to_path_buf();
+    // accept
+    s.answer(Choice::AcceptAll);
+    h.state_mut().queue_save_dialog_answer(Some(dir.join("accepted.md")));
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("file.saveCopyClean"));
+    h.run_steps(3);
+    wait_until(&mut h, "copy", |a| !a.is_saving_copy());
+    assert_eq!(s.last().unwrap().kind, Kind::CleanCopy);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("accepted.md")).unwrap(),
+        "# Plan\n\nWe ship the beta on Friday.\n\nThe team likes it.\n\nIt was fine. Costs stay low.\n"
+    );
+    // reject
+    s.answer(Choice::RejectAll);
+    h.state_mut().queue_save_dialog_answer(Some(dir.join("rejected.md")));
+    h.state_mut().save_copy_without_comments();
+    h.run_steps(3);
+    wait_until(&mut h, "copy", |a| !a.is_saving_copy());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("rejected.md")).unwrap(),
+        "# Plan\n\nWe ship on Friday.\n\nThe team really likes it.\n\nIt is fine. Costs stay low.\n"
+    );
+    // the document itself is untouched, in the editor and on disk
+    assert_eq!(text(&h), REVIEWED);
+    assert!(!h.state().is_dirty());
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), REVIEWED);
+    // the copy never replaces the document's own file
+    s.answer(Choice::AcceptAll);
+    h.state_mut().queue_save_dialog_answer(Some(p.clone()));
+    h.state_mut().save_copy_without_comments();
+    h.run_steps(3);
+    assert!(!h.state().is_saving_copy());
+    assert!(h.state().banner_text().unwrap_or_default().contains("cannot replace"));
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), REVIEWED);
+    // Cancel: nothing written
+    s.answer(Choice::Cancel);
+    h.state_mut().queue_save_dialog_answer(Some(dir.join("never.md")));
+    h.state_mut().save_copy_without_comments();
+    h.run_steps(3);
+    assert!(!dir.join("never.md").exists());
+}
+
+/// With CriticMarkup off the marks are plain text: Save Copy Without Comments is disabled and
+/// says why, and running it anyway writes nothing (it used to write the comments unchanged).
+#[test]
+fn save_copy_without_comments_is_disabled_while_critic_markup_is_off() {
+    let (mut h, p) = open("copy-off", REVIEWED);
+    let dir = p.parent().unwrap().to_path_buf();
+    let item = h.state().menu_model().item("file.saveCopyClean").unwrap().clone();
+    assert!(item.enabled);
+    assert_eq!(item.label, "Save Copy Without Comments…");
+    h.state_mut().set_critic_markup(false);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    let item = h.state().menu_model().item("file.saveCopyClean").unwrap().clone();
+    assert!(!item.enabled);
+    assert!(item.label.contains("Comments & Suggestions"), "{}", item.label);
+    h.state_mut().queue_save_dialog_answer(Some(dir.join("copy.md")));
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("file.saveCopyClean"));
+    h.run_steps(3);
+    assert!(!h.state().is_saving_copy());
+    assert!(!dir.join("copy.md").exists());
+    let banner = h.state().banner_text().unwrap_or_default();
+    assert!(banner.contains("Comments & Suggestions are off"), "{banner}");
+    assert_eq!(text(&h), REVIEWED);
+    // on again: the copy works
+    h.state_mut().set_critic_markup(true);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    assert!(h.state().menu_model().item("file.saveCopyClean").unwrap().enabled);
+}
+
+/// The motivating flow of issue #69, end to end: an AI tool writes a Markdown file; the user
+/// opens it in Markise and comments on passages; the file goes back to the AI tool, which
+/// answers with CriticMarkup suggestions (and comments of its own); the user accepts some,
+/// rejects others, deletes the answered comments, and saves. The saved bytes are checked
+/// exactly, and the file round-trips through both steps without touching any other byte.
+#[test]
+fn ai_review_loop_end_to_end() {
+    // 1. the AI's first draft
+    let draft = "# Launch plan\n\n\
+Our product launches on March 3. The marketing team will publish a blog post and a\n\
+newsletter on the same day.\n\n\
+- Budget: $40,000 for ads\n\
+- Owner: Dana\n\n\
+Risks are low because the beta had no major bugs.\n";
+    let (mut h, p) = open_opts("ailoop", draft, None, true);
+    // 2. the user comments on two passages
+    let a = draft.find("March 3").unwrap();
+    select(&mut h, a, a + "March 3".len());
+    h.key_press_modifiers(add_comment_chord(), Key::M);
+    h.run_steps(3);
+    typ(&mut h, "is this date confirmed");
+    save_card(&mut h);
+    let t = text(&h);
+    let b = t.find("Risks are low").unwrap();
+    let e = t.find("major bugs.").unwrap() + "major bugs.".len();
+    select(&mut h, b, e);
+    h.key_press_modifiers(add_comment_chord(), Key::M);
+    h.run_steps(3);
+    typ(&mut h, "too optimistic");
+    save_card(&mut h);
+    let commented = save_and_read(&mut h, &p);
+    assert_eq!(
+        commented,
+        "# Launch plan\n\n\
+Our product launches on {==March 3==}{>>is this date confirmed<<}. The marketing team will publish a blog post and a\n\
+newsletter on the same day.\n\n\
+- Budget: $40,000 for ads\n\
+- Owner: Dana\n\n\
+{==Risks are low because the beta had no major bugs.==}{>>too optimistic<<}\n"
+    );
+
+    // 3. the AI tool revises the file with suggestions and replies (as such tools write it)
+    let revised = "# Launch plan\n\n\
+Our product launches on {~~March 3~>March 10~~}{>>@ai: moved, the date was not confirmed<<}. The marketing team will publish a blog post{-- and a\n\
+newsletter--} on the same day.\n\n\
+- Budget: {~~$40,000~>$45,000~~} for ads\n\
+- Owner: Dana{++ (backup: Lee)++}\n\n\
+{~~Risks are low because the beta had no major bugs.~>Risks are moderate: the beta found two \
+major bugs, both fixed.~~}{>>@ai: rewritten after your comment<<}\n";
+    std::fs::write(&p, revised).unwrap();
+    h.state_mut().open(p.clone());
+    wait_until(&mut h, "reload", |a| {
+        a.document_text().as_deref() == Some(revised) && !a.is_busy()
+    });
+    show_panel(&mut h);
+    let marks = h.state().review_marks();
+    assert_eq!(marks.iter().filter(|m| m.is_suggestion()).count(), 5, "{marks:#?}");
+
+    // 4. the user decides: accept the new date (its reply goes with it), reject the
+    //    newsletter cut, reject the budget change, accept the backup owner and the rewrite
+    let at = |h: &H, needle: &str| h.state().document_text().unwrap().find(needle).unwrap() + 3;
+    let ctx = h.ctx.clone();
+    let steps = [
+        ("review.accept", "{~~March 3"),
+        ("review.reject", "{-- and a"),
+        ("review.reject", "{~~$40,000"),
+        ("review.accept", "{++ (backup"),
+        ("review.accept", "{~~Risks are low"),
+    ];
+    for (id, needle) in steps {
+        let off = at(&h, needle);
+        assert!(h.state_mut().run_review(&ctx, id, Some(off)), "{id} at {needle}");
+        h.run_steps(2);
+    }
+    let saved = save_and_read(&mut h, &p);
+    assert_eq!(
+        saved,
+        "# Launch plan\n\n\
+Our product launches on March 10. The marketing team will publish a blog post and a\n\
+newsletter on the same day.\n\n\
+- Budget: $40,000 for ads\n\
+- Owner: Dana (backup: Lee)\n\n\
+Risks are moderate: the beta found two major bugs, both fixed.\n"
+    );
+    assert!(h.state().review_marks().is_empty());
+}
+
+// ------------------------------------------------------------------ comment display
+
+use markise_engine::settings::CommentDisplay;
+
+/// A document whose column leaves room for margin cards (sidebar hidden, narrow column).
+fn open_roomy(name: &str, text: &str) -> (H, PathBuf) {
+    open_roomy_opts(name, text, None, false)
+}
+
+fn open_roomy_opts(name: &str, text: &str, confirm: Option<&Arc<Scripted>>, watch: bool) -> (H, PathBuf) {
+    let (mut h, p) = open_opts(name, text, confirm, watch);
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+    h.state_mut().set_overrides(markise_theme::Overrides {
+        content_width: Some(480.0),
+        ..Default::default()
+    });
+    h.run_steps(4);
+    settle(&mut h);
+    (h, p)
+}
+
+fn click_at(h: &mut H, p: egui::Pos2) {
+    h.hover_at(p);
+    h.step();
+    h.drag_at(p);
+    h.step();
+    h.drop_at(p);
+    h.step();
+}
+
+/// The comment being edited in its card: its source start and the field's text.
+fn edited(h: &mut H) -> Option<(usize, String)> {
+    h.state_mut()
+        .viewer()
+        .unwrap()
+        .card_edit()
+        .map(|(k, t)| (k, t.to_string()))
+}
+
+/// ⌘Enter (Ctrl+Enter): saves the card being edited.
+fn save_card(h: &mut H) {
+    h.key_press_modifiers(cmd(), Key::Enter);
+    h.run_steps(3);
+}
+
+/// Clicks the card of the shown comment starting at `key` (its margin card, or its glyph in
+/// bubbles mode).
+fn open_card(h: &mut H, key: usize) {
+    let c = comments(h)
+        .into_iter()
+        .find(|c| c.source.start == key)
+        .unwrap_or_else(|| panic!("no comment at {key}"));
+    click_at(h, c.card.map_or(c.glyph.center(), |r| r.center()));
+    h.run_steps(3);
+    assert_eq!(edited(h).map(|c| c.0), Some(key), "editing");
+}
+
+fn visible_text(h: &mut H) -> String {
+    h.state_mut().viewer().unwrap().visible_text()
+}
+
+fn comments(h: &mut H) -> Vec<markise_ui_egui::viewer::ShownComment> {
+    h.state_mut().viewer().unwrap().shown_comments().to_vec()
+}
+
+/// Waits until the viewer's "has comments" lookup (a worker) has answered and the answer is
+/// applied (the comment gutter, #91).
+fn settle(h: &mut H) {
+    let t = Instant::now();
+    h.run_steps(2);
+    while h.state_mut().viewer().is_some_and(|v| v.comment_lookup_pending()) {
+        assert!(t.elapsed() < Duration::from_secs(10), "comment lookup did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+        h.step();
+    }
+    h.run_steps(3);
+}
+
+fn caret_at(h: &mut H, at: usize) {
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| s.set_selection(Selection::caret(at)));
+    v.ed.refresh_focus();
+    v.request_refocus();
+    h.run_steps(3);
+}
+
+const NOTE: &str = "Note {==this==}{>>check **this** `x`<<} end.\n";
+
+/// Owner feedback: the comment's markers are not painted unless the caret is inside its text
+/// (not merely before or after the mark).
+#[test]
+fn comment_markers_show_only_with_the_caret_inside() {
+    let (mut h, _p) = open("markers", NOTE);
+    let start = NOTE.find("{>>").unwrap();
+    let end = NOTE.find("<<}").unwrap() + 3;
+    for at in [0, start, end, NOTE.len() - 1] {
+        caret_at(&mut h, at);
+        let t = visible_text(&mut h);
+        assert!(!t.contains("{>>") && !t.contains("<<}"), "caret at {at}: {t:?}");
+    }
+    caret_at(&mut h, start + 5);
+    assert!(visible_text(&mut h).contains("{>>check **this** `x`<<}"));
+}
+
+/// Margin cards: the text as written (plain, with its line breaks) beside its line; a click
+/// on the card opens its text for editing in the card (issue #87): the source is not
+/// revealed, and a click elsewhere saves the edit.
+#[test]
+fn margin_cards_show_the_text_and_open_for_editing() {
+    let src = "Plan {==date==}{>>first line\nsecond **line** [l](u)<<} ok.\n\nMore {>>solo<<} text.\n";
+    let (mut h, _p) = open_roomy("margin", src);
+    assert_eq!(h.state().comment_display(), CommentDisplay::Margin);
+    let cs = comments(&mut h);
+    assert_eq!(cs.len(), 2, "{cs:#?}");
+    assert_eq!(
+        &*cs[0].text, "first line\nsecond **line** [l](u)",
+        "lines and literal Markdown"
+    );
+    assert_eq!(&*cs[1].text, "solo", "a standalone comment has a card too");
+    let card = cs[0].card.expect("a margin card");
+    assert!(card.left() > cs[0].glyph.right(), "in the margin");
+    assert!((card.top() - cs[0].glyph.top()).abs() < 12.0, "aligned with its line");
+    click_at(&mut h, card.center());
+    h.run_steps(3);
+    assert_eq!(
+        edited(&mut h),
+        Some((cs[0].source.start, "first line\nsecond **line** [l](u)".into()))
+    );
+    let c = caret(&mut h);
+    assert!(c >= cs[0].source.end, "caret after the comment: {c}");
+    assert!(!visible_text(&mut h).contains("{>>"), "the source is not revealed");
+    // typed at the end of the text; a click into the document saves
+    typ(&mut h, " ok");
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(src.len() - 3).unwrap();
+    click_at(&mut h, r.left_center() + egui::vec2(4.0, 0.0));
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), None);
+    assert_eq!(
+        text(&h),
+        "Plan {==date==}{>>first line\nsecond **line** [l](u) ok<<} ok.\n\nMore {>>solo<<} text.\n"
+    );
+    // the click placed its own caret (in the second paragraph)
+    assert!(caret(&mut h) > src.find("More").unwrap());
+}
+
+/// Bubbles: hovering the glyph opens a popover after a short rest, leaving closes it,
+/// clicking the glyph opens the comment for editing and pins the popover; Esc closes it.
+#[test]
+fn bubbles_show_a_popover_on_hover() {
+    let (mut h, _p) = open_roomy("bubbles", NOTE);
+    h.state_mut().set_comment_display(CommentDisplay::Bubbles);
+    h.run_steps(3);
+    let cs = comments(&mut h);
+    assert!(cs[0].card.is_none(), "no card until hovered");
+    let glyph = cs[0].glyph;
+    h.hover_at(glyph.center());
+    let t = Instant::now();
+    while !h.state_mut().viewer().unwrap().popover_open() {
+        assert!(t.elapsed() < common::HANG_GUARD, "popover did not open");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(&*comments(&mut h)[0].text, "check **this** `x`");
+    // the pointer leaves: closed
+    h.hover_at(glyph.center() + egui::vec2(0.0, 200.0));
+    h.run_steps(3);
+    assert!(!h.state_mut().viewer().unwrap().popover_open());
+    // a click on the glyph: editing in the popover, pinned
+    click_at(&mut h, glyph.center());
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), Some((cs[0].source.start, "check **this** `x`".into())));
+    h.hover_at(glyph.center() + egui::vec2(0.0, 200.0));
+    h.run_steps(3);
+    assert!(h.state_mut().viewer().unwrap().popover_open(), "pinned");
+    // Esc cancels the edit and closes the popover
+    typ(&mut h, "!");
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), None);
+    assert!(!h.state_mut().viewer().unwrap().popover_open());
+    assert_eq!(text(&h), NOTE);
+    // edited in the popover and saved with ⌘Enter
+    click_at(&mut h, glyph.center());
+    h.run_steps(3);
+    typ(&mut h, "!");
+    save_card(&mut h);
+    assert_eq!(text(&h), "Note {==this==}{>>check **this** `x`!<<} end.\n");
+    assert!(!h.state_mut().viewer().unwrap().popover_open());
+}
+
+/// The setting switches the rendering; the panel's switch writes it to settings.json.
+#[test]
+fn panel_switch_changes_the_setting() {
+    let dir = tmpdir("display-setting");
+    let doc = dir.join("note.md");
+    std::fs::write(&doc, NOTE).unwrap();
+    let cfg = dir.join("config");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 760.0))
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| app.ui(ui),
+            MarkiseApp::new(AppOptions {
+                open: vec![doc],
+                config: markise_ui_egui::ConfigDir::Dir(cfg.clone()),
+                ..common::no_watch()
+            }),
+        );
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    show_panel(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+    h.state_mut().set_overrides(markise_theme::Overrides {
+        content_width: Some(420.0),
+        ..Default::default()
+    });
+    h.run_steps(4);
+    settle(&mut h);
+    assert!(comments(&mut h)[0].card.is_some(), "margin card");
+    h.get_by_label("Show comments as bubbles").click();
+    h.run_steps(3);
+    assert_eq!(h.state().comment_display(), CommentDisplay::Bubbles);
+    assert!(comments(&mut h)[0].card.is_none(), "bubbles: no card until hovered");
+    let settings = cfg.join("markise").join("settings.json");
+    common::assert_settings(&mut h, &settings, |s| s.contains("\"commentDisplay\": \"bubbles\""));
+    h.get_by_label("Show comments in the margin").click();
+    h.run_steps(3);
+    assert_eq!(h.state().comment_display(), CommentDisplay::Margin);
+}
+
+// ------------------------------------------------------------------ multi-line comments
+
+/// Owner decision: Enter inside a comment adds a line break inside it (keeping the quote or
+/// list prefix), a second Enter adds nothing; the comment round-trips.
+#[test]
+fn enter_inside_a_comment_makes_a_multi_line_comment() {
+    for (name, src, want) in [
+        ("para", "A {>>onetwo<<} b\n", "A {>>one\ntwo<<} b\n"),
+        ("quote", "> A {>>onetwo<<} b\n", "> A {>>one\n> two<<} b\n"),
+        ("item", "- A {>>onetwo<<} b\n", "- A {>>one\n  two<<} b\n"),
+    ] {
+        let (mut h, p) = open(&format!("ml-{name}"), src);
+        let at = src.find("two<<}").unwrap();
+        caret_at(&mut h, at);
+        h.key_press(Key::Enter);
+        h.step();
+        h.key_press(Key::Enter);
+        h.step();
+        assert_eq!(text(&h), want, "{name}");
+        let saved = save_and_read(&mut h, &p);
+        assert_eq!(saved, want);
+        let marks = h.state().review_marks();
+        assert_eq!(marks.len(), 1, "{name}: one comment");
+        assert_eq!(marks[0].kind, CriticKind::Comment);
+    }
+}
+
+// ------------------------------------------------------------------ cards stay on screen (#91)
+
+/// A comment at the start of a long line and one at the end of it, so the cards' anchors span
+/// the whole column.
+const WIDE: &str = "Intro {>>Card text that is long enough to wrap onto a few lines in the margin<<} \
+the rest of a fairly long paragraph line that fills the whole column width and wraps at least \
+once, ending here {>>@bot: Ca done<<}.\n\nSecond paragraph.\n";
+
+/// Checks the shown comments of the current frame: each margin card lies fully inside the
+/// window's visible area and the document surface (not under the sidebar, not past the right
+/// edge, not over the scrollbar); returns the problems found.
+fn check_cards_on_screen(h: &mut H, what: &str) -> Vec<String> {
+    let screen = h.ctx.content_rect();
+    let surface = h.state_mut().viewer().unwrap().surface_rect().expect("surface");
+    let mut bad = Vec::new();
+    if surface.right() > screen.right() + 0.5 {
+        bad.push(format!("{what}: surface {surface:?} past the window {screen:?}"));
+    }
+    // the document area without the scrollbar (10 pt)
+    let area = Rect::from_min_max(surface.min, egui::pos2(surface.right() - 10.0, surface.bottom()));
+    let cs = comments(h);
+    if cs.len() != 2 {
+        bad.push(format!("{what}: {} comments shown", cs.len()));
+    }
+    for c in &cs {
+        if let Some(card) = c.card
+            && !(area.expand(0.5).contains_rect(card) && screen.expand(0.5).contains_rect(card))
+        {
+            bad.push(format!("{what}: card {card:?} outside {area:?} / window {screen:?}"));
+        }
+    }
+    bad
+}
+
+use egui::Rect;
+
+/// Bubbles: hovers each shown glyph until its popover opens and checks that the popover lies
+/// inside the window and the document surface; moves the pointer away afterwards.
+fn check_popovers_on_screen(h: &mut H, what: &str) -> Vec<String> {
+    let screen = h.ctx.content_rect();
+    let surface = h.state_mut().viewer().unwrap().surface_rect().expect("surface");
+    let mut bad = Vec::new();
+    let n = comments(h).len();
+    for i in 0..n {
+        let g = comments(h)[i].glyph;
+        if !surface.contains(g.center()) {
+            continue;
+        }
+        h.hover_at(g.center());
+        let t = Instant::now();
+        while comments(h)[i].card.is_none() && t.elapsed() < Duration::from_secs(5) {
+            h.step();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        match comments(h)[i].card {
+            None => bad.push(format!("{what}: popover {i} did not open")),
+            Some(card) => {
+                if !(surface.expand(0.5).contains_rect(card) && screen.expand(0.5).contains_rect(card)) {
+                    bad.push(format!(
+                        "{what}: popover {card:?} outside {surface:?} / window {screen:?}"
+                    ));
+                }
+            }
+        }
+        h.hover_at(egui::pos2(surface.center().x, surface.bottom() - 2.0));
+        h.run_steps(3);
+    }
+    bad
+}
+
+/// Issue #91: in margin mode a comment card is drawn inside the visible area, or the comment
+/// falls back to a bubble (no card) when the right margin is too narrow — for every built-in
+/// style and CSS theme, several window widths and zoom levels, with the sidebar shown.
+#[test]
+fn margin_cards_stay_inside_the_window_in_every_style_and_theme() {
+    check_margin_cards_stay_inside_the_window_in_every_style_and_theme(false);
+}
+
+#[test]
+#[ignore = "heavy: large input or exhaustive matrix; cargo xtask heavy"]
+fn heavy_suite_margin_cards_stay_inside_the_window_in_every_style_and_theme() {
+    check_margin_cards_stay_inside_the_window_in_every_style_and_theme(true);
+}
+
+fn check_margin_cards_stay_inside_the_window_in_every_style_and_theme(exhaustive: bool) {
+    // a Retina display (2 px per point), like the owner's
+    let dir = tmpdir("on-screen");
+    let doc = dir.join("draft.md");
+    std::fs::write(&doc, WIDE).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 760.0))
+        .with_pixels_per_point(2.0)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| app.ui(ui),
+            MarkiseApp::new(AppOptions {
+                open: vec![doc],
+                ..common::no_watch()
+            }),
+        );
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    assert_eq!(h.state().comment_display(), CommentDisplay::Margin);
+    type Apply = Box<dyn Fn(&mut MarkiseApp)>;
+    let mut looks: Vec<(String, Apply)> = Vec::new();
+    for s in markise_theme::style::BUILTIN_STYLES.iter().map(|s| s.id) {
+        looks.push((
+            format!("style {s}"),
+            Box::new(move |a: &mut MarkiseApp| a.select_style(markise_theme::catalog::StyleId::Builtin(s.into()))),
+        ));
+    }
+    for t in markise_theme::builtin::BUILTIN_THEMES.iter().map(|t| t.id) {
+        looks.push((
+            format!("theme {t}"),
+            Box::new(move |a: &mut MarkiseApp| a.select_theme(markise_theme::catalog::ThemeId::Builtin(t.into()))),
+        ));
+    }
+    assert!(looks.len() >= 8, "registry");
+    let mut bad = Vec::new();
+    let mut margin_seen = 0;
+    let mut bubbles_seen = 0;
+    for (name, apply) in looks
+        .iter()
+        .filter(|(name, _)| exhaustive || name == "style classic" || name == "theme phycat")
+    {
+        let before = h.state().theme().clone();
+        apply(h.state_mut());
+        let t = Instant::now();
+        while *h.state().theme() == before && t.elapsed() < Duration::from_secs(10) {
+            h.step();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for sidebar in [true, false] {
+            for zoom in [1.0, 1.5] {
+                for width in [900.0, 1100.0, 1400.0, 1900.0]
+                    .into_iter()
+                    .filter(|w| exhaustive || *w == 900.0 || *w == 1900.0)
+                {
+                    // the zoom first (egui applies it at the next pass), then the window size in
+                    // points (kittest's size is in points; a zoomed window has fewer)
+                    h.state_mut().set_zoom(zoom);
+                    h.run_steps(2);
+                    h.set_size(egui::vec2(width / zoom, 760.0 / zoom));
+                    h.run_steps(4);
+                    let screen = h.ctx.content_rect();
+                    assert!(
+                        (screen.width() - width / zoom).abs() < 1.0,
+                        "window {screen:?} at {width} / {zoom}"
+                    );
+                    let what = format!("{name} sidebar={sidebar} zoom={zoom} width={width}");
+                    bad.extend(check_cards_on_screen(&mut h, &what));
+                    if comments(&mut h).iter().any(|c| c.card.is_some()) {
+                        margin_seen += 1;
+                    } else {
+                        bubbles_seen += 1;
+                        bad.extend(check_popovers_on_screen(&mut h, &what));
+                    }
+                }
+            }
+            let ctx = h.ctx.clone();
+            h.state_mut()
+                .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    assert!(
+        margin_seen > 0 && bubbles_seen > 0,
+        "margin {margin_seen}, bubbles {bubbles_seen}"
+    );
+}
+
+/// Issue #91, the mechanism: when the document surface is laid out wider than what is visible
+/// (here the whole app UI is given 420 pt more than the window, so its right part is clipped
+/// away), margin cards must not go into the invisible part: they stay in the visible margin
+/// or the comments fall back to bubbles, whose popovers stay on screen too.
+#[test]
+fn cards_stay_visible_when_the_surface_is_wider_than_the_window() {
+    let dir = tmpdir("wider-surface");
+    let doc = dir.join("draft.md");
+    std::fs::write(&doc, WIDE).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1500.0, 760.0))
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| {
+                let r = ui.max_rect();
+                let wide = Rect::from_min_size(r.min, egui::vec2(r.width() + 420.0, r.height()));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(wide));
+                app.ui(&mut child)
+            },
+            MarkiseApp::new(AppOptions {
+                open: vec![doc],
+                ..common::no_watch()
+            }),
+        );
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    settle(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+    let screen = h.ctx.content_rect();
+    let mut bad = Vec::new();
+    for width in [None, Some(480.0), Some(700.0)] {
+        h.state_mut().set_overrides(markise_theme::Overrides {
+            content_width: width,
+            ..Default::default()
+        });
+        h.run_steps(4);
+        let surface = h.state_mut().viewer().unwrap().surface_rect().unwrap();
+        assert!(
+            surface.right() > screen.right() + 300.0,
+            "the surface is wider: {surface:?}"
+        );
+        let cs = comments(&mut h);
+        assert_eq!(cs.len(), 2);
+        for c in &cs {
+            if let Some(card) = c.card
+                && !screen.contains_rect(card)
+            {
+                bad.push(format!(
+                    "content width {width:?}: card {card:?} outside the window {screen:?}"
+                ));
+            }
+        }
+        if cs.iter().all(|c| c.card.is_none()) {
+            // bubbles: each popover on screen
+            for (i, c) in cs.iter().enumerate() {
+                h.hover_at(c.glyph.center());
+                let t = Instant::now();
+                while comments(&mut h)[i].card.is_none() && t.elapsed() < Duration::from_secs(5) {
+                    h.step();
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let card = comments(&mut h)[i].card.expect("popover");
+                if !screen.contains_rect(card) {
+                    bad.push(format!(
+                        "content width {width:?}: popover {card:?} outside the window {screen:?}"
+                    ));
+                }
+                h.hover_at(egui::pos2(100.0, 700.0));
+                h.run_steps(3);
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    // with a narrow column the visible margin holds cards
+    h.state_mut().set_overrides(markise_theme::Overrides {
+        content_width: Some(480.0),
+        ..Default::default()
+    });
+    h.run_steps(4);
+    assert!(
+        comments(&mut h).iter().all(|c| c.card.is_some()),
+        "margin cards in the visible margin"
+    );
+}
+
+// ------------------------------------------------------------------ the comment gutter (#91)
+
+/// Opens `src` at `size` (points) with the built-in Phycat theme (a wide 950 pt column), the
+/// sidebar shown.
+fn open_phycat(name: &str, src: &str, size: egui::Vec2) -> H {
+    let dir = tmpdir(name);
+    let doc = dir.join("draft.md");
+    std::fs::write(&doc, src).unwrap();
+    let mut h = Harness::builder()
+        .with_size(size)
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| app.ui(ui),
+            MarkiseApp::new(AppOptions {
+                open: vec![doc],
+                ..common::no_watch()
+            }),
+        );
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    let before = h.state().theme().name.clone();
+    h.state_mut()
+        .select_theme(markise_theme::catalog::ThemeId::Builtin("phycat".into()));
+    wait_until(&mut h, "Phycat", |a| a.theme().name != before);
+    h.run_steps(4);
+    settle(&mut h);
+    h
+}
+
+/// Owner decision on #91: in margin mode a document with comments gets a comment gutter at
+/// the right; the (wide) column lays out in the rest, and the cards are shown inside the
+/// window. Removing the last comment releases the gutter (after a short debounce, not on every
+/// keystroke) and the column widens again.
+#[test]
+fn comment_gutter_is_reserved_while_comments_exist() {
+    let mut h = open_phycat("gutter", WIDE, egui::vec2(1400.0, 760.0));
+    assert_eq!(h.state().comment_display(), CommentDisplay::Margin);
+    let screen = h.ctx.content_rect();
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.comment_gutter(), "gutter reserved");
+    let (left, with_gutter) = v.column();
+    let cs = comments(&mut h);
+    assert_eq!(cs.len(), 2);
+    for c in &cs {
+        let card = c.card.expect("margin card");
+        assert!(screen.contains_rect(card), "card {card:?} inside the window {screen:?}");
+        assert!(card.left() >= left + with_gutter, "beside the column");
+    }
+    // edit the comments away: all text replaced by plain text
+    let len = text(&h).len();
+    select(&mut h, 0, len);
+    typ(&mut h, "plain");
+    assert_eq!(text(&h), "plain");
+    // right after the edit the layout has not jumped yet (debounced); shortly after, released
+    let t = Instant::now();
+    while h.state_mut().viewer().unwrap().comment_gutter() {
+        assert!(t.elapsed() < Duration::from_secs(5), "gutter not released");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    h.run_steps(2);
+    let (_, without) = h.state_mut().viewer().unwrap().column();
+    assert!(
+        without > with_gutter + 100.0,
+        "the column widens again: {with_gutter} -> {without}"
+    );
+    assert!(comments(&mut h).is_empty());
+}
+
+/// Typing inside a document with comments keeps the gutter (no layout jump per keystroke).
+#[test]
+fn comment_gutter_stays_while_typing() {
+    let mut h = open_phycat("gutter-typing", WIDE, egui::vec2(1400.0, 760.0));
+    let (_, w0) = h.state_mut().viewer().unwrap().column();
+    let end = text(&h).len();
+    caret_at(&mut h, end);
+    for _ in 0..3 {
+        typ(&mut h, "abc ");
+        std::thread::sleep(Duration::from_millis(150));
+        h.step();
+        let v = h.state_mut().viewer().unwrap();
+        assert!(v.comment_gutter());
+        assert_eq!(v.column().1, w0, "the column keeps its width");
+    }
+}
+
+/// A window too narrow for the gutter and a readable column: bubbles, popovers on screen.
+#[test]
+fn narrow_window_falls_back_to_bubbles() {
+    let mut h = open_phycat("gutter-narrow", WIDE, egui::vec2(900.0, 760.0));
+    let screen = h.ctx.content_rect();
+    assert!(!h.state_mut().viewer().unwrap().comment_gutter(), "no gutter");
+    let cs = comments(&mut h);
+    assert_eq!(cs.len(), 2);
+    assert!(cs.iter().all(|c| c.card.is_none()), "bubbles");
+    let bad = check_popovers_on_screen(&mut h, "narrow");
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    assert!(screen.width() <= 900.0);
+}
+
+/// Codex review of #94: a click on exactly the frame where the comment gutter would appear
+/// (the frame that first sees a new comment also gets the press) lands on the clicked
+/// character; the gutter follows a frame later.
+#[test]
+fn click_on_the_frame_the_gutter_appears_hits_the_clicked_character() {
+    let src = "Alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron \
+pi rho sigma tau upsilon phi chi psi omega and some more words to fill the line.\n\nTail.\n";
+    let mut h = open_phycat("gutter-click", src, egui::vec2(1400.0, 760.0));
+    assert!(
+        !h.state_mut().viewer().unwrap().comment_gutter(),
+        "no comments: no gutter"
+    );
+    // a character near the right end of the first line: with the narrower column (gutter)
+    // the same column-relative x is past the end of that line
+    let (col_left, col_w) = h.state_mut().viewer().unwrap().column();
+    caret_at(&mut h, 0);
+    let y0 = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .caret_screen
+        .expect("caret drawn")
+        .center()
+        .y;
+    let mut found = None;
+    for at in (40..src.find("\n").unwrap()).step_by(3) {
+        caret_at(&mut h, at);
+        let r = h.state_mut().viewer().unwrap().caret_screen.expect("caret drawn");
+        if (r.center().y - y0).abs() > 2.0 {
+            break;
+        }
+        if r.left() - col_left > col_w - 120.0 {
+            found = Some((at, r));
+            break;
+        }
+    }
+    let (target, r) = found.expect("a character near the end of the first line");
+    let p = egui::pos2(r.center().x + 1.0, r.center().y);
+    caret_at(&mut h, 0);
+    // the pointer is over the target first (kittest delivers a press one frame after a move)
+    h.event(Event::PointerMoved(p));
+    h.step();
+    std::thread::sleep(Duration::from_millis(500));
+    // a comment appended at the end (the target does not move); no frame runs before the press
+    let end = src.len() - 1;
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| {
+        s.set_selection(Selection::caret(end));
+        s.insert_text(" {>>note<<}")
+    })
+    .unwrap();
+    v.ed.refresh_focus();
+    assert!(text(&h).contains("Tail. {>>note<<}"), "{}", text(&h));
+    // the press arrives in the frame that first sees the comment
+    h.event(Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: Modifiers::default(),
+    });
+    h.step();
+    h.event(Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::default(),
+    });
+    h.step();
+    assert_eq!(caret(&mut h), target, "the caret is where the click was");
+    assert!(
+        !h.state_mut().viewer().unwrap().comment_gutter(),
+        "the gutter waits while the button is used"
+    );
+    h.run_steps(3);
+    assert!(h.state_mut().viewer().unwrap().comment_gutter(), "the gutter follows");
+    assert_eq!(caret(&mut h), target);
+}
+
+/// Coordinator review of #94: "has comments" is tracked incrementally. Typing ordinary text
+/// in a 10 MB document with comments runs no scan, reads no text and copies nothing.
+#[test]
+fn typing_ordinary_text_never_scans() {
+    check_typing_ordinary_text_in_a_10_mb_document_never_scans(128 << 10);
+}
+
+#[test]
+#[ignore = "heavy: large input or exhaustive matrix; cargo xtask heavy"]
+fn heavy_suite_typing_ordinary_text_in_a_10_mb_document_never_scans() {
+    check_typing_ordinary_text_in_a_10_mb_document_never_scans(10 << 20);
+}
+
+fn check_typing_ordinary_text_in_a_10_mb_document_never_scans(size: usize) {
+    let para = "An ordinary paragraph of the large document, with enough words to wrap a line.\n\n";
+    let mut src = String::from("Intro {>>a comment near the start<<} text.\n\n");
+    src.push_str(&para.repeat(size / para.len()));
+    src.push_str("Last {>>and one at the end<<}.\n");
+    let mut h = open_phycat("gutter-10mb", &src, egui::vec2(1400.0, 760.0));
+    assert!(h.state_mut().viewer().unwrap().comment_gutter());
+    let v = h.state_mut().viewer().unwrap();
+    let (scans, bytes) = v.comment_scans();
+    let copies = v.ed.session.copies;
+    // a progressive open (issue #126) scans the first part, then the whole document once
+    let progressive = src.len() >= markise_engine::load::ProgressiveOpts::default().min_bytes;
+    assert_eq!(
+        scans,
+        if progressive { 2 } else { 1 },
+        "one initial scan per document shown"
+    );
+    assert!(bytes < 4096, "it stopped at the first comment: {bytes} bytes");
+    // type in the middle of the document
+    let mid = src.len() / 2;
+    let mid = src[mid..].find("words").unwrap() + mid;
+    caret_at(&mut h, mid);
+    typ(&mut h, "hello there ");
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(200));
+        h.step();
+    }
+    let v = h.state_mut().viewer().unwrap();
+    assert_eq!(v.comment_scans(), (scans, bytes), "no scan, no text read");
+    assert_eq!(v.ed.session.copies, copies, "no document copy");
+    assert!(!v.comment_lookup_pending());
+    assert!(v.comment_gutter(), "still reserved");
+    // once idle, the safety net rescans once; it stops at the first comment
+    let t = Instant::now();
+    while h.state_mut().viewer().unwrap().comment_scans().0 == scans {
+        assert!(t.elapsed() < Duration::from_secs(10), "no idle rescan");
+        std::thread::sleep(Duration::from_millis(50));
+        h.step();
+    }
+    h.run_steps(3);
+    let v = h.state_mut().viewer().unwrap();
+    let (s2, b2) = v.comment_scans();
+    assert_eq!(s2, scans + 1);
+    assert!(b2 - bytes < 4096, "read {} bytes", b2 - bytes);
+    assert_eq!(v.ed.session.copies, copies);
+    assert!(v.comment_gutter());
+}
+
+/// Inserting a comment flips "has comments" by a local check (no scan); deleting the last
+/// comment releases the gutter (a scan confirms none is left).
+#[test]
+fn inserting_and_deleting_the_last_comment_flip_the_gutter() {
+    let src = "First paragraph with words.\n\nSecond paragraph.\n";
+    let mut h = open_phycat("gutter-flip", src, egui::vec2(1400.0, 760.0));
+    let v = h.state_mut().viewer().unwrap();
+    assert!(!v.comment_gutter());
+    let (scans, _) = v.comment_scans();
+    let at = src.find(" with").unwrap();
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| {
+        s.set_selection(Selection::caret(at));
+        s.insert_text("{>>check<<}")
+    })
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(450));
+    settle(&mut h);
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.comment_gutter(), "a comment: gutter");
+    assert_eq!(v.comment_scans().0, scans, "found by the local check");
+    assert_eq!(comments(&mut h).len(), 1);
+    // delete it
+    let t = text(&h);
+    let (a, b) = (t.find("{>>").unwrap(), t.find("<<}").unwrap() + 3);
+    select(&mut h, a, b);
+    h.key_press(Key::Backspace);
+    h.step();
+    assert_eq!(text(&h), src);
+    std::thread::sleep(Duration::from_millis(450));
+    settle(&mut h);
+    let v = h.state_mut().viewer().unwrap();
+    assert!(!v.comment_gutter(), "the last comment gone: released");
+    assert_eq!(v.comment_scans().0, scans + 1, "a scan confirmed it");
+}
+
+/// Codex round 3: unindenting `    Here is {>>note<<}` (an indented code line) exposes a
+/// comment without any relevance trigger; the idle safety net rescans and the gutter appears.
+#[test]
+fn unindenting_a_code_line_with_a_comment_shows_the_gutter_after_the_idle_rescan() {
+    let src = "    Here is {>>note<<}\n\nText.\n";
+    let mut h = open_phycat("gutter-unindent", src, egui::vec2(1400.0, 760.0));
+    assert!(!h.state_mut().viewer().unwrap().comment_gutter(), "code: no comment");
+    // the indent removed (as an external edit: the code block's indent is not a caret stop)
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| {
+        let ps = markise_doc::PatchSet::new(vec![markise_doc::Patch::verbatim(0..4, String::new())]).unwrap();
+        s.apply_external(&ps, "unindent", false)
+    })
+    .unwrap();
+    h.step();
+    assert_eq!(text(&h), "Here is {>>note<<}\n\nText.\n");
+    assert_eq!(
+        h.state_mut().viewer().unwrap().ed.session.review_edits().relevant,
+        0,
+        "no relevance trigger fired"
+    );
+    let t = Instant::now();
+    while !h.state_mut().viewer().unwrap().comment_gutter() {
+        assert!(t.elapsed() < Duration::from_secs(10), "gutter did not appear");
+        std::thread::sleep(Duration::from_millis(50));
+        h.step();
+    }
+    // found by the idle safety net's scan (the open scan was the first)
+    assert_eq!(h.state_mut().viewer().unwrap().comment_scans().0, 2);
+    h.run_steps(3);
+    assert!(comments(&mut h).iter().all(|c| c.card.is_some()), "margin cards");
+}
+
+// ---------------------------------------------------------------- editing in the card (#87)
+
+/// The card keeps the author prefix, writes one undo step, and leaves document shortcuts
+/// alone while its field has the focus.
+#[test]
+fn card_edit_keeps_the_author_and_is_one_undo_step() {
+    let src = "Note {>>@ai: old text<<} end.\n";
+    let (mut h, _p) = open_roomy("card-author", src);
+    open_card(&mut h, 5);
+    assert_eq!(
+        edited(&mut h),
+        Some((5, "old text".into())),
+        "the author is not in the field"
+    );
+    // ⌘B is not the document's while the field has the focus
+    h.key_press_modifiers(cmd(), Key::B);
+    h.run_steps(2);
+    assert_eq!(text(&h), src);
+    // a click inside the card being edited stays in the field
+    let r = comments(&mut h)[0].card.expect("the card");
+    click_at(&mut h, r.center());
+    h.run_steps(2);
+    assert_eq!(edited(&mut h).map(|e| e.0), Some(5));
+    h.key_press(Key::End);
+    for _ in 0.."old text".len() {
+        h.key_press(Key::Backspace);
+    }
+    typ(&mut h, "new");
+    save_card(&mut h);
+    assert_eq!(text(&h), "Note {>>@ai: new<<} end.\n");
+    undo(&mut h);
+    assert_eq!(text(&h), src, "one undo step");
+    // saving an unchanged text writes nothing
+    open_card(&mut h, 5);
+    save_card(&mut h);
+    assert_eq!(edited(&mut h), None);
+    assert_eq!(text(&h), src);
+    assert!(
+        h.state_mut().viewer().unwrap().ed.session.history().can_redo(),
+        "no new step"
+    );
+}
+
+/// An emptied comment goes, with its highlight (the highlighted text stays).
+#[test]
+fn emptied_card_removes_the_comment_and_its_highlight() {
+    let (mut h, _p) = open_roomy("card-empty", "A {==b==}{>>c<<} d.\n");
+    open_card(&mut h, 9);
+    h.key_press(Key::Backspace);
+    save_card(&mut h);
+    assert_eq!(text(&h), "A b d.\n");
+    undo(&mut h);
+    assert_eq!(text(&h), "A {==b==}{>>c<<} d.\n");
+}
+
+/// A new comment cancelled (Esc) or saved empty leaves no trace, not even an undo step;
+/// Add Comment from the menu opens the card too.
+#[test]
+fn new_comment_cancelled_or_left_empty_leaves_no_trace() {
+    let src = "The quick fox.\n";
+    let (mut h, _p) = open_roomy("card-new", src);
+    select(&mut h, 4, 9);
+    h.key_press_modifiers(add_comment_chord(), Key::M);
+    h.run_steps(3);
+    assert_eq!(text(&h), "The {==quick==}{>><<} fox.\n");
+    typ(&mut h, "x");
+    h.key_press(Key::Escape);
+    h.run_steps(3);
+    assert_eq!(text(&h), src);
+    let can = |h: &mut H| {
+        let s = &h.state_mut().viewer().unwrap().ed.session;
+        (s.history().can_undo(), s.history().can_redo())
+    };
+    assert_eq!(can(&mut h), (false, false));
+    // from the menu, saved without text
+    select(&mut h, 4, 9);
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("review.addComment"));
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), Some((15, String::new())));
+    save_card(&mut h);
+    assert_eq!(text(&h), src);
+    assert_eq!(can(&mut h), (false, false));
+}
+
+/// Comments in quotes and list items get line breaks with the continuation prefix; in a
+/// heading Enter saves (its comment is one line).
+#[test]
+fn card_edit_in_headings_lists_and_quotes() {
+    let src = "# Title{>>h<<}\n\n> quoted {>>q<<} text\n\n- item {>>l<<} end\n";
+    let (mut h, _p) = open_roomy("card-blocks", src);
+    let key = |s: &str, n: &str| s.find(n).unwrap();
+    // heading: Enter saves
+    open_card(&mut h, key(src, "{>>h"));
+    typ(&mut h, "x");
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), None);
+    let t = text(&h);
+    assert!(t.starts_with("# Title{>>hx<<}\n"), "{t:?}");
+    // quote: Enter is a line break
+    open_card(&mut h, key(&t, "{>>q"));
+    h.key_press(Key::Enter);
+    typ(&mut h, "two");
+    save_card(&mut h);
+    let t = text(&h);
+    assert!(t.contains("> quoted {>>q\n> two<<} text\n"), "{t:?}");
+    // list item: the item's content indent
+    open_card(&mut h, key(&t, "{>>l"));
+    h.key_press(Key::Enter);
+    typ(&mut h, "two");
+    save_card(&mut h);
+    let t = text(&h);
+    assert!(t.ends_with("- item {>>l\n  two<<} end\n"), "{t:?}");
+    // the multi-line comment opens with its lines
+    open_card(&mut h, key(&t, "{>>q"));
+    assert_eq!(edited(&mut h).unwrap().1, "q\ntwo");
+}
+
+/// Paged model (ADR 0016): a card being edited whose comment scrolls far away (its page is
+/// evicted) is saved, not lost; the comment's page coming back shows the new text.
+#[test]
+fn card_edit_is_saved_when_its_page_unloads() {
+    let mut src = String::from("Intro {==a==}{>>c<<} here.\n\n");
+    for i in 0..600 {
+        src.push_str(&format!("Paragraph {i} with some text.\n\n"));
+    }
+    let (mut h, _p) = open_roomy("card-paged", &src);
+    assert!(h.state_mut().viewer().unwrap().model().is_paged());
+    open_card(&mut h, 13);
+    typ(&mut h, " more");
+    h.state_mut().viewer().unwrap().ed.view.scroll_to_y(f64::MAX);
+    h.run_steps(5);
+    assert_eq!(edited(&mut h), None);
+    assert!(text(&h).starts_with("Intro {==a==}{>>c more<<} here.\n"));
+    h.state_mut().viewer().unwrap().ed.view.scroll_to_y(0.0);
+    h.run_steps(5);
+    let cs = comments(&mut h);
+    assert_eq!(&*cs[0].text, "c more");
+}
+
+/// Side by Side: the rendered pane is read-only, so its cards open no editor (a click puts
+/// the caret at the end of the comment's text, where the source pane edits it); a card being
+/// edited when Side by Side is entered is saved, and so is one open when the file is saved.
+#[test]
+fn card_edit_in_side_by_side_and_on_save() {
+    use markise_ui_egui::ViewMode;
+    let src = "Note {>>c<<} end.\n";
+    let (mut h, p) = open_roomy("card-sbs", src);
+    open_card(&mut h, 5);
+    typ(&mut h, "d");
+    h.state_mut().set_view_mode(ViewMode::SideBySide);
+    h.run_steps(4);
+    assert_eq!(edited(&mut h), None);
+    assert_eq!(text(&h), "Note {>>cd<<} end.\n");
+    settle(&mut h);
+    let c = comments(&mut h).into_iter().next().expect("the comment is shown");
+    click_at(&mut h, c.card.map_or(c.glyph.center(), |r| r.center()));
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), None, "read-only: no editor");
+    assert_eq!(caret(&mut h), c.content.end);
+    // back in the rendered view: ⌘S saves the card's text too
+    h.state_mut().set_view_mode(ViewMode::Rendered);
+    h.run_steps(4);
+    settle(&mut h);
+    open_card(&mut h, 5);
+    typ(&mut h, "e");
+    assert_eq!(save_and_read(&mut h, &p), "Note {>>cde<<} end.\n");
+}
+
+/// An edit elsewhere while the card is open (as the source pane or a menu makes them) moves
+/// the comment; the card follows it.
+#[test]
+fn card_edit_follows_edits_elsewhere() {
+    let (mut h, _p) = open_roomy("card-follow", "Note {>>c<<} end.\n");
+    open_card(&mut h, 5);
+    typ(&mut h, "d");
+    h.state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .edit(|s| s.apply_external(&markise_doc::PatchSet::single_verbatim(0..0, "A "), "Edit", false))
+        .unwrap();
+    h.run_steps(2);
+    assert_eq!(edited(&mut h), Some((7, "cd".into())));
+    save_card(&mut h);
+    assert_eq!(text(&h), "A Note {>>cd<<} end.\n");
+}
+
+// ---------------------------------------------------------------- card drafts (Codex review of #158)
+
+/// A save of the card that the planner refuses (here: Comments & Suggestions switched off
+/// while the card is open) keeps the draft: ⌘S stops with the reason and writes nothing, the
+/// document counts as unsaved (Close asks), and the draft is saved once it can be.
+#[test]
+fn refused_card_save_keeps_the_draft_and_stops_save_and_close() {
+    let src = "Note {>>c<<} end.\n";
+    let (mut h, p) = open_roomy("card-refused", src);
+    open_card(&mut h, 5);
+    typ(&mut h, "d");
+    assert!(h.state().is_dirty(), "an open draft is an unsaved change");
+    h.state_mut().set_critic_markup(false);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), Some((5, "cd".into())), "kept, not drawn");
+    h.key_press_modifiers(cmd(), Key::S);
+    h.run_steps(3);
+    let banner = h.state().banner_text().unwrap_or_default();
+    assert!(banner.contains("not saved"), "{banner}");
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), src, "nothing written");
+    assert_eq!(edited(&mut h), Some((5, "cd".into())));
+    assert!(h.state().is_dirty());
+    assert!(!h.state_mut().request_close(), "Close asks");
+    h.state_mut().answer_question(Choice::Cancel);
+    h.run_steps(2);
+    // on again: the card is back and saves
+    h.state_mut().set_critic_markup(true);
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    h.run_steps(4);
+    save_card(&mut h);
+    assert_eq!(edited(&mut h), None);
+    assert_eq!(save_and_read(&mut h, &p), "Note {>>cd<<} end.\n");
+}
+
+/// An open draft makes an external change a conflict (no silent reload over it); reloading
+/// anyway drops the draft instead of writing it over a different comment at the same place.
+#[test]
+fn external_change_with_an_open_draft_is_a_conflict() {
+    let src = "Note {>>c<<} end.\n";
+    let (mut h, p) = open_roomy_opts("card-reload", src, None, true);
+    open_card(&mut h, 5);
+    typ(&mut h, "d");
+    let theirs = "Note {>>zz<<} end.\n";
+    std::fs::write(&p, theirs).unwrap();
+    wait_until(&mut h, "conflict", |a| {
+        a.banner_text().is_some_and(|b| b.starts_with("conflict"))
+    });
+    assert_eq!(text(&h), src, "not reloaded");
+    assert_eq!(edited(&mut h), Some((5, "cd".into())));
+    h.state_mut().resolve_conflict_reload();
+    wait_until(&mut h, "reload", |a| {
+        a.document_text().as_deref() == Some(theirs) && !a.is_busy()
+    });
+    h.run_steps(2);
+    assert_eq!(edited(&mut h), None, "the draft named another comment");
+    save_card(&mut h);
+    assert_eq!(text(&h), theirs);
+}
+
+/// File → New with an open draft asks; Cancel keeps the draft, Save writes it first.
+#[test]
+fn new_document_asks_about_an_open_draft() {
+    let s = Scripted::new();
+    let src = "Note {>>c<<} end.\n";
+    let (mut h, p) = open_roomy_opts("card-new-doc", src, Some(&s), false);
+    open_card(&mut h, 5);
+    typ(&mut h, "d");
+    s.answer(Choice::Cancel);
+    h.state_mut().new_document();
+    h.run_steps(3);
+    assert_eq!(s.last().unwrap().kind, Kind::UnsavedChanges);
+    assert_eq!(text(&h), src);
+    assert_eq!(edited(&mut h), Some((5, "cd".into())));
+    s.answer(Choice::Save);
+    h.state_mut().new_document();
+    h.run_steps(3);
+    wait_until(&mut h, "new document", |a| a.is_untitled() && !a.is_busy());
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "Note {>>cd<<} end.\n");
+    assert_eq!(text(&h), "");
+}
+
+// ---------------------------------------------------------------- review views (#88)
+
+fn set_view(h: &mut H, id: &'static str) {
+    let ctx = h.ctx.clone();
+    h.state_mut().menu_action(&ctx, &MenuAction::Command(id));
+    h.run_steps(4);
+    settle(h);
+}
+
+/// Issue #88: View → Comments switches how marks show — display only. Final and Original show
+/// the text as if every suggestion were accepted / rejected, with no comments, no gutter and
+/// a read-only document (typing, document commands and saves change nothing); Simple shows
+/// glyphs and coloured suggestions without cards (a click on a glyph still edits the comment);
+/// All brings the cards back. The file never changes, and the choice is persisted.
+#[test]
+fn comment_views_change_the_display_not_the_file() {
+    use markise_engine::settings::CommentView;
+    let dir = tmpdir("comment-views");
+    let doc = dir.join("note.md");
+    std::fs::write(&doc, REVIEWED).unwrap();
+    let cfg = dir.join("config");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 760.0))
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| app.ui(ui),
+            MarkiseApp::new(AppOptions {
+                open: vec![doc.clone()],
+                config: markise_ui_egui::ConfigDir::Dir(cfg.clone()),
+                ..common::no_watch()
+            }),
+        );
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_loading());
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("view.toggleSidebar"));
+    h.run_steps(4);
+    settle(&mut h);
+    assert_eq!(h.state().comment_view(), CommentView::All);
+    assert!(h.state_mut().viewer().unwrap().comment_gutter());
+    assert_eq!(comments(&mut h).len(), 2);
+    let radio = |h: &H, id: &str| h.state().menu_model().item(id).unwrap().check;
+    assert_eq!(radio(&h, "view.commentsAll"), markise_ui_egui::menu::Check::Radio(true));
+
+    // No Markup (Final)
+    set_view(&mut h, "view.commentsFinal");
+    assert_eq!(h.state().comment_view(), CommentView::Final);
+    let t = visible_text(&mut h);
+    assert!(t.contains("We ship the beta on Friday."), "{t}");
+    assert!(t.contains("The team likes it."), "{t}");
+    assert!(t.contains("It was fine. Costs stay low."), "{t}");
+    assert!(comments(&mut h).is_empty());
+    assert!(!h.state_mut().viewer().unwrap().comment_gutter(), "no gutter");
+    // read-only: typing, document commands and the hover bar change nothing
+    caret_at(&mut h, 10);
+    typ(&mut h, "x");
+    h.key_press(Key::Backspace);
+    h.run_steps(2);
+    assert_eq!(text(&h), REVIEWED);
+    assert!(!h.state().menu_model().item("format.strong").unwrap().enabled);
+    assert!(!h.state().menu_model().item("review.acceptAll").unwrap().enabled);
+    let ctx = h.ctx.clone();
+    assert!(!h.state_mut().run_review(&ctx, "review.acceptAll", None));
+    assert_eq!(text(&h), REVIEWED);
+    assert!(!h.state().is_dirty());
+
+    // Original
+    set_view(&mut h, "view.commentsOriginal");
+    let t = visible_text(&mut h);
+    assert!(t.contains("We ship on Friday."), "{t}");
+    assert!(t.contains("The team really likes it."), "{t}");
+    assert!(t.contains("It is fine. Costs stay low."), "{t}");
+    assert!(comments(&mut h).is_empty());
+
+    // Simple: glyphs, no cards, no gutter; a click on a glyph edits the comment
+    set_view(&mut h, "view.commentsSimple");
+    let cs = comments(&mut h);
+    assert_eq!(cs.len(), 2);
+    assert!(cs.iter().all(|c| c.card.is_none()), "no cards");
+    assert!(!h.state_mut().viewer().unwrap().comment_gutter());
+    open_card(&mut h, cs[1].source.start);
+    typ(&mut h, "!");
+    save_card(&mut h);
+    assert!(text(&h).contains("{>>numbers?!<<}"));
+    undo(&mut h);
+    assert_eq!(text(&h), REVIEWED);
+
+    // All: cards again; the file was never written; the choice is persisted
+    set_view(&mut h, "view.commentsAll");
+    assert!(comments(&mut h).iter().all(|c| c.card.is_some()));
+    assert_eq!(std::fs::read_to_string(&doc).unwrap(), REVIEWED);
+    set_view(&mut h, "view.commentsFinal");
+    let settings = cfg.join("markise").join("settings.json");
+    common::assert_settings(&mut h, &settings, |s| s.contains("\"commentView\": \"final\""));
+}
+
+/// Switching to a clean view saves a comment being edited in its card first (the preview is
+/// read-only), and the status bar shows the view.
+#[test]
+fn clean_view_saves_an_open_card_and_shows_in_the_status_bar() {
+    let (mut h, _p) = open_roomy("view-card", NOTE);
+    let key = NOTE.find("{>>").unwrap();
+    open_card(&mut h, key);
+    typ(&mut h, "!");
+    set_view(&mut h, "view.commentsOriginal");
+    assert_eq!(edited(&mut h), None);
+    assert_eq!(text(&h), "Note {==this==}{>>check **this** `x`!<<} end.\n");
+    assert!(has_text(&mut h, "Original · read-only"), "status bar");
+    set_view(&mut h, "view.commentsAll");
+    assert!(has_text(&mut h, "All Markup"));
+}
+
+/// Codex review of #160: the clean previews are read-only at the session — Find & Replace
+/// (started there, or queued before the switch), Undo of an earlier Replace All and ⌘Z change
+/// nothing — and Copy takes the text shown (accepted / rejected).
+#[test]
+fn clean_preview_refuses_replace_and_undo_and_copies_what_is_shown() {
+    use markise_engine::search::Query;
+    use markise_engine::settings::CommentView;
+    let (mut h, _p) = open_roomy("view-find", REVIEWED);
+    let search = |h: &mut H, t: &str| {
+        h.state_mut().open_find(true);
+        h.state_mut().set_find_query(Query {
+            text: t.into(),
+            ..Default::default()
+        });
+        wait_until(h, "find", |a| a.find_results().is_some());
+    };
+    // a Replace All, then the preview: its undo is refused
+    search(&mut h, "Friday");
+    h.state_mut().replace_find("Monday".into(), true);
+    wait_until(&mut h, "replaced", |a| {
+        a.document_text().is_some_and(|t| t.contains("Monday"))
+    });
+    let replaced = text(&h);
+    h.state_mut().set_comment_view(CommentView::Final);
+    h.run_steps(2);
+    assert!(!h.state_mut().undo_replace_all());
+    undo(&mut h);
+    assert_eq!(text(&h), replaced);
+    // started in the preview: refused
+    search(&mut h, "Monday");
+    h.state_mut().replace_find("Sunday".into(), true);
+    h.run_steps(4);
+    assert_eq!(text(&h), replaced);
+    // queued just before the switch: refused when it completes
+    h.state_mut().set_comment_view(CommentView::All);
+    h.run_steps(2);
+    search(&mut h, "Monday");
+    h.state_mut().replace_find("Sunday".into(), true);
+    h.state_mut().set_comment_view(CommentView::Final);
+    for _ in 0..30 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(text(&h), replaced);
+    h.state_mut().close_find();
+    // Copy in Final / Original: the shown text
+    let a = replaced.find("team").unwrap();
+    let b = replaced.find("likes").unwrap() + 5;
+    let copied = |h: &mut H| -> String {
+        select(h, a, b);
+        h.event(Event::Copy);
+        h.step();
+        h.output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                egui::OutputCommand::CopyText(t) => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(copied(&mut h), "team likes");
+    h.state_mut().set_comment_view(CommentView::Original);
+    h.run_steps(2);
+    assert_eq!(copied(&mut h), "team really likes");
+    h.state_mut().set_comment_view(CommentView::All);
+    h.run_steps(2);
+    assert_eq!(copied(&mut h), "team {--really --}likes");
+}
+
+/// Codex review 2 of #160: literal syntax typed in the rendered view (`# Title` without Enter
+/// is a paragraph) is escaped when Source mode or Side by Side opens from a clean (read-only)
+/// review view, so the first source edit keeps it a paragraph.
+#[test]
+fn source_mode_from_a_clean_view_escapes_literal_syntax() {
+    use markise_engine::settings::CommentView;
+    use markise_ui_egui::ViewMode;
+    for mode in [ViewMode::Source, ViewMode::SideBySide] {
+        let (mut h, _p) = open_roomy("view-literal", "A {++b++}\n\nP\n");
+        select(&mut h, 11, 12);
+        typ(&mut h, "# Title");
+        let typed = text(&h);
+        assert_eq!(typed, "A {++b++}\n\n# Title\n");
+        h.state_mut().set_comment_view(CommentView::Final);
+        h.run_steps(2);
+        h.state_mut().set_view_mode(mode);
+        h.run_steps(3);
+        let t = text(&h);
+        assert_eq!(t, "A {++b++}\n\n\\# Title\n", "{mode:?}: escaped on opening the source");
+        h.state_mut().set_view_mode(ViewMode::Rendered);
+        h.state_mut().set_comment_view(CommentView::All);
+    }
+}
+
+/// Codex final check of #160: navigating a clean (read-only) preview never changes the
+/// document — an empty nested list item (a pending block hint) is not materialized or
+/// removed when the caret leaves it.
+#[test]
+fn caret_moves_in_a_clean_view_leave_pending_hints_alone() {
+    use markise_engine::settings::CommentView;
+    let src = "- a {++b++}\n\nPara text here.\n";
+    let (mut h, _p) = open_roomy("view-hints", src);
+    caret_at(&mut h, src.find("\n").unwrap());
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    h.key_press(Key::Tab);
+    h.run_steps(2);
+    let before = text(&h);
+    assert_ne!(before, src, "an empty nested item");
+    h.state_mut().set_comment_view(CommentView::Final);
+    h.run_steps(3);
+    let at = before.find("Para").unwrap() + 2;
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(at).unwrap();
+    click_at(&mut h, r.left_center() + egui::vec2(20.0, 0.0));
+    h.run_steps(3);
+    assert_eq!(text(&h), before, "read-only: nothing materialized or removed");
+    h.state_mut().set_comment_view(CommentView::All);
+    h.run_steps(2);
+}
+
+// ---------------------------------------------------------------- table cells (#90)
+
+const TABLE_DOC: &str = "Intro.\n\n| Head | Other |\n| --- | --- |\n| cell text | x {++y++} |\n";
+
+/// Issue #90: Add Comment in a table cell opens the card; Enter saves (one-line comment), a
+/// `|` is written `\|` and shows as `|`; the table keeps its shape; one undo step; the comment
+/// has a card and the panel lists the cell's marks; Accept works in the cell.
+#[test]
+fn comments_in_table_cells() {
+    let (mut h, p) = open_roomy("table-comment", TABLE_DOC);
+    let a = TABLE_DOC.find("cell").unwrap();
+    select(&mut h, a, a + 4);
+    h.key_press_modifiers(add_comment_chord(), Key::M);
+    h.run_steps(3);
+    let key = a + 4 + 6;
+    assert_eq!(edited(&mut h).map(|e| e.0), Some(key), "the card opens");
+    typ(&mut h, "a|b");
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(edited(&mut h), None, "Enter saves a cell's comment");
+    let t = text(&h);
+    assert_eq!(
+        t,
+        "Intro.\n\n| Head | Other |\n| --- | --- |\n| {==cell==}{>>a\\|b<<} text | x {++y++} |\n"
+    );
+    settle(&mut h);
+    let cs = comments(&mut h);
+    assert_eq!(cs.len(), 1, "{cs:#?}");
+    assert_eq!(&*cs[0].text, "a|b");
+    assert!(cs[0].card.is_some(), "a margin card");
+    assert_eq!(h.state().review_marks().len(), 3, "highlight, comment, insertion");
+    // Accept in the cell
+    let ctx = h.ctx.clone();
+    let at = t.find("{++y").unwrap() + 3;
+    assert!(h.state_mut().run_review(&ctx, "review.accept", Some(at)));
+    h.run_steps(2);
+    assert!(text(&h).ends_with("| x y |\n"), "{}", text(&h));
+    undo(&mut h);
+    undo(&mut h);
+    assert_eq!(text(&h), TABLE_DOC, "one undo step each");
+    assert_eq!(save_and_read(&mut h, &p), TABLE_DOC);
+}
+
+/// Issue #90: the Add Comment shortcut says why it does nothing (here: across table cells).
+#[test]
+fn add_comment_shortcut_explains_a_refusal() {
+    let (mut h, _p) = open_roomy("table-refused", TABLE_DOC);
+    let a = TABLE_DOC.find("text").unwrap();
+    let b = TABLE_DOC.find("x {++").unwrap() + 1;
+    select(&mut h, a, b);
+    h.key_press_modifiers(add_comment_chord(), Key::M);
+    h.run_steps(3);
+    assert_eq!(text(&h), TABLE_DOC);
+    let banner = h.state().banner_text().unwrap_or_default();
+    assert!(banner.contains("one table cell"), "{banner}");
+}
+
+/// Codex review 2 of #161: a refusal only the run-time check finds (enabled, but the marks
+/// would not come out as intended: `==}` in the selection closes the highlight early) is shown
+/// too — from the shortcut and from the menu — instead of nothing happening.
+#[test]
+fn add_comment_refused_when_it_runs_says_why() {
+    let src = "| H | I |\n| --- | --- |\n| x | a ==} b |\n";
+    for menu in [false, true] {
+        let (mut h, _p) = open_roomy(if menu { "late-menu" } else { "late-key" }, src);
+        let a = src.find("a ==}").unwrap();
+        select(&mut h, a, a + "a ==} b".len());
+        assert!(
+            h.state().menu_model().item("review.addComment").unwrap().enabled,
+            "enabled"
+        );
+        if menu {
+            let ctx = h.ctx.clone();
+            h.state_mut()
+                .menu_action(&ctx, &MenuAction::Command("review.addComment"));
+        } else {
+            h.key_press_modifiers(add_comment_chord(), Key::M);
+        }
+        h.run_steps(3);
+        assert_eq!(text(&h), src);
+        let banner = h.state().banner_text().unwrap_or_default();
+        assert!(banner.contains("Cannot add a comment here"), "menu {menu}: {banner}");
+    }
+}

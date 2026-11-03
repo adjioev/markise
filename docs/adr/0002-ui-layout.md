@@ -48,7 +48,9 @@ therefore not the bottleneck for M1's budgets; window/GPU start-up is (see "Meas
 - Bold comes from a system bold face (memory-mapped at run time; nothing bundled), italics are
   epaint's skew, CJK via a memory-mapped system fallback font.
 - Galleys are cached inside per-block layouts (key: block content hash, document context
-  hash, width, theme fingerprint, pixels-per-point, font generation, image epoch). Because an
+  hash, width, theme fingerprint, pixels-per-point, font generation; *2026-11-02, issue #29:*
+  no image epoch any more — the layouts that showed an image are dropped when its state or size
+  changes). Because an
   egui font-atlas rebuild invalidates glyph UVs, the painter re-requests each visible galley
   from egui's galley cache every frame (a hash lookup on a hit), so a cached layout can never
   paint stale glyphs.
@@ -101,6 +103,9 @@ The UI keeps one authoritative state per open document (`crates/markise-ui-egui/
   preserved in a reported `.<name>.markise-backup-*` file. Watcher events always trigger a
   reload check on one cancellable loader worker (latest request wins); a reload equal to the
   recorded disk version (our own save) is ignored; events during a load or save are queued.
+- **Progressive open** (ADR 0017): an open of a large file installs its first part at once
+  and the whole document in place later; until then the document is partial (saves wait for
+  the rest, autosave and backups pause, whole-document commands are unavailable).
 
 Deterministic tests inject delays and failures through worker hooks (`JobHooks`,
 `SaveHooks`, the loader `StageHook`) instead of sleeping.

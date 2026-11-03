@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use epaint::Rect;
-use markise_doc::{DocPos, DocumentFormat, FormatDoc, FormatOptions, Params, Selection};
+use markise_doc::{DocPos, DocumentFormat, EditSummary, FormatDoc, FormatOptions, Params, Selection};
 use markise_layout::caret::Geometry;
 use markise_layout::{DocModel, Images, TextShaper, View};
 
@@ -67,6 +67,17 @@ impl CaretGeometry for ViewCaret<'_> {
     }
 }
 
+/// What [`EditorView::continue_with`] did (timing log, tests).
+#[derive(Clone, Copy, Debug)]
+pub struct Continued {
+    /// Edits made in the first part were carried over.
+    pub edited: bool,
+    /// Time spent carrying the edits over …
+    pub merge: std::time::Duration,
+    /// … and in all.
+    pub total: std::time::Duration,
+}
+
 /// A session and the view showing it.
 pub struct EditorView {
     pub session: EditorSession,
@@ -80,7 +91,19 @@ pub struct EditorView {
     /// The source editor (Source and Side by Side modes; M2d), kept in step by
     /// [`EditorView::sync`].
     pub source: Option<super::SourcePane>,
+    /// The document's edits since [`EditorView::clear_recent_edits`] (`None`: replaced, or more
+    /// than [`RECENT_MAX`] — the rendered surface was not drawn meanwhile, e.g. Source mode):
+    /// the UI maps positions it kept from its last frame through them
+    /// ([`EditorView::map_recent`]).
+    recent: Option<Vec<EditSummary>>,
+    /// Document changes so far (a pressed checkbox is cancelled when the document changed
+    /// while it was held).
+    changes: u64,
 }
+
+/// Recent edits kept for [`EditorView::map_recent`]; beyond them positions kept from the last
+/// frame are dropped.
+const RECENT_MAX: usize = 64;
 
 impl EditorView {
     /// Wraps `session`, showing it in `view` (built for the session's document).
@@ -96,6 +119,8 @@ impl EditorView {
             placeholder,
             reveal: true,
             source: None,
+            recent: Some(Vec::new()),
+            changes: 0,
         };
         e.sync();
         e
@@ -123,6 +148,7 @@ impl EditorView {
 
     /// Brings the view up to the session's document (after any session change).
     pub fn sync(&mut self) {
+        let steps = self.session.take_steps();
         match self.session.take_change() {
             DocChange::None => {
                 // the view may still hold the placeholder after a no-op edit
@@ -131,7 +157,21 @@ impl EditorView {
                 }
             }
             DocChange::Edited(e) => {
-                let ch = self.view.model_mut().apply(self.session.doc(), &e);
+                self.changes += 1;
+                if let Some(r) = &mut self.recent {
+                    r.push(e.clone());
+                }
+                if self.recent.as_ref().is_some_and(|r| r.len() > RECENT_MAX) {
+                    self.recent = None;
+                }
+                let mut ch = self.view.model_mut().apply(self.session.doc(), &e);
+                // the edits one by one, not their covering range (a position between two of
+                // them only moved)
+                if ch.moved.is_some()
+                    && let Some(steps) = steps
+                {
+                    ch.moved = Some(markise_layout::Moved::from_steps(steps));
+                }
                 self.view.apply_change(self.session.doc_arc().clone(), &ch);
                 if let Some(p) = self.source.as_mut() {
                     p.view.apply(self.session.doc().text(), &e);
@@ -141,13 +181,125 @@ impl EditorView {
                 self.source_load_selection();
             }
             DocChange::Replaced => {
-                let model = DocModel::build(self.session.doc(), self.path.as_deref());
+                self.changes += 1;
+                self.recent = None;
+                // the same kind of model as before (paged or full)
+                let paging = self.view.model().paging();
+                let model = Arc::new(DocModel::build_with(self.session.doc(), self.path.as_deref(), paging));
                 self.view.set_model(self.session.doc_arc().clone(), model);
                 if let Some(p) = self.source.as_mut() {
                     p.view.rebuild(self.session.doc().text());
                 }
                 self.source_load_selection();
             }
+        }
+        self.pin_caret();
+    }
+
+    /// Progressive open (issue #126): the session holds the first `cut` bytes of a file's
+    /// text (and the edits made since); `doc` / `model` are the whole file as read. The edits
+    /// are applied to `doc` — one verbatim patch set, the diff of the session's text against
+    /// the original part, with the session's literal hints; `model` follows incrementally —
+    /// and the result replaces the session's document without an undo step
+    /// ([`EditorSession::adopt_continuation`]) and the view's model without moving the content
+    /// on screen ([`View::set_model_keep`]).
+    pub fn continue_with(
+        &mut self,
+        mut doc: Arc<dyn FormatDoc>,
+        mut model: Arc<DocModel>,
+        cut: usize,
+    ) -> Result<Continued, String> {
+        let t = std::time::Instant::now();
+        let text = doc.text();
+        if cut > text.len() || !text.is_char_boundary(cut) {
+            return Err(format!("the first part ({cut} bytes) is not a prefix of the file"));
+        }
+        let cur = self.session.doc_arc().clone();
+        let edited = cur.text() != &text[..cut];
+        let hints = cur.hints().clone();
+        if edited || !hints.is_empty() {
+            let patches: Vec<markise_doc::Patch> = crate::edit::patches(&text[..cut], cur.text())
+                .into_iter()
+                .map(|p| markise_doc::Patch::verbatim(p.start..p.end, p.insert))
+                .collect();
+            let ps = markise_doc::PatchSet::new(patches).map_err(|e| e.to_string())?;
+            if Arc::get_mut(&mut doc).is_none() {
+                doc = Arc::from(doc.clone_box());
+            }
+            let d = Arc::get_mut(&mut doc).expect("unique document");
+            let e = if edited {
+                d.apply_with_hints(&ps, (!hints.is_empty()).then_some(&hints))
+            } else {
+                d.set_hints(&hints)
+            };
+            Arc::make_mut(&mut model).apply(&*doc, &e);
+        }
+        let shown = cur.text().len();
+        drop(cur);
+        let merge = t.elapsed();
+        let sel = self.session.selection();
+        let keep: Vec<usize> = sel
+            .ranges()
+            .iter()
+            .flat_map(|r| [r.anchor.offset, r.focus.offset])
+            .collect();
+        self.release();
+        self.session.adopt_continuation(doc.clone());
+        self.view.set_model_keep(doc, model, shown, &keep);
+        if let Some(p) = self.source.as_mut() {
+            p.view.rebuild(self.session.doc().text());
+        }
+        // (positions in the text shown so far stay valid: `recent` and `changes` are kept, so
+        // hit tests from the last frame and a pressed checkbox survive)
+        self.source_load_selection();
+        self.pin_caret();
+        Ok(Continued {
+            edited,
+            merge,
+            total: t.elapsed(),
+        })
+    }
+
+    /// Document changes so far (edits, replacements).
+    pub fn changes(&self) -> u64 {
+        self.changes
+    }
+
+    /// Forgets the recent edits (the UI took a fresh look at the document: its last frame).
+    pub fn clear_recent_edits(&mut self) {
+        self.recent = Some(Vec::new());
+    }
+
+    /// Source position `at` of the document as it was at [`EditorView::clear_recent_edits`],
+    /// in the current document: moved by the edits since, `None` when an edit changed the text
+    /// there (or the document was replaced). For positions the UI keeps from its last frame
+    /// (hit geometry, a pressed checkbox) when keys edit the text before the pointer is handled.
+    pub fn map_recent(&self, at: usize) -> Option<usize> {
+        let mut at = at;
+        for e in self.recent.as_ref()? {
+            if at >= e.changed.end {
+                at = (at as isize + e.delta) as usize;
+            } else if at >= e.changed.start && !e.changed.is_empty() {
+                return None;
+            }
+        }
+        Some(at)
+    }
+
+    /// Paged models (issue #125): the pages of the caret and of both ends of every selection
+    /// range, and the items around them, stay materialized (not while the view holds a
+    /// placeholder document during an edit): caret geometry and selection fixing never see a
+    /// placeholder at a selection end.
+    fn pin_caret(&mut self) {
+        if self.view.model().is_paged() && Arc::ptr_eq(self.view.doc(), self.session.doc_arc()) {
+            let sel = self.session.selection();
+            let mut pins: Vec<usize> = vec![sel.primary().focus.offset, sel.primary().anchor.offset];
+            for r in sel.ranges() {
+                pins.extend([r.anchor.offset, r.focus.offset]);
+            }
+            pins.sort_unstable();
+            pins.dedup();
+            self.view.set_pinned_offsets(&pins);
         }
     }
 
@@ -204,6 +356,7 @@ impl EditorView {
             // the pointer does not shift mid-selection (ADR 0006 §2.4, M2b-6)
             return false;
         }
+        self.pin_caret();
         let focus = self.session.selection().primary().focus;
         let f = markise_layout::caret::focus_for(&self.view, focus, self.reveal);
         self.view.set_focus(f)
@@ -241,6 +394,9 @@ impl EditorView {
     /// a view-mode change): each end goes to the nearest stop after the object. No history
     /// entry. Returns `true` when the selection changed.
     pub fn fix_selection(&mut self, shaper: &mut dyn TextShaper, images: &dyn Images) -> bool {
+        // paged models: both ends are materialized before they are checked (an end in a
+        // placeholder would be "normalized" to another caret stop, changing the selection)
+        self.pin_caret();
         let sel = self.session.selection().primary();
         let mut g = self.geometry(shaper, images);
         // whitespace after the text of a paragraph, heading or cell is laid out only while the
@@ -249,8 +405,21 @@ impl EditorView {
         let in_trailing_ws = |g: &Geometry<'_>, p: DocPos| {
             markise_layout::caret::focus_for(g.view, p, true).is_some_and(|(_, f)| f.trailing_ws.is_some())
         };
+        // an end in a page placeholder (not materialized) is left alone: there is no layout
+        // to check it against
+        let in_page = |g: &Geometry<'_>, p: DocPos| {
+            let m = g.view.model();
+            m.is_paged() && m.is_page(m.item_at_offset(p.offset))
+        };
         let ok = |g: &mut Geometry<'_>, p: DocPos| {
-            in_trailing_ws(g, p) || (g.caret_rect(p).is_some() && g.normalize(p).offset == p.offset)
+            in_page(g, p)
+                || in_trailing_ws(g, p)
+                || if p.virt > 0 {
+                    // a virtual paragraph (its line is laid out once the focus is on it)
+                    g.normalize(p) == p
+                } else {
+                    g.caret_rect(p).is_some() && g.normalize(p).offset == p.offset
+                }
         };
         if ok(&mut g, sel.focus) && (sel.is_caret() || ok(&mut g, sel.anchor)) {
             return false;
@@ -278,6 +447,7 @@ impl EditorView {
 
     /// Scrolls the view so that the caret is visible in a viewport `vh` tall (with a margin).
     pub fn scroll_to_caret(&mut self, vh: f32, shaper: &mut dyn TextShaper, images: &dyn Images) {
+        self.pin_caret();
         let Some(r) = self.caret_rect(shaper, images) else {
             return;
         };

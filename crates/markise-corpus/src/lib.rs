@@ -452,24 +452,47 @@ pub const WORK_PER_SEC: u64 = if cfg!(windows) { 3_000_000_000 } else { 1_000_00
 /// Asserts that `run` scales (near) linearly on inputs built by `generate`.
 ///
 /// Measured in CPU work of this thread ([`thread_work`]), not wall-clock time, so a busy
-/// machine does not inflate one measurement (issue #42). The small input size starts at 4 000
-/// repetitions and doubles until the best-of-5 work is at least [`MIN_SMALL`] (so a fast
-/// quadratic step cannot hide below the timer floor; capped at 64 000 repetitions), then the
-/// large input is 16× that size. Linear ≈ 16×, n^1.5 ≈ 64×, quadratic ≈ 256×: the ratio must
-/// stay below 40×. Caches and frequency changes can still disturb one measurement, so up to
-/// three attempts are made; a super-linear algorithm fails every attempt. A large run that
-/// needs more CPU time than the cap fails at once.
+/// machine does not inflate one measurement (issue #42).
+///
+/// Both measured inputs are beyond the CPU caches (issue #109): the small input size starts at
+/// 1 000 repetitions and doubles until the text is at least [`SMALL_BYTES`] long or one run
+/// takes at least [`SMALL_WORK`]; the large input is [`SIZE_FACTOR`] (16×) that size and the
+/// work ratio must stay below [`MAX_RATIO`] (see [`scaling_ratio_ok`]). Comparing a small input
+/// that fits in the caches with a large one that does not added a one-off per-byte slowdown on
+/// GitHub's Linux runners, which no ratio threshold can tell apart from super-linear growth;
+/// so did page faults paid by the large input only (see `release_freed_memory`). The work
+/// bound keeps per-byte expensive (compute-bound) cases fast; their cache effects are small
+/// relative to their work. A small input faster than
+/// [`MIN_SMALL`] is timed as a batch of back-to-back runs divided by the batch size, never
+/// floored (PR #111 review).
+///
+/// Frequency changes and neighbours can still disturb one measurement, so up to three attempts
+/// are made; a super-linear algorithm fails every attempt. A large run that needs more CPU time
+/// than the cap fails at once. Each attempt's ratio is written to stderr (uncaptured), so CI
+/// logs show the margin.
 pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, run: &dyn Fn(&str)) {
+    scales_linearly_with(name, generate, run, &thread_work);
+}
+
+/// [`assert_scales_linearly`] with the work meter injected: `meter` returns the work done so
+/// far in [`thread_work`] units. Unit tests pass a fake clock that `run` advances by a
+/// deterministic amount, so the pass/fail decision is tested without timing noise (issue
+/// #142).
+fn scales_linearly_with(name: &str, generate: impl Fn(usize) -> String, run: &dyn Fn(&str), meter: &dyn Fn() -> u64) {
+    use std::io::Write as _;
     use std::time::Duration;
     let secs = |w: u64| Duration::from_secs_f64(w as f64 / WORK_PER_SEC as f64);
+    let work = |d: Duration| (d.as_secs_f64() * WORK_PER_SEC as f64) as u64;
     // Debug builds on shared CI runners are slow; release gets the tighter cap.
     let cap = Duration::from_secs(if cfg!(debug_assertions) { 15 } else { 5 });
     let once = |s: &str| {
-        let t = thread_work();
+        release_freed_memory();
+        let t = meter();
         run(s);
-        thread_work().saturating_sub(t)
+        meter().saturating_sub(t)
     };
-    let best = |s: &str| {
+    // Best of `samples` runs; the first run is checked against the cap.
+    let best = |s: &str, samples: usize| {
         let first = once(s);
         assert!(
             secs(first) < cap,
@@ -477,36 +500,154 @@ pub fn assert_scales_linearly(name: &str, generate: impl Fn(usize) -> String, ru
             s.len(),
             secs(first)
         );
-        (1..5).map(|_| once(s)).fold(first, u64::min)
+        (1..samples).map(|_| once(s)).fold(first, u64::min)
     };
-    let floor = WORK_PER_SEC / 1000; // 1 ms: the ratio's denominator never rounds to zero
-    let min_small = (MIN_SMALL.as_secs_f64() * WORK_PER_SEC as f64) as u64;
-    let mut last = String::new();
-    for _ in 0..3 {
-        let mut n = 4_000;
-        let ws = loop {
-            let w = best(&generate(n));
-            if w >= min_small || n >= 64_000 {
-                break w;
+    let min_small = work(MIN_SMALL);
+    // Best-of-3 work per run, timing batches of `runs` back-to-back runs that together last at
+    // least `min_small`.
+    let best_per_run = |s: &str| -> f64 {
+        let mut runs = 1u64;
+        loop {
+            let batch = || {
+                release_freed_memory();
+                let t = meter();
+                for _ in 0..runs {
+                    run(s);
+                }
+                meter().saturating_sub(t)
+            };
+            let first = batch();
+            if first >= min_small || runs >= MAX_BATCH {
+                assert!(
+                    first >= min_small,
+                    "{name}: {runs} runs of {} bytes took less than {MIN_SMALL:?}; cannot \
+                     measure the small input reliably",
+                    s.len()
+                );
+                let w = (1..3).map(|_| batch()).fold(first, u64::min);
+                return w as f64 / runs as f64;
+            }
+            // aim for about twice the minimum so the next batch does not fall just short
+            let per_run = (first / runs).max(1);
+            runs = (runs * 2).max(2 * min_small / per_run + 1).min(MAX_BATCH);
+        }
+    };
+    let mut failures = Vec::new();
+    for attempt in 1..=3 {
+        let mut n = 1_000;
+        let (small, w) = loop {
+            let small = generate(n);
+            let w = once(&small);
+            if small.len() >= SMALL_BYTES || w >= work(SMALL_WORK) {
+                break (small, w);
             }
             n *= 2;
         };
-        let wl = best(&generate(16 * n));
-        let ratio = wl as f64 / ws.max(floor) as f64;
-        if ratio < 40.0 {
-            return;
-        }
-        last = format!(
-            "{name}: 16× input (n={n}) took {ratio:.1}× more CPU time ({:?} → {:?})",
-            secs(ws),
+        let faults = minor_faults();
+        let ws = if w >= min_small {
+            best(&small, 3) as f64
+        } else {
+            best_per_run(&small)
+        };
+        let small_faults = minor_faults() - faults;
+        let large = generate(SIZE_FACTOR * n);
+        let faults = minor_faults();
+        let wl = best(&large, 2);
+        let large_faults = minor_faults() - faults;
+        let ratio = scaling_ratio(ws, wl);
+        let line = format!(
+            "{name}: n={n} ({} → {} bytes): {ratio:.1}× ({:?} → {:?}; page faults {small_faults} → \
+             {large_faults})",
+            small.len(),
+            large.len(),
+            Duration::from_secs_f64(ws / WORK_PER_SEC as f64),
             secs(wl)
         );
+        let _ = writeln!(std::io::stderr(), "scaling attempt {attempt}: {line}");
+        if scaling_ratio_ok(ws, wl) {
+            return;
+        }
+        failures.push(line);
     }
-    panic!("{last}");
+    panic!(
+        "{SIZE_FACTOR}× input took ≥ {MAX_RATIO}× more CPU time in every attempt \
+         (super-linear?): {}",
+        failures.join("; ")
+    );
 }
 
-/// Minimum best-of-5 CPU time of the small input in [`assert_scales_linearly`].
-pub const MIN_SMALL: std::time::Duration = std::time::Duration::from_millis(5);
+/// Returns freed heap memory to the OS (glibc only; never inside a timed region), so each
+/// measured run of [`assert_scales_linearly`] page-faults the large blocks it allocates,
+/// whatever the input size.
+///
+/// Without it only the large input paid page faults (issue #109): glibc's dynamic mmap
+/// threshold rises to at most 32 MiB, so the small input's blocks came from recycled heap pages
+/// while the large input's bigger blocks were fresh `mmap`s that `free` unmaps again. On CI
+/// runners that was 0 faults per small run against ~130 000 per large run, kernel time counted
+/// in [`thread_work`] (+60–150 % per byte). `cargo xtask heavy` therefore also fixes the
+/// threshold at 128 KiB from process start (`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072`,
+/// which disables the dynamic one), so blocks of 128 KiB and more are fresh mappings at both
+/// sizes and the fault cost is linear on both sides of the ratio.
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only returns free memory to the OS and is thread-safe (MT-Safe).
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+/// Minor page faults of the calling thread so far (Linux; 0 elsewhere), for the diagnostics of
+/// [`assert_scales_linearly`].
+fn minor_faults() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `usage` is a valid, writable rusage; RUSAGE_THREAD is a constant.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) } == 0 {
+            return usage.ru_minflt as u64;
+        }
+    }
+    0
+}
+
+/// Minimum text length of the small input in [`assert_scales_linearly`], so that its working
+/// set is already beyond the CPU caches (unless [`SMALL_WORK`] stops the growth first).
+pub const SMALL_BYTES: usize = 1 << 20;
+
+/// One run of the small input taking this long also ends its growth in
+/// [`assert_scales_linearly`]: such a case is compute-bound, and a larger input would be slow.
+pub const SMALL_WORK: std::time::Duration = std::time::Duration::from_millis(15);
+
+/// Below this CPU time per run, the small input in [`assert_scales_linearly`] is timed as a
+/// batch of runs.
+pub const MIN_SMALL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Most back-to-back runs in one batch of the small input; not reaching [`MIN_SMALL`] even
+/// then fails instead of guessing a denominator.
+const MAX_BATCH: u64 = 1 << 20;
+
+/// Large input size / small input size in [`assert_scales_linearly`].
+pub const SIZE_FACTOR: usize = 16;
+
+/// Largest accepted work ratio for a [`SIZE_FACTOR`]× input: linear is 16×, this allows a 2.5×
+/// per-byte slowdown (≈ n^1.33); n^1.5 (64×) and quadratic (256×) fail.
+pub const MAX_RATIO: f64 = 40.0;
+
+/// Work ratio of the large run to the small run (both in [`thread_work`] units per run). There
+/// is deliberately no floor on the small work: a floor would cap the ratio and let a fast
+/// super-linear workload pass. A small work of zero gives an infinite ratio, i.e. a failure.
+pub fn scaling_ratio(small: f64, large: u64) -> f64 {
+    if small > 0.0 {
+        large as f64 / small
+    } else {
+        f64::INFINITY
+    }
+}
+
+/// Whether a small/large work pair (in [`thread_work`] units per run) counts as linear scaling.
+pub fn scaling_ratio_ok(small: f64, large: u64) -> bool {
+    scaling_ratio(small, large) < MAX_RATIO
+}
 
 #[cfg(test)]
 mod tests {
@@ -525,6 +666,156 @@ mod tests {
         if cfg!(any(unix, windows)) {
             assert!(slept < super::WORK_PER_SEC / 50, "sleeping counted {slept}");
         }
+    }
+
+    #[test]
+    fn scaling_verdict_separates_linear_from_superlinear_growth() {
+        use super::{SIZE_FACTOR, WORK_PER_SEC, scaling_ratio_ok};
+        let ms = (WORK_PER_SEC / 1000) as f64;
+        let small = 2.0 * ms;
+        let k = SIZE_FACTOR as f64;
+        let large = |exponent: f64, per_byte_slowdown: f64| (small * k.powf(exponent) * per_byte_slowdown) as u64;
+        // linear, also with a 2× per-byte slowdown (allocation, memory bandwidth)
+        assert!(scaling_ratio_ok(small, large(1.0, 1.0)));
+        assert!(scaling_ratio_ok(small, large(1.0, 2.0)));
+        // n log n at the sizes used (1 MiB → 16 MiB)
+        let log_growth = ((16u64 << 20) as f64).ln() / ((1u64 << 20) as f64).ln();
+        assert!(scaling_ratio_ok(small, large(1.0, log_growth)));
+        // super-linear growth fails clearly
+        assert!(!scaling_ratio_ok(small, large(1.5, 1.0)));
+        assert!(!scaling_ratio_ok(small, large(2.0, 1.0)));
+        // fast workloads below any timer floor: no floor may mask super-linear growth
+        // (PR #111 review: n^1.5 0.1 ms → 51.2 ms and n² 0.01 ms → 40.96 ms)
+        assert!(!scaling_ratio_ok(0.1 * ms, (51.2 * ms) as u64));
+        assert!(!scaling_ratio_ok(0.01 * ms, (40.96 * ms) as u64));
+        assert!(scaling_ratio_ok(0.01 * ms, (0.16 * ms) as u64));
+        assert!(!scaling_ratio_ok(0.0, 1));
+    }
+
+    /// Runs [`super::scales_linearly_with`] on a fake clock: one run of `len` bytes advances it
+    /// by exactly `cost(len)` work units. No real time is measured, so the verdict is
+    /// deterministic (issue #142).
+    fn fake_clock_check(name: &str, cost: impl Fn(u64) -> u64) {
+        let clock = std::cell::Cell::new(0u64);
+        super::scales_linearly_with(
+            name,
+            |n| "a".repeat(n),
+            &|s| clock.set(clock.get() + cost(s.len() as u64)),
+            &|| clock.get(),
+        );
+    }
+
+    /// Work units of a step costing `small_us` µs at [`super::SMALL_BYTES`] and growing as
+    /// `len^exponent`.
+    fn growth(small_us: f64, exponent: f64, len: u64) -> u64 {
+        let us = super::WORK_PER_SEC as f64 / 1e6;
+        (small_us * us * (len as f64 / super::SMALL_BYTES as f64).powf(exponent)) as u64
+    }
+
+    #[test]
+    fn fake_clock_linear_workload_passes() {
+        // timed as a batch (10 µs per run) and as single runs (5 ms per run)
+        fake_clock_check("fake-linear-fast", |len| growth(10.0, 1.0, len));
+        fake_clock_check("fake-linear-slow", |len| growth(5_000.0, 1.0, len));
+        // a 2× per-byte slowdown at the large size (allocation, memory bandwidth) still passes
+        let small = super::SMALL_BYTES as u64;
+        fake_clock_check("fake-linear-slowdown", |len| {
+            growth(10.0, 1.0, len) * if len > 2 * small { 2 } else { 1 }
+        });
+    }
+
+    #[test]
+    fn fake_clock_n_log_n_workload_passes() {
+        fake_clock_check("fake-n-log-n", |len| {
+            let log = (len as f64).ln() / (super::SMALL_BYTES as f64).ln();
+            (growth(10.0, 1.0, len) as f64 * log) as u64
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "super-linear")]
+    fn fake_clock_quadratic_workload_below_the_timer_floor_fails() {
+        // PR #111 review: a quadratic step of 0.01 ms at the small size must not pass
+        fake_clock_check("fake-quadratic", |len| growth(10.0, 2.0, len));
+    }
+
+    #[test]
+    #[should_panic(expected = "super-linear")]
+    fn fake_clock_n_1_5_workload_below_the_timer_floor_fails() {
+        // PR #113 review: 10 µs at the small size (timed as a batch) growing as n^1.5 must fail;
+        // its ratio is exactly 64, so no timing noise can let it pass (issue #142)
+        fake_clock_check("fake-n^1.5", |len| growth(10.0, 1.5, len));
+    }
+
+    #[test]
+    #[should_panic(expected = "super-linear")]
+    fn fake_clock_n_1_5_workload_above_the_timer_floor_fails() {
+        // 2 ms at the small size: timed as single runs
+        fake_clock_check("fake-n^1.5-slow", |len| growth(2_000.0, 1.5, len));
+    }
+
+    #[test]
+    fn fake_clock_one_disturbed_attempt_is_retried() {
+        // the two large runs of the first attempt are 100× slower (e.g. a frequency drop), so
+        // that attempt fails; the second attempt sees linear growth and passes
+        let large_runs = std::cell::Cell::new(0u32);
+        let small = super::SMALL_BYTES as u64;
+        fake_clock_check("fake-disturbed", |len| {
+            let mut work = growth(10.0, 1.0, len);
+            if len > 2 * small {
+                large_runs.set(large_runs.get() + 1);
+                if large_runs.get() <= 2 {
+                    work *= 100;
+                }
+            }
+            work
+        });
+        assert_eq!(large_runs.get(), 4, "exactly one retry");
+    }
+
+    #[test]
+    #[should_panic(expected = "of CPU time (cap")]
+    fn fake_clock_run_over_the_cap_fails_at_once() {
+        // the large run alone takes 20 s, over the cap of 15 s (debug) or 5 s (release)
+        let small = super::SMALL_BYTES as u64;
+        fake_clock_check("fake-over-cap", |len| {
+            growth(10.0, 1.0, len) + if len > 2 * small { 20 * super::WORK_PER_SEC } else { 0 }
+        });
+    }
+
+    /// Spins until this thread has done `work` units of [`super::thread_work`].
+    fn spin(work: u64) {
+        let t = super::thread_work();
+        while super::thread_work() - t < work {
+            std::hint::black_box(0);
+        }
+    }
+
+    /// Real-timing smoke tests of [`super::assert_scales_linearly`] with [`super::thread_work`]
+    /// as the meter. Their margins are wide (ratio 16 against [`super::MAX_RATIO`] 40 and 256
+    /// against 40), so clock resolution and spin overshoot on CI runners cannot flip them; the
+    /// verdict's finer distinctions (n^1.5, n log n, retries) are covered on the fake clock.
+    #[test]
+    fn real_timing_fast_linear_workload_passes() {
+        // 10 µs at SMALL_BYTES: measured as a batch, ratio ≈ 16
+        let us = super::WORK_PER_SEC / 1_000_000;
+        let small = super::SMALL_BYTES as u64;
+        super::assert_scales_linearly("fast-linear", |n| "a".repeat(n), &|s| {
+            spin(10 * us * s.len() as u64 / small)
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "super-linear")]
+    fn real_timing_quadratic_workload_fails() {
+        // 100 µs at SMALL_BYTES growing as n²: ratio ≈ 256, more than 6× above MAX_RATIO even
+        // if the small batch overshoots
+        let us = super::WORK_PER_SEC / 1_000_000;
+        let small = super::SMALL_BYTES as u64;
+        super::assert_scales_linearly("real-quadratic", |n| "a".repeat(n), &|s| {
+            let k = s.len() as u64;
+            spin(100 * us * k / small * k / small)
+        });
     }
 
     #[test]

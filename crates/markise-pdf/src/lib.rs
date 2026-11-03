@@ -174,7 +174,19 @@ pub fn system_engine(timeout: Duration) -> TextEngine {
     let mut store = FontStore::new();
     store.start_system_discovery();
     store.wait_for_system(timeout);
+    register_bundled(&mut store);
     TextEngine::new(store)
+}
+
+/// Registers the fonts Markise bundles for export: the keyboard-symbol face
+/// ([`markise_text::keys`], issue #131), which [`layout`] appends to every font stack.
+pub fn register_bundled(store: &mut FontStore) {
+    store.register_system_family(
+        markise_text::keys::FAMILY,
+        markise_text::keys::FONT.to_vec(),
+        100.0,
+        400.0,
+    );
 }
 
 /// Export result.

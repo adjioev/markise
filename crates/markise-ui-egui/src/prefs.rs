@@ -92,8 +92,14 @@ impl Section {
 /// One setting (or one control group) in the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RowId {
+    Autosave,
+    BackupDrafts,
+    SaveOnClose,
+    RecentRecording,
+    AutosaveMinutes,
     KeyBindings,
     WordCount,
+    UpdateCheck,
     AutoPairBrackets,
     AutoPairMarkdown,
     SmartPunctuation,
@@ -110,6 +116,9 @@ pub enum RowId {
     Appearance,
     ThemeFiles,
     BodyFont,
+    CyrillicFont,
+    GreekFont,
+    CjkFont,
     FontSize,
     LineHeight,
     ContentWidth,
@@ -121,6 +130,7 @@ pub enum RowId {
     SoftWrap,
     CurrentLine,
     Whitespace,
+    SourceFontSize,
     ImageLocation,
     ImageFolder,
     ImageObsidian,
@@ -160,6 +170,41 @@ use Section as S;
 /// Every row, in display order.
 pub const ROWS: &[Row] = &[
     row(
+        R::Autosave,
+        S::Files,
+        "Saving",
+        "Automatically save files",
+        "autosave save timer",
+    ),
+    row(
+        R::AutosaveMinutes,
+        S::Files,
+        "Saving",
+        "Autosave interval (minutes)",
+        "autosave timer minutes",
+    ),
+    row(
+        R::BackupDrafts,
+        S::Files,
+        "Saving",
+        "Back up unsaved drafts",
+        "recovery crash backup",
+    ),
+    row(
+        R::SaveOnClose,
+        S::Files,
+        "Saving",
+        "Save when closing",
+        "save close quit",
+    ),
+    row(
+        R::RecentRecording,
+        S::Files,
+        "Saving",
+        "Remember recent files and folders",
+        "recent history privacy",
+    ),
+    row(
         R::KeyBindings,
         S::General,
         "Keyboard",
@@ -172,6 +217,13 @@ pub const ROWS: &[Row] = &[
         "Status bar",
         "Show word count",
         "words characters statistics reading time status bar",
+    ),
+    row(
+        R::UpdateCheck,
+        S::General,
+        "Updates",
+        "Check for updates automatically",
+        "update new version release github network download",
     ),
     row(
         R::AutoPairBrackets,
@@ -274,6 +326,27 @@ pub const ROWS: &[Row] = &[
         "typography family",
     ),
     row(
+        R::CyrillicFont,
+        S::Appearance,
+        "Font & size",
+        "Cyrillic font",
+        "russian ukrainian script fallback typography",
+    ),
+    row(
+        R::GreekFont,
+        S::Appearance,
+        "Font & size",
+        "Greek font",
+        "greek script fallback typography",
+    ),
+    row(
+        R::CjkFont,
+        S::Appearance,
+        "Font & size",
+        "CJK font",
+        "chinese japanese korean script fallback typography",
+    ),
+    row(
         R::FontSize,
         S::Appearance,
         "Font & size",
@@ -331,6 +404,13 @@ pub const ROWS: &[Row] = &[
         "Display",
         "Show whitespace",
         "spaces tabs invisibles marks",
+    ),
+    row(
+        R::SourceFontSize,
+        S::Source,
+        "Display",
+        "Font size",
+        "text size monospace editor zoom bigger smaller",
     ),
     row(
         R::ImageLocation,
@@ -443,6 +523,8 @@ pub struct FontDefaults {
     pub font_size: f32,
     pub line_height: f32,
     pub content_width: f32,
+    /// The source editor's automatic font size (the theme's, issue #130).
+    pub source_size: f32,
 }
 
 /// The colours a theme preview card is drawn with.
@@ -503,6 +585,10 @@ pub struct Values {
     pub show_recent: bool,
     /// Status bar word count (issue #53).
     pub show_word_count: bool,
+    /// Automatic update checks (issue #70; `None`: not answered yet = off).
+    pub update_auto: Option<bool>,
+    /// Why update checks are unavailable in this session (shown under the switch).
+    pub update_unavailable: Option<String>,
     pub zoom: f32,
     pub zoom_range: (f32, f32),
     pub settings_file: Option<PathBuf>,
@@ -512,11 +598,13 @@ pub struct Values {
     pub key_bindings: Vec<(String, String)>,
     /// Pasted and dropped images (Files & Images).
     pub images: ImageSettings,
+    pub files: markise_engine::settings::FileSettings,
 }
 
 /// What the user changed in the window this frame.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
+    Files(markise_engine::settings::FileSettings),
     Editing(EditingSettings),
     Source(SourceSettings),
     Diagrams(bool),
@@ -534,6 +622,7 @@ pub enum Change {
     ToolbarPosition(ToolbarPosition),
     ShowRecent(bool),
     ShowWordCount(bool),
+    UpdateAuto(bool),
     Zoom(f32),
     Images(ImageSettings),
     RevealSettingsFile,
@@ -1313,22 +1402,31 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                 }
             });
         }
-        R::BodyFont => {
+        R::BodyFont | R::CyrillicFont | R::GreekFont | R::CjkFont => {
             let mut o = v.overrides.clone();
+            let selected = match r.id {
+                R::CyrillicFont => &mut o.cyrillic_font,
+                R::GreekFont => &mut o.greek_font,
+                R::CjkFont => &mut o.cjk_font,
+                _ => &mut o.body_font,
+            };
             control_row(ui, p, r.label, |ui| {
-                if o.body_font.is_some() {
+                if selected.is_some() {
                     if reset_icon(ui, p, r.label) {
-                        o.body_font = None;
+                        *selected = None;
                     }
                 } else {
                     ui.add_space(20.0);
                 }
-                let mut font = o.body_font.clone().unwrap_or_default();
-                let hint = v
-                    .font_defaults
-                    .body_font
-                    .clone()
-                    .unwrap_or_else(|| "Style default".into());
+                let mut font = selected.clone().unwrap_or_default();
+                let hint = if r.id == R::BodyFont {
+                    v.font_defaults
+                        .body_font
+                        .clone()
+                        .unwrap_or_else(|| "Style default".into())
+                } else {
+                    "Automatic fallback".into()
+                };
                 let t = ui.add(
                     egui::TextEdit::singleline(&mut font)
                         .hint_text(hint)
@@ -1336,7 +1434,7 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                 );
                 name(&t, Role::TextInput, r.label);
                 if t.changed() {
-                    o.body_font = (!font.trim().is_empty()).then_some(font);
+                    *selected = (!font.trim().is_empty()).then(|| font.trim().to_owned());
                 }
             });
             if o != v.overrides {
@@ -1398,6 +1496,17 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                 out.push(Change::ShowWordCount(on));
             }
         }
+        R::UpdateCheck => {
+            if let Some(on) = switch(ui, v.update_auto == Some(true)) {
+                out.push(Change::UpdateAuto(on));
+            }
+            let note = v.update_unavailable.as_deref().unwrap_or(
+                "Once a day at launch, Markise asks GitHub for the latest release; only the app's \
+                 version is sent. Check for Updates… works either way.",
+            );
+            ui.add(egui::Label::new(RichText::new(note).size(12.0).color(p.look.weak)).wrap());
+            ui.add_space(10.0);
+        }
         R::Zoom => {
             let step = |z: f32, d: i32| ((z * 10.0).round() as i32 + d) as f32 / 10.0;
             let (lo, hi) = v.zoom_range;
@@ -1438,6 +1547,42 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                     whitespace_marks: on,
                     ..s
                 }));
+            }
+        }
+        R::SourceFontSize => {
+            let mut size = s.font_size;
+            slider_row(
+                ui,
+                p,
+                r.label,
+                &mut size,
+                v.font_defaults.source_size,
+                (SourceSettings::FONT_SIZE, 0.5, 1),
+            );
+            if size != s.font_size {
+                out.push(Change::Source(SourceSettings { font_size: size, ..s }));
+            }
+        }
+        R::Autosave | R::BackupDrafts | R::SaveOnClose | R::RecentRecording => {
+            let mut f = v.files;
+            let value = match r.id {
+                R::Autosave => &mut f.autosave,
+                R::BackupDrafts => &mut f.backups,
+                R::SaveOnClose => &mut f.save_on_close,
+                _ => &mut f.record_recent,
+            };
+            if let Some(on) = switch(ui, *value) {
+                *value = on;
+                out.push(Change::Files(f));
+            }
+        }
+        R::AutosaveMinutes => {
+            let mut f = v.files;
+            if control_row(ui, p, r.label, |ui| {
+                ui.add(egui::DragValue::new(&mut f.autosave_minutes).range(1..=1440))
+                    .changed()
+            }) {
+                out.push(Change::Files(f));
             }
         }
         R::ImageLocation => {
@@ -1669,7 +1814,7 @@ pub fn font_controls(ui: &mut Ui, o: &mut Overrides, d: &FontDefaults) {
             name(&r, Role::TextInput, "Body font");
             let r = r.labelled_by(l.id);
             if r.changed() {
-                o.body_font = (!font.trim().is_empty()).then_some(font);
+                o.body_font = (!font.trim().is_empty()).then(|| font.trim().to_owned());
             }
             ui.end_row();
             let row = |ui: &mut Ui, label: &str, v: &mut Option<f32>, current: f32, (lo, hi): (f32, f32), step: f64| {
@@ -1743,7 +1888,7 @@ pub fn section_at_defaults(s: Section, v: &Values) -> bool {
                 && v.show_recent
                 && (v.zoom - 1.0).abs() < 1e-3
         }
-        Section::Files => v.images == ImageSettings::default(),
+        Section::Files => v.images == ImageSettings::default() && v.files == Default::default(),
         Section::General | Section::Export => true,
     }
 }

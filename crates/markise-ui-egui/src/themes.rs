@@ -82,7 +82,7 @@ enum InstallFail {
 
 enum Done {
     /// Settings file contents and the canonical user theme folder.
-    Settings(Settings, Option<PathBuf>),
+    Settings(Box<Settings>, Option<PathBuf>),
     /// A watcher registered on the user theme folder (created on the worker).
     Watcher(Option<FileWatcher>),
     Families(Result<Vec<ThemeFamily>, String>),
@@ -160,7 +160,7 @@ fn spawn_worker(builtin_root: PathBuf, user_dir: Option<PathBuf>, settings: Opti
                             user_dir = Some(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()));
                         }
                         let published = crate::wake_track::publishing();
-                        if dtx.send(Done::Settings(loaded, user_dir.clone())).is_err() {
+                        if dtx.send(Done::Settings(Box::new(loaded), user_dir.clone())).is_err() {
                             drop(published);
                             break;
                         }
@@ -270,6 +270,9 @@ struct Composed {
 pub fn overrides_from_settings(o: &FontOverrides) -> Overrides {
     Overrides {
         body_font: o.font_family.clone(),
+        cyrillic_font: o.cyrillic_font.clone(),
+        greek_font: o.greek_font.clone(),
+        cjk_font: o.cjk_font.clone(),
         font_size: o.font_size,
         line_height: o.line_height,
         content_width: o.content_width,
@@ -279,6 +282,9 @@ pub fn overrides_from_settings(o: &FontOverrides) -> Overrides {
 pub fn overrides_to_settings(o: &Overrides) -> FontOverrides {
     FontOverrides {
         font_family: o.body_font.clone(),
+        cyrillic_font: o.cyrillic_font.clone(),
+        greek_font: o.greek_font.clone(),
+        cjk_font: o.cjk_font.clone(),
         font_size: o.font_size,
         line_height: o.line_height,
         content_width: o.content_width,
@@ -336,11 +342,16 @@ pub struct ThemeManager {
     chose_toolbar: bool,
     chose_recent: bool,
     chose_word_count: bool,
+    /// Update check state changed before the settings file arrived (those members win).
+    chose_update_auto: bool,
+    chose_update_last_check: bool,
+    chose_update_dismissed: bool,
     chose_count_mode: bool,
     chose_toolbar_position: bool,
     chose_editing: bool,
     chose_source: bool,
     chose_images: bool,
+    chose_files: bool,
     /// Wikilinks switched (Preferences) before the settings file was read.
     chose_markdown: bool,
     /// Settings changed and not yet handed to the worker (coalesced, debounced).
@@ -381,6 +392,8 @@ pub struct ThemeManager {
     /// Watches the user theme folder (live reload); registered by the worker.
     watcher: Option<FileWatcher>,
     watch_requested: bool,
+    /// Watch the user theme folder for live reload ([`ThemeManager::set_watch`]).
+    watch: bool,
     /// Fallback fonts (CJK) were asked for by the document; loaded with the next font job.
     want_fallback: bool,
     /// Preview colours of theme variants (Preferences' theme cards): a few colours per
@@ -421,11 +434,15 @@ impl ThemeManager {
             chose_toolbar: false,
             chose_recent: false,
             chose_word_count: false,
+            chose_update_auto: false,
+            chose_update_last_check: false,
+            chose_update_dismissed: false,
             chose_count_mode: false,
             chose_toolbar_position: false,
             chose_editing: false,
             chose_source: false,
             chose_images: false,
+            chose_files: false,
             chose_markdown: false,
             dirty: SettingsPatch::default(),
             save_at: None,
@@ -452,11 +469,24 @@ impl ThemeManager {
             last_fonts: None,
             watcher: None,
             watch_requested: false,
+            watch: true,
             want_fallback: false,
             previews: Vec::new(),
             previews_pending: Vec::new(),
             jobs_out: std::cell::Cell::new(0),
         }
+    }
+
+    /// Whether the user theme folder is watched for live reload (default: on; off for tests
+    /// that do not exercise it, [`crate::AppOptions::watch`]). Set before [`ThemeManager::start`].
+    pub fn set_watch(&mut self, on: bool) {
+        self.watch = on;
+    }
+
+    /// The folder watch should be requested now: wanted, not yet requested, and the folder and
+    /// the worker exist.
+    fn watch_due(&self) -> bool {
+        self.watch && !self.watch_requested && self.settings_loaded && self.has_user_dir() && self.worker.is_some()
     }
 
     /// Starts the worker (settings, built-ins, user themes, then the selected theme).
@@ -489,11 +519,17 @@ impl ThemeManager {
     /// or wakes the UI from here on until something new is asked.
     #[doc(hidden)]
     pub fn is_idle(&self) -> bool {
-        let watch_due = !self.watch_requested && self.settings_loaded && self.has_user_dir() && self.worker.is_some();
         self.jobs_out.get() == 0
             && self.save_at.is_none()
-            && !watch_due
+            && !self.watch_due()
             && self.watcher.as_ref().is_none_or(FileWatcher::is_synced)
+    }
+
+    /// Test hook: file-system events the theme folder watch passed on so far
+    /// ([`FileWatcher::fs_events`]).
+    #[doc(hidden)]
+    pub fn watch_fs_events(&self) -> u64 {
+        self.watcher.as_ref().map_or(0, FileWatcher::fs_events)
     }
 
     /// Test hook: blocks (at most `timeout`) until the theme folder watch has applied every
@@ -708,6 +744,16 @@ impl ThemeManager {
         }
     }
 
+    pub fn file_settings(&self) -> markise_engine::settings::FileSettings {
+        self.settings.files
+    }
+    pub fn set_file_settings(&mut self, value: markise_engine::settings::FileSettings) {
+        self.chose_files = true;
+        self.settings.files = value;
+        self.dirty.files = Some(value);
+        self.schedule_save();
+    }
+
     /// Pasted and dropped images (settings key `images`; Preferences → Files & Images).
     pub fn image_settings(&self) -> &markise_engine::settings::ImageSettings {
         &self.settings.images
@@ -764,6 +810,21 @@ impl ThemeManager {
         self.chose_markdown = true;
         if d != self.settings.markdown.comment_display {
             self.settings.markdown.comment_display = d;
+            self.dirty.markdown = Some(self.settings.markdown);
+            self.schedule_save();
+        }
+    }
+
+    /// How review marks are shown (settings key `markdown.commentView`, issue #88).
+    pub fn comment_view(&self) -> markise_engine::settings::CommentView {
+        self.settings.markdown.comment_view
+    }
+
+    /// View → Comments, the status bar's switch; persisted.
+    pub fn set_comment_view(&mut self, v: markise_engine::settings::CommentView) {
+        self.chose_markdown = true;
+        if v != self.settings.markdown.comment_view {
+            self.settings.markdown.comment_view = v;
             self.dirty.markdown = Some(self.settings.markdown);
             self.schedule_save();
         }
@@ -843,6 +904,73 @@ impl ThemeManager {
         if on != self.settings.show_word_count {
             self.settings.show_word_count = on;
             self.dirty.show_word_count = Some(on);
+            self.schedule_save();
+        }
+    }
+
+    /// The settings file has been read (or there is none): first-launch decisions wait for it.
+    pub fn settings_loaded(&self) -> bool {
+        self.settings_loaded
+    }
+
+    /// The welcome tutorial was opened at first launch (settings key `tutorialShown`, issue
+    /// #63).
+    pub fn tutorial_shown(&self) -> bool {
+        self.settings.tutorial_shown
+    }
+
+    /// Records that the first-launch tutorial was opened; persisted like the other settings.
+    pub fn set_tutorial_shown(&mut self) {
+        if !self.settings.tutorial_shown {
+            self.settings.tutorial_shown = true;
+            self.dirty.tutorial_shown = Some(true);
+            self.schedule_save();
+        }
+    }
+
+    /// Automatic update checks (settings key `updates.autoCheck`, issue #70): `None` until the
+    /// user answered the first-launch question (off until then).
+    pub fn update_auto(&self) -> Option<bool> {
+        self.settings.update_auto
+    }
+
+    /// Preferences → General → Check for updates automatically, or the first-launch answer;
+    /// persisted like the other settings.
+    pub fn set_update_auto(&mut self, on: bool) {
+        self.chose_update_auto = true;
+        if self.settings.update_auto != Some(on) {
+            self.settings.update_auto = Some(on);
+            self.dirty.update_auto = Some(on);
+            self.schedule_save();
+        }
+    }
+
+    /// Unix time of the last update check GitHub answered (settings key `updates.lastCheck`).
+    pub fn update_last_check(&self) -> Option<u64> {
+        self.settings.update_last_check
+    }
+
+    /// Records a completed update check; persisted like the other settings.
+    pub fn set_update_last_check(&mut self, t: u64) {
+        self.chose_update_last_check = true;
+        if self.settings.update_last_check != Some(t) {
+            self.settings.update_last_check = Some(t);
+            self.dirty.update_last_check = Some(t);
+            self.schedule_save();
+        }
+    }
+
+    /// The version whose update notice was dismissed (settings key `updates.dismissed`).
+    pub fn update_dismissed(&self) -> Option<&str> {
+        self.settings.update_dismissed.as_deref()
+    }
+
+    /// Dismisses the update notice of `version`; persisted like the other settings.
+    pub fn set_update_dismissed(&mut self, version: &str) {
+        self.chose_update_dismissed = true;
+        if self.settings.update_dismissed.as_deref() != Some(version) {
+            self.settings.update_dismissed = Some(version.to_string());
+            self.dirty.update_dismissed = Some(version.to_string());
             self.schedule_save();
         }
     }
@@ -1132,7 +1260,7 @@ impl ThemeManager {
                 // each part chosen before the file arrived wins; the others come from the file
                 // (the chosen parts are already pending as a patch: only they are written)
                 let chosen = self.settings.clone();
-                self.settings = loaded;
+                self.settings = *loaded;
                 if self.chose_style {
                     self.settings.style = chosen.style;
                 } else {
@@ -1164,6 +1292,15 @@ impl ThemeManager {
                 if self.chose_word_count {
                     self.settings.show_word_count = chosen.show_word_count;
                 }
+                if self.chose_update_auto {
+                    self.settings.update_auto = chosen.update_auto;
+                }
+                if self.chose_update_last_check {
+                    self.settings.update_last_check = chosen.update_last_check;
+                }
+                if self.chose_update_dismissed {
+                    self.settings.update_dismissed = chosen.update_dismissed.clone();
+                }
                 if self.chose_count_mode {
                     self.settings.count_mode = chosen.count_mode;
                 }
@@ -1175,6 +1312,9 @@ impl ThemeManager {
                 }
                 if self.chose_source {
                     self.settings.source = chosen.source;
+                }
+                if self.chose_files {
+                    self.settings.files = chosen.files;
                 }
                 if self.chose_images {
                     self.settings.images = chosen.images.clone();
@@ -1424,7 +1564,16 @@ impl ThemeManager {
         }
         // fonts of the active theme
         if self.system_fonts {
-            let req = FontRequest::of(&self.current);
+            let mut req = FontRequest::of(&self.current);
+            for (script, font) in [
+                ("cyrillic", &self.overrides.cyrillic_font),
+                ("greek", &self.overrides.greek_font),
+                ("cjk", &self.overrides.cjk_font),
+            ] {
+                if let Some(font) = font.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    req.scripts.insert(script.into(), font.into());
+                }
+            }
             let key = req.key() ^ u64::from(self.want_fallback);
             if self.font_key != Some(key) && self.worker.is_some() {
                 self.font_key = Some(key);
@@ -1480,7 +1629,7 @@ impl ThemeManager {
     /// Asks the worker to watch the user theme folder once it is known (after the first theme
     /// import was requested, so that import is not delayed).
     fn request_watch(&mut self) {
-        if !self.watch_requested && self.settings_loaded && self.has_user_dir() && self.worker.is_some() {
+        if self.watch_due() {
             self.watch_requested = true;
             self.send(Job::Watch);
         }
@@ -1668,7 +1817,7 @@ mod tests {
         // only the style is changed before the file arrives
         let mut m = ThemeManager::new(ConfigDir::None, false);
         m.select_style(StyleId::Builtin("classic".into()));
-        m.apply(Done::Settings(file.clone(), None), &mut Vec::new());
+        m.apply(Done::Settings(Box::new(file.clone()), None), &mut Vec::new());
         assert_eq!(
             m.selection(),
             &Selection {
@@ -1687,13 +1836,13 @@ mod tests {
         // only the colors
         let mut m = ThemeManager::new(ConfigDir::None, false);
         m.select_colors(ThemeId::Palette("dracula".into()));
-        m.apply(Done::Settings(file.clone(), None), &mut Vec::new());
+        m.apply(Done::Settings(Box::new(file.clone()), None), &mut Vec::new());
         assert_eq!(m.selection().style, StyleId::Builtin("compact".into()));
         assert_eq!(m.selection().colors, ThemeId::Palette("dracula".into()));
         // a complete theme sets both, even the part that equals the current one
         let mut m = ThemeManager::new(ConfigDir::None, false);
         m.select(ThemeId::Palette("rose-pine".into()));
-        m.apply(Done::Settings(file, None), &mut Vec::new());
+        m.apply(Done::Settings(Box::new(file), None), &mut Vec::new());
         assert_eq!(
             m.selection(),
             &Selection::complete(ThemeId::Palette("rose-pine".into()))
@@ -1833,7 +1982,7 @@ mod tests {
             },
             ..Default::default()
         };
-        m.apply(Done::Settings(loaded, None), &mut out);
+        m.apply(Done::Settings(Box::new(loaded), None), &mut out);
         assert_eq!(m.selection(), &Selection::complete(ThemeId::Palette("nord".into())));
         assert_eq!(
             m.overrides().line_height,
@@ -1853,7 +2002,7 @@ mod tests {
             },
             ..Default::default()
         };
-        m2.apply(Done::Settings(loaded, None), &mut Vec::new());
+        m2.apply(Done::Settings(Box::new(loaded), None), &mut Vec::new());
         assert_eq!(
             (m2.overrides().font_size, m2.overrides().line_height),
             (Some(18.0), Some(2.0))

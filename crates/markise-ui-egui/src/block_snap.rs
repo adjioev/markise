@@ -66,10 +66,23 @@ fn marker_of(line: &str) -> Option<(String, String)> {
 /// Finds the `:::name` blocks of the document (any name; blocks without site code fail in
 /// the worker and stay Markdown): an opening paragraph
 /// `:::name [variant]` and the next paragraph that is exactly `:::`.
-pub fn find_blocks(model: &DocModel, text: &str) -> Vec<Block> {
+///
+/// Paged models (ADR 0016): only blocks wholly in real items are found. A block cut by a page
+/// placeholder (a page boundary can fall inside it) is not, and the placeholder's start is
+/// returned so the caller can materialize it if it is near the viewport.
+pub fn find_blocks(model: &DocModel, text: &str) -> (Vec<Block>, Vec<usize>) {
     let mut out = Vec::new();
+    let mut cut = Vec::new();
     let mut open: Option<(usize, usize, usize, String, String)> = None; // item, start, end, name, variant
+    let mut page_before: Option<usize> = None;
     for (i, (start, it)) in model.items.iter_with_start().enumerate() {
+        if it.is_page() {
+            if open.take().is_some() {
+                cut.push(start);
+            }
+            page_before = Some(start);
+            continue;
+        }
         if !matches!(it.kind, ItemKind::Paragraph) || it.len > 64 {
             continue;
         }
@@ -81,6 +94,12 @@ pub fn find_blocks(model: &DocModel, text: &str) -> Vec<Block> {
             continue;
         }
         if line == ":::" {
+            let page = page_before.take();
+            if open.is_none()
+                && let Some(p) = page
+            {
+                cut.push(p);
+            }
             if let Some((oi, ostart, oend, name, args)) = open.take() {
                 let inner = text.get(oend..start).unwrap_or("").trim_matches('\n').to_string();
                 let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -100,9 +119,10 @@ pub fn find_blocks(model: &DocModel, text: &str) -> Vec<Block> {
         } else if let Some((name, args)) = marker_of(line) {
             // a new opener before a closer: the previous one was not a block
             open = Some((i, start, end, name, args));
+            page_before = None;
         }
     }
-    out
+    (out, cut)
 }
 
 /// Markise's current theme as handed to the site code: `data-theme="dark|light"` and
@@ -189,11 +209,17 @@ pub struct BlockSnaps {
     /// (content key, folder) → image.
     cache: HashMap<(u64, u64), Snap>,
     failed: HashSet<(u64, u64)>,
-    /// Image shown per block ordinal while its current content is pending.
-    last_shown: Vec<Option<(u64, u64)>>,
+    /// Image shown per block (its source offset: ordinals shift with paging) while its current
+    /// content is pending.
+    last_shown: HashMap<usize, (u64, u64)>,
+    /// Size of every image ever received (points at its own width). Survives texture eviction:
+    /// a block coming back keeps its height while its image is rendered again.
+    sizes: HashMap<(u64, u64), (f32, f32)>,
+    /// Starts of placeholders cutting a block (see [`find_blocks`]).
+    pub cut: Vec<usize>,
     /// Blocks of the current model.
     pub blocks: Vec<Block>,
-    scanned: Option<(usize, u64)>,
+    scanned: Option<(usize, u64, u64, usize)>,
     sent: Vec<u64>,
     frame: u64,
     log: bool,
@@ -229,7 +255,8 @@ pub struct Placed {
     pub offset: usize,
     /// End of the closing `:::` line.
     pub end: usize,
-    pub tex: egui::TextureId,
+    /// `None`: the block's image is being rendered again; its size is known.
+    pub tex: Option<egui::TextureId>,
     pub size: egui::Vec2,
 }
 
@@ -273,7 +300,9 @@ impl BlockSnaps {
             folder: 0,
             cache: HashMap::new(),
             failed: HashSet::new(),
-            last_shown: Vec::new(),
+            last_shown: HashMap::new(),
+            sizes: HashMap::new(),
+            cut: Vec::new(),
             blocks: Vec::new(),
             scanned: None,
             sent: Vec::new(),
@@ -316,7 +345,9 @@ impl BlockSnaps {
 
     /// One frame: rescans blocks when the model changed, takes finished snapshots, sends the
     /// wish list and returns the height overrides (item → layout height) and the images to
-    /// paint. `visible`: items visible at the last frame (wished first).
+    /// paint. Overrides are by source start of the item. `visible`: source starts of the items
+    /// visible at the last frame (wished first). `paging`: [`markise_layout::View::paging_generation`].
+    /// Only blocks of materialized pages are scanned, so only those are rendered.
     pub fn frame(
         &mut self,
         ctx: &egui::Context,
@@ -328,6 +359,7 @@ impl BlockSnaps {
         spacing: f32,
         visible: &[usize],
         theme: &ThemeVars,
+        paging: u64,
     ) -> (HashMap<usize, f32>, Vec<Placed>) {
         self.frame += 1;
         // PROTOTYPE (block forms): while the edit panel is being resized (and shortly after)
@@ -339,13 +371,13 @@ impl BlockSnaps {
             self.key_width = Some(width);
             width
         };
-        let id = (std::sync::Arc::as_ptr(model) as usize, revision);
+        let id = (std::sync::Arc::as_ptr(model) as usize, revision, paging, model.items.len());
         if self.form.preview != self.preview_applied {
             self.scanned = None;
         }
         if self.scanned != Some(id) {
             let t = Instant::now();
-            self.blocks = find_blocks(model, text);
+            (self.blocks, self.cut) = find_blocks(model, text);
             // live preview of the form: the edited block shows the form's values; a new block
             // gets a synthetic entry (rendered first, placed by the viewer)
             self.preview_applied = self.form.preview.clone();
@@ -367,7 +399,6 @@ impl BlockSnaps {
                 }
             }
             self.scanned = Some(id);
-            self.last_shown.resize(self.blocks.len(), None);
             if self.log {
                 eprintln!(
                     "[blocksnap] scan: {} blocks in {:.2} ms",
@@ -400,6 +431,10 @@ impl BlockSnaps {
                             info
                         );
                     }
+                    if self.sizes.len() > 4096 {
+                        self.sizes.clear();
+                    }
+                    self.sizes.insert((key, folder), (width, height));
                     self.cache.insert(
                         (key, folder),
                         Snap {
@@ -426,7 +461,7 @@ impl BlockSnaps {
         }
         // ---- wishes: visible blocks first, then the rest in document order
         let mut order: Vec<usize> = (0..self.blocks.len()).collect();
-        let is_vis = |b: &Block| visible.iter().any(|&v| v >= b.open && v <= b.close);
+        let is_vis = |b: &Block| visible.iter().any(|&v| v >= b.offset && v < b.end);
         order.sort_by_key(|&i| !is_vis(&self.blocks[i]));
         let mut jobs = Vec::new();
         let mut keys = Vec::new();
@@ -510,7 +545,7 @@ impl BlockSnaps {
             let key = Self::key_of(b, kw, scale, theme);
             let cur = (key, self.folder);
             let shown = if self.cache.contains_key(&cur) {
-                if self.log && self.last_shown[i] != Some(cur) {
+                if self.log && self.last_shown.get(&b.offset) != Some(&cur) {
                     if let Some(w) = self.wanted_at.get(&key) {
                         eprintln!(
                             "[blocksnap] block #{i} ({}) shown {:.1} ms after it was wanted",
@@ -519,7 +554,7 @@ impl BlockSnaps {
                         );
                     }
                 }
-                self.last_shown[i] = Some(cur);
+                self.last_shown.insert(b.offset, cur);
                 self.current.push(true);
                 Some(cur)
             } else {
@@ -530,23 +565,38 @@ impl BlockSnaps {
                 self.current.push(false);
                 // stale image of this block while the new one renders (same width only:
                 // a resize shows Markdown rather than a stretched picture)
-                self.last_shown[i].filter(|k| self.cache.contains_key(k) && !self.failed.contains(&cur))
+                self.last_shown
+                    .get(&b.offset)
+                    .copied()
+                    .filter(|k| self.cache.contains_key(k) && !self.failed.contains(&cur))
             };
-            let Some(k) = shown else { continue };
-            let snap = self.cache.get_mut(&k).expect("cached");
-            snap.last_used = self.frame;
+            // the texture was evicted but the size is known: keep the height, no raw Markdown
+            let known = (!self.failed.contains(&cur))
+                .then(|| self.sizes.get(&cur).copied())
+                .flatten();
+            let (tex, sw, sh) = match shown {
+                Some(k) => {
+                    let snap = self.cache.get_mut(&k).expect("cached");
+                    snap.last_used = self.frame;
+                    (Some(snap.tex.id()), snap.width, snap.height)
+                }
+                None => match known {
+                    Some((w, h)) => (None, w, h),
+                    None => continue,
+                },
+            };
             // a stale image of another width is scaled to the column until its new one arrives
-            let h = snap.height * width / snap.width.max(1.0);
-            over.insert(b.open, spacing + h);
+            let h = sh * width / sw.max(1.0);
+            over.insert(model.item_start(b.open), spacing + h);
             for j in b.open + 1..=b.close {
-                over.insert(j, 0.0);
+                over.insert(model.item_start(j), 0.0);
             }
             placed.push(Placed {
                 open: b.open,
                 close: b.close,
                 offset: b.offset,
                 end: b.end,
-                tex: snap.tex.id(),
+                tex,
                 size: egui::vec2(width, h),
             });
         }
@@ -579,7 +629,11 @@ impl BlockSnaps {
             }
         }
         // ---- eviction: keep what is shown plus a margin of recent images
-        let limit = 3 * self.blocks.len() + 16;
+        // (evicted pages' blocks are not in the list: keep a fair number of their images)
+        if self.last_shown.len() > 4096 {
+            self.last_shown.clear();
+        }
+        let limit = (3 * self.blocks.len() + 16).max(128);
         if self.cache.len() > limit {
             let mut by_age: Vec<((u64, u64), u64)> = self.cache.iter().map(|(k, s)| (*k, s.last_used)).collect();
             by_age.sort_by_key(|(_, u)| *u);

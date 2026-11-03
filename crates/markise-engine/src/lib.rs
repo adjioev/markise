@@ -9,16 +9,21 @@
 pub mod attach;
 // PROTOTYPE (proto/block-forms): block edit form codec
 pub mod block_form;
+pub mod comment_scan;
 pub mod count;
+pub mod count_worker;
 pub mod edit;
 pub mod editor;
 pub mod export;
 pub mod fsops;
 pub mod jobs;
+pub mod lease;
 pub mod load;
 pub mod save;
+pub mod search;
 pub mod settings;
 pub mod tree;
+pub mod update;
 pub mod vault;
 #[doc(hidden)]
 pub mod wake_track;
@@ -26,3 +31,7 @@ pub mod watch;
 
 /// Callback that wakes the UI (e.g. `egui::Context::request_repaint`).
 pub type Wake = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+pub mod recovery;
+
+pub mod quick_open;

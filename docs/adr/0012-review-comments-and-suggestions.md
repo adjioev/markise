@@ -65,15 +65,26 @@ also has `~>` as its middle marker). `markise_doc::review` finds marks through t
 (`all_marks`, `marks_near`, `mark_at`); a document without marks costs one byte scan for the
 openers, and only leaves holding an opener are parsed. Planner ids `review.addComment`,
 `review.accept`, `review.reject`, `review.acceptAll`, `review.rejectAll`,
-`review.deleteComment`, `review.cleanCopy`.
+`review.deleteComment`, `review.editComment` (planner only: the card editor), `review.cleanCopy`.
 
 ### 3. Commands (`markise-md` planners; one patch set each = one undo step)
 
 - **Add Comment** (⌥⌘M / Ctrl+Alt+M, Edit → Comments & Suggestions, the document's context
-  menu): a selection becomes `{==selection==}{>><<}`, a caret gets `{>><<}`; the caret goes into
-  the comment, which is revealed as source, so the user types the comment in place. Selection
+  menu): a selection becomes `{==selection==}{>><<}`, a caret gets `{>><<}`. In the rendered
+  view the new comment then opens in its card for its text (issue #87, §4 "Editing in the
+  card"); in Source mode the caret goes into the comment and the user types it in place. Selection
   ends that cut through a styled span are widened to the whole span; selections over several
-  blocks, inside code or math, or touching an existing mark are refused. The formatting
+  blocks, inside code or math, or touching an existing mark are refused. **Table cells**
+  (issue #90): a selection inside one cell (header or body) or a caret in it works the same;
+  selections across cells or rows and the delimiter row (by its place: the second row) are
+  refused; a caret in an empty cell's padding belongs to that cell. A selection right after an
+  unescaped backslash is refused everywhere (`\{` would make the marks plain text). When the
+  command runs, the result is verified by parsing only the affected part — the paragraph or
+  heading, or the table's header, delimiter and the affected row — for the intended highlight
+  with its attached comment (and, in a table, the same cells); menu enablement parses nothing,
+  so it stays cheap on huge tables (Codex review of #161). A comment's text in a cell is one line
+  (Enter in its card saves) and a `|` in it is written `\|`. A refused shortcut shows why in
+  a banner instead of doing nothing (menu items and the toolbar button are disabled there). The formatting
   toolbar has a Comment button (speech bubble) for the same command, shown only while
   CriticMarkup is on. **Shortcut:** Apple documents ⌥⌘M as Minimize All; Markise deliberately
   overrides it in-app for Add Comment, as Google Docs does, so it is taken off the
@@ -153,10 +164,64 @@ Show comments, and a switch in the comments panel header):
   (same look) that stays while the pointer is on the glyph or the card and closes when it
   leaves. The popover opens below the glyph and flips left or up near the visible area's
   edges, so it always stays on screen.
-- A click on the glyph or the card puts the caret at the end of the comment's text (its source
-  is revealed for editing); in bubbles mode the popover stays pinned until Esc.
+- A click on the glyph or the card opens the comment's text for editing in the card (below); on
+  a read-only surface (Side by Side's rendered pane) it puts the caret at the end of the
+  comment's text, where the source pane shows it. In bubbles mode the popover stays pinned
+  while the comment is edited (or until Esc).
+- **Editing in the card** (issue #87, Google Docs style): the card's text becomes a
+  multi-line field with the text as written (the `@name:` author shown above it, written back
+  unchanged); the document caret waits after the comment, so its source is never revealed.
+  ⌘Enter / Ctrl+Enter saves, a click anywhere outside the field saves, Esc cancels; Enter is a
+  line break in a paragraph's comment and saves in a heading's or table row's (one-line)
+  comment. Saving runs the `review.editComment` planner as one undo step ("Edit Comment"):
+  lines are trimmed, blank lines dropped (no blank line inside a mark), line breaks get the
+  paragraph's continuation prefix as Enter inside a comment does, one-line blocks and lines
+  that would start block syntax are joined with spaces, a `<<}` in the text is written `<< }`
+  (CriticMarkup has no escapes); an unchanged text writes nothing. An emptied comment is
+  removed with its highlight. A comment Add Comment has just created is folded into Add
+  Comment's undo step (one undo removes it with its text); cancelled or saved empty, it leaves
+  no trace (no undo step). While the field has the focus the document's commands are not
+  available in the menus (their shortcuts do not act behind the field); undo, redo and select
+  all act in the field. In a table cell a `|` in the text is written `\|` (GFM's escape; the
+  comment shows `|`), and every edit is checked to keep the surrounding blocks' shape (leaf
+  kinds, table cell counts). **An open draft is unsaved document state** (Codex review of
+  #158): the document counts as dirty, so Close, Quit, New, Open, the tutorial and external
+  changes ask or report a conflict instead of discarding it, and the crash-recovery backup
+  holds the document with the draft applied (the open document and its undo history are not
+  touched). The draft is written before a save, a view-mode switch or another command on the
+  document, and when its card stops being drawn (scrolled far away, its page evicted in a
+  paged model, ADR 0016); autosave does not write it (the user is still typing). A refused
+  write keeps the draft open with its reason, and the operation that asked (Save, the view
+  switch, the command) stops with that reason. The comment is followed by source position
+  through edits made meanwhile; after a reload or re-parse the draft stays only if the exact
+  comment source is still at its place (never written over another comment).
 - Only the visible items' comments are looked at and only shown cards are shaped (layout
   reports glyph positions per item, `BlockLayout::comments`).
+
+**Review views** (issue #88; setting `markdown.commentView`, View → Comments and the status
+bar's switch; display only — the text is never changed, exports and clean copies keep their
+own options):
+
+- `all` (default): everything above.
+- `simple`: comment glyphs and coloured suggestions; no highlight tint, no margin cards (no
+  gutter) and no hover popovers — a click on a glyph opens its card (to read or edit).
+- `final` ("No Markup"): the text as if every suggestion were accepted — insertions and new
+  text plain, deletions and old text hidden, highlights plain, comments hidden.
+- `original`: the text as if every suggestion were rejected.
+- In `final` and `original` the rendered view is a **read-only preview**: hidden marks would
+  make edits ambiguous (where does typing at the edge of a hidden deletion go?), so typing,
+  pasting, dropping, document commands and the hover bar are unavailable there, and the
+  status bar says "read-only"; Source mode (and the source pane of Side by Side) edit the raw
+  text as always. The rule is enforced at one choke point (Codex review of #160): the editor
+  session is read-only (`EditorSession::set_read_only`) while a clean view is shown in the
+  rendered view, so every mutation — commands, typing, IME, Find & Replace (also one queued
+  before the switch), undo / redo, pastes and attachments that finish late (the file stays
+  written, its link goes to the clipboard) — is refused there; reloads and re-parses still
+  apply. Copy takes the text shown (`review::visible_text`: accepted or rejected). Switching
+  to another view saves a comment being edited in its card first.
+- Layout: `LayoutParams::review` / `View::set_review_view` (part of every cache key and of the
+  key of evicted pages' measured heights); hidden
+  source has no rendered piece, so the caret steps over it as over an HTML comment.
 
 The source editor colours marks with the existing token classes (inserted text as link text,
 deleted text struck, highlights marked, comments as metadata).
@@ -185,7 +250,9 @@ PDF/PNG/Pandoc (export model): insertions underlined, deletions struck, comments
   reject pending suggestions (skipped when there are none), asks for a new file (default
   `<name> (clean).md`), refuses the document's own file, and writes through the checked save
   path (`save_checked`, never overwriting a file changed since the dialog). The open document is
-  not changed.
+  not changed. While CriticMarkup is off the marks are plain text, so the item is disabled and
+  its label says to turn on View → Comments & Suggestions; run any other way it writes nothing
+  and shows that in a banner (it never writes a "clean" copy that still holds the comments).
 - The switches live in Preferences → Markdown ("Comments & suggestions (CriticMarkup)", "Show
   comments: In the margin / As bubbles", "Keep comments in exports"); the export one is also
   File → Export → Include Comments, the display one also the comments panel's switch.

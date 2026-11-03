@@ -75,14 +75,14 @@ mounting a folder had the same synchronous calls.
 ## Consequences
 
 - Click → first frame of a small file: 2–10 ms in the release app (was up to ~1.5 s);
-  covered by `crates/markise-ui-egui/tests/open_latency.rs`, which stalls the watcher worker
+  covered by `crates/markise-ui-egui/tests/it/open_latency.rs`, which stalls the watcher worker
   for 800 ms through `JobHooks::before_watch` and asserts the open stays fast.
 - Dropping a `FileWatcher` no longer blocks: the worker drops the `notify` watcher.
 - Watch registration is asynchronous; code that needs it in effect (tests) calls `sync`.
   An external change made right after an open is reported once the registration is in
   effect; under heavy FSEvents load (the UI test suite starting many streams in parallel)
   that took 7–10 s in measurements. Before, the same wait froze the UI thread instead.
-  `tests/watch_gaps.rs` and the `watch` unit tests hold the worker inside a registration
+  `tests/it/watch_gaps.rs` and the `watch` unit tests hold the worker inside a registration
   change and change files meanwhile (tree refresh, folder switch with an open document,
   content-identity comparison, failed registration and retry).
 - After a registration change the worker reads the open file once to compare it (a 10 MB

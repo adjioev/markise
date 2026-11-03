@@ -22,6 +22,7 @@ use markise_theme::catalog::{StyleId, ThemeId};
 pub enum MenuAction {
     /// A registry command or an [`APP_COMMANDS`] id.
     Command(&'static str),
+    Recent(std::path::PathBuf),
     /// Theme → Style.
     Style(StyleId),
     /// Theme → Colors.
@@ -38,6 +39,7 @@ impl MenuAction {
     /// Stable key of the action (native menu item id).
     pub fn key(&self) -> String {
         match self {
+            MenuAction::Recent(p) => format!("recent:{}", p.display()),
             MenuAction::Command(id) => (*id).to_string(),
             MenuAction::Style(s) => format!("theme.style:{s:?}"),
             MenuAction::Colors(t) => format!("theme.colors:{t:?}"),
@@ -284,6 +286,9 @@ const fn mac_only(mac: &'static str) -> DefaultKey {
 /// the engine registry does not hold. Same descriptor type as the registry, so labels and
 /// per-platform chords have one source (spec 02 §15).
 pub static APP_COMMANDS: &[CommandDescriptor] = &[
+    app("file.clearRecent", "Clear Items", &[]),
+    app("file.recover", "Recover Unsaved Drafts…", &[]),
+    app("file.quickOpen", "Quick Open…", &[both("Cmd+P", "Ctrl+P")]),
     app(
         "file.openFolder",
         "Open Folder…",
@@ -296,6 +301,8 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("app.quit", "Quit Markise", &[mac_only("Cmd+Q")]),
     app("app.exit", "Exit", &[]),
     app("app.about", "About Markise", &[]),
+    // update check (issue #70): macOS application menu, Help menu elsewhere
+    app("app.checkUpdates", "Check for Updates…", &[]),
     app("app.preferences", "Preferences…", &[both("Cmd+,", "Ctrl+,")]),
     app("edit.cut", "Cut", &[both("Cmd+X", "Ctrl+X")]),
     app("edit.copy", "Copy", &[both("Cmd+C", "Ctrl+C")]),
@@ -327,6 +334,11 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     // CriticMarkup comments and suggestions (ADR 0012; setting `markdown.criticMarkup`; shown
     // in Preferences → Markdown, like Wikilinks)
     app("view.criticMarkup", "Comments & Suggestions", &[]),
+    // View → Comments (issue #88; setting `markdown.commentView`): how review marks show
+    app("view.commentsAll", "All Markup", &[]),
+    app("view.commentsSimple", "Simple Markup", &[]),
+    app("view.commentsFinal", "No Markup (Final)", &[]),
+    app("view.commentsOriginal", "Original", &[]),
     app("file.saveCopyClean", "Save Copy Without Comments…", &[]),
     app("export.comments", "Include Comments", &[]),
     // Back / Forward between opened notes (spec 06 §2.7): ⌥⌘← / ⌥⌘→ on macOS (⌘[ / ⌘] are
@@ -351,6 +363,14 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("theme.import", "Import Theme…", &[]),
     app("theme.openFolder", "Open Theme Folder", &[]),
     app("theme.report", "Theme Report…", &[]),
+    // Help menu (issue #63): the welcome tutorial and the keyboard shortcut cheat sheet
+    // (⌘? = ⇧⌘/ on macOS, Ctrl+? = Ctrl+Shift+/ elsewhere; no registry default uses them)
+    app("help.tutorial", "Tutorial", &[]),
+    app(
+        "help.shortcuts",
+        "Keyboard Shortcuts",
+        &[both("Shift+Cmd+/", "Ctrl+Shift+/")],
+    ),
 ];
 
 /// The application command `id`.
@@ -435,6 +455,7 @@ pub const EDIT_ORDER: &[Option<&str>] = &[
     Some("find.next"),
     Some("find.prev"),
     Some("find.replace"),
+    Some("find.replaceNext"),
 ];
 
 /// Preferred order of the Paragraph menu.
@@ -451,7 +472,6 @@ pub const PARAGRAPH_ORDER: &[Option<&str>] = &[
     Some("block.headingUp"),
     Some("block.headingDown"),
     None,
-    Some("insert.table"),
     Some("block.codeFence"),
     Some("block.mathBlock"),
     None,
@@ -687,6 +707,26 @@ fn entries_egui(ui: &mut egui::Ui, entries: &[Entry], platform: Platform, chosen
         }
     }
 }
+
+/// Table commands in the Paragraph → Table menu and the document context menu (spec 02 §6):
+/// Insert Table… (issue #164), then the operations on the caret's table.
+pub const TABLE_COMMANDS: &[Option<&str>] = &[
+    Some("table.insert"),
+    None,
+    Some("table.addRowAbove"),
+    Some("table.addRowBelow"),
+    Some("table.deleteRow"),
+    Some("table.addColumnBefore"),
+    Some("table.addColumnAfter"),
+    Some("table.deleteColumn"),
+    Some("table.moveRowUp"),
+    Some("table.moveRowDown"),
+    Some("table.moveColumnLeft"),
+    Some("table.moveColumnRight"),
+    Some("table.alignLeft"),
+    Some("table.alignCenter"),
+    Some("table.alignRight"),
+];
 
 #[cfg(test)]
 mod tests {

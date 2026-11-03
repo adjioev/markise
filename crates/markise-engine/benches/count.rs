@@ -1,16 +1,16 @@
-//! `count-1mb` / `count-10mb` (issue #53): word counting on the UI thread in per-frame byte
-//! budgets ([`FRAME_BYTES`], as the status bar uses them for documents over 256 KB) — the first
-//! count of the corpus
-//! (calls, longest call) and the work after a keystroke ([`DocCounter::reconcile`] against
-//! the edited model + counting the changed block).
+//! `count-1mb` / `count-10mb` (issue #53): word counting in byte-budgeted steps
+//! ([`FRAME_BYTES`], as the status bar's counting worker takes them, issue #132; an edit waits
+//! at most one step) — the first count of the corpus
+//! (calls, longest call) and the work after a keystroke ([`DocCounter::apply`] of the edit's
+//! summary + counting the changed block).
 //!
 //! Run: `cargo bench -p markise-engine --bench count`.
 
 use std::time::{Duration, Instant};
 
 use markise_corpus::generate;
+use markise_doc::{FormatDoc, Patch, PatchSet};
 use markise_engine::count::{DocCounter, FRAME_BYTES};
-use markise_layout::DocModel;
 use markise_md::{Document, ParseOptions};
 
 /// CPU time of the calling thread (separates scheduling noise on a loaded machine from work).
@@ -24,16 +24,15 @@ fn thread_cpu() -> Duration {
 fn main() {
     for mb in [1usize, 10] {
         let src = generate(mb << 20, 7);
-        let doc = Document::parse(src.as_str(), ParseOptions::default());
-        let model = DocModel::build_owned(&doc, None);
+        let mut doc = Document::parse(src.as_str(), ParseOptions::default());
 
         let mut c = DocCounter::new();
-        c.reconcile(&model);
+        c.reset(&doc);
         let (mut calls, mut longest, mut longest_cpu, mut cpu_total) =
             (0, Duration::ZERO, Duration::ZERO, Duration::ZERO);
         loop {
             let (t, cpu) = (Instant::now(), thread_cpu());
-            let done = c.fill(&doc, &model, FRAME_BYTES);
+            let done = c.fill(&doc, FRAME_BYTES);
             let (e, ec) = (t.elapsed(), thread_cpu() - cpu);
             calls += 1;
             longest = longest.max(e);
@@ -48,22 +47,19 @@ fn main() {
         // a keystroke in the middle of the document
         let mid = src.len() / 2;
         let at = mid + src[mid..].find(". ").unwrap_or(0) + 1;
-        let mut edited = src.clone();
-        edited.insert(at, 'x');
-        let doc2 = Document::parse(edited.as_str(), ParseOptions::default());
-        let model2 = DocModel::build_owned(&doc2, None);
+        let e = FormatDoc::apply(&mut doc, &PatchSet::new(vec![Patch::verbatim(at..at, "x")]).unwrap());
         let before = c.stats();
         let (t, cpu) = (Instant::now(), thread_cpu());
-        c.reconcile(&model2);
+        assert!(c.apply(&e));
         let reconciled = (t.elapsed(), thread_cpu() - cpu);
         let (t, cpu) = (Instant::now(), thread_cpu());
-        assert!(c.fill(&doc2, &model2, FRAME_BYTES));
+        assert!(c.fill(&doc, FRAME_BYTES));
         let filled = (t.elapsed(), thread_cpu() - cpu);
         println!(
-            "count-{mb}mb: {} items, {words} words; first count: {calls} frames, CPU {cpu_total:?} in all, \
-             longest frame {longest:?} (CPU {longest_cpu:?}); after a keystroke: reconcile {:?} (CPU {:?}), \
+            "count-{mb}mb: {} top-level blocks, {words} words; first count: {calls} steps, CPU {cpu_total:?} in all, \
+             longest step {longest:?} (CPU {longest_cpu:?}); after a keystroke: apply {:?} (CPU {:?}), \
              {} block(s) {:?} (CPU {:?}); approximate: {}",
-            model.items.len(),
+            c.len(),
             reconciled.0,
             reconciled.1,
             c.stats().blocks_counted - before.blocks_counted,

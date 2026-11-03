@@ -75,7 +75,8 @@ fn theme_import_prints_summary_and_json_report() {
 /// Issue #29: an HTML export estimated above 200 MB prints a warning and is still written;
 /// with `--max-size` below the estimate it is refused and nothing is written.
 #[test]
-fn html_size_warning_and_max_size() {
+#[ignore = "heavy: writes a 220 MB HTML export; cargo xtask heavy"]
+fn heavy_suite_html_size_warning_and_max_size() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     // 1500 headings (~110 KB of TOC each) and 2000 [TOC] blocks: ~220 MB
@@ -179,4 +180,38 @@ fn max_size_counts_expanding_content() {
         assert!(out.status.success());
         assert!(std::fs::metadata(&out_path).unwrap().len() > 20_000, "{name}");
     }
+}
+
+/// Fast CLI size-limit regression: expansion, refusal, usage errors and ordinary success.
+/// The warning threshold itself is exercised by the retained 220 MB heavy test.
+#[test]
+fn html_max_size_and_usage_on_small_input() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("small.md");
+    let dst = tmp.path().join("refused.html");
+    std::fs::write(&src, "[TOC]\n\n# A\n").unwrap();
+    let out = bin()
+        .args([
+            "html",
+            src.to_str().unwrap(),
+            "-o",
+            dst.to_str().unwrap(),
+            "--max-size",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("refusing"));
+    assert!(!dst.exists());
+    let out = bin()
+        .args(["html", src.to_str().unwrap(), "--max-size", "lots"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let out = bin()
+        .args(["html", src.to_str().unwrap(), "--max-size", "500M"])
+        .output()
+        .unwrap();
+    assert!(out.status.success() && out.stderr.is_empty());
 }

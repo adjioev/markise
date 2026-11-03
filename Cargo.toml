@@ -28,6 +28,8 @@ emojis = "0.9"
 similar = "3.2"
 html-escape = "0.3"
 serde_json = "1"
+# SemVer precedence for the update check (markise-engine update; MIT OR Apache-2.0)
+semver = "1"
 # layers.toml (xtask only)
 toml = { version = "1.1", default-features = false, features = ["std", "parse", "serde"] }
 proptest = "1"
@@ -38,16 +40,18 @@ cssparser = "0.38"
 egui = { version = "0.37.0", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts"] }
 epaint = { version = "0.37.0", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts"] }
 # eframe 0.37 switched its default renderer to wgpu and added a system-font provider. Markise
-# keeps the glow renderer and loads system fonts itself (ADR 0004), so the feature set below
-# mirrors the eframe 0.33 defaults; `winit` with its default features restores what eframe's
-# `winit/default` used to enable (Wayland via dlopen, client-side decorations).
-eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "web_screen_reader", "x11"] }
+# loads system fonts itself (ADR 0004), so the feature set below mirrors the eframe 0.33
+# defaults plus `wgpu`: the app renders with wgpu (Metal on macOS) and falls back to glow
+# (apps/markise/src/renderer.rs, issue #86); `winit` with its default features restores what
+# eframe's `winit/default` used to enable (Wayland via dlopen, client-side decorations).
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links", "wayland", "web_screen_reader", "wgpu", "x11"] }
 winit = "0.30.13"
 # macOS open-documents handler in apps/markise (already in the tree through eframe/arboard)
 objc2 = "0.6.5"
 # Windows: parent-console attach in apps/markise (already in the tree through winit and others)
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console"] }
-# Windows: icon resource embedded in markise.exe (apps/markise/build.rs)
+# Windows: icon and manifest resources embedded in markise.exe (apps/markise/build.rs) and the
+# common-controls manifest in markise-ui-egui's test executables (its build.rs)
 embed-resource = "3"
 egui_kittest = "0.37.0"
 rfd = "0.17"
@@ -100,6 +104,12 @@ ratex-parser = "0.1.15"
 ratex-layout = "0.1.15"
 ratex-types = "0.1.15"
 ratex-font = "0.1.15"
+# Update check (issue #70; apps/markise only): a small blocking HTTP client over rustls with
+# the ring crypto provider; certificates are verified by the OS (rustls-platform-verifier), so
+# no bundled root store (webpki-roots) and no gzip. MIT OR Apache-2.0; ring: Apache-2.0 AND
+# ISC; rustls-webpki, untrusted: ISC.
+ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 # The regex engines behind syntax highlighting are ~20× slower unoptimised; optimise them in

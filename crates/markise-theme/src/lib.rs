@@ -382,6 +382,14 @@ pub struct Theme {
     pub sidebar: SidebarStyle,
 }
 
+/// Source view size relative to the body size (see [`Theme::source_size`]). Measured on the
+/// default fonts (body Arial / Helvetica / Ubuntu / Georgia against Menlo / SF Mono / Hack, a
+/// prose sentence): a monospace face matches the body's x-height at about 0.95× but its glyphs
+/// are so much wider that the same text matches the body's width at about 0.71×; 0.82 is the
+/// geometric mean, so neither height nor width looks out of proportion (the old 0.9× read
+/// visibly larger than the rendered pane).
+pub const SOURCE_SCALE: f32 = 0.82;
+
 impl Theme {
     /// Built-in light theme ("Markise Light", original design).
     pub fn light() -> Theme {
@@ -609,9 +617,23 @@ impl Theme {
         self.font_size * self.line_height
     }
 
-    /// Monospace font size in points.
+    /// Monospace font size in points (inline code and code blocks of the rendered view).
     pub fn mono_size(&self) -> f32 {
         (self.font_size * self.mono_scale).round()
+    }
+
+    /// Default font size of the source view (Source mode, Side by Side) in points, rounded to a
+    /// half point: [`SOURCE_SCALE`] × the body size, so plain Markdown in a monospace face looks
+    /// as large as the rendered prose next to it (issue #130). A theme whose body text already
+    /// uses its monospace stack keeps the body size. Independent of [`Theme::mono_size`] (code
+    /// in the rendered view); a Preferences value replaces it.
+    pub fn source_size(&self) -> f32 {
+        let scale = if !self.fonts.body.is_empty() && self.fonts.body == self.fonts.mono {
+            1.0
+        } else {
+            SOURCE_SCALE
+        };
+        ((self.font_size * scale * 2.0).round() / 2.0).max(6.0)
     }
 }
 
@@ -649,6 +671,30 @@ mod tests {
         assert!(Theme::dark().page_bg.brightness() < 0.5);
         assert!(Theme::dark().dark);
         assert_eq!(Rgba::TRANSPARENT.brightness(), 1.0);
+    }
+
+    /// Issue #130: the source view is smaller than the old mono size (0.9× body), independent
+    /// of the rendered view's code size, and a monospace body keeps its size.
+    #[test]
+    fn source_size_matches_the_body_not_the_code_scale() {
+        let t = Theme::light();
+        assert_eq!(t.font_size, 16.0);
+        assert_eq!(t.source_size(), 13.0);
+        assert!(t.source_size() < t.mono_size());
+        let mut big_code = t.clone();
+        big_code.mono_scale = 1.2;
+        assert_eq!(
+            big_code.source_size(),
+            13.0,
+            "code-block scale does not move the source view"
+        );
+        let mut mono_body = t.clone();
+        mono_body.fonts.body = vec!["Menlo".into(), "monospace".into()];
+        mono_body.fonts.mono = mono_body.fonts.body.clone();
+        assert_eq!(mono_body.source_size(), 16.0);
+        let tech = crate::style::builtin_style("technical").unwrap();
+        let t = crate::style::compose(&tech, &Theme::light().colors());
+        assert_eq!(t.source_size(), t.font_size.max(6.0));
     }
 
     #[test]

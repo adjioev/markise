@@ -196,6 +196,10 @@ pub trait DocumentFormat: Send + Sync {
 /// A parsed document. Text is the source of truth; every mutation is a patch set or a hint
 /// change. `Sync` so that a parsed snapshot can be shared with workers (`Arc<dyn FormatDoc>`).
 pub trait FormatDoc: EditBehavior + Send + Sync {
+    /// Display hint for a raw-markup leaf. Other formats need not implement this.
+    fn raw_presentation(&self, _span: crate::Span) -> Option<crate::RawPresentation> {
+        None
+    }
     fn format_id(&self) -> &'static str;
     fn text(&self) -> &str;
     fn line_ending(&self) -> LineEnding;
@@ -339,6 +343,29 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
 
     /// Number of top-level blocks.
     fn top_count(&self) -> usize;
+    /// Absolute span of top-level block `t` (`None`: past the end, or not supported by the
+    /// format). Paged view models and the word count address the document by top-level block
+    /// (issue #125).
+    fn top_span(&self, t: usize) -> Option<Span> {
+        let _ = t;
+        None
+    }
+    /// Index of the last top-level block starting at or before absolute offset `offset`
+    /// (0 when none does; `None`: not supported by the format). The default searches
+    /// [`FormatDoc::top_span`].
+    fn top_at(&self, offset: usize) -> Option<usize> {
+        self.top_span(0)?;
+        let (mut lo, mut hi) = (0, self.top_count());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.top_span(mid).is_some_and(|s| s.start <= offset) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Some(lo.saturating_sub(1))
+    }
     /// Emits the leaves of top-level blocks `tops` with their container chains, in order.
     fn flatten(&self, tops: Range<usize>, sink: &mut dyn FnMut(FlatEvent<'_>));
     /// Emits the events needed for the leaves of top-level blocks `tops` that start in
@@ -381,6 +408,14 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
     /// sorted and deduplicated within the appended part; ADR 0006 §7.4).
     fn reference_candidates(&self, lines: &[Span], out: &mut Vec<u64>) {
         let _ = (lines, out);
+    }
+    /// Whether a leaf whose source lies in `span` (absolute) may look up a reference at all:
+    /// `false` only when [`FormatDoc::reference_candidates`] finds nothing for any content lines
+    /// inside it. A cheap pre-check that spares the caller finding the leaf's lines. Default:
+    /// `true`.
+    fn may_reference(&self, span: Span) -> bool {
+        let _ = span;
+        true
     }
     /// Fingerprint of the current definition of reference label `key` (`None`: undefined).
     fn reference_fingerprint(&self, key: u64) -> Option<u64> {
@@ -465,6 +500,16 @@ pub trait EditBehavior {
     /// the format defines no virtual slots.
     fn resolve_virtual(&self, slot: &VirtualSlot) -> Option<DocPos> {
         let _ = slot;
+        None
+    }
+    /// The editor-only empty paragraph in the gap after the leaf block ending at `end`
+    /// (ADR 0006 §2.2, issue #166): `Some(virt)` when the format offers a caret position
+    /// `DocPos { offset: end, virt }` between that block and the next one — the caret could
+    /// not reach an empty line there otherwise (no paragraph or heading stands next to the
+    /// gap at its level, e.g. between two tables) — else `None`. Asking changes nothing;
+    /// typing there materialises a paragraph like on any virtual paragraph. Default: none.
+    fn gap_virt(&self, end: usize) -> Option<u16> {
+        let _ = end;
         None
     }
     /// Container prefix to repeat on a new line at `at` (e.g. `> `).

@@ -10,7 +10,7 @@ use egui::{Context, Key, Modifiers};
 use markise_engine::editor::command::Registry;
 use markise_engine::editor::keymap::{Keymap, Platform};
 use markise_engine::export::ExportKind;
-use markise_engine::settings::{ToolbarPosition, ZOOM_RANGE};
+use markise_engine::settings::{CommentView, ToolbarPosition, ZOOM_RANGE};
 use markise_export::pandoc::PandocFormat;
 use markise_md::MarkdownFormat;
 use markise_theme::catalog::{Origin, Selection, ThemeId};
@@ -48,6 +48,17 @@ fn defaults(platform: Platform) -> &'static (Registry, Keymap) {
     })
 }
 
+/// View → Comments items and the review view each one picks (issue #88).
+const COMMENT_VIEWS: [(&str, CommentView); 4] = [
+    ("view.commentsAll", CommentView::All),
+    ("view.commentsSimple", CommentView::Simple),
+    ("view.commentsFinal", CommentView::Final),
+    ("view.commentsOriginal", CommentView::Original),
+];
+
+/// Why Save Copy Without Comments is disabled while CriticMarkup is off (menu label suffix).
+pub(crate) const CLEAN_COPY_OFF_HINT: &str = "turn on View → Comments & Suggestions";
+
 /// Commands that a focused text field (the source editor) performs itself: with one focused,
 /// the menu item sends the shortcut to it instead of running the registry command.
 const TEXT_FIELD_KEYS: [(&str, Modifiers, Key); 3] = [
@@ -56,9 +67,11 @@ const TEXT_FIELD_KEYS: [(&str, Modifiers, Key); 3] = [
     ("select.all", Modifiers::COMMAND, Key::A),
 ];
 
-/// Application commands that have no item in the macOS menus because AppKit adds its own
-/// (View → Enter Full Screen); their chords stay handled by the app's shortcut path.
-const MAC_SYSTEM_MENU_COMMANDS: [&str; 1] = ["view.fullScreen"];
+/// Application commands whose chords the app's shortcut path handles also with the native
+/// macOS menu: Full Screen has no item there (AppKit adds its own View → Enter Full Screen);
+/// Keyboard Shortcuts' ⌘? (⇧⌘/) may not reach its key equivalent through AppKit, whose Help
+/// menu search claims ⌘? (opening the cheat sheet twice is harmless).
+const MAC_SYSTEM_MENU_COMMANDS: [&str; 2] = ["view.fullScreen", "help.shortcuts"];
 
 fn text_field_focused(ctx: &Context) -> bool {
     ctx.memory(|m| m.focused())
@@ -87,18 +100,26 @@ impl MarkiseApp {
     fn command_enabled(&self, id: &str, text_field: bool) -> bool {
         let Some(d) = &self.doc else { return false };
         match id {
-            "edit.cut" | "edit.copy" | "edit.paste" => return true,
+            "edit.cut" | "edit.copy" | "edit.paste" | "find.open" | "find.next" | "find.prev" | "find.replace"
+            | "find.replaceNext" => {
+                return true;
+            }
             _ => {}
         }
         if text_field && TEXT_FIELD_KEYS.iter().any(|(k, ..)| *k == id) {
             return true;
+        }
+        // a comment being written in its card (issue #87): document commands wait (a menu
+        // shortcut such as ⌘B must not act on the document behind the field)
+        if d.viewer.card_edit().is_some() {
+            return false;
         }
         // the source editor (full Source mode, or focused in Side by Side) runs only its own
         // commands; format and block commands come to it in M2d slice 2
         if self.source_focused() && !markise_engine::editor::source::source_command_available(id) {
             return false;
         }
-        d.viewer.ed.registry.enabled(&d.viewer.ed.session, id).is_ok()
+        d.viewer.command_enabled(id)
     }
 
     /// Format and block-style toggles show whether the selection has them (spec 04 §3.2).
@@ -191,6 +212,20 @@ impl MarkiseApp {
     }
 
     /// An application command item.
+    /// File → Save Copy Without Comments…: disabled while there is no document, while only
+    /// the first part of a file is open (issue #126) and while CriticMarkup is off — then the
+    /// label says why (marks are plain text and a copy would keep them).
+    fn clean_copy_item(&self) -> Entry {
+        let label = app_command("file.saveCopyClean").map_or("file.saveCopyClean", |d| d.label);
+        if self.critic_markup() {
+            let enabled = self.doc.is_some() && !self.is_partial();
+            self.item(MenuAction::Command("file.saveCopyClean"), label, enabled, Check::None)
+        } else {
+            let label = format!("{label} ({CLEAN_COPY_OFF_HINT})");
+            self.item(MenuAction::Command("file.saveCopyClean"), label, false, Check::None)
+        }
+    }
+
     fn app_item(&self, id: &'static str, enabled: bool, check: Check) -> Entry {
         let label = app_command(id).map_or(id, |d| d.label);
         self.item(MenuAction::Command(id), label, enabled, check)
@@ -236,6 +271,7 @@ impl MarkiseApp {
                     "Markise",
                     vec![
                         self.app_item("app.about", true, Check::None),
+                        self.app_item("app.checkUpdates", true, Check::None),
                         Entry::Separator,
                         self.app_item("app.preferences", true, Check::None),
                         Entry::Separator,
@@ -256,10 +292,30 @@ impl MarkiseApp {
             self.item(MenuAction::Command("file.new"), "New", true, Check::None),
             self.item(MenuAction::Command("file.open"), "Open…", true, Check::None),
             self.app_item("file.openFolder", true, Check::None),
+            self.app_item("file.quickOpen", true, Check::None),
+            Entry::Submenu(Menu::new(
+                "Open Recent",
+                self.workflow
+                    .recent
+                    .iter()
+                    .map(|p| {
+                        self.item(
+                            MenuAction::Recent(p.clone()),
+                            p.display().to_string(),
+                            true,
+                            Check::None,
+                        )
+                    })
+                    .chain(std::iter::once(self.app_item("file.clearRecent", true, Check::None)))
+                    .collect(),
+            )),
+            self.app_item("file.recover", true, Check::None),
             Entry::Separator,
             self.item(MenuAction::Command("file.save"), "Save", has_doc, Check::None),
             self.item(MenuAction::Command("file.saveAs"), "Save As…", has_doc, Check::None),
-            self.app_item("file.saveCopyClean", has_doc, Check::None),
+            // (not from the first part of a progressively opened file, issue #126; not while
+            // CriticMarkup is off: the marks are then plain text, there is nothing to remove)
+            self.clean_copy_item(),
             Entry::Separator,
             self.app_item("file.rename", has_file, Check::None),
             self.item(
@@ -288,7 +344,12 @@ impl MarkiseApp {
             edit.entries.push(self.app_item("app.preferences", true, Check::None));
         }
         menus.push(edit);
-        menus.push(self.registry_menu("Paragraph", PARAGRAPH_ORDER, text_field));
+        let mut paragraph = self.registry_menu("Paragraph", PARAGRAPH_ORDER, text_field);
+        paragraph.entries.push(Entry::Submenu(Menu::new(
+            "Table",
+            self.command_entries(crate::menu::TABLE_COMMANDS, text_field),
+        )));
+        menus.push(paragraph);
         let format = self.registry_menu("Format", FORMAT_ORDER, text_field);
         if !format.entries.is_empty() {
             menus.push(format);
@@ -314,16 +375,40 @@ impl MarkiseApp {
                 )
                 .kind(MenuKind::Window),
             );
-            // About is in the application menu; Help content is P2 (spec 04 §2.8); macOS
-            // adds its menu search
-            menus.push(Menu::new("Help", Vec::new()).kind(MenuKind::Help));
+            // About is in the application menu; macOS adds its menu search
+            menus.push(Menu::new("Help", self.help_entries()).kind(MenuKind::Help));
         } else {
-            menus.push(Menu::new("Help", vec![self.app_item("app.about", true, Check::None)]).kind(MenuKind::Help));
+            let mut help = vec![
+                self.app_item("app.about", true, Check::None),
+                self.app_item("app.checkUpdates", true, Check::None),
+                Entry::Separator,
+            ];
+            help.extend(self.help_entries());
+            menus.push(Menu::new("Help", help).kind(MenuKind::Help));
         }
         MenuBar {
             platform: self.menu_platform,
             menus,
         }
+    }
+
+    /// Help → Tutorial, Keyboard Shortcuts (issue #63).
+    fn help_entries(&self) -> Vec<Entry> {
+        vec![
+            self.app_item("help.tutorial", true, Check::None),
+            self.app_item("help.shortcuts", true, Check::None),
+        ]
+    }
+
+    /// The keyboard shortcut cheat sheet for the menus' platform: the keymap in effect
+    /// (`keyBinding` applied), like the menus and the toolbar (issue #63).
+    pub fn shortcut_groups(&self) -> Vec<crate::shortcuts::Group> {
+        let km = if self.menu_platform == Platform::current() {
+            self.effective_keymap()
+        } else {
+            &defaults(self.menu_platform).1
+        };
+        crate::shortcuts::cheat_sheet(self.registry(), km, self.menu_platform)
     }
 
     /// Edit → Comments & Suggestions (ADR 0012).
@@ -374,7 +459,7 @@ impl MarkiseApp {
         v.push(self.app_item("export.overwritePrevious", prev.is_some(), Check::None));
         v.push(Entry::Separator);
         v.push(self.app_item("export.comments", true, Check::Toggle(self.export_comments())));
-        Menu::new("Export", v).enabled(self.doc.is_some() && !self.export.is_running())
+        Menu::new("Export", v).enabled(self.doc.is_some() && !self.is_partial() && !self.export.is_running())
     }
 
     fn view_menu(&self) -> Menu {
@@ -412,6 +497,7 @@ impl MarkiseApp {
             Entry::Separator,
             self.app_item("view.highlightCode", true, Check::Toggle(self.highlight_code)),
             Entry::Submenu(self.theme_menu()),
+            Entry::Submenu(self.comments_view_menu()),
             Entry::Separator,
             self.app_item("view.zoomIn", self.zoom() < ZOOM_RANGE.1, Check::None),
             self.app_item("view.zoomOut", self.zoom() > ZOOM_RANGE.0, Check::None),
@@ -436,6 +522,20 @@ impl MarkiseApp {
             ));
         }
         Menu::new("View", entries)
+    }
+
+    /// View → Comments (issue #88): how review marks are shown; disabled while CriticMarkup
+    /// is off (there are none).
+    fn comments_view_menu(&self) -> Menu {
+        let on = self.critic_markup();
+        let cur = self.comment_view();
+        Menu::new(
+            "Comments",
+            COMMENT_VIEWS
+                .iter()
+                .map(|(id, v)| self.app_item(id, on, Check::Radio(cur == *v)))
+                .collect(),
+        )
     }
 
     /// View → Theme: a quick switcher between the installed complete themes (Markise, the
@@ -492,6 +592,10 @@ impl MarkiseApp {
             return true;
         }
         match action {
+            MenuAction::Recent(p) => {
+                self.open(p.clone());
+                true
+            }
             MenuAction::Command(id) => self.menu_command(ctx, id, trigger),
             MenuAction::Style(id) => {
                 let colors = self.themes.selection().colors.clone();
@@ -531,7 +635,35 @@ impl MarkiseApp {
     }
 
     pub(super) fn menu_command(&mut self, ctx: &Context, id: &str, trigger: Trigger) -> bool {
+        // the Insert Table dialog is modal: no other command (menu, toolbar, shortcut) runs
+        // under it (PR #165 review: File → New would have received the table)
+        if self.insert_table_dialog().is_some() {
+            if !matches!(id, "file.close" | "app.quit" | "app.exit") {
+                return false;
+            }
+            // Close / Quit still work: the dialog goes first (PR #165 review 2)
+            self.cancel_insert_table();
+        }
+        // any other command (Preferences, About, Quick Open, a dialog…) takes over from the
+        // cheat sheet, which would otherwise keep the keyboard focus (Codex review of #120)
+        // cheat sheet, which would otherwise keep the keyboard focus (Codex review of #120);
+        // the editing commands a focused text field performs act on its search field instead
+        let field_edit = matches!(
+            id,
+            "edit.cut" | "edit.copy" | "edit.paste" | "edit.undo" | "edit.redo" | "select.all"
+        );
+        if id != "help.shortcuts" && !field_edit && self.cheat_sheet.open {
+            self.cheat_sheet.close(ctx);
+        }
         match id {
+            "file.quickOpen" => self.open_quick(ctx),
+            "file.clearRecent" => self.clear_recent_paths(),
+            "file.recover" => self.workflow.show_recovery = true,
+            "find.open" => self.open_find(false),
+            "find.replace" => self.open_find(true),
+            "find.next" => self.find_next(false),
+            "find.prev" => self.find_next(true),
+            "find.replaceNext" => self.replace_find_next(),
             "file.open" => self.open_dialog(),
             "file.openFolder" => self.open_folder_dialog(),
             "file.save" => self.save(),
@@ -550,6 +682,9 @@ impl MarkiseApp {
             "file.close" | "app.quit" | "app.exit" => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             "app.preferences" => self.open_preferences(),
             "app.about" => self.about.open(),
+            "app.checkUpdates" => self.check_for_updates(),
+            "help.tutorial" => self.open_tutorial(),
+            "help.shortcuts" => self.open_shortcuts(ctx),
             // the focused widget (rich view or a text field) handles these as from the keyboard
             "edit.cut" => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCut),
             "edit.copy" => ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy),
@@ -575,6 +710,11 @@ impl MarkiseApp {
             "view.diagrams" => self.set_diagrams(!self.diagrams),
             "view.wikilinks" => self.set_wikilinks(!self.wikilinks()),
             "view.criticMarkup" => self.set_critic_markup(!self.critic_markup()),
+            id if COMMENT_VIEWS.iter().any(|(c, _)| *c == id) => {
+                if let Some((_, v)) = COMMENT_VIEWS.iter().find(|(c, _)| *c == id) {
+                    self.set_comment_view(*v);
+                }
+            }
             "file.saveCopyClean" if self.doc.is_some() => self.save_copy_without_comments(),
             "export.comments" => self.set_export_comments(!self.export_comments()),
             "go.back" => self.go_back(),
@@ -617,6 +757,8 @@ impl MarkiseApp {
                 self.themes.set_editing(e);
             }
             "theme.fontAndSize" => self.font_window = true,
+            // issue #164: asks for the size first
+            "table.insert" => return self.open_insert_table(),
             "view.themeSettings" => self.open_preferences_at(crate::prefs::Section::Appearance),
             "theme.import" => self.import_theme_dialog(),
             "theme.openFolder" => self.open_theme_folder(),
@@ -693,9 +835,13 @@ impl MarkiseApp {
                 else {
                     return true;
                 };
-                let Some(mut chord) = crate::viewer::chord_of(*key, *modifiers, platform) else {
+                // egui names no key "?" for the keymap (`Key::Questionmark`): read as ⇧/ below
+                let q = *key == egui::Key::Questionmark;
+                let k = if q { egui::Key::Slash } else { *key };
+                let Some(mut chord) = crate::viewer::chord_of(k, *modifiers, platform) else {
                     return true;
                 };
+                chord.shift |= q;
                 // ⇧= arrives as "+" on most layouts: the zoom chords are written with "="
                 if chord.shift && chord.key == "+" {
                     chord.key = "=".into();

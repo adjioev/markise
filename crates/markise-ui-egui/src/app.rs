@@ -18,8 +18,11 @@
 //!   other file fails, the edited document stays as it was (dirty).
 //! - Every load and save records the file's disk version; saves refuse to overwrite external
 //!   changes (see `markise_engine::save`). Watcher events always trigger a reload check; a
-//!   reload equal to the recorded version (our own save) is ignored; events during a load or
-//!   save are queued. Loads run on one cancellable loader worker (latest request wins).
+//!   file equal to the recorded version (our own save) is recognised by the loader right after
+//!   reading, without parsing it, and ignored; events during a load or save are queued. Loads run on one cancellable loader worker (latest request wins).
+//! - **Progressive open** (issue #126, ADR 0017): a large file shows its first part at once;
+//!   the whole document replaces it in place when parsed (`app/progressive.rs`). Until then
+//!   the document is *partial*: saves wait, nothing writes the part alone.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,7 +33,7 @@ use egui::{Context, RichText, ThemePreference};
 use markise_engine::Wake;
 use markise_engine::editor::SaveSnapshot;
 use markise_engine::jobs::{Hooks, SaveText, Saved, spawn_save};
-use markise_engine::load::{Loaded, Loader, StageHook};
+use markise_engine::load::{Loaded, Loader, Outcome, StageHook};
 use markise_engine::save::{DiskVersion, Expect, SaveError};
 use markise_engine::settings::Appearance;
 use markise_engine::tree::{MARKDOWN_EXTENSIONS, TEXT_EXTENSIONS, is_markdown};
@@ -50,10 +53,17 @@ use crate::viewer::DocViewer;
 
 mod attach;
 mod files;
+mod find;
+mod help;
+mod insert_table;
 mod menus;
 mod prefs;
+mod progressive;
+mod quick_open;
 mod review;
+mod updates;
 mod vault;
+mod workflow;
 pub use menus::MenuHost;
 pub use vault::{Completion, NavHistory, Suggestion};
 
@@ -94,6 +104,9 @@ pub struct AppOptions {
     pub hooks: Hooks,
     /// Loader stage hook (tests).
     pub load_hook: Option<StageHook>,
+    /// Progressive open of large files (issue #126; `None`: off). Default: on with the
+    /// default sizes unless `MARKISE_PROGRESSIVE_OPEN=0`.
+    pub progressive: Option<markise_engine::load::ProgressiveOpts>,
     /// Settings file, user themes (`ConfigDir::None` in tests: nothing is read or written in
     /// the user's config folder).
     pub config: ConfigDir,
@@ -113,6 +126,18 @@ pub struct AppOptions {
     /// Files copied in a file manager, read on paste ([`crate::clipboard`]). Default: none;
     /// the desktop app passes the system clipboard's file list, tests a scripted one.
     pub clipboard_files: Arc<dyn crate::clipboard::ClipboardFiles>,
+    /// Open the welcome tutorial at the first launch ([`crate::tutorial`]; the settings flag
+    /// `tutorialShown` records it). The desktop app sets it; tests opt in.
+    pub welcome: bool,
+    /// Update checks (issue #70): the desktop app passes its HTTP client; the default (tests,
+    /// tools) is [`crate::updates::UpdateSource::Off`]: nothing ever contacts the network.
+    pub updates: crate::updates::UpdateSource,
+    /// Watch the open document, its folder and the user theme folder for changes on disk
+    /// (default: on). Tests that do not exercise watching turn it off: on macOS every watcher
+    /// is an FSEvents registration, and those are serialized system-wide, so a suite opening
+    /// one per test slows down and flakes under load (issue #151). Off, changes on disk are
+    /// not noticed until the file is opened again.
+    pub watch: bool,
 }
 
 impl Default for AppOptions {
@@ -125,6 +150,7 @@ impl Default for AppOptions {
             system_fonts: false,
             hooks: Hooks::default(),
             load_hook: None,
+            progressive: markise_engine::load::ProgressiveOpts::from_env(),
             config: ConfigDir::None,
             parse: ParseOptions::default(),
             highlight_code: true,
@@ -132,6 +158,9 @@ impl Default for AppOptions {
             commit: None,
             confirm: Arc::new(crate::confirm::InApp),
             clipboard_files: Arc::new(crate::clipboard::NoFiles),
+            welcome: false,
+            updates: Default::default(),
+            watch: true,
         }
     }
 }
@@ -205,16 +234,29 @@ struct DocState {
     saved_fp: Option<TextFp>,
     /// Content identity of the current text, cached per session revision counter.
     fp_cache: std::cell::Cell<Option<(u64, TextFp)>>,
+    /// Progressive open (issue #126): the session holds only the first part of the file
+    /// (the rest is loading, or failed to load). Never saved, backed up or exported as is.
+    partial: bool,
 }
 
-/// Content identity of a document text: length and hash.
-type TextFp = (usize, u64);
+/// Content identity of a document text: length and hash — the same identity the load and
+/// save workers compute for the bytes they read or write ([`DiskVersion::text_identity`]), so
+/// a loaded or saved text never has to be hashed again on the UI thread (issue #29).
+type TextFp = markise_engine::save::TextIdentity;
 
 fn text_fp(text: &str) -> TextFp {
-    use std::hash::{Hash, Hasher};
-    let mut h = ahash::AHasher::default();
-    text.hash(&mut h);
-    (text.len(), h.finish())
+    markise_engine::save::text_identity(text)
+}
+
+/// The content identity of a loaded document's text, from what the loader read (a lossily
+/// decoded text differs from the bytes: hashed here; such files are rare and cannot be saved).
+fn loaded_fp(loaded: &Loaded) -> TextFp {
+    if loaded.lossy {
+        text_fp(loaded.doc.text())
+    } else {
+        debug_assert_eq!(loaded.version.text_identity(), text_fp(loaded.doc.text()));
+        loaded.version.text_identity()
+    }
 }
 
 impl DocState {
@@ -238,7 +280,15 @@ impl DocState {
     /// state now, so there is nothing to fold.
     fn sync(&mut self) {}
 
+    /// Unsaved changes: the text differs from the saved one, or a comment draft is open in a
+    /// card (issue #87; it counts for every workflow that asks before discarding: close,
+    /// New, Open, reload, recovery backups — Codex review of #158).
     fn dirty(&self) -> bool {
+        self.viewer.has_card_draft() || self.dirty_text()
+    }
+
+    /// The session's text differs from the saved text (a card draft not counted).
+    fn dirty_text(&self) -> bool {
         let s = &self.viewer.ed.session;
         if !s.is_dirty() {
             // the saved state itself (StateId, ADR 0006 §4.3)
@@ -310,6 +360,8 @@ enum Then {
     Install(Box<Loaded>),
     /// File → New: replace the document with an untitled one.
     New,
+    /// Help → Tutorial: replace the document with the tutorial's scratch copy.
+    Tutorial,
 }
 
 struct SaveRequest {
@@ -322,8 +374,6 @@ struct SaveRequest {
 
 struct Saving {
     doc_id: u64,
-    /// Content identity of the text being saved.
-    fp: TextFp,
     rx: Receiver<Saved>,
     then: Then,
     /// The session state the save writes (marked saved on success).
@@ -347,7 +397,9 @@ enum Ask {
     /// Create the note `rel` (vault path) for an unresolved link (spec 06 V2.8).
     CreateNote { rel: String },
     /// Save Copy Without Comments: accept or reject the pending suggestions in the copy?
-    CleanCopy { suggestions: usize },
+    /// `doc` / `counter`: the document and revision it was asked for (a copy is written only
+    /// of that state; the question goes when the document is replaced).
+    CleanCopy { suggestions: usize, doc: u64, counter: u64 },
     /// Preferences → Reset to Defaults for this section.
     ResetPrefs(crate::prefs::Section),
 }
@@ -407,6 +459,15 @@ pub struct MarkiseApp {
     next_doc_id: u64,
     loader: Option<Loader>,
     load: Option<LoadInfo>,
+    /// Progressive open settings (issue #126; `None`: off).
+    progressive_opts: Option<markise_engine::load::ProgressiveOpts>,
+    /// The progressive open of the document shown, waiting for its whole document
+    /// ([`progressive`]).
+    progressive: Option<progressive::Progressive>,
+    /// A progressive open whose first part was not shown (the current document had unsaved
+    /// edits): its whole document goes through the usual question; the current document's
+    /// own continuation (`progressive`) stays until it is replaced.
+    progressive_waiting: Option<progressive::Progressive>,
     /// A watcher event arrived while a load / save was running: check again afterwards.
     reload_pending: bool,
     saving: Option<Saving>,
@@ -425,6 +486,9 @@ pub struct MarkiseApp {
     sidebar_visible: bool,
     /// Formatting toolbar state (spec 04 §3.2; shown per the `showToolbar` setting).
     toolbar: crate::toolbar::Toolbar,
+    find: find::FindState,
+    workflow: workflow::Workflow,
+    quick: quick_open::QuickOpen,
     tab: Tab,
     /// Recent files of the session and the sidebar's collapsed sections.
     side: crate::sidebar::SideState,
@@ -434,6 +498,11 @@ pub struct MarkiseApp {
     theme_report: bool,
     /// The "Font & size" window is open.
     font_window: bool,
+    /// The Insert Table dialog is open, with its size (issue #164).
+    insert_table: Option<insert_table::InsertTable>,
+    /// A command the document view handed over this frame (its shortcut or context menu item
+    /// opens a dialog first), run like its menu item after the view.
+    pending_command: Option<&'static str>,
     /// The Preferences window (issue #50).
     prefs: crate::prefs::PrefsState,
     /// Colours of the Preferences theme cards (refreshed while the window is open).
@@ -505,11 +574,20 @@ pub struct MarkiseApp {
     attach: attach::AttachState,
     /// How long the first frame waits for the selected theme ([`FIRST_THEME_WAIT`]; tests).
     first_theme_wait: Duration,
+    /// [`AppOptions::watch`]: create the document/folder watcher on the first frame.
+    watch: bool,
+    /// First launch: open the tutorial once the settings are read ([`AppOptions::welcome`]).
+    welcome_pending: bool,
+    /// Help → Keyboard Shortcuts.
+    cheat_sheet: crate::shortcuts::CheatSheet,
+    /// Update check: the launch check, Check for Updates…, the notice (issue #70).
+    updates: crate::updates::UpdateState,
 }
 
 impl MarkiseApp {
     pub fn new(mut opts: AppOptions) -> Self {
-        let themes = ThemeManager::new(opts.config, opts.system_fonts);
+        let mut themes = ThemeManager::new(opts.config, opts.system_fonts);
+        themes.set_watch(opts.watch);
         let diagrams = themes.diagrams();
         let vault = vault::VaultState::new(opts.parse.wikilinks);
         opts.parse.wikilinks &= themes.wikilinks();
@@ -525,11 +603,15 @@ impl MarkiseApp {
             ctx: None,
             wake: None,
             hooks: opts.hooks,
+            watch: opts.watch,
             load_hook: opts.load_hook,
             doc: None,
             next_doc_id: 1,
             loader: None,
             load: None,
+            progressive_opts: opts.progressive,
+            progressive: None,
+            progressive_waiting: None,
             reload_pending: false,
             saving: None,
             queued_save: None,
@@ -542,12 +624,17 @@ impl MarkiseApp {
             source_input_ms: Vec::new(),
             sidebar_visible: true,
             toolbar: Default::default(),
+            find: Default::default(),
+            workflow: Default::default(),
+            quick: Default::default(),
             tab: Tab::Outline,
             side: Default::default(),
             tree: None,
             themes,
             theme_report: false,
             font_window: false,
+            insert_table: None,
+            pending_command: None,
             prefs: Default::default(),
             swatches: Vec::new(),
             installed: None,
@@ -596,6 +683,9 @@ impl MarkiseApp {
             review,
             attach: attach::AttachState::new(opts.clipboard_files),
             first_theme_wait: FIRST_THEME_WAIT,
+            welcome_pending: opts.welcome,
+            cheat_sheet: Default::default(),
+            updates: crate::updates::UpdateState::new(opts.updates),
         }
     }
 
@@ -625,13 +715,15 @@ impl MarkiseApp {
         self.doc.as_ref().map(|d| d.viewer.ed.session.text())
     }
 
+    /// A load is running (also while a progressively opened document waits for the rest of
+    /// its file).
     pub fn is_loading(&self) -> bool {
-        self.load.is_some()
+        self.load.is_some() || self.progressive.is_some() || self.progressive_waiting.is_some()
     }
 
     /// A load or save job is running.
     pub fn is_busy(&self) -> bool {
-        self.saving.is_some() || self.load.is_some()
+        self.saving.is_some() || self.is_loading()
     }
 
     /// A save job is running.
@@ -819,6 +911,15 @@ impl MarkiseApp {
         Some(doc.and(themes))
     }
 
+    /// Test hook (issue #147): file-system events the app's watchers (open document and
+    /// folder, theme folder) passed on so far. Such an event can arrive at any time — the file
+    /// system reports with a delay, on macOS even changes made just before a watch started —
+    /// so no "settled" state excludes it; quiet checks compare this count before and after.
+    #[doc(hidden)]
+    pub fn watch_fs_events(&self) -> u64 {
+        self.watcher.as_ref().map_or(0, FileWatcher::fs_events) + self.themes.watch_fs_events()
+    }
+
     /// Test hook ("background settled", issue #42): no background job is outstanding — no
     /// load or save, the theme worker, vault scanner, file tree lister, image decoders and
     /// the highlight / diagram / math workers have nothing queued or unapplied, and every
@@ -843,6 +944,7 @@ impl MarkiseApp {
             && !self.highlighter.as_ref().is_some_and(|h| h.busy())
             && !self.diagram_renderer.as_ref().is_some_and(|d| d.busy())
             && !self.export.is_running()
+            && self.updates.running.is_none()
             && self.word_count.as_ref().is_none_or(|(_, w)| w.settled())
             && self.doc.as_ref().is_none_or(|d| d.viewer.comments_settled())
             // every published result's wake-up has returned (a result can be taken before
@@ -958,6 +1060,7 @@ impl MarkiseApp {
             if let Some(w) = self.watcher.as_mut() {
                 w.watch_folder(&path);
             }
+            self.remember_path(&path);
             self.tree = Some(FileTree::new(path));
             self.tab = Tab::Files;
             self.sidebar_visible = true;
@@ -989,6 +1092,7 @@ impl MarkiseApp {
 
     fn open_now(&mut self, path: PathBuf, reason: LoadReason) {
         if self.tree.is_none()
+            && !self.workflow.drafts.contains(&path)
             && let Some(parent) = path.parent()
         {
             // Mount the file's folder (lazy listing, decision M1-1).
@@ -1006,7 +1110,7 @@ impl MarkiseApp {
             return;
         };
         if self.loader.is_none() {
-            match Loader::new(self.parse.clone(), wake, self.load_hook.clone()) {
+            match Loader::with_progressive(self.parse.clone(), wake, self.load_hook.clone(), self.progressive_opts) {
                 Ok(l) => self.loader = Some(l),
                 Err(e) => {
                     self.banner = Some(Banner::Error(e));
@@ -1021,8 +1125,27 @@ impl MarkiseApp {
             self.timing
                 .log(&format!("open-start path={} bytes={size}", path.display()));
         }
-        // the single loader worker cancels whatever it was doing for an older request
-        let generation = self.loader.as_ref().expect("loader").request(path.clone());
+        // a watcher event only needs a full load when the content differs from what the
+        // document was loaded from or last saved as: the loader compares right after reading
+        // (our own save's event then costs one read, not a second parsed document; issue #29)
+        let known = match reason {
+            LoadReason::Reload => self
+                .doc
+                .as_ref()
+                .filter(|d| d.file() == Some(path.as_path()))
+                .and_then(|d| d.disk),
+            _ => None,
+        };
+        // the single loader worker cancels whatever it was doing for an older request (and a
+        // newer request supersedes an open waiting to be shown)
+        self.progressive_waiting = None;
+        let loader = self.loader.as_ref().expect("loader");
+        let generation = match (known, reason) {
+            (Some(v), _) => loader.request_unless(path.clone(), v),
+            // opens may show the first part of a large file first (issue #126)
+            (None, LoadReason::Open | LoadReason::OpenDiscarding) => loader.request_open(path.clone()),
+            (None, _) => loader.request(path.clone()),
+        };
         self.load = Some(LoadInfo {
             path,
             started: Instant::now(),
@@ -1049,18 +1172,18 @@ impl MarkiseApp {
                 }
                 self.banner = Some(Banner::Error(e));
             }
-            Ok(loaded) => {
-                let t = loaded.timings;
+            Ok(Outcome::Unchanged { path, version, read }) => {
                 self.timing.log(&format!(
-                    "loaded path={} bytes={} items={} read={:.1}ms parse={:.1}ms model={:.1}ms wall={:.1}ms",
-                    loaded.path.display(),
-                    loaded.bytes,
-                    loaded.model.items.len(),
-                    t.read.as_secs_f64() * 1e3,
-                    t.parse.as_secs_f64() * 1e3,
-                    t.model.as_secs_f64() * 1e3,
+                    "reload-unchanged path={} read={:.1}ms wall={:.1}ms",
+                    path.display(),
+                    read.as_secs_f64() * 1e3,
                     l.started.elapsed().as_secs_f64() * 1e3
                 ));
+                self.disk_unchanged(&path, version);
+            }
+            Ok(Outcome::Partial(part)) => self.partial_arrived(*part, l.reason, l.started),
+            Ok(Outcome::Loaded(loaded)) => {
+                self.log_loaded(&loaded, l.started);
                 match l.reason {
                     LoadReason::Open => {
                         if self.is_dirty() {
@@ -1079,6 +1202,20 @@ impl MarkiseApp {
         if std::mem::take(&mut self.reload_pending) {
             self.request_reload();
         }
+    }
+
+    fn log_loaded(&self, loaded: &Loaded, started: Instant) {
+        let t = loaded.timings;
+        self.timing.log(&format!(
+            "loaded path={} bytes={} items={} read={:.1}ms parse={:.1}ms model={:.1}ms wall={:.1}ms",
+            loaded.path.display(),
+            loaded.bytes,
+            loaded.model.items.len(),
+            t.read.as_secs_f64() * 1e3,
+            t.parse.as_secs_f64() * 1e3,
+            t.model.as_secs_f64() * 1e3,
+            started.elapsed().as_secs_f64() * 1e3
+        ));
     }
 
     /// The highlight source views use: the highlighter when highlighting is on.
@@ -1249,10 +1386,38 @@ impl MarkiseApp {
         self.install_doc(loaded, false);
     }
 
+    /// Installs the first part of a progressively opened file (issue #126): `loaded.doc` is
+    /// the part, its version and decoding describe the whole file.
+    fn install_partial(&mut self, loaded: Loaded) {
+        self.install_doc_as(loaded, false, true);
+    }
+
     /// Replaces the document; `untitled`: a new document without a file (`loaded.path` is
     /// its placeholder, not watched).
     fn install_doc(&mut self, loaded: Loaded, untitled: bool) {
+        self.install_doc_as(loaded, untitled, false);
+    }
+
+    fn install_doc_as(&mut self, loaded: Loaded, untitled: bool, partial: bool) {
+        // a progressive open still loading belongs to the document being replaced (and one
+        // waiting to be shown is superseded by this install)
+        self.progressive = None;
+        self.progressive_waiting = None;
+        // a question about the replaced document's content goes with it
+        if matches!(self.ask, Some(Ask::CleanCopy { .. })) {
+            self.ask = None;
+            self.question_id += 1;
+        }
+        let recovered = self.workflow.drafts.contains(&loaded.path);
+        self.forget_backup();
+        let untitled = untitled || recovered;
+        if recovered {
+            self.workflow.recovered = Some(loaded.path.clone());
+        }
         if !untitled {
+            self.remember_path(&loaded.path);
+        }
+        if !untitled && self.themes.file_settings().record_recent {
             self.side.opened(&loaded.path);
         }
         let same = !untitled
@@ -1281,8 +1446,14 @@ impl MarkiseApp {
         let format: Arc<dyn markise_doc::DocumentFormat> = Arc::new(MarkdownFormat {
             opts: self.parse.clone(),
         });
+        let saved_fp = if partial {
+            // the whole file's identity (a lossily decoded one is hashed when it is complete)
+            (!loaded.lossy).then(|| loaded.version.text_identity())
+        } else {
+            Some(loaded_fp(&loaded))
+        };
         let mut viewer = DocViewer::new(format, loaded.doc, loaded.model, &self.theme, Some(loaded.path.clone()));
-        let saved_fp = Some(text_fp(viewer.doc().text()));
+        viewer.partial = partial;
         viewer.set_font_generation(self.font_gen);
         self.document_changed(&mut viewer);
         let id = self.next_doc_id;
@@ -1300,7 +1471,14 @@ impl MarkiseApp {
             saved_rev: 0,
             saved_fp,
             fp_cache: std::cell::Cell::new(None),
+            partial,
         });
+        if recovered {
+            let d = self.doc.as_mut().unwrap();
+            d.path = std::env::temp_dir().join("Recovered.md");
+            d.saved_fp = None;
+            d.viewer.ed.session.clear_saved_state();
+        }
         self.nav_installed(untitled);
     }
 
@@ -1308,7 +1486,7 @@ impl MarkiseApp {
 
     /// Watcher event for the open file (spec 04 §11).
     fn request_reload(&mut self) {
-        if self.load.is_some() || self.saving.is_some() {
+        if self.is_loading() || self.saving.is_some() {
             self.reload_pending = true;
             return;
         }
@@ -1329,12 +1507,7 @@ impl MarkiseApp {
             w.acknowledge(&doc.path, Some(loaded.version));
         }
         if doc.disk.is_some_and(|d| d.same_content(&loaded.version)) {
-            // our own save, a touch without a content change, or the file is back after a
-            // deletion with the same content
-            if std::mem::take(&mut doc.deleted) && matches!(&self.banner, Some(Banner::Info(m)) if m == DELETED_NOTICE)
-            {
-                self.banner = None;
-            }
+            self.same_content_on_disk();
             return;
         }
         if self.saving.is_some() {
@@ -1353,6 +1526,35 @@ impl MarkiseApp {
         self.accept_reload(loaded);
     }
 
+    /// A reload check found `version` on disk with the content the document already has
+    /// ([`Outcome::Unchanged`]): nothing was parsed.
+    fn disk_unchanged(&mut self, path: &Path, version: DiskVersion) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        if doc.file() != Some(path) {
+            return;
+        }
+        // as for a full load: what the UI read is the watcher's new baseline
+        if let Some(w) = &self.watcher {
+            w.acknowledge(&doc.path, Some(version));
+        }
+        if doc.disk.is_some_and(|d| d.same_content(&version)) {
+            self.same_content_on_disk();
+        } else {
+            // the document's disk version changed while the check ran (a save finished): the
+            // check compared with an older version, so decide with a full load
+            self.request_reload();
+        }
+    }
+
+    /// The open file holds the document's disk version: our own save, a touch without a
+    /// content change, or the file is back after a deletion with the same content.
+    fn same_content_on_disk(&mut self) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        if std::mem::take(&mut doc.deleted) && matches!(&self.banner, Some(Banner::Info(m)) if m == DELETED_NOTICE) {
+            self.banner = None;
+        }
+    }
+
     /// Replaces the document's text with `loaded` (explicit decision, or a clean document).
     fn accept_reload(&mut self, loaded: Loaded) {
         let Some(doc) = self.doc.as_mut() else { return };
@@ -1366,6 +1568,7 @@ impl MarkiseApp {
         if in_session {
             doc.viewer.ed.session.end_source_session();
         }
+        let fp = loaded_fp(&loaded);
         let _ = doc.viewer.install(loaded.doc, loaded.model, "Reload from Disk", false);
         doc.viewer.ed.session.mark_current_saved();
         if in_session {
@@ -1384,7 +1587,7 @@ impl MarkiseApp {
         doc.lossy = loaded.lossy;
         doc.deleted = false;
         doc.saved_rev = doc.viewer.ed.session.revision().counter;
-        doc.saved_fp = Some(text_fp(doc.viewer.doc().text()));
+        doc.saved_fp = Some(fp);
         if matches!(self.banner, Some(Banner::Conflict(_) | Banner::SaveConflict { .. })) {
             self.banner = None;
         }
@@ -1455,6 +1658,30 @@ impl MarkiseApp {
     // ------------------------------------------------------------------ saving
 
     fn start_save(&mut self, req: SaveRequest) {
+        self.start_save_with(req, true);
+    }
+
+    /// `commit`: a comment being written in its card is saved into the document first
+    /// (issue #87); refused, nothing is saved and the draft stays. Autosave does not commit
+    /// (the user is still writing): it saves the document text as it is.
+    fn start_save_with(&mut self, req: SaveRequest, commit: bool) {
+        if commit && let Err(e) = self.commit_card_edit() {
+            self.queued_save = None;
+            self.banner = Some(Banner::Error(e));
+            return;
+        }
+        // progressive open (issue #126): the session holds only the first part of the file;
+        // the save runs once the whole document is in (status bar: "saving when done")
+        let req = match self.defer_save(req) {
+            Ok(()) => return,
+            Err(req) => req,
+        };
+        if self.is_partial() {
+            self.banner = Some(Banner::Error(
+                "Only the first part of the file could be loaded; saving is disabled.".into(),
+            ));
+            return;
+        }
         if self.saving.is_some() {
             // latest request wins, but a pending continuation is not forgotten
             let then = match (&req.then, self.queued_save.take()) {
@@ -1488,7 +1715,7 @@ impl MarkiseApp {
             self.banner = Some(Banner::Error("Saving is disabled for a lossily decoded file.".into()));
             return;
         }
-        if !doc.dirty() && !doc.deleted && req.expect.is_none() && req.target.is_none() {
+        if !doc.dirty_text() && !doc.deleted && req.expect.is_none() && req.target.is_none() {
             // the file already holds exactly this text
             self.finish_then(req.then);
             return;
@@ -1498,22 +1725,53 @@ impl MarkiseApp {
             (Some(v), true) => Expect::VersionOrMissing(v),
             (None, _) => Expect::Missing,
         });
+        // the text's content identity comes back from the save worker with the written version
+        // (no whole-text hash on the UI thread; issue #29)
         let (text, rev, snap) = doc.snapshot();
-        let fp = match &text {
-            SaveText::Exact(t) => text_fp(t),
-            SaveText::Buffer { text, .. } => text_fp(text),
-        };
         let path = req.target.clone().unwrap_or_else(|| doc.path.clone());
         let rx = spawn_save(text, path.clone(), expect, rev, self.hooks.clone(), wake);
         self.saving = Some(Saving {
             doc_id: doc.id,
-            fp,
             rx,
             then: req.then,
             snap,
             target: req.target,
             path,
         });
+    }
+
+    /// Saves a comment being edited in its card (issue #87) before the document is saved,
+    /// closed or shown in another view mode, where the card is not drawn.
+    fn commit_card_edit(&mut self) -> Result<(), String> {
+        match self.doc.as_mut() {
+            Some(d) => d.viewer.commit_card_edit(),
+            None => Ok(()),
+        }
+    }
+
+    /// [`Self::commit_card_edit`] for operations that stop when it is refused: the reason is
+    /// shown in a banner; `false`: stop.
+    fn card_edit_saved(&mut self) -> bool {
+        match self.commit_card_edit() {
+            Ok(()) => true,
+            Err(e) => {
+                self.banner = Some(Banner::Error(e));
+                false
+            }
+        }
+    }
+
+    /// Autosave: the document's text as it is; a comment draft open in a card is not
+    /// committed (it is in the crash-recovery backup instead).
+    pub(super) fn autosave_now(&mut self) {
+        self.start_save_with(
+            SaveRequest {
+                expect: None,
+                target: None,
+                then: Then::Nothing,
+            },
+            false,
+        );
     }
 
     /// Saves the document (Cmd/Ctrl+S).
@@ -1569,7 +1827,8 @@ impl MarkiseApp {
                     doc.deleted = false;
                     if saved.rev >= doc.saved_rev {
                         doc.saved_rev = saved.rev;
-                        doc.saved_fp = Some(s.fp);
+                        // the written bytes are exactly the saved text
+                        doc.saved_fp = Some(out.version.text_identity());
                     }
                     if let Some(snap) = &s.snap {
                         doc.viewer.ed.session.mark_saved(snap);
@@ -1589,6 +1848,9 @@ impl MarkiseApp {
                         // watched from now on, with what was just written as the baseline
                         let written = self.doc.as_ref().and_then(|d| d.disk);
                         self.document_moved(&target, written);
+                    }
+                    if !self.is_dirty() {
+                        self.forget_backup();
                     }
                     self.finish_then(s.then);
                 }
@@ -1643,7 +1905,9 @@ impl MarkiseApp {
             Then::Open(path) => self.open_now(path, LoadReason::OpenDiscarding),
             Then::Install(loaded) => self.install(*loaded),
             Then::New => self.new_document_now(),
+            Then::Tutorial => self.open_tutorial_now(),
             Then::Close => {
+                self.forget_backup();
                 self.allow_close = true;
                 if let Some(c) = &self.ctx {
                     c.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1655,11 +1919,21 @@ impl MarkiseApp {
     /// The window is about to close; returns `true` if it may (no unsaved edits). Otherwise
     /// the Save / Discard / Cancel question is shown.
     pub fn request_close(&mut self) -> bool {
+        // (an open comment draft makes the document dirty: Save / Discard / Cancel is asked)
         if let Some(d) = &mut self.doc {
             d.sync();
         }
         if self.allow_close || !self.is_dirty() {
+            self.forget_backup();
             return true;
+        }
+        if self.themes.file_settings().save_on_close && self.saving.is_none() {
+            self.start_save(SaveRequest {
+                expect: None,
+                target: None,
+                then: Then::Close,
+            });
+            return false;
         }
         self.set_ask(Ask::Unsaved(Then::Close));
         false
@@ -1668,6 +1942,20 @@ impl MarkiseApp {
     /// Toggles source-code mode, mapping the viewport middle and the caret in both directions
     /// (spec 02 §12.1). Full Source mode keeps its own undo history (ADR 0006 §4.3).
     pub fn toggle_source(&mut self) {
+        // the clean review previews are read-only only in the rendered view (issue #88):
+        // cleared before the switch (opening the source pane materializes literal hints),
+        // set again after it when the rendered view is shown
+        if let Some(d) = self.doc.as_mut() {
+            d.viewer.ed.session.set_read_only(None);
+        }
+        self.toggle_source_now();
+        self.apply_review_read_only();
+    }
+
+    fn toggle_source_now(&mut self) {
+        if !self.card_edit_saved() {
+            return;
+        }
         if self.side_by_side {
             // ⌘/ from Side by Side → Source, full width (spec 04 §3.3)
             self.set_view_mode(ViewMode::Source);
@@ -1710,6 +1998,20 @@ impl MarkiseApp {
     /// ⌃⌘/ (spec 04 §3.3): Rendered or Source → Side by Side, remembering that mode; again →
     /// back to the remembered mode.
     pub fn toggle_side_by_side(&mut self) {
+        // the clean review previews are read-only only in the rendered view (issue #88):
+        // cleared before the switch (opening the source pane materializes literal hints),
+        // set again after it when the rendered view is shown
+        if let Some(d) = self.doc.as_mut() {
+            d.viewer.ed.session.set_read_only(None);
+        }
+        self.toggle_side_by_side_now();
+        self.apply_review_read_only();
+    }
+
+    fn toggle_side_by_side_now(&mut self) {
+        if !self.card_edit_saved() {
+            return;
+        }
         if self.side_by_side {
             let back = if self.sbs_return_source {
                 ViewMode::Source
@@ -1726,7 +2028,21 @@ impl MarkiseApp {
     /// Sets the view mode directly (View menu radio items); Rendered and Source become the
     /// mode ⌃⌘/ returns to.
     pub fn set_view_mode(&mut self, m: ViewMode) {
+        // the clean review previews are read-only only in the rendered view (issue #88):
+        // cleared before the switch (opening the source pane materializes literal hints),
+        // set again after it when the rendered view is shown
+        if let Some(d) = self.doc.as_mut() {
+            d.viewer.ed.session.set_read_only(None);
+        }
+        self.set_view_mode_now(m);
+        self.apply_review_read_only();
+    }
+
+    fn set_view_mode_now(&mut self, m: ViewMode) {
         if self.doc.is_none() {
+            return;
+        }
+        if !self.card_edit_saved() {
             return;
         }
         match m {
@@ -1947,6 +2263,13 @@ impl MarkiseApp {
                 }
             }
         }
+        if ctx.input(|i| i.viewport().visible() == Some(false)) {
+            // minimized or occluded (issue #132): nothing would be shown, and presenting can
+            // block (macOS withholds drawables). eframe runs no pass for a hidden window;
+            // should one run anyway, it does no work and asks for no repaint. Background
+            // results wait in their channels; un-occluding repaints and picks them up.
+            return;
+        }
         if self.ctx.is_none() {
             // chrome text (status bar, sidebar, toolbar, dialogs) is not selectable: no I-beam
             // over it (issue #36); text that is worth copying opts back in locally
@@ -1968,7 +2291,9 @@ impl MarkiseApp {
                 }
             }
             if let Some(w) = self.wake.clone() {
-                self.watcher = FileWatcher::with_hooks(w.clone(), self.hooks.clone()).ok();
+                if self.watch {
+                    self.watcher = FileWatcher::with_hooks(w.clone(), self.hooks.clone()).ok();
+                }
                 self.themes.start(w);
             }
             // first frame: wait briefly for the settings and the selected theme (no flash of
@@ -2018,16 +2343,22 @@ impl MarkiseApp {
             self.open(p);
         }
         self.poll_loading();
+        self.poll_progressive();
         self.poll_save();
         self.poll_watcher();
         self.poll_themes(ctx);
+        self.workflow_poll(ctx);
+        self.first_launch_tutorial();
+        self.launch_update_check();
+        self.poll_update_check();
         if self.export.poll() && self.export.is_asking_large() {
             self.opened_export_question();
         }
-        if self.images.poll(ctx)
-            && let Some(d) = &mut self.doc
-        {
-            d.viewer.ed.view.images_changed();
+        if self.images.poll(ctx) {
+            let changed = self.images.take_changed();
+            if let Some(d) = &mut self.doc {
+                d.viewer.ed.view.images_changed_for(&changed);
+            }
         }
         self.images.ensure_math(ctx);
         if self.images.poll_math()
@@ -2059,6 +2390,10 @@ impl MarkiseApp {
         // while a question is open nothing else runs: no application command (shortcut or
         // menu: see `menu_action_by`), and no widget has the keyboard focus, so typing does
         // not reach the document; the focus comes back after the answer
+        // the cheat sheet is modal for the keyboard: nothing underneath acts on its keys
+        if !self.is_asking() {
+            self.cheat_sheet.take_keys(ctx);
+        }
         if self.is_asking() {
             if let Some(id) = ctx.memory(|m| m.focused()) {
                 self.focus_before_question.get_or_insert((id, 0));
@@ -2089,7 +2424,9 @@ impl MarkiseApp {
             }
         }
 
+        self.find_update(ctx);
         self.menus_ui(ui);
+        self.find_ui(ui);
         self.status_bar(ui);
         if let Some(r) = self.files.rename.as_mut() {
             r.drawn = false;
@@ -2102,13 +2439,21 @@ impl MarkiseApp {
         self.rename_blur(ctx);
         self.complete_pre_input(ctx);
         self.attach_pre_input(ctx);
+        self.quick_window(ctx);
+        self.shortcuts_window(ctx);
         self.central(ui);
         self.complete_update();
         self.complete_ui(ctx);
         self.theme_report_window(ctx);
         self.font_window(ctx);
+        if let Some(id) = self.pending_command.take() {
+            self.menu_command(ctx, id, crate::menu::Trigger::Shortcut);
+        }
+        self.insert_table_window(ctx);
         self.preferences_window(ctx);
+        self.recovery_window(ctx);
         self.about.show(ctx, self.commit.as_deref());
+        self.update_card(ctx);
         self.dialogs(ctx);
         self.update_title(ctx);
         self.sync_native_menu();
@@ -2149,7 +2494,7 @@ impl MarkiseApp {
                 let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
                 Question::create_note(name, dir)
             }
-            Some(Ask::CleanCopy { suggestions }) => Question::clean_copy(*suggestions),
+            Some(Ask::CleanCopy { suggestions, .. }) => Question::clean_copy(*suggestions),
             Some(Ask::ResetPrefs(s)) => Question::reset_settings(s.label()),
             None => match self.export.pending_large() {
                 Some((_, est)) => Question::large_export(&est.human(), est.tocs),
@@ -2201,8 +2546,17 @@ impl MarkiseApp {
             }),
             (Choice::MoveToTrash, Some(Ask::Trash(p))) => self.move_to_trash(&p),
             (Choice::Create, Some(Ask::CreateNote { rel })) => self.create_note(rel),
-            (Choice::AcceptAll, Some(Ask::CleanCopy { .. })) => self.write_clean_copy(false),
-            (Choice::RejectAll, Some(Ask::CleanCopy { .. })) => self.write_clean_copy(true),
+            (Choice::AcceptAll | Choice::RejectAll, Some(Ask::CleanCopy { doc, counter, .. })) => {
+                // only of the state it was asked for (issue #126 review: never of another
+                // document, e.g. the first part of a file opened meanwhile)
+                if self
+                    .doc
+                    .as_ref()
+                    .is_some_and(|d| d.id == doc && d.viewer.ed.session.revision().counter == counter)
+                {
+                    self.write_clean_copy(c == Choice::RejectAll);
+                }
+            }
             (Choice::Reset, Some(Ask::ResetPrefs(s))) => self.reset_preferences(s),
             (_, Some(_)) => {} // Cancel (or a choice the question does not offer)
             (c, None) if self.export.is_asking_large() => {
@@ -2465,6 +2819,15 @@ impl MarkiseApp {
                         "Loading {}…",
                         l.path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
                     ));
+                } else if let Some(p) = self.progressive_waiting.as_ref().or(self.progressive.as_ref()) {
+                    // progressive open (issue #126): only here, never above the document
+                    ui.spinner();
+                    let name = p.path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+                    ui.label(match (p.shown.is_some(), p.save.is_some()) {
+                        (false, _) => format!("Loading {name}…"),
+                        (true, false) => "Loading the rest of the file…".to_string(),
+                        (true, true) => "Loading the rest of the file… (saving when done)".to_string(),
+                    });
                 }
                 if self.saving.is_some() {
                     ui.label("Saving…");
@@ -2493,24 +2856,58 @@ impl MarkiseApp {
                     ));
                 }
                 self.word_count_label(ui);
+                self.comment_view_switch(ui);
             });
         });
+    }
+
+    /// The status bar's review-view switch (issue #88): the current view, a click picks
+    /// another. Shown while a document is open and CriticMarkup is on.
+    fn comment_view_switch(&mut self, ui: &mut egui::Ui) {
+        use markise_engine::settings::CommentView;
+        if self.doc.is_none() || !self.critic_markup() {
+            return;
+        }
+        let cur = self.comment_view();
+        let label = match cur {
+            CommentView::Final | CommentView::Original => format!("{} · read-only", cur.label()),
+            _ => cur.label().to_string(),
+        };
+        let mut picked = None;
+        let r = ui.menu_button(egui::RichText::new(label).weak(), |ui| {
+            for v in CommentView::ALL {
+                if ui.radio(v == cur, v.label()).clicked() {
+                    picked = Some(v);
+                    ui.close();
+                }
+            }
+        });
+        r.response
+            .on_hover_text("How comments and suggestions are shown (View → Comments)");
+        if let Some(v) = picked {
+            self.set_comment_view(v);
+        }
     }
 
     /// The status bar's word count (issue #53): click cycles words / characters / characters
     /// without spaces.
     fn word_count_label(&mut self, ui: &mut egui::Ui) {
-        let Some(d) = self.doc.as_ref().filter(|_| self.themes.show_word_count()) else {
+        let show = self.themes.show_word_count();
+        let Some(d) = self.doc.as_mut().filter(|_| show) else {
             self.word_count = None;
             return;
         };
+        if d.partial {
+            // progressive open (issue #126): counted once the whole document is in (the rest
+            // loading is shown instead)
+            return;
+        }
         if self.word_count.as_ref().is_none_or(|(id, _)| *id != d.id) {
             self.word_count = Some((d.id, Default::default()));
         }
         let Some((_, wc)) = self.word_count.as_mut() else {
             return;
         };
-        let ed = &d.viewer.ed;
         if self.side_by_side {
             let ctx = ui.ctx();
             if d.source_ui.has_focus(ctx) {
@@ -2520,18 +2917,21 @@ impl MarkiseApp {
             }
         }
         let source_pane = self.source_visible || (self.side_by_side && self.word_count_source_pane);
+        let ed = &mut d.viewer.ed;
         let sel = match ed.source.as_ref() {
             Some(p) if source_pane => p.sel.primary().range(),
             _ => ed.session.selection().primary().range(),
         };
-        let shown = wc.update(
-            ui.ctx(),
-            ed.session.doc(),
-            d.viewer.model(),
-            ed.session.revision().counter,
-            sel,
-        );
+        let was_settled = wc.settled();
+        let shown = wc.update(ui.ctx(), &mut ed.session, sel);
         let mode = self.themes.count_mode();
+        if !was_settled && wc.settled() {
+            // MARKISE_TIMING: when a count arrives (issue #132 measurements)
+            self.timing.log(&format!(
+                "word count settled: {}",
+                crate::word_count::label(&shown, mode)
+            ));
+        }
         let r = ui
             .add(
                 egui::Label::new(egui::RichText::new(crate::word_count::label(&shown, mode)).weak())
@@ -2602,9 +3002,14 @@ impl MarkiseApp {
                             self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
                         }
                         if let Some(d) = &mut self.doc {
-                            let model = d.viewer.model().clone();
-                            let cur = model.current_heading(d.viewer.ed.view.anchor().0);
-                            if let Some(item) = outline(ui, &model.outline, cur, &look) {
+                            let clicked = {
+                                let model = d.viewer.model().clone();
+                                let cur = model.current_heading(d.viewer.ed.view.anchor().0);
+                                outline(ui, &model.outline, cur, &look, d.partial)
+                            };
+                            // a paged model materializes the heading's page first
+                            if let Some(item) = clicked.and_then(|k| d.viewer.ed.view.ensure_heading(k)) {
+                                let model = d.viewer.model().clone();
                                 d.viewer.ed.view.scroll_to_item(item);
                                 // Side by Side: the source pane follows the rendered pane
                                 self.sbs.sync_source = true;
@@ -2724,8 +3129,22 @@ impl MarkiseApp {
                             });
                             d.viewer.request_refocus();
                         }
+                        let gutter = d.viewer.comment_gutter();
                         let mut vui = ui.new_child(egui::UiBuilder::new().max_rect(vrect).id_salt("markise-live-doc"));
                         let out = d.viewer.show(&mut vui, &mut self.images, &t, self.parley.as_mut(), true);
+                        if let Some(n) = d.viewer.take_notice() {
+                            self.banner = Some(Banner::Info(n));
+                        }
+                        // a shortcut or context menu item of a command that asks first
+                        if let Some(id) = d.viewer.take_app_command() {
+                            self.pending_command = Some(id);
+                        }
+                        if d.viewer.comment_gutter() != gutter {
+                            // MARKISE_TIMING: when the comment gutter appears or goes (issue
+                            // #138 measurements)
+                            let on = if gutter { "hidden" } else { "shown" };
+                            self.timing.log(&format!("comment gutter {on}"));
+                        }
                         if out.edited {
                             d.sync();
                         }
@@ -3019,14 +3438,24 @@ fn source_middle_to_rendered(viewer: &mut DocViewer, vh: f32) {
     let text = viewer.ed.session.text();
     let line = pane.view.line_at_y(pane.view.scroll_y() + vh as f64 * 0.5);
     let off = pane.view.line_start(text, line.floor().max(0.0) as usize);
-    let model = viewer.model().clone();
-    if model.items.is_empty() {
-        return;
-    }
-    let mut item = model.item_at_offset(off);
-    while item + 1 < model.items.len() && matches!(model.items[item].kind, markise_layout::ItemKind::Hidden) {
-        item += 1;
-    }
+    // a paged model materializes the page of the line, and of the block it maps to past
+    // hidden source, first
+    let mut at = off;
+    let item = loop {
+        viewer.ed.view.ensure_offset(at);
+        let model = viewer.model();
+        if model.items.is_empty() {
+            return;
+        }
+        let mut item = model.item_at_offset(off);
+        while item + 1 < model.items.len() && matches!(model.items[item].kind, markise_layout::ItemKind::Hidden) {
+            item += 1;
+        }
+        if !model.is_page(item) || model.item_start(item) == at {
+            break item;
+        }
+        at = model.item_start(item);
+    };
     let rvh = viewer.surface_rect().map_or(vh, |r| r.height());
     let v = &mut viewer.ed.view;
     v.scroll_to_item(item);
@@ -3147,6 +3576,74 @@ pub fn rss_mb() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reload_check_after_our_own_save_reads_but_does_not_parse() {
+        // issue #29: the watcher event of our own save costs one read on the loader (no second
+        // parsed document); a later external change is still loaded. The watcher event itself
+        // is simulated (`request_reload`): file-system event delivery is not deterministic.
+        use markise_engine::load::Stage;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        std::fs::write(&path, "v0\n").unwrap();
+        let (reads, parses) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (r2, p2) = (reads.clone(), parses.clone());
+        let hook: StageHook = Arc::new(move |st, _| match st {
+            Stage::Read => drop(r2.fetch_add(1, Ordering::SeqCst)),
+            Stage::Parse => drop(p2.fetch_add(1, Ordering::SeqCst)),
+            Stage::Model => {}
+        });
+        let mut app = MarkiseApp::new(AppOptions {
+            load_hook: Some(hook),
+            ..Default::default()
+        });
+        app.wake = Some(Arc::new(|| {}));
+        app.install_doc(
+            markise_engine::load::load_file(&path, Default::default()).unwrap(),
+            false,
+        );
+        let wait = |app: &mut MarkiseApp| {
+            let start = Instant::now();
+            while app.saving.is_some() || app.load.is_some() {
+                assert!(start.elapsed() < Duration::from_secs(10), "background job hangs");
+                app.poll_save();
+                app.poll_loading();
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        app.doc.as_mut().unwrap().viewer.ed.session.insert_text("v1 ").unwrap();
+        assert!(app.is_dirty());
+        app.save();
+        wait(&mut app);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v1 v0\n");
+        assert!(!app.is_dirty());
+        let doc = app.doc.as_ref().unwrap();
+        // the identity the save worker returned is the one the UI computes for the text
+        assert_eq!(doc.saved_fp, Some(text_fp(doc.viewer.doc().text())));
+        let disk = doc.disk;
+        // the watcher's event for our own write
+        app.request_reload();
+        wait(&mut app);
+        assert_eq!((reads.load(Ordering::SeqCst), parses.load(Ordering::SeqCst)), (1, 0));
+        assert!(!app.is_dirty());
+        assert!(app.banner.is_none());
+        assert_eq!(app.doc.as_ref().unwrap().disk, disk);
+        // an external write right after our save, with the same length: loaded in full
+        std::fs::write(&path, "ext 1\n").unwrap();
+        app.request_reload();
+        wait(&mut app);
+        assert_eq!((reads.load(Ordering::SeqCst), parses.load(Ordering::SeqCst)), (2, 1));
+        assert_eq!(app.document_text().unwrap(), "ext 1\n");
+        assert!(!app.is_dirty());
+        let doc = app.doc.as_ref().unwrap();
+        assert_eq!(doc.saved_fp, Some(text_fp("ext 1\n")));
+        // editing back to the reloaded text reads clean (identity from the loader)
+        app.doc.as_mut().unwrap().viewer.ed.session.insert_text("x").unwrap();
+        assert!(app.is_dirty());
+        assert!(app.doc.as_mut().unwrap().viewer.ed.session.undo());
+        assert!(!app.is_dirty());
+    }
 
     #[test]
     fn links_only_open_web_schemes_without_asking() {

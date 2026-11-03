@@ -1,13 +1,16 @@
-//! Font setup: egui's bundled fonts plus, when present, system fonts for body text, bold and
-//! CJK fallback, and the font stacks of the active theme (`font-family` lists, spec 03 §2.1)
+//! Font setup: egui's bundled fonts plus, when present, system fonts for body text, bold, CJK
+//! and symbol fallback, the bundled keyboard-symbol face ([`markise_text::keys`], issue #131),
+//! and the font stacks of the active theme (`font-family` lists, spec 03 §2.1)
 //! resolved to installed system fonts by family name.
 //!
 //! Fonts in OS-protected folders are memory-mapped (only the pages used become resident — a
 //! 24 MB CJK collection costs almost nothing until CJK text appears); fonts in user-writable
 //! folders are read into owned, size-bounded snapshots (a mapped file truncated by another
 //! program would fault). Every face is validated with epaint's own parser (skrifa) before it
-//! is handed to epaint. Each file is loaded at most once per process. Nothing is bundled, so no font licenses enter the
-//! repository.
+//! is handed to epaint. Each file is loaded at most once per process. The only bundled face of
+//! our own is the 4 KB keyboard-symbol subset (OFL-1.1, `assets/fonts/keys/SOURCE.md`); it sits
+//! after the text fonts and before egui's emoji fonts in every chain, so ⌘ ⇧ ⌥ ⌃ ⎋ ↩ ⌫ … never
+//! render as boxes (body, headings, source view, menus and tooltips alike).
 //!
 //! Theme fonts: [`resolve`] looks the names of a theme's body / heading / monospace stacks up
 //! in an index of the installed fonts ([`SystemFonts`], built once by scanning the platform
@@ -27,45 +30,75 @@ use egui::{FontData, FontDefinitions, FontFamily};
 use markise_layout::block::{FontSet, RoleFaces, register_families};
 use markise_theme::{FontSource, Theme};
 
-/// Candidate system fonts: (body regular, bold, CJK fallbacks).
-fn candidates() -> (
-    &'static [&'static str],
-    &'static [&'static str],
-    &'static [&'static str],
-) {
+/// Candidate system font files of one platform.
+struct Candidates {
+    body: &'static [&'static str],
+    bold: &'static [&'static str],
+    cjk: &'static [&'static str],
+    /// A broad symbol font (arrows, technical and miscellaneous symbols), loaded with the CJK
+    /// fallback when a document needs glyphs the primary fonts lack.
+    symbols: &'static [&'static str],
+}
+
+/// Candidate system fonts of this platform.
+fn candidates() -> Candidates {
     if cfg!(target_os = "macos") {
-        (
-            &["/System/Library/Fonts/Supplemental/Arial.ttf"],
-            &["/System/Library/Fonts/Supplemental/Arial Bold.ttf"],
-            &[
+        Candidates {
+            body: &["/System/Library/Fonts/Supplemental/Arial.ttf"],
+            bold: &["/System/Library/Fonts/Supplemental/Arial Bold.ttf"],
+            cjk: &[
                 "/System/Library/Fonts/Hiragino Sans GB.ttc",
                 "/System/Library/Fonts/STHeiti Light.ttc",
             ],
-        )
+            symbols: &["/System/Library/Fonts/Apple Symbols.ttf"],
+        }
     } else if cfg!(target_os = "windows") {
-        (
-            &["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"],
-            &["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"],
-            &["C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simsun.ttc"],
-        )
+        Candidates {
+            body: &["C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"],
+            bold: &["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"],
+            cjk: &["C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simsun.ttc"],
+            symbols: &["C:\\Windows\\Fonts\\seguisym.ttf"],
+        }
     } else {
-        (
-            &[
+        Candidates {
+            body: &[
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                 "/usr/share/fonts/dejavu/DejaVuSans.ttf",
                 "/usr/share/fonts/TTF/DejaVuSans.ttf",
             ],
-            &[
+            bold: &[
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
                 "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
                 "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
             ],
-            &[
+            cjk: &[
                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
                 "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
             ],
-        )
+            symbols: &[
+                "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+                "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+                "/usr/share/fonts/google-noto/NotoSansSymbols2-Regular.ttf",
+            ],
+        }
     }
+}
+
+/// Font-data name of the bundled keyboard-symbol face ([`markise_text::keys`]).
+pub const KEYS_FONT: &str = "markise-keys";
+
+/// Inserts `name` into `list` in front of egui's last-resort fallbacks (icons, emoji): after
+/// the fonts that cover the text, before the emoji fonts (which have their own, emoji-style
+/// glyphs for some of the same code points, e.g. ↩).
+fn insert_before_emoji(list: &mut Vec<String>, name: &str) {
+    if list.iter().any(|n| n == name) {
+        return;
+    }
+    let at = list
+        .iter()
+        .position(|n| matches!(n.as_str(), "egui-icons" | "NotoEmoji-Regular" | "emoji-icon-font"))
+        .unwrap_or(list.len());
+    list.insert(at, name.to_owned());
 }
 
 /// Largest font file read.
@@ -295,23 +328,31 @@ fn first(paths: &[&str], name: &str) -> Option<(String, Arc<FontData>)> {
         .map(|d| (name.to_string(), d))
 }
 
-/// The system default faces (body regular/bold, CJK fallback); loaded on the theme worker.
+/// The system default faces (body regular/bold, CJK and symbol fallback); loaded on the theme
+/// worker.
 #[derive(Clone, Default)]
 pub struct DefaultFaces {
     pub body: Option<(String, Arc<FontData>)>,
     pub bold: Option<(String, Arc<FontData>)>,
     pub cjk: Option<(String, Arc<FontData>)>,
+    /// The platform's symbol font (Apple Symbols, Segoe UI Symbol, Noto Sans Symbols 2).
+    pub symbols: Option<(String, Arc<FontData>)>,
 }
 
-/// Loads the system default faces (file reads: call off the UI thread). The CJK fallback
-/// (tens of MB) is loaded only with `fallback` — when a document first needs a glyph the
-/// primary fonts lack (see `View::missing_glyphs`).
+/// Loads the system default faces (file reads: call off the UI thread). The CJK and symbol
+/// fallbacks (tens of MB) are loaded only with `fallback` — when a document first needs a glyph
+/// the primary fonts lack (see `View::missing_glyphs`).
 pub fn load_defaults(fallback: bool) -> DefaultFaces {
-    let (b, bo, c) = candidates();
+    let c = candidates();
     DefaultFaces {
-        body: first(b, "sys-body"),
-        bold: first(bo, "sys-bold"),
-        cjk: if fallback { first(c, "sys-cjk") } else { None },
+        body: first(c.body, "sys-body"),
+        bold: first(c.bold, "sys-bold"),
+        cjk: if fallback { first(c.cjk, "sys-cjk") } else { None },
+        symbols: if fallback {
+            first(c.symbols, "sys-symbols")
+        } else {
+            None
+        },
     }
 }
 
@@ -327,12 +368,22 @@ pub fn definitions(system: bool) -> FontDefinitions {
 }
 
 /// Font definitions from already loaded faces (no file access): the theme's resolved roles
-/// (`themed`, see [`resolve`]) in front of the defaults (system body font, CJK fallback, then
-/// egui's bundled fonts).
+/// (`themed`, see [`resolve`]) in front of the defaults (system body font, egui's text font, the
+/// bundled keyboard symbols, egui's emoji fonts, then the CJK and symbol fallbacks).
 pub fn definitions_with(defaults: &DefaultFaces, themed: &FontSet) -> FontDefinitions {
     let mut defs = FontDefinitions::default();
-    if let Some((name, data)) = &defaults.cjk {
-        // CJK fallback for every family (after the primary fonts)
+    // keyboard symbols for every family (UI text, menus and shortcut hints included)
+    defs.font_data.insert(
+        KEYS_FONT.into(),
+        Arc::new(FontData::from_static(markise_text::keys::FONT)),
+    );
+    for fam in [FontFamily::Proportional, FontFamily::Monospace] {
+        if let Some(list) = defs.families.get_mut(&fam) {
+            insert_before_emoji(list, KEYS_FONT);
+        }
+    }
+    // CJK and symbol fallbacks for every family (after the primary fonts)
+    for (name, data) in defaults.cjk.iter().chain(&defaults.symbols) {
         defs.font_data.insert(name.clone(), data.clone());
         for fam in [FontFamily::Proportional, FontFamily::Monospace] {
             if let Some(list) = defs.families.get_mut(&fam) {
@@ -346,6 +397,17 @@ pub fn definitions_with(defaults: &DefaultFaces, themed: &FontSet) -> FontDefini
             regular: defaults.body.clone().into_iter().collect(),
             bold: defaults.bold.clone().into_iter().collect(),
         };
+    }
+    // Keep system fallbacks even when a theme supplied a partial-coverage face. A regular
+    // fallback must not replace a bold role merely because it happens to cover the script.
+    for role in std::iter::once(&mut set.body).chain(set.heading.iter_mut()) {
+        for (list, face) in [(&mut role.regular, &defaults.body), (&mut role.bold, &defaults.bold)] {
+            if let Some(face) = face
+                && !list.iter().any(|(name, _)| name == &face.0)
+            {
+                list.push(face.clone());
+            }
+        }
     }
     register_families(&mut defs, &set);
     defs
@@ -552,6 +614,7 @@ pub struct FontRequest {
     pub mono: Vec<String>,
     pub sidebar: Vec<String>,
     pub locals: Vec<(String, String)>,
+    pub scripts: std::collections::BTreeMap<String, String>,
 }
 
 impl FontRequest {
@@ -572,11 +635,16 @@ impl FontRequest {
             mono: theme.fonts.mono.clone(),
             sidebar: theme.sidebar.fonts.clone(),
             locals,
+            scripts: Default::default(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.body.is_empty() && self.heading.is_empty() && self.mono.is_empty() && self.sidebar.is_empty()
+        self.body.is_empty()
+            && self.heading.is_empty()
+            && self.mono.is_empty()
+            && self.sidebar.is_empty()
+            && self.scripts.is_empty()
     }
 
     pub fn key(&self) -> u64 {
@@ -589,7 +657,7 @@ impl FontRequest {
 /// What [`resolve`] chose (shown in the theme report).
 #[derive(Clone, Default)]
 pub struct ResolvedFonts {
-    /// System default faces (body, bold, CJK fallback).
+    /// System default faces (body, bold, CJK and symbol fallback).
     pub defaults: DefaultFaces,
     pub set: FontSet,
     /// Per role: the installed families used, in fallback order.
@@ -729,8 +797,15 @@ pub fn resolve_with(req: &FontRequest, idx: &SystemFonts) -> ResolvedFonts {
     } else {
         resolve_role(&req.sidebar, req, idx, "sidebar", &mut out)
     };
+    let mut scripts = std::collections::BTreeMap::new();
+    for (script, name) in &req.scripts {
+        if let Some(faces) = resolve_role(std::slice::from_ref(name), req, idx, "script override", &mut out) {
+            scripts.insert(script.clone(), faces);
+        }
+    }
     // a heading stack with no installed font uses the body faces
     out.set = FontSet {
+        scripts,
         body: body.unwrap_or_default(),
         heading,
         mono: mono.unwrap_or_default(),
@@ -740,7 +815,7 @@ pub fn resolve_with(req: &FontRequest, idx: &SystemFonts) -> ResolvedFonts {
 }
 
 /// [`resolve_with`] against the global system index (blocking on the first call).
-/// Also loads the system default faces (with the CJK fallback when `fallback`). File reads:
+/// Also loads the system default faces (with the CJK and symbol fallbacks when `fallback`). File reads:
 /// call on the theme worker.
 pub fn resolve(req: &FontRequest, fallback: bool) -> ResolvedFonts {
     let mut r = if req.is_empty() {
@@ -882,6 +957,83 @@ mod tests {
         let x = load_into(&st, budget, &b, 0).unwrap();
         let y = load_into(&st, budget, &b, 0).unwrap();
         assert!(Arc::ptr_eq(&x, &y));
+    }
+
+    /// Characters of `text` without a glyph in `family` (whitespace and controls aside).
+    fn missing(fonts: &mut egui::epaint::text::Fonts, family: &FontFamily, text: &str) -> String {
+        let id = egui::FontId::new(14.0, family.clone());
+        let mut out: Vec<char> = text
+            .chars()
+            .filter(|c| !c.is_whitespace() && !c.is_control() && !fonts.has_glyph(&id, *c))
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out.into_iter().collect()
+    }
+
+    /// Issue #131: with only the bundled fonts (no system font installed — the worst case on
+    /// any platform), every character of the welcome tutorial and of the ⌘? cheat sheet (both
+    /// platforms; labels, chords, group titles) and every macOS menu shortcut hint has a glyph,
+    /// in the document's families (body, bold, headings, source view) and in egui's UI fonts.
+    #[test]
+    fn tutorial_cheat_sheet_and_menu_hints_have_no_missing_glyphs() {
+        use markise_engine::editor::command::Registry;
+        use markise_engine::editor::keymap::{Keymap, Platform, chord_label};
+        let mut text = crate::tutorial::TEXT.to_string();
+        let r = Registry::for_format(&markise_md::MarkdownFormat::default());
+        for p in [Platform::Mac, Platform::Other] {
+            let k = Keymap::new(&r, p);
+            for g in crate::shortcuts::cheat_sheet(&r, &k, p) {
+                text.push_str(g.title);
+                for row in g.rows {
+                    text.push_str(row.label);
+                    text.push_str(&row.chord);
+                }
+            }
+            for d in r.describe() {
+                if let Some(c) = k.shown_chord_of(d.id) {
+                    text.push_str(&chord_label(c, p));
+                }
+            }
+        }
+        text.extend(markise_text::keys::SYMBOLS);
+        let mut fonts = egui::epaint::text::Fonts::new(Default::default(), definitions(false));
+        let families = [
+            markise_layout::FAMILY_BODY,
+            markise_layout::FAMILY_BOLD,
+            markise_layout::FAMILY_HEADING,
+            markise_layout::FAMILY_HEADING_BOLD,
+            markise_layout::FAMILY_MONO,
+            markise_layout::FAMILY_MONO_BOLD,
+        ]
+        .map(|n| FontFamily::Name(n.into()));
+        for fam in families
+            .iter()
+            .chain(&[FontFamily::Proportional, FontFamily::Monospace])
+        {
+            assert_eq!(missing(&mut fonts, fam, &text), "", "{fam:?}");
+        }
+        // the symbols come from the bundled face, not from emoji fonts
+        let chars = fonts
+            .with_pixels_per_point(1.0)
+            .characters(&FontFamily::Proportional)
+            .clone();
+        for c in ['⇧', '⌥', '⌃', '⎋', '⌫', '⌦', '⇞', '⇟'] {
+            assert!(chars[&c].iter().any(|n| n == KEYS_FONT), "{c}: {:?}", chars[&c]);
+        }
+    }
+
+    #[test]
+    fn the_keys_face_precedes_the_emoji_fonts_and_follows_the_text_fonts() {
+        let defs = definitions(false);
+        for fam in [FontFamily::Proportional, FontFamily::Monospace] {
+            let list = &defs.families[&fam];
+            let keys = list.iter().position(|n| n == KEYS_FONT).unwrap();
+            let emoji = list.iter().position(|n| n == "NotoEmoji-Regular").unwrap();
+            assert!(keys > 0 && keys < emoji, "{fam:?}: {list:?}");
+        }
+        let body = &defs.families[&FontFamily::Name(markise_layout::FAMILY_BODY.into())];
+        assert!(body.iter().any(|n| n == KEYS_FONT), "{body:?}");
     }
 
     #[test]

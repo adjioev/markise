@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Windows application manifest (issue #40): binds the executable to version 6 of the
+     common controls, which provides TaskDialogIndirect (rfd's "common-controls-v6" alerts with
+     labelled buttons). Every Windows executable linking markise-ui-egui must embed it: without
+     it the TaskDialogIndirect import cannot be resolved and the program does not start.
+     Embedded by crates/markise-ui-egui/build.rs (its tests, examples and benches) and
+     apps/markise/build.rs (markise.exe). -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>

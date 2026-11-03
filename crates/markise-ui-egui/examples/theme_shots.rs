@@ -20,6 +20,24 @@ use markise_ui_egui::{AppOptions, Appearance, ConfigDir, MarkiseApp};
 mod raster;
 use raster::{Tex, apply_all, rasterize, save_png};
 
+/// Issue #92 mixed-script corpus (`MARKISE_SHOTS=scripts`).
+const SAMPLE_SCRIPTS: &str = r#"# React и работа с DOM
+
+Компонент React получает props и обновляет DOM после commit. Это обычный русский текст с English terms на одной строке.
+
+**Жирный React и жирный DOM** рядом с *курсивом React и русским текстом*.
+
+## Ελληνικά and English
+
+Η εφαρμογή React ενημερώνει το DOM. **Έντονο bold** και *πλάγιο italic*.
+
+## 中文 and English
+
+使用 React 更新 DOM，然后执行 commit。 **中文 bold React** 和 *中文 italic text*。
+
+`const имя = React.createElement("div");`
+"#;
+
 const SAMPLE: &str = r#"# Field Notes on Lighthouses
 
 A lighthouse is a tower that guides ships at night. This page exercises **strong text**,
@@ -257,11 +275,12 @@ fn main() {
     let work = std::env::temp_dir().join(format!("markise-theme-shots-{}", std::process::id()));
     let config = work.join("config");
     std::fs::create_dir_all(&config).unwrap();
+    let which = std::env::var("MARKISE_SHOTS").unwrap_or_default();
     let doc = match args.get(1) {
         Some(p) => PathBuf::from(p),
         None => {
             let p = work.join("lighthouses.md");
-            std::fs::write(&p, SAMPLE).unwrap();
+            std::fs::write(&p, if which == "scripts" { SAMPLE_SCRIPTS } else { SAMPLE }).unwrap();
             p
         }
     };
@@ -272,8 +291,7 @@ fn main() {
         (ThemeId::Builtin("phycat".into()), "phycat"),
     ];
     // MARKISE_SHOTS=palettes renders only the palette pack, MARKISE_SHOTS=css only the rest
-    let which = std::env::var("MARKISE_SHOTS").unwrap_or_default();
-    if which.is_empty() || which == "css" {
+    if which.is_empty() || which == "css" || which == "scripts" {
         for (id, name) in themes {
             for (a, suffix) in [(Appearance::Light, "light"), (Appearance::Dark, "dark")] {
                 shoot(

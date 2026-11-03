@@ -67,6 +67,9 @@ pub struct SourceParams {
     pub wrap: bool,
     /// Columns per tab stop.
     pub tab_width: u32,
+    /// Font size in points chosen in Preferences; `None` = the theme's
+    /// [`Theme::source_size`] (issue #130).
+    pub font_size: Option<f32>,
 }
 
 impl Default for SourceParams {
@@ -74,13 +77,23 @@ impl Default for SourceParams {
         SourceParams {
             wrap: true,
             tab_width: 4,
+            font_size: None,
         }
     }
 }
 
-/// Font size and line height of the source view for a theme (monospace).
-pub fn metrics(theme: &Theme) -> (f32, f32) {
-    let size = theme.mono_size().max(8.0);
+/// Smallest and largest source view font size (points).
+pub const FONT_SIZE_RANGE: (f32, f32) = (8.0, 40.0);
+
+/// Font size and line height of the source view (monospace): the preference when set, else
+/// the theme's source size (issue #130; not the rendered view's code size).
+pub fn metrics(theme: &Theme, params: &SourceParams) -> (f32, f32) {
+    let (lo, hi) = FONT_SIZE_RANGE;
+    let size = params
+        .font_size
+        .filter(|s| s.is_finite())
+        .unwrap_or_else(|| theme.source_size())
+        .clamp(lo, hi);
     (size, (size * 1.5).round())
 }
 
@@ -718,7 +731,7 @@ impl SourceView {
     /// Height estimate of item `i` before layout (wrapped rows from the unit lengths).
     fn estimate(&self, i: usize) -> f32 {
         let Some(it) = self.items.get(i) else { return 0.0 };
-        let (size, line_h) = metrics(&self.theme);
+        let (size, line_h) = metrics(&self.theme, &self.params);
         let cols = if self.params.wrap {
             (self.width / (size * 0.6)).max(10.0) as usize
         } else {
@@ -853,7 +866,7 @@ impl SourceView {
 
     fn line_style(&self, tok: SourceTok, code: Option<TokenKind>) -> TextStyle {
         let p = &self.palette;
-        let (size, line_h) = metrics(&self.theme);
+        let (size, line_h) = metrics(&self.theme, &self.params);
         let mut s = TextStyle::new(size, line_h, FontRole::Mono, p.text);
         match tok {
             SourceTok::Plain => {}
@@ -1018,67 +1031,92 @@ impl SourceView {
             if start >= r.end {
                 break;
             }
-            let it = &model.items[i];
-            if let (ItemKind::Code { lang }, Some(code)) = (&it.kind, it.code) {
-                let units: Vec<markise_doc::Span> = match &it.segment {
-                    Some(Segment::Lines { spans, .. }) => spans
-                        .iter()
-                        .map(|s| markise_doc::Span::new(start + s.start, start + s.end))
-                        .collect(),
-                    _ => ctx.doc.leaf(start).map(|l| l.lines).unwrap_or_default(),
-                };
-                let overlaps =
-                    units.first().is_some_and(|f| f.start < r.end) && units.last().is_some_and(|l| l.end >= r.start);
-                if overlaps && !lang.is_empty() {
-                    let range = item_range(it, &code);
-                    let q = CodeQuery {
-                        code,
-                        lang,
-                        range,
-                        doc: ctx.doc,
-                        start,
-                        item: i,
-                    };
-                    if ctx.highlights.ready(&q) {
-                        if let Some(runs) = ctx.highlights.runs(&q) {
-                            // content offsets → source: walk the item's units
-                            let mut cpos = code.offset;
-                            let mut spans = Vec::with_capacity(units.len());
-                            for (k, u) in units.iter().enumerate() {
-                                spans.push((cpos, u.start, u.len()));
-                                cpos += u.len();
-                                if units.get(k + 1).is_none_or(|nx| nx.start != u.end) {
-                                    cpos += 1;
-                                }
-                            }
-                            for run in runs {
-                                let (rs, re) = (run.start as usize, run.end as usize);
-                                let k0 = spans.partition_point(|s| s.0 + s.2 <= rs);
-                                for s in &spans[k0..] {
-                                    if s.0 >= re {
-                                        break;
-                                    }
-                                    let a = rs.max(s.0) - s.0;
-                                    let b = re.min(s.0 + s.2) - s.0;
-                                    if a < b && s.1 + b <= text.len() {
-                                        let abs = s.1 + a..s.1 + b;
-                                        if abs.end > r.start && abs.start < r.end {
-                                            out.push((abs, run.kind));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        ctx.highlights.want(&q);
-                        pending = true;
+            if model.is_page(i) {
+                // a page of a paged model that the rendered view has not materialized (Source
+                // mode does not draw it): its code items, flattened for the lookup
+                for (start, it) in model.page_items(&**ctx.doc, i) {
+                    if start >= r.end {
+                        break;
                     }
+                    Self::item_code_runs(ctx, text, &r, i, start, &it, &mut out, &mut pending);
                 }
+            } else {
+                Self::item_code_runs(ctx, text, &r, i, start, &model.items[i], &mut out, &mut pending);
             }
             i += 1;
         }
         out.sort_by_key(|c| c.0.start);
         (out, pending)
+    }
+
+    /// The highlight runs inside `r` of code item `it` (index `i`, absolute start `start`).
+    #[allow(clippy::too_many_arguments)]
+    fn item_code_runs(
+        ctx: &SourceCtx<'_>,
+        text: &str,
+        r: &Range<usize>,
+        i: usize,
+        start: usize,
+        it: &crate::model::Item,
+        out: &mut Vec<(Range<usize>, TokenKind)>,
+        pending: &mut bool,
+    ) {
+        if let (ItemKind::Code { lang }, Some(code)) = (&it.kind, it.code.as_deref().copied()) {
+            let units: Vec<markise_doc::Span> = match &it.segment {
+                Some(Segment::Lines { spans, .. }) => spans
+                    .iter()
+                    .map(|s| markise_doc::Span::new(start + s.start, start + s.end))
+                    .collect(),
+                _ => ctx.doc.leaf(start).map(|l| l.lines).unwrap_or_default(),
+            };
+            let overlaps =
+                units.first().is_some_and(|f| f.start < r.end) && units.last().is_some_and(|l| l.end >= r.start);
+            if overlaps && !lang.is_empty() {
+                let range = item_range(it, &code);
+                let q = CodeQuery {
+                    code,
+                    lang,
+                    range,
+                    doc: &**ctx.doc,
+                    start,
+                    item: i,
+                };
+                if ctx.highlights.ready(&q) {
+                    if let Some(runs) = ctx.highlights.runs(&q) {
+                        // content offsets → source: walk the item's units
+                        let mut cpos = code.offset;
+                        let mut spans = Vec::with_capacity(units.len());
+                        for (k, u) in units.iter().enumerate() {
+                            spans.push((cpos, u.start, u.len()));
+                            cpos += u.len();
+                            if units.get(k + 1).is_none_or(|nx| nx.start != u.end) {
+                                cpos += 1;
+                            }
+                        }
+                        for run in runs {
+                            let (rs, re) = (run.start as usize, run.end as usize);
+                            let k0 = spans.partition_point(|s| s.0 + s.2 <= rs);
+                            for s in &spans[k0..] {
+                                if s.0 >= re {
+                                    break;
+                                }
+                                let a = rs.max(s.0) - s.0;
+                                let b = re.min(s.0 + s.2) - s.0;
+                                if a < b && s.1 + b <= text.len() {
+                                    let abs = s.1 + a..s.1 + b;
+                                    if abs.end > r.start && abs.start < r.end {
+                                        out.push((abs, run.kind));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    ctx.highlights.want(&q);
+                    *pending = true;
+                }
+            }
+        }
     }
 
     /// The layout of item `i` (cached on the item, or computed now).
@@ -1091,7 +1129,7 @@ impl SourceView {
         let mut toks = Vec::new();
         ctx.doc.source_tokens(r.clone(), &mut toks);
         let (code, pending_code) = Self::code_runs(ctx, text, r.clone());
-        let (_, line_h) = metrics(&self.theme);
+        let (_, line_h) = metrics(&self.theme, &self.params);
         let units = self.items[i].units.clone();
         let mid = self.items[i].mid;
         let mut lines = Vec::with_capacity(units.len() + 1);
@@ -1283,7 +1321,7 @@ impl SourceView {
         let (i, l, k, lp) = self.locate(pos, ctx, shaper);
         let ln = &l.lines[k];
         let r = ln.text.caret_rect(lp);
-        let (_, line_h) = metrics(&self.theme);
+        let (_, line_h) = metrics(&self.theme, &self.params);
         let h = r.height().max(line_h * 0.8);
         let top = self.item_y(i) as f32 + ln.y + r.min.y;
         Rect::from_min_max(pos2(r.min.x, top), pos2(r.min.x, top + h))
@@ -1336,7 +1374,7 @@ impl SourceView {
         if range.is_empty() {
             return out;
         }
-        let (size, _) = metrics(&self.theme);
+        let (size, _) = metrics(&self.theme, &self.params);
         for v in visible {
             for ln in &v.layout.lines {
                 let s = v.start + ln.start as usize;
@@ -1830,6 +1868,43 @@ mod tests {
         assert_eq!(next_grapheme(&zwj, 1), 1 + fam.len());
         assert_eq!(snap_offset("a\r\nb", 2), 1, "not inside CRLF");
         assert_eq!(snap_offset("éb", 1), 0, "a char boundary");
+    }
+
+    /// Issue #130: the source view uses the theme's source size (not the code-block size) by
+    /// default and the Preferences size when set; changing it re-lays the lines out.
+    #[test]
+    fn font_size_defaults_to_the_theme_source_size_and_follows_the_preference() {
+        let t = Theme::light();
+        let auto = SourceParams::default();
+        assert_eq!(metrics(&t, &auto), (t.source_size(), (t.source_size() * 1.5).round()));
+        assert!(metrics(&t, &auto).0 < t.mono_size(), "smaller than the old mono size");
+        let big = SourceParams {
+            font_size: Some(20.0),
+            ..auto
+        };
+        assert_eq!(metrics(&t, &big), (20.0, 30.0));
+        let huge = SourceParams {
+            font_size: Some(500.0),
+            ..auto
+        };
+        assert_eq!(metrics(&t, &huge).0, FONT_SIZE_RANGE.1, "clamped");
+        let src = "# Title\n\nSome *text*.\n";
+        let a = doc(src);
+        let ctx = SourceCtx {
+            doc: &a,
+            model: None,
+            highlights: &NoHighlights,
+        };
+        let mut fonts = crate::testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        let mut v = SourceView::new(src, auto, &t, 600.0, 1.0);
+        v.frame(400.0, 0.0, &ctx, &mut f);
+        let h = |v: &SourceView| v.items[0].layout.clone().unwrap().lines[0].height;
+        assert_eq!(h(&v), metrics(&t, &auto).1);
+        v.set_params(big, 600.0, &t, 1.0, 0);
+        assert!(v.items[0].layout.is_none(), "a size change drops the layouts");
+        v.frame(400.0, 0.0, &ctx, &mut f);
+        assert_eq!(h(&v), 30.0);
     }
 
     #[test]

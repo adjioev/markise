@@ -33,12 +33,16 @@ macro_rules! doc {
 /// Every licence text the repository ships (NOTICE, the project licences, THIRD_PARTY and the
 /// licence files of vendored assets referenced from NOTICE); the test
 /// `licence_viewer_embeds_every_shipped_licence_file` fails when one is missing.
-pub const DOCUMENTS: [Document; 15] = [
+pub const DOCUMENTS: [Document; 16] = [
     doc!("Third-party notices (NOTICE)", "NOTICE"),
     doc!("Markise: MIT licence", "LICENSE-MIT"),
     doc!("Markise: Apache licence 2.0", "LICENSE-APACHE"),
     doc!("Syntax grammars (THIRD_PARTY)", "THIRD_PARTY/syntax-licenses.md"),
     doc!("KaTeX fonts: SIL Open Font License 1.1", "assets/fonts/katex/OFL.txt"),
+    doc!(
+        "Markise Keys (Inter subset): SIL Open Font License 1.1",
+        "assets/fonts/keys/OFL.txt"
+    ),
     doc!("Lucide icons: ISC licence", "assets/icons/lucide/LICENSE"),
     doc!("Drake theme: MIT licence", "assets/themes/drake/LICENSE"),
     doc!("Lapis theme: MIT licence", "assets/themes/lapis/LICENSE"),

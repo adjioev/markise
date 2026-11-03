@@ -25,39 +25,37 @@
 //! **Estimates (documented approximation).** A block whose source is larger than
 //! [`BIG_BLOCK`] (a pathological single paragraph, table or code block) is not parsed: its
 //! counts are estimated from its byte length (characters ≈ bytes, words ≈ bytes / 6;
-//! [`estimate`]) and marked with [`Counts::approx`], which the status bar shows as `~`. A
-//! selection whose fully selected middle spans more than [`EXACT_ITEMS`] items on both sides
-//! (it is neither small nor almost the whole document) is estimated from the document's
-//! counts in proportion to its bytes, also marked. Documents of normal-sized blocks are
-//! counted exactly.
+//! [`estimate`]) and marked with [`Counts::approx`], which the status bar shows as `~`.
+//! Documents and selections of normal-sized blocks are counted exactly, however large: a
+//! selection's fully selected middle is summed from cached totals of runs of blocks (issue
+//! #125; it was estimated beyond 4,096 blocks).
 //!
-//! **Incremental, bounded counting.** [`DocCounter`] keeps one [`Counts`] per *block* (a leaf
-//! block of the document; the view model may split a large block into several items, which
-//! share the block's count) and matches blocks to the view model by the items'
-//! offset-independent content hashes. [`DocCounter::reconcile`] compares the current model
-//! with the last one (common prefix and suffix of keys: integer compares, no text read) and
-//! forgets only the blocks in between; [`DocCounter::fill`] counts forgotten blocks reading the
-//! document's text in place, about a byte budget per call (each block is at most
-//! [`BIG_BLOCK`]). [`DocCounter::selection`] reads at most the two partly selected blocks.
+//! **Incremental, bounded counting.** [`DocCounter`] keeps one [`Counts`] per *top-level
+//! block* of the document (not per view-model item: a paged view model materializes items only
+//! near the viewport, issue #125). [`DocCounter::apply`] follows the document's edits from
+//! their summaries ([`EditSummary`]: the replaced top-level blocks are forgotten, the others
+//! shift; no text is read); [`DocCounter::fill`] counts forgotten blocks reading the
+//! document's text in place, about a byte budget per call, leaf block by leaf block (each
+//! leaf is at most [`BIG_BLOCK`]; a large container is counted over several calls).
+//! [`DocCounter::selection`] reads only the leaves of the two partly selected blocks that the
+//! selection touches.
 //!
-//! Reference definitions are a document-level input: when one is added, removed or changed,
-//! every block that may use a reference (its source has a `[`) is counted again.
+//! Reference definitions are a document-level input: when the format reports one added,
+//! removed or changed, every block that may use a reference (its source has a `[`) is
+//! counted again.
 
 use std::ops::{Add, AddAssign, Range, Sub, SubAssign};
 
-use markise_doc::{CriticKind, FormatDoc, InlineKind, InlineNode, InlineSource, RichInline, Span};
-use markise_layout::DocModel;
-use markise_layout::model::ItemKind;
+use markise_doc::{
+    CriticKind, EditSummary, FlatEvent, FormatDoc, InlineKind, InlineNode, InlineSource, LeafKind, RichInline, Span,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Blocks with a larger source are estimated, not parsed.
 pub const BIG_BLOCK: usize = 64 * 1024;
-/// Source bytes [`DocCounter::fill`] reads per call of the status bar (a frame), plus at most
-/// one block.
+/// Source bytes [`DocCounter::fill`] reads per step of the counting worker
+/// ([`crate::count_worker`]; an edit waits at most one step), plus at most one block.
 pub const FRAME_BYTES: usize = 32 * 1024;
-/// A selection's fully selected middle is summed exactly when it, or the rest of the
-/// document, spans at most this many items; otherwise it is estimated.
-pub const EXACT_ITEMS: usize = 4096;
 /// Average bytes per word of the estimate.
 const BYTES_PER_WORD: u64 = 6;
 
@@ -363,12 +361,20 @@ enum Kind {
     Nothing,
 }
 
-fn kind_of(k: &ItemKind) -> Kind {
-    match k {
-        ItemKind::Paragraph | ItemKind::Heading { .. } => Kind::Prose,
-        ItemKind::Code { .. } => Kind::Code,
-        ItemKind::Html => Kind::Html,
-        ItemKind::Table => Kind::Table,
+/// What a leaf block of `kind` contributes (as the view shows it: math and diagram fences are
+/// not text).
+fn leaf_kind(kind: &LeafKind) -> Kind {
+    match kind {
+        LeafKind::Paragraph | LeafKind::Heading { .. } => Kind::Prose,
+        LeafKind::CodeBlock { info } => {
+            let lang = info.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+            match lang.as_str() {
+                "math" | "mermaid" | "flow" | "sequence" => Kind::Nothing,
+                _ => Kind::Code,
+            }
+        }
+        LeafKind::RawBlock => Kind::Html,
+        LeafKind::Table { .. } => Kind::Table,
         _ => Kind::Nothing,
     }
 }
@@ -399,18 +405,15 @@ pub fn estimate(bytes: usize) -> Counts {
 }
 
 /// A counted block: its counts, whether it may use reference definitions, source bytes read.
+#[derive(Clone, Copy, Debug, Default)]
 struct Counted {
     counts: Counts,
     refs: bool,
     read: usize,
 }
 
-/// Counts the block whose first item is `first` (with `clip`, only the part inside it).
-/// Reads at most [`BIG_BLOCK`] bytes: a larger block is estimated from its span length
-/// without looking at its text or structure.
-fn count_block_at(doc: &dyn FormatDoc, model: &DocModel, first: usize, clip: Option<&Range<usize>>) -> Counted {
-    let span = model.item_span(first);
-    let kind = model.items.get(first).map_or(Kind::Nothing, |it| kind_of(&it.kind));
+/// Counts the leaf block `span` of `kind` (with `clip`, only the part inside it).
+fn count_leaf(doc: &dyn FormatDoc, span: Span, kind: Kind, clip: Option<&Range<usize>>) -> Counted {
     let none = Counted {
         counts: Counts::default(),
         refs: false,
@@ -506,92 +509,156 @@ fn count_block_at(doc: &dyn FormatDoc, model: &DocModel, first: usize, clip: Opt
     }
 }
 
-/// Item key: offset-independent content hash and length.
-pub type ItemKey = (u64, usize);
-
-fn item_key(it: &markise_layout::model::Item) -> ItemKey {
-    (it.content_hash, it.len)
-}
-
-/// Items `a` and `b` show the same block (segments of one large block).
-fn same_block(model: &DocModel, a: usize, b: usize) -> bool {
-    match (model.items.get(a), model.items.get(b)) {
-        (Some(x), Some(y)) => {
-            x.segment.is_some() && y.segment.is_some() && x.len == y.len && model.item_start(a) == model.item_start(b)
-        }
-        _ => false,
-    }
-}
-
-/// Items `first..end` of the block that item `i` belongs to.
-fn block_bounds(model: &DocModel, i: usize) -> (usize, usize) {
-    let n = model.items.len();
-    let mut f = i;
-    while f > 0 && same_block(model, f - 1, f) {
-        f -= 1;
-    }
-    let mut e = i + 1;
-    while e < n && same_block(model, e - 1, e) {
-        e += 1;
-    }
-    (f, e)
-}
-
-/// Counts of the block that item `i` of `model` (built for `doc`) belongs to.
-pub fn count_block(doc: &dyn FormatDoc, model: &DocModel, i: usize) -> Counts {
-    count_block_at(doc, model, block_bounds(model, i).0, None).counts
-}
-
 /// Counts of the whole document at once (tests and tools).
-pub fn count_document(doc: &dyn FormatDoc, model: &DocModel) -> Counts {
+pub fn count_document(doc: &dyn FormatDoc) -> Counts {
     let mut acc = Counts::default();
-    let mut i = 0;
-    while i < model.items.len() {
-        let (f, e) = block_bounds(model, i);
-        acc += count_block_at(doc, model, f, None).counts;
-        i = e;
+    for t in 0..doc.top_count() {
+        acc += count_top(doc, t, None, 0, usize::MAX).counted.counts;
     }
     acc
+}
+
+/// Counts of the source byte range `sel` of `doc`, read directly (no cache): every leaf
+/// block inside or partly inside it, clipped. Reads about `sel.len()` bytes plus the leaves
+/// that `sel` cuts, so the status bar uses it for small selections only; larger ones go
+/// through [`DocCounter::selection`] on the counting worker ([`crate::count_worker`]).
+pub fn count_range(doc: &dyn FormatDoc, sel: Range<usize>) -> Counts {
+    let n = doc.top_count();
+    if n == 0 || sel.is_empty() {
+        return Counts::default();
+    }
+    let top_at = |o: usize| doc.top_at(o).unwrap_or(0).min(n - 1);
+    let (a, b) = (top_at(sel.start), top_at(sel.end.saturating_sub(1).max(sel.start)));
+    let mut acc = Counts::default();
+    for t in a..=b {
+        acc += count_top(doc, t, Some(&sel), 0, usize::MAX).counted.counts;
+    }
+    acc
+}
+
+/// What [`count_top`] found.
+struct TopCount {
+    counted: Counted,
+    /// Where to resume (the start of the next leaf to count); `None`: the block is done.
+    next: Option<usize>,
+}
+
+/// Counts the leaf blocks of top-level block `t` that start at or after `from` (with `clip`,
+/// only the parts inside it), until about `budget` source bytes are read (at least one
+/// leaf; each leaf reads at most [`BIG_BLOCK`] bytes).
+fn count_top(doc: &dyn FormatDoc, t: usize, clip: Option<&Range<usize>>, from: usize, budget: usize) -> TopCount {
+    let mut leaves: Vec<(Kind, Span)> = Vec::new();
+    doc.flatten(t..t + 1, &mut |ev| {
+        if let FlatEvent::Leaf(l) = ev {
+            leaves.push((leaf_kind(&l.kind), l.abs_span()));
+        }
+    });
+    let mut out = TopCount {
+        counted: Counted::default(),
+        next: None,
+    };
+    for (kind, span) in leaves {
+        if span.start < from {
+            continue;
+        }
+        if out.counted.read > 0 && out.counted.read >= budget {
+            out.next = Some(span.start);
+            break;
+        }
+        if clip.is_some_and(|c| span.end < c.start || span.start > c.end) {
+            continue;
+        }
+        let c = count_leaf(doc, span, kind, clip);
+        out.counted.counts += c.counts;
+        out.counted.refs |= c.refs;
+        out.counted.read += c.read;
+    }
+    out
 }
 
 /// Statistics of a [`DocCounter`] (tests prove that typing does not recount everything and
 /// that every call stays within its byte budget).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CounterStats {
-    /// Blocks counted (the document's and selections' partly selected blocks).
+    /// Top-level blocks counted (the document's and selections' partly selected blocks).
     pub blocks_counted: u64,
     /// Source bytes read.
     pub bytes_read: u64,
     /// The most source bytes one [`DocCounter::fill`] or [`DocCounter::selection`] call read.
     pub max_call_bytes: u64,
-    /// [`DocCounter::reconcile`] calls that found a change.
+    /// Changes applied ([`DocCounter::apply`], [`DocCounter::reset`]).
     pub reconciles: u64,
 }
 
-/// Item flag: a reference definition.
-const DEF: u8 = 1;
-/// Item flag: its block may use a reference definition.
-const REFS: u8 = 2;
+/// A block's cached [`Counts`] (or none yet) in 16 bytes instead of 40 (issue #29, part 4).
+/// Counts that do not fit in 32 bits (only a block of ~4 GiB) are kept exactly, out of line in
+/// [`DocCounter::big`]; the slot then holds their index ([`Slot::BIG`] tag). Never capped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Slot([u32; 4]);
 
-/// Incremental document counts (see the module docs): one cached [`Counts`] per block, kept on
-/// the block's first view-model item (its other items hold zero), matched to the model by
-/// content hash.
+impl Slot {
+    const NONE: Slot = Slot([u32::MAX, 0, 0, 0]);
+    /// Tag in the first word: counts are in `DocCounter::big[self.0[1]]`.
+    const BIG: u32 = u32::MAX - 1;
+    /// Largest value stored inline.
+    const MAX_INLINE: u64 = u32::MAX as u64 - 2;
+
+    /// The inline slot of `c`, `None` when a value does not fit.
+    fn inline(c: Counts) -> Option<Slot> {
+        let f = |v: u64| (v <= Slot::MAX_INLINE).then_some(v as u32);
+        Some(Slot([f(c.words)?, f(c.chars)?, f(c.chars_no_spaces)?, f(c.approx)?]))
+    }
+
+    fn is_some(self) -> bool {
+        self != Slot::NONE
+    }
+}
+
+/// Progress of a selection counted in steps: the two end blocks (`a`, `b`), the end being
+/// counted (index into them), where in it to resume, the counts so far.
+#[derive(Debug)]
+struct SelPartial {
+    sel: Range<usize>,
+    a: usize,
+    b: usize,
+    end: usize,
+    from: usize,
+    acc: Counts,
+}
+
+/// Block flag: it may use a reference definition.
+const REFS: u8 = 1;
+
+/// Incremental document counts (see the module docs): one cached [`Counts`] per top-level
+/// block of the document, kept in step with the document's edits ([`DocCounter::apply`]).
 #[derive(Debug, Default)]
 pub struct DocCounter {
-    /// Key of each item of the last reconciled model.
-    keys: Vec<ItemKey>,
-    counts: Vec<Option<Counts>>,
+    counts: Vec<Slot>,
+    /// Out-of-line counts of [`Slot::BIG`] slots, and the free entries among them.
+    big: Vec<Counts>,
+    big_free: Vec<u32>,
     flags: Vec<u8>,
     /// Sum of the known counts.
     known: Counts,
-    /// Items not counted yet (a block's items are all counted or all not).
+    /// Blocks not counted yet.
     missing: usize,
-    /// Every item before it is counted.
+    /// Every block before it is counted.
     cursor: usize,
+    /// A block counted in part (a large container takes several calls): its index, the start
+    /// of its next leaf, the counts so far.
+    partial: Option<(usize, usize, Counted)>,
     /// The last selection's counts.
     sel: Option<(Range<usize>, Counts)>,
+    /// A selection counted in steps ([`DocCounter::selection_step`]) not finished yet.
+    sel_partial: Option<SelPartial>,
+    /// Totals of the blocks `k * SUM_BLOCKS ..` (`None`: not summed since a change): a
+    /// selection's fully selected middle is summed from them exactly (issue #125).
+    sums: Vec<Option<Counts>>,
     stats: CounterStats,
 }
+
+/// Top-level blocks per cached total ([`DocCounter::sums`]).
+const SUM_BLOCKS: usize = 1024;
 
 impl DocCounter {
     pub fn new() -> Self {
@@ -602,7 +669,7 @@ impl DocCounter {
         self.stats
     }
 
-    /// Items not counted yet.
+    /// Top-level blocks not counted yet.
     pub fn missing(&self) -> usize {
         self.missing
     }
@@ -612,85 +679,191 @@ impl DocCounter {
         (self.missing == 0).then_some(self.known)
     }
 
-    fn forget(&mut self, i: usize) {
-        if let Some(c) = self.counts[i].take() {
-            self.known -= c;
-            self.missing += 1;
+    /// Blocks the counter holds (the document's top-level blocks once in step with it).
+    pub fn len(&self) -> usize {
+        self.counts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+
+    /// A slot holding `c` (out of line when it does not fit inline).
+    fn store(&mut self, c: Counts) -> Slot {
+        if let Some(s) = Slot::inline(c) {
+            return s;
+        }
+        let k = match self.big_free.pop() {
+            Some(k) => {
+                self.big[k as usize] = c;
+                k
+            }
+            None => {
+                self.big.push(c);
+                (self.big.len() - 1) as u32
+            }
+        };
+        Slot([Slot::BIG, k, 0, 0])
+    }
+
+    /// The counts held by `s` (`None`: not counted).
+    fn load(&self, s: Slot) -> Option<Counts> {
+        match s.0[0] {
+            u32::MAX => None,
+            Slot::BIG => Some(self.big[s.0[1] as usize]),
+            _ => Some(Counts {
+                words: s.0[0] as u64,
+                chars: s.0[1] as u64,
+                chars_no_spaces: s.0[2] as u64,
+                approx: s.0[3] as u64,
+            }),
         }
     }
 
-    /// Call for every new revision of the document. Matches `model` against the model of the
-    /// last call: blocks whose items are all in the
-    /// common prefix and suffix (same content hash and length) keep their counts, the others
-    /// are forgotten (and, when a reference definition changed, every block that may use
-    /// one). Comparisons of two integers per unchanged item; no text is read.
-    pub fn reconcile(&mut self, model: &DocModel) {
-        // a new revision may move text between blocks without changing any block (blank
-        // lines): selection counts are by byte range, so they are always recomputed
+    /// `s` is no longer held anywhere: frees its out-of-line entry.
+    fn release(&mut self, s: Slot) {
+        if s.0[0] == Slot::BIG {
+            self.big_free.push(s.0[1]);
+        }
+    }
+
+    fn forget(&mut self, i: usize) {
+        self.dirty(i);
+        let s = std::mem::replace(&mut self.counts[i], Slot::NONE);
+        if let Some(c) = self.load(s) {
+            self.known -= c;
+            self.missing += 1;
+        }
+        self.release(s);
+        if self.partial.is_some_and(|p| p.0 == i) {
+            self.partial = None;
+        }
+        self.cursor = self.cursor.min(i);
+    }
+
+    /// Starts over for `doc`: every top-level block uncounted.
+    pub fn reset(&mut self, doc: &dyn FormatDoc) {
+        let n = doc.top_count();
+        *self = DocCounter {
+            counts: vec![Slot::NONE; n],
+            flags: vec![0; n],
+            missing: n,
+            stats: self.stats,
+            ..Default::default()
+        };
+        self.stats.reconciles += 1;
+    }
+
+    /// Applies an edit of the document (`e` describes the change from the state the counter
+    /// is in step with to the next one): the counts of the replaced top-level blocks are
+    /// forgotten, the new blocks are uncounted, the others shift; when a reference definition
+    /// may have changed, every block that may use one is forgotten too. No text is read;
+    /// edits are applied in the order they were made. `false` when `e` does not fit the
+    /// counter (the caller starts over with [`DocCounter::reset`]).
+    pub fn apply(&mut self, e: &EditSummary) -> bool {
+        // selection counts are by byte range: recomputed after any change
         self.sel = None;
-        let items = &model.items;
-        let n = items.len();
-        let old = self.keys.len();
-        let mut pre = 0;
-        for (it, k) in items.iter().zip(&self.keys) {
-            if item_key(it) != *k {
-                break;
-            }
-            pre += 1;
+        self.sel_partial = None;
+        if e.deps.all {
+            return false;
         }
-        if pre == n && pre == old {
-            return;
+        let r = e.replaced_top.clone();
+        if r.end > self.counts.len() || r.start != e.new_top.start {
+            return false;
         }
-        let mut suf = 0;
-        let max_suf = n.min(old) - pre;
-        for (it, k) in items.iter().rev().zip(self.keys.iter().rev()) {
-            if suf >= max_suf || item_key(it) != *k {
-                break;
-            }
-            suf += 1;
+        let fresh = e.new_top.len();
+        if r.is_empty() && fresh == 0 && e.deps.labels.is_empty() {
+            return true;
         }
         self.stats.reconciles += 1;
-        let mut defs = false;
-        for (c, f) in self.counts.drain(pre..old - suf).zip(self.flags.drain(pre..old - suf)) {
-            defs |= f & DEF != 0;
-            match c {
+        // a block counted in part: forgotten when replaced, moved along when after the edit
+        self.partial = match self.partial.take() {
+            Some((p, _, _)) if r.contains(&p) => None,
+            Some((p, from, c)) if p >= r.end => Some((p + fresh - r.len(), (from as isize + e.delta) as usize, c)),
+            other => other,
+        };
+        let gone: Vec<Slot> = self
+            .counts
+            .splice(r.clone(), std::iter::repeat_n(Slot::NONE, fresh))
+            .collect();
+        self.flags.splice(r.clone(), std::iter::repeat_n(0, fresh));
+        if fresh == r.len() {
+            for k in r.start / SUM_BLOCKS..r.end.div_ceil(SUM_BLOCKS) {
+                self.dirty(k * SUM_BLOCKS);
+            }
+        } else {
+            // the blocks after the splice moved: their totals start over
+            self.sums.truncate(r.start / SUM_BLOCKS);
+        }
+        for s in gone {
+            match self.load(s) {
                 Some(c) => self.known -= c,
                 None => self.missing -= 1,
             }
+            self.release(s);
         }
-        let fresh = n - suf - pre;
-        let new: Vec<&markise_layout::model::Item> = items.iter().skip(pre).take(fresh).collect();
-        let new_flags: Vec<u8> = new
-            .iter()
-            .map(|it| if it.kind == ItemKind::Hidden { DEF } else { 0 })
-            .collect();
-        defs |= new_flags.iter().any(|f| f & DEF != 0);
-        self.keys.splice(pre..old - suf, new.iter().map(|it| item_key(it)));
-        self.counts.splice(pre..pre, std::iter::repeat_n(None, fresh));
-        self.flags.splice(pre..pre, new_flags);
         self.missing += fresh;
-        // a block is counted as a whole: forget the rest of the blocks around the change
-        let (mut lo, mut hi) = (pre, pre + fresh);
-        while lo > 0 && lo < n && same_block(model, lo - 1, lo) {
-            lo -= 1;
-            self.forget(lo);
+        self.cursor = self.cursor.min(r.start);
+        // reference definitions the format reports as added, removed or changed: blocks that
+        // may use one count again
+        if !e.deps.labels.is_empty() {
+            self.forget_refs();
         }
-        while hi > 0 && hi < n && same_block(model, hi - 1, hi) {
-            self.forget(hi);
-            hi += 1;
+        true
+    }
+
+    /// Forgets every block that may use a reference definition.
+    /// The cached total holding block `i` is stale.
+    fn dirty(&mut self, i: usize) {
+        if let Some(s) = self.sums.get_mut(i / SUM_BLOCKS) {
+            *s = None;
         }
-        if defs {
-            for i in 0..n {
-                if self.flags[i] & REFS != 0 {
-                    self.forget(i);
-                    lo = lo.min(i);
-                }
+    }
+
+    /// Exact counts of blocks `r` (all counted), from the cached totals where whole.
+    fn sum_range(&mut self, r: Range<usize>) -> Counts {
+        let slots = |c: &Self, r: Range<usize>| {
+            c.counts[r]
+                .iter()
+                .fold(Counts::default(), |s, x| s + c.load(*x).unwrap_or_default())
+        };
+        let n = self.counts.len();
+        self.sums.resize(n.div_ceil(SUM_BLOCKS), None);
+        let mut acc = Counts::default();
+        let mut i = r.start;
+        while i < r.end {
+            let k = i / SUM_BLOCKS;
+            let (a, b) = (k * SUM_BLOCKS, ((k + 1) * SUM_BLOCKS).min(n));
+            if i == a && b <= r.end {
+                let t = match self.sums[k] {
+                    Some(t) => t,
+                    None => {
+                        let t = slots(self, a..b);
+                        self.sums[k] = Some(t);
+                        t
+                    }
+                };
+                acc += t;
+                i = b;
+            } else {
+                let e = b.min(r.end);
+                acc += slots(self, i..e);
+                i = e;
             }
         }
-        self.cursor = self.cursor.min(lo);
-        self.sel = None;
-        debug_assert_eq!(self.keys.len(), n);
-        debug_assert_eq!(self.counts.len(), n);
+        acc
+    }
+
+    fn forget_refs(&mut self) {
+        // a block counted in part: the leaves counted so far may use one too (review of #129)
+        if self.partial.is_some_and(|(_, _, c)| c.refs) {
+            self.partial = None;
+        }
+        for i in 0..self.counts.len() {
+            if self.flags[i] & REFS != 0 {
+                self.forget(i);
+            }
+        }
     }
 
     fn record(&mut self, read: usize) {
@@ -698,12 +871,12 @@ impl DocCounter {
         self.stats.max_call_bytes = self.stats.max_call_bytes.max(read as u64);
     }
 
-    /// Counts forgotten blocks of `model` (reconciled, built for `doc`) until about `budget`
-    /// source bytes are read (at least one block, each at most [`BIG_BLOCK`]); `true` when
-    /// every block is counted.
-    pub fn fill(&mut self, doc: &dyn FormatDoc, model: &DocModel, budget: usize) -> bool {
-        let n = model.items.len();
-        if self.counts.len() != n {
+    /// Counts forgotten blocks of `doc` (the document the counter is in step with) until about
+    /// `budget` source bytes are read (at least one leaf block, each at most [`BIG_BLOCK`]);
+    /// `true` when every block is counted.
+    pub fn fill(&mut self, doc: &dyn FormatDoc, budget: usize) -> bool {
+        let n = self.counts.len();
+        if n != doc.top_count() {
             return false;
         }
         let mut read = 0;
@@ -715,92 +888,128 @@ impl DocCounter {
             if self.cursor >= n {
                 break;
             }
-            let (f, e) = block_bounds(model, self.cursor);
-            let c = count_block_at(doc, model, f, None);
-            for i in f..e {
-                let v = if i == f { c.counts } else { Counts::default() };
-                if self.counts[i].replace(v).is_none() {
-                    self.missing -= 1;
-                }
-                self.flags[i] = (self.flags[i] & !REFS) | if c.refs { REFS } else { 0 };
-            }
-            self.known += c.counts;
-            self.stats.blocks_counted += 1;
-            read += c.read;
+            let t = self.cursor;
+            let (from, mut acc) = match self.partial.take() {
+                Some((p, from, acc)) if p == t => (from, acc),
+                _ => (0, Counted::default()),
+            };
+            let left = if first { budget } else { budget.saturating_sub(read) };
+            let tc = count_top(doc, t, None, from, left.max(1));
+            acc.counts += tc.counted.counts;
+            acc.refs |= tc.counted.refs;
+            read += tc.counted.read;
             first = false;
-            self.cursor = e;
+            if let Some(next) = tc.next {
+                self.partial = Some((t, next, acc));
+                break;
+            }
+            let v = self.store(acc.counts);
+            self.dirty(t);
+            let old = std::mem::replace(&mut self.counts[t], v);
+            if !old.is_some() {
+                self.missing -= 1;
+            }
+            self.release(old);
+            self.flags[t] = if acc.refs { REFS } else { 0 };
+            self.known += acc.counts;
+            self.stats.blocks_counted += 1;
+            self.cursor = t + 1;
         }
         self.record(read);
         self.missing == 0
     }
 
-    /// Counts of the source byte range `sel` of the document (reconciled `model` built for
-    /// `doc`, all blocks counted — else `None`): whole blocks from the cache, the partly
-    /// selected blocks at both ends with a clip (at most [`BIG_BLOCK`] each). A fully selected
-    /// middle of more than [`EXACT_ITEMS`] items, when the rest of the document is that large
-    /// too, is estimated in proportion to its bytes (marked approximate). The result is kept
-    /// until the selection or the document changes.
-    pub fn selection(&mut self, doc: &dyn FormatDoc, model: &DocModel, sel: Range<usize>) -> Option<Counts> {
-        let n = model.items.len();
-        if n == 0 || sel.is_empty() {
-            return Some(Counts::default());
+    /// Counts of the source byte range `sel` of `doc` (the document the counter is in step
+    /// with, every block counted — else `None`): whole blocks from the cache, the partly
+    /// selected blocks at both ends with a clip (only their leaves inside it are read, each
+    /// at most [`BIG_BLOCK`]); the fully selected middle exactly, from cached totals of runs
+    /// of [`SUM_BLOCKS`] blocks (O(middle / SUM_BLOCKS) once they are summed). The result is
+    /// kept until the selection or the document
+    /// changes. Reads everything at once; [`DocCounter::selection_step`] does it in steps.
+    pub fn selection(&mut self, doc: &dyn FormatDoc, sel: Range<usize>) -> Option<Counts> {
+        loop {
+            if let Some(r) = self.selection_step(doc, sel.clone(), usize::MAX) {
+                return r;
+            }
         }
-        let total = self.total()?;
-        if self.counts.len() != n {
-            return None;
+    }
+
+    /// [`DocCounter::selection`] in steps of about `budget` source bytes (at least one leaf
+    /// block, each at most [`BIG_BLOCK`]; issue #132: the counting worker reads the lent
+    /// document in short steps even for a selection of most of a huge list): `None` while not
+    /// done — call again (with the same `sel`; another range starts over), `Some` with the
+    /// result of [`DocCounter::selection`] once done. A document change forgets the progress.
+    pub fn selection_step(&mut self, doc: &dyn FormatDoc, sel: Range<usize>, budget: usize) -> Option<Option<Counts>> {
+        let n = self.counts.len();
+        if n == 0 || sel.is_empty() {
+            return Some(Some(Counts::default()));
+        }
+        if self.total().is_none() {
+            return Some(None);
+        }
+        if n != doc.top_count() {
+            return Some(None);
         }
         if let Some((r, c)) = &self.sel
             && *r == sel
         {
-            return Some(*c);
+            return Some(Some(*c));
         }
-        let a = model.item_at_offset(sel.start);
-        let b = model.item_at_offset(sel.end.saturating_sub(1).max(sel.start));
-        let ends = [block_bounds(model, a), block_bounds(model, b)];
-        let mut acc = Counts::default();
-        let mut read = 0;
-        for (k, &(f, _)) in ends.iter().enumerate() {
-            if k == 1 && ends[1] == ends[0] {
-                break;
+        let mut p = match self.sel_partial.take() {
+            Some(p) if p.sel == sel => p,
+            _ => {
+                let top_at = |o: usize| doc.top_at(o).unwrap_or(0).min(n - 1);
+                let a = top_at(sel.start);
+                let b = top_at(sel.end.saturating_sub(1).max(sel.start));
+                SelPartial {
+                    sel: sel.clone(),
+                    a,
+                    b,
+                    end: 0,
+                    from: 0,
+                    acc: Counts::default(),
+                }
             }
-            let span = model.item_span(f);
-            match self.counts[f] {
-                Some(c) if sel.start <= span.start && span.end <= sel.end => acc += c,
+        };
+        let (a, b) = (p.a, p.b);
+        let ends: &[usize] = if a == b { &[a] } else { &[a, b] };
+        let mut read = 0;
+        while p.end < ends.len() {
+            if read > 0 && read >= budget {
+                self.record(read);
+                self.sel_partial = Some(p);
+                return None;
+            }
+            let t = ends[p.end];
+            let span = doc.top_span(t).unwrap_or_default();
+            match self.load(self.counts[t]) {
+                Some(c) if p.from == 0 && sel.start <= span.start && span.end <= sel.end => p.acc += c,
                 _ => {
-                    let c = count_block_at(doc, model, f, Some(&sel));
-                    acc += c.counts;
-                    read += c.read;
+                    let left = budget.saturating_sub(read).max(1);
+                    let tc = count_top(doc, t, Some(&sel), p.from, left);
+                    p.acc += tc.counted.counts;
+                    read += tc.counted.read;
+                    if let Some(next) = tc.next {
+                        p.from = next;
+                        self.record(read);
+                        self.sel_partial = Some(p);
+                        return None;
+                    }
                     self.stats.blocks_counted += 1;
                 }
             }
+            p.end += 1;
+            p.from = 0;
         }
-        let (ma, mb) = (ends[0].1, ends[1].0);
+        let mut acc = p.acc;
+        let (ma, mb) = (a + 1, b);
         if mb > ma {
-            let sum = |r: Range<usize>, counts: &[Option<Counts>]| {
-                counts[r]
-                    .iter()
-                    .fold(Counts::default(), |s, c| s + c.unwrap_or_default())
-            };
-            if mb - ma <= EXACT_ITEMS {
-                acc += sum(ma..mb, &self.counts);
-            } else if ma + (n - mb) <= EXACT_ITEMS {
-                acc += total - sum(0..ma, &self.counts) - sum(mb..n, &self.counts);
-            } else {
-                // proportional to the middle's share of the document's bytes
-                let bytes = (model.item_start(mb) - model.item_start(ma)) as u128;
-                let len = doc.text().len().max(1) as u128;
-                let part = |v: u64| (v as u128 * bytes / len) as u64;
-                acc += Counts {
-                    words: part(total.words),
-                    chars: part(total.chars),
-                    chars_no_spaces: part(total.chars_no_spaces),
-                    approx: 1,
-                };
-            }
+            // exact, from the cached totals of whole runs of blocks (issue #125)
+            acc += self.sum_range(ma..mb);
         }
         self.record(read);
         self.sel = Some((sel, acc));
-        Some(acc)
+        Some(Some(acc))
     }
 }
 
@@ -809,19 +1018,120 @@ mod tests {
     use super::*;
     use markise_md::{Document, ParseOptions};
 
-    fn md(src: &str) -> (Document, std::sync::Arc<DocModel>) {
-        let doc = Document::parse(src, ParseOptions::default());
-        let model = DocModel::build(&doc, None);
-        (doc, model)
+    fn md(src: &str) -> Document {
+        Document::parse(src, ParseOptions::default())
     }
 
     fn count(src: &str) -> Counts {
-        let (doc, model) = md(src);
-        count_document(&doc, &model)
+        count_document(&md(src))
+    }
+
+    /// Replaces `at` by `text` in `doc` and applies the edit to `c`.
+    fn edit(doc: &mut Document, c: &mut DocCounter, at: Range<usize>, text: &str) {
+        let ps = markise_doc::PatchSet::new(vec![markise_doc::Patch::verbatim(at, text)]).unwrap();
+        let e = FormatDoc::apply(doc, &ps);
+        assert!(c.apply(&e), "the counter takes the edit: {e:?}");
+    }
+
+    /// The counts of every leaf block as the view model (a full build) lists them: the
+    /// counter's document-based blocks give the same total.
+    fn count_by_items(src: &str) -> Counts {
+        let doc = md(src);
+        let model = markise_layout::DocModel::build_with(&doc, None, markise_layout::Paging::Full);
+        let mut acc = Counts::default();
+        let mut prev = None;
+        for (start, it) in model.items.iter_with_start() {
+            if prev == Some((start, it.len)) {
+                continue; // a later segment of the same block
+            }
+            prev = Some((start, it.len));
+            let kind = match &it.kind {
+                markise_layout::ItemKind::Paragraph | markise_layout::ItemKind::Heading { .. } => Kind::Prose,
+                markise_layout::ItemKind::Code { .. } => Kind::Code,
+                markise_layout::ItemKind::Html => Kind::Html,
+                markise_layout::ItemKind::Table => Kind::Table,
+                _ => Kind::Nothing,
+            };
+            acc += count_leaf(&doc, Span::new(start, start + it.len), kind, None).counts;
+        }
+        acc
+    }
+
+    /// Issue #125: the counter counts the document's top-level blocks (not the view model's
+    /// items, which a paged model materializes only near the viewport) and gets what counting
+    /// every leaf the view shows gets.
+    #[test]
+    fn document_blocks_count_like_view_items() {
+        let mut src = String::from("---\ntitle: x\n---\n\n[r]: /u\n\n");
+        for k in 0..40 {
+            src.push_str(&format!(
+                "# H{k}\n\nParagraph {k} with [r] *five* words.\n\n- item {k}\n- more `c`\n  > quoted {k}\n\n```\ncode {k}\n```\n\n```math\nx\n```\n\n| a | b |\n|---|---|\n| c{k} | d |\n\n<div>html {k}</div>\n\n"
+            ));
+        }
+        src.push_str(&"long line\n".repeat(300));
+        assert_eq!(count(&src), count_by_items(&src));
+        assert_eq!(count(&src), counted(&src).1.total().unwrap());
+    }
+
+    fn counted(src: &str) -> (Document, DocCounter) {
+        let doc = md(src);
+        let mut c = DocCounter::new();
+        c.reset(&doc);
+        assert!(c.fill(&doc, usize::MAX));
+        (doc, c)
+    }
+
+    fn sel(src: &str, a: usize, b: usize) -> Counts {
+        let (doc, mut c) = counted(src);
+        c.selection(&doc, a..b).unwrap()
     }
 
     fn words(src: &str) -> u64 {
         count(src).words
+    }
+
+    #[test]
+    fn cached_slot_is_compact_and_keeps_large_counts_exactly() {
+        // issue #29, part 4: one compact slot per block; counts beyond 32 bits (a ~4 GiB
+        // block) go out of line instead of being capped
+        assert_eq!(std::mem::size_of::<Slot>(), 16);
+        let mut d = DocCounter::new();
+        let c = Counts {
+            words: 3,
+            chars: 17,
+            chars_no_spaces: 14,
+            approx: 1,
+        };
+        for v in [c, Counts::default()] {
+            let s = d.store(v);
+            assert_eq!(d.load(s), Some(v));
+        }
+        assert_eq!(d.load(Slot::NONE), None);
+        assert!(d.big.is_empty());
+        let huge = Counts {
+            words: 1 << 33,
+            chars: (1 << 34) + 5,
+            ..c
+        };
+        let edge = Counts {
+            chars: Slot::MAX_INLINE + 1,
+            ..c
+        };
+        let (a, b) = (d.store(huge), d.store(edge));
+        assert_eq!((d.load(a), d.load(b)), (Some(huge), Some(edge)));
+        assert_eq!(d.big.len(), 2);
+        d.release(a);
+        let a2 = d.store(edge);
+        assert_eq!(d.big.len(), 2, "freed entry reused");
+        assert_eq!((d.load(a2), d.load(b)), (Some(edge), Some(edge)));
+        assert_eq!(
+            Slot::inline(Counts {
+                chars: Slot::MAX_INLINE,
+                ..c
+            })
+            .map(|s| s.0[1]),
+            Some(u32::MAX - 2)
+        );
     }
 
     #[test]
@@ -954,71 +1264,55 @@ mod tests {
         assert_eq!(c(201).reading_minutes(), 2);
     }
 
-    fn counted(src: &str) -> (Document, std::sync::Arc<DocModel>, DocCounter) {
-        let (doc, model) = md(src);
-        let mut c = DocCounter::new();
-        c.reconcile(&model);
-        assert!(c.fill(&doc, &model, usize::MAX));
-        (doc, model, c)
-    }
-
-    fn sel(src: &str, a: usize, b: usize) -> Counts {
-        let (doc, model, mut c) = counted(src);
-        c.selection(&doc, &model, a..b).unwrap()
-    }
-
     #[test]
     fn counter_matches_full_count_and_recounts_only_changed_blocks() {
         let mut src = String::new();
         for k in 0..300 {
             src.push_str(&format!("Paragraph number {k} with *five* words.\n\n"));
         }
-        let (doc, model) = md(&src);
+        let mut doc = md(&src);
         let mut c = DocCounter::new();
-        c.reconcile(&model);
+        c.reset(&doc);
         assert!(c.total().is_none());
-        assert!(c.fill(&doc, &model, usize::MAX));
-        assert_eq!(c.total(), Some(count_document(&doc, &model)));
+        assert!(c.fill(&doc, usize::MAX));
+        assert_eq!(c.total(), Some(count_document(&doc)));
         assert_eq!(c.total().unwrap().words, 300 * 6);
         assert!(!c.total().unwrap().is_approx(), "normal documents are exact");
         let before = c.stats().blocks_counted;
         assert_eq!(before, 300);
 
-        // an edit in the middle (and the model's offsets shifting below it)
-        let edited = src.replacen("Paragraph number 150 with", "Paragraph number 150 and more with", 1);
-        let (doc2, model2) = md(&edited);
-        c.reconcile(&model2);
-        assert!(c.fill(&doc2, &model2, usize::MAX));
+        // an edit in the middle (and the offsets shifting below it)
+        let at = doc.text().find("Paragraph number 150 with").unwrap() + "Paragraph number 150".len();
+        edit(&mut doc, &mut c, at..at, " and more");
+        assert!(c.fill(&doc, usize::MAX));
         assert_eq!(c.stats().blocks_counted - before, 1, "only the edited paragraph");
-        assert_eq!(c.total(), Some(count_document(&doc2, &model2)));
+        assert_eq!(c.total(), Some(count_document(&doc)));
 
-        // inserting and deleting paragraphs
-        let edited = edited.replacen("Paragraph number 10 ", "New one.\n\nParagraph number 10 ", 1);
-        let edited = edited.replacen("Paragraph number 200 with *five* words.\n\n", "", 1);
-        let (doc3, model3) = md(&edited);
+        // inserting and deleting paragraphs far apart: only those blocks
         let before = c.stats().blocks_counted;
-        c.reconcile(&model3);
-        assert!(c.fill(&doc3, &model3, usize::MAX));
+        let at = doc.text().find("Paragraph number 10 ").unwrap();
+        edit(&mut doc, &mut c, at..at, "New one.\n\n");
+        let at = doc.text().find("Paragraph number 200 with").unwrap();
+        let end = at + "Paragraph number 200 with *five* words.\n\n".len();
+        edit(&mut doc, &mut c, at..end, "");
+        assert!(c.fill(&doc, usize::MAX));
         assert!(
-            c.stats().blocks_counted - before <= 200,
-            "only the blocks between the two edits"
+            c.stats().blocks_counted - before <= 4,
+            "only the edited blocks: {}",
+            c.stats().blocks_counted - before
         );
-        assert_eq!(c.total(), Some(count_document(&doc3, &model3)));
-
-        // unchanged model: nothing to do
-        let r = c.stats().reconciles;
-        c.reconcile(&model3);
-        assert_eq!(c.stats().reconciles, r);
+        assert_eq!(c.total(), Some(count_document(&doc)));
+        assert_eq!(c.len(), doc.top_count());
     }
 
     #[test]
     fn fill_reads_about_its_byte_budget_per_call_and_resumes() {
         let src = "Some words here.\n\n".repeat(20_000);
-        let (doc, model) = md(&src);
+        let doc = md(&src);
         let mut c = DocCounter::new();
-        c.reconcile(&model);
+        c.reset(&doc);
         let mut calls = 1;
-        while !c.fill(&doc, &model, 4096) {
+        while !c.fill(&doc, 4096) {
             calls += 1;
             assert!(calls < 100_000);
         }
@@ -1026,11 +1320,44 @@ mod tests {
         assert!(c.stats().max_call_bytes <= 4096 + BIG_BLOCK as u64);
         assert_eq!(c.total().unwrap().words, 20_000 * 3);
         // a zero budget still counts one block per call
-        let (doc, model) = md("One.\n\nTwo.\n");
+        let doc = md("One.\n\nTwo.\n");
         let mut c = DocCounter::new();
-        c.reconcile(&model);
-        assert!(!c.fill(&doc, &model, 0));
-        assert!(c.fill(&doc, &model, 0));
+        c.reset(&doc);
+        assert!(!c.fill(&doc, 0));
+        assert!(c.fill(&doc, 0));
+    }
+
+    /// Issue #125: a top-level container larger than a call's budget (a long list) is counted
+    /// over several calls, leaf by leaf, and an edit in it while it is half counted is right.
+    #[test]
+    fn large_containers_are_counted_across_calls() {
+        let src = "- Some words here.\n".repeat(5_000);
+        let mut doc = md(&src);
+        assert_eq!(doc.top_count(), 1);
+        let mut c = DocCounter::new();
+        c.reset(&doc);
+        let mut calls = 1;
+        while !c.fill(&doc, 4096) {
+            calls += 1;
+            if calls == 5 {
+                // half counted: an edit in the list starts it over; one after it shifts it
+                edit(&mut doc, &mut c, 2..2, "More ");
+            }
+            assert!(calls < 100_000);
+        }
+        assert!(calls > 10, "{calls}");
+        assert!(c.stats().max_call_bytes <= 4096 + BIG_BLOCK as u64);
+        assert_eq!(c.total(), Some(count_document(&doc)));
+        assert_eq!(c.total().unwrap().words, 5_000 * 3 + 1);
+        let doc = md(&format!("Before.\n\n{src}"));
+        let mut c = DocCounter::new();
+        c.reset(&doc);
+        assert!(!c.fill(&doc, 4096));
+        assert!(!c.fill(&doc, 4096));
+        let mut doc = doc;
+        edit(&mut doc, &mut c, 0..0, "Two words. ");
+        while !c.fill(&doc, 4096) {}
+        assert_eq!(c.total(), Some(count_document(&doc)));
     }
 
     /// Review round 2: a block larger than [`BIG_BLOCK`] (a huge heading, table or code block)
@@ -1040,10 +1367,10 @@ mod tests {
     fn huge_blocks_are_estimated_and_marked() {
         let body = "lorem ipsum dolor sit amet ".repeat(4_000); // ~108 KB, one line
         let src = format!("# {body}\n\nTwo words.\n");
-        let (doc, model, mut c) = counted(&src);
+        let (doc, mut c) = counted(&src);
         let t = c.total().unwrap();
         assert!(t.is_approx());
-        let span = model.item_span(0).len();
+        let span = doc.leaf(0).unwrap().span.len();
         assert_eq!(t.words, estimate(span).words + 2);
         assert_eq!(t.chars, span as u64 + "Two words.".len() as u64);
         assert_eq!(
@@ -1052,12 +1379,12 @@ mod tests {
             "the huge block is not read"
         );
         // a selection inside it: estimated from the selected bytes
-        let s = c.selection(&doc, &model, 2..2 + 600).unwrap();
+        let s = c.selection(&doc, 2..2 + 600).unwrap();
         assert!(s.is_approx());
         assert_eq!(s.words, 100);
         // the exact paragraph alone
         let a = src.find("Two").unwrap();
-        let s = c.selection(&doc, &model, a..a + 3).unwrap();
+        let s = c.selection(&doc, a..a + 3).unwrap();
         assert!(!s.is_approx());
         assert_eq!(s.words, 1);
         // a huge table and a huge code block: estimated without being parsed
@@ -1081,26 +1408,21 @@ mod tests {
     #[test]
     fn segmented_blocks_count_as_one_block() {
         let src = "a\n".repeat(130);
-        let (doc, model) = md(&src);
-        assert!(model.items.len() > 1, "segmented");
-        let c = count_document(&doc, &model);
+        let c = count(&src);
         assert_eq!((c.words, c.chars), (130, 259));
-        let (_, _, k) = counted(&src);
+        let (_, k) = counted(&src);
         assert_eq!(k.total().unwrap().chars, 259);
         // strong emphasis spanning the segments: its delimiters are not counted
         let src = format!("**{}**\n", "word\n".repeat(200).trim_end());
-        let (doc, model) = md(&src);
-        assert!(model.items.len() > 1, "segmented");
-        let c = count_document(&doc, &model);
+        let c = count(&src);
         assert_eq!(c.words, 200);
         assert_eq!(c.chars, (200 * 4 + 199) as u64);
         // an edit in one segment recounts the whole block
-        let (_, _, mut k) = counted(&src);
-        let edited = src.replacen("word\nword", "word\nwords", 1);
-        let (doc2, model2) = md(&edited);
-        k.reconcile(&model2);
-        assert!(k.fill(&doc2, &model2, usize::MAX));
-        assert_eq!(k.total(), Some(count_document(&doc2, &model2)));
+        let (mut doc, mut k) = counted(&src);
+        let at = src.find("word\nword").unwrap() + "word\nword".len();
+        edit(&mut doc, &mut k, at..at, "s");
+        assert!(k.fill(&doc, usize::MAX));
+        assert_eq!(k.total(), Some(count_document(&doc)));
         assert_eq!(k.total().unwrap().chars, (200 * 4 + 199 + 1) as u64);
     }
 
@@ -1111,8 +1433,6 @@ mod tests {
         for k in 0..400 {
             src.push_str(&format!("| row{k} | cell{k} |\n"));
         }
-        let (_, model) = md(&src);
-        assert!(model.items.len() > 2, "segmented table");
         let a = src.find("| row350 |").unwrap() + 2;
         let s = sel(&src, a, a + "row350".len());
         assert_eq!((s.words, s.chars), (1, 6));
@@ -1150,19 +1470,14 @@ mod tests {
     #[test]
     fn selection_is_recomputed_after_an_offset_only_edit() {
         let src = "One two.\n\nThree four five.\n";
-        let (_, _, mut c) = counted(src);
-        let (doc, model) = md(src);
-        let s = c.selection(&doc, &model, 0..8).unwrap();
+        let (mut doc, mut c) = counted(src);
+        let s = c.selection(&doc, 0..8).unwrap();
         assert_eq!(s.words, 2);
-        let moved = format!("\n\n\n\n\n\n\n\n\n\n{src}");
-        let (doc2, model2) = md(&moved);
-        let r = c.stats().reconciles;
-        c.reconcile(&model2);
-        assert_eq!(c.stats().reconciles, r, "no block changed");
-        assert!(c.fill(&doc2, &model2, usize::MAX));
-        let s = c.selection(&doc2, &model2, 0..18).unwrap();
+        edit(&mut doc, &mut c, 0..0, "\n\n\n\n\n\n\n\n\n\n");
+        assert!(c.fill(&doc, usize::MAX));
+        let s = c.selection(&doc, 0..18).unwrap();
         assert_eq!(s.words, 2, "\\n×10 + \"One two.\"");
-        let s = c.selection(&doc2, &model2, 0..8).unwrap();
+        let s = c.selection(&doc, 0..8).unwrap();
         assert_eq!(s.words, 0, "only blank lines now");
     }
 
@@ -1170,18 +1485,48 @@ mod tests {
     #[test]
     fn reference_definition_edits_recount_their_users() {
         let with = "See [the site][r] now.\n\n[r]: https://example.com\n";
-        let without = "See [the site][r] now.\n";
-        let (_, _, mut c) = counted(with);
+        let (mut doc, mut c) = counted(with);
         assert_eq!(c.total().unwrap().chars, "See the site now.".len() as u64);
-        let (doc, model) = md(without);
-        c.reconcile(&model);
-        assert!(c.fill(&doc, &model, usize::MAX));
-        assert_eq!(c.total(), Some(count_document(&doc, &model)));
+        let at = with.find("\n\n[r]").unwrap();
+        edit(&mut doc, &mut c, at..with.len(), "\n");
+        assert!(c.fill(&doc, usize::MAX));
+        assert_eq!(c.total(), Some(count_document(&doc)));
         assert_eq!(c.total().unwrap().chars, "See [the site][r] now.".len() as u64);
-        let (doc, model) = md(with);
-        c.reconcile(&model);
-        assert!(c.fill(&doc, &model, usize::MAX));
+        let end = doc.text().len();
+        edit(&mut doc, &mut c, end..end, "\n[r]: https://example.com\n");
+        assert!(c.fill(&doc, usize::MAX));
         assert_eq!(c.total().unwrap().chars, "See the site now.".len() as u64);
+    }
+
+    /// Review of #129 (P2): a reference definition removed while a large container that
+    /// uses it is counted in part: the leaves counted so far are counted again, so the total
+    /// does not mix the old and the new meaning of the reference.
+    #[test]
+    fn definition_edits_during_a_partial_count_recount_the_part() {
+        let mut src = "- see ![alt text][r] here\n".repeat(3_000);
+        src.push_str("\nA paragraph between.\n\n[r]: /img.png\n");
+        let mut doc = md(&src);
+        let mut c = DocCounter::new();
+        c.reset(&doc);
+        assert!(!c.fill(&doc, 4096));
+        assert!(c.partial.is_some_and(|p| p.2.refs), "the list is counted in part");
+        let at = doc.text().find("[r]:").unwrap();
+        let end = doc.text().len();
+        let before = count_document(&doc);
+        let ps = markise_doc::PatchSet::new(vec![markise_doc::Patch::verbatim(at..end, "")]).unwrap();
+        let e = FormatDoc::apply(&mut doc, &ps);
+        assert_ne!(before, count_document(&doc), "the reference changes the list's text");
+        assert_eq!(e.replaced_top.start, 2, "only the definition is re-parsed: {e:?}");
+        assert!(c.apply(&e));
+        while !c.fill(&doc, 4096) {}
+        assert_eq!(c.total(), Some(count_document(&doc)));
+        // the definition back, again in the middle of the count
+        c.reset(&doc);
+        assert!(!c.fill(&doc, 4096));
+        let end = doc.text().len();
+        edit(&mut doc, &mut c, end..end, "[r]: /img.png\n");
+        while !c.fill(&doc, 4096) {}
+        assert_eq!(c.total(), Some(count_document(&doc)));
     }
 
     /// Review P2-8: entities in raw HTML count as the characters they show.
@@ -1201,8 +1546,8 @@ mod tests {
         let a = src.find("beta").unwrap();
         let b = src.find("eta theta").unwrap() + 3;
         assert_eq!(sel(src, a, b).words, 2 + 2 + 2);
-        let (doc, model, mut c) = counted(src);
-        assert_eq!(c.selection(&doc, &model, 0..src.len()), c.total());
+        let (doc, mut c) = counted(src);
+        assert_eq!(c.selection(&doc, 0..src.len()), c.total());
         let s = sel(src, a, a + 2);
         assert_eq!((s.words, s.chars), (1, 2));
         // markers inside the selection are not counted
@@ -1210,21 +1555,45 @@ mod tests {
         assert_eq!(sel(src, 0, src.len() - 1).chars, "Some bold text.".len() as u64);
     }
 
-    /// Review round 2 P2-3: selection sums are bounded: a middle of up to [`EXACT_ITEMS`]
-    /// items (or one whose complement is that small, like Select All) is exact; a middle and
-    /// complement both larger are estimated from the byte share and marked.
+    /// Issue #132: the status bar counts small selections directly ([`count_range`]); it gets
+    /// what the cached counter gets for the same range.
     #[test]
-    fn large_selections_are_exact_or_marked_estimates() {
-        let n = 4 * EXACT_ITEMS;
+    fn direct_range_counts_match_the_counter() {
+        let mut src = String::from("[r]: /u\n\n");
+        for k in 0..12 {
+            src.push_str(&format!(
+                "# H{k}\n\nPara {k} with [r] *five* words.\n\n- item {k}\n- more `c`\n  > quoted {k}\n\n```\ncode {k}\n```\n\n| a | b |\n|---|---|\n| c{k} | d |\n\n<div>html {k}</div>\n\n"
+            ));
+        }
+        let (doc, mut c) = counted(&src);
+        assert_eq!(count_range(&doc, 0..src.len()), count_document(&doc));
+        let mut x = 7usize;
+        for _ in 0..300 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let a = (x >> 33) % src.len();
+            let b = a + (x >> 13) % 400;
+            let (a, b) = (a, b.min(src.len()));
+            if !src.is_char_boundary(a) || !src.is_char_boundary(b) {
+                continue;
+            }
+            assert_eq!(count_range(&doc, a..b), c.selection(&doc, a..b).unwrap(), "{a}..{b}");
+        }
+    }
+
+    /// Issue #125 (phase 4): selections of any size are exact (a middle of tens of thousands of
+    /// blocks too), summed from cached totals; edits keep the totals right.
+    #[test]
+    fn large_selections_are_exact() {
+        let n = 5 * SUM_BLOCKS + 37;
         let src = "One two three.\n\n".repeat(n);
-        let (doc, model) = md(&src);
+        let mut doc = md(&src);
         let mut c = DocCounter::new();
-        c.reconcile(&model);
-        assert_eq!(c.selection(&doc, &model, 0..10), None, "needs the document counted");
-        assert!(c.fill(&doc, &model, usize::MAX));
+        c.reset(&doc);
+        assert_eq!(c.selection(&doc, 0..10), None, "needs the document counted");
+        assert!(c.fill(&doc, usize::MAX));
         let before = c.stats().blocks_counted;
-        // almost everything: exact through the complement
-        let s = c.selection(&doc, &model, 4..src.len() - 9).unwrap();
+        // almost everything
+        let s = c.selection(&doc, 4..src.len() - 9).unwrap();
         assert!(!s.is_approx());
         assert_eq!(s.words, n as u64 * 3 - 2);
         assert_eq!(
@@ -1232,16 +1601,21 @@ mod tests {
             2,
             "only the two partial blocks are read"
         );
-        // a small middle: exact
-        let p = 16;
-        let s = c.selection(&doc, &model, 0..p * 100).unwrap();
-        assert!(!s.is_approx());
-        assert_eq!(s.words, 300);
-        // the middle half: estimated, close to the truth
+        // the middle half: exact
         let q = src.len() / 4;
-        let s = c.selection(&doc, &model, q..3 * q).unwrap();
-        assert!(s.is_approx());
-        let truth = 2 * EXACT_ITEMS as u64 * 3;
-        assert!(s.words.abs_diff(truth) <= 6, "{} vs {truth}", s.words);
+        let (a, b) = (q - q % 16, 3 * q - (3 * q) % 16);
+        let s = c.selection(&doc, a..b).unwrap();
+        assert!(!s.is_approx());
+        assert_eq!(s, count_range(&doc, a..b));
+        // after edits (a block gained a word, blocks came and went), still exact
+        edit(&mut doc, &mut c, 16 * 700..16 * 700, "Four ");
+        edit(&mut doc, &mut c, 16 * 3000..16 * 3000, "New.\n\n");
+        edit(&mut doc, &mut c, 16 * 10..16 * 12, "");
+        assert!(c.fill(&doc, usize::MAX));
+        let len = doc.text().len();
+        for (a, b) in [(4, len - 9), (16 * 5, len / 2), (len / 3, len - 100)] {
+            let s = c.selection(&doc, a..b).unwrap();
+            assert_eq!(s, count_range(&doc, a..b), "{a}..{b}");
+        }
     }
 }

@@ -6,10 +6,11 @@
 //! formula is placed as a [`Prim::Math`](crate::Prim::Math) bitmap; a pending, failed or
 //! unavailable one keeps the styled-source rendering (failed: in the error color).
 //!
-//! Cache contract: items that may contain math ([`Item::has_math`](crate::Item::has_math)) carry
-//! the view's math epoch in their cache key; the UI calls
-//! [`View::math_changed`](crate::View::math_changed) when results arrive, so a formula is laid
-//! out as source first and once more when its bitmap is ready.
+//! Cache contract: the view notes which cached layouts asked for a formula that was still
+//! pending (or the renderer unavailable); the UI calls
+//! [`View::math_changed`](crate::View::math_changed) when results arrive, which drops just
+//! those layouts, so a formula is laid out as source first and once more when its bitmap is
+//! ready, and items whose formulas were all drawn are not touched (issue #29).
 
 use std::sync::Arc;
 

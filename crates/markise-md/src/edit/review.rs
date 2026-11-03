@@ -9,6 +9,7 @@
 //! its line, otherwise the space before it when the mark is followed by punctuation or the
 //! end of the line.
 
+use crate::text::Span;
 use markise_doc::review::{self, ReviewMark};
 use markise_doc::{
     CriticKind, FormatDoc, InlineKind as NK, InlineNode, LeafKind, Plan, PlanError, PlanRequest, PlanStep, PlannerId,
@@ -17,6 +18,9 @@ use markise_doc::{
 
 use super::Edits;
 use crate::Document;
+
+/// Why Add Comment refuses outside text that can hold one.
+const NOT_IN_TEXT: &str = "comments can be added in paragraphs, headings and table cells";
 
 /// What to do with the suggestions while building a result.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -41,6 +45,7 @@ impl Document {
             planners::REVIEW_ACCEPT_ALL => self.plan_resolve_all(Resolve::Accept, false),
             planners::REVIEW_REJECT_ALL => self.plan_resolve_all(Resolve::Reject, false),
             planners::REVIEW_DELETE_COMMENT => self.plan_delete_comment(req),
+            planners::REVIEW_EDIT_COMMENT => self.plan_edit_comment(req),
             planners::REVIEW_CLEAN_COPY => {
                 let how = if req.params.get_bool("reject") == Some(true) {
                     Resolve::Reject
@@ -61,10 +66,12 @@ impl Document {
             planners::REVIEW_ACCEPT_ALL | planners::REVIEW_REJECT_ALL | planners::REVIEW_CLEAN_COPY => {
                 Some(self.options().critic_markup)
             }
-            planners::REVIEW_ADD_COMMENT
-            | planners::REVIEW_ACCEPT
+            // (enablement: no verifying parse, Codex review of #161)
+            planners::REVIEW_ADD_COMMENT => Some(self.add_comment(req, false).is_ok()),
+            planners::REVIEW_ACCEPT
             | planners::REVIEW_REJECT
-            | planners::REVIEW_DELETE_COMMENT => Some(self.plan_review(id, req).is_some_and(|r| r.is_ok())),
+            | planners::REVIEW_DELETE_COMMENT
+            | planners::REVIEW_EDIT_COMMENT => Some(self.plan_review(id, req).is_some_and(|r| r.is_ok())),
             _ => None,
         }
     }
@@ -90,8 +97,18 @@ impl Document {
     /// Add Comment: a selection becomes `{==selection==}{>><<}`, a caret gets `{>><<}`; the
     /// caret goes into the empty comment. Selection ends that cut through a styled span are
     /// widened to the whole span; selections over several blocks, inside code, math or raw
-    /// HTML, or touching an existing mark are refused (marks do not nest).
+    /// HTML, touching an existing mark, or right after a backslash (it would escape the
+    /// opener) are refused (marks do not nest). In a table (issue #90) the selection stays in
+    /// one cell of a header or body row.
     fn plan_add_comment(&self, req: &PlanRequest) -> Result<Plan, PlanError> {
+        self.add_comment(req, true)
+    }
+
+    /// Add Comment's plan; `exact`: the result is verified by parsing the affected block part
+    /// (the paragraph or heading, or the table's header, delimiter and the affected row) —
+    /// done when the command runs, not for menu enablement, which stays cheap on huge tables
+    /// (Codex review of #161).
+    pub(crate) fn add_comment(&self, req: &PlanRequest, exact: bool) -> Result<Plan, PlanError> {
         self.review_on()?;
         let sel = req.selection.primary();
         if sel.focus.virt > 0 || sel.anchor.virt > 0 {
@@ -112,16 +129,59 @@ impl Document {
             a = sel.focus.offset;
             b = a;
         }
-        let leaf = self.leaf(a).ok_or(PlanError::NotApplicable("no block"))?;
-        if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) {
-            return Err(PlanError::NotApplicable("not in text"));
-        }
-        let content = leaf.content();
-        if a < content.start || b > content.end {
-            return Err(PlanError::NotApplicable("selection spans blocks"));
-        }
-        let base = content.start;
-        let rich = self.inlines(&leaf);
+        // a table row is found without copying the table's lines (huge tables)
+        let row = self.table_row_at(a);
+        let mut lines: Vec<Span> = Vec::new();
+        let (base, rich) = match row {
+            // issue #90: within one table cell (header or body), never across cells
+            Some(tr) => {
+                if b > tr.row.end {
+                    return Err(PlanError::NotApplicable("the selection spans several table rows"));
+                }
+                if tr.index == 1 {
+                    return Err(PlanError::NotApplicable("the table's delimiter row has no text"));
+                }
+                let cells = self.table_row_cells(tr.row);
+                // a caret in a cell's padding (an empty cell: only spaces between its pipes)
+                // belongs to that cell
+                let blank = |x: usize, y: usize| text[x.min(y)..x.max(y)].bytes().all(|c| c == b' ' || c == b'\t');
+                let cell = cells
+                    .iter()
+                    .find(|c| c.start <= a && b <= c.end)
+                    .or_else(|| {
+                        cells
+                            .iter()
+                            .find(|c| collapsed && (blank(a, c.start) || blank(c.end, a)))
+                    })
+                    .copied()
+                    .ok_or(PlanError::NotApplicable(
+                        "the selection must stay inside one table cell",
+                    ))?;
+                let rich = self.inline(
+                    markise_doc::InlineSource::Cell {
+                        span: cell,
+                        cap: cell.len().max(1),
+                    },
+                    cell.start,
+                );
+                (cell.start, rich)
+            }
+            None => {
+                let leaf = self.leaf(a).ok_or(PlanError::NotApplicable(NOT_IN_TEXT))?;
+                if !matches!(leaf.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) {
+                    return Err(PlanError::NotApplicable(NOT_IN_TEXT));
+                }
+                let content = leaf.content();
+                if a < content.start || b > content.end {
+                    return Err(PlanError::NotApplicable("the selection spans several blocks"));
+                }
+                let rich = self.inlines(&leaf);
+                if exact {
+                    lines = leaf.lines.clone();
+                }
+                (content.start, rich)
+            }
+        };
         // widen through styled spans the selection cuts (`**a|b**` → the whole strong span)
         let mut nodes = Vec::new();
         flat(&rich.nodes, &mut nodes);
@@ -151,27 +211,110 @@ impl Document {
             let inside = |p: usize| s < p && p < e;
             let critic = matches!(n.kind, NK::Critic(_));
             if critic && (inside(a) || inside(b) || (!collapsed && a <= s && e <= b)) {
-                return Err(PlanError::NotApplicable("inside a comment or suggestion"));
+                return Err(PlanError::NotApplicable(
+                    "comments cannot overlap another comment or suggestion",
+                ));
             }
             let literal = matches!(
                 n.kind,
                 NK::Code | NK::Math { .. } | NK::RawInline | NK::Atom | NK::Image { .. }
             );
             if literal && (inside(a) || inside(b)) {
-                return Err(PlanError::NotApplicable("inside code or math"));
+                return Err(PlanError::NotApplicable("comments cannot go inside code, math or HTML"));
+            }
+        }
+        // `\{` is a literal brace: a backslash right before the opener would hide the mark
+        // (Codex review of #161)
+        let slashes = text.as_bytes()[..a].iter().rev().take_while(|&&c| c == b'\\').count();
+        if slashes % 2 == 1 {
+            return Err(PlanError::NotApplicable(
+                "a backslash right before it would turn the comment into plain text",
+            ));
+        }
+        let inserts: Vec<(usize, &str)> = if collapsed {
+            vec![(a, "{>><<}")]
+        } else {
+            vec![(a, "{=="), (b, "==}{>><<}")]
+        };
+        let caret = if collapsed { a + 3 } else { b + 3 + 6 };
+        if exact {
+            let ok = match row {
+                Some(tr) => self.add_keeps_table_row(tr, &inserts, collapsed),
+                None => self.add_makes_marks(&lines, &inserts, collapsed),
+            };
+            if !ok {
+                return Err(PlanError::NotApplicable(if row.is_some() {
+                    "a comment here would change the table"
+                } else {
+                    "a comment here would not be recognised"
+                }));
             }
         }
         let mut ed = Edits::new();
-        let caret = if collapsed {
-            ed.insert(a, "{>><<}");
-            a + 3
-        } else {
-            ed.insert(a, "{==");
-            ed.insert(b, "==}{>><<}");
-            b + 3 + 6
-        };
+        for &(p, s) in &inserts {
+            ed.insert(p, s);
+        }
         let ps = ed.build().ok_or(PlanError::NotApplicable("overlap"))?;
         Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(caret))))
+    }
+
+    /// `lines` (absolute spans, in order) joined with `\n`, `inserts` (absolute offsets inside
+    /// them) applied; and where each insert landed in the result.
+    fn lines_with_inserts(&self, lines: &[Span], inserts: &[(usize, &str)]) -> Option<(String, Vec<usize>)> {
+        let text = self.text();
+        let mut out = String::new();
+        let mut at = Vec::with_capacity(inserts.len());
+        let mut k = 0;
+        for (i, l) in lines.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            let mut pos = l.start;
+            while k < inserts.len() && inserts[k].0 >= l.start && inserts[k].0 <= l.end {
+                out.push_str(&text[pos..inserts[k].0]);
+                at.push(out.len());
+                out.push_str(inserts[k].1);
+                pos = inserts[k].0;
+                k += 1;
+            }
+            out.push_str(&text[pos..l.end]);
+        }
+        out.push('\n');
+        (k == inserts.len()).then_some((out, at))
+    }
+
+    /// Whether the marks Add Comment inserts into a paragraph or heading (`lines`) are
+    /// recognised: the highlight where it starts and the comment attached to it (or the lone
+    /// comment of a caret). The leaf is parsed alone.
+    fn add_makes_marks(&self, lines: &[Span], inserts: &[(usize, &str)], collapsed: bool) -> bool {
+        let Some((t, at)) = self.lines_with_inserts(lines, inserts) else {
+            return false;
+        };
+        #[cfg(test)]
+        tests::PARSED.with(|v| v.set(v.get() + t.len()));
+        intended_marks(&Document::parse(t, self.options().clone()), &at, collapsed)
+    }
+
+    /// Whether the marks Add Comment inserts into table row `tr` are recognised and the row
+    /// keeps its cells: the header, the delimiter and the row alone are parsed (bounded by one
+    /// row, whatever the table's size).
+    fn add_keeps_table_row(&self, tr: crate::owner::TableRowAt, inserts: &[(usize, &str)], collapsed: bool) -> bool {
+        let rows: Vec<Span> = if tr.index == 0 {
+            vec![tr.header, tr.delimiter]
+        } else {
+            vec![tr.header, tr.delimiter, tr.row]
+        };
+        let Some((before, _)) = self.lines_with_inserts(&rows, &[]) else {
+            return false;
+        };
+        let Some((after, at)) = self.lines_with_inserts(&rows, inserts) else {
+            return false;
+        };
+        #[cfg(test)]
+        tests::PARSED.with(|v| v.set(v.get() + before.len() + after.len()));
+        let new = Document::parse(after, self.options().clone());
+        intended_marks(&new, &at, collapsed)
+            && block_shape(&new) == block_shape(&Document::parse(before, self.options().clone()))
     }
 
     // ---------------------------------------------------------------- accept / reject
@@ -299,29 +442,7 @@ impl Document {
         if blank(before) || blank(after) {
             return ignore();
         }
-        // the continuation prefix: a continuation line repeats its own prefix; the first line
-        // of a list item gives quote markers plus the item's content indent (marker and its
-        // spaces, a task box not included); a quote gives its markers
-        let ls = crate::line_start(text, line.start);
-        let first = leaf.lines.first().is_some_and(|f| f.start == line.start);
-        let prefix: String = if !first {
-            text[ls..line.start].to_string()
-        } else {
-            let item = self
-                .containers_at(at)
-                .into_iter()
-                .rev()
-                .find(|c| matches!(c.kind, markise_doc::ContainerKind::ListItem { .. }))
-                .filter(|c| c.span.start >= ls && c.span.start <= line.start);
-            let upto = match item {
-                Some(c) => item_content_start(text.as_bytes(), c.span.start, line.start),
-                None => line.start,
-            };
-            text[ls..upto]
-                .chars()
-                .map(|c| if c == '>' || c == '\t' { c } else { ' ' })
-                .collect()
-        };
+        let prefix = self.continuation_prefix(&leaf, line.start, at);
         let insert = format!("{}{prefix}", self.line_ending().as_str());
         // the general check (review round 3): the block re-parsed with the line break must
         // still hold the same comment over both lines — text after the caret that starts block
@@ -334,27 +455,124 @@ impl Document {
         Some(Ok(Plan::single(PlanStep::patches(ps), Some(Selection::caret(caret)))))
     }
 
+    /// The prefix a new line inside the paragraph `leaf` needs after a line break on the line
+    /// starting at `line_start` (at offset `at`): a continuation line repeats its own prefix;
+    /// the first line of a list item gives quote markers plus the item's content indent
+    /// (marker and its spaces, a task box not included); a quote gives its markers.
+    fn continuation_prefix(&self, leaf: &markise_doc::LeafView, line_start: usize, at: usize) -> String {
+        let text = self.text();
+        let ls = crate::line_start(text, line_start);
+        let first = leaf.lines.first().is_some_and(|f| f.start == line_start);
+        if !first {
+            return text[ls..line_start].to_string();
+        }
+        let item = self
+            .containers_at(at)
+            .into_iter()
+            .rev()
+            .find(|c| matches!(c.kind, markise_doc::ContainerKind::ListItem { .. }))
+            .filter(|c| c.span.start >= ls && c.span.start <= line_start);
+        let upto = match item {
+            Some(c) => item_content_start(text.as_bytes(), c.span.start, line_start),
+            None => line_start,
+        };
+        text[ls..upto]
+            .chars()
+            .map(|c| if c == '>' || c == '\t' { c } else { ' ' })
+            .collect()
+    }
+
     /// Whether inserting `insert` at `at` keeps comment `m` one comment: the top-level block
     /// holding `at` (whole lines) is parsed alone with the insertion and must contain a
     /// comment at the same place, grown by the insertion.
     fn comment_survives_break(&self, at: usize, insert: &str, m: &ReviewMark) -> bool {
+        self.comment_survives(at..at, insert, m)
+    }
+
+    /// Whether replacing `range` (inside comment `m`) with `insert` keeps `m` one comment over
+    /// exactly the new text: the top-level block holding it (whole lines) is parsed alone with
+    /// the replacement and must contain a comment at the same place with the new length.
+    fn comment_survives(&self, range: std::ops::Range<usize>, insert: &str, m: &ReviewMark) -> bool {
         let text = self.text();
-        let i = self.top_partition_point(|t| t.end() < at);
+        let i = self.top_partition_point(|t| t.end() < range.start);
         let Some(top) = self.top(i) else { return false };
-        let a = crate::line_start(text, top.start().min(at));
-        let (b, _) = crate::text::line_end(text, top.end().max(at));
+        let a = crate::line_start(text, top.start().min(range.start));
+        let (b, _) = crate::text::line_end(text, top.end().max(range.end));
         if !(a <= m.range.start && m.range.end <= b) {
             return false;
         }
         let mut block = String::with_capacity(b - a + insert.len());
-        block.push_str(&text[a..at]);
+        block.push_str(&text[a..range.start]);
         block.push_str(insert);
-        block.push_str(&text[at..b]);
+        block.push_str(&text[range.end..b]);
         let doc = Document::parse(block, self.options().clone());
-        let (s, e) = (m.range.start - a, m.range.end - a + insert.len());
-        review::all_marks(&doc)
+        let (s, e) = (m.range.start - a, m.range.end - a + insert.len() - range.len());
+        let same_comment = review::all_marks(&doc)
             .iter()
-            .any(|c| c.kind == CriticKind::Comment && c.range.start == s && c.range.end == e)
+            .any(|c| c.kind == CriticKind::Comment && c.range.start == s && c.range.end == e);
+        // the blocks around it must keep their shape too (a `|` in a table cell's comment
+        // would add a column and turn the table into a paragraph; Codex review of #158)
+        same_comment
+            && block_shape(&doc) == block_shape(&Document::parse(text[a..b].to_string(), self.options().clone()))
+    }
+
+    // ---------------------------------------------------------------- edit comment
+
+    /// Edit Comment (issue #87): the text of the comment at `at` becomes the `text` parameter.
+    /// Lines are trimmed and blank ones dropped (a blank line would end the paragraph); in a
+    /// paragraph each line break is the document's line ending plus the paragraph's
+    /// continuation prefix (as Enter inside a comment inserts), in headings and table rows the
+    /// lines are joined with spaces. CriticMarkup has no escapes, so a `<<}` in the text (it
+    /// would close the comment early) is written `<< }`. When the lines would start block
+    /// syntax (`# `, `- `…) and end the paragraph they are joined with spaces; if even that
+    /// does not keep the comment whole the edit is refused. An empty text deletes the comment
+    /// (with its highlight). The caret is not moved.
+    fn plan_edit_comment(&self, req: &PlanRequest) -> Result<Plan, PlanError> {
+        self.review_on()?;
+        let at = Self::review_at(req);
+        let new = req.params.get_text("text").unwrap_or_default();
+        let m = review::mark_at(self, at, |k| k == CriticKind::Comment)
+            .filter(|m| m.content.start <= at && at <= m.content.end)
+            .ok_or(PlanError::NotApplicable("no comment here"))?;
+        let leaf = self.leaf(m.content.start).ok_or(PlanError::NotApplicable("no block"))?;
+        // in a table cell a `|` would end the cell: written `\|` (GFM's escape; the comment's
+        // text shows `|`)
+        let table = matches!(leaf.kind, LeafKind::Table { .. });
+        let lines: Vec<String> = new
+            .lines()
+            .map(|l| {
+                let l = l.trim().replace("<<}", "<< }");
+                if table { l.replace('|', "\\|") } else { l }
+            })
+            .filter(|l| !l.is_empty())
+            .collect();
+        if lines.is_empty() {
+            return self.plan_delete_comment(req);
+        }
+        let text = self.text();
+        let joined = lines.join(" ");
+        let mut body = joined.clone();
+        if matches!(leaf.kind, LeafKind::Paragraph) && lines.len() > 1 {
+            let line = leaf
+                .lines
+                .iter()
+                .find(|l| l.start <= m.content.start && m.content.start <= l.end)
+                .ok_or(PlanError::NotApplicable("no line"))?;
+            let prefix = self.continuation_prefix(&leaf, line.start, m.content.start);
+            let sep = format!("{}{prefix}", self.line_ending().as_str());
+            body = lines.join(&sep);
+        }
+        if !self.comment_survives(m.content.clone(), &body, &m) {
+            body = joined;
+            if !self.comment_survives(m.content.clone(), &body, &m) {
+                return Err(PlanError::NotApplicable("the text would break the comment"));
+            }
+        }
+        if text[m.content.clone()] == body {
+            return Ok(Plan::select(req.selection.clone()));
+        }
+        let ps = markise_doc::PatchSet::single_verbatim(m.content.clone(), body);
+        Ok(Plan::single(PlanStep::patches(ps), None))
     }
 
     // ---------------------------------------------------------------- delete comment
@@ -386,6 +604,53 @@ impl Document {
         let ch = remove_comment_change(text, &marks, i);
         single_change_plan(text, ch)
     }
+}
+
+/// Whether `doc` (a block part parsed alone, Add Comment's inserts at offsets `at`) has the
+/// intended marks: a comment at the insert (a caret), or a highlight at the first insert with
+/// a comment attached right after its closer.
+fn intended_marks(doc: &Document, at: &[usize], collapsed: bool) -> bool {
+    let marks = review::all_marks(doc);
+    if collapsed {
+        return marks
+            .iter()
+            .any(|m| m.kind == CriticKind::Comment && Some(&m.range.start) == at.first());
+    }
+    let (Some(&h), Some(&c)) = (at.first(), at.get(1)) else {
+        return false;
+    };
+    marks
+        .iter()
+        .any(|m| m.kind == CriticKind::Highlight && m.range.start == h)
+        && marks
+            .iter()
+            .any(|m| m.kind == CriticKind::Comment && m.attached && m.range.start == c + 3)
+}
+
+/// The leaves of `doc` (a block parsed alone) by kind, with every table row's cell count:
+/// an edit inside a comment must not change them.
+fn block_shape(doc: &Document) -> Vec<String> {
+    let text = doc.text();
+    let mut out = Vec::new();
+    let mut at = 0;
+    let mut last = None;
+    while at < text.len() {
+        match doc.leaf(at) {
+            Some(l) if last != Some(l.span.start) => {
+                last = Some(l.span.start);
+                let mut s = format!("{:?}", l.kind);
+                if matches!(l.kind, LeafKind::Table { .. }) {
+                    for line in &l.lines {
+                        s.push_str(&format!(" {}", doc.table_row_cells(*line).len()));
+                    }
+                }
+                out.push(s);
+                at = l.span.end.max(at + 1);
+            }
+            _ => at += 1,
+        }
+    }
+    out
 }
 
 /// The plan of one change, the caret after its result.
@@ -534,4 +799,42 @@ fn apply_in_order(text: &str, changes: &[Change]) -> (Vec<(std::ops::Range<usize
         i = j;
     }
     (patches, carets)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use markise_doc::{EditBehavior, PlanRequest, Selection, planners};
+
+    thread_local! {
+        /// Bytes Add Comment's verification parsed on this thread.
+        pub(super) static PARSED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn parsed(f: impl FnOnce()) -> usize {
+        PARSED.with(|v| v.set(0));
+        f();
+        PARSED.with(|v| v.get())
+    }
+
+    /// Codex review of #161: Add Comment's enablement in a huge table parses nothing, and
+    /// running it parses only the header, the delimiter and the affected row — whatever the
+    /// table's size.
+    #[test]
+    fn add_comment_in_a_huge_table_stays_bounded() {
+        for rows in [100, 50_000] {
+            let mut text = String::from("| Head | Other |\n| --- | --- |\n");
+            for i in 0..rows {
+                text.push_str(&format!("| cell {i} | value {i} |\n"));
+            }
+            let d = crate::parse(&text);
+            let at = text.find(&format!("cell {}", rows / 2)).unwrap();
+            let req = PlanRequest::at(Selection::range(at, at + 4));
+            let n = parsed(|| assert!(d.can_plan(planners::REVIEW_ADD_COMMENT, &req)));
+            assert_eq!(n, 0, "{rows} rows: enablement parsed {n} bytes");
+            let n = parsed(|| assert!(d.plan(planners::REVIEW_ADD_COMMENT, &req).is_ok()));
+            assert!(n > 0 && n < 300, "{rows} rows: the command parsed {n} bytes");
+        }
+    }
 }
