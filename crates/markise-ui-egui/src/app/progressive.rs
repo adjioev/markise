@@ -119,7 +119,9 @@ impl MarkiseApp {
                     self.side.forget(&p.path);
                     self.banner = Some(Banner::Error(e));
                 }
-                Ok(full) => {
+                Ok(mut full) => {
+                    // (renamed meanwhile: `p.path` followed the file)
+                    full.path = p.path.clone();
                     self.log_loaded(&full, p.started);
                     if p.reason == LoadReason::Open && self.is_dirty() {
                         // installing it (Discard, or after a covering save) replaces the
@@ -535,6 +537,46 @@ mod tests {
         app.answer_question(Choice::DontSave);
         assert_eq!(app.document_text().unwrap(), text_b);
         assert!(!app.is_partial() && app.progressive.is_none());
+    }
+
+    /// Review of #152 round 2: a waiting open follows a rename of its file or of its folder,
+    /// before its whole document arrives and while its question is open.
+    #[test]
+    fn a_waiting_open_follows_renames() {
+        use crate::confirm::Choice;
+        let dir = tempfile::tempdir().unwrap();
+        let (a, _) = big_file(dir.path(), "a.md");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let (b, text_b) = big_file(&sub, "b.md");
+        let gate = Arc::new(Gate::default());
+        gate.hold();
+        let mut app = app_with(&gate);
+        open_partial(&mut app, &a);
+        app.open(b.clone());
+        type_at(&mut app, 0, "MINE ");
+        pump(&mut app, "b waiting", |a| a.progressive_waiting.is_some());
+        // the file is renamed while its rest loads …
+        let c = sub.join("c.md");
+        std::fs::rename(&b, &c).unwrap();
+        app.renamed(&b, &c);
+        gate.release();
+        pump(&mut app, "question", |a| {
+            a.progressive_waiting.is_none() && a.ask.is_some()
+        });
+        // … and its folder while the question is open
+        let moved = dir.path().join("moved");
+        std::fs::rename(&sub, &moved).unwrap();
+        app.renamed(&sub, &moved);
+        app.answer_question(Choice::DontSave);
+        let want = moved.join("c.md");
+        assert_eq!(app.document_path(), Some(want.as_path()));
+        assert_eq!(app.document_text().unwrap(), text_b);
+        type_at(&mut app, 0, "Z");
+        app.save();
+        pump(&mut app, "saved", |a| a.saving.is_none() && !a.is_dirty());
+        assert_eq!(std::fs::read_to_string(&want).unwrap(), format!("Z{text_b}"));
+        assert!(!b.exists() && !c.exists(), "nothing written at the old paths");
     }
 
     /// Review of #152, P2: a clean-copy question asked about one document never writes
