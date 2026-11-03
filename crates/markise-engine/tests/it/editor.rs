@@ -922,3 +922,35 @@ fn enablement_is_memoised_until_the_document_or_selection_changes() {
     ask(&s);
     assert!(s.plan_queries_run() > runs);
 }
+
+/// Issue #88 (Codex review of #160): a read-only session refuses every text change at one
+/// choke point — typing, plans, transactions, external patches, undo and redo — while a
+/// document replacement (reload / re-parse) still applies.
+#[test]
+fn read_only_session_refuses_every_change() {
+    let (mut s, _clock) = md_session("abc\n");
+    s.set_selection(Selection::caret(3));
+    s.insert_text("d").unwrap();
+    s.close_typing();
+    s.set_read_only(Some("preview"));
+    assert_eq!(s.read_only(), Some("preview"));
+    assert!(matches!(s.insert_text("x"), Err(EditError::ReadOnly("preview"))));
+    assert!(matches!(
+        s.apply_external(&PatchSet::single_verbatim(0..0, "y"), "Replace", false),
+        Err(EditError::ReadOnly(_))
+    ));
+    assert!(
+        s.transact("t", TxKind::Format, |tx| tx
+            .step(PlanStep::patches(PatchSet::single_verbatim(0..1, ""))))
+            .is_err()
+    );
+    assert!(!s.undo());
+    assert_eq!(s.text(), "abcd\n");
+    // a replacement (reload) still applies
+    let doc: Arc<dyn markise_doc::FormatDoc> = Arc::new(markise_md::Document::parse("new\n", Default::default()));
+    s.replace_doc(doc, "Reload", TxKind::Bulk, false).unwrap();
+    assert_eq!(s.text(), "new\n");
+    s.set_read_only(None);
+    assert!(s.undo());
+    assert_eq!(s.text(), "abcd\n");
+}

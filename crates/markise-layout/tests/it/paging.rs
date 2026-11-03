@@ -1106,3 +1106,44 @@ fn scroll_position_survives_region_edits_and_rebuilds() {
     assert!(d.text()[after.0..].starts_with(&next[..20]));
     v.model().check_against_full(&d).unwrap();
 }
+
+/// Codex review of #160 (issue #88): a page evicted with its measured height in one review
+/// view must not keep that height in another (the view is part of the page key; long
+/// deletions are lines of text with all markup and nothing in Final).
+#[test]
+fn evicted_page_heights_follow_the_review_view() {
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let long = "deleted words ".repeat(40);
+    let mut src = String::new();
+    for i in 0..3000 {
+        src.push_str(&format!("Paragraph {i} {{--{long}--}} end.\n\n"));
+    }
+    let mut v = paged_view(&src, 8);
+    // scroll through the start so its pages are measured, then away so they are evicted
+    for s in 0..20 {
+        v.scroll_to_y(s as f64 * 300.0);
+        v.frame(800.0, 400.0, &mut f, &NoImages);
+    }
+    v.scroll_to_y(v.total_height() * 0.8);
+    for _ in 0..3 {
+        v.frame(800.0, 400.0, &mut f, &NoImages);
+    }
+    let seen = src.find("Paragraph 40 ").unwrap();
+    let pages: Vec<(usize, f32)> = (0..v.len())
+        .filter(|&i| v.model().is_page(i) && v.model().item_start(i) < seen)
+        .map(|i| (i, v.height(i)))
+        .collect();
+    assert!(!pages.is_empty(), "a measured page was evicted");
+    v.set_review_view(markise_layout::ReviewView::Final);
+    for &(i, h) in &pages {
+        assert!(v.model().is_page(i));
+        // not the height measured with all markup (an estimate until measured again)
+        assert_ne!(v.height(i), h, "page {i}");
+    }
+    // back to all markup: the measured heights apply again
+    v.set_review_view(markise_layout::ReviewView::All);
+    for &(i, h) in &pages {
+        assert_eq!(v.height(i), h, "page {i}");
+    }
+}

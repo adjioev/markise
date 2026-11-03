@@ -1826,3 +1826,74 @@ fn clean_view_saves_an_open_card_and_shows_in_the_status_bar() {
     set_view(&mut h, "view.commentsAll");
     assert!(has_text(&mut h, "All Markup"));
 }
+
+/// Codex review of #160: the clean previews are read-only at the session — Find & Replace
+/// (started there, or queued before the switch), Undo of an earlier Replace All and ⌘Z change
+/// nothing — and Copy takes the text shown (accepted / rejected).
+#[test]
+fn clean_preview_refuses_replace_and_undo_and_copies_what_is_shown() {
+    use markise_engine::search::Query;
+    use markise_engine::settings::CommentView;
+    let (mut h, _p) = open_roomy("view-find", REVIEWED);
+    let search = |h: &mut H, t: &str| {
+        h.state_mut().open_find(true);
+        h.state_mut().set_find_query(Query {
+            text: t.into(),
+            ..Default::default()
+        });
+        wait_until(h, "find", |a| a.find_results().is_some());
+    };
+    // a Replace All, then the preview: its undo is refused
+    search(&mut h, "Friday");
+    h.state_mut().replace_find("Monday".into(), true);
+    wait_until(&mut h, "replaced", |a| {
+        a.document_text().is_some_and(|t| t.contains("Monday"))
+    });
+    let replaced = text(&h);
+    h.state_mut().set_comment_view(CommentView::Final);
+    h.run_steps(2);
+    assert!(!h.state_mut().undo_replace_all());
+    undo(&mut h);
+    assert_eq!(text(&h), replaced);
+    // started in the preview: refused
+    search(&mut h, "Monday");
+    h.state_mut().replace_find("Sunday".into(), true);
+    h.run_steps(4);
+    assert_eq!(text(&h), replaced);
+    // queued just before the switch: refused when it completes
+    h.state_mut().set_comment_view(CommentView::All);
+    h.run_steps(2);
+    search(&mut h, "Monday");
+    h.state_mut().replace_find("Sunday".into(), true);
+    h.state_mut().set_comment_view(CommentView::Final);
+    for _ in 0..30 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(text(&h), replaced);
+    h.state_mut().close_find();
+    // Copy in Final / Original: the shown text
+    let a = replaced.find("team").unwrap();
+    let b = replaced.find("likes").unwrap() + 5;
+    let copied = |h: &mut H| -> String {
+        select(h, a, b);
+        h.event(Event::Copy);
+        h.step();
+        h.output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                egui::OutputCommand::CopyText(t) => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(copied(&mut h), "team likes");
+    h.state_mut().set_comment_view(CommentView::Original);
+    h.run_steps(2);
+    assert_eq!(copied(&mut h), "team really likes");
+    h.state_mut().set_comment_view(CommentView::All);
+    h.run_steps(2);
+    assert_eq!(copied(&mut h), "team {--really --}likes");
+}

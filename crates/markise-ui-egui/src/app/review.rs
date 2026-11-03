@@ -25,6 +25,10 @@ use markise_layout::block::color;
 use super::{Ask, Banner, MarkiseApp};
 use crate::sidebar::SideLook;
 
+/// Why the document is read-only in the clean review previews (issue #88).
+pub(super) const PREVIEW_READ_ONLY: &str =
+    "comments show as No Markup or Original (View → Comments); switch back to edit, or use Source mode";
+
 /// Why no clean copy is written while CriticMarkup is off.
 const CLEAN_COPY_OFF: &str = "Comments & Suggestions are off, so comments are plain text and cannot be removed. \
      Turn on View → Comments & Suggestions to save a copy without comments.";
@@ -211,6 +215,21 @@ impl MarkiseApp {
         if let Some(d) = self.doc.as_mut() {
             d.viewer.set_comment_display(display);
             d.viewer.set_comment_view(view);
+        }
+        self.apply_review_read_only();
+    }
+
+    /// The clean review previews (No Markup / Original, issue #88) make the session read-only
+    /// while the rendered view is the one shown: every document change is refused at the
+    /// session (commands, typing, Find & Replace, pastes and attachments finishing late,
+    /// undo / redo). Source mode and Side by Side edit the raw text as always.
+    pub(super) fn apply_review_read_only(&mut self) {
+        let rendered = !self.source_visible && !self.side_by_side;
+        if let Some(d) = self.doc.as_mut() {
+            let want = (rendered && d.viewer.review_preview()).then_some(PREVIEW_READ_ONLY);
+            if d.viewer.ed.session.read_only() != want {
+                d.viewer.ed.session.set_read_only(want);
+            }
         }
     }
 

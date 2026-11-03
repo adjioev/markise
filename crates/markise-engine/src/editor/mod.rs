@@ -71,6 +71,8 @@ pub enum EditError {
     Plan(PlanError),
     /// Raised by a transaction body.
     Aborted(String),
+    /// The session is read-only ([`EditorSession::set_read_only`]); the reason.
+    ReadOnly(&'static str),
 }
 
 impl fmt::Display for EditError {
@@ -79,6 +81,7 @@ impl fmt::Display for EditError {
             EditError::Patch(e) => write!(f, "{e}"),
             EditError::Plan(e) => write!(f, "{e}"),
             EditError::Aborted(why) => write!(f, "aborted: {why}"),
+            EditError::ReadOnly(why) => write!(f, "read-only: {why}"),
         }
     }
 }
@@ -269,6 +272,8 @@ pub struct EditorSession {
     /// the comment presence scan, issue #138): taken back before every change of the
     /// document, so an edit never finds it shared.
     leases: Vec<Arc<crate::lease::DocLease>>,
+    /// Read-only, and why ([`EditorSession::set_read_only`]).
+    read_only: Option<&'static str>,
 }
 
 /// Counters for consumers that track review comments incrementally (the comment gutter,
@@ -387,7 +392,22 @@ impl EditorSession {
             review: ReviewEdits::default(),
             plan_queries: Mutex::new(PlanQueries::default()),
             leases: Vec::new(),
+            read_only: None,
         }
+    }
+
+    /// Makes the session read-only (`Some(reason)`) or editable again: every text change
+    /// through it — commands, typing, pastes, transactions, external patches, undo and redo —
+    /// is refused while set (one choke point: [`EditError::ReadOnly`] from the mutation path,
+    /// `false` from undo / redo). Replacing the document (reload, re-parse) and materializing
+    /// literal hints for a save still work. Used for the clean review previews (issue #88).
+    pub fn set_read_only(&mut self, reason: Option<&'static str>) {
+        self.read_only = reason;
+    }
+
+    /// Why the session is read-only, if it is.
+    pub fn read_only(&self) -> Option<&'static str> {
+        self.read_only
     }
 
     /// Editing preferences (spec 02 §4, §13, §16).
@@ -726,6 +746,11 @@ impl EditorSession {
     /// The single mutation path: canonicalise, validate, apply, transform live marks, update
     /// hints, bump the counter. Nothing is changed when validation fails.
     fn apply_raw(&mut self, patches: &PatchSet, hints_after: Option<HintSet>) -> Result<Step, EditError> {
+        if let Some(why) = self.read_only
+            && !patches.is_empty()
+        {
+            return Err(EditError::ReadOnly(why));
+        }
         let forward = self.doc.canonicalize(patches);
         forward.validate(self.doc.text())?;
         let removed = forward.removed_from(self.doc.text());
@@ -1544,6 +1569,9 @@ impl EditorSession {
 
     /// Undoes the newest transaction: inverse steps in reverse, exact hints, `sel_before`.
     pub fn undo(&mut self) -> bool {
+        if self.read_only.is_some() {
+            return false;
+        }
         self.close_typing();
         if !self.can_undo() {
             return false;
@@ -1564,6 +1592,9 @@ impl EditorSession {
 
     /// Redoes: forward steps in order, exact hints, `sel_after`.
     pub fn redo(&mut self) -> bool {
+        if self.read_only.is_some() {
+            return false;
+        }
         self.close_typing();
         let Some(tx) = self.history.pop_redo() else {
             return false;
@@ -1619,7 +1650,11 @@ impl EditorSession {
     /// Prepares a save: materialises hints, closes the typing group (the saved state is a
     /// transaction boundary) and snapshots the hint-free text with its revision.
     pub fn prepare_save(&mut self) -> Result<SaveSnapshot, EditError> {
-        self.expire_hints()?;
+        // (materializing hints writes what the user already sees: allowed while read-only)
+        let ro = self.read_only.take();
+        let r = self.expire_hints();
+        self.read_only = ro;
+        r?;
         self.close_typing();
         // the state being written is a permanent boundary from the start of the save, so
         // edits made while the save runs never join its transaction; kept even if the save

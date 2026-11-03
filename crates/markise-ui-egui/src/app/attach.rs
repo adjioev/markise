@@ -531,7 +531,11 @@ impl MarkiseApp {
                     return;
                 }
                 self.restore_selection(&e.sel, e.source);
-                self.insert_attachment_text(&ctx, &text);
+                if let Err(why) = self.insert_attachment_text(&ctx, &text) {
+                    self.banner = Some(Banner::Info(format!(
+                        "The paste was not inserted ({why}); it is on the clipboard."
+                    )));
+                }
             }
             Stage::Done(out) => {
                 for f in &out.written {
@@ -546,7 +550,19 @@ impl MarkiseApp {
                     // links generated again for where the note is now (Save As may have moved it
                     // while the job ran); the files stay where they were written
                     let md = self.render_for_current_note(&out);
-                    self.insert_attachment_text(&ctx, &md);
+                    if let Err(why) = self.insert_attachment_text(&ctx, &md) {
+                        // the files stay where they were written; their links are offered
+                        let files: Vec<String> = out.written.iter().map(|p| p.display().to_string()).collect();
+                        self.banner = Some(Banner::Info(format!(
+                            "Saved {} but not inserted ({why}); the links are on the clipboard.",
+                            if files.is_empty() {
+                                "the attachment".to_string()
+                            } else {
+                                files.join(", ")
+                            }
+                        )));
+                        return;
+                    }
                 }
                 if !out.errors.is_empty() {
                     self.banner = Some(Banner::Error(out.errors.join(" ")));
@@ -591,9 +607,16 @@ impl MarkiseApp {
 
     /// Inserts `md` at the current selection as one undo step (in the source editor in Source and
     /// Side by Side, whose rendered pane is read-only) and records it as our own edit.
-    fn insert_attachment_text(&mut self, ctx: &Context, md: &str) {
+    ///
+    /// Refused (the document is read-only: a clean review preview, issue #88), nothing is
+    /// inserted, the Markdown goes to the clipboard and the reason comes back.
+    fn insert_attachment_text(&mut self, ctx: &Context, md: &str) -> Result<(), String> {
         let source = self.source_visible || self.side_by_side;
-        let Some(d) = self.doc.as_mut() else { return };
+        let Some(d) = self.doc.as_mut() else { return Ok(()) };
+        if !source && let Some(why) = d.viewer.ed.session.read_only() {
+            ctx.copy_text(md.to_string());
+            return Err(format!("read-only: {why}"));
+        }
         let (from, old_len) = (d.viewer.ed.session.revision().counter, d.viewer.ed.session.text().len());
         let range;
         if source && d.viewer.ed.source.is_some() {
@@ -634,5 +657,6 @@ impl MarkiseApp {
             });
         }
         ctx.request_repaint();
+        Ok(())
     }
 }

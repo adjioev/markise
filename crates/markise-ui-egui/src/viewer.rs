@@ -1764,8 +1764,18 @@ impl DocViewer {
             Event::Copy | Event::Cut => {
                 let r = self.ed.session.selection().primary().range();
                 if !r.is_empty() {
-                    // copied after the shaper closure (the context is locked inside it)
-                    self.pending_copy = Some(self.ed.session.text()[r].to_string());
+                    // copied after the shaper closure (the context is locked inside it); in a
+                    // clean review view what is shown (issue #88: accepted / rejected text)
+                    let shown = match self.comment_view {
+                        markise_engine::settings::CommentView::Final => {
+                            markise_doc::review::visible_text(self.ed.session.doc(), r, true)
+                        }
+                        markise_engine::settings::CommentView::Original => {
+                            markise_doc::review::visible_text(self.ed.session.doc(), r, false)
+                        }
+                        _ => self.ed.session.text()[r].to_string(),
+                    };
+                    self.pending_copy = Some(shown);
                     if matches!(e, Event::Cut) && editable {
                         self.ed.session.close_typing();
                         return self.exec("edit.deleteBackward", &Params::new(), sh, images, vh);

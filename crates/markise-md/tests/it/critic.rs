@@ -395,3 +395,20 @@ fn comment_text_is_plain() {
     let doc = Document::parse("a {>>one\n\ntwo<<}\n", on());
     assert!(markise_doc::review::all_marks(&doc).is_empty());
 }
+
+/// Issue #88 (Codex review of #160): Copy in the clean review views takes the text shown —
+/// accepted (Final) or rejected (Original) — also for marks the selection cuts.
+#[test]
+fn visible_text_of_the_clean_review_views() {
+    use markise_doc::review::visible_text;
+    let src = "a {--secret--} b {++new++} {~~old~>neu~~}{>>note<<} {==hi==} c\n\nnext {++x++}\n";
+    let doc = markise_md::Document::parse(src, markise_md::ParseOptions::default());
+    let all = 0..src.len();
+    assert_eq!(visible_text(&doc, all.clone(), true), "a  b new neu hi c\n\nnext x\n");
+    assert_eq!(visible_text(&doc, all, false), "a secret b  old hi c\n\nnext \n");
+    // a selection that starts inside a deletion and ends inside an insertion
+    let a = src.find("cret").unwrap();
+    let b = src.find("ew++").unwrap();
+    assert_eq!(visible_text(&doc, a..b, true), " b n");
+    assert_eq!(visible_text(&doc, a..b, false), "cret b ");
+}

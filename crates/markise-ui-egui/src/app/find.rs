@@ -133,6 +133,12 @@ impl MarkiseApp {
         if all && self.is_partial() {
             return; // Replace All waits for the whole file (progressive open, issue #126)
         }
+        // a read-only document (the clean review previews, issue #88): no replacement starts;
+        // one already queued is refused by the session when it completes
+        if let Some(why) = self.doc.as_ref().and_then(|d| d.viewer.ed.session.read_only()) {
+            self.find.error = Some(format!("Read-only: {why}."));
+            return;
+        }
         if !self
             .find_results()
             .is_some_and(|r| r.error.is_none() && !r.matches.is_empty())

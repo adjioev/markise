@@ -1934,6 +1934,12 @@ impl MarkiseApp {
     /// Toggles source-code mode, mapping the viewport middle and the caret in both directions
     /// (spec 02 §12.1). Full Source mode keeps its own undo history (ADR 0006 §4.3).
     pub fn toggle_source(&mut self) {
+        self.toggle_source_now();
+        // the clean review previews are read-only only in the rendered view (issue #88)
+        self.apply_review_read_only();
+    }
+
+    fn toggle_source_now(&mut self) {
         if !self.card_edit_saved() {
             return;
         }
@@ -1979,6 +1985,12 @@ impl MarkiseApp {
     /// ⌃⌘/ (spec 04 §3.3): Rendered or Source → Side by Side, remembering that mode; again →
     /// back to the remembered mode.
     pub fn toggle_side_by_side(&mut self) {
+        self.toggle_side_by_side_now();
+        // the clean review previews are read-only only in the rendered view (issue #88)
+        self.apply_review_read_only();
+    }
+
+    fn toggle_side_by_side_now(&mut self) {
         if !self.card_edit_saved() {
             return;
         }
@@ -1998,6 +2010,12 @@ impl MarkiseApp {
     /// Sets the view mode directly (View menu radio items); Rendered and Source become the
     /// mode ⌃⌘/ returns to.
     pub fn set_view_mode(&mut self, m: ViewMode) {
+        self.set_view_mode_now(m);
+        // the clean review previews are read-only only in the rendered view (issue #88)
+        self.apply_review_read_only();
+    }
+
+    fn set_view_mode_now(&mut self, m: ViewMode) {
         if self.doc.is_none() {
             return;
         }

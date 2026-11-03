@@ -202,8 +202,15 @@ own options):
   make edits ambiguous (where does typing at the edge of a hidden deletion go?), so typing,
   pasting, dropping, document commands and the hover bar are unavailable there, and the
   status bar says "read-only"; Source mode (and the source pane of Side by Side) edit the raw
-  text as always. Switching to another view saves a comment being edited in its card first.
-- Layout: `LayoutParams::review` / `View::set_review_view` (part of every cache key); hidden
+  text as always. The rule is enforced at one choke point (Codex review of #160): the editor
+  session is read-only (`EditorSession::set_read_only`) while a clean view is shown in the
+  rendered view, so every mutation — commands, typing, IME, Find & Replace (also one queued
+  before the switch), undo / redo, pastes and attachments that finish late (the file stays
+  written, its link goes to the clipboard) — is refused there; reloads and re-parses still
+  apply. Copy takes the text shown (`review::visible_text`: accepted or rejected). Switching
+  to another view saves a comment being edited in its card first.
+- Layout: `LayoutParams::review` / `View::set_review_view` (part of every cache key and of the
+  key of evicted pages' measured heights); hidden
   source has no rendered piece, so the caret steps over it as over an HTML comment.
 
 The source editor colours marks with the existing token classes (inserted text as link text,
