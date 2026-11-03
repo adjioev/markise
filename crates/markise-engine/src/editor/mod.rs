@@ -1615,10 +1615,20 @@ impl EditorSession {
     /// Expires every literal hint: one step materialising the format's escapes and removing the
     /// hints. Joins the open typing transaction (which closes) if there is one, otherwise it is
     /// its own `Auto` transaction "Escape Literal Syntax".
+    ///
+    /// Allowed while the session is read-only: it writes what the user already sees (opening
+    /// the source pane and saving need it; Codex review of #160).
     pub fn expire_hints(&mut self) -> Result<(), EditError> {
         if self.doc.hints().is_empty() {
             return Ok(());
         }
+        let ro = self.read_only.take();
+        let r = self.expire_hints_now();
+        self.read_only = ro;
+        r
+    }
+
+    fn expire_hints_now(&mut self) -> Result<(), EditError> {
         let mut patches = Vec::new();
         for h in self.doc.hints().iter() {
             if let Some(ps) = self.doc.materialize_hint(h) {
@@ -1650,11 +1660,7 @@ impl EditorSession {
     /// Prepares a save: materialises hints, closes the typing group (the saved state is a
     /// transaction boundary) and snapshots the hint-free text with its revision.
     pub fn prepare_save(&mut self) -> Result<SaveSnapshot, EditError> {
-        // (materializing hints writes what the user already sees: allowed while read-only)
-        let ro = self.read_only.take();
-        let r = self.expire_hints();
-        self.read_only = ro;
-        r?;
+        self.expire_hints()?;
         self.close_typing();
         // the state being written is a permanent boundary from the start of the save, so
         // edits made while the save runs never join its transaction; kept even if the save

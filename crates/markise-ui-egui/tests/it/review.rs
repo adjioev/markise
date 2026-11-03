@@ -1897,3 +1897,27 @@ fn clean_preview_refuses_replace_and_undo_and_copies_what_is_shown() {
     h.run_steps(2);
     assert_eq!(copied(&mut h), "team {--really --}likes");
 }
+
+/// Codex review 2 of #160: literal syntax typed in the rendered view (`# Title` without Enter
+/// is a paragraph) is escaped when Source mode or Side by Side opens from a clean (read-only)
+/// review view, so the first source edit keeps it a paragraph.
+#[test]
+fn source_mode_from_a_clean_view_escapes_literal_syntax() {
+    use markise_engine::settings::CommentView;
+    use markise_ui_egui::ViewMode;
+    for mode in [ViewMode::Source, ViewMode::SideBySide] {
+        let (mut h, _p) = open_roomy("view-literal", "A {++b++}\n\nP\n");
+        select(&mut h, 11, 12);
+        typ(&mut h, "# Title");
+        let typed = text(&h);
+        assert_eq!(typed, "A {++b++}\n\n# Title\n");
+        h.state_mut().set_comment_view(CommentView::Final);
+        h.run_steps(2);
+        h.state_mut().set_view_mode(mode);
+        h.run_steps(3);
+        let t = text(&h);
+        assert_eq!(t, "A {++b++}\n\n\\# Title\n", "{mode:?}: escaped on opening the source");
+        h.state_mut().set_view_mode(ViewMode::Rendered);
+        h.state_mut().set_comment_view(CommentView::All);
+    }
+}

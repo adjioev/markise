@@ -1934,8 +1934,13 @@ impl MarkiseApp {
     /// Toggles source-code mode, mapping the viewport middle and the caret in both directions
     /// (spec 02 §12.1). Full Source mode keeps its own undo history (ADR 0006 §4.3).
     pub fn toggle_source(&mut self) {
+        // the clean review previews are read-only only in the rendered view (issue #88):
+        // cleared before the switch (opening the source pane materializes literal hints),
+        // set again after it when the rendered view is shown
+        if let Some(d) = self.doc.as_mut() {
+            d.viewer.ed.session.set_read_only(None);
+        }
         self.toggle_source_now();
-        // the clean review previews are read-only only in the rendered view (issue #88)
         self.apply_review_read_only();
     }
 
@@ -1985,8 +1990,13 @@ impl MarkiseApp {
     /// ⌃⌘/ (spec 04 §3.3): Rendered or Source → Side by Side, remembering that mode; again →
     /// back to the remembered mode.
     pub fn toggle_side_by_side(&mut self) {
+        // the clean review previews are read-only only in the rendered view (issue #88):
+        // cleared before the switch (opening the source pane materializes literal hints),
+        // set again after it when the rendered view is shown
+        if let Some(d) = self.doc.as_mut() {
+            d.viewer.ed.session.set_read_only(None);
+        }
         self.toggle_side_by_side_now();
-        // the clean review previews are read-only only in the rendered view (issue #88)
         self.apply_review_read_only();
     }
 
@@ -2010,8 +2020,13 @@ impl MarkiseApp {
     /// Sets the view mode directly (View menu radio items); Rendered and Source become the
     /// mode ⌃⌘/ returns to.
     pub fn set_view_mode(&mut self, m: ViewMode) {
+        // the clean review previews are read-only only in the rendered view (issue #88):
+        // cleared before the switch (opening the source pane materializes literal hints),
+        // set again after it when the rendered view is shown
+        if let Some(d) = self.doc.as_mut() {
+            d.viewer.ed.session.set_read_only(None);
+        }
         self.set_view_mode_now(m);
-        // the clean review previews are read-only only in the rendered view (issue #88)
         self.apply_review_read_only();
     }
 
