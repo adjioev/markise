@@ -246,10 +246,11 @@ impl Document {
                 // the containers' prefix of the block's first line (not a heading's marker)
                 let ls = crate::line_start(text, leaf.span.start);
                 let mut prefix = super::blocks::cont_prefix(text, ls, leaf.span.start);
-                // after indented code (the caret in the paragraph after it): its 4-column
-                // indentation is the code's, not a container's
+                // after indented code (the caret in the paragraph after it): its own columns
+                // (tabs included) are not a container's — the containers' prefix from the
+                // containers themselves
                 if matches!(leaf.kind, LeafKind::CodeBlock { .. }) && self.code_fence(leaf.span.start).is_none() {
-                    prefix = super::blocks::strip_code_indent(&prefix);
+                    prefix = self.container_prefix(leaf.span.start, usize::MAX);
                 }
                 let end = leaf.span.end;
                 (end..end, prefix.clone(), format!("{eol}{}{eol}", prefix.trim_end()))

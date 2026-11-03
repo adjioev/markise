@@ -86,21 +86,64 @@ pub(crate) fn cont_prefix(text: &str, ls: usize, upto: usize) -> String {
         .collect()
 }
 
-/// The containers' prefix of an indented code block's first line, from `prefix` (up to the
-/// code's content, as [`cont_prefix`] gives it): without the code's own four columns of
-/// indentation, measured in columns (a tab advances to the next multiple of four), the
-/// remaining indentation as spaces (Codex review of PR #167).
-pub(crate) fn strip_code_indent(prefix: &str) -> String {
-    let col = |s: &str| {
-        s.chars()
-            .fold(0usize, |c, ch| if ch == '\t' { c + 4 - c % 4 } else { c + 1 })
-    };
-    let head = prefix.trim_end_matches([' ', '\t']);
-    let keep = col(prefix).saturating_sub(4).max(col(head));
-    format!("{head}{}", " ".repeat(keep - col(head)))
+/// The column of byte `at` on its line (a tab advances to the next multiple of four).
+pub(crate) fn col_at(text: &str, at: usize) -> usize {
+    text[line_start(text, at)..at]
+        .chars()
+        .fold(0, |c, ch| if ch == '\t' { c + 4 - c % 4 } else { c + 1 })
 }
 
 impl Document {
+    /// The prefix that puts a new line inside the `keep` outermost containers (lists and their
+    /// items counted apart, as `Block::is_container` does) holding the leaf at `at`, derived
+    /// from what the parser recorded for them — never from the leaf's own line: a quote's `>`
+    /// at its column followed by a space, a list item's content column (marker column +
+    /// `content_offset`), a footnote definition's body four columns in — written with spaces
+    /// (Codex review of PR #167: tabs partially consumed by indented code).
+    pub(crate) fn container_prefix(&self, at: usize, keep: usize) -> String {
+        let text = self.text();
+        let path = self.block_path_at(at);
+        let (mut out, mut col, mut n) = (String::new(), 0usize, 0usize);
+        let pad = |out: &mut String, col: &mut usize, to: usize| {
+            while *col < to {
+                out.push(' ');
+                *col += 1;
+            }
+        };
+        for d in 1..=path.len() {
+            if n >= keep {
+                break;
+            }
+            let Some((b, o)) = self.block_at_path_rel(&path[..d]) else {
+                break;
+            };
+            if !b.is_container() {
+                break;
+            }
+            n += 1;
+            match &b.kind {
+                BlockKind::BlockQuote { .. } => {
+                    let q = col_at(text, b.span.start + o);
+                    pad(&mut out, &mut col, q);
+                    out.push_str("> ");
+                    col += 2;
+                }
+                BlockKind::ListItem {
+                    marker, content_offset, ..
+                } => {
+                    let to = col_at(text, marker.start + o) + content_offset;
+                    pad(&mut out, &mut col, to);
+                }
+                BlockKind::FootnoteDef { .. } => {
+                    let to = col_at(text, b.span.start + o) + 4;
+                    pad(&mut out, &mut col, to);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
     fn item_of(&self, b: &Block, o: usize, path: Vec<usize>) -> Option<Item> {
         let BlockKind::ListItem {
             marker,

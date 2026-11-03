@@ -1646,7 +1646,14 @@ typed.
   before and now also one after it when the next block starts on the very next line (a table
   would take it as a row, a rule as a setext underline, indented code as lazy text; after `# Title⏎Para`, Enter and `x` used to give
   `x⏎Para`, one paragraph, and now give two). After
-  indented code the code's own four columns are not repeated as a container prefix.
+  a block other than a paragraph or heading the prefix comes from the containers the parser
+  recorded (`Document::container_prefix`: quote markers, list items' content columns, written
+  with spaces), never from the block's own line — indented code's columns, tabs partially
+  consumed by the containers included. As a safety net a gap inside or after containers is
+  offered only when the typed paragraph, parsed again with its region (up to 64 KiB), lands in
+  the intended container with both neighbours unchanged; Insert Table after indented code uses
+  the same prefix. The gap check reads leaf heads only and parses a paragraph (for being
+  image-only) only when it starts with `!` or `[` and is at most 2 KiB.
 - Tests: `markise-engine` `block_gaps` (every block pair both ways, quote/list ends, no-slot
   cases, horizontal moves, Enter in tables, page boundaries against a full model, undo),
   `markise-ui-egui` `block_gaps` (click between tables and between rules, arrows, file

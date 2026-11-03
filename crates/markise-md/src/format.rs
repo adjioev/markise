@@ -1944,7 +1944,7 @@ impl Document {
 
     /// The typing step on the virtual empty paragraph (ADR 0006 §2.2): materialises the
     /// paragraph after the block at `gap` with the separator and the container prefix.
-    fn typing_virtual(&self, gap: usize, virt: u16, typed: &str) -> TypingPlan {
+    pub(crate) fn typing_virtual(&self, gap: usize, virt: u16, typed: &str) -> TypingPlan {
         let eol = self.line_ending().as_str();
         let text = self.text();
         let levels = virt.saturating_sub(1) as usize;
@@ -1972,16 +1972,10 @@ impl Document {
                 Some(l) if matches!(l.kind, LeafKind::Paragraph | LeafKind::Heading { .. }) => {
                     self.line_prefix(&l, gap)
                 }
-                // other blocks (code, tables…): the containers' prefix of the block's first
-                // line; indented code's own 4 columns are not a container's (issue #166)
-                Some(l) => {
-                    let mut prefix =
-                        crate::edit::blocks::cont_prefix(text, line_start(text, l.span.start), l.span.start);
-                    if matches!(l.kind, LeafKind::CodeBlock { .. }) && self.code_fence(l.span.start).is_none() {
-                        prefix = crate::edit::blocks::strip_code_indent(&prefix);
-                    }
-                    prefix
-                }
+                // other blocks (code, tables…): the prefix of the block's containers, from the
+                // containers themselves (not the block's line: indented code's own columns,
+                // tabs included, are not a container's; issue #166)
+                Some(l) => self.container_prefix(l.span.start, usize::MAX),
                 None => String::new(),
             }
         };
