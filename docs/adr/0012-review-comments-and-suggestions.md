@@ -185,7 +185,9 @@ PDF/PNG/Pandoc (export model): insertions underlined, deletions struck, comments
   reject pending suggestions (skipped when there are none), asks for a new file (default
   `<name> (clean).md`), refuses the document's own file, and writes through the checked save
   path (`save_checked`, never overwriting a file changed since the dialog). The open document is
-  not changed.
+  not changed. While CriticMarkup is off the marks are plain text, so the item is disabled and
+  its label says to turn on View → Comments & Suggestions; run any other way it writes nothing
+  and shows that in a banner (it never writes a "clean" copy that still holds the comments).
 - The switches live in Preferences → Markdown ("Comments & suggestions (CriticMarkup)", "Show
   comments: In the margin / As bubbles", "Keep comments in exports"); the export one is also
   File → Export → Include Comments, the display one also the comments panel's switch.
