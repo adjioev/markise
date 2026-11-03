@@ -534,3 +534,43 @@ fn resolve_marks_in_table_cells() {
         assert_eq!(markise_doc::FormatDoc::table_row_cells(&d, *r).len(), 2, "{t}");
     }
 }
+
+/// Codex review of #161: rows are told apart by their place in the table (a body row of `-`
+/// and `:` is text, an empty cell takes a comment), and a backslash right before the
+/// selection — which would escape the opener and leave the marks as plain text — is refused,
+/// in cells and in paragraphs.
+#[test]
+fn add_comment_table_rows_by_index_and_backslashes() {
+    let add = |src: &str, sel: Selection| run(src, planners::REVIEW_ADD_COMMENT, sel, Params::new()).map(|(t, _)| t);
+    let src = "| A | B |\n| --- | --- |\n| - | : |\n|  |  |\n";
+    let colon = src.find(" : ").unwrap() + 1;
+    let t = add(src, Selection::range(colon, colon + 1)).unwrap();
+    assert!(t.contains("| - | {==:==}{>><<} |"), "{t}");
+    let dash = src.find("| - ").unwrap() + 2;
+    assert!(add(src, Selection::range(dash, dash + 1)).is_ok());
+    let empty = src.find("|  |  |").unwrap() + 2;
+    let t = add(src, Selection::caret(empty)).unwrap();
+    assert!(t.ends_with("| {>><<} |  |\n"), "{t}");
+    // the delimiter row (by its index) is still refused
+    let d = src.find("---").unwrap() + 1;
+    assert!(add(src, Selection::caret(d)).unwrap_err().contains("delimiter"));
+    // a backslash right before: refused with a reason (cells and paragraphs)
+    for src in [
+        "| a\\word | x |\n| --- | --- |\n| b | c |\n",
+        "| H | I |\n| --- | --- |\n| a\\word | x |\n",
+        "a\\word here\n",
+        "# a\\word\n",
+    ] {
+        let w = src.find("word").unwrap();
+        let err = add(src, Selection::range(w, w + 4)).unwrap_err();
+        assert!(err.contains("backslash"), "{src:?}: {err}");
+        assert!(add(src, Selection::caret(w)).is_err(), "{src:?}: caret");
+    }
+    // an escaped backslash is just text
+    let src = "a\\\\word here\n";
+    let w = src.find("word").unwrap();
+    assert_eq!(
+        add(src, Selection::range(w, w + 4)).unwrap(),
+        "a\\\\{==word==}{>><<} here\n"
+    );
+}
