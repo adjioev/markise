@@ -1501,3 +1501,467 @@ impl DirScript {
         }
     }
 }
+
+// ---------------------------------------------------------------- paged model check
+
+/// PROTOTYPE measurement driver (`MARKISE_PROTO_PAGED=1`, on a copy of a lesson): blocks over
+/// the paged view model (ADR 0016). Scrolls through the document and back, jumps, edits, moves
+/// and walks the caret across pages, and reports what happened. Pair with `MARKISE_PAGE_TOPS=n`.
+#[derive(Default)]
+struct PagedScript {
+    step: u32,
+    since: Option<Instant>,
+    original: String,
+    last: std::collections::HashMap<(usize, usize), f32>,
+    jump: f32,
+    scrolled: bool,
+    total: f64,
+    total_first: f64,
+    max_blocks: usize,
+    moves: u32,
+    target: usize,
+    saves: usize,
+    prev_off: usize,
+    stuck: u32,
+    max_stuck: u32,
+    inside: u32,
+    virt: u32,
+    furthest: usize,
+    partial_seen: bool,
+}
+
+thread_local! {
+    static PAGED_SCRIPT: std::cell::RefCell<Option<PagedScript>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn paged_script(ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
+    if !std::env::var_os("MARKISE_PROTO_PAGED").is_some_and(|v| v != "0") {
+        return;
+    }
+    PAGED_SCRIPT.with(|s| s.borrow_mut().get_or_insert_with(Default::default).frame(ctx, viewer));
+}
+
+impl PagedScript {
+    fn say(s: String) {
+        eprintln!("[proto-paged] {s}");
+    }
+
+    fn key(ctx: &egui::Context, key: egui::Key) {
+        ctx.input_mut(|i| {
+            i.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            })
+        });
+    }
+
+    fn stats(viewer: &mut crate::viewer::DocViewer) -> String {
+        let st = viewer.ed.view.paging_stats().clone();
+        let n = viewer.ed.view.len();
+        let pages = (0..n).filter(|&i| viewer.ed.view.model().is_page(i)).count();
+        format!(
+            "items {n} (placeholders {pages}), materialized {}, evicted {}, total height {:.0}, paged {}",
+            st.materialized,
+            st.evicted,
+            viewer.ed.view.total_height(),
+            viewer.ed.view.model().is_paged()
+        )
+    }
+
+    /// On-screen movement of the items that stayed visible since the last frame, when nothing
+    /// scrolled.
+    fn track(&mut self, viewer: &crate::viewer::DocViewer) {
+        let now: std::collections::HashMap<(usize, usize), f32> = viewer.painted().iter().copied().collect();
+        if !self.scrolled {
+            for (k, y) in &now {
+                if let Some(o) = self.last.get(k) {
+                    self.jump = self.jump.max((y - o).abs());
+                }
+            }
+        }
+        self.scrolled = false;
+        self.last = now;
+    }
+
+    fn frame(&mut self, ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
+        use markise_engine::block_form as bf;
+        ctx.request_repaint();
+        let now = Instant::now();
+        let since = *self.since.get_or_insert(now);
+        let after = |ms: u64| now - since >= std::time::Duration::from_millis(ms);
+        let Some(snaps) = viewer.snaps.as_ref() else { return };
+        let pending = snaps.pending();
+        let scanned = snaps.blocks.len();
+        self.max_blocks = self.max_blocks.max(scanned);
+        self.partial_seen |= viewer.partial;
+        let form_open = snaps.form.is_open();
+        let n_saves = snaps.form.saves.len();
+        let vh = viewer.surface_rect().map_or(800.0, |r| r.height());
+        let next = |me: &mut Self| {
+            me.step += 1;
+            me.since = Some(Instant::now());
+            me.jump = 0.0;
+            me.last.clear();
+        };
+        let at_end = viewer.ed.view.scroll_y() + vh as f64 >= viewer.ed.view.total_height() - 2.0;
+        let at_top = viewer.ed.view.scroll_y() <= 1.0;
+        match self.step {
+            0 => {
+                let ready = !viewer.partial && scanned > 0 && pending == 0;
+                if ready && after(1500) {
+                    self.original = viewer.ed.session.text().to_string();
+                    let all = bf::all_blocks(&self.original).len();
+                    Self::say(format!(
+                        "start: blocks in the text {all}, scanned (materialized) {scanned}, progressive part seen {}; {}",
+                        self.partial_seen,
+                        Self::stats(viewer)
+                    ));
+                    next(self);
+                } else if !ready {
+                    self.since = Some(now);
+                }
+            }
+            // down: images arrive as pages come in
+            1 => {
+                self.track(viewer);
+                if after(5000) {
+                    Self::say(format!(
+                        "pass down waiting: pending {pending}, moves {}, scroll {:.0} of {:.0}, vh {vh}, {}",
+                        self.moves,
+                        viewer.ed.view.scroll_y(),
+                        viewer.ed.view.total_height(),
+                        Self::stats(viewer)
+                    ));
+                    self.since = Some(now);
+                }
+                if pending == 0 && after(60) {
+                    if at_end {
+                        self.total_first = viewer.ed.view.total_height();
+                        Self::say(format!(
+                            "pass down done ({} moves): at most {} blocks scanned at once; on-screen movement (images arriving) {:.1}; {}",
+                            self.moves,
+                            self.max_blocks,
+                            self.jump,
+                            Self::stats(viewer)
+                        ));
+                        self.moves = 0;
+                        next(self);
+                    } else {
+                        viewer.ed.view.scroll_by(vh * 0.8);
+                        self.scrolled = true;
+                        self.moves += 1;
+                        self.since = Some(now);
+                    }
+                }
+            }
+            // up: heights known, pages come back
+            2 => {
+                self.track(viewer);
+                if pending == 0 && after(60) {
+                    if at_top {
+                        self.total = viewer.ed.view.total_height();
+                        Self::say(format!(
+                            "pass up done ({} moves): on-screen movement without scrolling {:.1}; total height {:.0} → {:.0}; {}",
+                            self.moves,
+                            self.jump,
+                            self.total_first,
+                            self.total,
+                            Self::stats(viewer)
+                        ));
+                        self.moves = 0;
+                        next(self);
+                    } else {
+                        viewer.ed.view.scroll_by(-vh * 0.8);
+                        self.scrolled = true;
+                        self.moves += 1;
+                        self.since = Some(now);
+                    }
+                }
+            }
+            // a jump to a block far away
+            3 => {
+                let text = viewer.ed.session.text();
+                let blocks = bf::all_blocks(text);
+                let q: Vec<usize> = blocks
+                    .iter()
+                    .filter(|b| text[b.range.clone()].starts_with(":::question"))
+                    .map(|b| b.range.start)
+                    .collect();
+                let off = q[q.len() * 2 / 3];
+                self.target = off;
+                viewer.ed.view.scroll_to_source(off, 0, 0.0);
+                Self::say(format!("jump to the block at {off}"));
+                next(self);
+            }
+            4 if pending == 0 && after(500) => {
+                let t = self.target;
+                let found = snaps.blocks.iter().any(|b| b.offset == t);
+                let placed = viewer.atomic.iter().any(|a| a.0 == t);
+                let y = viewer.painted().iter().find(|k| k.0.0 == t).map(|k| k.1);
+                Self::say(format!(
+                    "after the jump: scanned {found}, placed {placed}, top of the block on screen at {y:?}; {}",
+                    Self::stats(viewer)
+                ));
+                viewer.pending_edit = Some(t);
+                next(self);
+            }
+            5 if form_open && after(900) => {
+                let dir = std::env::var_os("MARKISE_PROTO_SHOTS");
+                crate::form_panel::handle(json!({
+                    "op": "form_debug",
+                    "path": dir.as_ref().map(|d| PathBuf::from(d).join("paged-window.png")),
+                }));
+                if let Some(d) = dir {
+                    crate::form_panel::handle(
+                        json!({"op": "form_shot", "path": PathBuf::from(d).join("paged-form.png")}),
+                    );
+                }
+                crate::block_snap::ProtoScript::default().shot(ctx, "paged-form-egui");
+                next(self);
+            }
+            // the block's page goes away while its form is open
+            6 if after(800) => {
+                viewer.ed.view.scroll_to_source(0, 0, 0.0);
+                next(self);
+            }
+            7 if after(800) => {
+                let t = self.target;
+                let there = snaps.blocks.iter().any(|b| b.offset == t);
+                Self::say(format!(
+                    "scrolled away with the form open: block still materialized {there}; panel open {form_open}"
+                ));
+                self.saves = n_saves;
+                snaps
+                    .form
+                    .eval("window.markiseForm.set('prompt', 'Правка через форму?')");
+                next(self);
+            }
+            8 if after(400) => {
+                snaps.form.eval("window.markiseForm.save()");
+                next(self);
+            }
+            9 if n_saves > self.saves => {
+                let text = viewer.ed.session.text().to_string();
+                let changed: Vec<String> = similar::TextDiff::from_lines(&self.original, &text)
+                    .iter_all_changes()
+                    .filter(|c| c.tag() != similar::ChangeTag::Equal)
+                    .map(|c| c.value().trim_end().to_string())
+                    .collect();
+                Self::say(format!(
+                    "save → {:?}; changed lines {changed:?}; undo label {:?}",
+                    snaps.form.saves.last(),
+                    viewer
+                        .ed
+                        .session
+                        .history()
+                        .undo_stack()
+                        .last()
+                        .map(|t| t.label.to_string())
+                ));
+                viewer.ed.edit(|s| s.undo());
+                Self::say(format!(
+                    "undo → byte-identical = {}",
+                    viewer.ed.session.text() == self.original
+                ));
+                next(self);
+            }
+            // the caret across images, pages and gaps
+            10 if after(300) => {
+                let text = viewer.ed.session.text();
+                let first = bf::all_blocks(text).first().map_or(0, |b| b.range.start);
+                let start = first.saturating_sub(1);
+                viewer.ed.set_selection(markise_doc::Selection::caret(start));
+                viewer.request_refocus();
+                self.prev_off = start;
+                self.furthest = start;
+                self.moves = 0;
+                next(self);
+            }
+            11 | 12 if after(300) => {
+                let down = self.step == 11;
+                let f = viewer.ed.session.selection().primary().focus;
+                let inside = viewer
+                    .atomic
+                    .iter()
+                    .any(|a| f.offset > a.0 && f.offset < a.1 && viewer.focused_block != Some(a.0));
+                self.inside += inside as u32;
+                self.virt += (f.virt > 0) as u32;
+                let progress = if down {
+                    f.offset > self.prev_off
+                } else {
+                    f.offset < self.prev_off
+                };
+                self.stuck = if progress { 0 } else { self.stuck + 1 };
+                self.max_stuck = self.max_stuck.max(self.stuck);
+                if self.stuck == 20 {
+                    let i = viewer.ed.view.model().item_at_offset(f.offset);
+                    for j in i.saturating_sub(6)..(i + 5).min(viewer.ed.view.len()) {
+                        let m = viewer.ed.view.model();
+                        Self::say(format!(
+                            "  stall at {} virt {}: item {j} start {} len {} page {} h {:.1}{}",
+                            f.offset,
+                            f.virt,
+                            m.item_start(j),
+                            m.items[j].len,
+                            m.is_page(j),
+                            viewer.ed.view.height(j),
+                            if j == i { " <" } else { "" }
+                        ));
+                    }
+                    Self::say(format!(
+                        "  atomic near: {:?}",
+                        viewer
+                            .atomic
+                            .iter()
+                            .filter(|a| a.1 + 400 > f.offset && a.0 < f.offset + 400)
+                            .collect::<Vec<_>>()
+                    ));
+                }
+                self.prev_off = f.offset;
+                self.furthest = if down {
+                    self.furthest.max(f.offset)
+                } else {
+                    self.furthest.min(f.offset)
+                };
+                self.moves += 1;
+                if self.moves >= 400 || self.stuck > 30 {
+                    Self::say(format!(
+                        "caret {}: {} key presses, reached offset {} (text {}), inside an image {} times, on a gap paragraph {} frames, longest stall {} frames; text unchanged {}",
+                        if down { "down" } else { "up" },
+                        self.moves,
+                        self.furthest,
+                        self.original.len(),
+                        self.inside,
+                        self.virt,
+                        self.max_stuck,
+                        viewer.ed.session.text() == self.original
+                    ));
+                    self.moves = 0;
+                    self.stuck = 0;
+                    self.max_stuck = 0;
+                    next(self);
+                } else {
+                    viewer.request_refocus();
+                    Self::key(ctx, if down { egui::Key::ArrowDown } else { egui::Key::ArrowUp });
+                }
+            }
+            // moving a block, by keys' code path
+            13 if after(300) => {
+                let t = self.target;
+                viewer.ed.view.scroll_to_source(t, 0, 0.0);
+                viewer.ed.view.ensure_offset(t);
+                let r = viewer.move_block_step(t, false);
+                let text = viewer.ed.session.text().to_string();
+                Self::say(format!(
+                    "move a block down → {r:?}; blocks intact {}; undo label {:?}",
+                    bf::all_blocks(&text).len() == bf::all_blocks(&self.original).len(),
+                    viewer
+                        .ed
+                        .session
+                        .history()
+                        .undo_stack()
+                        .last()
+                        .map(|t| t.label.to_string())
+                ));
+                next(self);
+            }
+            14 if after(500) => {
+                viewer.ed.edit(|s| s.undo());
+                Self::say(format!(
+                    "undo → byte-identical = {}",
+                    viewer.ed.session.text() == self.original
+                ));
+                next(self);
+            }
+            // read-only session
+            15 if pending == 0 && after(500) => {
+                viewer.ed.session.set_read_only(Some("read-only (script)"));
+                viewer.pending_edit = Some(self.target);
+                next(self);
+            }
+            16 if after(400) => {
+                let err = snaps.form.error.as_ref().map(|e| e.0.clone());
+                viewer.ed.session.set_read_only(Some("read-only (script)"));
+                let r = viewer.move_block_step(self.target, false);
+                Self::say(format!(
+                    "read-only: form opened {form_open}, error {err:?}, move → {r:?}, text unchanged {}",
+                    viewer.ed.session.text() == self.original
+                ));
+                viewer.ed.session.set_read_only(None);
+                next(self);
+            }
+            // a block dragged to an insertion point (the line and the drop's edit; the real
+            // pointer press and release are the owner's to try)
+            17 if after(120) => {
+                let pair = viewer.atomic.iter().copied().find_map(|a| {
+                    viewer
+                        .gaps
+                        .iter()
+                        .copied()
+                        .find(|g| g.0 != a.1 && g.0 != a.2 && g.0 > a.3)
+                        .map(|g| (a, g))
+                });
+                match pair {
+                    Some((a, g)) if !at_end => {
+                        egui::DragAndDrop::set_payload(ctx, crate::viewer::MoveBlock(a.0));
+                        let top = viewer.surface_rect().map_or(0.0, |r| r.top());
+                        viewer.debug_drag_y = Some(g.1 - top + 2.0);
+                        self.target = a.0;
+                        self.saves = g.0;
+                        next(self);
+                    }
+                    _ if at_end => {
+                        Self::say("no block with an insertion point on one screen".to_string());
+                        self.step = 21;
+                    }
+                    _ => {
+                        viewer.ed.view.scroll_by(vh * 0.5);
+                        self.since = Some(now);
+                    }
+                }
+            }
+            18 if after(500) => {
+                crate::block_snap::ProtoScript::default().shot(ctx, "paged-drag-line");
+                next(self);
+            }
+            19 if after(300) => {
+                egui::DragAndDrop::clear_payload(ctx);
+                viewer.debug_drag_y = None;
+                let r = viewer.move_block(self.target, self.saves);
+                let text = viewer.ed.session.text().to_string();
+                Self::say(format!(
+                    "drop at {} → {r:?}; blocks intact {}; undo label {:?}",
+                    self.saves,
+                    bf::all_blocks(&text).len() == bf::all_blocks(&self.original).len(),
+                    viewer
+                        .ed
+                        .session
+                        .history()
+                        .undo_stack()
+                        .last()
+                        .map(|t| t.label.to_string())
+                ));
+                next(self);
+            }
+            20 if after(500) => {
+                viewer.ed.edit(|s| s.undo());
+                Self::say(format!(
+                    "undo → byte-identical = {}",
+                    viewer.ed.session.text() == self.original
+                ));
+                next(self);
+            }
+            21 if after(300) => {
+                Self::say(format!("done; {}", Self::stats(viewer)));
+                if std::env::var_os("MARKISE_PROTO_EXIT").is_some_and(|v| v != "0") {
+                    std::process::exit(0);
+                }
+                self.step = 99;
+            }
+            _ => {}
+        }
+    }
+}

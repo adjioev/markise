@@ -388,13 +388,17 @@ impl View {
                 while s > a && top(self, s) == top(self, s - 1) {
                     s -= 1;
                 }
+                // PROTOTYPE (block snapshots): never between an image's opener and its rest
+                while s < b && self.override_is_zero(s) {
+                    s += 1;
+                }
                 if s > a {
                     far.push(a..s);
                 }
             }
             if yb > keep.end {
                 let mut s = (self.heights.index_at(keep.end) + 1).clamp(a, b);
-                while s < b && top(self, s) == top(self, s - 1) {
+                while s < b && (top(self, s) == top(self, s - 1) || self.override_is_zero(s)) {
                     s += 1;
                 }
                 if s < b {
@@ -417,7 +421,7 @@ impl View {
             while s < r.end {
                 let t0 = top(self, s);
                 let mut e = s + 1;
-                while e < r.end && top(self, e) < t0 + page_tops {
+                while e < r.end && (top(self, e) < t0 + page_tops || self.override_is_zero(e)) {
                     e += 1;
                 }
                 let edge = s == 0 || e == n;

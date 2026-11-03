@@ -371,7 +371,12 @@ impl BlockSnaps {
             self.key_width = Some(width);
             width
         };
-        let id = (std::sync::Arc::as_ptr(model) as usize, revision, paging, model.items.len());
+        let id = (
+            std::sync::Arc::as_ptr(model) as usize,
+            revision,
+            paging,
+            model.items.len(),
+        );
         if self.form.preview != self.preview_applied {
             self.scanned = None;
         }

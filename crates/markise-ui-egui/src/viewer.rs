@@ -942,7 +942,8 @@ impl DocViewer {
 
         // ---- input: pointer (hit tests against the last frame's layout)
         let modifiers = ui.input(|i| i.modifiers);
-        let on_plus = if editable && !self.snap_blocks && self.snaps.is_some() && self.ed.session.read_only().is_none() {
+        let on_plus = if editable && !self.snap_blocks && self.snaps.is_some() && self.ed.session.read_only().is_none()
+        {
             ui.input(|i| i.pointer.interact_pos()).and_then(|p| {
                 self.gaps
                     .iter()
@@ -1253,6 +1254,25 @@ impl DocViewer {
                     }
                     // indices only hold from here on: pages come and go first (ADR 0016)
                     self.ed.view.prepare_for_frame(vh);
+                    // a page boundary inside a block near the viewport: bring in the other part
+                    // (far ones stay cut, else this would cascade over the document)
+                    if !s.cut.is_empty() {
+                        let y = self.ed.view.scroll_y();
+                        let (lo, hi) = (y - 2.0 * vh as f64, y + 3.0 * vh as f64);
+                        let near: Vec<usize> = s
+                            .cut
+                            .iter()
+                            .copied()
+                            .filter(|&o| {
+                                let i = self.ed.view.model().item_at_offset(o);
+                                let yi = self.ed.view.item_y(i);
+                                yi >= lo && yi <= hi
+                            })
+                            .collect();
+                        for o in near {
+                            self.ed.view.ensure_offset(o);
+                        }
+                    }
                     let vis: Vec<usize> = self.last_visible.iter().map(|v| v.0.0).collect();
                     let model = self.ed.view.model().clone();
                     let width = self.ed.view.width();
@@ -1269,27 +1289,6 @@ impl DocViewer {
                         &crate::block_snap::ThemeVars::from_theme(theme),
                         paging,
                     );
-                    // a page boundary inside a block near the viewport: bring in the other part
-                    // (far ones stay cut, else this would cascade over the document)
-                    if !s.cut.is_empty() {
-                        let y = self.ed.view.scroll_y();
-                        let (lo, hi) = (y - 2.0 * vh as f64, y + 3.0 * vh as f64);
-                        let near: Vec<usize> = s
-                            .cut
-                            .iter()
-                            .copied()
-                            .filter(|&o| {
-                                let yi = self.ed.view.item_y(model.item_at_offset(o));
-                                yi >= lo && yi <= hi
-                            })
-                            .collect();
-                        if !near.is_empty() {
-                            for o in near {
-                                self.ed.view.ensure_offset(o);
-                            }
-                            ctx.request_repaint();
-                        }
-                    }
                     // live preview of a new block: extra height under the item before the point
                     // (or in place of the `/` line), painted after the layout
                     self.draft_paint = None;
@@ -1311,9 +1310,11 @@ impl DocViewer {
                                 self.draft_paint = Some((k, spacing, tex, size, true));
                             }
                         } else {
-                            let k = placed.iter().find(|p| p.end == st).map(|p| p.offset).or_else(|| {
-                                items.iter().rfind(|&&(a, l)| a + l <= st && l > 0).map(|x| x.0)
-                            });
+                            let k = placed
+                                .iter()
+                                .find(|p| p.end == st)
+                                .map(|p| p.offset)
+                                .or_else(|| items.iter().rfind(|&&(a, l)| a + l <= st && l > 0).map(|x| x.0));
                             if let Some(k) = k {
                                 let base = over.get(&k).copied().or_else(|| self.natural.get(&k).copied());
                                 if let Some(base) = base {
@@ -1391,10 +1392,16 @@ impl DocViewer {
         self.last_visible = visible.iter().map(|v| (self.item_key(v.idx), v.y)).collect();
         self.track_card_edit();
         self.ed.clear_recent_edits();
-        self.natural = visible.iter().map(|v| (self.ed.view.model().item_start(v.idx), v.layout.height)).collect();
-        let draft_y = self
-            .draft_paint
-            .and_then(|(k, ..)| visible.iter().find(|v| self.ed.view.model().item_start(v.idx) == k).map(|v| v.y));
+        self.natural = visible
+            .iter()
+            .map(|v| (self.ed.view.model().item_start(v.idx), v.layout.height))
+            .collect();
+        let draft_y = self.draft_paint.and_then(|(k, ..)| {
+            visible
+                .iter()
+                .find(|v| self.ed.view.model().item_start(v.idx) == k)
+                .map(|v| v.y)
+        });
         self.last_left = left;
         self.last_top = rect.top();
         // PROTOTYPE (block packages): insertion points between top-level items (never inside a

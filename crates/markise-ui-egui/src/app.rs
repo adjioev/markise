@@ -3104,6 +3104,7 @@ impl MarkiseApp {
                         crate::block_edit::live_script(ctx, &mut d.viewer);
                         crate::block_edit::insert_script(ctx, &mut d.viewer);
                         crate::block_edit::dir_script(ctx, &mut d.viewer);
+                        crate::block_edit::paged_script(ctx, &mut d.viewer);
                         let mut vrect = ui.available_rect_before_wrap();
                         if d.viewer.snaps.as_ref().is_some_and(|s| s.form.is_open()) {
                             vrect = crate::form_panel::reserve(ui, vrect);

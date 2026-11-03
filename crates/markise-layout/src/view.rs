@@ -1187,7 +1187,10 @@ impl View {
         let lh = if self.overrides.is_empty() {
             l.height
         } else {
-            self.overrides.get(&self.model.item_start(i)).copied().unwrap_or(l.height)
+            self.overrides
+                .get(&self.model.item_start(i))
+                .copied()
+                .unwrap_or(l.height)
         };
         self.heights.set(i, (lh + a + b) as f64);
         self.exact[i] = true;
@@ -1202,6 +1205,13 @@ impl View {
         let h = *self.overrides.get(&self.model.item_start(i))?;
         let (a, b) = self.item_pad(i);
         Some((h + a + b) as f64)
+    }
+
+    /// PROTOTYPE (block snapshots): item `i` is painted by the image of a block opened earlier.
+    pub(super) fn override_is_zero(&self, i: usize) -> bool {
+        !self.overrides.is_empty()
+            && !self.model.is_page(i)
+            && self.overrides.get(&self.model.item_start(i)) == Some(&0.0)
     }
 
     /// PROTOTYPE (block snapshots): the real items starting at source offset `start` (segments

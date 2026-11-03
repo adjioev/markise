@@ -357,7 +357,57 @@ mod mac {
             "form_close" => hide(),
             "form_eval" => eval(v["js"].as_str().unwrap_or("")),
             "form_shot" => shot(v["path"].as_str().unwrap_or("form.png").to_string()),
+            "form_debug" => debug(v["path"].as_str().map(str::to_string)),
             _ => {}
+        }
+    }
+
+    /// Measurement hook: the view and layer tree around the panel, and a capture of the real
+    /// composited window (needs the Screen Recording permission).
+    fn debug(path: Option<String>) {
+        let Some((web, window)) = with(|p| (p.web.clone(), p.window.clone())) else {
+            eprintln!("[blockform] debug: no panel");
+            return;
+        };
+        let Some(content) = window.contentView() else { return };
+        let name = |o: &AnyObject| o.class().name().to_string_lossy().to_string();
+        unsafe {
+            let root: Option<Retained<AnyObject>> = msg_send![&*content, layer];
+            let web_layer: Option<Retained<AnyObject>> = msg_send![&*web, layer];
+            eprintln!(
+                "[blockform] content view {} flipped={} layer {:?}; web hidden={} frame={:?} layer {:?}",
+                name(&content),
+                content.isFlipped(),
+                root.as_deref().map(name),
+                web.isHidden(),
+                web.frame(),
+                web_layer.as_deref().map(name)
+            );
+            let subs = content.subviews();
+            for i in 0..subs.len() {
+                eprintln!("[blockform]   subview {i}: {}", name(&subs.objectAtIndex(i)));
+            }
+            if let Some(root) = &root {
+                let sublayers: Option<Retained<objc2_foundation::NSArray<AnyObject>>> = msg_send![&**root, sublayers];
+                if let Some(ls) = sublayers {
+                    for i in 0..ls.len() {
+                        let l = ls.objectAtIndex(i);
+                        let same = web_layer.as_deref().is_some_and(|w| std::ptr::eq(w, &*l));
+                        eprintln!(
+                            "[blockform]   sublayer {i}: {}{}",
+                            name(&l),
+                            if same { " (the panel)" } else { "" }
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(path) = path {
+            let id = window.windowNumber();
+            let st = std::process::Command::new("/usr/sbin/screencapture")
+                .args(["-x", "-o", &format!("-l{id}"), &path])
+                .status();
+            eprintln!("[blockform] screencapture window {id} → {path}: {st:?}");
         }
     }
 
