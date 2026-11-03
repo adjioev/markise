@@ -107,7 +107,8 @@ impl MarkiseApp {
 
     /// Draws the open dialog (a modal); Enter inserts, Esc or a click outside cancels.
     pub(super) fn insert_table_window(&mut self, ctx: &Context) {
-        if self.insert_table.is_some() && !self.insert_table_current() {
+        // another document or revision, or the window lost the focus: the dialog goes
+        if self.insert_table.is_some() && (!self.insert_table_current() || window_blurred(ctx)) {
             self.cancel_insert_table();
         }
         let Some(mut t) = self.insert_table else { return };
@@ -187,4 +188,9 @@ fn picker(ui: &mut Ui, t: &mut InsertTable, accent: Color32, border: Color32, we
     }
     ui.label(format!("{} columns × {} rows + header", t.columns, t.rows));
     resp.clicked()
+}
+
+/// The window lost the keyboard focus (this frame's event, or the input state).
+fn window_blurred(ctx: &Context) -> bool {
+    ctx.input(|i| !i.focused || i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(false))))
 }

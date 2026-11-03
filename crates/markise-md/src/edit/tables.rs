@@ -175,9 +175,10 @@ impl Document {
     /// blank lines keep it apart from its neighbours. The caret goes into the first header
     /// cell. One patch, so one undo step.
     /// Why Insert Table cannot run at the caret (PR #165 review): inside a code block, math
-    /// block, raw (HTML) block or front matter the table would be code, not a table; after
-    /// a fence that is never closed (it runs to the end of the document) the same. The
-    /// editor-only paragraph after a closed block is fine.
+    /// block, raw (HTML) block or front matter the table would be code, not a table (cheap
+    /// check). From the editor-only paragraph after such a block, the planned insertion is
+    /// verified by re-parsing ([`Document::insert_table_parses`]): an unclosed fence or HTML
+    /// block would swallow it.
     fn insert_table_refusal(&self, req: &PlanRequest) -> Option<&'static str> {
         let focus = req.selection.primary().focus;
         let leaf = self.leaf(focus.offset.min(self.text().len()))?;
@@ -191,34 +192,35 @@ impl Document {
         if focus.virt == 0 {
             return Some("a table cannot go inside a code, math or HTML block or the front matter");
         }
-        if matches!(leaf.kind, LeafKind::CodeBlock { .. }) && self.unclosed_fence(&leaf) {
-            return Some("the code block is not closed: a table after it would be code");
-        }
-        None
-    }
-
-    /// `leaf` is a fenced code block without a closing fence.
-    fn unclosed_fence(&self, leaf: &markise_doc::LeafView) -> bool {
-        let Some(f) = self.code_fence(leaf.span.start) else {
-            return false; // indented code
-        };
-        let text = self.text();
-        let fence = &text[f.opener.start..f.opener.end];
-        let ch = fence.as_bytes()[0];
-        let n = fence.bytes().take_while(|&b| b == ch).count();
-        let last = text[..leaf.span.end].trim_end_matches(['\n', '\r']);
-        let ls = crate::line_start(last, last.len());
-        if ls <= f.opener.start {
-            return true; // only the opening line
-        }
-        let close = last[ls..].trim_start_matches(['>', ' ', '\t']).trim_end();
-        !(close.len() >= n && close.bytes().all(|b| b == ch))
+        self.insert_table_edit(req).err()
     }
 
     fn plan_insert_table(&self, req: &PlanRequest) -> Result<Plan, PlanError> {
-        if let Some(why) = self.insert_table_refusal(req) {
-            return Err(PlanError::NotApplicable(why));
+        let focus = req.selection.primary().focus;
+        if focus.virt == 0
+            && self.leaf(focus.offset.min(self.text().len())).is_some_and(|l| {
+                matches!(
+                    l.kind,
+                    LeafKind::CodeBlock { .. } | LeafKind::Math | LeafKind::RawBlock | LeafKind::Metadata
+                )
+            })
+        {
+            return Err(PlanError::NotApplicable(
+                "a table cannot go inside a code, math or HTML block or the front matter",
+            ));
         }
+        let (range, ins, caret) = self.insert_table_edit(req).map_err(PlanError::NotApplicable)?;
+        Ok(Plan::single(
+            PlanStep::patches(PatchSet::single_verbatim(range, ins)),
+            Some(Selection::caret(caret)),
+        )
+        .labeled("Insert Table"))
+    }
+
+    /// The patch of Insert Table (range, replacement, caret), verified: the region re-parsed
+    /// with it holds exactly the new table there (Codex review of PR #165: no heuristics
+    /// about fences or HTML blocks that could be fooled).
+    fn insert_table_edit(&self, req: &PlanRequest) -> Result<(std::ops::Range<usize>, String, usize), &'static str> {
         let size = |name: &str, default: usize, max: usize| {
             req.params
                 .get_int(name)
@@ -297,10 +299,41 @@ impl Document {
             ins.push_str(eol);
             ins.push_str(prefix.trim_end());
         }
-        Ok(Plan::single(
-            PlanStep::patches(PatchSet::single_verbatim(range, ins)),
-            Some(Selection::caret(caret)),
-        )
-        .labeled("Insert Table"))
+        if !self.insert_table_parses(&range, &ins, caret, cols, rows) {
+            return Err("the new table would not stay a table here");
+        }
+        Ok((range, ins, caret))
+    }
+
+    /// The top-level block around `range` (whole lines, and the line after it) parsed alone
+    /// with `ins` in place of `range` has a table of `cols` columns and `rows` body rows
+    /// whose first header cell starts at `caret`.
+    fn insert_table_parses(
+        &self,
+        range: &std::ops::Range<usize>,
+        ins: &str,
+        caret: usize,
+        cols: usize,
+        rows: usize,
+    ) -> bool {
+        let text = self.text();
+        let i = self.top_partition_point(|t| t.end() < range.start);
+        let a = crate::line_start(text, self.top(i).map_or(range.start, |t| t.start().min(range.start)));
+        let (_, next) = crate::text::line_end(text, range.end);
+        let (b, _) = crate::text::line_end(text, next);
+        let mut block = String::with_capacity(b - a + ins.len());
+        block.push_str(&text[a..range.start]);
+        block.push_str(ins);
+        block.push_str(&text[range.end..b.max(range.end)]);
+        let doc = Document::parse(block, self.options().clone());
+        let at = caret - a;
+        let Some(leaf) = doc.leaf(at) else { return false };
+        if !matches!(leaf.kind, LeafKind::Table { columns } if columns as usize == cols) {
+            return false;
+        }
+        let Some(t) = doc.table(leaf.span.start) else {
+            return false;
+        };
+        t.rows.len() == rows + 2 && doc.table_row_cells(t.rows[0]).first().is_some_and(|c| c.start == at)
     }
 }

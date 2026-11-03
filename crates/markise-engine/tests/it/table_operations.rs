@@ -368,3 +368,20 @@ fn insert_table_after_code_blocks() {
         "unclosed fence"
     );
 }
+
+/// Codex review 2 of PR #165: whatever the block before the editor-only paragraph, the
+/// insertion is verified by re-parsing — a fence "closed" by indented or quoted backticks
+/// (still open), an unclosed HTML block: refused, nothing inserted.
+#[test]
+fn insert_table_verified_by_reparse_after_open_blocks() {
+    for src in ["```\ncode\n    ```\n", "```\ncode\n> ```\n", "<script>\ncode\n"] {
+        let mut t = T::new(src);
+        let end = t.ed.session.doc().leaf(src.find("code").unwrap()).unwrap().span.end;
+        t.ed.set_caret(markise_doc::DocPos::with_virt(end, 1), false);
+        assert!(
+            t.ed.registry.enabled(&t.ed.session, "table.insert").is_err(),
+            "{src:?}: refused"
+        );
+        assert_eq!(t.text(), src);
+    }
+}

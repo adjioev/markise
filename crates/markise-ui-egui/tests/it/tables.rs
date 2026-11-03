@@ -366,3 +366,29 @@ fn insert_table_dialog_stays_with_its_document() {
     assert!(h.state().insert_table_dialog().is_none(), "closed after an edit");
     assert_eq!(text(&h), "Inxtro\n");
 }
+
+/// Codex review 2 of PR #165: Close (and Quit) still work while the Insert Table dialog is
+/// open — the dialog goes first; losing the window focus dismisses it too.
+#[test]
+fn close_and_focus_loss_dismiss_the_insert_table_dialog() {
+    let mut h = open("insert-close", "Intro\n");
+    click(&mut h, egui::pos2(600.0, 200.0));
+    set_caret(&mut h, 2);
+    menu(&mut h, "table.insert");
+    assert!(h.state().insert_table_dialog().is_some());
+    let ctx = h.ctx.clone();
+    assert!(
+        h.state_mut().menu_action(&ctx, &MenuAction::Command("file.close")),
+        "Close runs"
+    );
+    assert!(h.state().insert_table_dialog().is_none(), "the dialog went first");
+    // focus loss
+    let mut h = open("insert-blur", "Intro\n");
+    click(&mut h, egui::pos2(600.0, 200.0));
+    set_caret(&mut h, 2);
+    menu(&mut h, "table.insert");
+    h.event(Event::WindowFocused(false));
+    h.run_steps(2);
+    assert!(h.state().insert_table_dialog().is_none(), "dismissed on focus loss");
+    assert_eq!(text(&h), "Intro\n");
+}
