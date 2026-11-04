@@ -92,7 +92,10 @@ fn read_index() -> Value {
 
 fn write_index(v: &Value) -> Result<(), String> {
     std::fs::create_dir_all(cache_dir()).map_err(|e| e.to_string())?;
-    std::fs::write(index_path(), serde_json::to_string_pretty(v).unwrap_or_default()).map_err(|e| e.to_string())
+    // atomically: another Markise reading a half-written index would see no libraries
+    let tmp = index_path().with_extension(format!("tmp{}", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_string_pretty(v).unwrap_or_default()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, index_path()).map_err(|e| e.to_string())
 }
 
 /// An installed library (Preferences list).

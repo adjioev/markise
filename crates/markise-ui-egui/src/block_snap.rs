@@ -447,6 +447,7 @@ pub struct BlockSnaps {
     pending: usize,
     /// PROTOTYPE (native blocks): the library's `view`s.
     views: HashMap<String, ViewSpec>,
+    views_root: Option<PathBuf>,
     /// Per block of the scan: its native view, when it has one and its content allows it.
     native_of: Vec<Option<NativeBlock>>,
     /// All blocks' setting (View menu, status bar) …
@@ -458,6 +459,7 @@ pub struct BlockSnaps {
     pub native: Vec<NativeBlock>,
     pub insets: HashMap<usize, markise_layout::block::ItemInset>,
     pub raw: Vec<(usize, usize, BlockView)>,
+    logged_state: Option<(usize, usize, usize, usize, usize)>,
 }
 
 /// Where the image of a block is painted this frame.
@@ -502,6 +504,7 @@ impl BlockSnaps {
         if log_on() {
             eprintln!("[blocksnap] native views: {:?}", views.keys().collect::<Vec<_>>());
         }
+        let views_root = root.clone().or_else(|| site.root.clone());
         let form = crate::block_edit::FormState::new(doc.clone(), root, ctx);
         let ctx = ctx.clone();
         let log = log_on();
@@ -543,6 +546,7 @@ impl BlockSnaps {
             last_scale: 2.0,
             pending: 0,
             views,
+            views_root,
             native_of: Vec::new(),
             global_view: match std::env::var("MARKISE_BLOCK_VIEW").as_deref() {
                 Ok("site") => BlockView::Site,
@@ -553,6 +557,7 @@ impl BlockSnaps {
             native: Vec::new(),
             insets: HashMap::new(),
             raw: Vec::new(),
+            logged_state: None,
         })
     }
 
@@ -649,6 +654,11 @@ impl BlockSnaps {
         );
         if self.form.preview != self.preview_applied {
             self.scanned = None;
+        }
+        // the first moments of a document: scan and paint again without waiting for input
+        if self.created.elapsed() < Duration::from_secs(2) {
+            self.scanned = None;
+            ctx.request_repaint();
         }
         if self.scanned != Some(id) {
             let t = Instant::now();
@@ -749,6 +759,12 @@ impl BlockSnaps {
                         eprintln!("[blocksnap] site code changed: re-rendering");
                     }
                     self.folder = h;
+                    // the library arrived or changed: classify the blocks again, on screen now
+                    if let Some(r) = &self.views_root {
+                        self.views = load_views(r);
+                    }
+                    self.scanned = None;
+                    ctx.request_repaint();
                 }
             }
         }
@@ -922,6 +938,21 @@ impl BlockSnaps {
             });
         }
         self.pending = if self.folder == 0 { sites } else { pending };
+        if self.log {
+            let state = (self.blocks.len(), self.native.len(), placed.len(), self.raw.len(), self.cut.len());
+            if self.logged_state != Some(state) {
+                self.logged_state = Some(state);
+                eprintln!(
+                    "[blocksnap] frame state: scanned {} native {} images {} raw {} cut {} (items {}, paging {paging})",
+                    state.0,
+                    state.1,
+                    state.2,
+                    state.3,
+                    state.4,
+                    model.items.len()
+                );
+            }
+        }
         // the new block's preview (its last image while the next one renders)
         self.draft_image = None;
         if let Some(b) = &self.draft_block {

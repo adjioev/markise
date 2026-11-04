@@ -2051,6 +2051,43 @@ struct NativeScript {
 }
 
 pub fn native_script(ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
+    // first frames as they are, nothing forces a repaint except a slow timer
+    if std::env::var_os("MARKISE_PROTO_FIRST").is_some_and(|v| v != "0") {
+        thread_local!(static N: std::cell::Cell<(u32, Option<Instant>)> = const { std::cell::Cell::new((0, None)) });
+        let (n, t0) = N.with(|c| c.get());
+        let t0 = t0.unwrap_or_else(Instant::now);
+        N.with(|c| c.set((n + 1, Some(t0))));
+        let ms = t0.elapsed().as_millis();
+        let m = viewer.ed.view.model().clone();
+        let first_painted: Vec<String> = viewer
+            .painted()
+            .iter()
+            .take(40)
+            .filter(|((st, _), _)| viewer.ed.session.text()[*st..].starts_with(":::"))
+            .map(|((st, _), y)| format!("{st}@{y:.0}"))
+            .collect();
+        eprintln!(
+            "[first] frame {n} t={ms}ms snaps {} partial {} read_only {} items {} width {} ctl {:?} markers painted {:?}",
+            viewer.snaps.is_some(),
+            viewer.partial,
+            viewer.ed.session.read_only().is_some(),
+            m.items.len(),
+            viewer.ed.view.width(),
+            viewer.block_ctl.iter().map(|c| (c.offset, c.view.label(), c.rect.top() as i32, c.rect.height() as i32)).take(4).collect::<Vec<_>>(),
+            first_painted,
+        );
+        if n < 6 {
+            crate::block_snap::ProtoScript::default().shot(ctx, &format!("first-{n}"));
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(1500));
+        if ms > 6000 {
+            crate::block_snap::ProtoScript::default().shot(ctx, "first-last");
+        }
+        if ms > 6500 {
+            std::process::exit(0);
+        }
+        return;
+    }
     if !std::env::var_os("MARKISE_PROTO_NATIVE").is_some_and(|v| v != "0") {
         return;
     }
