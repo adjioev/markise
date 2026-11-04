@@ -436,18 +436,43 @@ fn a_record_without_a_files_digest_grants_nothing() {
     site.pending();
 }
 
+#[cfg(unix)]
 #[test]
-fn stale_staging_folders_are_swept() {
+fn a_linked_packages_folder_stops_every_store_write() {
+    use std::os::unix::fs::symlink;
     let site = Site::new();
     let sha = site.bind(&sample_archive());
-    accept(&site.pending(), &site.store).unwrap();
-    let packages = site.store.root().join("packages");
-    let stale = packages.join(".staging-left");
-    fs::create_dir_all(stale.join("files")).unwrap();
+    let pending = site.pending();
 
-    site.store.sweep_staging(std::time::Duration::from_secs(3600));
-    assert!(stale.exists(), "a young one may be another Markise's");
-    site.store.sweep_staging(std::time::Duration::ZERO);
-    assert!(!stale.exists());
-    assert!(site.store.files_dir(&sha).exists(), "installed packages stay");
+    let away = site.folder.parent().unwrap().join("away");
+    let victim = away.join(sha.as_str());
+    fs::create_dir_all(&victim).unwrap();
+    fs::create_dir_all(site.store.root()).unwrap();
+    symlink(&away, site.store.root().join("packages")).unwrap();
+
+    let e = accept(&pending, &site.store).unwrap_err();
+    assert!(
+        matches!(&e, Problem::Store(m) if m.contains("not a real folder")),
+        "{e:?}"
+    );
+    assert!(
+        !site.store.is_accepted("sample", &sha),
+        "no consent for a failed install"
+    );
+    assert!(site.store.remove_package(&sha).is_err());
+    assert!(site.store.forget("sample", &sha).is_err());
+    assert!(victim.is_dir(), "nothing outside was removed");
+    assert_eq!(fs::read_dir(&away).unwrap().count(), 1, "nothing outside was written");
+}
+
+#[test]
+fn an_archive_with_colliding_folders_never_reaches_the_store() {
+    let site = Site::new();
+    let mut entries: Vec<_> = crate::common::files().into_iter().collect();
+    entries.push(("Assets/a.js".to_string(), b"a".to_vec()));
+    entries.push(("assets/b.js".to_string(), b"b".to_vec()));
+    let raw: Vec<_> = entries.iter().map(|(p, c)| file(p, c)).collect();
+    site.bind(&targz(&raw));
+    assert!(matches!(site.problem(), Problem::Archive(e) if e.contains("differ only by")));
+    assert!(!site.store.root().exists());
 }
