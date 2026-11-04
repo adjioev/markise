@@ -7,14 +7,14 @@ use std::sync::Arc;
 
 use crate::archive::{Files, read_archive};
 use crate::binding::{Binding, find_binding, read_binding, read_source};
-use crate::store::{Store, sha256_hex};
+use crate::store::{Accepted, Sha256Hex, Store};
 use crate::{PackageError, PackageId, PackageIndex};
 
 /// A package ready for use: accepted, verified, unpacked and indexed.
 #[derive(Clone, Debug)]
 pub struct InstalledPackage {
     pub binding: Binding,
-    pub sha256: String,
+    pub sha256: Sha256Hex,
     /// The folder with the package's files.
     pub root: PathBuf,
     pub index: Arc<PackageIndex>,
@@ -37,7 +37,7 @@ impl InstalledPackage {
 pub struct Pending {
     pub binding: Binding,
     pub id: PackageId,
-    pub sha256: String,
+    pub sha256: Sha256Hex,
     pub block_count: usize,
     /// The version of this library the user accepted before, when this one differs.
     pub previous: Option<PackageId>,
@@ -51,7 +51,7 @@ pub enum Problem {
     /// The archive it names cannot be read.
     Source(String),
     /// The archive is not the one the binding pins.
-    HashMismatch { expected: String, found: String },
+    HashMismatch { expected: Sha256Hex, found: Sha256Hex },
     /// The archive is unsafe or broken.
     Archive(String),
     /// The package's own data is invalid or of another format.
@@ -112,10 +112,9 @@ pub fn resolve(doc: &Path, store: &Store, home: Option<&Path>) -> Resolution {
         Ok(b) => b,
         Err(e) => return failed(Problem::Binding(e)),
     };
-    let result = if store.is_accepted(&binding.library, &binding.sha256) {
-        ready(&binding, store).map(Resolution::Ready)
-    } else {
-        inspect(&binding, store).map(Resolution::Ask)
+    let result = match store.acceptance(&binding.library, &binding.sha256) {
+        Some(accepted) => ready(&binding, store, &accepted).map(Resolution::Ready),
+        None => inspect(&binding, store).map(Resolution::Ask),
     };
     result.unwrap_or_else(failed)
 }
@@ -126,11 +125,11 @@ pub fn accept(pending: &Pending, store: &Store) -> Result<InstalledPackage, Prob
     if verified.index.id() != &pending.id {
         return Err(identity_problem(&pending.binding, verified.index.id()));
     }
-    store
+    let digest = store
         .install(&pending.binding.sha256, &verified.files)
         .map_err(Problem::Store)?;
     store
-        .accept(&pending.id, &pending.binding.sha256)
+        .accept(&pending.id, &pending.binding.sha256, &digest)
         .map_err(Problem::Store)?;
     Ok(installed(&pending.binding, store, verified.index))
 }
@@ -145,8 +144,8 @@ fn installed(binding: &Binding, store: &Store, index: PackageIndex) -> Installed
 }
 
 /// An accepted package: from the cache, or unpacked again when the cache lost or damaged it.
-fn ready(binding: &Binding, store: &Store) -> Result<InstalledPackage, Problem> {
-    let cached = store.load(&binding.sha256);
+fn ready(binding: &Binding, store: &Store, accepted: &Accepted) -> Result<InstalledPackage, Problem> {
+    let cached = store.load(&binding.sha256, &accepted.files_digest);
     if let Ok(Some(files)) = cached {
         let index = PackageIndex::from_files(&files).map_err(Problem::Package)?;
         check_identity(binding, &index)?;
@@ -156,9 +155,16 @@ fn ready(binding: &Binding, store: &Store) -> Result<InstalledPackage, Problem> 
         store.remove_package(&binding.sha256).map_err(Problem::Store)?;
     }
     let verified = verified_source(binding)?;
-    store
+    let digest = store
         .install(&binding.sha256, &verified.files)
         .map_err(Problem::Store)?;
+    // the pin matched, so these are the accepted bytes; a digest differs only if a later Markise
+    // reads archives differently
+    if digest != accepted.files_digest {
+        store
+            .accept(verified.index.id(), &binding.sha256, &digest)
+            .map_err(Problem::Store)?;
+    }
     Ok(installed(binding, store, verified.index))
 }
 
@@ -186,7 +192,7 @@ struct Verified {
 /// The binding's archive, hashed and validated from one read of its bytes.
 fn verified_source(binding: &Binding) -> Result<Verified, Problem> {
     let bytes = read_source(binding).map_err(Problem::Source)?;
-    let found = sha256_hex(&bytes);
+    let found = Sha256Hex::of(&bytes);
     if found != binding.sha256 {
         return Err(Problem::HashMismatch {
             expected: binding.sha256.clone(),

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::paths::clean_relative;
+use crate::store::Sha256Hex;
 use crate::value::is_token;
 
 /// The binding's file name.
@@ -15,14 +16,14 @@ const MAX_BINDING_BYTES: u64 = 64 << 10;
 /// Folders looked at above a document.
 const MAX_LEVELS: usize = 64;
 
-/// A parsed, checked binding. `source` has passed the path rules and `sha256` is lowercase hex.
+/// A parsed, checked binding. `source` has passed the path rules.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Binding {
     pub file: PathBuf,
     pub library: String,
     pub version: String,
     pub source: String,
-    pub sha256: String,
+    pub sha256: Sha256Hex,
 }
 
 impl Binding {
@@ -89,10 +90,7 @@ pub fn parse_binding(file: &Path, bytes: &[u8]) -> Result<Binding, String> {
     if clean.is_empty() {
         return Err("source does not name a file".to_string());
     }
-    let sha256 = text("sha256")?.to_ascii_lowercase();
-    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("sha256 must be 64 hexadecimal digits".to_string());
-    }
+    let sha256 = Sha256Hex::parse(text("sha256")?)?;
     Ok(Binding {
         file: file.to_path_buf(),
         library: library.to_string(),

@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use markise_package::{
-    BINDING_FILE, InstalledPackage, Pending, Problem, Resolution, Store, accept, resolve, sha256_hex,
+    BINDING_FILE, InstalledPackage, Pending, Problem, Resolution, Sha256Hex, Store, accept, resolve,
 };
 
 use crate::fixture_archive::{file, sample_archive, targz};
@@ -30,10 +30,10 @@ impl Site {
         }
     }
 
-    fn bind(&self, archive: &[u8]) -> String {
+    fn bind(&self, archive: &[u8]) -> Sha256Hex {
         fs::write(self.folder.join("blocks/p.tar.gz"), archive).unwrap();
-        let sha = sha256_hex(archive);
-        self.bind_raw("sample", "1.2.0", "blocks/p.tar.gz", &sha);
+        let sha = Sha256Hex::of(archive);
+        self.bind_raw("sample", "1.2.0", "blocks/p.tar.gz", sha.as_str());
         sha
     }
 
@@ -69,6 +69,12 @@ impl Site {
             other => panic!("expected a failure, got {other:?}"),
         }
     }
+}
+
+/// The store's check, against the digest the consent record holds.
+fn load(site: &Site, sha: &Sha256Hex) -> Result<Option<markise_package::Files>, String> {
+    let digest = site.store.acceptance("sample", sha).unwrap().files_digest;
+    site.store.load(sha, &digest)
 }
 
 /// The sample package with another version in its manifest.
@@ -145,7 +151,7 @@ fn a_changed_hash_asks_again() {
     accept(&site.pending(), &site.store).unwrap();
 
     let second = site.bind(&archive_of_version("1.3.0").clone());
-    site.bind_raw("sample", "1.3.0", "blocks/p.tar.gz", &second);
+    site.bind_raw("sample", "1.3.0", "blocks/p.tar.gz", second.as_str());
     let pending = site.pending();
     assert_ne!(first, second);
     assert_eq!(pending.id.version, "1.3.0");
@@ -178,7 +184,7 @@ fn a_tampered_archive_is_refused_with_both_hashes() {
     match site.problem() {
         Problem::HashMismatch { expected, found } => {
             assert_eq!(expected, sha);
-            assert_eq!(found, sha256_hex(&bytes));
+            assert_eq!(found, Sha256Hex::of(&bytes));
         }
         other => panic!("{other:?}"),
     }
@@ -203,9 +209,9 @@ fn binding_and_package_must_agree() {
     let site = Site::new();
     let archive = sample_archive();
     let sha = site.bind(&archive);
-    site.bind_raw("other", "1.2.0", "blocks/p.tar.gz", &sha);
+    site.bind_raw("other", "1.2.0", "blocks/p.tar.gz", sha.as_str());
     assert!(matches!(site.problem(), Problem::IdentityMismatch { .. }));
-    site.bind_raw("sample", "2.0.0", "blocks/p.tar.gz", &sha);
+    site.bind_raw("sample", "2.0.0", "blocks/p.tar.gz", sha.as_str());
     assert!(matches!(site.problem(), Problem::IdentityMismatch { .. }));
 }
 
@@ -243,11 +249,11 @@ fn a_source_link_may_not_leave_the_folder() {
     use std::os::unix::fs::symlink;
     let site = Site::new();
     let archive = sample_archive();
-    let sha = sha256_hex(&archive);
+    let sha = Sha256Hex::of(&archive);
     let outside = site.folder.parent().unwrap().join("outside.tar.gz");
     fs::write(&outside, &archive).unwrap();
     symlink(&outside, site.folder.join("blocks/link.tar.gz")).unwrap();
-    site.bind_raw("sample", "1.2.0", "blocks/link.tar.gz", &sha);
+    site.bind_raw("sample", "1.2.0", "blocks/link.tar.gz", sha.as_str());
     match site.problem() {
         Problem::Source(e) => assert!(e.contains("outside"), "{e}"),
         other => panic!("{other:?}"),
@@ -257,13 +263,13 @@ fn a_source_link_may_not_leave_the_folder() {
     fs::create_dir_all(site.folder.parent().unwrap().join("away")).unwrap();
     fs::write(site.folder.parent().unwrap().join("away/p.tar.gz"), &archive).unwrap();
     symlink(site.folder.parent().unwrap().join("away"), site.folder.join("via")).unwrap();
-    site.bind_raw("sample", "1.2.0", "via/p.tar.gz", &sha);
+    site.bind_raw("sample", "1.2.0", "via/p.tar.gz", sha.as_str());
     assert!(matches!(site.problem(), Problem::Source(_)));
 
     // a link that stays inside is fine
     fs::write(site.folder.join("blocks/real.tar.gz"), &archive).unwrap();
     symlink("real.tar.gz", site.folder.join("blocks/inner.tar.gz")).unwrap();
-    site.bind_raw("sample", "1.2.0", "blocks/inner.tar.gz", &sha);
+    site.bind_raw("sample", "1.2.0", "blocks/inner.tar.gz", sha.as_str());
     site.pending();
 }
 
@@ -275,7 +281,7 @@ fn a_damaged_cache_is_replaced_from_the_source() {
     let js = site.store.files_dir(&sha).join("components/poll/poll.js");
 
     fs::write(&js, "changed").unwrap();
-    assert!(site.store.load(&sha).unwrap_err().contains("was changed"));
+    assert!(load(&site, &sha).unwrap_err().contains("not the ones"));
     site.ready();
     assert_eq!(
         fs::read(&js).unwrap(),
@@ -283,10 +289,10 @@ fn a_damaged_cache_is_replaced_from_the_source() {
     );
 
     fs::write(site.store.files_dir(&sha).join("added.js"), "x").unwrap();
-    assert!(site.store.load(&sha).is_err());
+    assert!(load(&site, &sha).is_err());
     site.ready();
     assert!(!site.store.files_dir(&sha).join("added.js").exists());
-    assert!(site.store.load(&sha).unwrap().is_some());
+    assert!(load(&site, &sha).unwrap().is_some());
 
     // damaged and no source: refused, not used
     fs::write(&js, "changed").unwrap();
@@ -303,7 +309,7 @@ fn a_link_in_the_cache_counts_as_damage() {
     let js = site.store.files_dir(&sha).join("components/poll/poll.js");
     fs::remove_file(&js).unwrap();
     std::os::unix::fs::symlink("/etc/hosts", &js).unwrap();
-    assert!(site.store.load(&sha).unwrap_err().contains("not a regular file"));
+    assert!(load(&site, &sha).unwrap_err().contains("not a regular file"));
 }
 
 #[test]
@@ -350,6 +356,98 @@ fn install_refuses_unclean_paths() {
     let site = Site::new();
     let mut files = markise_package::Files::new();
     files.insert("../escape.txt".to_string(), b"x".to_vec());
-    assert!(site.store.install(&"a".repeat(64), &files).is_err());
+    let sha = Sha256Hex::parse(&"a".repeat(64)).unwrap();
+    assert!(site.store.install(&sha, &files).is_err());
     assert!(!site.store.root().join("packages/escape.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_files_root_is_damage() {
+    let site = Site::new();
+    let sha = site.bind(&sample_archive());
+    accept(&site.pending(), &site.store).unwrap();
+    let files = site.store.files_dir(&sha);
+    let away = site.folder.parent().unwrap().join("away");
+    fs::rename(&files, &away).unwrap();
+    std::os::unix::fs::symlink(&away, &files).unwrap();
+    assert!(load(&site, &sha).unwrap_err().contains("not a real folder"));
+
+    // resolving replaces the link and leaves what it pointed to alone
+    let ready = site.ready();
+    assert!(!fs::symlink_metadata(&ready.root).unwrap().is_symlink());
+    assert!(away.join("manifest.json").is_file());
+}
+
+#[test]
+fn hashes_cannot_name_other_folders() {
+    for bad in [
+        "../../victim",
+        "..",
+        "",
+        "a/b",
+        &"g".repeat(64),
+        &"a".repeat(63),
+        &"a".repeat(65),
+    ] {
+        assert!(Sha256Hex::parse(bad).is_err(), "{bad}");
+    }
+    assert_eq!(Sha256Hex::parse(&"AB".repeat(32)).unwrap().as_str(), "ab".repeat(32));
+
+    // a record naming a traversal is dropped, so it can reach no store operation
+    let site = Site::new();
+    fs::create_dir_all(site.store.root()).unwrap();
+    let record = format!(
+        r#"{{"version":1,"accepted":[{{"library":"sample","version":"1","sha256":"../../victim","files_digest":"{}"}}]}}"#,
+        "a".repeat(64)
+    );
+    fs::write(site.store.root().join("trust.json"), record).unwrap();
+    assert!(site.store.accepted().is_empty());
+}
+
+#[test]
+fn a_cache_replaced_whole_does_not_inherit_the_consent() {
+    let site = Site::new();
+    let sha = site.bind(&sample_archive());
+    accept(&site.pending(), &site.store).unwrap();
+    let js = site.store.files_dir(&sha).join("components/poll/poll.js");
+    fs::write(&js, "replaced").unwrap();
+
+    // from the source again, not served
+    let ready = site.ready();
+    assert_eq!(
+        fs::read(ready.root.join("components/poll/poll.js")).unwrap(),
+        crate::common::files()["components/poll/poll.js"]
+    );
+
+    // no source: an error, not the replacement
+    fs::write(&js, "replaced").unwrap();
+    fs::remove_file(site.folder.join("blocks/p.tar.gz")).unwrap();
+    assert!(matches!(site.problem(), Problem::Source(_)));
+}
+
+#[test]
+fn a_record_without_a_files_digest_grants_nothing() {
+    let site = Site::new();
+    let sha = site.bind(&sample_archive());
+    accept(&site.pending(), &site.store).unwrap();
+    let record = format!(r#"{{"version":1,"accepted":[{{"library":"sample","version":"1.2.0","sha256":"{sha}"}}]}}"#);
+    fs::write(site.store.root().join("trust.json"), record).unwrap();
+    site.pending();
+}
+
+#[test]
+fn stale_staging_folders_are_swept() {
+    let site = Site::new();
+    let sha = site.bind(&sample_archive());
+    accept(&site.pending(), &site.store).unwrap();
+    let packages = site.store.root().join("packages");
+    let stale = packages.join(".staging-left");
+    fs::create_dir_all(stale.join("files")).unwrap();
+
+    site.store.sweep_staging(std::time::Duration::from_secs(3600));
+    assert!(stale.exists(), "a young one may be another Markise's");
+    site.store.sweep_staging(std::time::Duration::ZERO);
+    assert!(!stale.exists());
+    assert!(site.store.files_dir(&sha).exists(), "installed packages stay");
 }

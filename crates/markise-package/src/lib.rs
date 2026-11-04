@@ -29,7 +29,7 @@ pub use palette::{Palette, PaletteBlock, PaletteGroup, Preset};
 pub use paths::clean_relative;
 pub use resolve::{InstalledPackage, Pending, Problem, Resolution, accept, resolve};
 pub use schema::{BlockSchema, FieldKind, FieldSchema};
-pub use store::{Accepted, Store, sha256_hex};
+pub use store::{Accepted, Sha256Hex, Store, files_digest};
 pub use value::Localized;
 pub use views::{ViewConfig, ViewKind};
 
