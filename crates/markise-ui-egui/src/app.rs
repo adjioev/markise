@@ -54,6 +54,7 @@ use crate::viewer::DocViewer;
 mod attach;
 mod files;
 mod find;
+mod full_view;
 mod help;
 mod insert_table;
 mod menus;
@@ -503,6 +504,12 @@ pub struct MarkiseApp {
     font_window: bool,
     /// The Insert Table dialog is open, with its size (issue #164).
     insert_table: Option<insert_table::InsertTable>,
+    /// The full-window view, while it is open.
+    full_view: Option<full_view::FullView>,
+    /// Decodes whole images for the full-window view.
+    whole_images: full_view::WholeImages,
+    /// A surface asked for a full-window view of this in this frame.
+    full_view_request: Option<crate::viewer::ViewTarget>,
     /// A command the document view handed over this frame (its shortcut or context menu item
     /// opens a dialog first), run like its menu item after the view.
     pending_command: Option<&'static str>,
@@ -639,6 +646,9 @@ impl MarkiseApp {
             theme_report: false,
             font_window: false,
             insert_table: None,
+            full_view: None,
+            whole_images: Default::default(),
+            full_view_request: None,
             pending_command: None,
             prefs: Default::default(),
             swatches: Vec::new(),
@@ -946,6 +956,7 @@ impl MarkiseApp {
             && self.review_settled()
             && self.attach_settled()
             && self.images.is_idle()
+            && self.full_view_settled()
             && self.tree.as_ref().is_none_or(FileTree::is_idle)
             && !self.highlighter.as_ref().is_some_and(|h| h.busy())
             && !self.diagram_renderer.as_ref().is_some_and(|d| d.busy())
@@ -1925,6 +1936,8 @@ impl MarkiseApp {
     /// The window is about to close; returns `true` if it may (no unsaved edits). Otherwise
     /// the Save / Discard / Cancel question is shown.
     pub fn request_close(&mut self) -> bool {
+        // the full-window view goes first, then the window's close goes on
+        self.close_full_view();
         // (an open comment draft makes the document dirty: Save / Discard / Cancel is asked)
         if let Some(d) = &mut self.doc {
             d.sync();
@@ -2376,7 +2389,8 @@ impl MarkiseApp {
         if !self.is_asking() {
             self.cheat_sheet.take_keys(ctx);
         }
-        if self.is_asking() {
+        self.full_view_check();
+        if self.is_asking() || self.full_view.is_some() {
             if let Some(id) = ctx.memory(|m| m.focused()) {
                 self.focus_before_question.get_or_insert((id, 0));
                 ctx.memory_mut(|m| m.surrender_focus(id));
@@ -2397,6 +2411,8 @@ impl MarkiseApp {
                     }
                 }
             }
+        }
+        if !self.is_asking() {
             self.app_shortcuts(ctx);
             // host commands (Save, Open…, Source Code Mode, Toggle Sidebar) go through the
             // effective keymap, so `keyBinding` overrides rebind, unbind or take over their
@@ -2405,6 +2421,7 @@ impl MarkiseApp {
                 self.menu_command(ctx, id, crate::menu::Trigger::Shortcut);
             }
         }
+        self.full_view_keys(ctx);
 
         self.find_update(ctx);
         self.menus_ui(ui);
@@ -2432,6 +2449,7 @@ impl MarkiseApp {
             self.menu_command(ctx, id, crate::menu::Trigger::Shortcut);
         }
         self.insert_table_window(ctx);
+        self.full_view_window(ctx);
         self.preferences_window(ctx);
         self.recovery_window(ctx);
         self.about.show(ctx, self.commit.as_deref());
@@ -3083,7 +3101,8 @@ impl MarkiseApp {
                     Some(d) => {
                         d.viewer.set_font_generation(self.font_gen);
                         let gutter = d.viewer.comment_gutter();
-                        let out = d.viewer.show(ui, &mut self.images, &t, self.parley.as_mut(), true);
+                        let mut out = d.viewer.show(ui, &mut self.images, &t, self.parley.as_mut(), true);
+                        self.full_view_request = out.open_view.take();
                         if let Some(n) = d.viewer.take_notice() {
                             self.banner = Some(Banner::Info(n));
                         }
@@ -3208,6 +3227,7 @@ impl MarkiseApp {
         if let Some(v) = out.split {
             self.themes.set_side_by_side_split(v);
         }
+        self.full_view_request = out.open_view;
         if let Some(link) = out.link {
             self.open_link(&ctx, &link);
         }

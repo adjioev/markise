@@ -251,6 +251,9 @@ pub struct BlockLayout {
     pub virtual_caret: Option<Rect>,
     /// Review comments of the item (glyph positions and texts, ADR 0012).
     pub comments: Vec<CommentHit>,
+    /// The row reserved under a rendered diagram (item-local) for its hover controls, so they
+    /// never cover the picture (issue #174).
+    pub diagram_controls: Option<Rect>,
 }
 
 impl BlockLayout {
@@ -276,6 +279,11 @@ impl BlockLayout {
     /// Target of the link at item-local position `pos`, if any.
     pub fn link_at(&self, pos: Pos2) -> Option<&str> {
         for l in &self.links {
+            if let Some(Prim::Image { rect, .. }) = self.prims.get(l.prim)
+                && rect.contains(pos)
+            {
+                return Some(&l.target);
+            }
             let Some(Prim::Text { pos: p, text, .. }) = self.prims.get(l.prim) else {
                 continue;
             };
@@ -649,7 +657,12 @@ enum Mark {
 /// One run of a paragraph: text (with its item-relative source map) or a block-level image.
 enum Segment {
     Text(StyledText, Links),
-    Image { src: String, alt: String },
+    /// `link`: the target of a link wrapping only this image.
+    Image {
+        src: String,
+        alt: String,
+        link: Option<String>,
+    },
 }
 
 /// The strut of one rendered inline formula: its byte offset in the job, the text line height
@@ -1353,7 +1366,11 @@ impl<'a> InlineBuilder<'a> {
                     let alt = r.value(&n.children[0]).to_string();
                     self.flush();
                     let src = self.resolve(isrc);
-                    self.segments.push(Segment::Image { src, alt });
+                    self.segments.push(Segment::Image {
+                        src,
+                        alt,
+                        link: Some(target.to_string()),
+                    });
                     return;
                 }
                 // links are distinguished by color only: egui draws underlines at the bottom
@@ -1375,7 +1392,7 @@ impl<'a> InlineBuilder<'a> {
                     let alt = alt.to_string();
                     self.flush();
                     let src = self.resolve(src);
-                    self.segments.push(Segment::Image { src, alt });
+                    self.segments.push(Segment::Image { src, alt, link: None });
                 } else {
                     let mut c = st.clone();
                     c.color = color(t.meta_text);
@@ -1981,6 +1998,7 @@ pub fn layout_item(
     }
     let width = (p.width - x).max(40.0);
     let line_px = t.line_px();
+    let mut diagram_controls = None;
     let mut out = Out {
         prims: Vec::new(),
         links: Vec::new(),
@@ -2127,7 +2145,15 @@ pub fn layout_item(
                             }
                             y += h;
                         }
-                        Segment::Image { src, alt } => {
+                        Segment::Image { src, alt, link } => {
+                            if let Some(target) = link {
+                                // (the image's primitive comes first in `layout_image`)
+                                out.links.push(LinkHit {
+                                    prim: out.prims.len(),
+                                    range: 0..0,
+                                    target,
+                                });
+                            }
                             let h = layout_image(&mut out, shaper, images, t, &src, &alt, x, y, width, only_image);
                             if first {
                                 first_line_h = h.min(line_px);
@@ -2325,6 +2351,9 @@ pub fn layout_item(
                     return BlockLayout::default();
                 }
                 y = diagram_scene(&mut out, shaper, t, scene, x, y, width);
+                let row = diagram_controls_height(t);
+                diagram_controls = Some(Rect::from_min_size(pos2(x, y), vec2(width, row)));
+                y += row;
             } else {
                 if let Some(DiagramState::Done(r)) = p.diagram
                     && let Err(e) = &**r
@@ -2672,6 +2701,7 @@ pub fn layout_item(
         empty_anchor,
         virtual_caret,
         comments,
+        diagram_controls,
     }
 }
 
@@ -2728,7 +2758,7 @@ pub fn label_metrics(shaper: &mut dyn TextShaper) -> markise_blocks::diagram::Ta
 /// Flattens a cubic Bézier into `out` (excluding the start point).
 fn flatten_cubic(out: &mut Vec<Pos2>, p0: Pos2, p1: Pos2, p2: Pos2, p3: Pos2) {
     let len = p0.distance(p1) + p1.distance(p2) + p2.distance(p3);
-    let n = ((len / 6.0).ceil() as usize).clamp(2, 32);
+    let n = ((len / 6.0).ceil() as usize).clamp(2, 128);
     for k in 1..=n {
         let t = k as f32 / n as f32;
         let u = 1.0 - t;
@@ -2753,15 +2783,58 @@ fn diagram_scene(
     y: f32,
     width: f32,
 ) -> f32 {
-    use markise_blocks::diagram::{Anchor, DiagramPalette, Item as DItem, Paint, Seg};
-    let pal = DiagramPalette::from_theme(t);
-    let col = |p: Paint| color(pal.resolve(p));
     let s = if scene.width > width && scene.width > 0.0 {
         width / scene.width
     } else {
         1.0
     };
     let x0 = x + ((width - scene.width * s) / 2.0).max(0.0);
+    scene_prims(out, shaper, t, scene, x0, y, s);
+    y + scene.height * s
+}
+
+/// Height of the row reserved under a rendered diagram for its hover controls.
+pub fn diagram_controls_height(t: &Theme) -> f32 {
+    (t.font_size * 1.35).round().max(18.0) + 8.0
+}
+
+/// A diagram's primitives at `scale` with the scene's origin at (0, 0): labels are shaped at the
+/// scaled size and shapes are flattened for it, so the picture is sharp at any scale (the
+/// full-window view, issue #174).
+pub fn diagram_scene_layout(
+    shaper: &mut dyn TextShaper,
+    t: &Theme,
+    scene: &markise_blocks::diagram::Scene,
+    scale: f32,
+) -> BlockLayout {
+    let mut out = Out {
+        prims: Vec::new(),
+        links: Vec::new(),
+        comments: Vec::new(),
+        underline: None,
+        col: (0.0, scene.width * scale),
+    };
+    scene_prims(&mut out, shaper, t, scene, 0.0, 0.0, scale);
+    BlockLayout {
+        height: scene.height * scale,
+        prims: out.prims,
+        ..Default::default()
+    }
+}
+
+/// Appends the scene's primitives with its origin at `(x0, y)`, scaled by `s`.
+fn scene_prims(
+    out: &mut Out,
+    shaper: &mut dyn TextShaper,
+    t: &Theme,
+    scene: &markise_blocks::diagram::Scene,
+    x0: f32,
+    y: f32,
+    s: f32,
+) {
+    use markise_blocks::diagram::{Anchor, DiagramPalette, Item as DItem, Paint, Seg};
+    let pal = DiagramPalette::from_theme(t);
+    let col = |p: Paint| color(pal.resolve(p));
     let pt = |p: [f32; 2]| pos2(x0 + p[0] * s, y + p[1] * s);
     let stroke_of = |st: Option<markise_blocks::diagram::Stroke>| match st {
         Some(st) => (
@@ -2807,7 +2880,7 @@ fn diagram_scene(
                 let (st, dash) = stroke_of(*stroke);
                 let c = pt(*center);
                 let (rx, ry) = (radii[0] * s, radii[1] * s);
-                let n = ((rx.max(ry) * 0.8) as usize).clamp(16, 64);
+                let n = ((rx.max(ry) * 0.8) as usize).clamp(16, 256);
                 let pts = (0..n)
                     .map(|k| {
                         let a = k as f32 / n as f32 * std::f32::consts::TAU;
@@ -2891,7 +2964,6 @@ fn diagram_scene(
             }
         }
     }
-    y + scene.height * s
 }
 
 fn push_box(out: &mut Out, rect: Rect, bx: &BoxStyle) {

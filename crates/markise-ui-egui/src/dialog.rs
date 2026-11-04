@@ -213,7 +213,7 @@ pub fn keys(ctx: &Context, layer: egui::LayerId) -> (bool, bool) {
 }
 
 /// The ✕ in a tool window's top right corner (painted: not every UI font has the glyph).
-fn close_button(ui: &mut Ui, look: &Look, at: egui::Pos2) -> egui::Response {
+pub(crate) fn close_button(ui: &mut Ui, look: &Look, at: egui::Pos2) -> egui::Response {
     let rect = egui::Rect::from_min_size(at, egui::vec2(16.0, 16.0));
     let r = ui
         .interact(rect, ui.scope_id().with("markise-dialog-close"), egui::Sense::click())

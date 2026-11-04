@@ -13,6 +13,7 @@ mod editing;
 mod export;
 mod files;
 mod find;
+mod full_view;
 mod help;
 mod highlight;
 mod idle;
