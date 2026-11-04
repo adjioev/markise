@@ -185,6 +185,45 @@ fn a_preset_draws_its_variants_choice_as_icon_buttons() {
 }
 
 #[test]
+fn a_preset_for_the_block_without_a_variant_stays_there() {
+    let mut p = icon_preset();
+    p["variant"] = json!("");
+    let presets = [p];
+    let is_buttons = |variant| {
+        matches!(
+            spec_of(&with_variants(), &presets, variant).fields[0].control,
+            Control::ChoiceButtons { .. }
+        )
+    };
+    assert!(is_buttons(None));
+    assert!(!is_buttons(Some("multi")), "a named variant has its own form");
+    assert!(!is_buttons(Some("icons")));
+}
+
+#[test]
+fn a_preset_with_no_variant_key_is_for_every_variant() {
+    let mut p = icon_preset();
+    p.as_object_mut().expect("object").remove("variant");
+    let spec = spec_of(&with_variants(), &[p], Some("multi"));
+    assert!(matches!(spec.fields[0].control, Control::ChoiceButtons { .. }));
+}
+
+#[test]
+fn a_preset_key_of_the_wrong_type_is_refused() {
+    for (key, value) in [
+        ("field", json!(42)),
+        ("field", json!(false)),
+        ("variant", json!(42)),
+        ("variant", json!(false)),
+    ] {
+        let mut p = icon_preset();
+        p[key] = value;
+        let e = input(&with_variants(), &[p]).expect_err(key);
+        assert!(e.reason.contains(&format!("`{key}`")), "{e}");
+    }
+}
+
+#[test]
 fn a_preset_of_another_widget_is_left_for_later() {
     let mut p = icon_preset();
     p["widget"] = json!("something-new");
