@@ -1,6 +1,8 @@
 //! Drawing: a field at a time, over the JSON values. A value of an unexpected type is shown as
 //! not editable and kept as it is; the form never coerces what it did not write.
 
+use std::collections::HashSet;
+
 use egui::{Id, Key, KeyboardShortcut, Modifiers, Response, Role, ScrollArea, TextEdit, Ui, UiBuilder, WidgetInfo};
 use schema_form_core::{Control, FieldError, FieldSpec, Limits, Selection};
 use serde_json::{Map, Value, json};
@@ -23,6 +25,13 @@ struct Cx<'a> {
     errors: &'a [FieldError],
     texts: &'a crate::Texts,
     focus_rows: std::collections::HashMap<Id, Id>,
+    /// Every text editor of this frame: what a composition can belong to.
+    editors: HashSet<Id>,
+    /// A new row whose first real control is to take the focus.
+    focus_row: &'a mut Option<Id>,
+    focus_row_drawn: bool,
+    /// Where that focus goes if the row has no real control: its first enabled button.
+    focus_fallback: Option<Id>,
     status: &'a mut std::collections::HashMap<Id, String>,
     buttons: &'a mut std::collections::HashMap<Id, [Id; 3]>,
     moving: MoveRequest,
@@ -32,6 +41,16 @@ struct Cx<'a> {
 }
 
 impl Cx<'_> {
+    /// Like [`Cx::track`], for a control that is something to edit: a new row around it gives it
+    /// the focus.
+    fn track_control(&mut self, r: &Response) {
+        self.track(r);
+        if r.enabled() && self.focus_row.is_some_and(|row| self.row_stack.contains(&row)) {
+            r.request_focus();
+            *self.focus_row = None;
+        }
+    }
+
     /// Notes that a focusable widget belongs to the row being drawn.
     fn track(&mut self, r: &Response) {
         if let Some(row) = self.row_stack.last() {
@@ -93,6 +112,10 @@ impl SchemaForm {
             errors: &self.errors,
             texts: &self.texts,
             focus_rows: std::collections::HashMap::new(),
+            editors: HashSet::new(),
+            focus_row: &mut self.focus_row,
+            focus_row_drawn: false,
+            focus_fallback: None,
             status: &mut self.status,
             buttons: &mut self.buttons,
             moving,
@@ -107,7 +130,14 @@ impl SchemaForm {
         let root = self.values.as_object_mut().expect("checked");
         ui.vertical(|ui| draw_fields(ui, &self.spec.fields, root, self.id, "", &mut cx));
         let changed = cx.changed;
+        if cx.focus_row_drawn && cx.focus_row.is_some() {
+            *cx.focus_row = None;
+            if let Some(button) = cx.focus_fallback {
+                ui.memory_mut(|m| m.request_focus(button));
+            }
+        }
         self.focus_rows = cx.focus_rows;
+        self.editors = cx.editors;
         changed
     }
 }
@@ -124,9 +154,15 @@ fn draw_fields(ui: &mut Ui, fields: &[FieldSpec], obj: &mut Map<String, Value>, 
 fn draw_field(ui: &mut Ui, f: &FieldSpec, obj: &mut Map<String, Value>, id: Id, path: &str, cx: &mut Cx) {
     let missing = !obj.contains_key(&f.key);
     if let Control::Checkbox = f.control {
+        if obj.get(&f.key).is_some_and(|v| !v.is_boolean()) {
+            ui.label(&f.label);
+            not_editable(ui, cx);
+            cx.draw_errors(ui, path);
+            return;
+        }
         let mut on = obj.get(&f.key).and_then(Value::as_bool).unwrap_or(false);
         let r = ui.checkbox(&mut on, &f.label);
-        cx.track(&r);
+        cx.track_control(&r);
         if r.changed() {
             obj.insert(f.key.clone(), Value::Bool(on));
             cx.changed = true;
@@ -214,7 +250,8 @@ fn text_editor(ui: &mut Ui, s: &mut String, id: Id, multiline: bool, width: f32,
         cx.changed = true;
         cx.status.clear();
     }
-    cx.track(&r);
+    cx.editors.insert(r.id);
+    cx.track_control(&r);
     r
 }
 
@@ -262,6 +299,7 @@ fn draw_array(ui: &mut Ui, f: &FieldSpec, arr: &mut Vec<Value>, id: Id, path: &s
             action = Some(RowAction::Move(i, d));
             cx.moving = None;
         }
+        cx.focus_row_drawn |= *cx.focus_row == Some(row);
         cx.row_stack.push(row);
         // an explicit scope: egui's automatic ids of the buttons inside then do not depend on
         // the row's position, and the focus can stay on them through a reorder
@@ -272,19 +310,34 @@ fn draw_array(ui: &mut Ui, f: &FieldSpec, arr: &mut Vec<Value>, id: Id, path: &s
         });
         cx.row_stack.pop();
         cx.draw_errors(ui, &p);
+        if matches!(f.control, Control::Choices { .. }) {
+            for key in ["id", "text", "correct"] {
+                cx.draw_errors(ui, &join(&p, key));
+            }
+        }
     }
     if let Some(mark) = exclusive {
         for (i, e) in arr.iter_mut().enumerate() {
-            if let Some(o) = e.as_object_mut() {
+            // a mark it cannot read is not its to change
+            if let Some(o) = e
+                .as_object_mut()
+                .filter(|o| o.get("correct").is_none_or(Value::is_boolean))
+            {
                 o.insert("correct".into(), Value::Bool(i == mark));
             }
         }
         cx.changed = true;
     }
     let add_label = f.add_label.as_deref().unwrap_or(&cx.texts.add);
-    let add = ui.add_enabled(may_add(&f.limits, n), egui::Button::new(add_label));
+    // an explicit scope: its id stays the same as rows come and go, so it can take the focus
+    let add = ui
+        .scope_builder(UiBuilder::new().scope_id(id.with("add")), |ui| {
+            ui.add_enabled(may_add(&f.rule.limits, n), egui::Button::new(add_label))
+        })
+        .inner;
     let add = add.labelled_by(label);
-    add.widget_info(|| WidgetInfo::labeled(Role::Button, may_add(&f.limits, n), add_label));
+    add.widget_info(|| WidgetInfo::labeled(Role::Button, may_add(&f.rule.limits, n), add_label));
+    cx.track_control(&add);
     if add.clicked() {
         action = Some(RowAction::Add);
     }
@@ -309,9 +362,12 @@ fn draw_array(ui: &mut Ui, f: &FieldSpec, arr: &mut Vec<Value>, id: Id, path: &s
             keys.remove(i);
             cx.changed = true;
             cx.status.remove(&id);
-            // the pressed button goes away with its row: the focus goes to the next one left
+            // the pressed button goes away with its row: the focus goes to the next one left,
+            // or to Add when the rows have reached their limit and can no longer be removed
             let next = keys.get(i).or(keys.last()).and_then(|k| cx.buttons.get(&id.with(*k)));
-            let target = next.map_or(add.id, |b| b[2]);
+            let target = next
+                .filter(|_| may_remove(&f.rule.limits, n - 1))
+                .map_or(add.id, |b| b[2]);
             ui.ctx().memory_mut(|m| m.request_focus(target));
         }
         Some(RowAction::Add) => {
@@ -320,7 +376,7 @@ fn draw_array(ui: &mut Ui, f: &FieldSpec, arr: &mut Vec<Value>, id: Id, path: &s
             keys.push(key);
             cx.changed = true;
             cx.status.remove(&id);
-            ui.ctx().memory_mut(|m| m.request_focus(first_editor(f, id.with(key))));
+            *cx.focus_row = Some(id.with(key));
         }
         None => {}
     }
@@ -344,15 +400,6 @@ fn pass_focus_at_the_edge(ui: &Ui, cx: &Cx, row: Id, to: usize, n: usize) {
     ui.ctx().memory_mut(|m| m.request_focus(target));
 }
 
-/// The widget of a new row that takes the focus.
-fn first_editor(f: &FieldSpec, row: Id) -> Id {
-    match &f.control {
-        Control::Array { fields } => fields.first().map_or(row, |x| row.with(&x.key).with("text")),
-        Control::Images => row.with("alt").with("text"),
-        _ => row.with("text"),
-    }
-}
-
 /// Up, down and remove of a row. Their ids move with the row, so focus stays on the button
 /// that was pressed while the row travels.
 fn row_buttons(ui: &mut Ui, f: &FieldSpec, row: Id, i: usize, n: usize, cx: &mut Cx) -> Option<RowAction> {
@@ -374,10 +421,24 @@ fn row_buttons(ui: &mut Ui, f: &FieldSpec, row: Id, i: usize, n: usize, cx: &mut
     if r.clicked() {
         action = Some(RowAction::Move(i, 1));
     }
-    let r = icon_button(ui, row.with("remove"), Icon::Cross, &remove, may_remove(&f.limits, n));
+    let r = icon_button(
+        ui,
+        row.with("remove"),
+        Icon::Cross,
+        &remove,
+        may_remove(&f.rule.limits, n),
+    );
     cx.track(&r);
     if r.clicked() {
         action = Some(RowAction::Remove(i));
+    }
+    if *cx.focus_row == Some(row) && cx.focus_fallback.is_none() {
+        let enabled = [
+            (i > 0, up_id),
+            (i + 1 < n, down_id),
+            (may_remove(&f.rule.limits, n), r.id),
+        ];
+        cx.focus_fallback = enabled.iter().find(|(on, _)| *on).map(|(_, b)| *b);
     }
     cx.buttons.insert(row, [up_id, down_id, r.id]);
     action
@@ -426,6 +487,10 @@ fn draw_row(
                     return row_buttons(ui, f, row, i, n, cx);
                 };
                 draw_mark(ui, o, *selection, row, i, &row_name, exclusive, cx);
+                if o.get("text").is_some_and(|t| !t.is_string()) {
+                    not_editable(ui, cx);
+                    return row_buttons(ui, f, row, i, n, cx);
+                }
                 let w = ui.available_width() - buttons_width(ui);
                 let mut s = o.get("text").and_then(Value::as_str).unwrap_or("").to_string();
                 let r = text_editor(ui, &mut s, row, false, w, cx);
@@ -455,10 +520,15 @@ fn image_fields(t: &crate::Texts) -> Vec<FieldSpec> {
         help: None,
         add_label: None,
         required: false,
-        limits: Limits::default(),
-        item_limits: Limits::default(),
         control: Control::Text { multiline: false },
-        json_type: schema_form_core::JsonType::String,
+        rule: schema_form_core::ValueRule {
+            json_type: schema_form_core::JsonType::String,
+            limits: Limits::default(),
+            items: None,
+            props: Vec::new(),
+            closed: false,
+            choices: None,
+        },
         extensions: Map::new(),
     };
     vec![text("alt", &t.alt), text("path", &t.path)]
@@ -503,6 +573,10 @@ fn draw_mark(
     exclusive: &mut Option<usize>,
     cx: &mut Cx,
 ) {
+    if o.get("correct").is_some_and(|c| !c.is_boolean()) {
+        not_editable(ui, cx);
+        return;
+    }
     let on = o.get("correct").and_then(Value::as_bool).unwrap_or(false);
     let label = format!("{}: {row_name}", cx.texts.correct);
     ui.push_id(row.with("mark"), |ui| match selection {

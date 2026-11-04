@@ -20,7 +20,7 @@ mod draw;
 mod rows;
 mod widgets;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use egui::{Event, Id, ImeEvent, Ui};
@@ -92,6 +92,10 @@ pub struct SchemaForm {
     focus_rows: HashMap<Id, Id>,
     /// What screen readers last heard about a move, per array.
     status: HashMap<Id, String>,
+    /// The text editors of the last frame: a composition is this form's only inside one.
+    editors: HashSet<Id>,
+    /// A new row whose first real control is to take the focus.
+    focus_row: Option<Id>,
     /// Up, down and remove of each row, to pass the focus on when one of them goes away.
     buttons: HashMap<Id, [Id; 3]>,
 }
@@ -113,6 +117,8 @@ impl SchemaForm {
             focus_rows: HashMap::new(),
             status: HashMap::new(),
             buttons: HashMap::new(),
+            editors: HashSet::new(),
+            focus_row: None,
         }
     }
 
@@ -167,7 +173,14 @@ impl SchemaForm {
         out
     }
 
+    /// IME events go to whatever has the focus, so only an editor of this form makes them ours.
+    /// Focus leaving the form ends a composition here: egui interrupts it on a focus change.
     fn track_composition(&mut self, ui: &Ui) {
+        let focused = ui.memory(egui::Memory::focused);
+        if !focused.is_some_and(|f| self.editors.contains(&f)) {
+            self.composing = false;
+            return;
+        }
         ui.input(|i| {
             for e in &i.events {
                 match e {

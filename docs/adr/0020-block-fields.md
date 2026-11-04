@@ -134,10 +134,12 @@ any site's vocabulary lives here.
   and scroll follow a row through a reorder. `set_values` keeps keys by `id`, equal content, then
   order.
 - **IME.** egui writes the unfinished composition into the text. So `changed` stays false during a
-  composition and comes at its end, and values set from outside wait for it.
+  composition and comes at its end, and values set from outside wait for it. A composition belongs
+  to the form whose editor has the focus; other forms in the window hear nothing of it.
 - **Keyboard.** No drag in this phase. Up, down and remove are buttons in the tab order, and Alt+Up
   and Alt+Down move a row from anywhere inside it. Focus does not get lost: a button going disabled
-  at the edge passes it to the other, a removed row to the next, a new row takes it.
+  at the edge passes it to the other, a removed row to the next, or to Add when none can go. A new
+  row gives it to its first real control, whatever kind that is.
 - **Screen readers.** Fields are labelled, a reason is an `Alert` live region and the field's
   description, a move is announced.
 - **Theme and zoom.** Colours and sizes come from the `Ui`; icons are painted, so no font is needed.
