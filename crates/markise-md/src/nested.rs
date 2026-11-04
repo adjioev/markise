@@ -254,6 +254,8 @@ impl Document {
                 }
                 let flips = self.assemble_synced(t, o, kept, &path_starts, level, chain, sib_rel, delta);
                 self.top.shift_after(t, delta);
+                // the re-parse stayed inside this container: no marker line among its lines
+                self.directives.shift_from(old_edit_end, delta);
                 // failed openers: before the restart, new ones, old ones after the sibling
                 let old_sib = (sibling as isize - delta) as usize;
                 let mut fo: Vec<usize> = self.failed_openers.iter().copied().filter(|&f| f < restart).collect();
@@ -298,6 +300,7 @@ impl Document {
                 for b in &out.blocks {
                     definition_labels(text, b, 0, &mut labels);
                 }
+                let markers = out.markers;
                 let mut blocks_new = out.blocks;
                 if blocks_new.is_empty() {
                     // cannot happen: the reconstructed container is always emitted
@@ -341,14 +344,21 @@ impl Document {
                 fo.sort_unstable();
                 fo.dedup();
                 self.failed_openers = fo;
-                Some(self.finish_nested(
+                let mut r = self.finish_nested(
                     t..t + n_new,
                     replaced,
                     o,
                     reparsed_end,
                     labels,
                     (region_start_ok && !flips).then_some(region_start),
-                ))
+                );
+                let old_end = if out.stopped_at.is_some() {
+                    old_resume
+                } else {
+                    usize::MAX
+                };
+                self.splice_directives(o..old_end, markers, delta, &mut r);
+                Some(r)
             }
         }
     }

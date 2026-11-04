@@ -97,6 +97,69 @@ pub(crate) fn fence_close(b: &[u8], p: usize, end: usize, ch: u8, len: usize) ->
     }
 }
 
+/// A directive marker line (ADR 0018), from its first colon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DirectiveLine {
+    pub fence: usize,
+    pub close: bool,
+    /// Empty on a closing line.
+    pub name: Span,
+    /// Trimmed; empty right after the name when there are none.
+    pub args: Span,
+}
+
+/// `text[p..end]` as a directive marker: at least three colons and nothing else (closer), or
+/// followed directly by a name (letters and digits of any script, `-`, `_`, starting with a
+/// letter or digit) and optionally by whitespace and arguments (opener). Anything else is not
+/// a marker, so `::: note`, `:::note:` and `:::note{x}` stay ordinary text.
+pub(crate) fn directive_marker(text: &str, p: usize, end: usize) -> Option<DirectiveLine> {
+    let b = text.as_bytes();
+    let mut q = p;
+    while q < end && b[q] == b':' {
+        q += 1;
+    }
+    let fence = q - p;
+    if fence < 3 {
+        return None;
+    }
+    if rest_blank(b, q, end) {
+        let none = Span::new(q, q);
+        return Some(DirectiveLine {
+            fence,
+            close: true,
+            name: none,
+            args: none,
+        });
+    }
+    let mut name_end = q;
+    for (i, c) in text[q..end].char_indices() {
+        if c == ' ' || c == '\t' {
+            break;
+        }
+        let ok = c.is_alphanumeric() || (i > 0 && (c == '-' || c == '_'));
+        if !ok {
+            return None;
+        }
+        name_end = q + i + c.len_utf8();
+    }
+    if name_end == q {
+        return None;
+    }
+    let args_start = skip_ws(b, name_end, end);
+    let args_end = trim_end_ws(b, args_start, end);
+    let args = if args_start < args_end {
+        Span::new(args_start, args_end)
+    } else {
+        Span::new(name_end, name_end)
+    };
+    Some(DirectiveLine {
+        fence,
+        close: false,
+        name: Span::new(q, name_end),
+        args,
+    })
+}
+
 /// Em/en dash run used as remapped `---` (R4.5.2, decision C26).
 fn dash_lookalike_line(s: &str) -> bool {
     let t = s.trim_matches([' ', '\t']);

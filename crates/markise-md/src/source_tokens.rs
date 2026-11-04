@@ -175,6 +175,13 @@ impl Painter<'_> {
                 self.children(b, origin);
                 self.paint(at(label.start), at(label.end), SourceTok::Link);
             }
+            BlockKind::DirectiveOpen { name, args, .. } => {
+                self.paint(bs, be, SourceTok::Marker);
+                self.paint(at(name.start), at(name.end), SourceTok::Meta);
+                self.paint(at(args.start), at(args.end), SourceTok::Meta);
+            }
+            BlockKind::DirectiveClose { .. } => self.paint(bs, be, SourceTok::Marker),
+            BlockKind::Directive { .. } => self.children(b, origin),
             BlockKind::LinkRefDef { label, dest, title } => {
                 self.paint(bs, be, SourceTok::Marker);
                 self.paint(at(label.start), at(label.end), SourceTok::Link);

@@ -120,6 +120,26 @@ pub enum BlockKind {
         dest: Span,
         title: Option<Span>,
     },
+    /// The opening line of a paired directive (`:::name args`, ADR 0018) in the stored flat
+    /// block list; `lines` holds the line. An unpaired marker line is a [`BlockKind::Paragraph`].
+    DirectiveOpen {
+        fence_len: usize,
+        name: Span,
+        args: Span,
+    },
+    /// The closing line of a paired directive in the stored flat block list; `lines` holds it.
+    DirectiveClose {
+        fence_len: usize,
+    },
+    /// A paired directive as a node of [`crate::Document::tree`], the only place it appears:
+    /// `children` are the blocks between its marker lines.
+    Directive {
+        fence_len: usize,
+        name: Span,
+        args: Span,
+        opener: Span,
+        closer: Span,
+    },
 }
 
 /// One node of the block tree.
@@ -157,6 +177,7 @@ impl Block {
                 | BlockKind::List { .. }
                 | BlockKind::ListItem { .. }
                 | BlockKind::FootnoteDef { .. }
+                | BlockKind::Directive { .. }
         )
     }
 
@@ -198,6 +219,22 @@ impl Block {
                 closer.shift(delta);
             }
             BlockKind::FootnoteDef { label } => label.shift(delta),
+            BlockKind::DirectiveOpen { name, args, .. } => {
+                name.shift(delta);
+                args.shift(delta);
+            }
+            BlockKind::Directive {
+                name,
+                args,
+                opener,
+                closer,
+                ..
+            } => {
+                name.shift(delta);
+                args.shift(delta);
+                opener.shift(delta);
+                closer.shift(delta);
+            }
             BlockKind::LinkRefDef { label, dest, title } => {
                 label.shift(delta);
                 dest.shift(delta);
@@ -263,6 +300,22 @@ impl Block {
                 }
             }
             BlockKind::FootnoteDef { label } => f(label),
+            BlockKind::DirectiveOpen { name, args, .. } => {
+                f(name);
+                f(args);
+            }
+            BlockKind::Directive {
+                name,
+                args,
+                opener,
+                closer,
+                ..
+            } => {
+                f(name);
+                f(args);
+                f(opener);
+                f(closer);
+            }
             BlockKind::LinkRefDef { label, dest, title } => {
                 f(label);
                 f(dest);

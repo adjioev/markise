@@ -726,7 +726,8 @@ impl<'a> Ctx<'a> {
     fn block(&mut self, b: &Block, out: &mut String, tight: bool) {
         let text = self.text;
         match &b.kind {
-            BlockKind::Paragraph => {
+            // a marker line exports as the text it is until exporters know directives
+            BlockKind::Paragraph | BlockKind::DirectiveOpen { .. } | BlockKind::DirectiveClose { .. } => {
                 let html = self.inline_html(&b.content(text));
                 if tight {
                     out.push_str(&html);
@@ -841,6 +842,8 @@ impl<'a> Ctx<'a> {
             }
             BlockKind::ListItem { .. } => self.list_item(b, tight, out),
             BlockKind::FrontMatter { .. } | BlockKind::LinkRefDef { .. } => {}
+            // only in `Document::tree`, which the exporter does not read
+            BlockKind::Directive { .. } => {}
             BlockKind::Toc => self.toc(out),
             BlockKind::FootnoteDef { label } => {
                 let key = markise_md::inline::normalize_label(label.slice(text));

@@ -729,7 +729,10 @@ pub(crate) fn container_kind(b: &Block) -> ContainerKind {
 
 fn leaf_kind(text: &str, b: &Block) -> LeafKind {
     match &b.kind {
-        BlockKind::Paragraph => LeafKind::Paragraph,
+        // a marker line shows as the text it is until the layout knows directives
+        BlockKind::Paragraph | BlockKind::DirectiveOpen { .. } | BlockKind::DirectiveClose { .. } => {
+            LeafKind::Paragraph
+        }
         BlockKind::Heading { level, .. } => LeafKind::Heading { level: *level },
         BlockKind::FencedCode { info, .. } => LeafKind::CodeBlock {
             info: info.slice(text).into(),

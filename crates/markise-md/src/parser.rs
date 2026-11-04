@@ -5,6 +5,7 @@
 use markise_doc::HintSet;
 
 use crate::block::{AlertKind, Block, BlockKind, MathDelim};
+use crate::directive::RawMarker;
 use crate::options::ParseOptions;
 use crate::scan::{self, HtmlEnd, is_ws};
 use crate::text::{Line, Lines, Span, count_terminators, is_blank};
@@ -150,6 +151,8 @@ pub(crate) struct ParseOutput {
     pub failed_openers: Vec<usize>,
     /// Where parsing stopped because the sync predicate matched (incremental re-parse).
     pub stopped_at: Option<usize>,
+    /// Directive marker lines, in order (ADR 0018).
+    pub markers: Vec<RawMarker>,
 }
 
 pub(crate) struct Parser<'a> {
@@ -165,6 +168,7 @@ pub(crate) struct Parser<'a> {
     math_fail: std::collections::HashMap<(bool, Vec<usize>), usize>,
     /// Literal-line hints (ADR 0006 §2.6): hinted lines open no new block.
     hints: &'a HintSet,
+    markers: Vec<RawMarker>,
 }
 
 /// Parses `text[from..]` (where `from` is a line start at which no block is open).
@@ -196,6 +200,7 @@ pub(crate) fn parse_blocks(
         doc_start: bom_len(text),
         math_fail: Default::default(),
         hints,
+        markers: Vec::new(),
     };
     let mut stopped_at = None;
     for line in Lines::new(text, from) {
@@ -218,6 +223,7 @@ pub(crate) fn parse_blocks(
         blocks: doc.block.children,
         failed_openers: p.failed_openers,
         stopped_at,
+        markers: p.markers,
     }
 }
 
@@ -497,6 +503,25 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 let ch = b[p];
+
+                // Directive marker (ADR 0018): only at document level, always a block of its
+                // own whether it pairs or not, so nothing else here depends on pairing.
+                if ch == b':'
+                    && (container == 0 || (container == 1 && matches!(self.stack[1].st, St::Paragraph | St::Table)))
+                    && let Some(m) = scan::directive_marker(text, p, c.end)
+                {
+                    self.prepare(&mut container, &mut started);
+                    let mut blk = Block::new(BlockKind::Paragraph, Span::new(p, line.content_end));
+                    blk.lines.push(Span::new(p, line.content_end));
+                    self.markers.push(RawMarker {
+                        at: p,
+                        fence: m.fence,
+                        close: m.close,
+                    });
+                    self.add_leaf(blk, clean);
+                    consumed = true;
+                    break;
+                }
 
                 // Block quote.
                 let room = MAX_NESTING.saturating_sub(self.container_depth(container));
@@ -1418,6 +1443,7 @@ pub(crate) fn prepare_nested(text: &str, opts: &ParseOptions, plan: &NestedPlan<
         doc_start: bom_len(text),
         math_fail: Default::default(),
         hints: &hints,
+        markers: Vec::new(),
     };
     let o = plan.origin;
     let mut levels: Vec<(St, Block)> = Vec::with_capacity(plan.path.len());
@@ -1551,6 +1577,7 @@ pub(crate) fn parse_nested(
         doc_start: bom_len(text),
         math_fail: Default::default(),
         hints,
+        markers: Vec::new(),
     };
     let k = prep.starts.len();
     let mut top_mode = false;
@@ -1628,6 +1655,7 @@ pub(crate) fn parse_nested(
         blocks: doc.block.children,
         failed_openers: p.failed_openers,
         stopped_at,
+        markers: p.markers,
     })
 }
 
