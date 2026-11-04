@@ -6,6 +6,7 @@ use schema_form_core::{Control, FieldError, FieldSpec, Limits, Selection};
 use serde_json::{Map, Value, json};
 
 use crate::SchemaForm;
+use crate::host::{FormHost, HostWidget, WidgetContext};
 use crate::rows::Rows;
 use crate::widgets::{Icon, error_label, field_label, icon_button, status_label};
 
@@ -18,22 +19,27 @@ const MAX_ROWS: f32 = 12.0;
 /// A row that a shortcut asked to move: its id and the direction.
 type MoveRequest = Option<(Id, isize)>;
 
-struct Cx<'a> {
-    rows: &'a mut Rows,
+pub(crate) struct Cx<'a> {
+    pub rows: &'a mut Rows,
+    pub host: &'a mut dyn FormHost,
+    pub widgets: &'a mut std::collections::HashMap<String, Box<dyn HostWidget>>,
+    pub next_request: &'a mut u64,
+    pub file_requests: &'a mut std::collections::HashMap<u64, Id>,
+    pub delivered: &'a mut std::collections::HashMap<Id, String>,
     errors: &'a [FieldError],
-    texts: &'a crate::Texts,
+    pub texts: &'a crate::Texts,
     focus_rows: std::collections::HashMap<Id, Id>,
     status: &'a mut std::collections::HashMap<Id, String>,
     buttons: &'a mut std::collections::HashMap<Id, [Id; 3]>,
     moving: MoveRequest,
     /// The rows around the widget being drawn, innermost last.
     row_stack: Vec<Id>,
-    changed: bool,
+    pub changed: bool,
 }
 
 impl Cx<'_> {
     /// Notes that a focusable widget belongs to the row being drawn.
-    fn track(&mut self, r: &Response) {
+    pub fn track(&mut self, r: &Response) {
         if let Some(row) = self.row_stack.last() {
             self.focus_rows.insert(r.id, *row);
         }
@@ -53,7 +59,7 @@ impl Cx<'_> {
     }
 
     /// Tells a screen reader the widget's reasons.
-    fn describe(&self, ui: &Ui, r: &Response, path: &str) {
+    pub fn describe(&self, ui: &Ui, r: &Response, path: &str) {
         let m = self.messages(path);
         if !m.is_empty() {
             ui.ctx().accesskit_node_builder(r.id, |n| {
@@ -64,7 +70,7 @@ impl Cx<'_> {
     }
 }
 
-fn join(path: &str, key: impl std::fmt::Display) -> String {
+pub(crate) fn join(path: &str, key: impl std::fmt::Display) -> String {
     if path.is_empty() {
         key.to_string()
     } else {
@@ -73,7 +79,7 @@ fn join(path: &str, key: impl std::fmt::Display) -> String {
 }
 
 impl SchemaForm {
-    pub(crate) fn draw(&mut self, ui: &mut Ui) -> bool {
+    pub(crate) fn draw(&mut self, ui: &mut Ui, host: &mut dyn FormHost) -> bool {
         // a shortcut has to be taken before the text field under it sees the arrow key
         let focused = ui.memory(|m| m.focused());
         let row = focused.and_then(|f| self.focus_rows.get(&f).copied());
@@ -90,6 +96,11 @@ impl SchemaForm {
         });
         let mut cx = Cx {
             rows: &mut self.rows,
+            host,
+            widgets: &mut self.widgets,
+            next_request: &mut self.next_request,
+            file_requests: &mut self.file_requests,
+            delivered: &mut self.delivered,
             errors: &self.errors,
             texts: &self.texts,
             focus_rows: std::collections::HashMap::new(),
@@ -108,6 +119,8 @@ impl SchemaForm {
         ui.vertical(|ui| draw_fields(ui, &self.spec.fields, root, self.id, "", &mut cx));
         let changed = cx.changed;
         self.focus_rows = cx.focus_rows;
+        // every live row has taken its file by now: what is left was for a removed row
+        self.delivered.clear();
         changed
     }
 }
@@ -163,8 +176,18 @@ fn draw_field(ui: &mut Ui, f: &FieldSpec, obj: &mut Map<String, Value>, id: Id, 
             }
             None => not_editable(ui, cx),
         },
-        Control::Custom { .. } => {
-            ui.label(&cx.texts.no_widget);
+        Control::Custom { name } => {
+            let errors = cx.messages(path);
+            let context = WidgetContext {
+                value: &mut value,
+                label: &f.label,
+                id,
+                errors: &errors,
+            };
+            match cx.widgets.get_mut(name) {
+                Some(w) => cx.changed |= w.ui(ui, context),
+                None => not_available(ui, cx),
+            }
         }
     }
     cx.draw_errors(ui, path);
@@ -183,13 +206,17 @@ fn empty_value(c: &Control) -> Value {
     }
 }
 
-fn not_editable(ui: &mut Ui, cx: &Cx) {
+pub(crate) fn not_editable(ui: &mut Ui, cx: &Cx) {
     ui.colored_label(ui.visuals().warn_fg_color, &cx.texts.cannot_edit);
+}
+
+fn not_available(ui: &mut Ui, cx: &Cx) {
+    ui.colored_label(ui.visuals().warn_fg_color, &cx.texts.no_widget);
 }
 
 /// The text editor of a field or a row. Its id is the widget's identity, so its caret,
 /// selection and composition follow it.
-fn text_editor(ui: &mut Ui, s: &mut String, id: Id, multiline: bool, width: f32, cx: &mut Cx) -> Response {
+pub(crate) fn text_editor(ui: &mut Ui, s: &mut String, id: Id, multiline: bool, width: f32, cx: &mut Cx) -> Response {
     let editor_id = id.with("text");
     let r = if multiline {
         let line = ui.text_style_height(&egui::TextStyle::Body);
@@ -233,7 +260,7 @@ fn new_row(c: &Control) -> Value {
     }
 }
 
-enum RowAction {
+pub(crate) enum RowAction {
     Move(usize, isize),
     Remove(usize),
     Add,
@@ -348,14 +375,14 @@ fn pass_focus_at_the_edge(ui: &Ui, cx: &Cx, row: Id, to: usize, n: usize) {
 fn first_editor(f: &FieldSpec, row: Id) -> Id {
     match &f.control {
         Control::Array { fields } => fields.first().map_or(row, |x| row.with(&x.key).with("text")),
-        Control::Images => row.with("alt").with("text"),
+        Control::Images => crate::image::first_editor(row),
         _ => row.with("text"),
     }
 }
 
 /// Up, down and remove of a row. Their ids move with the row, so focus stays on the button
 /// that was pressed while the row travels.
-fn row_buttons(ui: &mut Ui, f: &FieldSpec, row: Id, i: usize, n: usize, cx: &mut Cx) -> Option<RowAction> {
+pub(crate) fn row_buttons(ui: &mut Ui, f: &FieldSpec, row: Id, i: usize, n: usize, cx: &mut Cx) -> Option<RowAction> {
     let mut action = None;
     let t = cx.texts;
     let name = format!("{} {}", f.label, i + 1);
@@ -383,7 +410,7 @@ fn row_buttons(ui: &mut Ui, f: &FieldSpec, row: Id, i: usize, n: usize, cx: &mut
     action
 }
 
-fn buttons_width(ui: &Ui) -> f32 {
+pub(crate) fn buttons_width(ui: &Ui) -> f32 {
     3.0 * (ui.spacing().interact_size.y + ui.spacing().item_spacing.x)
 }
 
@@ -438,30 +465,10 @@ fn draw_row(
             })
             .inner
         }
-        Control::Images => {
-            let fields = image_fields(cx.texts);
-            draw_group_row(ui, f, &fields, v, row, path, i, n, cx)
-        }
+        Control::Images => crate::image::image_row(ui, f, v, row, path, i, n, cx),
         Control::Array { fields } => draw_group_row(ui, f, fields, v, row, path, i, n, cx),
         _ => None,
     }
-}
-
-/// The plain form of an image row until a host draws it better.
-fn image_fields(t: &crate::Texts) -> Vec<FieldSpec> {
-    let text = |key: &str, label: &str| FieldSpec {
-        key: key.into(),
-        label: label.into(),
-        help: None,
-        add_label: None,
-        required: false,
-        limits: Limits::default(),
-        item_limits: Limits::default(),
-        control: Control::Text { multiline: false },
-        json_type: schema_form_core::JsonType::String,
-        extensions: Map::new(),
-    };
-    vec![text("alt", &t.alt), text("path", &t.path)]
 }
 
 #[expect(clippy::too_many_arguments, reason = "the drawing state of one row")]

@@ -15,8 +15,13 @@
 //! ids from the key. Caret, selection, IME composition, focus and scrolling live in egui under
 //! those ids, so they follow a row through a reorder and survive redraws. Colours and sizes come
 //! from the [`egui::Ui`], so the form follows the host's theme and zoom.
+//!
+//! The form opens no dialogs and loads no pictures: it asks a [`FormHost`], and the answers come
+//! later. The only way to add a widget is [`SchemaForm::register_widget`].
 
 mod draw;
+mod host;
+mod image;
 mod rows;
 mod widgets;
 
@@ -27,6 +32,7 @@ use egui::{Event, Id, ImeEvent, Ui};
 use schema_form_core::{ErrorKind, FieldError, FormSpec};
 use serde_json::Value;
 
+pub use host::{FileRequest, FormHost, HostWidget, NoHost, Thumbnail, WidgetContext};
 pub use schema_form_core;
 
 use rows::Rows;
@@ -41,6 +47,8 @@ pub struct Texts {
     pub correct: String,
     pub alt: String,
     pub path: String,
+    pub choose_file: String,
+    pub loading: String,
     pub cannot_edit: String,
     pub no_widget: String,
     /// `{}` twice: the new position and the count.
@@ -59,6 +67,8 @@ impl Default for Texts {
             correct: "Marked".into(),
             alt: "Alt text".into(),
             path: "Path".into(),
+            choose_file: "Choose file".into(),
+            loading: "Loading".into(),
             cannot_edit: "This value cannot be edited here".into(),
             no_widget: "This field needs a widget the application does not have".into(),
             moved: "Moved to position {} of {}".into(),
@@ -94,6 +104,13 @@ pub struct SchemaForm {
     status: HashMap<Id, String>,
     /// Up, down and remove of each row, to pass the focus on when one of them goes away.
     buttons: HashMap<Id, [Id; 3]>,
+    /// The widgets the host registered, by name.
+    widgets: HashMap<String, Box<dyn HostWidget>>,
+    next_request: u64,
+    /// The row each open file request is for: it can move while the dialog is open.
+    file_requests: HashMap<u64, Id>,
+    /// Files delivered and not yet put into their row.
+    delivered: HashMap<Id, String>,
 }
 
 impl SchemaForm {
@@ -113,12 +130,30 @@ impl SchemaForm {
             focus_rows: HashMap::new(),
             status: HashMap::new(),
             buttons: HashMap::new(),
+            widgets: HashMap::new(),
+            next_request: 0,
+            file_requests: HashMap::new(),
+            delivered: HashMap::new(),
         }
     }
 
     pub fn with_texts(mut self, texts: Texts) -> Self {
         self.texts = texts;
         self
+    }
+
+    /// Registers a widget for the fields whose hints name it (`"widget": "custom"`, `"custom":
+    /// name`). The name means nothing to the form.
+    pub fn register_widget(&mut self, name: impl Into<String>, widget: impl HostWidget + 'static) {
+        self.widgets.insert(name.into(), Box::new(widget));
+    }
+
+    /// The answer to a [`FormHost::request_file`]: the path for the image's row, wherever that
+    /// row is now, or `None` if the person cancelled. A row removed meanwhile drops it.
+    pub fn deliver_file(&mut self, request: FileRequest, path: Option<String>) {
+        if let (Some(row), Some(path)) = (self.file_requests.remove(&request.0), path) {
+            self.delivered.insert(row, path);
+        }
     }
 
     /// The values now. During a composition they hold its unfinished text; see
@@ -149,10 +184,15 @@ impl SchemaForm {
         self.errors = self.spec.validate(&self.values);
     }
 
-    /// Draws the form.
+    /// Draws the form for a host without files.
     pub fn ui(&mut self, ui: &mut Ui) -> FormOutput {
+        self.ui_with(ui, &mut NoHost)
+    }
+
+    /// Draws the form.
+    pub fn ui_with(&mut self, ui: &mut Ui, host: &mut dyn FormHost) -> FormOutput {
         self.track_composition(ui);
-        let changed = self.draw(ui);
+        let changed = self.draw(ui, host);
         if changed {
             self.errors = self.spec.validate(&self.values);
         }
