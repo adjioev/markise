@@ -85,7 +85,8 @@ pub fn toggle_option(options: &[ChoiceOption], selection: Selection, selected: &
 }
 
 /// The rows of an array that belong to no option: nothing a button can show, and not the
-/// buttons' to change. A second row with an option's value is one too.
+/// buttons' to change. A second answer with an option's text is one too: it has an id and a mark of
+/// its own. A repeated string is not: it says nothing more than the first.
 pub fn unknown_rows(shape: ChoiceShape, options: &[ChoiceOption], value: &Value) -> Vec<usize> {
     let Some(rows) = value.as_array().filter(|_| shape != ChoiceShape::String) else {
         return Vec::new();
@@ -93,7 +94,9 @@ pub fn unknown_rows(shape: ChoiceShape, options: &[ChoiceOption], value: &Value)
     let mut seen: Vec<&str> = Vec::new();
     (0..rows.len())
         .filter(|&i| match entry_value(shape, &rows[i]) {
-            Some(t) if options.iter().any(|o| o.value == t) && !seen.contains(&t) => {
+            Some(t)
+                if options.iter().any(|o| o.value == t) && (shape == ChoiceShape::Strings || !seen.contains(&t)) =>
+            {
                 seen.push(t);
                 false
             }
@@ -127,12 +130,8 @@ pub fn write_selected(shape: ChoiceShape, options: &[ChoiceOption], selected: &[
         let at = rows.iter().position(later).unwrap_or(rows.len());
         match shape {
             ChoiceShape::Strings if selected[i] => rows.insert(at, json!(o.value)),
-            // the option's own row: a second one stays until it is removed (`unknown_rows`)
-            ChoiceShape::Strings => {
-                if let Some(row) = rows.iter().position(|r| r.as_str() == Some(&o.value)) {
-                    rows.remove(row);
-                }
-            }
+            // every row of it: repeated strings are one selected option, so a press clears them all
+            ChoiceShape::Strings => rows.retain(|r| r.as_str() != Some(&o.value)),
             _ => match row_of(rows, &o.value) {
                 Some(row) => {
                     if let Some(r) = rows[row]

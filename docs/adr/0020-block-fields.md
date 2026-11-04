@@ -176,9 +176,14 @@ differs by variant, so for them `options` alone says what is allowed.
   the drawing: one selection stays on what was pressed; otherwise a press toggles, an exclusive option
   clears the others and any other clears the exclusive ones.
 - **Answers keep their rows.** A press writes only the marks that changed. A selected option with
-  no row gets one in the options' order. A row that fits no option, or a second row of one, is not
-  a button's to change: the form shows its text and a remove button, and the validator gives a reason
-  (`NotAnOption`). Marks that break an exclusive option give a reason too, and any press mends them.
+  no row gets one in the options' order. A row that fits no option, or a second answer with an
+  option's text, is not a button's to change: the form shows its text and a remove button, and the
+  validator gives a reason (`NotAnOption`). Marks that break an exclusive option give a reason too,
+  and any press mends them.
+- **Repeated strings are one selected option.** In an array of strings, `["a", "a"]` selects `a` once.
+  The second row still has a reason (`NotAnOption`), but no remove button of its own: pressing the
+  option removes every row of that value, so a press always deselects and an exclusive press leaves
+  no copy behind.
 - **New answers have no `id` key.** In a form draft, a row with no `id` key is new and its host
   gives it an id when the values are stored. An empty `id` is a row read from somewhere that has
   none, and that is a reason (`MissingId`). So adding an answer no longer shows a false reason.
