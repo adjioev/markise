@@ -363,7 +363,8 @@ pub fn decode(text: &str, block: &BlockSrc, def: &Value) -> Result<Decoded, Stri
                         if indent == 0
                             && let Some(m) = list_marker_len(l)
                         {
-                            let span = s + m..s + l.trim_end().len();
+                            // `.max`: an empty item (`- `, a row just added, live preview) has its marker's space
+                            let span = s + m..(s + l.trim_end().len()).max(s + m);
                             items.push(Item {
                                 line_start: s,
                                 text: span,
@@ -574,7 +575,8 @@ pub fn form(dec: &Decoded, lang: &str, over: Option<&Value>) -> (String, Value, 
             "choices" => {
                 // answers: text, correctness (radio for one answer, checkboxes otherwise),
                 // order, add/remove; labels {#id} travel with their answer
-                let single = correct_rule(&dec.def, &f.def, &dec.block.args) == "exactly-one";
+                let rule = correct_rule(&dec.def, &f.def, &dec.block.args);
+                let single = rule == "exactly-one";
                 let taken: Vec<String> = match &f.parts {
                     Parts::Choices { items } => items.iter().map(|c| c.id.clone()).collect(),
                     _ => Vec::new(),
@@ -586,7 +588,7 @@ pub fn form(dec: &Decoded, lang: &str, over: Option<&Value>) -> (String, Value, 
                 }
                 props.insert(f.name.clone(), s);
                 els.push(json!({"type": "Control", "scope": scope, "label": label,
-                    "options": opts_of(f, json!({"format": "choices", "single": single, "taken": taken}))}));
+                    "options": opts_of(f, json!({"format": "choices", "single": single, "correct": rule, "taken": taken}))}));
             }
             "image" => {
                 // pictures: one sub-card each (preview, alt, path with a file picker), add/remove

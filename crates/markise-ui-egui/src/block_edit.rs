@@ -99,6 +99,11 @@ pub struct Preview {
 /// Edit dialog state of one viewer.
 pub struct FormState {
     events: Receiver<Value>,
+    tx: std::sync::mpsc::Sender<Value>,
+    /// The native form (default); None with `MARKISE_FORM=web` or when closed.
+    pub native: Option<crate::form_native::NativeForm>,
+    refocus: bool,
+    markdown_request: Option<usize>,
     doc: Option<PathBuf>,
     /// The block library's root (package cache, dev folder or site).
     root: Option<PathBuf>,
@@ -141,9 +146,13 @@ fn form_dir(root: Option<&Path>, name: &str) -> Option<PathBuf> {
 impl FormState {
     pub fn new(doc: Option<PathBuf>, root: Option<PathBuf>, ctx: &egui::Context) -> Self {
         let (tx, events) = std::sync::mpsc::channel();
-        crate::form_panel::set_sink(tx, ctx.clone());
+        crate::form_panel::set_sink(tx.clone(), ctx.clone());
         FormState {
             events,
+            tx,
+            native: None,
+            refocus: false,
+            markdown_request: None,
             doc,
             root,
             open: None,
@@ -160,9 +169,47 @@ impl FormState {
         self.open.is_some()
     }
 
-    fn send(&self, v: &Value) -> Result<(), String> {
-        crate::form_panel::handle(v.clone());
+    fn send(&mut self, v: &Value) -> Result<(), String> {
+        if !crate::form_native::enabled() {
+            crate::form_panel::handle(v.clone());
+            return Ok(());
+        }
+        match v["op"].as_str().unwrap_or("") {
+            "form_result" if v["ok"] != true => {
+                if let Some(n) = self.native.as_mut() {
+                    n.banner = v["error"].as_str().map(str::to_string);
+                }
+            }
+            "form_result" | "form_close" => {
+                self.native = None;
+                self.refocus = true;
+            }
+            _ => {}
+        }
         Ok(())
+    }
+
+    pub fn take_refocus(&mut self) -> bool {
+        std::mem::take(&mut self.refocus)
+    }
+
+    pub fn take_markdown_request(&mut self) -> Option<usize> {
+        self.markdown_request.take()
+    }
+
+    /// The native form's "show Markdown" action: closes the form and switches the block's view.
+    pub fn request_markdown(&mut self) {
+        if let Some(o) = self.open.take() {
+            self.markdown_request = Some(o.dec.block.range.start);
+        }
+        self.preview = None;
+        self.native = None;
+        self.refocus = true;
+    }
+
+    /// The doc's folder (pictures in the native form are relative to it).
+    pub fn doc_dir(&self) -> Option<PathBuf> {
+        self.doc.as_deref().and_then(Path::parent).map(Path::to_path_buf)
     }
 
     /// The library root this viewer uses.
@@ -307,7 +354,30 @@ impl FormState {
             "base": doc.parent().map(file_url_dir).unwrap_or_default(),
         });
         let ms_build = t.elapsed().as_secs_f64() * 1e3;
-        self.send(&req)?;
+        if crate::form_native::enabled() {
+            // fields of a type this version cannot edit stay verbatim; the form says so
+            if let Some(els) = uischema["elements"].as_array_mut() {
+                for f in &dec.fields {
+                    if !matches!(
+                        f.ty.as_str(),
+                        "heading" | "text" | "list" | "choices" | "quote" | "image"
+                    ) {
+                        els.push(json!({"type": "Control", "scope": format!("#/properties/{}", f.name),
+                            "label": f.name, "options": {"format": format!("unknown type `{}`", f.ty)}}));
+                    }
+                }
+            }
+            self.native = Some(crate::form_native::NativeForm::new(
+                id,
+                &req,
+                &schema,
+                &uischema,
+                dec.data.clone(),
+                self.tx.clone(),
+            ));
+        } else {
+            self.send(&req)?;
+        }
         if self.log {
             eprintln!(
                 "[blockform] open #{id} :::{} at {offset}{}: form built in {ms_build:.2} ms (site files: {:?})",
@@ -336,12 +406,13 @@ impl FormState {
     pub fn close(&mut self) {
         self.open = None;
         self.preview = None;
+        self.native = None;
         let _ = self.send(&json!({"op": "form_close"}));
     }
 
     /// Runs JavaScript in the form page (measurement script).
     pub fn eval(&self, js: &str) {
-        let _ = self.send(&json!({"op": "form_eval", "js": js}));
+        crate::form_panel::handle(json!({"op": "form_eval", "js": js}));
     }
 
     /// Handles the helper's events; a save edits the document through `ed`.
@@ -387,6 +458,8 @@ impl FormState {
                     if id == current {
                         self.open = None;
                         self.preview = None;
+                        self.native = None;
+                        self.refocus = true;
                     }
                 }
                 "draft" if id == current && id.is_some() => {
@@ -516,10 +589,10 @@ impl FormScript {
         std::env::var_os("MARKISE_PROTO_FORMS").is_some_and(|v| v != "0")
     }
 
-    fn shot_form(form: &FormState, name: &str) {
+    fn shot_form(_form: &FormState, name: &str) {
         if let Some(dir) = std::env::var_os("MARKISE_PROTO_SHOTS") {
             let path = PathBuf::from(dir).join(format!("{name}.png"));
-            let _ = form.send(&json!({"op": "form_shot", "path": path}));
+            crate::form_panel::handle(json!({"op": "form_shot", "path": path}));
         }
     }
 
@@ -890,7 +963,7 @@ fn file_url_dir(dir: &Path) -> String {
 }
 
 /// `to` relative to the folder `from` (`../../styles/a.png`), with `/` separators.
-fn relative_path(from: &Path, to: &Path) -> String {
+pub(crate) fn relative_path(from: &Path, to: &Path) -> String {
     let a: Vec<_> = from.components().collect();
     let b: Vec<_> = to.components().collect();
     let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
@@ -1980,7 +2053,7 @@ pub fn proto_raw_input(raw: &mut egui::RawInput) {
     }
 }
 
-fn q_click(p: egui::Pos2) {
+pub(crate) fn q_click(p: egui::Pos2) {
     use egui::{Event, Modifiers, PointerButton};
     let btn = |pressed| Event::PointerButton {
         pos: p,
@@ -1998,11 +2071,15 @@ fn q_click(p: egui::Pos2) {
     });
 }
 
-fn q_events(ev: Vec<egui::Event>) {
+pub(crate) fn q_idle() -> bool {
+    RAW_QUEUE.with(|q| q.borrow().is_empty())
+}
+
+pub(crate) fn q_events(ev: Vec<egui::Event>) {
     RAW_QUEUE.with(|q| q.borrow_mut().push_back(ev));
 }
 
-fn q_key(key: egui::Key, modifiers: egui::Modifiers) {
+pub(crate) fn q_key(key: egui::Key, modifiers: egui::Modifiers) {
     q_events(vec![
         egui::Event::Key {
             key,
@@ -2073,7 +2150,12 @@ pub fn native_script(ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer)
             viewer.ed.session.read_only().is_some(),
             m.items.len(),
             viewer.ed.view.width(),
-            viewer.block_ctl.iter().map(|c| (c.offset, c.view.label(), c.rect.top() as i32, c.rect.height() as i32)).take(4).collect::<Vec<_>>(),
+            viewer
+                .block_ctl
+                .iter()
+                .map(|c| (c.offset, c.view.label(), c.rect.top() as i32, c.rect.height() as i32))
+                .take(4)
+                .collect::<Vec<_>>(),
             first_painted,
         );
         if n < 6 {
@@ -2205,11 +2287,17 @@ impl NativeScript {
                 let off = Self::block_off(viewer, &proto_name(0));
                 self.check("callout shown natively", ctl_view(viewer, off) == Some(V::Native));
                 let vt = viewer.visible_text();
-                eprintln!("[proto-native] note unit: {:?}", viewer.native_units.iter().find(|u| u.0 == off));
+                eprintln!(
+                    "[proto-native] note unit: {:?}",
+                    viewer.native_units.iter().find(|u| u.0 == off)
+                );
                 let _ = vt;
                 let b = markise_engine::block_form::block_at(&text, off).expect("note");
                 // the last paragraph of the note: click into its text
-                let last = text[b.inner.clone()].trim_end().rfind("\n\n").map_or(b.inner.start, |i| b.inner.start + i + 2);
+                let last = text[b.inner.clone()]
+                    .trim_end()
+                    .rfind("\n\n")
+                    .map_or(b.inner.start, |i| b.inner.start + i + 2);
                 self.probe = last;
                 if let Some(r) = viewer.item_screen_rect(last) {
                     q_click(egui::pos2(r.left() + 60.0, r.bottom() - 10.0));
@@ -2223,7 +2311,10 @@ impl NativeScript {
                 next(self);
             }
             4 if after(200) => {
-                self.check("typed in place", text.len() == self.original.len() + 4 && text.contains("ЙЖ"));
+                self.check(
+                    "typed in place",
+                    text.len() == self.original.len() + 4 && text.contains("ЙЖ"),
+                );
                 let off = Self::block_off(viewer, &proto_name(0));
                 self.check("still native after typing", ctl_view(viewer, off) == Some(V::Native));
                 shot("n-03-typed");
@@ -2345,10 +2436,7 @@ impl NativeScript {
             // the caret walks down the document
             9 => {
                 let c = viewer.ed.session.selection().primary().focus.offset;
-                let bad = viewer
-                    .native_markers
-                    .iter()
-                    .any(|a| c >= a.0 && c <= a.1);
+                let bad = viewer.native_markers.iter().any(|a| c >= a.0 && c <= a.1);
                 self.in_marker += bad as u32;
                 if bad {
                     eprintln!(
@@ -2389,7 +2477,10 @@ impl NativeScript {
                     q_key(Key::ArrowUp, Modifiers::NONE);
                 } else {
                     self.check(
-                        &format!("caret walk back: ends at {c}, frames on a marker line {}", self.in_marker),
+                        &format!(
+                            "caret walk back: ends at {c}, frames on a marker line {}",
+                            self.in_marker
+                        ),
                         self.in_marker == 0,
                     );
                     self.step = 100;
@@ -2441,7 +2532,11 @@ impl NativeScript {
                 self.check("toggle undone: byte-identical", same);
                 // Enter at an answer's end: its label stays with it
                 let off = Self::block_off(viewer, &proto_name(1));
-                let hid = snaps.native.iter().find(|n| n.offset == off).and_then(|n| n.hidden.first().cloned());
+                let hid = snaps
+                    .native
+                    .iter()
+                    .find(|n| n.offset == off)
+                    .and_then(|n| n.hidden.first().cloned());
                 if let Some(h) = hid {
                     self.probe = h.end;
                     viewer.ed.set_selection(Selection::caret(h.start));
@@ -2452,7 +2547,10 @@ impl NativeScript {
             }
             140 if after(300) => {
                 let label = text.get(..self.probe).unwrap_or("");
-                self.check("Enter at an answer's end leaves the label on it", label.ends_with("{#a1}") && !same);
+                self.check(
+                    "Enter at an answer's end leaves the label on it",
+                    label.ends_with("{#a1}") && !same,
+                );
                 shot("n-24-answer-enter");
                 while viewer.ed.session.text() != self.original && viewer.ed.session.can_undo() {
                     viewer.ed.edit(|s| s.undo());
@@ -2484,9 +2582,15 @@ impl NativeScript {
             }
             15 if after(300) => {
                 let off = Self::block_off(viewer, &proto_name(1));
-                self.check("rotate 2: question as Markdown", ctl_view(viewer, off) == Some(V::Markdown));
+                self.check(
+                    "rotate 2: question as Markdown",
+                    ctl_view(viewer, off) == Some(V::Markdown),
+                );
                 let vt = viewer.visible_text();
-                self.check("its raw source is on screen", vt.contains(&format!(":::{}", proto_name(1))) && vt.contains("{#a1}"));
+                self.check(
+                    "its raw source is on screen",
+                    vt.contains(&format!(":::{}", proto_name(1))) && vt.contains("{#a1}"),
+                );
                 shot("n-07-question-markdown");
                 if let Some(c) = viewer.block_ctl.iter().find(|c| c.offset == off) {
                     q_click(egui::pos2(c.rect.right() - 45.0, c.rect.top() + 17.0));
@@ -2495,7 +2599,10 @@ impl NativeScript {
             }
             16 if after(300) => {
                 let off = Self::block_off(viewer, &proto_name(1));
-                self.check("rotate 3: question back to Native", ctl_view(viewer, off) == Some(V::Native));
+                self.check(
+                    "rotate 3: question back to Native",
+                    ctl_view(viewer, off) == Some(V::Native),
+                );
                 self.check(
                     "rotating never touched the document",
                     same && viewer.ed.session.revision().counter == self.revision,
@@ -2521,16 +2628,16 @@ impl NativeScript {
                 next(self);
             }
             19 if after(800) => {
-                eprintln!(
-                    "[proto-native] at the end: {}",
-                    viewer.ed.view.paging_stats().evicted
-                );
+                eprintln!("[proto-native] at the end: {}", viewer.ed.view.paging_stats().evicted);
                 Self::scroll_to(viewer, Self::block_off(viewer, &proto_name(2)));
                 next(self);
             }
             20 if after(600) => {
                 let off = Self::block_off(viewer, &proto_name(2));
-                self.check("still Markdown after the trip", ctl_view(viewer, off) == Some(V::Markdown));
+                self.check(
+                    "still Markdown after the trip",
+                    ctl_view(viewer, off) == Some(V::Markdown),
+                );
                 // an edit above moves the block; the state follows
                 viewer.ed.set_selection(Selection::caret(2));
                 q_events(vec![egui::Event::Text("ЙЖ".into())]);
@@ -2538,7 +2645,10 @@ impl NativeScript {
             }
             21 if after(300) => {
                 let off = Self::block_off(viewer, &proto_name(2));
-                self.check("… and after an edit above it", ctl_view(viewer, off) == Some(V::Markdown));
+                self.check(
+                    "… and after an edit above it",
+                    ctl_view(viewer, off) == Some(V::Markdown),
+                );
                 viewer.ed.edit(|s| s.undo());
                 next(self);
             }
@@ -2557,7 +2667,10 @@ impl NativeScript {
                 next(self);
             }
             24 if after(400) => {
-                self.check("all Markdown: nothing native, no images", snaps.native.is_empty() && viewer.atomic.is_empty());
+                self.check(
+                    "all Markdown: nothing native, no images",
+                    snaps.native.is_empty() && viewer.atomic.is_empty(),
+                );
                 shot("n-09-all-markdown");
                 viewer.snaps.as_mut().expect("snaps").set_all_views(V::Native);
                 next(self);
@@ -2587,7 +2700,13 @@ impl NativeScript {
                 next(self);
             }
             28 if n_saves > self.saves && after(300) => {
-                self.check(&format!("form from a native block, unchanged save: {:?}", snaps.form.saves.last()), same);
+                self.check(
+                    &format!(
+                        "form from a native block, unchanged save: {:?}",
+                        snaps.form.saves.last()
+                    ),
+                    same,
+                );
                 self.saves = n_saves;
                 let off = Self::block_off(viewer, &proto_name(3));
                 if form_open {
@@ -2645,7 +2764,10 @@ impl NativeScript {
             }
             33 if n_saves > self.saves && after(800) => {
                 let blocks = markise_engine::block_form::all_blocks(&text).len();
-                self.check(&format!("palette: block inserted ({:?})", snaps.form.saves.last()), blocks == self.natives + 1);
+                self.check(
+                    &format!("palette: block inserted ({:?})", snaps.form.saves.last()),
+                    blocks == self.natives + 1,
+                );
                 viewer.snaps.as_mut().expect("snaps").form.close();
                 next(self);
             }
@@ -2653,7 +2775,10 @@ impl NativeScript {
                 let gap = viewer.native_units.get(1).copied();
                 eprintln!("[proto-native] after insert: {gap:?}");
                 let off = viewer.native_units.first().map_or(0, |a| a.3);
-                self.check("the inserted note is native", snaps.native.iter().any(|n| n.offset == off));
+                self.check(
+                    "the inserted note is native",
+                    snaps.native.iter().any(|n| n.offset == off),
+                );
                 shot("n-12-palette-inserted");
                 viewer.ed.edit(|s| s.undo());
                 next(self);
@@ -2668,7 +2793,10 @@ impl NativeScript {
             36 if after(1000) => {
                 let path = viewer.ed.path().map(|p| p.to_path_buf());
                 let disk = path.and_then(|p| std::fs::read_to_string(p).ok());
-                self.check("file on disk = what was opened", disk.as_deref() == Some(self.original.as_str()));
+                self.check(
+                    "file on disk = what was opened",
+                    disk.as_deref() == Some(self.original.as_str()),
+                );
                 eprintln!("[proto-native] done, failures: {}", self.fails);
                 std::process::exit(if self.fails == 0 { 0 } else { 1 });
             }

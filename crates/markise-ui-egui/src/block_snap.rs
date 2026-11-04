@@ -280,7 +280,9 @@ fn id_range(text: &str, span: std::ops::Range<usize>) -> Option<std::ops::Range<
     let line = text.get(span.clone())?;
     let t = line.trim_end();
     let at = t.rfind("{#")?;
-    t[at..].ends_with('}').then(|| span.start + t[..at].trim_end().len()..span.start + t.len())
+    t[at..]
+        .ends_with('}')
+        .then(|| span.start + t[..at].trim_end().len()..span.start + t.len())
 }
 
 /// The native view of a block, when its content allows one.
@@ -590,6 +592,11 @@ impl BlockSnaps {
             BlockView::Markdown => BlockView::Site,
         };
         self.view_of.insert(offset, next);
+    }
+
+    /// The block at `offset` to view `v`.
+    pub fn set_view(&mut self, offset: usize, v: BlockView) {
+        self.view_of.insert(offset, v);
     }
 
     /// Every block to `v` (blocks without a native view stay on Site for Native).
@@ -939,7 +946,13 @@ impl BlockSnaps {
         }
         self.pending = if self.folder == 0 { sites } else { pending };
         if self.log {
-            let state = (self.blocks.len(), self.native.len(), placed.len(), self.raw.len(), self.cut.len());
+            let state = (
+                self.blocks.len(),
+                self.native.len(),
+                placed.len(),
+                self.raw.len(),
+                self.cut.len(),
+            );
             if self.logged_state != Some(state) {
                 self.logged_state = Some(state);
                 eprintln!(

@@ -337,27 +337,23 @@ fn paint_view_icon(p: &egui::Painter, c: Pos2, icon: &str, col: Color32) {
             ));
         }
         "image" => {
-            p.rect_stroke(
-                Rect::from_center_size(c, vec2(13.0, 10.0)),
-                1.5,
-                s,
-                StrokeKind::Middle,
-            );
+            p.rect_stroke(Rect::from_center_size(c, vec2(13.0, 10.0)), 1.5, s, StrokeKind::Middle);
             p.line_segment([c + vec2(-5.0, 3.5), c + vec2(-1.0, -1.0)], Stroke::new(1.0, col));
             p.line_segment([c + vec2(-1.0, -1.0), c + vec2(3.0, 3.5)], Stroke::new(1.0, col));
         }
         "question" => {
             p.circle_stroke(c, 6.0, s);
-            p.text(c, egui::Align2::CENTER_CENTER, "?", egui::FontId::proportional(10.0), col);
+            p.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "?",
+                egui::FontId::proportional(10.0),
+                col,
+            );
         }
         _ => {
             // a sheet with lines
-            p.rect_stroke(
-                Rect::from_center_size(c, vec2(9.0, 12.0)),
-                1.5,
-                s,
-                StrokeKind::Middle,
-            );
+            p.rect_stroke(Rect::from_center_size(c, vec2(9.0, 12.0)), 1.5, s, StrokeKind::Middle);
             p.line_segment([c + vec2(-2.0, -2.0), c + vec2(2.0, -2.0)], Stroke::new(1.0, col));
             p.line_segment([c + vec2(-2.0, 1.5), c + vec2(2.0, 1.5)], Stroke::new(1.0, col));
         }
@@ -1396,6 +1392,13 @@ impl DocViewer {
             match self.snaps.as_mut() {
                 Some(s) => {
                     s.form.poll(&mut self.ed);
+                    // PROTOTYPE (native form): the keyboard back after closing; "Markdown view"
+                    if s.form.take_refocus() {
+                        self.refocus = true;
+                    }
+                    if let Some(off) = s.form.take_markdown_request() {
+                        s.set_view(off, crate::block_snap::BlockView::Markdown);
+                    }
                     // PROTOTYPE (block packages): a block chosen in the palette → draft form
                     if editable
                         && !self.snap_blocks
@@ -1648,15 +1651,13 @@ impl DocViewer {
                     }
                 }
                 // a moved block: not at its own position
-                let own = moving
-                    .as_ref()
-                    .and_then(|m| {
-                        self.atomic
-                            .iter()
-                            .chain(self.native_units.iter())
-                            .find(|a| a.0 == m.0)
-                            .copied()
-                    });
+                let own = moving.as_ref().and_then(|m| {
+                    self.atomic
+                        .iter()
+                        .chain(self.native_units.iter())
+                        .find(|a| a.0 == m.0)
+                        .copied()
+                });
                 let valid: Vec<(usize, f32)> = self
                     .gaps
                     .iter()
@@ -1829,7 +1830,9 @@ impl DocViewer {
                 };
                 let card = Rect::from_min_max(pos2(left, top), pos2(left + width, bottom));
                 let accent = accent_color(&n.spec.accent, theme.dark);
-                let tint = if n.spec.kind == crate::block_snap::ViewKind::Callout || n.spec.kind == crate::block_snap::ViewKind::Choices {
+                let tint = if n.spec.kind == crate::block_snap::ViewKind::Callout
+                    || n.spec.kind == crate::block_snap::ViewKind::Choices
+                {
                     accent
                 } else {
                     theme_color(theme.meta_text)
@@ -3547,11 +3550,8 @@ impl DocViewer {
             .iter()
             .map(|a| (mv(a.0), mv(a.1), mv(a.2), mv(a.3)))
             .collect();
-        let Some(&(start, end, before, after)) = self
-            .atomic
-            .iter()
-            .chain(markers.iter())
-            .find(|a| f >= a.0 && f <= a.1)
+        let Some(&(start, end, before, after)) =
+            self.atomic.iter().chain(markers.iter()).find(|a| f >= a.0 && f <= a.1)
         else {
             return false;
         };

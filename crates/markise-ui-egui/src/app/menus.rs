@@ -118,7 +118,7 @@ impl MarkiseApp {
         }
         // a comment being written in its card (issue #87): document commands wait (a menu
         // shortcut such as ⌘B must not act on the document behind the field)
-        if d.viewer.card_edit().is_some() {
+        if d.viewer.card_edit().is_some() || crate::form_native::focused() {
             return false;
         }
         // the source editor (full Source mode, or focused in Side by Side) runs only its own
@@ -607,7 +607,7 @@ impl MarkiseApp {
         }
         // PROTOTYPE (block forms): edit shortcuts go to the docked form panel when it has focus
         if let MenuAction::Command(id) = action
-            && crate::form_panel::forward(id)
+            && (crate::form_panel::forward(id) || crate::form_native::forward(id))
         {
             return true;
         }
@@ -806,6 +806,10 @@ impl MarkiseApp {
                         })
                     });
                     return true;
+                }
+                // PROTOTYPE: document commands wait while the native block form has the keyboard
+                if crate::form_native::focused() {
+                    return false;
                 }
                 return self.run_command(ctx, id);
             }

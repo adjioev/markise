@@ -46,6 +46,7 @@ Layered workspace (`crates/*`, `apps/*`), lower layers never depend on higher on
 | L3 | `markise-render`, `markise-export`, `markise-pdf` | rasterising; HTML (spec 03 DOM contract), export model, Pandoc bridge; paginated PDF/PNG export |
 | L4 | `markise-engine` | session, undo, commands, files, autosave, search, file watching |
 | L5 | `markise-mcp` | MCP server |
+| L6 | `egui-schema-form` | forms from JSON schema + values, no host knowledge (prototype branch only) |
 | L6 | `markise-ui-egui` | egui front end |
 | apps | `markise`, `markise-cli`, `markise-web-render` | desktop app, command line; block-snapshot helper (prototype branch only) |
 | tests | `markise-corpus` | deterministic corpus for tests and benchmarks (dev-dependency only) |

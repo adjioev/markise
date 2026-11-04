@@ -395,7 +395,7 @@ impl SideBySide {
         let mut rect = ui.available_rect_before_wrap();
         // PROTOTYPE (block forms): the edit panel docks at the right; the panes narrow
         if viewer.snaps.as_ref().is_some_and(|s| s.form.is_open()) {
-            rect = crate::form_panel::reserve(ui, rect);
+            rect = crate::form_native::dock(ui, rect, viewer.snaps.as_mut(), f.images);
         }
         let w = rect.width().max(2.0 * DIVIDER_W + 2.0);
         let left_w = ((w - DIVIDER_W) * f.split).round();

@@ -37,6 +37,7 @@ markise-export = 3
 markise-pdf = 3
 markise-engine = 4
 markise-mcp = 5
+egui-schema-form = 6
 markise-ui-egui = 6
 
 # Crates outside the layer stack:
@@ -64,6 +65,8 @@ L1 = ["markise-doc", "markise-md"]
 # shapes text through markise-text; the theme model may use markise-text's font matching.
 # Code highlighting (markise-blocks) classifies tokens into the theme model's token kinds.
 L2 = ["markise-text", "markise-theme", "markise-blocks", "markise-layout"]
+# PROTOTYPE: the form renderer is a host-independent crate under the egui front end.
+L6 = ["egui-schema-form", "markise-ui-egui"]
 # The PDF/PNG back ends lay out the export model built by markise-export.
 L3 = ["markise-export", "markise-pdf"]
 

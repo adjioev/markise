@@ -2235,6 +2235,7 @@ impl MarkiseApp {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         // PROTOTYPE (block forms): the docked edit panel hides itself when no pane placed it
         crate::form_panel::frame_start();
+        crate::form_native::frame_start();
         self.ui_frame(ui);
         crate::form_panel::frame_end();
     }
@@ -3140,9 +3141,10 @@ impl MarkiseApp {
                         crate::block_edit::dir_script(ctx, &mut d.viewer);
                         crate::block_edit::paged_script(ctx, &mut d.viewer);
                         crate::block_edit::native_script(ctx, &mut d.viewer);
+                        crate::form_script::run(ctx, &mut d.viewer);
                         let mut vrect = ui.available_rect_before_wrap();
                         if d.viewer.snaps.as_ref().is_some_and(|s| s.form.is_open()) {
-                            vrect = crate::form_panel::reserve(ui, vrect);
+                            vrect = crate::form_native::dock(ui, vrect, d.viewer.snaps.as_mut(), &mut self.images);
                         } else if crate::block_palette::is_open() {
                             // PROTOTYPE (block packages): the native block palette in the panel
                             let (panel, rest) = crate::form_panel::reserve_rect(ui, vrect);

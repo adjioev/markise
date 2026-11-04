@@ -20,6 +20,7 @@ markise-blocks.workspace = true
 markise-engine.workspace = true
 markise-export.workspace = true
 egui.workspace = true
+egui-schema-form = { path = "../egui-schema-form" }
 rfd.workspace = true
 ttf-parser.workspace = true
 memmap2.workspace = true

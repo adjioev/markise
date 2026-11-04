@@ -1,0 +1,11 @@
+[package]
+name = "egui-schema-form"
+description = "PROTOTYPE: forms for egui from JSON (schema + UI hints + values); knows nothing about its host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+serde_json.workspace = true
