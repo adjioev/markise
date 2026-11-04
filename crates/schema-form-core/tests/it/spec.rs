@@ -207,3 +207,26 @@ fn a_custom_widget_cannot_declare_what_the_subset_lacks() {
         assert!(FormSpec::parse(&s, &hints, None).is_err(), "{s}");
     }
 }
+
+#[test]
+fn a_custom_widget_without_a_type_cannot_have_constraints() {
+    let hints = json!({"version": 1, "fields": {"c": {"widget": "custom", "custom": "w"}}});
+    for constraint in ["maxLength", "minLength", "minItems", "maxItems"] {
+        let s = json!({"type": "object", "properties": {"c": {constraint: 1}}});
+        let e = FormSpec::parse(&s, &hints, None).expect_err(constraint);
+        assert_eq!(e.path, format!("c/{constraint}"));
+    }
+    for (key, value) in [
+        ("required", json!([])),
+        ("properties", json!({})),
+        ("items", json!({"type": "string"})),
+    ] {
+        let s = json!({"type": "object", "properties": {"c": {key: value}}});
+        assert!(FormSpec::parse(&s, &hints, None).is_err(), "{s}");
+    }
+    let bare = json!({"type": "object", "properties": {"c": {"description": "anything goes"}}});
+    assert!(
+        FormSpec::parse(&bare, &hints, None).is_ok(),
+        "an annotation constrains nothing"
+    );
+}

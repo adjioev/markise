@@ -198,9 +198,7 @@ fn rule_of(
         Some("object") => JsonType::Object,
         Some(t) => return err(&join(path, "type"), format!("`{t}` is not in the supported subset")),
     };
-    if let Some(t) = ty {
-        check_applies(path, s, t)?;
-    }
+    check_applies(path, s, ty.unwrap_or("(none)"))?;
     let mut rule = ValueRule {
         json_type,
         limits: limits(path, s)?,
