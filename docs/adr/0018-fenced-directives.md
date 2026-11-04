@@ -156,17 +156,21 @@ pairs across the boundary, and this has no effect on `:::` pairing.
 
 The rendered view draws a simple card, the same for every name: edges around the content,
 `name args` as a label, no per-name behaviour. Marker lines have no caret stops; the virtual
-paragraph in an empty block takes the caret. Source mode shows the lines as they are.
+paragraph in an empty block takes the caret. Source mode shows the lines as they are. The label
+is cut at 200 characters for display, because a marker is one item and is not segmented like a
+long paragraph; the source keeps it whole.
 
 - **HTML:** `<div class='md-directive md-directive-NAME' data-name='…' data-args='…'>`, a
   `<p class='md-directive-label'>` and the content. Name and arguments are HTML-escaped; in the
   class, every character but ASCII letters, digits, `-` and `_` becomes `-`.
-- **PDF and PNG:** a bar in the rule color, the label in bold, the content indented.
+- **PDF and PNG:** a bar in the rule color, the label in bold, the content indented. Page
+  breaks before an h1 apply inside a block; a block starting with an h1 breaks before the block.
 - **Pandoc (Word and the other Pandoc targets):** a `Div` with classes `directive` and the
   sanitized name, attributes `name` and `args`, and a `title` `Div` holding the label, as alerts
   have. Values are JSON strings. What a target does with a `Div` is the target's own choice.
 
 Unpaired markers export as the text they are. Exporters read `Document::tree`.
+HTML's size limit and cancellation checkpoints also run between the blocks inside a block.
 
 ## Consequences
 
