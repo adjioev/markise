@@ -26,6 +26,7 @@ exclude_paths = ["spikes/"]
 # Layered library crates: crate = layer.
 [layers]
 markise-geom = 0
+schema-form-core = 0
 markise-md = 1
 markise-doc = 1
 markise-layout = 2

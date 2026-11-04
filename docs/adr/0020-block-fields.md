@@ -83,6 +83,38 @@ match answers by `id`, then anything by equal content, then the rest in order. E
 interchangeable, and an item both moved and edited at once still ends up correct. In-place editing
 uses `FieldEdit`s and `ItemId`s directly.
 
+### Validation
+
+Fitting a block to its schema is a report, never a gate: a block outside the schema reports a
+reason per field, stays editable and can be saved, because strict checks belong to whoever
+publishes. `BlockFields::check` gives the reasons plus the extras.
+
+The rules live in `schema-form-core`: no GUI, no Markdown, used by the engine here and by a form
+crate above. It reads a **declared, versioned subset** (`SPEC_VERSION` 1) and refuses the rest by
+name, so an arbitrary schema cannot silently become a promise:
+
+- JSON Schema: `type` (one of string, boolean, array, object), `properties`, `required`, `items`,
+  `minLength`, `maxLength`, `minItems`, `maxItems`, `additionalProperties` as true or false.
+  Annotations are ignored. `enum`, `pattern`, `format`, `$ref` and combinators are refused.
+- UI hints, our own small format and not JSON Forms: `version`, `order`, `fields`, and per field
+  `label`, `help`, `widget`, `multiline`, `add_label`, `selection`, `correct`, nested `fields` and
+  `order`, and `custom` for a host's widget. `variants` overlays the hints by a host's name.
+  Layouts and rules are not offered. `x-` keys are ignored; the engine reads `x-markdown` (heading,
+  quote) there, so the rest stays free of Markdown.
+- Correctness (`exactly-one`, `at-least-one`), missing and duplicate answer ids: these are not
+  JSON Schema, so a validator would not have given them anyway.
+
+Empty is how missing content looks in a document, so an empty string or array fails `required`
+and passes the other limits.
+
+**Own validator, not the `jsonschema` crate.** The crate is MIT, and with default features off its
+tree has no HTTP or TLS. Measured on this machine with 0.60.2 against a binary using only
+`serde_json` (release, macOS arm64): 5.47 MB against 0.47 MB, 64 against 6 crates in the tree, 44 s
+against 4 s from clean. For that it would check what about 170 lines check here, its error output
+would still need mapping to fields and languages, and it would not refuse keywords outside the
+subset. Should the subset grow to where this is no longer small, the choice can be revisited
+behind `FormSpec::validate`.
+
 ### Limits
 
 - A text value holding a line that is only an image reads back as the image field when the block

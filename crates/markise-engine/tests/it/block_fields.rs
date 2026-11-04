@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use markise_doc::DocumentFormat;
 use markise_engine::block_fields::{
-    BlockFields, FieldDecl, FieldEdit, FieldKind, FieldValue, ItemData, ItemId, block_range_at,
+    BlockFields, FieldDecl, FieldEdit, FieldKind, FieldValue, ItemData, ItemId, block_range_at, decls_from_spec,
 };
 use markise_engine::editor::{EditorSession, HistoryLimits, ManualClock};
 use markise_md::{MarkdownFormat, ParseOptions};
 use proptest::prelude::*;
+use schema_form_core::{ErrorKind, FormSpec};
 use serde_json::{Value, json};
 
 fn poll_decls() -> Vec<FieldDecl> {
@@ -920,4 +921,94 @@ proptest! {
         prop_assert_eq!(a, c);
         prop_assert_eq!(&next.values()["answers"], &json!(arr));
     }
+}
+
+// ---------------------------------------------------------------- against a form spec
+
+fn poll_spec() -> FormSpec {
+    let schema = json!({
+        "type": "object",
+        "required": ["prompt", "answers"],
+        "properties": {
+            "prompt": {"type": "string"},
+            "setup": {"type": "string"},
+            "answers": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 4,
+                "items": {"type": "object", "properties": {
+                    "id": {"type": "string"},
+                    "text": {"type": "string", "minLength": 1},
+                    "correct": {"type": "boolean"},
+                }},
+            },
+            "why": {"type": "string"},
+        },
+    });
+    let hints = json!({
+        "version": 1,
+        "order": ["prompt", "setup", "answers", "why"],
+        "fields": {
+            "prompt": {"x-markdown": {"kind": "heading", "level": 2}},
+            "setup": {"widget": "multiline"},
+            "answers": {"widget": "choices", "correct": "exactly-one"},
+            "why": {"widget": "multiline", "x-markdown": "quote"},
+        },
+    });
+    FormSpec::parse(&schema, &hints, None).expect("in the subset")
+}
+
+#[test]
+fn the_spec_declares_the_fields() {
+    assert_eq!(decls_from_spec(&poll_spec()).expect("all have a place"), poll_decls());
+    let schema = json!({"type": "object", "properties": {"m": {"type": "object"}}});
+    let spec = FormSpec::parse(&schema, &json!({"version": 1}), None).expect("in the subset");
+    assert_eq!(decls_from_spec(&spec), Err("m".to_string()));
+}
+
+#[test]
+fn a_block_that_fits_has_no_reasons() {
+    let src = POLL
+        .replace("- [x] Green", "- [ ] Green")
+        .replace("- [ ] Blue", "- [x] Blue");
+    let fit = dec(&src, &poll_decls()).check(&poll_spec());
+    assert!(fit.fits(), "{fit:?}");
+}
+
+#[test]
+fn a_block_outside_its_schema_reports_per_field_and_stays_editable() {
+    // no heading, one answer without an id and none marked, content no field takes
+    let src = ":::poll\n\n- [ ] Only\n\n> why\n\n> a second quote\n\n:::";
+    let spec = poll_spec();
+    let decls = decls_from_spec(&spec).expect("all have a place");
+    let b = dec(src, &decls);
+    let fit = b.check(&spec);
+    assert!(!fit.fits());
+    let reasons: Vec<(&str, &ErrorKind)> = fit.errors.iter().map(|e| (e.path.as_str(), &e.kind)).collect();
+    assert_eq!(
+        reasons,
+        [
+            ("prompt", &ErrorKind::Required),
+            ("answers", &ErrorKind::TooFew { min: 2 }),
+            ("answers", &ErrorKind::ExactlyOneCorrect),
+            ("answers/0", &ErrorKind::MissingId),
+        ]
+    );
+    assert_eq!(
+        fit.extras.iter().map(|r| &src[r.clone()]).collect::<Vec<_>>(),
+        ["> a second quote"]
+    );
+
+    // still editable; nothing the check said blocks a change, and bad content stays
+    let next = run(
+        &b,
+        &[FieldEdit::SetText {
+            field: "prompt".into(),
+            text: "Now".into(),
+        }],
+    );
+    assert!(next.source().contains("> a second quote"));
+    let mut fixed = next.check(&spec).errors;
+    fixed.retain(|e| e.path == "prompt");
+    assert!(fixed.is_empty());
 }
