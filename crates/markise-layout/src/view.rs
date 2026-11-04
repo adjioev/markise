@@ -726,6 +726,16 @@ impl View {
         self.diagram_query_of(i, it, start).map(|q| self.diagrams.state(&q))
     }
 
+    /// The rendered scene of diagram item `i`, if it has one. The result is shared: it stays
+    /// valid whatever happens to the item, its page or the renderer's cache afterwards.
+    pub fn diagram_scene(&self, i: usize) -> Option<markise_blocks::diagram::DiagramResult> {
+        let it = self.model.items.get(i)?;
+        match self.diagram_state_of(i, it, || self.model.item_start(i))? {
+            DiagramState::Done(r) if r.is_ok() => Some(r),
+            _ => None,
+        }
+    }
+
     /// The highlighting question of code item `i`, if it has one.
     fn code_query(&self, i: usize) -> Option<CodeQuery<'_>> {
         let it = self.model.items.get(i)?;

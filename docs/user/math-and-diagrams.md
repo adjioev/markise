@@ -64,6 +64,13 @@ sequenceDiagram
 
 Edit the source in Source Code Mode or Side by Side and the diagram redraws.
 
+To read a wide diagram, open it in a full-window view: double-click it, or hover it and press
+the expand button under it. The diagram is redrawn sharply at whatever size you view it. The
+mouse wheel or a pinch zooms around the pointer, dragging pans, and <kbd>+</kbd>, <kbd>-</kbd>
+and <kbd>0</kbd> zoom in, zoom out and fit it to the window again. <kbd>Esc</kbd> or a click
+outside the diagram closes the view. It only shows the diagram; the document does not change.
+[Images](editing.md#images) open the same way.
+
 Other Mermaid diagram types — class, state, Gantt, pie and so on — are not drawn yet. Markise
 shows their source with a note ("Mermaid diagram type … is not supported yet"), and the same
 fallback applies when a diagram has a syntax error, is too large, or takes too long to lay out.

@@ -2,6 +2,10 @@
 //! the block's top-right and a language field at its bottom-right. Both show while the
 //! pointer is over the block or the caret is inside it.
 //!
+//! A rendered diagram has no room inside its box (the picture fills it), so its controls sit
+//! in a row reserved under the picture and never cover it (issue #174), with an expand button
+//! that opens the full-window view.
+//!
 //! - Copy puts the block's content on the clipboard as stored (no fence lines, no info string)
 //!   and shows a short "Copied" state. It never moves the caret.
 //! - The language field shows the first info word, or a muted "language" placeholder. A click
@@ -81,6 +85,8 @@ pub(crate) struct CodeTools {
     fences: Vec<(usize, u64, Option<Arc<CodeFenceView>>)>,
     /// Screen rectangles of the tools drawn last frame (tests).
     pub(crate) shown: Vec<ShownTools>,
+    /// Screen rectangles of the images' expand buttons drawn last frame (tests).
+    pub(crate) shown_images: Vec<Rect>,
 }
 
 /// Where the tools of one block were drawn (screen points).
@@ -90,6 +96,49 @@ pub struct ShownTools {
     pub block: usize,
     pub copy: Rect,
     pub lang: Rect,
+    /// The expand button of a rendered diagram.
+    pub expand: Option<Rect>,
+}
+
+/// Side of the block's square buttons (the row under a diagram is this high plus 8).
+fn tool_size(theme: &Theme) -> f32 {
+    markise_layout::block::diagram_controls_height(theme) - 8.0
+}
+
+/// The button that opens the full-window view: the corners of a frame. Returns whether it was
+/// clicked.
+fn expand_button(ui: &mut Ui, painter: &egui::Painter, r: Rect, id: egui::Id, theme: &Theme) -> bool {
+    let s = r.width();
+    let bg = color(theme.code_block.background);
+    let fg = color(theme.meta_text);
+    // click-and-drag: on top of the surface for presses too (the caret stays)
+    let resp = ui.interact(r, id, Sense::click_and_drag());
+    let hot = resp.hovered();
+    painter.rect(
+        r,
+        CornerRadius::same(4),
+        if hot { mix(bg, fg, 0.12) } else { bg },
+        Stroke::new(1.0, mix(bg, fg, 0.35)),
+        StrokeKind::Inside,
+    );
+    let stroke = Stroke::new(1.3, if hot { color(theme.text) } else { fg });
+    let k = r.shrink(s * 0.27);
+    let arm = s * 0.16;
+    for (c, x, y) in [
+        (k.left_top(), arm, arm),
+        (k.right_top(), -arm, arm),
+        (k.left_bottom(), arm, -arm),
+        (k.right_bottom(), -arm, -arm),
+    ] {
+        painter.line_segment([c, c + vec2(x, 0.0)], stroke);
+        painter.line_segment([c, c + vec2(0.0, y)], stroke);
+    }
+    let resp = resp.on_hover_text("Open in full window");
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Open in full window"));
+    if hot {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
 }
 
 /// What the field asks for after this frame's keys.
@@ -112,6 +161,8 @@ struct OnScreen {
     rect: Rect,
     /// The first segment's top-right language label, when visible (covered by the button).
     label: Option<Rect>,
+    /// A rendered diagram: the item and the row reserved for its controls.
+    diagram: Option<(usize, Rect)>,
 }
 
 impl DocViewer {
@@ -123,6 +174,11 @@ impl DocViewer {
     /// Where the code block tools were drawn last frame (tests).
     pub fn code_tools_shown(&self) -> &[ShownTools] {
         &self.code.shown
+    }
+
+    /// Where the images' expand buttons were drawn last frame (tests).
+    pub fn image_tools_shown(&self) -> &[Rect] {
+        &self.code.shown_images
     }
 
     /// Fenced code blocks of the visible items, by item start.
@@ -156,12 +212,19 @@ impl DocViewer {
             let rect = best
                 .unwrap_or_else(|| Rect::from_min_size(Pos2::ZERO, vec2(self.ed.view.width(), v.layout.height)))
                 .translate(origin);
+            let controls = v.layout.diagram_controls.map(|r| (v.idx, r.translate(origin)));
             match out.iter_mut().find(|b| b.start == start) {
                 Some(b) => {
                     b.rect = b.rect.union(rect);
                     b.label = b.label.or(label);
+                    b.diagram = b.diagram.or(controls);
                 }
-                None => out.push(OnScreen { start, rect, label }),
+                None => out.push(OnScreen {
+                    start,
+                    rect,
+                    label,
+                    diagram: controls,
+                }),
             }
         }
         // only fenced blocks (not `$$` math or indented code): a fenced leaf starts at its
@@ -234,12 +297,16 @@ impl DocViewer {
             let Some(fence) = self.fence(b.start) else {
                 continue;
             };
+            let expand = b
+                .diagram
+                .map(|(idx, row)| self.diagram_expand(ui, &painter, idx, row, theme, out));
             let copy = self.copy_button(ui, &painter, b, &fence, theme, now);
             let lang = self.lang_field(ui, &painter, b, &fence, theme, out, sh);
             self.code.shown.push(ShownTools {
                 block: fence.opener.start,
                 copy,
                 lang,
+                expand,
             });
         }
     }
@@ -283,7 +350,68 @@ impl DocViewer {
         self.code.composing = false;
     }
 
-    /// The copy button at the block's top-right; returns its rectangle.
+    /// The expand button at the right of a rendered diagram's row of controls; a click opens the
+    /// full-window view. Returns its rectangle.
+    fn diagram_expand(
+        &mut self,
+        ui: &mut Ui,
+        painter: &egui::Painter,
+        idx: usize,
+        row: Rect,
+        theme: &Theme,
+        out: &mut ViewerOutput,
+    ) -> Rect {
+        let s = tool_size(theme);
+        let r = Rect::from_min_size(pos2(row.right() - s - 4.0, row.center().y - s * 0.5), vec2(s, s));
+        let start = self.ed.view.model().item_start(idx);
+        let id = ui.scope_id().with(("markise-diagram-expand", start));
+        if expand_button(ui, painter, r, id, theme) {
+            out.open_view = self.ed.view.diagram_scene(idx).map(super::ViewTarget::Diagram);
+            ui.ctx().request_repaint();
+        }
+        r
+    }
+
+    /// The expand button of the loaded image under the pointer, in its top-right corner (it shows
+    /// only while hovered).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn image_tools_ui(
+        &mut self,
+        ui: &mut Ui,
+        visible: &[Visible],
+        surface: Rect,
+        left: f32,
+        theme: &Theme,
+        images: &dyn markise_layout::Images,
+        out: &mut ViewerOutput,
+    ) {
+        self.code.shown_images.clear();
+        let painter = ui.painter_at(ui.clip_rect().intersect(surface));
+        let s = tool_size(theme);
+        for v in visible {
+            let origin = vec2(left, surface.top() + v.y);
+            for prim in &v.layout.prims {
+                let Prim::Image { rect, src, .. } = prim else { continue };
+                let rect = rect.translate(origin);
+                if !ui.rect_contains_pointer(rect.intersect(surface)) {
+                    continue;
+                }
+                let Some(target) = super::loaded_image(images, src) else {
+                    continue;
+                };
+                let r = Rect::from_min_size(pos2(rect.right() - s - 6.0, rect.top() + 6.0), vec2(s, s));
+                let id = ui.scope_id().with(("markise-image-expand", v.idx, src));
+                if expand_button(ui, &painter, r, id, theme) {
+                    out.open_view = Some(target);
+                    ui.ctx().request_repaint();
+                }
+                self.code.shown_images.push(r);
+            }
+        }
+    }
+
+    /// The copy button at the block's top-right (a diagram: left of the expand button); returns
+    /// its rectangle.
     fn copy_button(
         &mut self,
         ui: &mut Ui,
@@ -293,8 +421,13 @@ impl DocViewer {
         theme: &Theme,
         now: f64,
     ) -> Rect {
-        let s = (theme.font_size * 1.35).round().max(18.0);
-        let r = Rect::from_min_size(pos2(b.rect.right() - s - 4.0, b.rect.top() + 4.0), vec2(s, s));
+        let s = tool_size(theme);
+        let r = match b.diagram {
+            Some((_, row)) => {
+                Rect::from_min_size(pos2(row.right() - 2.0 * s - 8.0, row.center().y - s * 0.5), vec2(s, s))
+            }
+            None => Rect::from_min_size(pos2(b.rect.right() - s - 4.0, b.rect.top() + 4.0), vec2(s, s)),
+        };
         let bg = color(theme.code_block.background);
         let fg = color(theme.meta_text);
         // the static language label sits there: covered while the tools show
@@ -361,7 +494,8 @@ impl DocViewer {
         r
     }
 
-    /// The language field at the block's bottom-right; returns its rectangle.
+    /// The language field at the block's bottom-right (a diagram: left of its buttons); returns
+    /// its rectangle.
     #[allow(clippy::too_many_arguments)]
     fn lang_field(
         &mut self,
@@ -395,7 +529,13 @@ impl DocViewer {
         let tw = ctx.fonts_mut(|f| f.layout_no_wrap(measure.to_string(), font.clone(), txt).size().x);
         let w = (tw + 16.0).clamp(72.0, 220.0);
         let h = size + 8.0;
-        let r = Rect::from_min_size(pos2(b.rect.right() - w - 4.0, b.rect.bottom() - h - 4.0), vec2(w, h));
+        let r = match b.diagram {
+            Some((_, row)) => {
+                let right = row.right() - 2.0 * tool_size(theme) - 12.0;
+                Rect::from_min_size(pos2(right - w, row.center().y - h * 0.5), vec2(w, h))
+            }
+            None => Rect::from_min_size(pos2(b.rect.right() - w - 4.0, b.rect.bottom() - h - 4.0), vec2(w, h)),
+        };
         let field_id = ui.scope_id().with(("markise-code-lang", fence.opener.start));
         painter.rect(
             r,

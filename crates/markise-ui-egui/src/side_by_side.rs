@@ -261,6 +261,8 @@ pub struct SbsOutput {
     pub input_ms: Option<f64>,
     /// The rendered pane's rectangle (the formatting toolbar floats over it).
     pub right: Option<Rect>,
+    /// The rendered pane asks for a full-window view.
+    pub open_view: Option<crate::viewer::ViewTarget>,
 }
 
 /// Per-document Side by Side state (the divider position lives in the settings).
@@ -433,6 +435,7 @@ impl SideBySide {
             let mut rui = ui.new_child(UiBuilder::new().max_rect(right).id_salt("markise-sbs-right"));
             let vo = viewer.show(&mut rui, f.images, f.theme, parley, false);
             out.link = vo.link;
+            out.open_view = vo.open_view;
             out.right = Some(pane);
             user_scrolls_rendered |= vo.wheel_scrolled;
         }

@@ -61,6 +61,17 @@ pub struct ViewerOutput {
     pub review: Option<(&'static str, Option<usize>)>,
     /// Wheel / trackpad scrolling moved the document this frame (smooth scrolling included).
     pub wheel_scrolled: bool,
+    /// Open this in the full-window view (its expand button or a double click).
+    pub open_view: Option<ViewTarget>,
+}
+
+/// What the full-window view can show (issue #174).
+#[derive(Clone, Debug)]
+pub enum ViewTarget {
+    /// A rendered diagram (the renderer's shared scene, always `Ok`).
+    Diagram(markise_blocks::diagram::DiagramResult),
+    /// A loaded image: its resolved source and natural size in pixels.
+    Image { src: String, size: [u32; 2] },
 }
 
 /// The suggestion under the pointer and its floating Accept / Reject bar (ADR 0012).
@@ -181,6 +192,8 @@ pub struct DocViewer {
     /// Take the keyboard focus on the next frame (the surface came back after a view mode
     /// whose widgets held it, e.g. the source editor).
     refocus: bool,
+    /// The second press of a double click that opens this view, at this point (screen).
+    view_press: Option<(ViewTarget, Pos2)>,
     /// Screen rectangle of the caret at the last frame it was drawn (popups anchor to it).
     pub caret_screen: Option<Rect>,
     /// The hovered suggestion's action bar.
@@ -259,6 +272,7 @@ impl DocViewer {
             pending_copy: None,
             last_surface: None,
             refocus: false,
+            view_press: None,
             caret_screen: None,
             hover: None,
             hover_cache: None,
@@ -803,7 +817,22 @@ impl DocViewer {
                 _ => 1,
             };
             self.last_press = Some((now, p, count));
+            // the second press on a rendered diagram or a loaded image: its full-window view
+            // opens on the release (the selection stays what the first click made it)
+            let target = if count == 2 {
+                self.view_target_at(p, rect.top(), &*images)
+            } else {
+                None
+            };
+            let on_target = target.is_some();
+            if on_target {
+                self.view_press = target.map(|d| (d, p));
+                self.last_press = None;
+            }
             with_shaper(&ctx, parley.as_deref_mut(), |sh| {
+                if on_target {
+                    return;
+                }
                 if let Some(pos) = self.hit_screen(p, rect.top(), sh, &*images) {
                     let unit = match count {
                         2 => Unit::Word,
@@ -827,6 +856,14 @@ impl DocViewer {
             });
             out.edited = true;
             self.blink_from = now;
+        }
+        if self.view_press.is_some() && ui.input(|i| i.pointer.primary_released()) {
+            let over = ui.input(|i| i.pointer.interact_pos());
+            if let Some((d, at)) = self.view_press.take()
+                && over.is_some_and(|p| p.distance(at) < 5.0)
+            {
+                out.open_view = Some(d);
+            }
         }
         if let Some(d) = self.drag {
             let down = ui.input(|i| i.pointer.primary_down());
@@ -964,6 +1001,7 @@ impl DocViewer {
                 with_shaper(&ctx, parley.as_deref_mut(), |s| f(s, imgs))
             };
             self.code_tools_ui(ui, &visible, rect, left, theme, focused, editable, &mut out, &mut sh);
+            self.image_tools_ui(ui, &visible, rect, left, theme, imgs, &mut out);
         }
 
         // ---- review comments: margin cards or bubble popovers (visible items only)
@@ -1542,6 +1580,31 @@ impl DocViewer {
         None
     }
 
+    /// What the full-window view would show for screen point `p`: a rendered diagram (not its
+    /// row of controls) or a loaded image.
+    fn view_target_at(&self, p: Pos2, top: f32, images: &dyn markise_layout::Images) -> Option<ViewTarget> {
+        for &(idx, y) in &self.shown() {
+            let Some(l) = self.ed.view.cache_peek(idx) else {
+                continue;
+            };
+            let local = pos2(p.x - self.last_left, p.y - top - y);
+            if local.y < 0.0 || local.y >= l.height {
+                continue;
+            }
+            if let Some(row) = l.diagram_controls {
+                return (local.y < row.top())
+                    .then(|| self.ed.view.diagram_scene(idx))
+                    .flatten()
+                    .map(ViewTarget::Diagram);
+            }
+            return l.prims.iter().find_map(|prim| match prim {
+                markise_layout::Prim::Image { rect, src, .. } if rect.contains(local) => loaded_image(images, src),
+                _ => None,
+            });
+        }
+        None
+    }
+
     /// Toggles the task box of list item `li` (ordinal among the enclosing list items, 0 =
     /// outermost) of visible item `idx` as one undo step ("Toggle Task Status"); the selection
     /// is kept as it was (the box is not a caret stop, spec 02 §9).
@@ -1908,6 +1971,17 @@ impl DocViewer {
     }
 }
 
+/// The view target of an image that loaded (a failed or pending one offers no view).
+pub(crate) fn loaded_image(images: &dyn markise_layout::Images, src: &str) -> Option<ViewTarget> {
+    match images.state(src) {
+        markise_layout::block::ImageState::Ready { size } => Some(ViewTarget::Image {
+            src: src.to_string(),
+            size,
+        }),
+        _ => None,
+    }
+}
+
 /// Runs `f` with the text shaper of the active backend.
 pub(crate) fn with_shaper<R>(
     ctx: &egui::Context,
@@ -2194,7 +2268,7 @@ pub(crate) fn paint_text_block(
     }
 }
 
-fn paint_layout(
+pub(crate) fn paint_layout(
     painter: &egui::Painter,
     ui: &Ui,
     layout: &BlockLayout,

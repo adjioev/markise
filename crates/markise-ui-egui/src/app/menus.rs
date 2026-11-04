@@ -578,6 +578,10 @@ impl MarkiseApp {
             // dialog): no command may replace or bypass the action waiting for the answer
             return false;
         }
+        // the full-window view is modal: only Close / Quit pass (`menu_command`)
+        if self.full_view.is_some() && !matches!(action, MenuAction::Command(_)) {
+            return false;
+        }
         match action {
             MenuAction::Recent(p) => {
                 self.open(p.clone());
@@ -630,6 +634,13 @@ impl MarkiseApp {
             }
             // Close / Quit still work: the dialog goes first (PR #165 review 2)
             self.cancel_insert_table();
+        }
+        // so is the full-window view: it goes first, then Close / Quit proceed
+        if self.full_view.is_some() {
+            if !matches!(id, "file.close" | "app.quit" | "app.exit") {
+                return false;
+            }
+            self.close_full_view();
         }
         // any other command (Preferences, About, Quick Open, a dialog…) takes over from the
         // cheat sheet, which would otherwise keep the keyboard focus (Codex review of #120)

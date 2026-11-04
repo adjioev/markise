@@ -93,6 +93,13 @@ with a relative path. Pasted image data is saved as `Pasted image <date and time
   (`user-images`, next to the settings file) and are linked with absolute paths.
 - Limits: 50 MiB per file; clipboard images up to 100 megapixels.
 
+To look at an image closely, open it in a full-window view: double-click it, or hover it and
+press the expand button in its corner. It opens fitted to the window, at its full resolution
+even if the document shows a reduced copy. The mouse wheel or a pinch zooms around the pointer,
+dragging pans, and <kbd>+</kbd>, <kbd>-</kbd> and <kbd>0</kbd> zoom in, zoom out and fit it again.
+<kbd>Esc</kbd> or a click outside the image closes the view. A single click still places the
+caret, and <kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+click on an image inside a link still follows the link.
+
 Where images go is set in **Preferences → Files & Images**; see
 [Settings](settings.md#files-and-images). In an Obsidian vault, the vault's attachment folder is
 used when it is set.
