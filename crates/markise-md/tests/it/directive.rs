@@ -195,6 +195,22 @@ fn queries_by_position() {
 }
 
 #[test]
+fn trailing_whitespace_on_a_closer_belongs_to_its_line() {
+    let mut d = parse(":::a\nx\n:::   \n\nafter\n");
+    let in_ws = ":::a\nx\n:::  ".len();
+    assert_eq!(d.directives_at(in_ws).len(), 1);
+    assert_eq!(d.directives_at(d.text().find("after").unwrap()).len(), 0);
+    // typing more of it moves the end of the line
+    let end = in_ws + 1;
+    d.edit(end..end, "      ");
+    assert_eq!(d.directives_at(end + 6).len(), 1);
+    assert_eq!(d.directives_at(d.text().find("after").unwrap()).len(), 0);
+    // an edit above shifts it
+    d.edit(0..0, "new\n\n");
+    assert_eq!(d.directives_at(end + 11).len(), 1);
+}
+
+#[test]
 fn stored_blocks_stay_flat() {
     let d = parse("a\n\n:::n x\n\nb\n\n:::\n\nc\n");
     let kinds: Vec<&BlockKind> = d.blocks().iter().map(|b| &b.kind).collect();
@@ -304,6 +320,7 @@ fn line() -> impl Strategy<Value = &'static str> {
         ":::",
         "::::",
         ":::::",
+        " ",
         "::: not",
         "  :::i",
         "   :::",
@@ -420,6 +437,9 @@ proptest! {
             let fresh = parse(d.text());
             prop_assert_eq!(snap(&d), snap(&fresh), "after {:?} on {:?}", (a..z, &insert), before.text());
             prop_assert_eq!(d.blocks(), fresh.blocks());
+            for p in (0..=d.text().len()).step_by(3) {
+                prop_assert_eq!(d.directives_at(p), fresh.directives_at(p), "at {}", p);
+            }
             // blocks before and after the reported range are the old ones
             for i in 0..r.new_blocks.start {
                 prop_assert!(same_top(&before, i, &d, i), "before the range {}", i);

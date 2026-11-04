@@ -517,6 +517,7 @@ impl<'a> Parser<'a> {
                         at: p,
                         fence: m.fence,
                         close: m.close,
+                        line_len: line.content_end - p,
                     });
                     self.add_leaf(blk, clean);
                     consumed = true;
