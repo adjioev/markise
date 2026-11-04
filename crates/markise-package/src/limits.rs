@@ -19,3 +19,11 @@ pub const MAX_TEXT_BYTES: usize = 4096;
 pub const MAX_PRESET_MARKDOWN_BYTES: usize = 64 << 10;
 /// Validation issues reported for one package; the rest are dropped.
 pub const MAX_ISSUES: usize = 32;
+/// The package archive, compressed.
+pub const MAX_ARCHIVE_BYTES: u64 = 32 << 20;
+/// All files of a package, unpacked.
+pub const MAX_UNPACKED_BYTES: u64 = 64 << 20;
+/// One file of a package.
+pub const MAX_FILE_BYTES: u64 = 32 << 20;
+/// Files in a package.
+pub const MAX_FILES: usize = 4096;

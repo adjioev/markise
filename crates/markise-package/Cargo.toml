@@ -1,6 +1,6 @@
 [package]
 name = "markise-package"
-description = "Markise L2: block packages — format validation and index (ADR 0019)"
+description = "Markise L2: block packages — format, binding, cache and consent (ADR 0019)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,18 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# resource::read_regular (hardened file reads)
+markise-doc.workspace = true
 serde_json.workspace = true
+flate2.workspace = true
+tar.workspace = true
+sha2.workspace = true
+# staging folders and atomic writes in the store
+tempfile.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+tempfile.workspace = true
 
 [[test]]
 name = "it"
