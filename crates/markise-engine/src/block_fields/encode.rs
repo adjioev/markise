@@ -242,7 +242,11 @@ fn new_anchor(taken: &BTreeSet<String>, wanted: Option<&str>, retired: &BTreeSet
     }
     let number = |a: &String| a.strip_prefix('a').and_then(|n| n.parse::<u64>().ok());
     let top = taken.iter().chain(retired).filter_map(number).max().unwrap_or(0);
-    format!("a{}", top + 1)
+    // wide enough that a u64 id in the file cannot overflow it; what u64 could not read is checked
+    (u128::from(top) + 1..)
+        .map(|n| format!("a{n}"))
+        .find(|a| !taken.contains(a) && !retired.contains(a))
+        .expect("finitely many ids are taken")
 }
 
 /// The new block text: the regions in order, with the old gaps where neighbours stay neighbours
