@@ -184,6 +184,11 @@ pub(crate) fn build_theme(c: &Computed, dom: &Dom, sheet: &Sheet, name: &str, va
     let code = st(dom.code);
     if code.font_size_set && p.font_size > 0.0 && (code.font_size - p.font_size).abs() > 0.01 {
         t.mono_scale = (code.font_size / p.font_size).clamp(0.5, 1.5);
+        t.code_block_scale = t.mono_scale;
+    }
+    let block = st(dom.fences);
+    if block.font_size_own && p.font_size > 0.0 {
+        t.code_block_scale = (block.font_size / p.font_size).clamp(0.5, 1.5);
     }
 
     // ---- headings

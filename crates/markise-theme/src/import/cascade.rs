@@ -98,6 +98,8 @@ pub(crate) struct Style {
     pub bg: Option<Rgba>,
     pub font_size: f32,
     pub font_size_set: bool,
+    /// This element declares its own `font-size` (not inherited).
+    pub font_size_own: bool,
     pub family: Option<Vec<String>>,
     pub weight: Option<u16>,
     pub italic: Option<bool>,
@@ -132,6 +134,7 @@ impl Default for Style {
             bg: None,
             font_size: 16.0,
             font_size_set: false,
+            font_size_own: false,
             family: None,
             weight: None,
             italic: None,
@@ -395,6 +398,7 @@ fn compute_style(spec: &[Option<V>], parent: Option<&Style>, root_fs: f32, opts:
         if let Some(px) = len_px(*l, base, root_fs, base, opts) {
             s.font_size = px.clamp(1.0, 400.0);
             s.font_size_set = true;
+            s.font_size_own = true;
         }
     }
     let fs = s.font_size;

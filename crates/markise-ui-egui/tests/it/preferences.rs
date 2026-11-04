@@ -638,7 +638,7 @@ fn source_font_size_preference_reaches_the_source_view() {
     };
     assert_eq!(params(&mut h).font_size, None, "automatic by default");
     let theme = h.state().theme().clone();
-    assert!(theme.source_size() < theme.mono_size());
+    assert!(theme.source_size() < (theme.font_size * 0.9).round());
     open_at(&mut h, Section::Source);
     assert!(h.query_by_role_and_label(egui::Role::Slider, "Font size").is_some());
     let s = h.state().source_prefs();
