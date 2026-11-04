@@ -260,7 +260,9 @@ pub struct DocViewer {
     natural: std::collections::HashMap<usize, f32>,
     /// PROTOTYPE (live preview): new-block preview this frame: (item's source start, y offset in it, texture,
     /// size, replaces the item).
-    draft_paint: Option<(usize, f32, egui::TextureId, Vec2, bool)>,
+    draft_paint: Option<(usize, f32, Option<egui::TextureId>, Vec2, bool)>,
+    /// PROTOTYPE: the form's preview in the block's native view.
+    preview_card: Option<crate::block_snap::PreviewCard>,
     /// PROTOTYPE (block move): scripted drag position (y in the pane) instead of the pointer.
     pub debug_drag_y: Option<f32>,
 }
@@ -451,6 +453,7 @@ impl DocViewer {
             gaps: Vec::new(),
             natural: Default::default(),
             draft_paint: None,
+            preview_card: None,
             debug_drag_y: None,
             thumb_drag: Default::default(),
             smooth: Default::default(),
@@ -1386,11 +1389,15 @@ impl DocViewer {
                             caret_target(text, self.ed.session.selection().primary().focus.offset, rev)
                         });
                         let tv = crate::block_snap::ThemeVars::from_theme(theme);
-                        let res = if in_block(text, target.start) {
-                            Err("Внутри блока вставлять блоки нельзя (вложенные блоки не поддерживаются).".to_string())
-                        } else {
-                            s.form.open_draft(text, &preset.markdown, target, &tv)
+                        // the caret inside a block: right after that block (no nested blocks)
+                        let inside = markise_engine::block_form::all_blocks(text)
+                            .into_iter()
+                            .find(|b| target.start > b.range.start && target.start < b.range.end);
+                        let target = match inside {
+                            Some(b) => crate::block_edit::InsertTarget::new(text, b.range.end, b.range.end, rev),
+                            None => target,
                         };
+                        let res = s.form.open_draft(text, &preset.markdown, target, &tv);
                         if let Err(e) = res {
                             s.form.error = Some((e, Instant::now()));
                         }
@@ -1439,6 +1446,36 @@ impl DocViewer {
                     let model = self.ed.view.model().clone();
                     let width = self.ed.view.width();
                     let paging = self.ed.view.paging_generation();
+                    // the form's preview: a native card when the package has a view for the block
+                    let want = s.form.preview.as_ref().and_then(|p| {
+                        let name = markise_engine::block_form::block_at(&p.markdown, 0)?.name;
+                        let at = match p.at {
+                            crate::block_edit::PreviewAt::Edit(o) => Some(o),
+                            crate::block_edit::PreviewAt::Insert(..) => None,
+                        };
+                        Some((p.markdown.clone(), s.preview_spec(&name, at)?))
+                    });
+                    match want {
+                        Some((md, spec)) => {
+                            if self.preview_card.as_ref().is_none_or(|c| c.markdown != md) {
+                                self.preview_card = crate::block_snap::PreviewCard::new(
+                                    self.ed.session.format().clone(),
+                                    &md,
+                                    &spec,
+                                    theme,
+                                    width,
+                                );
+                            }
+                        }
+                        None => self.preview_card = None,
+                    }
+                    if let Some(pc) = self.preview_card.as_mut() {
+                        let imgs: &TextureStore = images;
+                        with_shaper(&ctx, parley.as_deref_mut(), |sh| {
+                            pc.measure(theme, width, ppp, sh, imgs)
+                        });
+                    }
+                    s.card_height = self.preview_card.as_ref().map(|c| c.height);
                     let (mut over, placed) = s.frame(
                         &ctx,
                         &model,
@@ -1454,13 +1491,17 @@ impl DocViewer {
                     // live preview of a new block: extra height under the item before the point
                     // (or in place of the `/` line), painted after the layout
                     self.draft_paint = None;
+                    let draft_look = match self.preview_card.as_ref() {
+                        Some(c) => Some((None, egui::vec2(width, c.height))),
+                        None => s.draft_image.map(|(t, z)| (Some(t), z)),
+                    };
                     if let (
                         Some((tex, size)),
                         Some(crate::block_edit::Preview {
                             at: crate::block_edit::PreviewAt::Insert(st, en),
                             ..
                         }),
-                    ) = (s.draft_image, s.form.preview.as_ref())
+                    ) = (draft_look, s.form.preview.as_ref())
                     {
                         let (st, en) = (*st, *en);
                         let items: Vec<(usize, usize)> =
@@ -1476,7 +1517,7 @@ impl DocViewer {
                                 .iter()
                                 .find(|p| p.end == st)
                                 .map(|p| p.offset)
-                                .or_else(|| items.iter().rfind(|&&(a, l)| a + l <= st && l > 0).map(|x| x.0));
+                                .or_else(|| items.iter().rfind(|&&(a, l)| a < st && l > 0).map(|x| x.0));
                             if let Some(k) = k {
                                 let base = over.get(&k).copied().or_else(|| self.natural.get(&k).copied());
                                 if let Some(base) = base {
@@ -1707,11 +1748,27 @@ impl DocViewer {
             if let Some(v) = visible.iter().find(|v| model.item_start(v.idx) == p.offset) {
                 let r = Rect::from_min_size(pos2(left, rect.top() + v.y + theme.block_spacing), p.size);
                 self.snap_rects.push((r, p.offset));
+                let is_card = p.tex.is_none()
+                    && self.preview_card.is_some()
+                    && self.snaps.as_ref().is_some_and(|s| {
+                        matches!(s.form.preview.as_ref().map(|x| &x.at),
+                            Some(crate::block_edit::PreviewAt::Edit(o)) if *o == p.offset)
+                    });
                 self.block_ctl.push(BlockCtl {
                     rect: r,
                     offset: p.offset,
-                    view: crate::block_snap::BlockView::Site,
+                    view: if is_card {
+                        crate::block_snap::BlockView::Native
+                    } else {
+                        crate::block_snap::BlockView::Site
+                    },
                 });
+                if is_card {
+                    if let Some(pc) = self.preview_card.as_ref() {
+                        paint_preview_card(&painter, ui, theme, pc, r, images, parley.as_deref_mut());
+                    }
+                    continue;
+                }
                 match p.tex {
                     Some(tex) => painter.image(
                         tex,
@@ -1726,7 +1783,7 @@ impl DocViewer {
         }
         // PROTOTYPE (native blocks): cards behind their items (the items are painted below)
         {
-            use crate::block_snap::{CARD_BOTTOM, CARD_HEADER, CARD_PAD};
+            use crate::block_snap::{CARD_BOTTOM, CARD_PAD};
             let width = self.ed.view.width();
             let text_len = self.ed.session.text().len();
             self.native_units.clear();
@@ -1781,66 +1838,28 @@ impl DocViewer {
                     None => ymax + rect.height() + 40.0,
                 };
                 let card = Rect::from_min_max(pos2(left, top), pos2(left + width, bottom));
-                let accent = accent_color(&n.spec.accent, theme.dark);
-                let tint = if n.spec.kind == crate::block_snap::ViewKind::Callout
-                    || n.spec.kind == crate::block_snap::ViewKind::Choices
-                {
-                    accent
-                } else {
-                    theme_color(theme.meta_text)
-                };
-                painter.rect_filled(card, 12.0, tint.gamma_multiply(if theme.dark { 0.10 } else { 0.06 }));
-                painter.rect_stroke(
-                    card,
-                    12.0,
-                    Stroke::new(1.0, tint.gamma_multiply(0.35)),
-                    StrokeKind::Inside,
-                );
-                let hc = pos2(left + CARD_PAD + 6.0, top + CARD_HEADER * 0.5);
-                paint_view_icon(&painter, hc, &n.spec.icon, accent);
-                painter.text(
-                    hc + vec2(13.0, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    &n.spec.title,
-                    egui::FontId::proportional(13.0),
-                    accent,
-                );
-                // answer rows and the explanation area
-                let (rl, rr) = (left + CARD_PAD, left + width - CARD_PAD);
-                for (st, correct) in &n.answers {
-                    if let Some((y, gap, h)) = item_of(&visible, *st) {
-                        let r = Rect::from_min_max(pos2(rl, y + gap), pos2(rr, y + h));
-                        let (fill, line) = if *correct {
-                            let g = accent_color("green", theme.dark);
-                            (g.gamma_multiply(0.14), g.gamma_multiply(0.6))
-                        } else {
-                            (
-                                theme_color(theme.page_bg),
-                                theme_color(theme.meta_text).gamma_multiply(0.35),
-                            )
-                        };
-                        painter.rect_filled(r, 8.0, fill);
-                        painter.rect_stroke(r, 8.0, Stroke::new(1.0, line), StrokeKind::Inside);
-                    }
-                }
+                let answers: Vec<(Rect, bool)> = n
+                    .answers
+                    .iter()
+                    .filter_map(|(st, correct)| {
+                        let (y, gap, h) = item_of(&visible, *st)?;
+                        Some((
+                            Rect::from_min_max(pos2(left + CARD_PAD, y + gap), pos2(left + width - CARD_PAD, y + h)),
+                            *correct,
+                        ))
+                    })
+                    .collect();
                 let ex: Vec<(f32, f32, f32)> = n.explain.iter().filter_map(|st| item_of(&visible, *st)).collect();
-                if let (Some(a), Some(b)) = (ex.first(), ex.last()) {
-                    let r = Rect::from_min_max(pos2(rl, a.0 + a.1), pos2(rr, b.0 + b.2));
-                    painter.rect_filled(r, 8.0, theme_color(theme.meta_text).gamma_multiply(0.10));
-                    if n.explain.first().is_some_and(|f| item_of(&visible, *f).is_some()) {
-                        painter.text(
-                            pos2(r.left() + crate::block_snap::ROW_PAD, r.top() + 15.0),
-                            egui::Align2::LEFT_CENTER,
-                            if crate::block_edit::lang() == "ru" {
-                                "Объяснение"
-                            } else {
-                                "Explanation"
-                            },
-                            egui::FontId::proportional(12.5),
-                            theme_color(theme.meta_text),
-                        );
-                    }
-                }
+                let explain = ex.first().zip(ex.last()).map(|(a, b)| {
+                    (
+                        Rect::from_min_max(
+                            pos2(left + CARD_PAD, a.0 + a.1),
+                            pos2(left + width - CARD_PAD, b.0 + b.2),
+                        ),
+                        n.explain.first().is_some_and(|f| item_of(&visible, *f).is_some()),
+                    )
+                });
+                paint_card_chrome(&painter, theme, card, &n.spec, &answers, explain);
                 self.block_ctl.push(BlockCtl {
                     rect: card,
                     offset: n.offset,
@@ -2002,12 +2021,18 @@ impl DocViewer {
             && let Some(vy) = draft_y
         {
             let r = Rect::from_min_size(pos2(left, rect.top() + vy + off), size);
-            painter.image(
-                tex,
-                r,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            match (tex, self.preview_card.as_ref()) {
+                (Some(tex), _) => {
+                    painter.image(
+                        tex,
+                        r,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+                (None, Some(pc)) => paint_preview_card(&painter, ui, theme, pc, r, images, parley.as_deref_mut()),
+                _ => {}
+            }
             painter.rect_stroke(
                 r.expand(3.0),
                 8.0,
@@ -3299,6 +3324,121 @@ pub(crate) fn paint_text_block(
         painter.galley(pos, g, Color32::PLACEHOLDER);
     } else if let (Some(block), Some(p)) = (text.as_any().downcast_ref::<ParleyBlock>(), parley) {
         p.atlas.paint(ui.ctx(), painter, block, pos);
+    }
+}
+
+/// PROTOTYPE (native blocks): a card's panel, header, answer rows and explanation area.
+fn paint_card_chrome(
+    painter: &egui::Painter,
+    theme: &Theme,
+    card: Rect,
+    spec: &crate::block_snap::ViewSpec,
+    answers: &[(Rect, bool)],
+    explain: Option<(Rect, bool)>,
+) {
+    use crate::block_snap::{CARD_HEADER, CARD_PAD};
+    let (left, top) = (card.left(), card.top());
+    let accent = accent_color(&spec.accent, theme.dark);
+    let tint = if spec.kind == crate::block_snap::ViewKind::Callout || spec.kind == crate::block_snap::ViewKind::Choices
+    {
+        accent
+    } else {
+        theme_color(theme.meta_text)
+    };
+    painter.rect_filled(card, 12.0, tint.gamma_multiply(if theme.dark { 0.10 } else { 0.06 }));
+    painter.rect_stroke(
+        card,
+        12.0,
+        Stroke::new(1.0, tint.gamma_multiply(0.35)),
+        StrokeKind::Inside,
+    );
+    let hc = pos2(left + CARD_PAD + 6.0, top + CARD_HEADER * 0.5);
+    paint_view_icon(painter, hc, &spec.icon, accent);
+    painter.text(
+        hc + vec2(13.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        &spec.title,
+        egui::FontId::proportional(13.0),
+        accent,
+    );
+    for (r, correct) in answers {
+        let (fill, line) = if *correct {
+            let g = accent_color("green", theme.dark);
+            (g.gamma_multiply(0.14), g.gamma_multiply(0.6))
+        } else {
+            (
+                theme_color(theme.page_bg),
+                theme_color(theme.meta_text).gamma_multiply(0.35),
+            )
+        };
+        painter.rect_filled(*r, 8.0, fill);
+        painter.rect_stroke(*r, 8.0, Stroke::new(1.0, line), StrokeKind::Inside);
+    }
+    if let Some((r, label)) = explain {
+        painter.rect_filled(r, 8.0, theme_color(theme.meta_text).gamma_multiply(0.10));
+        if label {
+            painter.text(
+                pos2(r.left() + crate::block_snap::ROW_PAD, r.top() + 15.0),
+                egui::Align2::LEFT_CENTER,
+                if crate::block_edit::lang() == "ru" {
+                    "Объяснение"
+                } else {
+                    "Explanation"
+                },
+                egui::FontId::proportional(12.5),
+                theme_color(theme.meta_text),
+            );
+        }
+    }
+}
+
+/// PROTOTYPE: the form's preview as a native card with its top-left at `card.min`.
+#[allow(clippy::too_many_arguments)]
+fn paint_preview_card(
+    painter: &egui::Painter,
+    ui: &Ui,
+    theme: &Theme,
+    pc: &crate::block_snap::PreviewCard,
+    card: Rect,
+    images: &mut TextureStore,
+    mut parley: Option<&mut ParleyText>,
+) {
+    use crate::block_snap::{CARD_HEADER, CARD_PAD};
+    let mut y = card.top() + CARD_HEADER;
+    let (rl, rr) = (card.left() + CARD_PAD, card.right() - CARD_PAD);
+    let mut answers = Vec::new();
+    let mut ex: Option<(f32, f32)> = None;
+    let mut tops = Vec::with_capacity(pc.laid.len());
+    for (st, l) in &pc.laid {
+        tops.push(y);
+        if let Some((_, correct)) = pc.native.answers.iter().find(|(a, _)| a == st) {
+            answers.push((
+                Rect::from_min_max(pos2(rl, y + l.gap), pos2(rr, y + l.height)),
+                *correct,
+            ));
+        }
+        if pc.native.explain.contains(st) {
+            let top = ex.map_or(y + l.gap, |e| e.0);
+            ex = Some((top, y + l.height));
+        }
+        y += l.height;
+    }
+    let explain = ex.map(|(a, b)| (Rect::from_min_max(pos2(rl, a), pos2(rr, b)), true));
+    paint_card_chrome(painter, theme, card, &pc.native.spec, &answers, explain);
+    let mut requests = Vec::new();
+    for ((_, l), top) in pc.laid.iter().zip(tops) {
+        paint_layout(
+            painter,
+            ui,
+            l,
+            pos2(card.left(), top),
+            images,
+            &mut requests,
+            parley.as_deref_mut(),
+        );
+    }
+    for src in requests {
+        images.request(ui.ctx(), &src);
     }
 }
 

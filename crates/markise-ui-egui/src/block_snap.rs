@@ -275,6 +275,63 @@ pub struct NativeBlock {
     insets: Vec<(usize, markise_layout::block::ItemInset)>,
 }
 
+/// PROTOTYPE: the form's values in a block's native view, before anything is written: a small
+/// off-screen document holding only that block, laid out with the same insets as a card in the
+/// page. The viewer paints it where the block is or will be.
+pub struct PreviewCard {
+    pub markdown: String,
+    pub native: NativeBlock,
+    ed: markise_engine::editor::EditorView,
+    inner: std::ops::Range<usize>,
+    /// Inner items of the last measure: (item start, layout).
+    pub laid: Vec<(usize, std::sync::Arc<markise_layout::block::BlockLayout>)>,
+    /// Height of the whole card.
+    pub height: f32,
+}
+
+impl PreviewCard {
+    pub fn new(
+        format: std::sync::Arc<dyn markise_doc::DocumentFormat>,
+        markdown: &str,
+        spec: &ViewSpec,
+        theme: &markise_theme::Theme,
+        width: f32,
+    ) -> Option<Self> {
+        let mut ed = markise_engine::editor::EditorView::open(format, markdown.to_string(), theme.clone(), width);
+        let model = ed.view.model().clone();
+        let (blocks, _) = find_blocks(&model, markdown);
+        let b = blocks.first()?;
+        let native = classify(&model, markdown, b, spec)?;
+        ed.view.set_item_insets(native.insets.iter().copied().collect());
+        Some(PreviewCard {
+            markdown: markdown.to_string(),
+            native,
+            ed,
+            inner: b.open + 1..b.close,
+            laid: Vec::new(),
+            height: 0.0,
+        })
+    }
+
+    pub fn measure(
+        &mut self,
+        theme: &markise_theme::Theme,
+        width: f32,
+        ppp: f32,
+        shaper: &mut dyn markise_layout::TextShaper,
+        images: &dyn markise_layout::Images,
+    ) {
+        self.ed.view.set_params(width, theme, ppp);
+        let model = self.ed.view.model().clone();
+        self.laid = self
+            .inner
+            .clone()
+            .map(|i| (model.item_start(i), self.ed.view.layout(i, shaper, images)))
+            .collect();
+        self.height = CARD_HEADER + self.laid.iter().map(|(_, l)| l.height).sum::<f32>() + CARD_BOTTOM;
+    }
+}
+
 /// The source of an item's trailing ` {#id}` (spaces included).
 fn id_range(text: &str, span: std::ops::Range<usize>) -> Option<std::ops::Range<usize>> {
     let line = text.get(span.clone())?;
@@ -438,6 +495,8 @@ pub struct BlockSnaps {
     /// Live preview applied to the block list (from the form), and the new-block preview.
     preview_applied: Option<crate::block_edit::Preview>,
     draft_block: Option<Block>,
+    /// Height of the form's preview when the viewer shows it as a native card ([`PreviewCard`]).
+    pub card_height: Option<f32>,
     last_draft: Option<(u64, u64)>,
     /// The new block's preview image this frame (texture, size in points).
     pub draft_image: Option<(egui::TextureId, egui::Vec2)>,
@@ -541,6 +600,7 @@ impl BlockSnaps {
             key_width: None,
             preview_applied: None,
             draft_block: None,
+            card_height: None,
             last_draft: None,
             draft_image: None,
             thumb_wants: Vec::new(),
@@ -566,6 +626,29 @@ impl BlockSnaps {
     /// Blocks of the last frame still waiting for their current image (not failed).
     pub fn pending(&self) -> usize {
         self.pending
+    }
+
+    /// The native view for a form's preview of block `name` (`at`: the existing block; a new one
+    /// follows the global choice), when the package has one and the view selection allows it.
+    pub fn preview_spec(&self, name: &str, at: Option<usize>) -> Option<ViewSpec> {
+        let v = at
+            .and_then(|o| self.view_of.get(&o).copied())
+            .unwrap_or(self.global_view);
+        (v == BlockView::Native)
+            .then(|| self.views.get(name).cloned())
+            .flatten()
+    }
+
+    /// The offset of the existing block whose preview is a native card this frame.
+    fn card_offset(&self) -> Option<usize> {
+        self.card_height?;
+        match &self.preview_applied {
+            Some(crate::block_edit::Preview {
+                at: crate::block_edit::PreviewAt::Edit(off),
+                ..
+            }) => Some(*off),
+            _ => None,
+        }
     }
 
     /// The view block `i` of the scan is shown in.
@@ -781,7 +864,7 @@ impl BlockSnaps {
         order.sort_by_key(|&i| !is_vis(&self.blocks[i]));
         let mut jobs = Vec::new();
         let mut keys = Vec::new();
-        if let Some(b) = &self.draft_block {
+        if let Some(b) = self.draft_block.as_ref().filter(|_| self.card_height.is_none()) {
             let key = Self::key_of(b, kw, scale, theme);
             if self.folder != 0
                 && !self.cache.contains_key(&(key, self.folder))
@@ -800,8 +883,9 @@ impl BlockSnaps {
                 });
             }
         }
+        let card_at = self.card_offset();
         for &i in &order {
-            if self.view_at(i) != BlockView::Site {
+            if self.view_at(i) != BlockView::Site || Some(self.blocks[i].offset) == card_at {
                 continue;
             }
             let b = &self.blocks[i];
@@ -866,6 +950,24 @@ impl BlockSnaps {
         let mut sites = 0;
         let modes: Vec<BlockView> = (0..self.blocks.len()).map(|i| self.view_at(i)).collect();
         for (i, b) in self.blocks.iter().enumerate() {
+            if Some(b.offset) == card_at
+                && let Some(h) = self.card_height
+            {
+                over.insert(model.item_start(b.open), spacing + h);
+                for j in b.open + 1..=b.close {
+                    over.insert(model.item_start(j), 0.0);
+                }
+                placed.push(Placed {
+                    open: b.open,
+                    close: b.close,
+                    offset: b.offset,
+                    end: b.end,
+                    tex: None,
+                    size: egui::vec2(width, h),
+                });
+                self.current.push(true);
+                continue;
+            }
             match modes[i] {
                 BlockView::Native => {
                     let n = self.native_of[i].clone().expect("view_at: native");
@@ -968,7 +1070,7 @@ impl BlockSnaps {
         }
         // the new block's preview (its last image while the next one renders)
         self.draft_image = None;
-        if let Some(b) = &self.draft_block {
+        if let Some(b) = self.draft_block.as_ref().filter(|_| self.card_height.is_none()) {
             let cur = (Self::key_of(b, kw, scale, theme), self.folder);
             if self.cache.contains_key(&cur) {
                 self.last_draft = Some(cur);
