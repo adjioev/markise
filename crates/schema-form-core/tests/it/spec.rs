@@ -1,6 +1,6 @@
 //! What parses is what is promised: everything outside the subset is refused by name.
 
-use schema_form_core::{Control, CorrectRule, FormSpec, SPEC_VERSION, Selection};
+use schema_form_core::{ChoiceShape, Control, CorrectRule, ErrorKind, FormSpec, SPEC_VERSION, Selection};
 use serde_json::{Value, json};
 
 fn schema() -> Value {
@@ -97,7 +97,7 @@ fn another_version_is_refused() {
 #[test]
 fn keywords_outside_the_subset_are_refused_by_name() {
     for bad in [
-        "pattern", "enum", "oneOf", "anyOf", "allOf", "$ref", "if", "format", "const", "default",
+        "pattern", "oneOf", "anyOf", "allOf", "$ref", "if", "format", "const", "default",
     ] {
         let mut s = schema();
         s["properties"]["title"][bad] = json!("x");
@@ -168,7 +168,7 @@ fn the_subset_holds_at_any_depth() {
     let choices = |extra: Value| json!({"type": "object", "properties": props(extra)});
     let refused = inner(choices(json!({"type": "string", "pattern": "x"})), "choices").expect_err("refused");
     assert_eq!(refused.path, "a/items/text/pattern");
-    assert!(inner(choices(json!({"type": "string", "enum": ["x"]})), "choices").is_err());
+    assert!(inner(choices(json!({"type": "string", "const": "x"})), "choices").is_err());
     let images = json!({"type": "object", "pattern": "x", "properties": {
         "alt": {"type": "string"}, "path": {"type": "string"},
     }});
@@ -229,4 +229,122 @@ fn a_custom_widget_without_a_type_cannot_have_constraints() {
         FormSpec::parse(&bare, &hints, None).is_ok(),
         "an annotation constrains nothing"
     );
+}
+
+fn buttons_schema() -> Value {
+    json!({"type": "object", "properties": {
+        "one": {"type": "string", "enum": ["a", "b"]},
+        "many": {"type": "array", "items": {"type": "string", "enum": ["a", "b", "c"]}},
+        "marks": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "string"}, "text": {"type": "string"}, "correct": {"type": "boolean"},
+        }}},
+    }})
+}
+
+fn buttons_hints() -> Value {
+    json!({"version": SPEC_VERSION, "fields": {
+        "one": {"options": [{"value": "b", "label": "Bee", "icon": "bee"}]},
+        "many": {"columns": 2, "options": [{"value": "c", "exclusive": true}]},
+        "marks": {"widget": "buttons", "correct": "at-least-one", "options": [
+            {"value": "Left", "icon": "left"},
+            {"value": "None", "label": "Neither", "exclusive": true},
+        ]},
+    }})
+}
+
+#[test]
+fn choice_buttons_read_every_shape() {
+    let spec = FormSpec::parse(&buttons_schema(), &buttons_hints(), None).expect("in the subset");
+    let control = |key: &str| &spec.fields.iter().find(|f| f.key == key).expect("field").control;
+    let Control::ChoiceButtons {
+        options,
+        selection,
+        shape,
+        columns,
+    } = control("one")
+    else {
+        panic!("{:?}", control("one"));
+    };
+    assert_eq!(
+        (*shape, *selection, *columns),
+        (ChoiceShape::String, Selection::Single, None)
+    );
+    // the hints' options first, then the rest of the enum under its own name
+    assert_eq!(options[0].label, "Bee");
+    assert_eq!(options[0].icon.as_deref(), Some("bee"));
+    assert_eq!(options[1].value, "a");
+    assert_eq!(options[1].label, "a");
+    let Control::ChoiceButtons {
+        options,
+        shape,
+        columns,
+        selection,
+    } = control("many")
+    else {
+        panic!();
+    };
+    assert_eq!(
+        (*shape, *selection, *columns),
+        (ChoiceShape::Strings, Selection::Multiple, Some(2))
+    );
+    assert!(options[0].exclusive);
+    let Control::ChoiceButtons { options, shape, .. } = control("marks") else {
+        panic!();
+    };
+    assert_eq!(*shape, ChoiceShape::Marks);
+    assert_eq!(options[1].label, "Neither");
+}
+
+#[test]
+fn enum_means_buttons_unless_a_widget_says_otherwise() {
+    let schema = json!({"type": "object", "properties": {"x": {"type": "string", "enum": ["a"]}}});
+    let hints = json!({"version": SPEC_VERSION, "fields": {"x": {"widget": "text"}}});
+    let spec = FormSpec::parse(&schema, &hints, None).expect("in the subset");
+    assert_eq!(spec.fields[0].control, Control::Text { multiline: false });
+    assert_eq!(spec.validate(&json!({"x": "b"}))[0].kind, ErrorKind::NotAnOption);
+}
+
+#[test]
+fn version_1_hints_keep_their_meaning() {
+    let plain = json!({"type": "object", "properties": {"x": {"type": "string"}}});
+    FormSpec::parse(&plain, &json!({"version": 1}), None).expect("still read");
+    let with_enum = json!({"type": "object", "properties": {"x": {"type": "string", "enum": ["a"]}}});
+    let e = FormSpec::parse(&with_enum, &json!({"version": 1}), None).expect_err("needs 2");
+    assert_eq!(e.path, "hints/version");
+    FormSpec::parse(&with_enum, &json!({"version": 2}), None).expect("in the subset");
+}
+
+#[test]
+fn choices_outside_the_subset_are_refused_by_name() {
+    let refused = |schema: Value, hints: Value| {
+        let h = json!({"version": SPEC_VERSION, "fields": {"x": hints}});
+        let s = json!({"type": "object", "properties": {"x": schema}});
+        FormSpec::parse(&s, &h, None).expect_err("refused").path
+    };
+    let en = json!({"type": "string", "enum": ["a"]});
+    assert_eq!(refused(json!({"type": "boolean", "enum": ["a"]}), json!({})), "x/enum");
+    assert_eq!(refused(json!({"type": "string", "enum": []}), json!({})), "x/enum");
+    assert_eq!(
+        refused(json!({"type": "string", "enum": ["a", "a"]}), json!({})),
+        "x/enum"
+    );
+    assert_eq!(refused(json!({"type": "string", "enum": [1]}), json!({})), "x/enum");
+    assert_eq!(refused(en.clone(), json!({"options": [{"value": "z"}]})), "x/options/0");
+    assert_eq!(refused(en.clone(), json!({"options": [{}]})), "x/options/0");
+    assert_eq!(
+        refused(en.clone(), json!({"options": [{"value": "a", "site": 1}]})),
+        "x/options/0/site"
+    );
+    assert_eq!(
+        refused(en.clone(), json!({"options": [{"value": "a", "exclusive": "yes"}]})),
+        "x/options/0/exclusive"
+    );
+    assert_eq!(refused(en.clone(), json!({"columns": 0})), "x/columns");
+    assert_eq!(refused(en.clone(), json!({"selection": "multiple"})), "x/selection");
+    assert_eq!(refused(json!({"type": "string"}), json!({"widget": "buttons"})), "x");
+    let answers = json!({"type": "array", "items": {"type": "object", "properties": {
+        "id": {"type": "string"}, "text": {"type": "string"}, "correct": {"type": "boolean"},
+    }}});
+    // answers have nothing that lists their options
+    assert_eq!(refused(answers, json!({"widget": "buttons"})), "x/options");
 }

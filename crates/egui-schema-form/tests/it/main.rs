@@ -2,6 +2,7 @@
 //! `egui_kittest` drives the form through its accessibility tree, so what a screen reader finds
 //! is also what the tests find.
 
+mod choice;
 mod common;
 mod form;
 mod media;

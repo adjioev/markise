@@ -19,6 +19,7 @@
 //! The form opens no dialogs and loads no pictures: it asks a [`FormHost`], and the answers come
 //! later. The only way to add a widget is [`SchemaForm::register_widget`].
 
+mod choice;
 mod draw;
 mod host;
 mod image;

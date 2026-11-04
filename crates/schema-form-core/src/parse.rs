@@ -1,10 +1,12 @@
 //! Schema and hints to a [`FormSpec`], refusing what is outside the subset.
 
+use std::collections::HashSet;
+
 use serde_json::{Map, Value};
 
 use crate::{
-    Control, CorrectRule, FieldSpec, FormSpec, JsonType, Limits, PropRule, SPEC_VERSION, Selection, SpecError,
-    ValueRule,
+    ChoiceOption, ChoiceShape, Control, CorrectRule, FieldSpec, FormSpec, JsonType, Limits, OptionsRule, PropRule,
+    SPEC_VERSION, Selection, SpecError, ValueRule,
 };
 
 /// Keys of a schema that describe and never constrain; ignored.
@@ -63,8 +65,9 @@ fn limits(path: &str, o: &Map<String, Value>) -> Result<Limits, SpecError> {
     })
 }
 
-const SCHEMA_KEYS: [&str; 9] = [
+const SCHEMA_KEYS: [&str; 10] = [
     "type",
+    "enum",
     "properties",
     "required",
     "items",
@@ -74,7 +77,7 @@ const SCHEMA_KEYS: [&str; 9] = [
     "maxItems",
     "additionalProperties",
 ];
-const HINT_KEYS: [&str; 10] = [
+const HINT_KEYS: [&str; 12] = [
     "label",
     "help",
     "widget",
@@ -85,12 +88,15 @@ const HINT_KEYS: [&str; 10] = [
     "correct",
     "order",
     "fields",
+    "options",
+    "columns",
 ];
 const STRING_HINTS: [&str; 7] = ["label", "help", "widget", "custom", "add_label", "selection", "correct"];
 
 /// The keywords that mean something for each type; on another type they would be ignored.
 fn check_applies(path: &str, s: &Map<String, Value>, ty: &str) -> Result<(), SpecError> {
     let all = [
+        "enum",
         "properties",
         "required",
         "additionalProperties",
@@ -101,7 +107,7 @@ fn check_applies(path: &str, s: &Map<String, Value>, ty: &str) -> Result<(), Spe
         "maxItems",
     ];
     let allowed: &[&str] = match ty {
-        "string" => &["minLength", "maxLength"],
+        "string" => &["enum", "minLength", "maxLength"],
         "array" => &["items", "minItems", "maxItems"],
         "object" => &["properties", "required", "additionalProperties"],
         _ => &[],
@@ -175,6 +181,100 @@ fn correct_rule(path: &str, h: &Map<String, Value>) -> Result<CorrectRule, SpecE
     }
 }
 
+fn columns_of(path: &str, h: &Map<String, Value>) -> Result<Option<u32>, SpecError> {
+    match h.get("columns") {
+        None => Ok(None),
+        Some(v) => match v.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0) {
+            Some(n) => Ok(Some(n)),
+            None => err(&join(path, "columns"), "must be a positive integer"),
+        },
+    }
+}
+
+/// The widget that draws choice buttons.
+const BUTTONS: &str = "buttons";
+
+fn selection_of(path: &str, h: &Map<String, Value>, correct: CorrectRule) -> Result<Selection, SpecError> {
+    match h.get("selection").and_then(Value::as_str) {
+        Some("single") => Ok(Selection::Single),
+        Some("multiple") => Ok(Selection::Multiple),
+        None if correct == CorrectRule::ExactlyOne => Ok(Selection::Single),
+        None => Ok(Selection::Multiple),
+        Some(o) => err(&join(path, "selection"), format!("unknown selection `{o}`")),
+    }
+}
+
+/// `enum`: distinct strings, at least one.
+fn enum_of(path: &str, s: &Map<String, Value>) -> Result<Option<Vec<String>>, SpecError> {
+    let Some(e) = s.get("enum") else {
+        return Ok(None);
+    };
+    let p = join(path, "enum");
+    let names: Option<Vec<&str>> = e
+        .as_array()
+        .map(|a| a.iter().map(Value::as_str).collect())
+        .unwrap_or(None);
+    let Some(names) = names.filter(|n| !n.is_empty()) else {
+        return err(&p, "must be an array of strings, at least one");
+    };
+    let mut seen = HashSet::new();
+    if let Some(twice) = names.iter().find(|n| !seen.insert(**n)) {
+        return err(&p, format!("`{twice}` is there twice"));
+    }
+    Ok(Some(names.into_iter().map(str::to_string).collect()))
+}
+
+/// The options of choice buttons: the hints' `options`, then what else `allowed` holds. With
+/// `allowed` (an `enum`) an option must be one of those; without it there must be options.
+fn options_of(path: &str, h: &Map<String, Value>, allowed: Option<&[String]>) -> Result<Vec<ChoiceOption>, SpecError> {
+    let p = join(path, "options");
+    let listed: &[Value] = match h.get("options") {
+        None => &[],
+        Some(Value::Array(a)) => a,
+        Some(_) => return err(&p, "must be an array of options"),
+    };
+    let mut out: Vec<ChoiceOption> = Vec::with_capacity(listed.len());
+    for (i, o) in listed.iter().enumerate() {
+        let here = join(&p, &i.to_string());
+        let o = object(&here, o, "an option")?;
+        check_keys(&here, o, &["value", "label", "icon", "exclusive"], "an option")?;
+        let text = |k: &str| match o.get(k) {
+            None => Ok(None),
+            Some(Value::String(s)) if !s.is_empty() => Ok(Some(s.clone())),
+            Some(_) => err(&join(&here, k), "must be a string, not empty"),
+        };
+        let Some(value) = text("value")? else {
+            return err(&here, "needs a `value`");
+        };
+        if out.iter().any(|x| x.value == value) {
+            return err(&here, format!("`{value}` is there twice"));
+        }
+        if allowed.is_some_and(|a| !a.contains(&value)) {
+            return err(&here, format!("`{value}` is not in the `enum`"));
+        }
+        let exclusive = match o.get("exclusive") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => return err(&join(&here, "exclusive"), "must be true or false"),
+        };
+        out.push(ChoiceOption {
+            label: text("label")?.unwrap_or_else(|| value.clone()),
+            icon: text("icon")?,
+            exclusive,
+            value,
+        });
+    }
+    for value in allowed.unwrap_or(&[]) {
+        if !out.iter().any(|x| x.value == *value) {
+            out.push(ChoiceOption::plain(value));
+        }
+    }
+    if out.is_empty() {
+        return err(&p, "choice buttons need options");
+    }
+    Ok(out)
+}
+
 /// What a value must look like, checking the whole schema below it against the subset. Only a
 /// custom widget's own value may leave `type` out.
 fn rule_of(
@@ -206,6 +306,8 @@ fn rule_of(
         props: Vec::new(),
         closed: false,
         choices: None,
+        one_of: enum_of(path, s)?,
+        options: None,
     };
     if json_type == JsonType::Array {
         if let Some(it) = s.get("items") {
@@ -222,6 +324,20 @@ fn rule_of(
         }
         if h.get("widget").is_some_and(|w| w == "choices") {
             rule.choices = Some(correct_rule(path, h)?);
+        }
+        let buttons = h.get("widget").is_some_and(|w| w == BUTTONS);
+        let items_enum = rule.items.as_ref().and_then(|i| i.one_of.as_deref());
+        if buttons || (h.get("widget").is_none() && items_enum.is_some()) {
+            let options = options_of(path, h, items_enum)?;
+            rule.options = Some(OptionsRule {
+                values: options.iter().map(|o| o.value.clone()).collect(),
+                exclusive: (options.iter().filter(|o| o.exclusive))
+                    .map(|o| o.value.clone())
+                    .collect(),
+            });
+            if rule.items.as_ref().is_some_and(|i| i.json_type == JsonType::Object) {
+                rule.choices = Some(correct_rule(path, h)?);
+            }
         }
     }
     if json_type == JsonType::Object {
@@ -322,14 +438,50 @@ fn field(
         }
         Ok(())
     };
+    let has_enum = s.contains_key("enum");
+    let items_enum = items.and_then(|i| enum_of(path, i).transpose()).transpose()?;
     let control = match (widget, ty) {
         (Some("custom"), _) => match hint_str("custom") {
             Some(name) if !name.is_empty() => Control::Custom { name },
             _ => return err(path, "a custom widget needs its name in `custom`"),
         },
+        (None | Some(BUTTONS), Some("string")) if has_enum => {
+            if h.contains_key("selection") {
+                return err(&join(path, "selection"), "a string holds one choice");
+            }
+            Control::ChoiceButtons {
+                options: options_of(path, h, rule.one_of.as_deref())?,
+                selection: Selection::Single,
+                shape: ChoiceShape::String,
+                columns: columns_of(path, h)?,
+            }
+        }
         (None | Some("text"), Some("string")) => Control::Text { multiline: false },
         (Some("multiline"), Some("string")) => Control::Text { multiline: true },
         (None | Some("checkbox"), Some("boolean")) => Control::Checkbox,
+        (None | Some(BUTTONS), Some("array")) if items_of("string") && items_enum.is_some() => {
+            if h.contains_key("selection") {
+                return err(
+                    &join(path, "selection"),
+                    "an array of strings holds any number of choices",
+                );
+            }
+            Control::ChoiceButtons {
+                options: options_of(path, h, items_enum.as_deref())?,
+                selection: Selection::Multiple,
+                shape: ChoiceShape::Strings,
+                columns: columns_of(path, h)?,
+            }
+        }
+        (Some(BUTTONS), Some("array")) if items_of("object") => {
+            check_item(&[("id", "string"), ("text", "string"), ("correct", "boolean")])?;
+            Control::ChoiceButtons {
+                options: options_of(path, h, None)?,
+                selection: selection_of(path, h, correct_rule(path, h)?)?,
+                shape: ChoiceShape::Marks,
+                columns: columns_of(path, h)?,
+            }
+        }
         (None | Some("list"), Some("array")) if items_of("string") => Control::StringList { multiline },
         (Some("choices"), Some("array")) => {
             if items.is_none() {
@@ -337,13 +489,7 @@ fn field(
             }
             check_item(&[("id", "string"), ("text", "string"), ("correct", "boolean")])?;
             let correct = correct_rule(path, h)?;
-            let selection = match h.get("selection").and_then(Value::as_str) {
-                Some("single") => Selection::Single,
-                Some("multiple") => Selection::Multiple,
-                None if correct == CorrectRule::ExactlyOne => Selection::Single,
-                None => Selection::Multiple,
-                Some(o) => return err(&join(path, "selection"), format!("unknown selection `{o}`")),
-            };
+            let selection = selection_of(path, h, correct)?;
             Control::Choices { selection, correct }
         }
         (Some("images"), Some("array")) => {
@@ -388,6 +534,13 @@ fn field(
     })
 }
 
+fn uses_choice_rules(r: &ValueRule) -> bool {
+    r.one_of.is_some()
+        || r.options.is_some()
+        || r.items.as_deref().is_some_and(uses_choice_rules)
+        || r.props.iter().any(|p| uses_choice_rules(&p.rule))
+}
+
 /// Replaces in `base` what `over` says, object by object.
 fn overlay(base: &mut Value, over: &Value) {
     match (base, over) {
@@ -406,11 +559,11 @@ impl FormSpec {
     /// checked, picked or not.
     pub fn parse(schema: &Value, hints: &Value, variant: Option<&str>) -> Result<FormSpec, SpecError> {
         let h = object("hints", hints, "hints")?;
-        match h.get("version").and_then(Value::as_u64) {
-            Some(SPEC_VERSION) => {}
-            Some(v) => return err("hints/version", format!("version {v}, this reads {SPEC_VERSION}")),
+        let version = match h.get("version").and_then(Value::as_u64) {
+            Some(v @ 1..=SPEC_VERSION) => v,
+            Some(v) => return err("hints/version", format!("version {v}, this reads up to {SPEC_VERSION}")),
             None => return err("hints/version", "missing"),
-        }
+        };
         check_keys("hints", h, &["version", "order", "fields", "variants"], "the hints")?;
         if let Some(vs) = h.get("variants") {
             for (name, over) in object("hints/variants", vs, "`variants`")? {
@@ -428,9 +581,10 @@ impl FormSpec {
         }
         let m = merged.as_object().expect("an object overlaid with an object stays one");
         let fields = fields_of("", s, m)?;
-        Ok(FormSpec {
-            fields,
-            rule: rule_of("", s, m, false)?,
-        })
+        let rule = rule_of("", s, m, false)?;
+        if version < 2 && uses_choice_rules(&rule) {
+            return err("hints/version", "`enum` and choice buttons need version 2");
+        }
+        Ok(FormSpec { fields, rule })
     }
 }

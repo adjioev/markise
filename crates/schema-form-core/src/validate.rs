@@ -5,22 +5,38 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value};
 
-use crate::{CorrectRule, FormSpec, JsonType, Limits, PropRule, ValueRule};
+use crate::{CorrectRule, FormSpec, JsonType, Limits, OptionsRule, PropRule, ValueRule};
 
 /// What is wrong with a value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     Required,
     WrongType,
-    TooShort { min: u64 },
-    TooLong { max: u64 },
-    TooFew { min: u64 },
-    TooMany { max: u64 },
+    TooShort {
+        min: u64,
+    },
+    TooLong {
+        max: u64,
+    },
+    TooFew {
+        min: u64,
+    },
+    TooMany {
+        max: u64,
+    },
     ExactlyOneCorrect,
     AtLeastOneCorrect,
     MissingId,
-    DuplicateId { id: String },
+    DuplicateId {
+        id: String,
+    },
     UnknownKey,
+    /// Not one of the values a choice allows.
+    NotAnOption,
+    /// An option that excludes the others is selected together with others.
+    ExclusiveWithOthers {
+        value: String,
+    },
 }
 
 impl std::fmt::Display for ErrorKind {
@@ -38,6 +54,8 @@ impl std::fmt::Display for ErrorKind {
             ErrorKind::MissingId => write!(f, "Has no id"),
             ErrorKind::DuplicateId { id } => write!(f, "The id `{id}` is used twice"),
             ErrorKind::UnknownKey => write!(f, "Not a field of this form"),
+            ErrorKind::NotAnOption => write!(f, "Not one of the options"),
+            ErrorKind::ExclusiveWithOthers { value } => write!(f, "`{value}` cannot go with the others"),
         }
     }
 }
@@ -158,7 +176,15 @@ fn check_value(rule: &ValueRule, v: &Value, path: &str, in_item: bool, out: &mut
         return;
     }
     match v {
-        Value::String(s) if rule.json_type == JsonType::String => check_string(s, &rule.limits, path, out),
+        Value::String(s) if rule.json_type == JsonType::String => {
+            check_string(s, &rule.limits, path, out);
+            if rule.one_of.as_ref().is_some_and(|o| !s.is_empty() && !o.contains(s)) {
+                out.push(FieldError {
+                    path: path.to_string(),
+                    kind: ErrorKind::NotAnOption,
+                });
+            }
+        }
         Value::Object(o) if rule.json_type == JsonType::Object => check_object(rule, o, path, in_item, out),
         Value::Array(a) if rule.json_type == JsonType::Array => {
             let mut push = |kind| {
@@ -180,6 +206,9 @@ fn check_value(rule: &ValueRule, v: &Value, path: &str, in_item: bool, out: &mut
             }
             if let Some(correct) = rule.choices {
                 check_choices(a, correct, path, out);
+            }
+            if let Some(options) = &rule.options {
+                check_options(a, options, path, out);
             }
         }
         _ => {}
@@ -203,7 +232,9 @@ fn check_choices(a: &[Value], rule: CorrectRule, path: &str, out: &mut Vec<Field
     }
     let mut seen: HashSet<&str> = HashSet::with_capacity(a.len());
     for (i, e) in a.iter().enumerate() {
-        match e.get("id").and_then(Value::as_str).unwrap_or("") {
+        // no `id` key at all: a new row, whose id its host gives it when the values are stored
+        let Some(id) = e.get("id") else { continue };
+        match id.as_str().unwrap_or("") {
             "" => out.push(FieldError {
                 path: join(path, i),
                 kind: ErrorKind::MissingId,
@@ -216,5 +247,39 @@ fn check_choices(a: &[Value], rule: CorrectRule, path: &str, out: &mut Vec<Field
             }
             _ => {}
         }
+    }
+}
+
+/// Answers must be options, and an exclusive option stands alone among what is selected. An
+/// array of strings holds what is selected; of answers, those marked.
+fn check_options(a: &[Value], options: &OptionsRule, path: &str, out: &mut Vec<FieldError>) {
+    let mut selected = Vec::with_capacity(a.len());
+    for (i, e) in a.iter().enumerate() {
+        match e {
+            Value::String(s) => selected.push(s.as_str()),
+            Value::Object(o) => {
+                let text = o.get("text").and_then(Value::as_str).unwrap_or("");
+                if !options.values.iter().any(|v| v == text) {
+                    out.push(FieldError {
+                        path: join(path, i),
+                        kind: ErrorKind::NotAnOption,
+                    });
+                }
+                if o.get("correct") == Some(&Value::Bool(true)) {
+                    selected.push(text);
+                }
+            }
+            _ => {}
+        }
+    }
+    if selected.len() > 1
+        && let Some(value) = selected.iter().find(|s| options.exclusive.iter().any(|x| x == *s))
+    {
+        out.push(FieldError {
+            path: path.to_string(),
+            kind: ErrorKind::ExclusiveWithOthers {
+                value: (*value).to_string(),
+            },
+        });
     }
 }

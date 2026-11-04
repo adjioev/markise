@@ -22,6 +22,13 @@ fn thumbnail(ui: &mut Ui, state: &Thumbnail, alt: &str, loading: &str, side: f32
                 .fit_to_exact_size(frame);
             ui.add_sized(frame, image);
         }
+        Thumbnail::Mask { texture, size } => {
+            let image = Image::new(SizedTexture::new(*texture, *size))
+                .alt_text(alt)
+                .tint(ui.visuals().text_color())
+                .fit_to_exact_size(frame);
+            ui.add_sized(frame, image);
+        }
         Thumbnail::Loading => {
             let r = ui.add_sized(frame, Spinner::new());
             r.widget_info(|| WidgetInfo::labeled(Role::ProgressIndicator, true, loading));
