@@ -44,6 +44,8 @@ pub enum Container {
         /// `[^label]` shown on the definition's first leaf.
         label: Option<String>,
     },
+    /// A named container (ADR 0018): its marker lines and everything between them.
+    Card,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1658,6 +1660,7 @@ fn spend_markers(containers: &mut [Container]) {
             Container::ListItem { marker, .. } => *marker = None,
             Container::Footnote { label } => *label = None,
             Container::Quote { first, .. } => *first = false,
+            Container::Card => {}
         }
     }
 }
@@ -1708,6 +1711,7 @@ fn flatten(doc: &dyn FormatDoc, tops: std::ops::Range<usize>, doc_start: bool) -
 
 enum Frame {
     Quote,
+    Card,
     List { saved_tight: bool, ordered: bool },
     ListItem,
     Footnote,
@@ -1732,6 +1736,10 @@ impl Flattener<'_> {
     fn event(&mut self, ev: FlatEvent<'_>) {
         match ev {
             FlatEvent::Open(c) => match c {
+                FlatContainer::Card => {
+                    self.containers.push(Container::Card);
+                    self.frames.push(Frame::Card);
+                }
                 FlatContainer::Quote { callout } => {
                     self.containers.push(Container::Quote { callout, first: true });
                     self.frames.push(Frame::Quote);
@@ -1770,6 +1778,10 @@ impl Flattener<'_> {
                 }
             },
             FlatEvent::Resume(c) => match c {
+                FlatContainer::Card => {
+                    self.containers.push(Container::Card);
+                    self.frames.push(Frame::Card);
+                }
                 // the container's first leaf lies before the region: decorations spent
                 FlatContainer::Quote { callout } => {
                     self.containers.push(Container::Quote { callout, first: false });
@@ -1797,7 +1809,7 @@ impl Flattener<'_> {
                 }
             },
             FlatEvent::Close => match self.frames.pop() {
-                Some(Frame::Quote | Frame::ListItem | Frame::Footnote) => {
+                Some(Frame::Quote | Frame::Card | Frame::ListItem | Frame::Footnote) => {
                     self.containers.pop();
                 }
                 Some(Frame::List { saved_tight, ordered }) => {

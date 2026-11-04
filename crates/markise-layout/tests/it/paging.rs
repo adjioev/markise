@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use markise_doc::{FormatDoc, LineEnding, PatchSet};
+use markise_doc::{EditBehavior, FormatDoc, LineEnding, PatchSet};
 use markise_layout::block::NoImages;
 use markise_layout::{DocModel, Paging, View, testing};
 use markise_theme::Theme;
@@ -117,6 +117,26 @@ fn big_docs() -> Vec<String> {
     v
 }
 
+/// `:::` blocks of every shape: many small ones, nested ones, one spanning many top-level
+/// blocks (so many pages), stray markers.
+fn directive_doc() -> String {
+    let mut s = String::from("intro\n\n:::stray\n\n");
+    for i in 0..40 {
+        s.push_str(&format!(
+            ":::note {i}\n\n## In {i}\n\nBody {i}.\n\n- [ ] one {{#a}}\n\n:::\n\nOutside {i}.\n\n"
+        ));
+    }
+    s.push_str("::::wide\n\n");
+    for i in 0..40 {
+        s.push_str(&format!("# H{i}\n\nInside wide {i}.\n\n"));
+        if i % 9 == 4 {
+            s.push_str(":::inner\n\n> q\n\n:::\n\n");
+        }
+    }
+    s.push_str("::::\n\nEnd.\n\n:::\n");
+    s
+}
+
 #[test]
 fn paged_builds_materialize_and_evict_like_full_builds() {
     for src in big_docs() {
@@ -204,11 +224,16 @@ const SNIPPETS: &[&str] = &[
     "[r]: http://other\n",
     "> <details>\n",
     "---\n",
+    ":::note\n",
+    ":::\n",
+    "::::card x\n",
+    "::::\n",
     "x",
     "#",
     "-",
     "`",
     " ",
+    ":",
 ];
 
 #[derive(Clone, Debug)]
@@ -312,6 +337,14 @@ proptest! {
     fn prop_paged_model_equals_full_build_markdown(base in 0usize..2, tops in 1usize..5, ops in ops()) {
         let src = big_docs().swap_remove(base);
         let mut doc = md(&src);
+        if let Err(e) = run_ops(&mut doc, tops, &ops) {
+            return Err(TestCaseError::fail(e));
+        }
+    }
+
+    #[test]
+    fn prop_paged_model_equals_full_build_directives(tops in 1usize..5, ops in ops()) {
+        let mut doc = md(&directive_doc());
         if let Err(e) = run_ops(&mut doc, tops, &ops) {
             return Err(TestCaseError::fail(e));
         }
@@ -499,7 +532,7 @@ fn page_estimates_match_the_items_estimates() {
     }
     // (closed disclosures hide content a placeholder partly holding them still counts: the
     // documents here have none)
-    for src in [short, big_docs().swap_remove(1), doc(2000)] {
+    for src in [short, big_docs().swap_remove(1), doc(2000), directive_doc().repeat(10)] {
         let doc: Arc<dyn FormatDoc> = Arc::new(md(&src));
         for width in [300.0, 700.0, 1200.0] {
             let p = View::new(doc.clone(), Arc::new(paged(&*doc, 16)), Theme::light(), width, 1.0);
@@ -508,6 +541,93 @@ fn page_estimates_match_the_items_estimates() {
             assert!((a / b - 1.0).abs() < 0.02, "width {width}: paged {a} vs full {b}");
         }
     }
+}
+
+// ---- `:::` blocks (ADR 0018) ---------------------------------------------------------------
+
+/// How many `Card` containers item `i` has.
+fn cards(m: &DocModel, i: usize) -> usize {
+    m.items[i]
+        .containers
+        .iter()
+        .filter(|c| matches!(c, markise_layout::Container::Card))
+        .count()
+}
+
+/// A block spanning many pages has its content on every page; a paged model agrees with a full
+/// one on what is inside once materialized, with no top-level block holding it all.
+#[test]
+fn a_block_spans_page_boundaries() {
+    let doc = md(&directive_doc());
+    let mut m = paged(&doc, 3);
+    assert!(m.page_count() > 10);
+    m.check_against_full(&doc).unwrap();
+    let wide = doc.text().find("::::wide").unwrap();
+    let end = doc.text().rfind("::::").unwrap();
+    assert!(
+        doc.top_at(end).unwrap() - doc.top_at(wide).unwrap() > 3,
+        "several pages"
+    );
+    materialize_all(&mut m, &doc).unwrap();
+    for i in 0..m.items.len() {
+        let at = m.item_start(i);
+        let want = doc.named_containers_at(at).len();
+        assert_eq!(cards(&m, i), want, "item {i} at {at}");
+    }
+}
+
+/// An opener or closer typed or deleted far from its partner changes what the items between
+/// them are inside, on pages with real items and on placeholders, with no parse between.
+#[test]
+fn typing_a_marker_far_away_updates_what_lies_between() {
+    let mut src = String::from(":::x\n\n");
+    for i in 0..400 {
+        src.push_str(&format!("Paragraph {i}.\n\n"));
+    }
+    for tops in [3, 16] {
+        let mut doc = md(&src);
+        let mut m = paged(&doc, tops);
+        assert_eq!(doc.named_containers_at(src.len() / 2).len(), 0);
+        // the closer at the end
+        let end = doc.text().len();
+        let e = FormatDoc::apply(&mut doc, &PatchSet::single_verbatim(end..end, ":::\n"));
+        m.apply(&doc, &e);
+        m.check_against_full(&doc).unwrap();
+        assert_eq!(doc.named_containers_at(src.len() / 2).len(), 1);
+        materialize_all(&mut m, &doc).unwrap();
+        // and away again
+        let end = doc.text().len();
+        let e = FormatDoc::apply(&mut doc, &PatchSet::single_verbatim(end - 4..end, ""));
+        m.apply(&doc, &e);
+        m.check_against_full(&doc).unwrap();
+        materialize_all(&mut m, &doc).unwrap();
+        assert!((0..m.items.len()).all(|i| cards(&m, i) == 0));
+    }
+}
+
+/// A placeholder's measured height does not outlive a change of the block around it.
+#[test]
+fn a_new_pair_replaces_the_placeholders_between() {
+    let mut src = String::from(":::x\n\n");
+    for i in 0..400 {
+        src.push_str(&format!("Paragraph {i}.\n\n"));
+    }
+    let mut doc = md(&src);
+    let mut m = paged(&doc, 16);
+    let hash_before: Vec<u64> = (0..m.items.len())
+        .filter(|&i| m.is_page(i))
+        .map(|i| m.items[i].hash)
+        .collect();
+    let end = doc.text().len();
+    let e = FormatDoc::apply(&mut doc, &PatchSet::single_verbatim(end..end, ":::\n"));
+    let ch = m.apply(&doc, &e);
+    assert!(!ch.inserted.is_empty());
+    let hash_after: Vec<u64> = (0..m.items.len())
+        .filter(|&i| m.is_page(i))
+        .map(|i| m.items[i].hash)
+        .collect();
+    // the pages hold different items now (the container is part of the item hash)
+    assert_ne!(hash_before, hash_after);
 }
 
 // ---- cross-block facts (phase 3) ---------------------------------------------------------
@@ -1146,4 +1266,27 @@ fn evicted_page_heights_follow_the_review_view() {
     for &(i, h) in &pages {
         assert_eq!(v.height(i), h, "page {i}");
     }
+}
+
+/// A closer line with a huge run of trailing whitespace, followed by many blocks: asking which
+/// directives are around each block must not read that line again (Codex review of #181).
+/// The bound is a hang guard for what was quadratic, not a speed budget.
+#[test]
+fn many_blocks_after_a_closer_with_a_long_line_build_in_linear_time() {
+    let mut src = format!(":::x\nx\n:::{}\n\n", " ".repeat(1_000_000));
+    for _ in 0..20_000 {
+        src.push_str("p\n\n");
+    }
+    let doc = md(&src);
+    let t = std::time::Instant::now();
+    for paging in [Paging::Full, Paging::Paged { tops: 128 }] {
+        let m = DocModel::build_with(&doc, None, paging);
+        assert!(!m.items.is_empty());
+    }
+    let e = t.elapsed();
+    assert!(e.as_secs() < 60, "{e:?}");
+    // the whitespace still belongs to the closer's line: the block's own range
+    let in_ws = src.find("     ").unwrap() + 500;
+    assert_eq!(doc.named_containers_at(in_ws).len(), 1);
+    assert_eq!(doc.named_containers_at(src.len() - 2).len(), 0);
 }
