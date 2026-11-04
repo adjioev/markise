@@ -117,6 +117,8 @@ pub struct AppOptions {
     /// Text backend for document text (`MARKISE_TEXT=parley` in the app; ADR 0005 T2 developer
     /// switch, default epaint).
     pub text_backend: crate::text_paint::TextBackend,
+    /// Diagnostic overrides of glyph hinting and the coverage curve (issue #172).
+    pub text_tuning: crate::text_look::TextTuning,
     /// Short git commit of the build (About window), if known.
     pub commit: Option<String>,
     /// Shows the yes/no questions (unsaved changes, Move to Trash, …). Default: the in-app
@@ -155,6 +157,7 @@ impl Default for AppOptions {
             parse: ParseOptions::default(),
             highlight_code: true,
             text_backend: crate::text_paint::TextBackend::Epaint,
+            text_tuning: Default::default(),
             commit: None,
             confirm: Arc::new(crate::confirm::InApp),
             clipboard_files: Arc::new(crate::clipboard::NoFiles),
@@ -509,8 +512,10 @@ pub struct MarkiseApp {
     swatches: Vec<(ThemeId, Option<crate::prefs::Swatch>)>,
     /// Summary of the last "Import theme…" (shown in the report window).
     installed: Option<InstallDone>,
-    /// Fingerprint of the theme the egui visuals were built from.
-    visuals_fp: Option<u64>,
+    /// Fingerprint of the theme the egui visuals were built from, and whether for a
+    /// high-density display.
+    visuals_fp: Option<(u64, bool)>,
+    text_tuning: crate::text_look::TextTuning,
     /// [`ThemeManager::generation`] of `theme`.
     theme_gen: u64,
     /// New font definitions were handed to egui; they apply at the next pass, so the font
@@ -639,6 +644,7 @@ impl MarkiseApp {
             swatches: Vec::new(),
             installed: None,
             visuals_fp: None,
+            text_tuning: opts.text_tuning,
             theme_gen: 0,
             fonts_pending: false,
             parse: opts.parse,
@@ -2122,10 +2128,15 @@ impl MarkiseApp {
                 d.set_font_size(self.theme.font_size);
             }
         }
-        let fp = self.theme.fingerprint();
-        if self.visuals_fp != Some(fp) {
-            self.visuals_fp = Some(fp);
-            ctx.set_visuals(visuals_for(&self.theme));
+        let ppp = ctx.pixels_per_point();
+        let key = (self.theme.fingerprint(), crate::text_look::is_high_density(ppp));
+        if self.visuals_fp != Some(key) {
+            // the text options apply at the next pass (which rebuilds the glyph atlas)
+            if self.visuals_fp.is_some_and(|(_, density)| density != key.1) {
+                ctx.request_repaint();
+            }
+            self.visuals_fp = Some(key);
+            ctx.set_visuals(visuals_for(&self.theme, self.text_tuning, ppp));
             crate::dialog::Look::from_theme(&self.theme).store(ctx);
         }
     }
@@ -3480,7 +3491,7 @@ fn report_ui(ui: &mut egui::Ui, r: &markise_theme::ImportResult) {
 }
 
 /// egui visuals following the theme's chrome (spec 03 §2.2: colors only).
-fn visuals_for(t: &Theme) -> egui::Visuals {
+fn visuals_for(t: &Theme, tuning: crate::text_look::TextTuning, ppp: f32) -> egui::Visuals {
     let mut v = if t.dark {
         egui::Visuals::dark()
     } else {
@@ -3498,6 +3509,7 @@ fn visuals_for(t: &Theme) -> egui::Visuals {
     v.widgets.inactive.fg_stroke.color = color(chrome.control_text);
     v.widgets.hovered.weak_bg_fill = color(chrome.active_bg);
     v.widgets.active.weak_bg_fill = color(chrome.active_bg);
+    tuning.apply(&mut v.text_options, t.dark, ppp);
     v
 }
 
