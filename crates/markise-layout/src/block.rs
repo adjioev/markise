@@ -2450,7 +2450,7 @@ pub fn layout_item(
             let mut body = None;
             if p.expanded {
                 st.fam = FontRole::Mono;
-                st.size = t.mono_size() * 0.95;
+                st.size = t.code_block_size() * 0.95;
                 st.line_height = st.size * 1.45;
                 let mut body_job = StyledText::single(lines_text(text, &lines), st.text_style());
                 body_job.source_map = Some(Arc::new(lines_map(&lines, origin)));
@@ -3081,7 +3081,7 @@ fn code_box_hl(
     width: f32,
     hl: Option<CodeHl>,
 ) -> f32 {
-    let size = t.mono_size();
+    let size = t.code_block_size();
     let mut st = Style::base(size, (size * 1.5).round(), color(bx.text));
     st.fam = FontRole::Mono;
     // chunks of CHUNK_LINES source lines: long code blocks are culled per chunk when painting

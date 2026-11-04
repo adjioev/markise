@@ -233,7 +233,7 @@ pub fn theme_css(theme: &Theme) -> String {
         c,
         "#write pre.md-fences {{ {} font-family: var(--monospace); font-size: {:.3}em; line-height: 1.5; overflow-x: auto; white-space: pre; }}",
         box_css(&t.code_block),
-        t.mono_scale
+        t.code_block_scale
     );
     let _ = writeln!(
         c,

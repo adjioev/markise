@@ -90,7 +90,8 @@ impl View {
                 h += n as f32 * (extra + hs.size * 1.3 + hs.margin_bottom + pad);
             }
         }
-        h += s.code_lines as f32 * (t.mono_size() * 1.5).round() + s.code_blocks as f32 * 2.0 * t.code_block.padding;
+        h += s.code_lines as f32 * (t.code_block_size() * 1.5).round()
+            + s.code_blocks as f32 * 2.0 * t.code_block.padding;
         h += s.table_rows as f32 * (line + 2.0 * t.table_cell_padding);
         h += s.front as f32 * (line + 2.0 * t.meta_block.padding) + s.simple as f32 * line;
         // a TOC lists the whole outline, one line per entry

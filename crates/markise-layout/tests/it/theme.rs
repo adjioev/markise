@@ -461,6 +461,38 @@ fn code_boxes(l: &BlockLayout, t: &Theme) -> Vec<epaint::Rect> {
         .collect()
 }
 
+/// Issue #176: fenced code follows `code_block_scale` (line pitch included), inline code
+/// `mono_scale`; neither moves the other.
+#[test]
+fn code_blocks_and_inline_code_scale_independently() {
+    let measure = |t: &Theme, src: &str| {
+        let mut fonts = testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        let mut v = testing::Shown::new(Arc::new(markise_md::parse(src))).view(t.clone(), 600.0, 1.0);
+        let _ = v.frame(4000.0, 0.0, &mut f, &NoImages);
+        let l = v.layout(0, &mut f, &NoImages);
+        let width = code_boxes(&l, t).first().map_or(0.0, |r| r.width());
+        (l.height, width)
+    };
+    let fence = "```\na\nb\nc\nd\n```\n";
+    let inline = "`code`\n";
+    let base = Theme::light();
+    let mut big_block = base.clone();
+    big_block.code_block_scale = 1.25;
+    let mut big_inline = base.clone();
+    big_inline.mono_scale = 2.0;
+    assert_eq!(base.code_block_size(), 13.0);
+    assert_eq!(big_block.code_block_size(), 20.0);
+    // four lines at 20 and 13 points: pitch 30 against 20 (rounded ×1.5)
+    assert_eq!(
+        measure(&big_block, fence).0 - measure(&base, fence).0,
+        4.0 * (30.0 - 20.0)
+    );
+    assert_eq!(measure(&big_inline, fence).0, measure(&base, fence).0);
+    assert_eq!(measure(&big_block, inline).1, measure(&base, inline).1);
+    assert!(measure(&big_inline, inline).1 > measure(&base, inline).1);
+}
+
 #[test]
 fn trailing_inline_box_padding_stays_inside_the_column() {
     let mut t = Theme::light();

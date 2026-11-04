@@ -1405,7 +1405,7 @@ impl Flow<'_> {
             ExBlock::Code { text, runs, .. } => {
                 let code_ctx = Ctx {
                     color: t.code_block.text,
-                    size: self.u(t.mono_size()),
+                    size: self.u(t.code_block_size()),
                     mono: true,
                     line_height: 1.45,
                     ..ctx
@@ -1416,7 +1416,7 @@ impl Flow<'_> {
             ExBlock::Math(src) => {
                 let c = Ctx {
                     color: t.math_block.text,
-                    size: self.u(t.mono_size()),
+                    size: self.u(t.code_block_size()),
                     mono: true,
                     line_height: 1.45,
                     ..ctx
@@ -1427,7 +1427,7 @@ impl Flow<'_> {
             ExBlock::Diagram { source, .. } => {
                 let c = Ctx {
                     color: t.math_block.text,
-                    size: self.u(t.mono_size()),
+                    size: self.u(t.code_block_size()),
                     mono: true,
                     line_height: 1.45,
                     ..ctx

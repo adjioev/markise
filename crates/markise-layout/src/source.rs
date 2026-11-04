@@ -1877,7 +1877,10 @@ mod tests {
         let t = Theme::light();
         let auto = SourceParams::default();
         assert_eq!(metrics(&t, &auto), (t.source_size(), (t.source_size() * 1.5).round()));
-        assert!(metrics(&t, &auto).0 < t.mono_size(), "smaller than the old mono size");
+        assert!(
+            metrics(&t, &auto).0 < (t.font_size * 0.9).round(),
+            "smaller than the old code size"
+        );
         let big = SourceParams {
             font_size: Some(20.0),
             ..auto

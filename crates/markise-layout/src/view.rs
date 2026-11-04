@@ -928,7 +928,7 @@ impl View {
             }
             ItemKind::Code { .. } | ItemKind::Math | ItemKind::Diagram { .. } | ItemKind::Html => {
                 let lines = it.est_lines.saturating_sub(2).max(1) as f32;
-                t.block_spacing + lines * (t.mono_size() * 1.5).round() + 2.0 * t.code_block.padding
+                t.block_spacing + lines * (t.code_block_size() * 1.5).round() + 2.0 * t.code_block.padding
             }
             ItemKind::Table => {
                 let rows = it.est_lines.saturating_sub(1).max(1) as f32;
