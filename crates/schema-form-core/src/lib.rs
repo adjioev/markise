@@ -47,8 +47,8 @@ pub enum Control {
     Images,
     /// An object drawn as a group.
     Group { fields: Vec<FieldSpec> },
-    /// Drawn by what the host registered under this name; its value is the host's business
-    /// beyond the schema.
+    /// Drawn by what the host registered under this name. Its schema still holds; without a
+    /// `type` any value goes.
     Custom { name: String },
 }
 
@@ -61,6 +61,29 @@ pub struct Limits {
     pub max_items: Option<u64>,
 }
 
+/// What a value must look like, whatever draws it. Parsed from the schema, in the hints' order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValueRule {
+    pub json_type: JsonType,
+    pub limits: Limits,
+    /// The rule of an array's entries.
+    pub items: Option<Box<ValueRule>>,
+    /// The properties of an object.
+    pub props: Vec<PropRule>,
+    /// `additionalProperties: false`.
+    pub closed: bool,
+    /// An array of answers: what must hold for their marks. Their ids are checked as well.
+    pub choices: Option<CorrectRule>,
+}
+
+/// One property of an object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PropRule {
+    pub key: String,
+    pub required: bool,
+    pub rule: ValueRule,
+}
+
 /// One field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldSpec {
@@ -71,12 +94,8 @@ pub struct FieldSpec {
     /// The label of the add button of an array.
     pub add_label: Option<String>,
     pub required: bool,
-    pub limits: Limits,
-    /// For a string list: the limits of each string.
-    pub item_limits: Limits,
     pub control: Control,
-    /// The JSON type of the value: refuses the rest.
-    pub json_type: JsonType,
+    pub rule: ValueRule,
     /// Hint keys starting with `x-`: ignored by the form, for a host of its own.
     pub extensions: serde_json::Map<String, serde_json::Value>,
 }
@@ -87,7 +106,7 @@ pub enum JsonType {
     Boolean,
     Array,
     Object,
-    /// A custom widget without a declared type.
+    /// A custom widget's value without a declared type.
     Any,
 }
 
@@ -95,8 +114,8 @@ pub enum JsonType {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FormSpec {
     pub fields: Vec<FieldSpec>,
-    /// `additionalProperties: false` at the root.
-    pub closed: bool,
+    /// What the values must look like as a whole.
+    pub rule: ValueRule,
 }
 
 /// Why a schema or its hints are outside the subset. `path` names the place, `/` separated.

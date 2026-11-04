@@ -97,7 +97,9 @@ name, so an arbitrary schema cannot silently become a promise:
 
 - JSON Schema: `type` (one of string, boolean, array, object), `properties`, `required`, `items`,
   `minLength`, `maxLength`, `minItems`, `maxItems`, `additionalProperties` as true or false.
-  Annotations are ignored. `enum`, `pattern`, `format`, `$ref` and combinators are refused.
+  Annotations are ignored. `enum`, `pattern`, `format`, `$ref` and combinators are refused, and so
+  is a keyword that would mean nothing on its type. This holds at any depth, in the entries of
+  choices and images and below a custom widget too; a custom widget may only leave `type` out.
 - UI hints, our own small format and not JSON Forms: `version`, `order`, `fields`, and per field
   `label`, `help`, `widget`, `multiline`, `add_label`, `selection`, `correct`, nested `fields` and
   `order`, and `custom` for a host's widget. `variants` overlays the hints by a host's name.
@@ -106,8 +108,9 @@ name, so an arbitrary schema cannot silently become a promise:
 - Correctness (`exactly-one`, `at-least-one`), missing and duplicate answer ids: these are not
   JSON Schema, so a validator would not have given them anyway.
 
-Empty is how missing content looks in a document, so an empty string or array fails `required`
-and passes the other limits.
+Empty is how missing content looks in a document, so an empty string or array as a field's value
+fails `required` and passes the other limits. An entry of an array exists, so its strings answer
+to their limits even when empty.
 
 **Own validator, not the `jsonschema` crate.** The crate is MIT, and with default features off its
 tree has no HTTP or TLS. Measured on this machine with 0.60.2 against a binary using only
