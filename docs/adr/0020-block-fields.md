@@ -115,6 +115,29 @@ would still need mapping to fields and languages, and it would not refuse keywor
 subset. Should the subset grow to where this is no longer small, the choice can be revisited
 behind `FormSpec::validate`.
 
+### The native form
+
+`crates/egui-schema-form` draws a `FormSpec` over JSON values: schema, hints and values in, changed
+values and reasons out. It depends on `schema-form-core`, egui and `serde_json`, and knows nothing of
+Markdown, Markise or any block. It draws generic primitives only: text, multiline text, string
+list, array with add, remove and reorder, radio and checkbox choices, checkbox, group. No widget of
+any site's vocabulary lives here.
+
+- **Identity.** Values stay plain JSON. Beside them every array row has a key that moves with it,
+  and each row has an explicit egui scope built from the key, not its position. Text fields, their
+  scroll areas and the buttons take their ids from it, so caret, selection, IME composition, focus
+  and scroll follow a row through a reorder. `set_values` keeps keys by `id`, equal content, then
+  order.
+- **IME.** egui writes the unfinished composition into the text. So `changed` stays false during a
+  composition and comes at its end, and values set from outside wait for it.
+- **Keyboard.** No drag in this phase. Up, down and remove are buttons in the tab order, and Alt+Up
+  and Alt+Down move a row from anywhere inside it. Focus does not get lost: a button going disabled
+  at the edge passes it to the other, a removed row to the next, a new row takes it.
+- **Screen readers.** Fields are labelled, a reason is an `Alert` live region and the field's
+  description, a move is announced.
+- **Theme and zoom.** Colours and sizes come from the `Ui`; icons are painted, so no font is needed.
+- A value of an unexpected type is shown as not editable and kept. The form never coerces it.
+
 ### Limits
 
 - A text value holding a line that is only an image reads back as the image field when the block
@@ -134,5 +157,6 @@ behind `FormSpec::validate`.
 ## Consequences
 
 - The form crate and the panel get JSON and need no Markdown. The panel is a later PR.
+- `egui-schema-form` could leave the repository as it is: nothing in it is ours.
 - The decode cost is one parse of the block and the encode cost one line diff of it, per apply.
   Neither depends on the document's size.

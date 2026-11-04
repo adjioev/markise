@@ -38,6 +38,7 @@ markise-export = 3
 markise-pdf = 3
 markise-engine = 4
 markise-mcp = 5
+egui-schema-form = 6
 markise-ui-egui = 6
 
 # Crates outside the layer stack:
@@ -65,6 +66,8 @@ L1 = ["markise-doc", "markise-md"]
 L2 = ["markise-text", "markise-theme", "markise-blocks", "markise-layout"]
 # The PDF/PNG back ends lay out the export model built by markise-export.
 L3 = ["markise-export", "markise-pdf"]
+# The UI uses the form crate, which knows nothing of Markise.
+L6 = ["egui-schema-form", "markise-ui-egui"]
 
 # The format seam (ADR 0006 §1.5): these crates read documents only through `markise-doc`
 # (`FormatDoc` views), so another source format can be added without touching them. Format
