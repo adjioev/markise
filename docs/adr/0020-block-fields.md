@@ -162,6 +162,11 @@ id and the reasons, and shows its reasons as well. An unregistered name shows a 
 the value. This repository holds no such widget except one in the tests, and no site's vocabulary:
 a site's particular picker is a host's or a package's business.
 
+Known limits of that contract: the form does not see inside a host widget. Inside an array row, Alt+Up
+and Alt+Down do not work from the widget's own controls, and a composition in its own text editor
+is not the form's: `is_composing` stays false, so a host widget owns that. No host widget exists in
+the repository yet, so this stays as it is until one needs more.
+
 ### Limits
 
 - A text value holding a line that is only an image reads back as the image field when the block

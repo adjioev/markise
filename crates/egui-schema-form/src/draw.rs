@@ -71,7 +71,7 @@ impl Cx<'_> {
             .collect()
     }
 
-    fn draw_errors(&self, ui: &mut Ui, path: &str) {
+    pub fn draw_errors(&self, ui: &mut Ui, path: &str) {
         for m in self.messages(path) {
             error_label(ui, &m);
         }

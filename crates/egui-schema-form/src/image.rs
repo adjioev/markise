@@ -43,19 +43,26 @@ fn labelled_text(
     row: Id,
     width: f32,
     cx: &mut Cx,
-) -> Response {
-    let mut s = o.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+) -> Option<Response> {
     ui.small(label);
+    // a value of another type is not an empty text to type over
+    if o.get(key).is_some_and(|v| !v.is_string()) {
+        not_editable(ui, cx);
+        return None;
+    }
+    let mut s = o.get(key).and_then(Value::as_str).unwrap_or("").to_string();
     let r = text_editor(ui, &mut s, row.with(key), false, width, cx);
     if r.changed() {
         o.insert(key.to_string(), Value::String(s));
     }
-    r
+    Some(r)
 }
 
 /// Puts a delivered file into its row.
 fn take_delivery(o: &mut Map<String, Value>, row: Id, cx: &mut Cx) {
-    if let Some(path) = cx.delivered.remove(&row) {
+    if let Some(path) = cx.delivered.remove(&row)
+        && o.get("path").is_none_or(Value::is_string)
+    {
         o.insert("path".to_string(), Value::String(path));
         cx.changed = true;
     }
@@ -109,15 +116,18 @@ pub(crate) fn image_row(
         let width = (ui.available_width() - buttons_width(ui) - ui.spacing().item_spacing.x).max(side);
         ui.vertical(|ui| {
             ui.set_width(width);
-            let r = labelled_text(ui, o, "alt", alt_label, row, width, cx);
-            ui.ctx()
-                .accesskit_node_builder(r.id, |b| b.set_label(format!("{alt_label}: {row_name}")));
-            cx.describe(ui, &r, &join(path, "alt"));
-            let r = labelled_text(ui, o, "path", path_label, row, width, cx);
-            ui.ctx()
-                .accesskit_node_builder(r.id, |b| b.set_label(format!("{path_label}: {row_name}")));
-            cx.describe(ui, &r, &join(path, "path"));
-            picker(ui, choose, row, &row_name, cx);
+            for (key, label) in [("alt", alt_label), ("path", path_label)] {
+                let at = join(path, key);
+                if let Some(r) = labelled_text(ui, o, key, label, row, width, cx) {
+                    ui.ctx()
+                        .accesskit_node_builder(r.id, |b| b.set_label(format!("{label}: {row_name}")));
+                    cx.describe(ui, &r, &at);
+                }
+                cx.draw_errors(ui, &at);
+            }
+            if o.get("path").is_none_or(Value::is_string) {
+                picker(ui, choose, row, &row_name, cx);
+            }
             if let Thumbnail::Failed(why) = &state {
                 error_label(ui, why);
             }

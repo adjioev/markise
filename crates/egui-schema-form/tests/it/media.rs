@@ -281,3 +281,45 @@ fn an_unknown_widget_says_so_and_keeps_the_value() {
         "another field's edit keeps it"
     );
 }
+
+#[test]
+fn a_wrong_type_in_an_image_row_is_shown_and_kept() {
+    let schema = json!({"type": "object", "properties": {"pictures": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"alt": {"type": "string"}, "path": {"type": "string"}},
+    }}}});
+    let hints = json!({"version": 1, "fields": {"pictures": {"label": "Pictures", "widget": "images"}}});
+    let spec = FormSpec::parse(&schema, &hints, None).expect("in the subset");
+    let v = json!({"pictures": [{"alt": 7, "path": ["x"]}, {"alt": 9, "path": "ok.png"}]});
+    let mut h = harness(spec, v.clone());
+    h.run();
+    assert_eq!(h.query_all_by_label("This value cannot be edited here").count(), 3);
+    assert_eq!(
+        h.query_all_by_label("The value has the wrong type").count(),
+        3,
+        "the reasons show"
+    );
+    assert!(
+        h.query_by_label("Alt text: Pictures 1").is_none(),
+        "no empty box to type over"
+    );
+    assert!(h.query_by_label("Path: Pictures 1").is_none());
+    assert!(
+        h.query_by_label("Choose file: Pictures 1").is_none(),
+        "a file would overwrite it"
+    );
+    assert!(
+        !h.state().host.asked.iter().any(String::is_empty),
+        "nothing to show for it"
+    );
+
+    // the other part of a row still edits, and the bad one stays
+    h.get_by_label("Path: Pictures 2").focus();
+    h.run();
+    h.get_by_label("Path: Pictures 2").type_text("x");
+    h.run();
+    assert_eq!(
+        h.state().form.values(),
+        &json!({"pictures": [{"alt": 7, "path": ["x"]}, {"alt": 9, "path": "ok.pngx"}]})
+    );
+}
