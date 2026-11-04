@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use markise_doc::{Patch, PatchSet};
 use similar::{Algorithm, DiffOp, TextDiff, capture_diff_slices};
 
-use super::decode::Line;
+use super::decode::{Line, columns};
 use super::escape::{escape_anchor_tail, escape_heading_tail, escape_line, valid_anchor};
 use super::{Applied, BlockFields, Field, FieldEdit, FieldKind, FieldValue, FieldsError, Item, ItemData, ItemId};
 
@@ -130,6 +130,7 @@ impl FieldEdit {
 impl Draft {
     fn edit(&mut self, old: &BlockFields, e: &FieldEdit) -> Result<(), FieldsError> {
         let name = e.field();
+        let taken = block_ids(old, &self.fields);
         let f = &mut self.fields[old.field_index(name)?];
         let wrong = || FieldsError::WrongKind {
             field: name.to_string(),
@@ -186,7 +187,7 @@ impl Draft {
                 }
                 let mut data = item.clone();
                 if let ItemData::Choice { anchor, .. } = &mut data {
-                    let fresh = new_anchor(items, anchor.as_deref(), &self.retired);
+                    let fresh = new_anchor(&taken, anchor.as_deref(), &self.retired);
                     *anchor = Some(fresh);
                 }
                 let id = ItemId(self.next_item);
@@ -213,21 +214,35 @@ impl Draft {
     }
 }
 
+/// Every id in the block: in the source, headings and what no field took included, and on the
+/// answers as edited so far.
+fn block_ids(old: &BlockFields, fields: &[Field]) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    for part in old.source.split("{#").skip(1) {
+        if let Some(id) = part.split('}').next().filter(|id| valid_anchor(id)) {
+            ids.insert(id.to_string());
+        }
+    }
+    for f in fields {
+        if let FieldValue::Items(items) = &f.value {
+            ids.extend(items.iter().filter_map(|i| match &i.data {
+                ItemData::Choice { anchor, .. } => anchor.clone(),
+                _ => None,
+            }));
+        }
+    }
+    ids
+}
+
 /// The wanted id if valid and free, or `a<N>` above every number in use or retired, so a
 /// removed answer's id does not come back.
-fn new_anchor(items: &[Item], wanted: Option<&str>, retired: &BTreeSet<String>) -> String {
-    let taken: BTreeSet<&str> = (items.iter())
-        .filter_map(|i| match &i.data {
-            ItemData::Choice { anchor, .. } => anchor.as_deref(),
-            _ => None,
-        })
-        .collect();
-    if let Some(w) = wanted.filter(|w| valid_anchor(w) && !taken.contains(w) && !retired.contains(*w)) {
+fn new_anchor(taken: &BTreeSet<String>, wanted: Option<&str>, retired: &BTreeSet<String>) -> String {
+    if let Some(w) = wanted.filter(|w| valid_anchor(w) && !taken.contains(*w) && !retired.contains(*w)) {
         return w.to_string();
     }
-    let number = |a: &str| a.strip_prefix('a').and_then(|n| n.parse::<u64>().ok());
-    let used = taken.iter().copied().chain(retired.iter().map(String::as_str));
-    format!("a{}", used.filter_map(number).max().unwrap_or(0) + 1)
+    let number = |a: &String| a.strip_prefix('a').and_then(|n| n.parse::<u64>().ok());
+    let top = taken.iter().chain(retired).filter_map(number).max().unwrap_or(0);
+    format!("a{}", top + 1)
 }
 
 /// The new block text: the regions in order, with the old gaps where neighbours stay neighbours
@@ -255,7 +270,14 @@ fn render(old: &BlockFields, fields: &[Field]) -> String {
             None => pieces.push((Some(ci), s[c.range.clone()].to_string())),
             Some(k) => {
                 absent_up_to(k, &mut pieces);
-                pieces.push((Some(ci), render_field(old, &fields[k])));
+                // a value nobody changed is its bytes, even when it reads as empty
+                let same = fields[k].value == old.fields[k].value;
+                let text = if same {
+                    s[c.range.clone()].to_string()
+                } else {
+                    render_field(old, &fields[k])
+                };
+                pieces.push((Some(ci), text));
             }
         }
     }
@@ -422,6 +444,10 @@ fn render_field(old: &BlockFields, f: &Field) -> String {
     }
     out.push_str(&s[f.src.head.clone()]);
     render_lines(old, &f.src.lines, &new, &st, &mut out);
+    // the id of a heading that had no text has no space before it yet
+    if s[f.src.tail.clone()].starts_with('{') {
+        out.push(' ');
+    }
     out.push_str(&s[f.src.tail.clone()]);
     out
 }
@@ -509,7 +535,13 @@ fn render_list_item(
         ItemData::Choice { text, correct, anchor } => (text.as_str(), Some(*correct), anchor.as_deref()),
         ItemData::Image { .. } => return,
     };
-    let head = match item.src.as_ref().or(model) {
+    let tail = item.src.as_ref().map(|x| &s[x.tail.clone()]);
+    let written = match (tail, anchor) {
+        (Some(t), _) => t.to_string(),
+        (None, Some(a)) => format!("{{#{a}}}"),
+        _ => String::new(),
+    };
+    let mut head = match item.src.as_ref().or(model) {
         Some(x) => marker(old, f, x, pos, correct),
         None => match correct {
             Some(true) => "- [x] ".to_string(),
@@ -517,12 +549,14 @@ fn render_list_item(
             None => "- ".to_string(),
         },
     };
+    // a bare `-` needs its space once it has something to hold
+    if (!text.trim().is_empty() || !written.is_empty()) && !head.ends_with([' ', '\t']) {
+        head.push(' ');
+    }
     out.push_str(&head);
     // the continuation lines hang under the text; under the box's `[` for an answer
-    let width = head
-        .find('[')
-        .filter(|_| correct.is_some())
-        .unwrap_or(head.chars().count());
+    let hang = head.find('[').filter(|_| correct.is_some()).unwrap_or(head.len());
+    let width = columns(&head[..hang]);
     let indent = " ".repeat(width);
     let mut new = value_lines(text);
     if new.is_empty() {
@@ -537,12 +571,6 @@ fn render_list_item(
         esc,
     };
     render_lines(old, lines, &new, &st, out);
-    let tail = item.src.as_ref().map(|x| &s[x.tail.clone()]);
-    let written = match (tail, anchor) {
-        (Some(t), _) => t.to_string(),
-        (None, Some(a)) => format!("{{#{a}}}"),
-        _ => String::new(),
-    };
     if !written.is_empty() && !written.starts_with(' ') && !text.trim().is_empty() {
         out.push(' ');
     }
