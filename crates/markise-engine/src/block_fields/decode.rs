@@ -206,6 +206,28 @@ fn cut_anchor(s: &str, r: &R) -> Option<(String, R)> {
     Some((text[at + 2..text.len() - 1].to_string(), r.start + cut..r.end))
 }
 
+/// The columns `text` takes, with tab stops every four.
+pub(super) fn columns(text: &str) -> usize {
+    text.chars().fold(0, next_column)
+}
+
+fn next_column(col: usize, c: char) -> usize {
+    if c == '\t' { (col / 4 + 1) * 4 } else { col + 1 }
+}
+
+/// How many bytes of `text` reach column `target`, or as far as it goes; with `blank_only` only
+/// over spaces and tabs.
+fn bytes_to_column(text: &str, target: usize, blank_only: bool) -> usize {
+    let mut col = 0;
+    for (at, c) in text.char_indices() {
+        if col >= target || (blank_only && !matches!(c, ' ' | '\t')) {
+            return at;
+        }
+        col = next_column(col, c);
+    }
+    text.len()
+}
+
 fn list_item(s: &str, b: &Block, opts: &ParseOptions, choice: bool) -> Option<(ItemSrc, ItemData)> {
     let BlockKind::ListItem {
         marker,
@@ -218,21 +240,17 @@ fn list_item(s: &str, b: &Block, opts: &ParseOptions, choice: bool) -> Option<(I
     };
     let whole = line_start(s, marker.start)..line_end(s, b.span.end);
     let task = task.as_ref().filter(|_| choice);
-    let col = marker.start + content_offset;
+    // the parser's offset is in columns, and a tab is several of them
+    let indent = columns(&s[whole.start..marker.start]) + content_offset;
     let first_end = line_end(s, marker.start);
     let content_start = match task {
         Some((_, bx)) => bx.end + usize::from(s[bx.end..first_end].starts_with(' ')),
-        None => col.min(first_end),
+        None => whole.start + bytes_to_column(&s[whole.start..first_end], indent, false),
     };
-    let indent = col - whole.start;
     let mut lines = Vec::new();
     for (i, (l, term)) in split_lines(s, content_start..whole.end).into_iter().enumerate() {
         let text = &s[l.clone()];
-        let p = if i == 0 {
-            0
-        } else {
-            (text.len() - text.trim_start_matches(' ').len()).min(indent)
-        };
+        let p = if i == 0 { 0 } else { bytes_to_column(text, indent, true) };
         let value = unescape_line(&text[p..], opts);
         lines.push(Line {
             prefix: l.start..l.start + p,

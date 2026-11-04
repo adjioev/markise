@@ -13,10 +13,6 @@ use crate::widgets::error_label;
 /// The thumbnail's side, in lines of text, so it follows the zoom.
 const THUMB_LINES: f32 = 4.0;
 
-pub(crate) fn first_editor(row: Id) -> Id {
-    row.with("alt").with("text")
-}
-
 fn thumbnail(ui: &mut Ui, state: &Thumbnail, alt: &str, loading: &str, side: f32) {
     let frame = Vec2::splat(side);
     match state {

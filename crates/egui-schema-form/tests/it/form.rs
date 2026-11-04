@@ -389,3 +389,140 @@ fn it_follows_zoom_and_theme_without_leaving_its_width() {
         assert_eq!(h.ctx.global_style().visuals.dark_mode, theme == egui::Theme::Dark);
     }
 }
+
+#[test]
+fn a_composition_belongs_to_the_form_that_has_the_focus() {
+    use egui_schema_form::SchemaForm;
+    use egui_schema_form::schema_form_core::FormSpec;
+    let spec = || FormSpec::parse(&schema(), &hints("single"), None).expect("in the subset");
+    struct Two {
+        a: SchemaForm,
+        b: SchemaForm,
+    }
+    let state = Two {
+        a: SchemaForm::new(spec(), values(), "form a"),
+        b: SchemaForm::new(spec(), json!({"title": "Other"}), "form b"),
+    };
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(900.0, 900.0))
+        .build_ui_state(
+            |ui, s: &mut Two| {
+                ui.columns(2, |c| {
+                    s.a.ui(&mut c[0]);
+                    s.b.ui(&mut c[1]);
+                });
+            },
+            state,
+        );
+    h.run();
+    h.get_all_by_label("Items 1").next().expect("in form a").focus();
+    h.run();
+    h.event(Event::Ime(ImeEvent::Preedit {
+        text: "n".into(),
+        active_range_chars: None,
+    }));
+    h.run();
+    assert!(h.state().a.is_composing());
+    assert!(!h.state().b.is_composing(), "the other form hears nothing of it");
+    // and values for the other form do not wait
+    h.state_mut().b.set_values(json!({"title": "Now"}));
+    assert_eq!(h.state().b.values()["title"], json!("Now"));
+    assert_eq!(h.state().a.values()["items"][0], json!("onen"));
+    // focus going elsewhere ends it
+    h.get_all_by_label("Title").nth(1).expect("in form b").focus();
+    h.run();
+    assert!(!h.state().a.is_composing());
+}
+
+#[test]
+fn removing_down_to_the_limit_lands_on_an_enabled_control() {
+    let mut h = harness("single");
+    h.run();
+    h.get_by_label("Remove: Items 2").click();
+    h.run();
+    assert_eq!(texts(&h, "items"), ["one"]);
+    assert!(h.get_by_label("Remove: Items 1").accesskit_node().is_disabled());
+    assert!(
+        h.get_by_label("Add item").is_focused(),
+        "not on the button that went disabled"
+    );
+    // and with Add at its own limit first: its id stays the same as rows come and go
+    h.get_by_label("Add item").click();
+    h.run();
+    h.get_by_label("Add item").click();
+    h.run();
+    assert!(h.get_by_label("Add item").accesskit_node().is_disabled());
+    h.get_by_label("Remove: Items 3").click();
+    h.run();
+    assert!(h.get_by_label("Remove: Items 2").is_focused());
+}
+
+#[test]
+fn a_new_row_focuses_its_first_real_control() {
+    let schema = json!({"type": "object", "properties": {
+        "flags": {"type": "array", "items": {"type": "object", "properties": {
+            "on": {"type": "boolean"}, "name": {"type": "string"},
+        }}},
+        "groups": {"type": "array", "items": {"type": "object", "properties": {
+            "g": {"type": "object", "properties": {"inner": {"type": "string"}}},
+        }}},
+        "lists": {"type": "array", "items": {"type": "object", "properties": {
+            "tags": {"type": "array", "items": {"type": "string"}},
+        }}},
+        "empty": {"type": "array", "items": {"type": "object", "properties": {}}},
+    }});
+    let hints = json!({"version": 1, "fields": {
+        "flags": {"add_label": "Add flag", "order": ["on", "name"], "fields": {"on": {"label": "Enabled"}}},
+        "groups": {"add_label": "Add group", "fields": {"g": {"fields": {"inner": {"label": "Inner"}}}}},
+        "lists": {"add_label": "Add list", "fields": {"tags": {"label": "Tags", "add_label": "Add tag"}}},
+        "empty": {"label": "Bare", "add_label": "Add bare"},
+    }});
+    let mut h = harness_with(&schema, &hints, json!({}));
+    h.run();
+    h.get_by_label("Add flag").click();
+    h.run();
+    assert!(h.get_by_label("Enabled").is_focused(), "a checkbox");
+    h.get_by_label("Add group").click();
+    h.run();
+    assert!(h.get_by_label("Inner").is_focused(), "inside a group");
+    h.get_by_label("Add list").click();
+    h.run();
+    assert!(h.get_by_label("Add tag").is_focused(), "a nested array's add");
+    h.get_by_label("Add bare").click();
+    h.run();
+    assert!(h.get_by_label("Remove: Bare 1").is_focused(), "nothing else in the row");
+    // an answer's first real control is its text, not its mark
+    let mut h = harness("single");
+    h.run();
+    h.get_by_label("Add answer").click();
+    h.run();
+    assert!(h.get_by_label("Answers 4").is_focused());
+}
+
+#[test]
+fn an_entrys_reason_shows_and_a_wrong_type_inside_an_entry_is_kept() {
+    let mut v = values();
+    v["answers"][0]["text"] = json!(42);
+    v["answers"][1]["correct"] = json!("yes");
+    v["answers"][2]["text"] = json!("");
+    let mut h = harness_with(&schema(), &hints("single"), v.clone());
+    h.run();
+    assert_eq!(h.query_all_by_label("This value cannot be edited here").count(), 2);
+    assert!(h.query_by_label("Required").is_some(), "the empty text of answer 3");
+    // marking another answer does not touch a mark it cannot read
+    h.get_by_label("Marked: Answers 3").click();
+    h.run();
+    assert_eq!(value_of(&h, "answers")[0]["text"], json!(42));
+    assert_eq!(value_of(&h, "answers")[1]["correct"], json!("yes"));
+    assert_eq!(value_of(&h, "answers")[2]["correct"], json!(true));
+}
+
+#[test]
+fn a_checkbox_over_a_wrong_type_keeps_it() {
+    let mut v = values();
+    v["rows"][0]["on"] = json!("yes");
+    let mut h = harness_with(&schema(), &hints("single"), v);
+    h.run();
+    assert!(h.query_by_label("This value cannot be edited here").is_some());
+    assert_eq!(value_of(&h, "rows")[0]["on"], json!("yes"));
+}

@@ -1,9 +1,11 @@
 //! Values against a [`FormSpec`]. The result is data: every reason names its field and says what
 //! is wrong; what to do about it is the caller's.
 
+use std::collections::HashSet;
+
 use serde_json::{Map, Value};
 
-use crate::{Control, CorrectRule, FieldSpec, FormSpec, JsonType, Limits};
+use crate::{CorrectRule, FormSpec, JsonType, Limits, PropRule, ValueRule};
 
 /// What is wrong with a value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,12 +51,13 @@ pub struct FieldError {
 
 impl FormSpec {
     /// Every reason `values` does not fit, in field order. A key absent from the values counts
-    /// as empty. An empty string or array fails `required` and passes everything else: when a
-    /// value comes from a document, empty is how missing content looks.
+    /// as empty. An empty string or array as a field's value fails `required` and passes
+    /// everything else: when a value comes from a document, empty is how missing content looks.
+    /// An entry of an array exists, so its strings answer to their limits even when empty.
     pub fn validate(&self, values: &Value) -> Vec<FieldError> {
         let mut out = Vec::new();
         match values.as_object() {
-            Some(o) => check_object(&self.fields, o, "", self.closed, &mut out),
+            Some(o) => check_object(&self.rule, o, "", false, &mut out),
             None => out.push(FieldError {
                 path: String::new(),
                 kind: ErrorKind::WrongType,
@@ -72,17 +75,40 @@ fn join(path: &str, key: impl std::fmt::Display) -> String {
     }
 }
 
-fn check_object(fields: &[FieldSpec], o: &Map<String, Value>, path: &str, closed: bool, out: &mut Vec<FieldError>) {
-    for f in fields {
-        check_field(f, o.get(&f.key), &join(path, &f.key), out);
+fn check_object(rule: &ValueRule, o: &Map<String, Value>, path: &str, in_item: bool, out: &mut Vec<FieldError>) {
+    for p in &rule.props {
+        check_prop(p, o.get(&p.key), &join(path, &p.key), in_item, out);
     }
-    if closed {
-        for k in o.keys().filter(|k| !fields.iter().any(|f| f.key == **k)) {
+    if rule.closed {
+        for k in o.keys().filter(|k| !rule.props.iter().any(|p| p.key == **k)) {
             out.push(FieldError {
                 path: join(path, k),
                 kind: ErrorKind::UnknownKey,
             });
         }
+    }
+}
+
+fn check_prop(p: &PropRule, v: Option<&Value>, path: &str, in_item: bool, out: &mut Vec<FieldError>) {
+    let empty = match v {
+        None | Some(Value::Null) => true,
+        Some(Value::String(s)) => s.trim().is_empty(),
+        Some(Value::Array(a)) => a.is_empty(),
+        _ => false,
+    };
+    if empty && p.required {
+        out.push(FieldError {
+            path: path.to_string(),
+            kind: ErrorKind::Required,
+        });
+        return;
+    }
+    let Some(v) = v.filter(|v| !v.is_null()) else {
+        return;
+    };
+    let empty_string_in_item = in_item && v.is_string();
+    if !empty || empty_string_in_item {
+        check_value(&p.rule, v, path, in_item, out);
     }
 }
 
@@ -107,27 +133,8 @@ fn check_string(s: &str, l: &Limits, path: &str, out: &mut Vec<FieldError>) {
     }
 }
 
-fn check_field(f: &FieldSpec, v: Option<&Value>, path: &str, out: &mut Vec<FieldError>) {
-    let mut push = |kind| {
-        out.push(FieldError {
-            path: path.to_string(),
-            kind,
-        })
-    };
-    let empty = match v {
-        None | Some(Value::Null) => true,
-        Some(Value::String(s)) => s.trim().is_empty(),
-        Some(Value::Array(a)) => a.is_empty(),
-        _ => false,
-    };
-    if empty && f.required {
-        push(ErrorKind::Required);
-        return;
-    }
-    let Some(v) = v.filter(|v| !v.is_null()) else {
-        return;
-    };
-    let type_ok = match f.json_type {
+fn check_value(rule: &ValueRule, v: &Value, path: &str, in_item: bool, out: &mut Vec<FieldError>) {
+    let type_ok = match rule.json_type {
         JsonType::String => v.is_string(),
         JsonType::Boolean => v.is_boolean(),
         JsonType::Array => v.is_array(),
@@ -135,61 +142,43 @@ fn check_field(f: &FieldSpec, v: Option<&Value>, path: &str, out: &mut Vec<Field
         JsonType::Any => true,
     };
     if !type_ok {
-        push(ErrorKind::WrongType);
+        out.push(FieldError {
+            path: path.to_string(),
+            kind: ErrorKind::WrongType,
+        });
         return;
     }
-    if let Some(s) = v.as_str() {
-        if !s.is_empty() {
-            check_string(s, &f.limits, path, out);
-        }
-        return;
-    }
-    let Some(a) = v.as_array() else {
-        if let (Control::Group { fields }, Some(o)) = (&f.control, v.as_object()) {
-            check_object(fields, o, path, false, out);
-        }
-        return;
-    };
-    if let Some(min) = f.limits.min_items.filter(|m| (a.len() as u64) < *m) {
-        push(ErrorKind::TooFew { min });
-    }
-    if let Some(max) = f.limits.max_items.filter(|m| (a.len() as u64) > *m) {
-        push(ErrorKind::TooMany { max });
-    }
-    for (i, e) in a.iter().enumerate() {
-        let p = join(path, i);
-        match &f.control {
-            Control::StringList { .. } => match e.as_str() {
-                Some(s) => check_string(s, &f.item_limits, &p, out),
-                None => out.push(FieldError {
-                    path: p,
-                    kind: ErrorKind::WrongType,
-                }),
-            },
-            Control::Array { fields } => match e.as_object() {
-                Some(o) => check_object(fields, o, &p, false, out),
-                None => out.push(FieldError {
-                    path: p,
-                    kind: ErrorKind::WrongType,
-                }),
-            },
-            Control::Choices { .. } | Control::Images if !e.is_object() => {
+    match v {
+        Value::String(s) if rule.json_type == JsonType::String => check_string(s, &rule.limits, path, out),
+        Value::Object(o) if rule.json_type == JsonType::Object => check_object(rule, o, path, in_item, out),
+        Value::Array(a) if rule.json_type == JsonType::Array => {
+            let mut push = |kind| {
                 out.push(FieldError {
-                    path: p,
-                    kind: ErrorKind::WrongType,
-                });
+                    path: path.to_string(),
+                    kind,
+                })
+            };
+            if let Some(min) = rule.limits.min_items.filter(|m| (a.len() as u64) < *m) {
+                push(ErrorKind::TooFew { min });
             }
-            _ => {}
+            if let Some(max) = rule.limits.max_items.filter(|m| (a.len() as u64) > *m) {
+                push(ErrorKind::TooMany { max });
+            }
+            if let Some(item) = &rule.items {
+                for (i, e) in a.iter().enumerate() {
+                    check_value(item, e, &join(path, i), true, out);
+                }
+            }
+            if let Some(correct) = rule.choices {
+                check_choices(a, correct, path, out);
+            }
         }
-    }
-    if let Control::Choices { correct, .. } = &f.control {
-        check_choices(a, *correct, path, out);
+        _ => {}
     }
 }
 
 fn check_choices(a: &[Value], rule: CorrectRule, path: &str, out: &mut Vec<FieldError>) {
-    let marked = a
-        .iter()
+    let marked = (a.iter())
         .filter(|e| e.get("correct") == Some(&Value::Bool(true)))
         .count();
     let kind = match rule {
@@ -203,20 +192,20 @@ fn check_choices(a: &[Value], rule: CorrectRule, path: &str, out: &mut Vec<Field
             kind,
         });
     }
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::with_capacity(a.len());
     for (i, e) in a.iter().enumerate() {
         match e.get("id").and_then(Value::as_str).unwrap_or("") {
             "" => out.push(FieldError {
                 path: join(path, i),
                 kind: ErrorKind::MissingId,
             }),
-            id if seen.contains(&id) => {
+            id if !seen.insert(id) => {
                 out.push(FieldError {
                     path: join(path, i),
                     kind: ErrorKind::DuplicateId { id: id.to_string() },
                 });
             }
-            id => seen.push(id),
+            _ => {}
         }
     }
 }

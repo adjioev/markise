@@ -85,11 +85,13 @@ pub(super) fn unescape_anchor_tail(s: &str) -> String {
     }
 }
 
-/// The start of the `#` run that would close an ATX heading.
+/// The start of a trailing `#` run that is, or with its backslashes removed would be, a closing
+/// sequence of an ATX heading.
 fn closing_run(s: &str) -> Option<usize> {
     let t = s.trim_end();
     let at = t.trim_end_matches('#').len();
-    (at < t.len() && (at == 0 || t[..at].ends_with([' ', '\t']))).then_some(at)
+    let before = t[..at].trim_end_matches('\\');
+    (at < t.len() && (before.is_empty() || before.ends_with([' ', '\t']))).then_some(at)
 }
 
 pub(super) fn escape_heading_tail(s: &str) -> String {
@@ -100,15 +102,8 @@ pub(super) fn escape_heading_tail(s: &str) -> String {
 }
 
 pub(super) fn unescape_heading_tail(s: &str) -> String {
-    let t = s.trim_end();
-    let at = t.trim_end_matches('#').len();
-    if at == t.len() || !t[..at].ends_with('\\') {
-        return s.to_string();
-    }
-    let before = &t[..at - 1];
-    if before.is_empty() || before.ends_with([' ', '\t']) {
-        format!("{before}{}", &s[at..])
-    } else {
-        s.to_string()
+    match closing_run(s) {
+        Some(at) if s[..at].ends_with('\\') => format!("{}{}", &s[..at - 1], &s[at..]),
+        _ => s.to_string(),
     }
 }
