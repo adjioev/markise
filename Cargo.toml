@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 markise-md = { path = "crates/markise-md" }
 schema-form-core = { path = "crates/schema-form-core" }
+egui-schema-form = { path = "crates/egui-schema-form" }
 markise-doc = { path = "crates/markise-doc" }
 markise-testfmt = { path = "crates/markise-testfmt" }
 markise-export = { path = "crates/markise-export" }

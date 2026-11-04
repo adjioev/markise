@@ -48,6 +48,7 @@ Layered workspace (`crates/*`, `apps/*`), lower layers never depend on higher on
 | L3 | `markise-render`, `markise-export`, `markise-pdf` | rasterising; HTML (spec 03 DOM contract), export model, Pandoc bridge; paginated PDF/PNG export |
 | L4 | `markise-engine` | session, undo, commands, files, autosave, search, file watching |
 | L5 | `markise-mcp` | MCP server |
+| L6 | `egui-schema-form` | a native egui form from JSON (schema, UI hints, values); knows nothing of Markise or Markdown (ADR 0020) |
 | L6 | `markise-ui-egui` | egui front end |
 | apps | `markise`, `markise-cli` | desktop app, command line |
 | tests | `markise-corpus` | deterministic corpus for tests and benchmarks (dev-dependency only) |
@@ -57,7 +58,7 @@ The table is enforced by `cargo xtask layers` (CI): its machine-readable copy is
 which must list the same crates at the same layers. Within one layer a crate may only use an
 earlier crate of an `[intra_layer]` chain there (today `markise-doc` → `markise-md` and
 `markise-text` → `markise-theme` → `markise-blocks` → `markise-layout`, and `markise-export` →
-`markise-pdf`); apps sit on top and nothing depends on them; UI toolkits (egui, eframe, winit, rfd, muda) are allowed from L6 only;
+`markise-pdf`, and `egui-schema-form` → `markise-ui-egui`); apps sit on top and nothing depends on them; UI toolkits (egui, eframe, winit, rfd, muda) are allowed from L6 only;
 format-neutral crates (`[format_seam]`, today `markise-layout`) read documents only through
 `markise-doc` and may use a format crate (`markise-md`) only as a dev-dependency.
 Throwaway `spikes/` are not workspace members and are

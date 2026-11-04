@@ -1360,6 +1360,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-schema-form"
+version = "0.1.0-beta.1"
+dependencies = [
+ "egui",
+ "egui_kittest",
+ "schema-form-core",
+ "serde_json",
+]
+
+[[package]]
 name = "egui-wgpu"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
