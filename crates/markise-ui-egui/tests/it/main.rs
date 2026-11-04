@@ -5,6 +5,7 @@
 
 mod block_form;
 mod block_gaps;
+mod block_ids;
 mod block_packages;
 mod code_tools;
 mod common;

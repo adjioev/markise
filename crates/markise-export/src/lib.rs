@@ -644,7 +644,10 @@ impl<'a> Ctx<'a> {
         let mut tracker = SlugTracker::new();
         // `<a name="…">` anchors in raw HTML count for uniqueness (R7.2).
         let mut found = Vec::new();
-        for b in self.doc.blocks() {
+        // the same headings the body will show: with a block's id left out of them
+        let tree = self.doc.export_tree();
+        let blocks = tree.as_deref().unwrap_or_else(|| self.doc.blocks());
+        for b in blocks {
             b.walk(&mut |b, _| match &b.kind {
                 BlockKind::Heading { level, .. } => found.push((Some(*level), b.content(self.text))),
                 BlockKind::HtmlBlock | BlockKind::Paragraph | BlockKind::Table { .. } => {
@@ -718,7 +721,7 @@ impl<'a> Ctx<'a> {
     fn render_write_limited(&mut self, limit: Option<u64>) -> Result<(String, u64), job::Cancelled> {
         self.limit = limit;
         let mut out = String::with_capacity(self.text.len().min(64 << 20) * 2);
-        let tree = self.doc.has_directives().then(|| self.doc.tree());
+        let tree = self.doc.export_tree();
         let blocks = tree.as_deref().unwrap_or_else(|| self.doc.blocks());
         for b in blocks {
             if self.cancelled() {

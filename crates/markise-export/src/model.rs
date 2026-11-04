@@ -234,7 +234,7 @@ impl ExDoc {
         b.number_footnotes(&labels);
         let headings = b.collect_headings();
         let mut blocks = Vec::new();
-        for blk in &doc.tree() {
+        for blk in &doc.tree_for_export() {
             b.block(blk, &mut blocks);
         }
         let mut footnotes = std::mem::take(&mut b.footnotes);
@@ -300,7 +300,10 @@ impl Builder<'_> {
     fn collect_headings(&mut self) -> Vec<HeadingEntry> {
         let mut tracker = SlugTracker::new();
         let mut found = Vec::new();
-        for b in self.doc.blocks() {
+        // the same headings the body will show: with a block's id left out of them
+        let tree = self.doc.export_tree();
+        let blocks = tree.as_deref().unwrap_or_else(|| self.doc.blocks());
+        for b in blocks {
             b.walk(&mut |b, _| match &b.kind {
                 BlockKind::Heading { level, .. } => found.push((Some(*level), b.content(self.text))),
                 BlockKind::HtmlBlock | BlockKind::Paragraph | BlockKind::Table { .. } => {

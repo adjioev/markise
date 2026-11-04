@@ -915,6 +915,60 @@ impl Document {
         path
     }
 
+    /// [`Document::tree`] as exports read it: a hidden id is left out of what shows ([`hidden_block_id`],
+    /// ADR 0018). The document itself stays as it is. `None`: the document has no directive and no
+    /// such id, so its top-level blocks are the same thing.
+    pub fn export_tree(&self) -> Option<Vec<Block>> {
+        (self.has_directives() || self.text().contains("{#")).then(|| self.tree_for_export())
+    }
+
+    /// See [`Document::export_tree`], whatever the document holds.
+    pub fn tree_for_export(&self) -> Vec<Block> {
+        fn visit(b: &mut Block, text: &str, in_block: bool) {
+            match &b.kind {
+                BlockKind::Heading { .. } if heading_can_hide_id(b) => drop_block_id(b, text),
+                BlockKind::ListItem { .. } if in_block => {
+                    if let Some(first) = b.children.first_mut()
+                        && matches!(first.kind, BlockKind::Paragraph)
+                    {
+                        drop_block_id(first, text);
+                    }
+                }
+                _ => {}
+            }
+            let in_block = in_block || matches!(b.kind, BlockKind::Directive { .. });
+            for c in &mut b.children {
+                visit(c, text, in_block);
+            }
+        }
+        let mut tree = self.tree();
+        let text = self.text();
+        for b in &mut tree {
+            visit(b, text, false);
+        }
+        tree
+    }
+
+    /// Whether a trailing id of the leaf starting at `base` is hidden: of an ATX heading anywhere, and
+    /// of the first paragraph of a list item inside a `:::` block (ADR 0018).
+    pub(crate) fn hides_block_id_at(&self, base: usize) -> bool {
+        let path = self.block_path_at(base);
+        let Some(leaf) = self.block_at_path_rel(&path).map(|(b, _)| b) else {
+            return false;
+        };
+        match leaf.kind {
+            BlockKind::Heading { .. } => heading_can_hide_id(leaf),
+            BlockKind::Paragraph => {
+                let first = path.last() == Some(&0);
+                let parent = path.split_last().and_then(|(_, p)| self.block_at_path_rel(p));
+                first
+                    && parent.is_some_and(|(b, _)| matches!(b.kind, BlockKind::ListItem { .. }))
+                    && !self.directives_at(base).is_empty()
+            }
+            _ => false,
+        }
+    }
+
     /// Resolves a block path produced by [`Document::block_path_at`]: an owned copy of that
     /// block (and its descendants) with absolute spans.
     pub fn block_at_path(&self, path: &[usize]) -> Option<Block> {
@@ -1085,4 +1139,41 @@ pub fn debug_tree(doc: &Document) -> String {
         });
     }
     out
+}
+
+/// Where a trailing `{#id}` starts in `s`: an id with no space and no brace. Whether it is
+/// escaped is the caller's question.
+pub fn block_id_start(s: &str) -> Option<usize> {
+    let body = s.strip_suffix('}')?;
+    let at = body.rfind("{#")?;
+    let id = &body[at + 2..];
+    (!id.is_empty() && !id.contains(char::is_whitespace) && !id.contains('{')).then_some(at)
+}
+
+/// What of the line `s` to hide as an id, `Some(where it starts)`: a `{#id}` at its very end, at its
+/// start or after a blank, and nothing else. The id has no blank and no brace. An escaped one is text.
+pub fn hidden_block_id(s: &str) -> Option<usize> {
+    let at = block_id_start(s)?;
+    if s[at + 2..s.len() - 1].contains('}') {
+        return None;
+    }
+    let before = &s[..at];
+    if !before.is_empty() && !before.ends_with([' ', '\t']) {
+        return None;
+    }
+    Some(before.trim_end_matches([' ', '\t']).len())
+}
+
+/// An ATX heading with nothing after its text: no closing hashes behind the id. A setext heading
+/// keeps its text as written.
+fn heading_can_hide_id(b: &Block) -> bool {
+    matches!(b.kind, BlockKind::Heading { setext: false, .. }) && b.lines.last().is_some_and(|l| l.end == b.span.end)
+}
+
+fn drop_block_id(b: &mut Block, text: &str) {
+    if let Some(last) = b.lines.last_mut()
+        && let Some(cut) = hidden_block_id(last.slice(text))
+    {
+        last.end = last.start + cut;
+    }
 }

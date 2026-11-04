@@ -59,10 +59,7 @@ pub(super) fn unescape_line(line: &str, opts: &ParseOptions) -> String {
 
 /// Where a trailing `{#id}` starts in `s`.
 pub(super) fn anchor_start(s: &str) -> Option<usize> {
-    let body = s.strip_suffix('}')?;
-    let at = body.rfind("{#")?;
-    let id = &body[at + 2..];
-    (!id.is_empty() && !id.contains(char::is_whitespace) && !id.contains('{')).then_some(at)
+    markise_md::block_id_start(s)
 }
 
 /// Is this usable as the id inside `{#…}`?

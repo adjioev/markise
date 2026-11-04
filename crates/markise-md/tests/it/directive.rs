@@ -469,3 +469,105 @@ proptest! {
         prop_assert_eq!(snap(&d), snap(&parse(&s)));
     }
 }
+
+// ---- a block's id (ADR 0018) -------------------------
+
+fn inline_of(src: &str, needle: &str) -> markise_doc::RichInline {
+    use markise_doc::{FormatDoc, InlineSource};
+    let doc = Document::parse(src.to_string(), ParseOptions::default());
+    let at = src.find(needle).expect("in the text");
+    let end = src[at..].find('\n').map_or(src.len(), |e| at + e);
+    let line = [markise_md::text::Span::new(at, end)];
+    doc.inline(InlineSource::Lines(&line), at)
+}
+
+#[test]
+fn an_id_is_a_hidden_note_on_a_heading_anywhere_and_a_list_item_in_a_block() {
+    use markise_doc::InlineKind;
+    for (src, needle, shown) in [
+        ("## Title {#q}\n", "Title", "Title"),
+        ("> ## Title {#q}\n", "Title", "Title"),
+        ("# A b  {#T1-x_y}\n", "A b", "A b"),
+        (":::a\n\n## Title {#q}\n\n:::\n", "Title", "Title"),
+        (":::a\n\n- [ ] One {#a1}\n- Two  {#b}\n\n:::\n", "One", "One"),
+        (":::a\n\n- [ ] One {#a1}\n- Two  {#b}\n\n:::\n", "Two", "Two"),
+        (":::a\n\n1. **Bold** end {#c}\n\n:::\n", "**Bold", "Bold end"),
+    ] {
+        let r = inline_of(src, needle);
+        assert_eq!(r.plain(&r.nodes), shown, "{src}");
+        let last = r.nodes.last().expect("a node");
+        assert_eq!(last.kind, InlineKind::Comment, "{src}");
+        assert!(!last.markers.is_empty(), "it can be revealed");
+        assert!(r.value(last).trim_start().starts_with("{#"), "{src}");
+    }
+}
+
+#[test]
+fn a_heading_of_only_an_id_shows_nothing_and_stays_a_heading() {
+    let r = inline_of("## {#q}\n", "{#q}");
+    assert_eq!(r.plain(&r.nodes), "");
+    let doc = Document::parse("## {#q}\n".to_string(), ParseOptions::default());
+    assert_eq!(
+        doc.tree()[0].content(doc.text()),
+        "{#q}",
+        "the plain tree keeps it, for the field model"
+    );
+}
+
+#[test]
+fn an_id_elsewhere_stays_text() {
+    for (src, needle, shown) in [
+        // a list item or a paragraph outside a block
+        ("- One {#a1}\n", "One", "One {#a1}"),
+        ("Some text {#x}\n", "Some", "Some text {#x}"),
+        // a plain paragraph in a block
+        (":::a\n\nSome text {#x}\n\n:::\n", "Some", "Some text {#x}"),
+        // a list item with an unpaired opener: no block
+        (":::a\n\n- One {#a1}\n", "One", "One {#a1}"),
+        // not the exact form
+        ("## Title{#q}\n", "Title", "Title{#q}"),
+        ("## Title \\{#q}\n", "Title", "Title {#q}"),
+        ("## Title {# q}\n", "Title", "Title {# q}"),
+        ("## Title {#}\n", "Title", "Title {#}"),
+        ("## Title {#q} more\n", "Title", "Title {#q} more"),
+        ("## Title {#a}b}\n", "Title", "Title {#a}b}"),
+        ("## Title {#q} ##\n", "Title", "Title {#q} ##"),
+        ("Title {#q}\n=====\n", "Title", "Title {#q}"),
+        // not plain text
+        ("## Title `{#q}`\n", "Title", "Title {#q}"),
+        (":::a\n\n- Item **{#q}**\n\n:::\n", "Item", "Item {#q}"),
+    ] {
+        let r = inline_of(src, needle);
+        assert_eq!(r.plain(&r.nodes), shown, "{src}");
+    }
+}
+
+#[test]
+fn the_export_tree_leaves_the_id_out_and_the_document_alone() {
+    let src = "## Out {#o}\n\n- Plain {#l}\n\n:::a\n\n## Title {#q}\n\nText {#t}\n\n- One {#a1}\n\n:::\n";
+    let doc = Document::parse(src.to_string(), ParseOptions::default());
+    let mut seen = Vec::new();
+    for b in &doc.tree_for_export() {
+        b.walk(&mut |b, _| {
+            if !b.lines.is_empty() {
+                seen.push(b.content(doc.text()));
+            }
+        });
+    }
+    assert_eq!(seen, ["Out", "Plain {#l}", "Title", "Text {#t}", "One"]);
+    assert_eq!(doc.text(), src);
+    let mut original = Vec::new();
+    for b in &doc.tree() {
+        b.walk(&mut |b, _| {
+            if !b.lines.is_empty() {
+                original.push(b.content(doc.text()));
+            }
+        });
+    }
+    assert!(original.contains(&"Title {#q}".to_string()), "the plain tree keeps it");
+    assert!(
+        Document::parse("# Plain\n".to_string(), ParseOptions::default())
+            .export_tree()
+            .is_none()
+    );
+}

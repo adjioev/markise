@@ -119,6 +119,27 @@ fn body(md: &str) -> String {
 }
 
 #[test]
+fn a_hidden_id_is_not_in_the_export() {
+    let h = body(":::q\n\n## Asked {#q}\n\n- [x] One {#a1}\n\n:::\n\n## Out {#o}\n\n- Plain {#l}\n");
+    for id in ["{#q}", "{#a1}", "{#o}"] {
+        assert!(!h.contains(id), "{id}: {h}");
+    }
+    assert!(h.contains("{#l}"), "a list item outside a block keeps it: {h}");
+    assert!(
+        h.contains("id='asked'") || h.contains("id=\"asked\""),
+        "the anchor comes from what shows: {h}"
+    );
+    assert!(h.contains("id='out'") || h.contains("id=\"out\""), "{h}");
+}
+
+#[test]
+fn a_document_with_no_block_loses_a_headings_id_too() {
+    let h = body("# Intro {#x}\n\ntext\n");
+    assert!(!h.contains("{#x}"), "{h}");
+    assert!(h.contains("id='intro'") || h.contains("id=\"intro\""), "{h}");
+}
+
+#[test]
 fn a_directive_exports_as_a_div_with_its_content_inside() {
     let h = body(":::note some args\n\n# Title\n\ntext\n\n:::\n\nafter\n");
     let open = h
