@@ -29,7 +29,7 @@ use crate::block::{AlertKind, Align, Block, BlockKind};
 use crate::inline::{Inline, InlineKind, decode_entity, parse_inlines, plain_text};
 use crate::options::ParseOptions;
 use crate::text::{Span, line_end};
-use crate::{Document, EditResult, hidden_block_id, line_start, ops, scan};
+use crate::{Document, EditResult, line_start, ops, scan};
 
 /// The Markdown file type. Holds the Markdown-specific parse options.
 #[derive(Clone, Debug, Default)]
@@ -515,16 +515,14 @@ impl FormatDoc for Document {
                     (src - base) as u32
                 };
                 let mut rich = neutral_tree(&content, &nodes, &map);
-                if let Some(last) = lines.last().filter(|l| l.slice(text).ends_with('}'))
-                    && let Some(cut) = hidden_block_id(last.slice(text))
+                if content.ends_with('}')
                     && self.hides_block_id_at(lines[0].start)
+                    && let Some(cut) = self.block_id_cut(&content)
+                    && let Some(last) = lines.last()
                 {
-                    hide_tail(
-                        &mut rich,
-                        (last.start + cut - base) as u32,
-                        (last.end - base) as u32,
-                        last.slice(text)[cut..].to_string(),
-                    );
+                    let in_line = cut - starts[starts.len() - 1];
+                    let (a, b) = ((last.start + in_line - base) as u32, (last.end - base) as u32);
+                    hide_tail(&mut rich, a, b, content[cut..].to_string());
                 }
                 rich
             }
@@ -673,8 +671,8 @@ impl FormatDoc for Document {
             content.push_str(&text[l.start + origin..l.end + origin]);
         }
         // what shows: an id is no part of the heading's name, in the outline or in its anchor
-        if let Some(cut) = hidden_block_id(&content)
-            && self.hides_block_id_at(b.lines.first().map_or(at, |l| l.start + origin))
+        if self.hides_block_id_at(b.lines.first().map_or(at, |l| l.start + origin))
+            && let Some(cut) = self.block_id_cut(&content)
         {
             content.truncate(cut);
         }

@@ -163,3 +163,73 @@ fn source_mode_shows_it_and_nothing_changes() {
     common::run(&mut h);
     assert!(!h.state().is_dirty());
 }
+
+const ID_ONLY: &str = "Top.\n\n:::q\n\n- {#a}\n- Next\n\n:::\n\nEnd.\n";
+
+#[test]
+fn an_item_of_only_an_id_keeps_its_place_for_the_caret() {
+    let (_d, _p, mut h) = open(ID_ONLY);
+    let next = ID_ONLY.find("Next").unwrap();
+    caret(&mut h, next);
+    h.key_press(Key::ArrowUp);
+    common::run(&mut h);
+    let v = h.state_mut().viewer().unwrap();
+    let at = v.ed.session.selection().primary().focus.offset;
+    let id = ID_ONLY.find("{#a}").unwrap();
+    assert!(
+        (id..id + 4).contains(&at) || at == id + 4,
+        "the arrow lands on the item, not past it: {at}"
+    );
+    assert!(shown(&mut h).contains("{#a}"), "and with the caret on it, it shows");
+}
+
+#[test]
+fn a_click_on_an_item_of_only_an_id_lands_on_it() {
+    let (_d, _p, mut h) = open(ID_ONLY);
+    let id = ID_ONLY.find("{#a}").unwrap();
+    let rect = h.state().viewer_item_rect(id).expect("the item is on screen");
+    let p = rect.center();
+    h.hover_at(p);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+    }
+    common::run(&mut h);
+    let at = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .session
+        .selection()
+        .primary()
+        .focus
+        .offset;
+    assert!((id..=id + 4).contains(&at), "{at}");
+}
+
+#[test]
+fn a_heading_of_only_an_id_keeps_its_place_for_the_caret() {
+    let doc = "Top.\n\n## {#h}\n\nNext.\n";
+    let (_d, _p, mut h) = open(doc);
+    caret(&mut h, doc.find("Next").unwrap());
+    h.key_press(Key::ArrowUp);
+    common::run(&mut h);
+    let at = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .session
+        .selection()
+        .primary()
+        .focus
+        .offset;
+    let id = doc.find("{#h}").unwrap();
+    assert!((id..=id + 4).contains(&at), "{at}");
+    assert!(shown(&mut h).contains("{#h}"));
+}

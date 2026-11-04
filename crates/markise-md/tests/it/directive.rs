@@ -543,6 +543,34 @@ fn an_id_elsewhere_stays_text() {
 }
 
 #[test]
+fn an_id_that_is_not_plain_text_is_kept_by_every_reader() {
+    use markise_doc::FormatDoc;
+    for src in [
+        "## `literal {#id`}\n",
+        "## **bold {#id**}\n",
+        ":::a\n\n- `x {#id`}\n\n:::\n",
+    ] {
+        let doc = Document::parse(src.to_string(), ParseOptions::default());
+        let mut lines = Vec::new();
+        for b in &doc.tree_for_export() {
+            b.walk(&mut |b, _| {
+                if !b.lines.is_empty() {
+                    lines.push(b.content(doc.text()));
+                }
+            });
+        }
+        assert!(
+            lines.iter().any(|l| l.ends_with("{#id`}") || l.ends_with("{#id**}")),
+            "{src}: {lines:?}"
+        );
+    }
+    let doc = Document::parse("## `literal {#id`}\n".to_string(), ParseOptions::default());
+    let at = doc.text().find('`').expect("in the text");
+    let info = doc.heading(at).expect("a heading");
+    assert!(info.text.contains("{#id"), "{}", info.text);
+}
+
+#[test]
 fn the_export_tree_leaves_the_id_out_and_the_document_alone() {
     let src = "## Out {#o}\n\n- Plain {#l}\n\n:::a\n\n## Title {#q}\n\nText {#t}\n\n- One {#a1}\n\n:::\n";
     let doc = Document::parse(src.to_string(), ParseOptions::default());

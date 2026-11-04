@@ -924,29 +924,51 @@ impl Document {
 
     /// See [`Document::export_tree`], whatever the document holds.
     pub fn tree_for_export(&self) -> Vec<Block> {
-        fn visit(b: &mut Block, text: &str, in_block: bool) {
+        fn visit(doc: &Document, b: &mut Block, in_block: bool) {
             match &b.kind {
-                BlockKind::Heading { .. } if heading_can_hide_id(b) => drop_block_id(b, text),
+                BlockKind::Heading { .. } if heading_can_hide_id(b) => doc.drop_block_id(b),
                 BlockKind::ListItem { .. } if in_block => {
                     if let Some(first) = b.children.first_mut()
                         && matches!(first.kind, BlockKind::Paragraph)
                     {
-                        drop_block_id(first, text);
+                        doc.drop_block_id(first);
                     }
                 }
                 _ => {}
             }
             let in_block = in_block || matches!(b.kind, BlockKind::Directive { .. });
             for c in &mut b.children {
-                visit(c, text, in_block);
+                visit(doc, c, in_block);
             }
         }
         let mut tree = self.tree();
-        let text = self.text();
         for b in &mut tree {
-            visit(b, text, false);
+            visit(self, b, false);
         }
         tree
+    }
+
+    fn drop_block_id(&self, b: &mut Block) {
+        let content = b.content(self.text());
+        if let Some(cut) = self.block_id_cut(&content)
+            && let Some(last) = b.lines.last_mut()
+        {
+            let line_start = content.rfind('\n').map_or(0, |i| i + 1);
+            last.end = last.start + (cut - line_start);
+        }
+    }
+
+    /// Where the hidden id of a leaf with this content starts, for every reader alike: the exact form
+    /// on its last line ([`hidden_block_id`]), and plain text when parsed, so that a code span or
+    /// emphasis ending there stays whole.
+    pub(crate) fn block_id_cut(&self, content: &str) -> Option<usize> {
+        let line_start = content.rfind('\n').map_or(0, |i| i + 1);
+        let cut = line_start + hidden_block_id(&content[line_start..])?;
+        let nodes = inline::parse_inlines(content, self.options(), &self.ref_context().inline);
+        let plain = (nodes.iter().rev())
+            .take_while(|n| n.span.end > cut)
+            .all(|n| matches!(n.kind, inline::InlineKind::Text));
+        plain.then_some(cut)
     }
 
     /// Whether a trailing id of the leaf starting at `base` is hidden: of an ATX heading anywhere, and
@@ -1168,12 +1190,4 @@ pub fn hidden_block_id(s: &str) -> Option<usize> {
 /// keeps its text as written.
 fn heading_can_hide_id(b: &Block) -> bool {
     matches!(b.kind, BlockKind::Heading { setext: false, .. }) && b.lines.last().is_some_and(|l| l.end == b.span.end)
-}
-
-fn drop_block_id(b: &mut Block, text: &str) {
-    if let Some(last) = b.lines.last_mut()
-        && let Some(cut) = hidden_block_id(last.slice(text))
-    {
-        last.end = last.start + cut;
-    }
 }

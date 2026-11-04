@@ -183,6 +183,9 @@ name for that part (ADR 0020). Readers of the rendered view are not meant to rea
 blank and no brace, then `}` and nothing else. So `Title{#q}`, `\\{#q}`, `{# q}`, `{#}`, `{#q} more` and `{#q} ##`
 stay text, as does an id inside code or emphasis.
 
+One check decides for every reader (screen, outline, counts, exports): the form above, on text that
+parses as plain text there, so `` ## `literal {#id`} `` keeps its code span whole.
+
 **Where.** On an ATX heading in any document, inside a block or not: real documents keep their
 section ids on headings outside any block. On a list item only inside a paired `:::` block, since `{#x}` at
 the end of an item in ordinary prose may well be text. A setext heading, a plain paragraph and a table
@@ -193,6 +196,8 @@ packages, and nothing else about them.
   non-rendered annotations), from the blanks before it to the end of the line. With the caret on it, or
   touching it at the end of the text, it shows as muted source like the marks of emphasis do; a caret
   elsewhere hides it. Typing at the end of the text goes before it.
+- **Nothing else there.** A leaf of only an id keeps a caret place like an empty one, so an arrow or a
+  click still lands on `- {#a}`, and the caret there shows the id.
 - **The file.** No bytes change, and Source mode shows it as written. A selection copies source, here
   as everywhere. The field model reads the plain tree, so `## {#q}`, a heading of only an id, shows
   nothing and keeps its id for the model.
