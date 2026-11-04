@@ -251,6 +251,56 @@ and Alt+Down do not work from the widget's own controls, and a composition in it
 is not the form's: `is_composing` stays false, so a host widget owns that. No host widget exists in
 the repository yet, so this stays as it is until one needs more.
 
+### The panel
+
+`markise-ui-egui` holds the form in a right-hand panel, in every view mode. It holds no rule of its
+own: it decides which block, and what becomes of a draft when the document changes under it.
+
+- **Opening.** A button on the card's top edge, or the command Edit Block (⇧⌘E, for the block around
+  the caret, innermost first). A document with no package or one not accepted shows neither. A block with no
+  schema in the package has no form. A package that says something a form cannot honour gives a
+  panel with the reason. The keyboard lands in the first field. Full Source mode has no cards, so
+  there the command opens it.
+- **The draft stays in the panel.** Save applies `edits_from_values` through `apply_to_session`, one
+  undo step named Edit Block, closes the panel and gives the keyboard back to the document. An
+  unchanged draft writes nothing. Save does not write the file.
+- **Keys, while the keyboard is in the panel.** ⌘Enter and ⌘S save the form. Esc and ⌘W cancel it. So a
+  second ⌘S writes the file, since the first gave the keyboard back. Other document commands wait, as
+  they do for a comment being written, and neither key acts during an IME composition.
+- **Undo in a field is the field's.** egui's text editor keeps its own history, and the existing
+  rule that a focused text field takes ⌘Z and ⇧⌘Z applies. On a button of the panel, ⌘Z does nothing rather
+  than reach past it into the document.
+- **Following the document.** The block is looked for when the text's revision moves: where it
+  was; else the nearest place holding the same source, so an edit above only moves it; else a block
+  of the same name at the same place, which is a change inside.
+  - Inside, with an unchanged draft: the panel reads the block again, and opens anew if the
+    arguments changed, since another variant has another form.
+  - Inside, with a changed draft: the panel says so and refuses Save (`Stale` from the engine is the
+    last check). Read the Block Again loses the draft; so does Cancel.
+  - Gone, with an unchanged draft: the panel closes. With a changed one, it stays, says so, and
+    offers only Cancel, so the text can still be read and copied.
+  - A reload is the same as any other change. The document switching or the package being withdrawn
+    closes the panel, **and a draft goes with it**: a question at that moment is left for later.
+- **A draft is not thrown away for another block.** Opening another block with a changed draft
+  refuses and says why.
+- **Outside the schema.** The fields show their reasons, the top says the block does not fit and can
+  still be saved, content in no field is listed and kept, and an argument naming no variant is a reason.
+- **Files.** The file dialog runs between frames, as the app's others do, and starts in the document's
+  folder. A file inside gets a path relative to it with `/`, as documents write them. A file
+  outside is refused with a message, and nothing is copied. Thumbnails come from the document's
+  image store: decoded off the UI thread, same limits, same resolver.
+- **Icons.** An answer's `icon` is a file of the package. SVG goes through `resvg` on a worker thread, at
+  most 256 KiB, and `currentColor` makes it a mask that follows the theme; linked images in it are not
+  read. Other formats go through the image store. New dependency: `resvg` 0.45 with default
+  features off (Apache-2.0 OR MIT; its tree adds `usvg`, `tiny-skia`, `roxmltree` and a few small
+  crates, all MIT, Apache-2.0 or BSD).
+- **Theme and zoom.** Colours come from the egui visuals the app derives from the theme, sizes from the
+  whole-window zoom. The width is the user's for the session, from 280 points up to 60 % of the window.
+- **Cost.** A document with no package pays one comparison per frame. With a package, one index
+  lookup per block opener on screen. An open panel adds a search of the text only when the document
+  changed and the block is not where it was.
+- **Language.** Package texts are looked up as English, the app's only language so far.
+
 ### Limits
 
 - A text value holding a line that is only an image reads back as the image field when the block
@@ -269,7 +319,7 @@ the repository yet, so this stays as it is until one needs more.
 
 ## Consequences
 
-- The form crate and the panel get JSON and need no Markdown. The panel is a later PR.
+- The form crate and the panel get JSON and need no Markdown.
 - `egui-schema-form` could leave the repository as it is: nothing in it is ours.
 - The decode cost is one parse of the block and the encode cost one line diff of it, per apply.
   Neither depends on the document's size.

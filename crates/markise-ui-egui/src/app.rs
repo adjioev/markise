@@ -52,6 +52,7 @@ use crate::themes::{ConfigDir, InstallDone, ThemeEvent, ThemeManager};
 use crate::viewer::DocViewer;
 
 mod attach;
+mod block_form;
 mod files;
 mod find;
 mod full_view;
@@ -142,6 +143,9 @@ pub struct AppOptions {
     /// one per test slows down and flakes under load (issue #151). Off, changes on disk are
     /// not noticed until the file is opened again.
     pub watch: bool,
+    /// Chooses a file for an image field of a block's form, starting in the given folder.
+    /// Default: the system's file dialog; tests pass their own.
+    pub block_image_picker: Option<block_form::ImagePicker>,
 }
 
 impl Default for AppOptions {
@@ -166,6 +170,7 @@ impl Default for AppOptions {
             welcome: false,
             updates: Default::default(),
             watch: true,
+            block_image_picker: None,
         }
     }
 }
@@ -597,11 +602,14 @@ pub struct MarkiseApp {
     updates: crate::updates::UpdateState,
     /// The open document's block package (ADR 0019).
     package: package::PackageState,
+    /// The form of a block in the side panel (ADR 0020).
+    block_form: block_form::BlockFormState,
 }
 
 impl MarkiseApp {
     pub fn new(mut opts: AppOptions) -> Self {
         let package = package::PackageState::new(&opts.config);
+        let opts_picker = opts.block_image_picker.clone();
         let mut themes = ThemeManager::new(opts.config, opts.system_fonts);
         themes.set_watch(opts.watch);
         let diagrams = themes.diagrams();
@@ -707,6 +715,7 @@ impl MarkiseApp {
             cheat_sheet: Default::default(),
             updates: crate::updates::UpdateState::new(opts.updates),
             package,
+            block_form: block_form::BlockFormState::new(opts_picker),
         }
     }
 
@@ -2442,6 +2451,7 @@ impl MarkiseApp {
         } else if self.files.rename.is_some() {
             self.tree_action(ctx, TreeAction::EndRename(EditEnd::CommitOrCancel));
         }
+        self.block_form_panel(ui);
         self.rename_blur(ctx);
         self.complete_pre_input(ctx);
         self.attach_pre_input(ctx);
@@ -3112,6 +3122,7 @@ impl MarkiseApp {
                         let gutter = d.viewer.comment_gutter();
                         let mut out = d.viewer.show(ui, &mut self.images, &t, self.parley.as_mut(), true);
                         self.full_view_request = out.open_view.take();
+                        self.block_form.request(out.open_block_form.take());
                         if let Some(n) = d.viewer.take_notice() {
                             self.banner = Some(Banner::Info(n));
                         }
@@ -3237,6 +3248,7 @@ impl MarkiseApp {
             self.themes.set_side_by_side_split(v);
         }
         self.full_view_request = out.open_view;
+        self.block_form.request(out.open_block_form);
         if let Some(link) = out.link {
             self.open_link(&ctx, &link);
         }

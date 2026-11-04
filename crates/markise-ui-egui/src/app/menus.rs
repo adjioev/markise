@@ -109,6 +109,10 @@ impl MarkiseApp {
         if text_field && TEXT_FIELD_KEYS.iter().any(|(k, ..)| *k == id) {
             return true;
         }
+        // the keyboard is in the block form: document commands wait
+        if self.ctx.as_ref().is_some_and(|c| self.block_form_focused(c)) {
+            return false;
+        }
         // a comment being written in its card (issue #87): document commands wait (a menu
         // shortcut such as ⌘B must not act on the document behind the field)
         if d.viewer.card_edit().is_some() {
@@ -337,6 +341,11 @@ impl MarkiseApp {
         let mut edit = self.registry_menu("Edit", EDIT_ORDER, text_field);
         edit.entries.push(Entry::Separator);
         edit.entries.push(Entry::Submenu(self.review_menu(text_field)));
+        // only where a package can give a block a form (ADR 0020)
+        if self.block_package().is_some() {
+            edit.entries
+                .push(self.app_item("block.editForm", self.block_form_available(), Check::None));
+        }
         if !mac {
             // Windows and Linux: Preferences at the end of the Edit menu (the GNOME/KDE
             // convention; macOS has it in the application menu)
@@ -653,7 +662,21 @@ impl MarkiseApp {
         if id != "help.shortcuts" && !field_edit && self.cheat_sheet.open {
             self.cheat_sheet.close(ctx);
         }
+        if self.block_form_focused(ctx) {
+            match id {
+                "file.save" => {
+                    self.block_form_save(ctx);
+                    return true;
+                }
+                "file.close" => {
+                    self.block_form_cancel();
+                    return true;
+                }
+                _ => {}
+            }
+        }
         match id {
+            "block.editForm" => return self.open_block_form_at_caret(),
             "file.quickOpen" => self.open_quick(ctx),
             "file.clearRecent" => self.clear_recent_paths(),
             "file.recover" => self.workflow.show_recovery = true,
@@ -777,6 +800,9 @@ impl MarkiseApp {
                         })
                     });
                     return true;
+                }
+                if self.block_form_focused(ctx) {
+                    return false;
                 }
                 return self.run_command(ctx, id);
             }

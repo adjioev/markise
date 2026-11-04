@@ -58,6 +58,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 embed-resource = "3"
 egui_kittest = "0.37.0"
 rfd = "0.17"
+# icons of block packages (SVG to pixels; Apache-2.0 OR MIT, tiny-skia BSD-3-Clause); no text, no raster images
+resvg = { version = "0.45", default-features = false }
 # Native menu bar (macOS NSMenu, Windows HMENU; apps/markise only). No GTK: Linux keeps the
 # in-window egui menu bar.
 muda = { version = "0.21.2", default-features = false }

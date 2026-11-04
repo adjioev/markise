@@ -36,6 +36,8 @@ pub(crate) struct Cx<'a> {
     /// A new row whose first real control is to take the focus.
     focus_row: &'a mut Option<Id>,
     focus_row_drawn: bool,
+    /// The first real control is to take the focus.
+    focus_first: &'a mut bool,
     /// Where that focus goes if the row has no real control: its first enabled button.
     focus_fallback: Option<Id>,
     pub status: &'a mut std::collections::HashMap<Id, String>,
@@ -51,6 +53,9 @@ impl Cx<'_> {
     /// the focus.
     pub(crate) fn track_control(&mut self, r: &Response) {
         self.track(r);
+        if r.enabled() && std::mem::take(self.focus_first) {
+            r.request_focus();
+        }
         if r.enabled() && self.focus_row.is_some_and(|row| self.row_stack.contains(&row)) {
             r.request_focus();
             *self.focus_row = None;
@@ -134,6 +139,7 @@ impl SchemaForm {
             editors: HashSet::new(),
             focus_row: &mut self.focus_row,
             focus_row_drawn: false,
+            focus_first: &mut self.focus_first,
             focus_fallback: None,
             status: &mut self.status,
             buttons: &mut self.buttons,

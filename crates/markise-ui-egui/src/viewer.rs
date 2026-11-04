@@ -27,6 +27,7 @@ use crate::images::TextureStore;
 use crate::smooth_scroll::{self, SmoothScroll};
 use crate::text_paint::ParleyText;
 
+mod block_tools;
 mod card_edit;
 mod code_tools;
 mod comment_place;
@@ -63,6 +64,8 @@ pub struct ViewerOutput {
     pub wheel_scrolled: bool,
     /// Open this in the full-window view (its expand button or a double click).
     pub open_view: Option<ViewTarget>,
+    /// Open the form of the block at this offset (the button on its card).
+    pub open_block_form: Option<usize>,
 }
 
 /// What the full-window view can show (issue #174).
@@ -226,6 +229,8 @@ pub struct DocViewer {
     gutter: bool,
     /// Copy button and language field of fenced code blocks (issue #76).
     code: code_tools::CodeTools,
+    /// The document's block package, when it has one in use: its blocks get a button.
+    block_index: Option<std::sync::Arc<markise_package::PackageIndex>>,
     /// A press on the scrollbar (issue #123).
     thumb_drag: scrollbar::ThumbDrag,
     /// Wheel / trackpad smoothing (issue #86).
@@ -272,6 +277,7 @@ impl DocViewer {
             pending_copy: None,
             last_surface: None,
             refocus: false,
+            block_index: None,
             view_press: None,
             caret_screen: None,
             hover: None,
@@ -1002,6 +1008,7 @@ impl DocViewer {
             };
             self.code_tools_ui(ui, &visible, rect, left, theme, focused, editable, &mut out, &mut sh);
             self.image_tools_ui(ui, &visible, rect, left, theme, imgs, &mut out);
+            self.block_tools_ui(ui, &visible, rect, left, theme, &mut out);
         }
 
         // ---- review comments: margin cards or bubble popovers (visible items only)
