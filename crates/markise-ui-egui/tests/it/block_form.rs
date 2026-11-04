@@ -617,11 +617,11 @@ fn another_variant_in_the_document_gets_its_own_form() {
     let f = Fixture::new(DOC);
     let mut h = f.ready();
     open_form(&mut h, "poll");
-    assert!(has(&h, "Poll · one answer"));
+    assert!(has(&h, "Poll") && has(&h, "one answer"));
     let at = offset(DOC, ":::poll\n") + ":::poll".len();
     edit_document(&mut h, at..at, " many");
     common::run(&mut h);
-    assert!(has(&h, "Poll · several"), "opened anew");
+    assert!(has(&h, "several"), "opened anew");
     assert_eq!(h.state().block_form().unwrap().args(), "many");
 }
 

@@ -8,7 +8,9 @@ use egui::Context;
 use markise_layout::block::color;
 
 use super::MarkiseApp;
-use crate::block_form::{FormAssets, OpenForm, PanelAction, PanelHost, block_at, panel_widths, relative_to_folder};
+use crate::block_form::{
+    FormAssets, OpenForm, PanelAction, PanelHost, block_at, panel_widths, relative_to_folder, style_for,
+};
 
 /// Chooses a file, starting in the given folder.
 pub type ImagePicker = Arc<dyn Fn(&Path) -> Option<PathBuf> + Send + Sync>;
@@ -197,7 +199,7 @@ impl MarkiseApp {
             .frame(
                 egui::Frame::new()
                     .fill(color(t.chrome.sidebar_bg))
-                    .inner_margin(egui::Margin::same(10)),
+                    .inner_margin(egui::Margin::symmetric(14, 12)),
             )
             .show(ui, |ui| {
                 let Some(open) = self.block_form.open.as_mut() else {
@@ -208,6 +210,7 @@ impl MarkiseApp {
                 let folder = path.as_deref().and_then(Path::parent);
                 let root_url = self.doc.as_ref().and_then(|d| d.viewer.model().root_url.clone());
                 let mut host = PanelHost {
+                    style: style_for(&t),
                     ctx: &ctx,
                     images: &mut self.images,
                     assets: &mut self.block_form.assets,

@@ -556,3 +556,34 @@ fn moving_to_another_field_ends_a_composition() {
     h.run();
     assert!(h.state().form.is_composing());
 }
+
+#[test]
+fn a_hosts_accent_gives_its_fills_and_readable_text() {
+    use egui_schema_form::Style;
+    let light_accent = egui::Color32::from_rgb(0xf0, 0xe0, 0x60);
+    let dark_accent = egui::Color32::from_rgb(0x10, 0x20, 0x60);
+    let s = Style::DARK.with_accent(light_accent);
+    assert_eq!(s.accent, light_accent);
+    assert_eq!(s.on_accent, egui::Color32::BLACK);
+    assert_ne!(s.accent_soft, Style::DARK.accent_soft);
+    assert_ne!(s.accent_soft, Style::DARK.field, "a marked row stands out");
+    assert_ne!(s.hover, s.accent_soft);
+    assert_eq!(Style::LIGHT.with_accent(dark_accent).on_accent, egui::Color32::WHITE);
+}
+
+#[test]
+fn a_checkbox_field_still_answers_to_mouse_and_keyboard() {
+    let schema = json!({"type": "object", "properties": {"on": {"type": "boolean"}}});
+    let hints = json!({"version": 2, "fields": {"on": {"label": "On"}}});
+    let mut h = harness_with(&schema, &hints, json!({"on": false}));
+    h.run();
+    assert_eq!(h.get_by_label("On").accesskit_node().role(), Role::CheckBox);
+    h.get_by_label("On").click();
+    h.run();
+    assert_eq!(value_of(&h, "on"), json!(true));
+    h.get_by_label("On").focus();
+    h.run();
+    h.key_press(Key::Space);
+    h.run();
+    assert_eq!(value_of(&h, "on"), json!(false));
+}

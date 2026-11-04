@@ -24,6 +24,7 @@ mod draw;
 mod host;
 mod image;
 mod rows;
+mod style;
 mod widgets;
 
 use std::collections::{HashMap, HashSet};
@@ -35,6 +36,7 @@ use serde_json::Value;
 
 pub use host::{FileRequest, FormHost, HostWidget, NoHost, Thumbnail, WidgetContext};
 pub use schema_form_core;
+pub use style::{Style, button};
 
 use rows::Rows;
 
@@ -49,6 +51,7 @@ pub struct Texts {
     pub alt: String,
     pub path: String,
     pub choose_file: String,
+    pub no_preview: String,
     pub loading: String,
     pub cannot_edit: String,
     pub no_widget: String,
@@ -69,6 +72,7 @@ impl Default for Texts {
             alt: "Alt text".into(),
             path: "Path".into(),
             choose_file: "Choose file".into(),
+            no_preview: "No preview".into(),
             loading: "Loading".into(),
             cannot_edit: "This value cannot be edited here".into(),
             no_widget: "This field needs a widget the application does not have".into(),
@@ -94,6 +98,8 @@ pub struct SchemaForm {
     pub(crate) rows: Rows,
     errors: Vec<FieldError>,
     texts: Texts,
+    /// The host's colours; without them, the ones for the `Ui`'s visuals.
+    style: Option<Style>,
     composing: Option<Id>,
     /// Changed during the composition, not yet reported.
     held_change: bool,
@@ -131,6 +137,7 @@ impl SchemaForm {
             rows: Rows::default(),
             errors,
             texts: Texts::default(),
+            style: None,
             composing: None,
             held_change: false,
             pending: None,
@@ -150,6 +157,17 @@ impl SchemaForm {
     pub fn with_texts(mut self, texts: Texts) -> Self {
         self.texts = texts;
         self
+    }
+
+    /// The host's colours, for instance from its theme.
+    pub fn with_style(mut self, style: Style) -> Self {
+        self.style = Some(style);
+        self
+    }
+
+    /// The host's colours from now on: a theme can change while a form is open.
+    pub fn set_style(&mut self, style: Style) {
+        self.style = Some(style);
     }
 
     /// Registers a widget for the fields whose hints name it (`"widget": "custom"`, `"custom":
