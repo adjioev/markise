@@ -182,7 +182,7 @@ impl PageStats {
                 self.table_rows += it.est_lines.saturating_sub(1).max(1);
             }
             ItemKind::FrontMatter => self.front += 1,
-            ItemKind::Rule | ItemKind::Empty => self.simple += 1,
+            ItemKind::Rule | ItemKind::Empty | ItemKind::ContainerMarker { .. } => self.simple += 1,
             ItemKind::Toc => {
                 // a segmented TOC counts once (its segments share the block)
                 if it.segment.as_ref().is_none_or(Segment::first) {

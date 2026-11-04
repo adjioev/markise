@@ -293,6 +293,12 @@ pub fn theme_css(theme: &Theme) -> String {
         color(t.table_stripe_bg)
     );
     let _ = writeln!(c, "#write img {{ max-width: 100%; }}");
+    let _ = writeln!(
+        c,
+        "#write .md-directive {{ border: 1px solid {rule}; border-radius: 4px; padding: 0.5em 1em; margin: 0 0 1em 0; }} #write .md-directive-label {{ color: {label}; font-size: 0.85em; font-weight: 600; margin: 0 0 0.5em 0; }}",
+        rule = color(t.rule),
+        label = color(t.meta_block.text),
+    );
     let kinds = ["note", "tip", "important", "warning", "caution"];
     for (k, col) in kinds.iter().zip(t.alert.iter()) {
         let _ = writeln!(

@@ -1455,6 +1455,10 @@ impl Flow<'_> {
                 self.bar_block(t.quote_bar, t.quote_bg, None, inner, c)?;
                 self.space(gap);
             }
+            ExBlock::Directive { name, args, blocks } => {
+                self.directive_block(name, args, blocks, ctx)?;
+                self.space(gap);
+            }
             ExBlock::Alert { kind, blocks } => {
                 let col = t.alert[alert_index(*kind)];
                 self.bar_block(col, Rgba::TRANSPARENT, Some((*kind, col)), blocks, ctx)?;
@@ -1641,6 +1645,40 @@ impl Flow<'_> {
             f.blocks(inner, ctx, false)
         });
         self.pending = 0.0; // inner bottom margin collapses into the bar's padding
+        self.x0 = ox0;
+        self.x1 = ox1;
+        self.end_frame(vpad);
+        r
+    }
+
+    /// A `:::name` block: a bar in the rule color, its name and arguments as a label on top.
+    fn directive_block(&mut self, name: &str, args: &str, inner: &[ExBlock], ctx: Ctx) -> Result<(), Cancelled> {
+        let t = self.t;
+        let width = self.u(1.0);
+        let indent = self.u(t.quote_indent);
+        let vpad = self.u(4.0);
+        self.begin_frame(
+            Deco::Bar {
+                color: t.rule,
+                width,
+                bg: Rgba::TRANSPARENT,
+            },
+            vpad,
+        );
+        let (ox0, ox1) = (self.x0, self.x1);
+        self.x0 += indent;
+        let r = self.with_node(SKind::Div, |f| {
+            let c = Ctx {
+                color: t.meta_block.text,
+                bold: true,
+                ..ctx
+            };
+            let label = format!("{name} {args}");
+            f.paragraph(c, &[ExInline::Text(label.trim_end().to_string())], SKind::P)?;
+            f.space(f.u(t.block_spacing) * 0.4);
+            f.blocks(inner, ctx, false)
+        });
+        self.pending = 0.0;
         self.x0 = ox0;
         self.x1 = ox1;
         self.end_frame(vpad);

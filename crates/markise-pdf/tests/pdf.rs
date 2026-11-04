@@ -434,3 +434,17 @@ fn keyboard_symbols_have_glyphs_in_exports() {
     assert!(seen >= 5 * keys.chars().count(), "{seen}");
     assert!(missing.is_empty(), "{missing:?}");
 }
+
+/// `:::` blocks (ADR 0018): the label and the content are in the PDF, the markers are not.
+#[test]
+fn a_directive_shows_its_label_and_content() {
+    let (bytes, _) = pdf_of(
+        "before\n\n:::note some args\n\nInside text\n\n:::\n\nafter\n",
+        PdfOptions::default(),
+    );
+    let pdf = Pdf::load_mem(&bytes).unwrap();
+    let t = text_of(&pdf);
+    assert!(t.contains("note some args"), "{t}");
+    assert!(t.contains("Inside text"), "{t}");
+    assert!(!t.contains(":::"), "{t}");
+}

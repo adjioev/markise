@@ -325,6 +325,53 @@ fn editing_across_pages_matches_a_full_model() {
     assert!(p.ed.session.doc().named_containers_at(at).is_empty());
 }
 
+/// Marker lines are no caret stops: the arrows go from outside to the first line inside.
+#[test]
+fn the_caret_skips_marker_lines() {
+    let mut t = T::at("be‸fore\n\n:::note\n\ninside\n\n:::\n\nafter\n");
+    t.fix_selection = true;
+    t.run("caret.down");
+    assert!(t.selection_on_stops());
+    let le = t.text().find("inside").unwrap();
+    assert!((le..le + 6).contains(&t.caret().offset), "{}", t.shown());
+    t.run("caret.down");
+    assert!(t.caret().offset >= t.text().find("after").unwrap(), "{}", t.shown());
+    // an empty block: the caret stops on its virtual paragraph
+    let mut t = T::at("be‸fore\n\n:::note\n:::\n\nafter\n");
+    t.fix_selection = true;
+    t.run("caret.down");
+    assert_eq!(t.caret(), DocPos::with_virt("before\n\n:::note".len(), 1));
+    t.typ("x");
+    assert_eq!(t.text(), "before\n\n:::note\n\nx\n\n:::\n\nafter\n");
+}
+
+/// Content in a card starts further in and wraps earlier than the same text outside it.
+#[test]
+fn a_card_insets_its_content() {
+    use markise_layout::block::NoImages;
+    let mut t = T::at("outs‸ide\n\n:::note\n\ninside\n\n:::\n");
+    let x = |t: &mut T| {
+        let mut f = t.fonts.with_pixels_per_point(1.0);
+        t.ed.caret_rect(&mut f, &NoImages).unwrap().min.x
+    };
+    let a = x(&mut t);
+    let at = t.text().find("inside").unwrap() + 4;
+    t.set(at);
+    t.frame();
+    let b = x(&mut t);
+    assert!(b > a, "inside {b}, outside {a}");
+}
+
+/// Enter at the start of the first line inside: an empty paragraph above it, inside.
+#[test]
+fn enter_at_the_start_of_the_first_line_inside() {
+    let mut t = T::at(":::note\n\n‸text\n\n:::\n");
+    t.run("edit.newline");
+    assert_eq!(t.caret(), DocPos::with_virt(":::note".len(), 1));
+    t.typ("x");
+    assert_eq!(t.text(), ":::note\n\nx\n\ntext\n\n:::\n");
+}
+
 // ---- properties ----------------------------------------------------------------------------
 
 /// `(pairs, marker lines that pair with nothing)`.

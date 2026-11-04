@@ -1920,7 +1920,7 @@ pub fn layout_item(
     let text = doc.text();
     // content lines of the item (absolute): its segment's pieces, or the leaf's lines
     let lines: Vec<Span> = match &item.kind {
-        ItemKind::Empty | ItemKind::Rule | ItemKind::Toc => Vec::new(),
+        ItemKind::Empty | ItemKind::Rule | ItemKind::Toc | ItemKind::ContainerMarker { .. } => Vec::new(),
         _ => model.item_lines(doc, idx),
     };
 
@@ -1954,10 +1954,19 @@ pub fn layout_item(
     let mut level_x: Vec<(f32, u16)> = Vec::new();
     // ordinal of the next list item container (outermost first)
     let mut list_item = 0u16;
+    // left edge and right margin of each card around the item (ADR 0018)
+    let mut cards: Vec<(f32, f32)> = Vec::new();
+    let mut card_right = 0.0;
+    let card_inset = (t.font_size * 0.8).round();
     for c in item.containers.iter() {
         level_x.push((x, if matches!(c, Container::ListItem { .. }) { 2 } else { 1 }));
         match c {
-            Container::Card => {}
+            Container::Card => {
+                cards.push((x, card_right));
+                x += card_inset;
+                card_right += card_inset;
+                quote_prefix_here = false;
+            }
             Container::Quote { callout: alert, first } => {
                 let bar = match alert {
                     Some(k) => color(t.alert[alert_index(k)]),
@@ -1997,7 +2006,7 @@ pub fn layout_item(
             }
         }
     }
-    let width = (p.width - x).max(40.0);
+    let width = (p.width - x - card_right).max(40.0);
     let line_px = t.line_px();
     let mut diagram_controls = None;
     let mut out = Out {
@@ -2422,6 +2431,21 @@ pub fn layout_item(
                 p.review,
             );
         }
+        ItemKind::ContainerMarker { close: true } => y += line_px * 0.5,
+        ItemKind::ContainerMarker { close: false } => {
+            // the name and arguments as written: uninterpreted
+            let label = doc
+                .named_containers_at(origin)
+                .last()
+                .map_or_else(String::new, |c| format!("{} {}", c.name, c.args).trim_end().to_string());
+            let size = t.font_size * 0.85;
+            let mut st = Style::base(size, size * 1.4, color(t.meta_block.text));
+            st.fam = FontRole::Bold;
+            let g = shaper.shape(&StyledText::single(label, st.text_style()), wrapped(width));
+            let h = g.size().y;
+            out.text(pos2(x, y), g, Vec::new(), FragmentId::label());
+            y += h;
+        }
         ItemKind::Rule => {
             let mid = y + line_px * 0.5;
             out.prims.push(Prim::Line {
@@ -2660,6 +2684,38 @@ pub fn layout_item(
             stroke: Stroke::NONE,
             radius: 0.0,
         });
+    }
+
+    // ---- cards: side edges continuous over the items of a card, top and bottom at its markers
+    let stroke = Stroke::new(1.0, color(t.rule));
+    for (i, &(left, right)) in cards.iter().enumerate() {
+        let (l, r) = (left, p.width - right);
+        // a marker is its own card's top or bottom edge, the innermost around it
+        let own = i + 1 == cards.len();
+        let opens = own && item.kind == (ItemKind::ContainerMarker { close: false });
+        let closes = own && item.kind == (ItemKind::ContainerMarker { close: true });
+        let top = if opens { gap } else { 0.0 };
+        for ex in [l, r] {
+            deco.push(Prim::Line {
+                a: pos2(ex, top),
+                b: pos2(ex, content_bottom),
+                stroke,
+            });
+        }
+        if opens {
+            deco.push(Prim::Line {
+                a: pos2(l, top),
+                b: pos2(r, top),
+                stroke,
+            });
+        }
+        if closes {
+            deco.push(Prim::Line {
+                a: pos2(l, content_bottom),
+                b: pos2(r, content_bottom),
+                stroke,
+            });
+        }
     }
 
     // decorations first (painted below text); shift link prim indices accordingly

@@ -630,6 +630,48 @@ fn a_new_pair_replaces_the_placeholders_between() {
     assert_ne!(hash_before, hash_after);
 }
 
+/// The card on screen: the name and arguments as a label, edges from the opener to the
+/// closer, content inside, marker text not shown (ADR 0018).
+#[test]
+fn a_card_draws_its_label_and_edges() {
+    use markise_layout::Prim;
+    let src = "::::outer x y\n\nbody\n\n:::\n\n::::\n\n:::unpaired\n";
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(src));
+    let m = Arc::new(full(&*doc));
+    let mut v = View::new(doc.clone(), m.clone(), Theme::light(), 600.0, 1.0);
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let texts = |l: &markise_layout::BlockLayout| -> Vec<String> {
+        l.prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Text { text, .. } => Some(text.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let lines = |l: &markise_layout::BlockLayout| l.prims.iter().filter(|p| matches!(p, Prim::Line { .. })).count();
+    // opener: the label, both side edges and the top edge
+    let opener = v.layout(0, &mut f, &NoImages);
+    assert_eq!(texts(&opener), ["outer x y"]);
+    assert_eq!(lines(&opener), 3);
+    // content: side edges, its text
+    let body = v.layout(1, &mut f, &NoImages);
+    assert_eq!(texts(&body), ["body"]);
+    assert_eq!(lines(&body), 2);
+    // a bare `:::` too short for the fence is ordinary text inside the block
+    let stray = v.layout(2, &mut f, &NoImages);
+    assert_eq!(texts(&stray), [":::"]);
+    // closer: side edges and the bottom edge, no text
+    let closer = v.layout(3, &mut f, &NoImages);
+    assert!(texts(&closer).is_empty());
+    assert_eq!(lines(&closer), 3);
+    // outside: no edges, marker as text
+    let out = v.layout(4, &mut f, &NoImages);
+    assert_eq!(texts(&out), [":::unpaired"]);
+    assert_eq!(lines(&out), 0);
+}
+
 // ---- cross-block facts (phase 3) ---------------------------------------------------------
 
 /// Hidden, depth, `(title, open)` of an item ([`View::disclosure_of`]).

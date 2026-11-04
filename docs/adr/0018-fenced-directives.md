@@ -152,6 +152,22 @@ numbers). Typing elsewhere costs a shift of the later markers.
 directive is no scope for disclosures. A `<details>` opened in a block and closed outside it
 pairs across the boundary, and this has no effect on `:::` pairing.
 
+### On screen and in export
+
+The rendered view draws a simple card, the same for every name: edges around the content,
+`name args` as a label, no per-name behaviour. Marker lines have no caret stops; the virtual
+paragraph in an empty block takes the caret. Source mode shows the lines as they are.
+
+- **HTML:** `<div class='md-directive md-directive-NAME' data-name='…' data-args='…'>`, a
+  `<p class='md-directive-label'>` and the content. Name and arguments are HTML-escaped; in the
+  class, every character but ASCII letters, digits, `-` and `_` becomes `-`.
+- **PDF and PNG:** a bar in the rule color, the label in bold, the content indented.
+- **Pandoc (Word and the other Pandoc targets):** a `Div` with classes `directive` and the
+  sanitized name, attributes `name` and `args`, and a `title` `Div` holding the label, as alerts
+  have. Values are JSON strings. What a target does with a `Div` is the target's own choice.
+
+Unpaired markers export as the text they are. Exporters read `Document::tree`.
+
 ## Consequences
 
 - Round trip is byte-exact by construction: the text remains the source of truth, and markers

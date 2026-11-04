@@ -299,6 +299,20 @@ fn comment_line(s: &str) -> String {
         .join(" ")
 }
 
+/// A directive's name as a CSS class suffix: ASCII letters, digits, `-`, `_`; anything else
+/// (names may use any script) becomes `-`. The name itself is in `data-name`, escaped.
+pub(crate) fn directive_class(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     escape_html(s, &mut o);
@@ -675,7 +689,8 @@ impl<'a> Ctx<'a> {
     fn render_write_limited(&mut self, limit: Option<u64>) -> Result<(String, u64), job::Cancelled> {
         self.limit = limit;
         let mut out = String::with_capacity(self.text.len().min(64 << 20) * 2);
-        let blocks = self.doc.blocks();
+        let tree = self.doc.has_directives().then(|| self.doc.tree());
+        let blocks = tree.as_deref().unwrap_or_else(|| self.doc.blocks());
         for b in blocks {
             if self.cancelled() {
                 return Err(job::Cancelled);
@@ -726,8 +741,7 @@ impl<'a> Ctx<'a> {
     fn block(&mut self, b: &Block, out: &mut String, tight: bool) {
         let text = self.text;
         match &b.kind {
-            // a marker line exports as the text it is until exporters know directives
-            BlockKind::Paragraph | BlockKind::DirectiveOpen { .. } | BlockKind::DirectiveClose { .. } => {
+            BlockKind::Paragraph => {
                 let html = self.inline_html(&b.content(text));
                 if tight {
                     out.push_str(&html);
@@ -842,8 +856,24 @@ impl<'a> Ctx<'a> {
             }
             BlockKind::ListItem { .. } => self.list_item(b, tight, out),
             BlockKind::FrontMatter { .. } | BlockKind::LinkRefDef { .. } => {}
-            // only in `Document::tree`, which the exporter does not read
-            BlockKind::Directive { .. } => {}
+            // the exporter reads `Document::tree`: markers are part of their `Directive`
+            BlockKind::DirectiveOpen { .. } | BlockKind::DirectiveClose { .. } => {}
+            BlockKind::Directive { name, args, .. } => {
+                let (name, args) = (name.slice(text), args.slice(text));
+                let label = format!("{name} {args}");
+                let _ = writeln!(
+                    out,
+                    "<div class='md-directive md-directive-{}' data-name='{}' data-args='{}'>",
+                    directive_class(name),
+                    esc(name),
+                    esc(args)
+                );
+                let _ = writeln!(out, "<p class='md-directive-label'>{}</p>", esc(label.trim_end()));
+                for c in &b.children {
+                    self.block(c, out, false);
+                }
+                out.push_str("</div>\n");
+            }
             BlockKind::Toc => self.toc(out),
             BlockKind::FootnoteDef { label } => {
                 let key = markise_md::inline::normalize_label(label.slice(text));

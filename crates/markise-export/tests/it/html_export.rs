@@ -110,3 +110,50 @@ fn common_html_export_keeps_native_elements_and_existing_comment_policy() {
     assert!(trusted.contains("<!-- private -->"));
     assert_eq!(doc.text(), src);
 }
+
+// ---- `:::` blocks (ADR 0018) ---------------------------------------------------------------
+
+fn body(md: &str) -> String {
+    let d = markise_md::parse(md);
+    render_document(&d, &HtmlOptions::default())
+}
+
+#[test]
+fn a_directive_exports_as_a_div_with_its_content_inside() {
+    let h = body(":::note some args\n\n# Title\n\ntext\n\n:::\n\nafter\n");
+    let open = h
+        .find("<div class='md-directive md-directive-note' data-name='note' data-args='some args'>")
+        .unwrap();
+    let label = h.find("<p class='md-directive-label'>note some args</p>").unwrap();
+    let title = h.find("<h1").unwrap();
+    let close = h[title..].find("</div>").unwrap() + title;
+    let after = h.find("<p>after</p>").unwrap();
+    assert!(open < label && label < title && title < close && close < after, "{h}");
+    assert!(!h.contains(":::"), "{h}");
+}
+
+#[test]
+fn directives_nest_and_unpaired_markers_stay_text() {
+    let h = body("::::a\n\n:::b\n\nx\n\n:::\n\n::::\n\n:::stray\n");
+    let (a, b) = (h.find("data-name='a'").unwrap(), h.find("data-name='b'").unwrap());
+    assert!(a < b);
+    assert!(h.contains("<p>:::stray</p>"), "{h}");
+}
+
+#[test]
+fn directive_names_and_args_are_escaped() {
+    let h = body(":::note-1 '><script>alert(1)</script> & \"x\"\n\ntext\n\n:::\n");
+    assert!(!h.contains("<script>alert"), "{h}");
+    assert!(h.contains("data-args='&#39;&gt;&lt;script&gt;"), "{h}");
+    // a name in any script keeps its text and gets a safe class
+    let h = body(":::заметка\n\ntext\n\n:::\n");
+    assert!(h.contains("md-directive--------"), "{h}");
+    assert!(h.contains("data-name='заметка'"), "{h}");
+}
+
+#[test]
+fn headings_inside_a_directive_keep_their_anchors_and_toc_entries() {
+    let h = body("[toc]\n\n:::note\n\n# Inside\n\n:::\n");
+    assert!(h.contains("#inside"), "{h}");
+    assert!(h.contains("id='inside'") || h.contains("id=\"inside\""), "{h}");
+}

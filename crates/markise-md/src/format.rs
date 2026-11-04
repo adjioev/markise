@@ -1863,6 +1863,7 @@ impl Document {
                         | LeafKind::Table { .. }
                         | LeafKind::Math
                         | LeafKind::RawBlock
+                        | LeafKind::ContainerMarker { .. }
                 )
             {
                 return Ok(Plan::single(

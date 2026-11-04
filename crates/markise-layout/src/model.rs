@@ -59,6 +59,11 @@ pub enum Marker {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ItemKind {
     Paragraph,
+    /// The opening line (drawn as the card's label) or closing line (its bottom edge) of a
+    /// named container, ADR 0018. No caret stops: structure, not text.
+    ContainerMarker {
+        close: bool,
+    },
     Heading {
         level: u8,
     },
@@ -2062,7 +2067,7 @@ fn item_kind(k: &LeafKind) -> ItemKind {
         LeafKind::Metadata => ItemKind::FrontMatter,
         LeafKind::Toc => ItemKind::Toc,
         LeafKind::Definition => ItemKind::Hidden,
-        LeafKind::ContainerMarker { .. } => ItemKind::Paragraph,
+        LeafKind::ContainerMarker { close } => ItemKind::ContainerMarker { close: *close },
     }
 }
 

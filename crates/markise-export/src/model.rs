@@ -87,6 +87,13 @@ pub enum ExBlock {
     },
     RawHtml(String),
     Quote(Vec<ExBlock>),
+    /// A `:::name args` block (ADR 0018): name and arguments as written, uninterpreted. A
+    /// target escapes them for itself.
+    Directive {
+        name: String,
+        args: String,
+        blocks: Vec<ExBlock>,
+    },
     Alert {
         kind: AlertKind,
         blocks: Vec<ExBlock>,
@@ -227,7 +234,7 @@ impl ExDoc {
         b.number_footnotes(&labels);
         let headings = b.collect_headings();
         let mut blocks = Vec::new();
-        for blk in doc.blocks() {
+        for blk in &doc.tree() {
             b.block(blk, &mut blocks);
         }
         let mut footnotes = std::mem::take(&mut b.footnotes);
@@ -334,8 +341,7 @@ impl Builder<'_> {
     fn block(&mut self, b: &Block, out: &mut Vec<ExBlock>) {
         let text = self.text;
         match &b.kind {
-            // a marker line exports as the text it is until exporters know directives
-            BlockKind::Paragraph | BlockKind::DirectiveOpen { .. } | BlockKind::DirectiveClose { .. } => {
+            BlockKind::Paragraph => {
                 let c = self.inline_content(&b.content(text));
                 if !c.is_empty() {
                     out.push(ExBlock::Paragraph(c));
@@ -460,8 +466,19 @@ impl Builder<'_> {
             }
             BlockKind::FrontMatter { .. } | BlockKind::LinkRefDef { .. } => {}
             BlockKind::Toc => out.push(ExBlock::Toc),
-            // only in `Document::tree`, which the exporter does not read
-            BlockKind::Directive { .. } => {}
+            // the exporter reads `Document::tree`: markers are part of their `Directive`
+            BlockKind::DirectiveOpen { .. } | BlockKind::DirectiveClose { .. } => {}
+            BlockKind::Directive { name, args, .. } => {
+                let mut inner = Vec::new();
+                for c in &b.children {
+                    self.block(c, &mut inner);
+                }
+                out.push(ExBlock::Directive {
+                    name: name.slice(text).to_string(),
+                    args: args.slice(text).to_string(),
+                    blocks: inner,
+                });
+            }
             BlockKind::FootnoteDef { label } => {
                 let key = markise_md::inline::normalize_label(label.slice(text));
                 let n = self.footnote_numbers.get(&key).copied().unwrap_or(0);
