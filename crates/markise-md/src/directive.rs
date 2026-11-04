@@ -34,6 +34,8 @@ pub(crate) struct RawMarker {
     pub at: usize,
     pub fence: usize,
     pub close: bool,
+    /// Bytes from `at` to the end of the line's content.
+    pub line_len: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -42,6 +44,10 @@ struct Marker {
     at: usize,
     fence: u32,
     close: bool,
+    /// Bytes from `at` to the end of the line's content, so that "is this position on the
+    /// marker's line" does not read the line (it may hold megabytes of whitespace). Any edit of
+    /// the line re-parses the marker.
+    line_len: usize,
     /// Index of the other marker of the pair.
     partner: u32,
     /// Index of the opener of the innermost directive around this marker (around both markers
@@ -283,6 +289,7 @@ fn to_marker(r: RawMarker) -> Marker {
         at: r.at,
         fence: r.fence as u32,
         close: r.close,
+        line_len: r.line_len,
         partner: NONE,
         parent: NONE,
     }
@@ -321,10 +328,11 @@ impl Document {
         let first = x.markers.partition_point(|m| m.origin < a).saturating_sub(1);
         let mut out = Vec::new();
         for (k, m) in x.markers.range(first..x.markers.len()).enumerate() {
-            if m.origin > b {
+            // the line starts before the first colon (at most three columns of indentation)
+            if crate::line_start(self.text(), m.origin) > b {
                 break;
             }
-            if m.item.partner != NONE && line_end(self.text(), m.origin).0 >= a {
+            if m.item.partner != NONE && m.origin + m.item.line_len >= a {
                 out.push(first + k);
             }
         }
@@ -410,7 +418,7 @@ impl Document {
         let m = x.markers.get(k).expect("marker");
         let mut cur = match (m.item.partner != NONE, m.item.close) {
             (true, false) => k as u32,
-            (true, true) if pos <= line_end(self.text(), m.origin).0 => m.item.partner,
+            (true, true) if pos <= m.origin + m.item.line_len => m.item.partner,
             _ => m.item.parent,
         };
         let mut out = Vec::new();
@@ -434,7 +442,7 @@ impl Document {
         let m = x.markers.get(k).expect("marker");
         let mut cur = match (m.item.partner != NONE, m.item.close) {
             (true, false) => k as u32,
-            (true, true) if pos <= line_end(self.text(), m.origin).0 => m.item.partner,
+            (true, true) if pos <= m.origin + m.item.line_len => m.item.partner,
             _ => m.item.parent,
         };
         let mut depth = 0;

@@ -1309,3 +1309,26 @@ fn evicted_page_heights_follow_the_review_view() {
         assert_eq!(v.height(i), h, "page {i}");
     }
 }
+
+/// A closer line with a huge run of trailing whitespace, followed by many blocks: asking which
+/// directives are around each block must not read that line again (Codex review of #181).
+/// The bound is a hang guard for what was quadratic, not a speed budget.
+#[test]
+fn many_blocks_after_a_closer_with_a_long_line_build_in_linear_time() {
+    let mut src = format!(":::x\nx\n:::{}\n\n", " ".repeat(1_000_000));
+    for _ in 0..20_000 {
+        src.push_str("p\n\n");
+    }
+    let doc = md(&src);
+    let t = std::time::Instant::now();
+    for paging in [Paging::Full, Paging::Paged { tops: 128 }] {
+        let m = DocModel::build_with(&doc, None, paging);
+        assert!(!m.items.is_empty());
+    }
+    let e = t.elapsed();
+    assert!(e.as_secs() < 60, "{e:?}");
+    // the whitespace still belongs to the closer's line: the block's own range
+    let in_ws = src.find("     ").unwrap() + 500;
+    assert_eq!(doc.named_containers_at(in_ws).len(), 1);
+    assert_eq!(doc.named_containers_at(src.len() - 2).len(), 0);
+}
