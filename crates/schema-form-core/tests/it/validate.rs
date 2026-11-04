@@ -430,6 +430,35 @@ mod choice_options {
     }
 
     #[test]
+    fn pressing_an_option_takes_only_its_own_row_of_strings() {
+        let o = options("many");
+        let mut v = json!(["a", "a", "b"]);
+        assert_eq!(unknown_rows(ChoiceShape::Strings, &o, &v), [1]);
+        write_selected(ChoiceShape::Strings, &o, &[false, false, true], &mut v);
+        assert_eq!(v, json!(["a", "b"]), "the second `a` stays until it is removed");
+    }
+
+    #[test]
+    fn a_second_row_of_an_option_has_a_reason() {
+        assert_eq!(
+            kinds(json!({"marks": [mark("x", "L", true), mark("y", "L", false)]})),
+            [("marks/1".to_string(), ErrorKind::NotAnOption)]
+        );
+        assert_eq!(
+            kinds(json!({"many": ["a", "a"]})),
+            [("many/1".to_string(), ErrorKind::NotAnOption)]
+        );
+    }
+
+    #[test]
+    fn an_empty_entry_is_not_an_option() {
+        assert_eq!(
+            kinds(json!({"many": [""]})),
+            [("many/0".to_string(), ErrorKind::NotAnOption)]
+        );
+    }
+
+    #[test]
     fn a_new_answer_without_an_id_key_is_not_missing_one() {
         let new = json!({"text": "L", "correct": true});
         assert_eq!(kinds(json!({"marks": [new]})), []);
