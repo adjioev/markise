@@ -422,6 +422,29 @@ impl Document {
         out
     }
 
+    /// Number of directives around `pos`, as [`Document::directives_at`] counts them, without
+    /// reading their text. O(log markers + depth); O(1) in a document without directives.
+    pub(crate) fn directive_depth_at(&self, pos: usize) -> usize {
+        let x = &self.directives;
+        if x.paired == 0 {
+            return 0;
+        }
+        let k = x.markers.partition_point(|m| m.origin <= pos);
+        let Some(k) = k.checked_sub(1) else { return 0 };
+        let m = x.markers.get(k).expect("marker");
+        let mut cur = match (m.item.partner != NONE, m.item.close) {
+            (true, false) => k as u32,
+            (true, true) if pos <= line_end(self.text(), m.origin).0 => m.item.partner,
+            _ => m.item.parent,
+        };
+        let mut depth = 0;
+        while cur != NONE {
+            depth += 1;
+            cur = x.markers.get(cur as usize).map_or(NONE, |m| m.item.parent);
+        }
+        depth
+    }
+
     /// The block tree with directives as nodes: [`BlockKind::Directive`] holds the blocks
     /// between its marker lines as children (absolute spans). The stored top-level list
     /// ([`Document::tops`], [`Document::blocks`]) is flat; this view folds it, O(document).

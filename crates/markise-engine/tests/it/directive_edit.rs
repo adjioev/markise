@@ -273,6 +273,58 @@ fn inline_styles_over_a_block_skip_the_markers() {
     assert!(d.contains("**"), "{d:?}");
 }
 
+/// The same keys on a paged and a full model, with a block spanning many pages: the text and
+/// the caret agree, and the paged model equals a full build where it holds real items.
+#[test]
+fn editing_across_pages_matches_a_full_model() {
+    use markise_layout::Paging;
+    let mut src = String::from(":::wide\n\n");
+    for i in 0..60 {
+        src.push_str(&format!("## Head {i}\n\nPara {i} has words.\n\n"));
+    }
+    src.push_str(":::\n\nAfter.\n");
+    let mut p = T::paged(&src, 4);
+    let mut f = T::with_paging(&src, Paging::Full);
+    for t in [&mut p, &mut f] {
+        t.fix_selection = true;
+    }
+    assert!(p.ed.view.model().page_count() > 5);
+    let at = src.find("Para 30").unwrap() + 2;
+    let steps: &[&str] = &[
+        "edit.newline",
+        "type:x",
+        "edit.deleteBackward",
+        "edit.undo",
+        "edit.undo",
+    ];
+    for t in [&mut p, &mut f] {
+        t.set(at);
+    }
+    for k in steps {
+        for t in [&mut p, &mut f] {
+            if let Some(s) = k.strip_prefix("type:") {
+                t.typ(s);
+            } else {
+                t.run(k);
+            }
+        }
+        assert_eq!(p.text(), f.text(), "{k}");
+        assert_eq!(p.ed.session.selection(), f.ed.session.selection(), "{k}");
+        p.ed.view.model().check_against_full(p.ed.session.doc()).unwrap();
+    }
+    // a closer removed through the source: the pages follow
+    let end = p.text().rfind(":::").unwrap();
+    for t in [&mut p, &mut f] {
+        t.ed.session
+            .apply_external(&markise_doc::PatchSet::single_verbatim(end..end + 3, ""), "Edit", false)
+            .unwrap();
+        t.ed.sync();
+        t.frame();
+    }
+    p.ed.view.model().check_against_full(p.ed.session.doc()).unwrap();
+    assert!(p.ed.session.doc().named_containers_at(at).is_empty());
+}
+
 // ---- properties ----------------------------------------------------------------------------
 
 /// `(pairs, marker lines that pair with nothing)`.

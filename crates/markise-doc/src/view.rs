@@ -376,10 +376,22 @@ pub enum ListMarker {
 /// A container opened in the [`FlatEvent`] stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FlatContainer {
-    Quote { callout: Option<CalloutKind> },
-    List { ordered: bool, tight: bool },
-    ListItem { marker: ListMarker },
-    Footnote { label: Box<str> },
+    Quote {
+        callout: Option<CalloutKind>,
+    },
+    List {
+        ordered: bool,
+        tight: bool,
+    },
+    ListItem {
+        marker: ListMarker,
+    },
+    Footnote {
+        label: Box<str>,
+    },
+    /// A named container (ADR 0018). Emitted around each top-level block it holds, so it may
+    /// open and close many times; the markers carry the name.
+    Card,
 }
 
 /// A leaf in the [`FlatEvent`] stream. Spans are relative to `origin` (the origin of the

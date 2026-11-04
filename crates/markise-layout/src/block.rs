@@ -1957,6 +1957,7 @@ pub fn layout_item(
     for c in item.containers.iter() {
         level_x.push((x, if matches!(c, Container::ListItem { .. }) { 2 } else { 1 }));
         match c {
+            Container::Card => {}
             Container::Quote { callout: alert, first } => {
                 let bar = match alert {
                     Some(k) => color(t.alert[alert_index(k)]),

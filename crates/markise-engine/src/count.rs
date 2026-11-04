@@ -1081,6 +1081,20 @@ mod tests {
         (doc, c)
     }
 
+    /// Marker lines of a `:::` block are structure, not words; unpaired they are text.
+    #[test]
+    fn directive_markers_are_not_counted_and_follow_pairing() {
+        assert_eq!(count(":::note extra\n\ntwo words\n\n:::\n").words, 2);
+        assert_eq!(count(":::note\n\ntwo words\n").words, 3);
+        let (mut doc, mut c) = counted(":::note\n\ntwo words\n");
+        assert_eq!(c.total().unwrap().words, 3);
+        let end = doc.text().len();
+        edit(&mut doc, &mut c, end..end, ":::\n");
+        c.fill(&doc, usize::MAX);
+        assert_eq!(c.total().unwrap().words, 2);
+        assert_eq!(c.total(), Some(count_document(&doc)));
+    }
+
     fn sel(src: &str, a: usize, b: usize) -> Counts {
         let (doc, mut c) = counted(src);
         c.selection(&doc, a..b).unwrap()

@@ -558,7 +558,7 @@ impl FormatDoc for Document {
     fn flatten(&self, tops: Range<usize>, sink: &mut dyn FnMut(FlatEvent<'_>)) {
         let text = self.text();
         for (k, t) in self.tops_range(tops.clone()).enumerate() {
-            flatten_block(text, t.block, t.origin, tops.start + k, sink);
+            flatten_top(self, text, t, tops.start + k, sink);
         }
     }
     fn flatten_region(&self, tops: Range<usize>, from: usize, to: usize, sink: &mut dyn FnMut(FlatEvent<'_>)) {
@@ -594,6 +594,10 @@ impl FormatDoc for Document {
         if !matches!(scan_tail(&x.children[..first]), Tail::Emits { list_after: false }) {
             return self.flatten(tops, sink);
         }
+        let cards = self.directive_depth_at(t.start());
+        for _ in 0..cards {
+            sink(FlatEvent::Resume(FlatContainer::Card));
+        }
         for x in &chain {
             sink(FlatEvent::Resume(flat_container(text, x, o)));
         }
@@ -608,11 +612,14 @@ impl FormatDoc for Document {
             }
             sink(FlatEvent::Close);
         }
+        for _ in 0..cards {
+            sink(FlatEvent::Close);
+        }
         for (k, b) in self.top.range(tops.start + 1..tops.end).enumerate() {
             if b.start() >= to {
                 break;
             }
-            flatten_block(text, b.block, b.origin, tops.start + 1 + k, sink);
+            flatten_top(self, text, b, tops.start + 1 + k, sink);
         }
     }
     fn table(&self, at: usize) -> Option<TableView> {
@@ -1312,6 +1319,18 @@ fn flat_container(text: &str, b: &Block, origin: usize) -> FlatContainer {
             label: text[label.start + origin..label.end + origin].into(),
         },
         _ => FlatContainer::Quote { callout: None },
+    }
+}
+
+/// Emits one top-level block inside the directives around it.
+fn flatten_top(doc: &Document, text: &str, t: crate::Top<'_>, top: usize, sink: &mut dyn FnMut(FlatEvent<'_>)) {
+    let cards = doc.directive_depth_at(t.start());
+    for _ in 0..cards {
+        sink(FlatEvent::Open(FlatContainer::Card));
+    }
+    flatten_block(text, t.block, t.origin, top, sink);
+    for _ in 0..cards {
+        sink(FlatEvent::Close);
     }
 }
 

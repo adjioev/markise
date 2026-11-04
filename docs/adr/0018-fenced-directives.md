@@ -139,6 +139,19 @@ the directives around a position is `FormatDoc::named_containers_at`. Outside so
 Source mode edits the text as text. The pairing rule then decides what a line is, and an edit
 that breaks a pair shows immediately: the other marker reads as plain text.
 
+### Layout and paging
+
+`FormatDoc::flatten` emits each top-level block inside `FlatContainer::Card` for every directive
+around it, so items carry `Container::Card` in their chain and their hash. Pages split a block
+freely. An edit changing a pair reports the blocks between as changed: real items are rebuilt
+and the placeholders between are replaced, which drops their measured heights. Cost per edit
+that changes a pair far away: one re-paging of that range, without a parse (see the PR's
+numbers). Typing elsewhere costs a shift of the later markers.
+
+`CrossBlockIndex` pairs `<details>` as before, by the containers that have a line prefix: a
+directive is no scope for disclosures. A `<details>` opened in a block and closed outside it
+pairs across the boundary, and this has no effect on `:::` pairing.
+
 ## Consequences
 
 - Round trip is byte-exact by construction: the text remains the source of truth, and markers

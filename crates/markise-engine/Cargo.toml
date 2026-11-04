@@ -57,6 +57,10 @@ name = "typing"
 harness = false
 
 [[bench]]
+name = "directives"
+harness = false
+
+[[bench]]
 name = "source"
 harness = false
 
