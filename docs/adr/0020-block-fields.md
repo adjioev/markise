@@ -39,7 +39,7 @@ The identity of a field is its declared name. An item (list item, answer, image)
 goes by anchor, then equal content, then position.
 
 A persistent answer id is the `{#id}` in the file. A new answer gets `a<N>` above every number in
-use and every number removed through this model. A removed id does not come back while the model
+use anywhere in the block and every number removed through this model. A removed id does not come back while the model
 lives; after a reload the file is all there is.
 
 ### Encoding: old bytes plus a diff
@@ -49,6 +49,8 @@ from the old bytes of everything still the same, and a line diff of old and new 
 patches, narrowed to the differing characters on a changed line. Therefore:
 
 - No change gives no patch, and a patch can hold only what differs.
+- A value nobody changed is written as its old bytes, even when it reads as empty: `## {#q}` keeps
+  its id until its field is really edited.
 - A line that stays in a value keeps its bytes: prefix, trailing spaces, line terminator, in
   mixed-ending files too (C23). New lines take the block's line ending.
 - A move is a deleted and an inserted line. A character diff over the whole text would be smaller
