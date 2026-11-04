@@ -4,7 +4,7 @@
 //!
 //! - click on a preset → insert at the caret; drag it onto the page → drop between
 //!   paragraphs/blocks (the viewer draws the insertion line, never inside a block);
-//! - "+ Добавить блок" between items, `/` on an empty line and Paragraph › Insert Block… open
+//! - `/` on an empty line and Paragraph › Insert Block… open
 //!   the palette with its search focused and a fixed insertion point.
 //!
 //! Choosing never writes: the viewer opens a draft form ([`crate::block_edit`]); Save inserts.

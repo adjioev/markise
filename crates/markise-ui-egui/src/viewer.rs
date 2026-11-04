@@ -255,8 +255,6 @@ pub struct DocViewer {
     lib: Option<crate::block_lib::Lib>,
     /// PROTOTYPE (block packages): valid insertion points of the last frame (offset, screen y).
     pub gaps: Vec<(usize, f32)>,
-    /// Column left edge and width of the last frame (insertion affordances).
-    gap_col: (f32, f32),
     /// PROTOTYPE (live preview): natural layout heights of the last frame's visible items (by
     /// source start of the item).
     natural: std::collections::HashMap<usize, f32>,
@@ -274,11 +272,6 @@ pub struct MoveBlock(pub usize);
 /// PROTOTYPE (block move): the ⠿ handle left of a block image.
 fn handle_rect(r: Rect) -> Rect {
     Rect::from_min_size(pos2(r.left() - 24.0, r.top() + 6.0), vec2(18.0, 24.0))
-}
-
-/// PROTOTYPE (block packages): the "+ Добавить блок" pill at an insertion point.
-fn plus_rect(left: f32, y: f32) -> Rect {
-    Rect::from_min_size(pos2(left - 2.0, y - 11.0), vec2(136.0, 22.0))
 }
 
 /// PROTOTYPE: block images in the normal (live) editing mode (`MARKISE_LIVE_SNAPS=0` turns
@@ -456,7 +449,6 @@ impl DocViewer {
             last_focus: 0,
             lib: None,
             gaps: Vec::new(),
-            gap_col: (0.0, 0.0),
             natural: Default::default(),
             draft_paint: None,
             debug_drag_y: None,
@@ -1087,27 +1079,6 @@ impl DocViewer {
 
         // ---- input: pointer (hit tests against the last frame's layout)
         let modifiers = ui.input(|i| i.modifiers);
-        let on_plus = if editable && !self.snap_blocks && self.snaps.is_some() && self.ed.session.read_only().is_none()
-        {
-            ui.input(|i| i.pointer.interact_pos()).and_then(|p| {
-                self.gaps
-                    .iter()
-                    .find(|g| plus_rect(self.gap_col.0, g.1).contains(p))
-                    .map(|g| g.0)
-            })
-        } else {
-            None
-        };
-        if let Some(off) = on_plus
-            && resp.hovered()
-        {
-            ctx.set_cursor_icon(CursorIcon::PointingHand);
-            if resp.clicked() {
-                let text = self.ed.session.text();
-                let rev = self.ed.session.revision().counter;
-                crate::block_palette::open_for(Some(crate::block_edit::InsertTarget::new(text, off, off, rev)));
-            }
-        }
         let on_handle = if editable && !self.snap_blocks && self.ed.session.read_only().is_none() {
             ui.input(|i| i.pointer.press_origin().or(i.pointer.interact_pos()))
                 .and_then(|p| {
@@ -1185,7 +1156,6 @@ impl DocViewer {
         let pressed = ui.input(|i| i.pointer.primary_pressed())
             && resp.hovered()
             && on_snap.is_none()
-            && on_plus.is_none()
             && on_handle.is_none()
             && on_view.is_none()
             && on_form.is_none();
@@ -1599,9 +1569,8 @@ impl DocViewer {
         self.last_left = left;
         self.last_top = rect.top();
         // PROTOTYPE (block packages): insertion points between top-level items (never inside a
-        // block), the "+ Добавить блок" pill on hover and the drop line while dragging a preset
+        // block) and the drop line while dragging a preset
         self.gaps.clear();
-        self.gap_col = (left, col_w);
         let mut do_move: Option<(usize, usize)> = None;
         if editable && !self.snap_blocks && self.snaps.is_some() && self.ed.session.read_only().is_none() {
             let text = self.ed.session.text();
@@ -1725,27 +1694,6 @@ impl DocViewer {
                     lp.galley(r.min + vec2(10.0, (26.0 - g.size().y) / 2.0), g, Color32::WHITE);
                     ctx.set_cursor_icon(CursorIcon::Grabbing);
                 }
-            } else if let Some(h) = hover.filter(|h| h.x > left - 30.0 && h.x < left + col_w && rect.contains(*h))
-                && let Some(&(_, y)) = self.gaps.iter().find(|g| (g.1 - h.y).abs() < 9.0)
-            {
-                let r = plus_rect(left, y);
-                let hot = r.contains(h);
-                painter.line_segment(
-                    [pos2(r.right() + 4.0, y), pos2(left + col_w, y)],
-                    Stroke::new(1.0, accent.gamma_multiply(0.5)),
-                );
-                painter.rect_filled(r, 11.0, if hot { accent } else { accent.gamma_multiply(0.75) });
-                painter.text(
-                    r.center(),
-                    egui::Align2::CENTER_CENTER,
-                    if crate::block_edit::lang() == "ru" {
-                        "+ Добавить блок"
-                    } else {
-                        "+ Add block"
-                    },
-                    egui::FontId::proportional(12.0),
-                    Color32::WHITE,
-                );
             }
         }
         if let Some((start, dest)) = do_move {
@@ -2203,9 +2151,6 @@ impl DocViewer {
             let writable = self.ed.session.read_only().is_none();
             if egui::DragAndDrop::payload::<MoveBlock>(&ctx).is_some() {
                 return Some(CursorIcon::Grabbing);
-            }
-            if on_plus.is_some() {
-                return Some(CursorIcon::PointingHand);
             }
             self.block_ctl.iter().find_map(|c| {
                 if view_button_rect(c.rect).contains(p)
