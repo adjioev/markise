@@ -19,6 +19,44 @@ in the same process. The diagnostics log (`markise.log`, folder per platform: se
 | `MARKISE_FRAME_LATENCY=<n>` | wgpu maximum frame latency (default 1) |
 | `WGPU_BACKEND`, `WGPU_POWER_PREF`, `WGPU_ADAPTER_NAME` | wgpu's own adapter selection; e.g. `WGPU_BACKEND=vulkan` on macOS finds no adapter and shows the glow fallback |
 
+## Text weight (issue #172)
+
+The default text backend rasterises glyphs into egui's atlas with these settings, chosen from
+the theme's brightness and the display density (`crates/markise-ui-egui/src/text_look.rs`):
+
+| | 1× (below 1.5 pixels per point, zoom included) | high density, dark theme | high density, light theme |
+|---|---|---|---|
+| Hinting (font instructions) | on | off | off |
+| Alpha from coverage `c` | egui's stock curve (dark `2c − c²`, light `c`) | `2c − c²` | `c^0.7` |
+
+| Variable | Effect |
+|---|---|
+| `MARKISE_TEXT_GAMMA=egui\|off\|<exponent>` | egui's stock curve for the theme's brightness; alpha = coverage; or alpha = coverage^exponent, in every theme |
+| `MARKISE_TEXT_HINTING=1\|0` | hinting on or off on every display |
+
+`MARKISE_TEXT_GAMMA=egui MARKISE_TEXT_HINTING=1` is the rendering before issue #172.
+`cargo run -p markise-ui-egui --release --example text_shots -- <out-dir>` writes a test page in
+both themes at 2× and honours both variables.
+
+Measured on macOS 26 (Arial 16 pt at 2×, Markise Dark and Light colours, 2026-11-04): width of a
+vertical and a horizontal stroke in device pixels, ink of one Cyrillic line (sum of alpha), mean
+absolute difference from Chrome in levels of 255. The system renderer (Chrome; an `NSTextView`
+drawn offscreen and CoreText with smoothing give the same picture) widens the outline itself,
+which no coverage curve reproduces, so it stays somewhat heavier; the gain is in the proportions.
+
+| | Vertical | Horizontal | Ink | From Chrome |
+|---|---|---|---|---|
+| Dark: Chrome | 3.47 | 2.94 | 7468 | |
+| Dark: before | 3.16 | 3.00 | 6895 | 4.24 |
+| Dark: now | 3.16 | 2.77 | 6639 | 3.61 |
+| Light: Chrome | 3.14 | 2.66 | 6809 | |
+| Light: before | 2.81 | 3.00 | 6262 | 5.04 |
+| Light: now | 3.00 | 2.50 | 6284 | 3.05 |
+
+Hinting rounds horizontal strokes up to 3 px and takes 2 px off the height of a line of glyphs
+(29 rows against 31 in every other renderer); vertical strokes are not fitted. Stroke-rich scripts
+such as Cyrillic show it most.
+
 ## Scrolling (issue #86)
 
 The document panes (rendered view, source editor, both panes of Side by Side) scroll as follows

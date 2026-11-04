@@ -291,3 +291,53 @@ fn complete_theme_menu_click_marks_style_and_colors_chosen() {
     );
     let _ = std::fs::remove_dir_all(&cfg);
 }
+
+/// Issue #172: plain outlines on high-density displays, a coverage curve per theme brightness,
+/// egui's stock settings at 1×; moving the window between displays switches them.
+#[test]
+fn text_options_follow_theme_brightness_and_display_density() {
+    use egui::epaint::FontColorTransferFunction as Transfer;
+
+    fn options(ctx: &egui::Context, app: &mut MarkiseApp, ppp: f32) -> egui::epaint::text::TextOptions {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0))),
+            ..Default::default()
+        };
+        raw.viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(ppp);
+        for _ in 0..3 {
+            let mut out = ctx.run_ui(raw.clone(), |ui| app.ui(ui));
+            out.textures_delta.clear();
+        }
+        ctx.global_style().visuals.text_options
+    }
+
+    let dir = tmpdir("text-options");
+    for (appearance, high_density_curve, low_density_curve) in [
+        (
+            Appearance::Dark,
+            Transfer::DARK_MODE_DEFAULT,
+            Transfer::DARK_MODE_DEFAULT,
+        ),
+        (Appearance::Light, Transfer::Gamma(0.7), Transfer::LIGHT_MODE_DEFAULT),
+    ] {
+        let mut app = MarkiseApp::new(AppOptions {
+            config: ConfigDir::Dir(dir.clone()),
+            ..Default::default()
+        });
+        app.set_theme_choice(appearance);
+        let ctx = egui::Context::default();
+        for (ppp, hinting, curve) in [
+            (2.0, false, high_density_curve),
+            (1.0, true, low_density_curve),
+            (2.0, false, high_density_curve),
+        ] {
+            let o = options(&ctx, &mut app, ppp);
+            assert_eq!(o.font_hinting, hinting, "{appearance:?} at {ppp}x");
+            assert_eq!(o.color_transfer_function, curve, "{appearance:?} at {ppp}x");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

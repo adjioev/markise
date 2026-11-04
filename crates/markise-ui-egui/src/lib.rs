@@ -20,6 +20,7 @@ pub mod side_by_side;
 pub mod sidebar;
 pub mod smooth_scroll;
 pub mod source;
+pub mod text_look;
 pub mod text_paint;
 pub mod themes;
 pub mod toolbar;
@@ -32,5 +33,6 @@ pub mod word_count;
 
 pub use app::{AppOptions, MarkiseApp, MenuHost, ThemeChoice, ViewMode, rss_mb};
 pub use markise_engine::settings::Appearance;
+pub use text_look::TextTuning;
 pub use text_paint::TextBackend;
 pub use themes::ConfigDir;

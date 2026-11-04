@@ -159,6 +159,7 @@ fn main() -> eframe::Result {
         start,
         system_fonts: true,
         text_backend: markise_ui_egui::TextBackend::from_env(),
+        text_tuning: markise_ui_egui::TextTuning::from_env(),
         commit: option_env!("MARKISE_COMMIT").map(String::from),
         // settings file and user themes in the platform config folder (ADR 0004)
         config: markise_theme::discover::config_dir().map_or(ConfigDir::None, ConfigDir::Dir),
