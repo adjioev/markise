@@ -1151,3 +1151,37 @@ fn a_typed_backslash_before_closing_hashes_stays() {
         assert!(fresh.apply(&[]).expect("applies").patches.is_empty());
     }
 }
+
+#[test]
+fn the_largest_number_in_an_id_does_not_overflow_the_next_one() {
+    let src = ":::x\n\n## Q {#a18446744073709551615}\n\n- [ ] A {#a18446744073709551614}\n\n:::";
+    let decls = vec![
+        FieldDecl::new("h", FieldKind::Heading { level: Some(2) }),
+        FieldDecl::new("one", FieldKind::Choices),
+    ];
+    let b = dec(src, &decls);
+    let insert = FieldEdit::InsertItem {
+        field: "one".into(),
+        at: 1,
+        item: ItemData::Choice {
+            anchor: None,
+            text: "N".into(),
+            correct: false,
+        },
+    };
+    let next = run(&b, std::slice::from_ref(&insert));
+    let got = anchors_of(&next, "one");
+    assert_eq!(got.len(), 2);
+    assert!(!got[1].is_empty());
+    assert!(!src.contains(&format!("{{#{}}}", got[1])), "{}", next.source());
+    assert_eq!(got[0], "a18446744073709551614");
+    // the next number after the largest u64 can itself be taken
+    let src = src.replace("{#a18446744073709551614}", "{#a18446744073709551616}");
+    let next = run(&dec(&src, &decls), &[insert]);
+    assert_eq!(
+        anchors_of(&next, "one")[1],
+        "a18446744073709551617",
+        "{}",
+        next.source()
+    );
+}

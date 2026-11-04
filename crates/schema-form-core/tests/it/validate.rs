@@ -329,3 +329,32 @@ fn a_large_list_of_answers_names_its_one_duplicate() {
         [s("a/20000", ErrorKind::DuplicateId { id: "i7".into() })]
     );
 }
+
+#[test]
+fn an_empty_value_of_the_wrong_type_is_still_the_wrong_type() {
+    let spec = parse(
+        json!({"type": "object", "properties": {
+            "enabled": {"type": "boolean"},
+            "title": {"type": "string", "minLength": 2},
+            "tags": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+            "meta": {"type": "object", "properties": {}},
+        }}),
+        json!({"version": 1}),
+    );
+    for empty in [json!([]), json!(""), json!("  ")] {
+        assert_eq!(
+            reasons(&spec, json!({ "enabled": empty })),
+            [s("enabled", ErrorKind::WrongType)],
+            "{empty}"
+        );
+        assert_eq!(
+            reasons(&spec, json!({ "meta": empty })),
+            [s("meta", ErrorKind::WrongType)],
+            "{empty}"
+        );
+    }
+    assert_eq!(reasons(&spec, json!({"title": []})), [s("title", ErrorKind::WrongType)]);
+    assert_eq!(reasons(&spec, json!({"tags": ""})), [s("tags", ErrorKind::WrongType)]);
+    // the right type, empty: still exempt from the limits
+    assert_eq!(reasons(&spec, json!({"title": "", "tags": []})), []);
+}
