@@ -37,6 +37,7 @@ Layered workspace (`crates/*`, `apps/*`), lower layers never depend on higher on
 | Layer | Crate | Job |
 |---|---|---|
 | L0 | `markise-geom` | units, measurements |
+| L0 | `schema-form-core` | forms from JSON: a declared subset of JSON Schema plus UI hints to a field tree and validation; no GUI, knows nothing of Markdown (ADR 0020) |
 | L1 | `markise-doc` | format-neutral document seam (ADR 0006): spans, patches, positions, selections, hints, views, command descriptors, format traits |
 | L1 | `markise-md` | Markdown parse/serialize, lossless round-trip (spec 01); implements the `markise-doc` traits |
 | L2 | `markise-layout` | shaping, line breaking, block layout, tables, hit testing |

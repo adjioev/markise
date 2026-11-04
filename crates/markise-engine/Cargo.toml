@@ -11,6 +11,7 @@ publish.workspace = true
 regex = "1.12"
 markise-doc.workspace = true
 markise-md.workspace = true
+schema-form-core.workspace = true
 markise-layout.workspace = true
 notify.workspace = true
 trash.workspace = true

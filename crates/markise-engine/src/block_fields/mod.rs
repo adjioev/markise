@@ -10,8 +10,11 @@
 mod decode;
 mod encode;
 mod escape;
+mod fit;
 mod identity;
 mod values;
+
+pub use fit::{BlockFit, decls_from_spec};
 
 use std::collections::BTreeSet;
 use std::ops::Range;
