@@ -258,6 +258,23 @@ impl AstWriter<'_> {
             ExBlock::Diagram { lang, source } => out.push(node("CodeBlock", json!([attr("", &[lang]), source]))),
             ExBlock::RawHtml(h) => out.push(node("RawBlock", json!(["html", h]))),
             ExBlock::Quote(bs) => out.push(node("BlockQuote", json!(self.blocks(bs)))),
+            ExBlock::Directive { name, args, blocks } => {
+                // `name` and `args` go as JSON strings: pandoc attributes, nothing to escape
+                let title = format!("{name} {args}");
+                let mut inner = vec![node(
+                    "Div",
+                    json!([
+                        attr("", &["title"]),
+                        [node("Para", json!([node("Str", json!(title.trim_end()))]))]
+                    ]),
+                )];
+                inner.extend(self.blocks(blocks));
+                let class = crate::directive_class(name);
+                out.push(node(
+                    "Div",
+                    json!([["", ["directive", class], [["name", name], ["args", args]]], inner]),
+                ));
+            }
             ExBlock::Alert { kind, blocks } => {
                 let k = kind.as_str();
                 let title = alert_title(*kind);

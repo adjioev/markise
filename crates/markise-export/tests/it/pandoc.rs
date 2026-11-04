@@ -148,3 +148,17 @@ fn pandoc_errors_carry_stderr() {
         other => panic!("{other:?}"),
     }
 }
+
+/// `:::` blocks (ADR 0018): a `Div` with the name and arguments as attributes and a title.
+#[test]
+fn a_directive_is_a_div() {
+    let doc = model(":::note x \"y\"\n\ntext\n\n:::\n");
+    let ast = markise_export::pandoc::to_pandoc_json(&doc, &[1, 23]);
+    let div = &ast["blocks"][0];
+    assert_eq!(div["t"], "Div");
+    assert_eq!(div["c"][0][1][0], "directive");
+    assert_eq!(div["c"][0][1][1], "note");
+    assert_eq!(div["c"][0][2][0][1], "note");
+    assert_eq!(div["c"][0][2][1][1], "x \"y\"");
+    assert_eq!(div["c"][1][1]["t"], "Para");
+}

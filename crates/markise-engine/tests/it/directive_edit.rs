@@ -342,6 +342,53 @@ fn editing_across_pages_matches_a_full_model() {
     assert!(p.ed.session.doc().named_containers_at(at).is_empty());
 }
 
+/// Marker lines are no caret stops: the arrows go from outside to the first line inside.
+#[test]
+fn the_caret_skips_marker_lines() {
+    let mut t = T::at("be‸fore\n\n:::note\n\ninside\n\n:::\n\nafter\n");
+    t.fix_selection = true;
+    t.run("caret.down");
+    assert!(t.selection_on_stops());
+    let le = t.text().find("inside").unwrap();
+    assert!((le..le + 6).contains(&t.caret().offset), "{}", t.shown());
+    t.run("caret.down");
+    assert!(t.caret().offset >= t.text().find("after").unwrap(), "{}", t.shown());
+    // an empty block: the caret stops on its virtual paragraph
+    let mut t = T::at("be‸fore\n\n:::note\n:::\n\nafter\n");
+    t.fix_selection = true;
+    t.run("caret.down");
+    assert_eq!(t.caret(), DocPos::with_virt("before\n\n:::note".len(), 1));
+    t.typ("x");
+    assert_eq!(t.text(), "before\n\n:::note\n\nx\n\n:::\n\nafter\n");
+}
+
+/// Content in a card starts further in and wraps earlier than the same text outside it.
+#[test]
+fn a_card_insets_its_content() {
+    use markise_layout::block::NoImages;
+    let mut t = T::at("outs‸ide\n\n:::note\n\ninside\n\n:::\n");
+    let x = |t: &mut T| {
+        let mut f = t.fonts.with_pixels_per_point(1.0);
+        t.ed.caret_rect(&mut f, &NoImages).unwrap().min.x
+    };
+    let a = x(&mut t);
+    let at = t.text().find("inside").unwrap() + 4;
+    t.set(at);
+    t.frame();
+    let b = x(&mut t);
+    assert!(b > a, "inside {b}, outside {a}");
+}
+
+/// Enter at the start of the first line inside: an empty paragraph above it, inside.
+#[test]
+fn enter_at_the_start_of_the_first_line_inside() {
+    let mut t = T::at(":::note\n\n‸text\n\n:::\n");
+    t.run("edit.newline");
+    assert_eq!(t.caret(), DocPos::with_virt(":::note".len(), 1));
+    t.typ("x");
+    assert_eq!(t.text(), ":::note\n\nx\n\ntext\n\n:::\n");
+}
+
 /// Enter at the start of a block next to a marker: an empty paragraph above it, on the same
 /// side of the marker, as next to any other block.
 #[test]
@@ -417,6 +464,75 @@ fn selecting_and_clearing_format_work_over_markers() {
     t.run("select.block");
     t.run("select.block");
     assert_eq!(markers(&t), (1, 0));
+}
+
+/// With the caret on a virtual paragraph, the frame goes on through that line: the item it
+/// follows draws its side edges to its full height, at any depth; a closer's own card ends at
+/// its bottom edge and the paragraph after it stands outside.
+#[test]
+fn card_frames_run_through_virtual_paragraphs() {
+    use markise_layout::Prim;
+    use markise_layout::block::NoImages;
+    let sides = |t: &mut T| -> (usize, f32, Vec<(f32, f32)>, f32) {
+        t.frame();
+        let m = t.ed.view.model().clone();
+        let at = t.caret().offset;
+        let i = (0..m.items.len())
+            .rfind(|&i| m.item_start(i) <= at)
+            .expect("an item at the caret");
+        let mut f = t.fonts.with_pixels_per_point(1.0);
+        let l = t.ed.view.layout(i, &mut f, &NoImages);
+        let vc = l.virtual_caret.expect("the virtual paragraph is laid out");
+        let v: Vec<(f32, f32)> = l
+            .prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Line { a, b, .. } if a.x == b.x => Some((a.x, b.y)),
+                _ => None,
+            })
+            .collect();
+        (i, l.height, v, vc.min.x)
+    };
+    let src = "::::outer\n\n:::inner\n\ntext\n\n```\ncode\n```\n\n:::\n\nend\n\n::::\n\nout\n";
+    // Enter at the end of a paragraph in the inner card: both cards go through the new line
+    let mut t = T::at(&src.replace("text\n", "text‸\n"));
+    t.run("edit.newline");
+    assert!(t.caret().virt > 0);
+    let (_, h, v, _) = sides(&mut t);
+    assert_eq!(v.len(), 4);
+    assert!(v.iter().all(|&(_, b)| b == h), "{v:?} to {h}");
+    // the slot after a code block, the last line inside
+    let gap = src.find("```\n\n:::").unwrap() + 3;
+    t.ed.session
+        .set_selection(Selection::caret_at(DocPos::with_virt(gap, 1)));
+    let (_, h, v, _) = sides(&mut t);
+    assert_eq!(v.len(), 4);
+    assert!(v.iter().all(|&(_, b)| b == h), "{v:?} to {h}");
+    // an empty card: after its opener, the first line inside
+    let mut t = T::new(":::note\n:::\n");
+    t.ed.session.set_selection(Selection::caret_at(DocPos::with_virt(7, 1)));
+    let (_, h, v, x) = sides(&mut t);
+    assert_eq!(v.len(), 2);
+    assert!(v.iter().all(|&(_, b)| b == h), "{v:?} to {h}");
+    assert!(x > v[0].0 && x < v[1].0, "the caret inside the edges");
+    // after an inner closer: the outer card goes on, the inner one has ended; the caret is
+    // inside the outer card and outside the inner one
+    let src = "::::outer\n\n:::inner\n\nx\n\n:::\n\n```\ncode\n```\n\n::::\n";
+    let mut t = T::new(src);
+    let gap = src.find(":::\n\n```").unwrap() + 3;
+    t.ed.session
+        .set_selection(Selection::caret_at(DocPos::with_virt(gap, 1)));
+    let (_, h, v, x) = sides(&mut t);
+    assert_eq!(v.len(), 4);
+    let mut xs = v.clone();
+    xs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (outer_l, inner_l) = (xs[0], xs[1]);
+    assert_eq!(outer_l.1, h, "the outer card reaches the bottom");
+    assert!(inner_l.1 < h, "the inner card ended above the paragraph");
+    assert_eq!(
+        x, inner_l.0,
+        "the caret lines up with the inner card's edge, in the outer card"
+    );
 }
 
 // ---- properties ----------------------------------------------------------------------------

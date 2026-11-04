@@ -630,6 +630,48 @@ fn a_new_pair_replaces_the_placeholders_between() {
     assert_ne!(hash_before, hash_after);
 }
 
+/// The card on screen: the name and arguments as a label, edges from the opener to the
+/// closer, content inside, marker text not shown (ADR 0018).
+#[test]
+fn a_card_draws_its_label_and_edges() {
+    use markise_layout::Prim;
+    let src = "::::outer x y\n\nbody\n\n:::\n\n::::\n\n:::unpaired\n";
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(src));
+    let m = Arc::new(full(&*doc));
+    let mut v = View::new(doc.clone(), m.clone(), Theme::light(), 600.0, 1.0);
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let texts = |l: &markise_layout::BlockLayout| -> Vec<String> {
+        l.prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Text { text, .. } => Some(text.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let lines = |l: &markise_layout::BlockLayout| l.prims.iter().filter(|p| matches!(p, Prim::Line { .. })).count();
+    // opener: the label, both side edges and the top edge
+    let opener = v.layout(0, &mut f, &NoImages);
+    assert_eq!(texts(&opener), ["outer x y"]);
+    assert_eq!(lines(&opener), 3);
+    // content: side edges, its text
+    let body = v.layout(1, &mut f, &NoImages);
+    assert_eq!(texts(&body), ["body"]);
+    assert_eq!(lines(&body), 2);
+    // a bare `:::` too short for the fence is ordinary text inside the block
+    let stray = v.layout(2, &mut f, &NoImages);
+    assert_eq!(texts(&stray), [":::"]);
+    // closer: side edges and the bottom edge, no text
+    let closer = v.layout(3, &mut f, &NoImages);
+    assert!(texts(&closer).is_empty());
+    assert_eq!(lines(&closer), 3);
+    // outside: no edges, marker as text
+    let out = v.layout(4, &mut f, &NoImages);
+    assert_eq!(texts(&out), [":::unpaired"]);
+    assert_eq!(lines(&out), 0);
+}
+
 // ---- cross-block facts (phase 3) ---------------------------------------------------------
 
 /// Hidden, depth, `(title, open)` of an item ([`View::disclosure_of`]).
@@ -1266,6 +1308,147 @@ fn evicted_page_heights_follow_the_review_view() {
     for &(i, h) in &pages {
         assert_eq!(v.height(i), h, "page {i}");
     }
+}
+
+/// `(x, top, bottom)` of the vertical lines of an item's layout, by x.
+fn card_sides(l: &markise_layout::BlockLayout) -> Vec<(f32, f32, f32)> {
+    let mut v: Vec<(f32, f32, f32)> = l
+        .prims
+        .iter()
+        .filter_map(|p| match p {
+            markise_layout::Prim::Line { a, b, .. } if a.x == b.x => Some((a.x, a.y, b.y)),
+            _ => None,
+        })
+        .collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    v
+}
+
+/// Every item between a card's markers carries the card and draws its side edges from its top
+/// to its bottom, whatever it is, at any depth: the frame has no holes. The opener starts at
+/// its top edge; the padding is the same above the label, at the sides and below the content.
+#[test]
+fn card_frames_are_continuous_for_every_kind_of_item() {
+    let src = "::::outer\n\n:::inner\n\nfirst\n\n# Head\n\n```\ncode\n```\n\n- a\n- b\n\n> q\n\n| a |\n|---|\n| 1 |\n\n***\n\n$$\nx\n$$\n\n<div>h</div>\n\n[r]: /u\n\nlast\n\n:::\n\nmiddle\n\n::::\n";
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(src));
+    let m = Arc::new(full(&*doc));
+    let mut v = View::new(doc.clone(), m.clone(), Theme::light(), 600.0, 1.0);
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let n = m.items.len();
+    let mut seen = 0;
+    for i in 0..n {
+        let depth = cards(&m, i);
+        let want = doc.named_containers_at(m.item_start(i)).len();
+        assert_eq!(depth, want, "item {i} has the chain of its position");
+        let l = v.layout(i, &mut f, &NoImages);
+        if m.items[i].kind == markise_layout::ItemKind::Hidden {
+            assert_eq!(l.height, 0.0);
+            continue;
+        }
+        // (a table draws vertical lines of its own)
+        let sides = card_sides(&l);
+        let edges = |d: usize| -> Vec<f32> {
+            let (pad, w) = ((Theme::light().font_size * 0.8).round(), 600.0);
+            let mut x: Vec<f32> = (0..d).flat_map(|k| [k as f32 * pad, w - k as f32 * pad]).collect();
+            x.sort_by(f32::total_cmp);
+            x
+        };
+        let opener = m.items[i].kind == (markise_layout::ItemKind::ContainerMarker { close: false });
+        for x in edges(depth) {
+            let e = sides.iter().find(|s| s.0 == x);
+            let e = e.unwrap_or_else(|| panic!("item {i} {:?}: no edge at {x}: {sides:?}", m.items[i].kind));
+            assert_eq!(e.2, l.height, "item {i} at {x}: to its bottom");
+            if !opener {
+                assert_eq!(e.1, 0.0, "item {i} at {x}: from its top");
+            }
+        }
+        seen += depth;
+    }
+    assert!(seen > 20);
+    // the same x for the same card from item to item
+    let xs = |l: &markise_layout::BlockLayout| -> Vec<f32> { card_sides(l).iter().map(|s| s.0).collect() };
+    let inner_first = xs(&v.layout(2, &mut f, &NoImages));
+    assert_eq!(inner_first.len(), 4);
+    assert_eq!(inner_first, xs(&v.layout(3, &mut f, &NoImages)));
+    // padding: the label below the top edge, the closer's bottom edge below its top
+    let t = Theme::light();
+    let pad = (t.font_size * 0.8).round();
+    let opener = v.layout(0, &mut f, &NoImages);
+    let label_y = opener
+        .prims
+        .iter()
+        .find_map(|p| match p {
+            markise_layout::Prim::Text { pos, .. } => Some(pos.y),
+            _ => None,
+        })
+        .unwrap();
+    let edge_y = card_sides(&opener)[0].1;
+    assert_eq!(label_y - edge_y, pad, "above the label");
+    let closer = v.layout(n - 1, &mut f, &NoImages);
+    assert_eq!(closer.height, pad, "below the content");
+    assert_eq!(card_sides(&opener)[0].0 + pad, inner_first[1], "at the sides");
+}
+
+/// Height estimates of cards follow their layout, so scroll positions stay right.
+#[test]
+fn card_estimates_match_their_layout() {
+    let src = ":::note\n\n:::\n\n".repeat(300);
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(&src));
+    let m = Arc::new(paged(&*doc, 16));
+    let f_m = Arc::new(full(&*doc));
+    let p = View::new(doc.clone(), m, Theme::light(), 600.0, 1.0);
+    let mut v = View::new(doc.clone(), f_m.clone(), Theme::light(), 600.0, 1.0);
+    let est = v.total_height();
+    assert!((p.total_height() / est - 1.0).abs() < 0.02);
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    for i in 0..f_m.items.len() {
+        v.layout(i, &mut f, &NoImages);
+    }
+    let real = v.total_height();
+    assert!((est / real - 1.0).abs() < 0.03, "estimate {est} vs laid out {real}");
+}
+
+/// A huge label is shortened for display, as one line of a bounded size; the source is not
+/// touched (Codex review of #182).
+#[test]
+fn a_huge_label_is_shown_shortened() {
+    use markise_layout::Prim;
+    let args = "word ".repeat(2_000).trim_end().to_string();
+    let src = format!(":::note {args}\n\nbody\n\n:::\n");
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(&src));
+    let m = Arc::new(full(&*doc));
+    let mut v = View::new(doc.clone(), m, Theme::light(), 600.0, 1.0);
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let l = v.layout(0, &mut f, &NoImages);
+    let shown: Vec<String> = l
+        .prims
+        .iter()
+        .filter_map(|p| match p {
+            Prim::Text { text, .. } => Some(text.text().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown.len(), 1);
+    assert!(
+        shown[0].chars().count() <= 200 && shown[0].starts_with("note word") && shown[0].ends_with('…'),
+        "{}",
+        shown[0].len()
+    );
+    assert_eq!(doc.text(), src);
+    // a label of a normal length is not touched, in any script
+    let src = ":::заметка один два\n\nbody\n\n:::\n";
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(src));
+    let m = Arc::new(full(&*doc));
+    let mut v = View::new(doc.clone(), m, Theme::light(), 600.0, 1.0);
+    let l = v.layout(0, &mut f, &NoImages);
+    assert!(
+        l.prims
+            .iter()
+            .any(|p| matches!(p, Prim::Text { text, .. } if text.text() == "заметка один два"))
+    );
 }
 
 /// A closer line with a huge run of trailing whitespace, followed by many blocks: asking which

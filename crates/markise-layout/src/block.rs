@@ -1895,6 +1895,37 @@ fn callout_title(k: &CalloutKind) -> String {
     t
 }
 
+const CARD_LABEL_CHARS: usize = 200;
+
+/// A card's padding: between its edges and its content, on every side (ADR 0018).
+pub(crate) fn card_padding(t: &Theme) -> f32 {
+    (t.font_size * 0.8).round()
+}
+
+/// Height of a card's opener without the gap before it: padding, then one line of label.
+pub(crate) fn card_opener_height(t: &Theme) -> f32 {
+    let size = t.font_size * 0.85;
+    card_padding(t) + size * 1.4
+}
+
+/// The shown label of a named container: name and arguments, at most [`CARD_LABEL_CHARS`]
+/// characters. The source keeps them whole.
+fn card_label(name: &str, args: &str) -> String {
+    let mut out = String::with_capacity(name.len().min(CARD_LABEL_CHARS) + args.len().min(CARD_LABEL_CHARS) + 4);
+    let joined = name
+        .chars()
+        .chain(" ".chars().filter(|_| !args.is_empty()))
+        .chain(args.chars());
+    for (i, c) in joined.enumerate() {
+        if i + 1 == CARD_LABEL_CHARS {
+            out.push('…');
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Lays out item `idx` of `model` (a view model of `doc`). The result is item-relative: it
 /// does not depend on where the item is in the document (positions, fragment ids and source
 /// maps are relative to the item's start), so it is cached by content.
@@ -1920,11 +1951,13 @@ pub fn layout_item(
     let text = doc.text();
     // content lines of the item (absolute): its segment's pieces, or the leaf's lines
     let lines: Vec<Span> = match &item.kind {
-        ItemKind::Empty | ItemKind::Rule | ItemKind::Toc => Vec::new(),
+        ItemKind::Empty | ItemKind::Rule | ItemKind::Toc | ItemKind::ContainerMarker { .. } => Vec::new(),
         _ => model.item_lines(doc, idx),
     };
 
     let gap = match item.gap {
+        // a card's closer: only the card's padding between the last block and the edge
+        _ if item.kind == (ItemKind::ContainerMarker { close: true }) => 0.0,
         Gap::None => 0.0,
         Gap::Tight => 3.0,
         Gap::Normal => match item.kind {
@@ -1954,10 +1987,19 @@ pub fn layout_item(
     let mut level_x: Vec<(f32, u16)> = Vec::new();
     // ordinal of the next list item container (outermost first)
     let mut list_item = 0u16;
+    // left edge and right margin of each card around the item (ADR 0018)
+    let mut cards: Vec<(f32, f32)> = Vec::new();
+    let mut card_right = 0.0;
+    let card_inset = card_padding(t);
     for c in item.containers.iter() {
         level_x.push((x, if matches!(c, Container::ListItem { .. }) { 2 } else { 1 }));
         match c {
-            Container::Card => {}
+            Container::Card => {
+                cards.push((x, card_right));
+                x += card_inset;
+                card_right += card_inset;
+                quote_prefix_here = false;
+            }
             Container::Quote { callout: alert, first } => {
                 let bar = match alert {
                     Some(k) => color(t.alert[alert_index(k)]),
@@ -1997,7 +2039,7 @@ pub fn layout_item(
             }
         }
     }
-    let width = (p.width - x).max(40.0);
+    let width = (p.width - x - card_right).max(40.0);
     let line_px = t.line_px();
     let mut diagram_controls = None;
     let mut out = Out {
@@ -2422,6 +2464,23 @@ pub fn layout_item(
                 p.review,
             );
         }
+        ItemKind::ContainerMarker { close: true } => y += card_inset,
+        ItemKind::ContainerMarker { close: false } => {
+            // the name and arguments as written: uninterpreted, cut for display at a size that
+            // lays out at once (a marker is one item, not segmented like a long paragraph)
+            let label = doc
+                .named_containers_at(origin)
+                .last()
+                .map_or_else(String::new, |c| card_label(&c.name, &c.args));
+            y += card_inset;
+            let size = t.font_size * 0.85;
+            let mut st = Style::base(size, size * 1.4, color(t.meta_block.text));
+            st.fam = FontRole::Bold;
+            let g = shaper.shape(&StyledText::single(label, st.text_style()), wrapped(width));
+            let h = g.size().y;
+            out.text(pos2(x, y), g, Vec::new(), FragmentId::label());
+            y += h;
+        }
         ItemKind::Rule => {
             let mid = y + line_px * 0.5;
             out.prims.push(Prim::Line {
@@ -2662,6 +2721,65 @@ pub fn layout_item(
         });
     }
 
+    // ---- the editor-only empty paragraph after the item (caret in it)
+    let mut height = content_bottom;
+    let mut virtual_caret = None;
+    if p.focus.is_some_and(|f| f.virtual_after) {
+        height += t.block_spacing;
+        let mut vx = x;
+        // after a closer it stands outside that card
+        if item.kind == (ItemKind::ContainerMarker { close: true })
+            && let Some(&(left, _)) = cards.last()
+        {
+            vx = left;
+        }
+        let mut left = p.focus.map_or(0, |f| f.virtual_exit);
+        for &(xb, n) in level_x.iter().rev() {
+            if left < n {
+                break;
+            }
+            left -= n;
+            vx = xb;
+        }
+        virtual_caret = Some(Rect::from_min_size(pos2(vx, height), vec2(0.0, line_px)));
+        height += line_px;
+    }
+
+    // ---- cards: side edges over the item's whole height, the virtual paragraph included, so
+    // they are continuous from item to item; top and bottom edges at the markers
+    let stroke = Stroke::new(1.0, color(t.rule));
+    for (i, &(left, right)) in cards.iter().enumerate() {
+        let (l, r) = (left, p.width - right);
+        // a marker is its own card's top or bottom edge, the innermost around it
+        let own = i + 1 == cards.len();
+        let opens = own && item.kind == (ItemKind::ContainerMarker { close: false });
+        let closes = own && item.kind == (ItemKind::ContainerMarker { close: true });
+        let top = if opens { gap } else { 0.0 };
+        // a virtual paragraph after a closer is outside that card
+        let bottom = if closes { content_bottom } else { height };
+        for ex in [l, r] {
+            deco.push(Prim::Line {
+                a: pos2(ex, top),
+                b: pos2(ex, bottom),
+                stroke,
+            });
+        }
+        if opens {
+            deco.push(Prim::Line {
+                a: pos2(l, top),
+                b: pos2(r, top),
+                stroke,
+            });
+        }
+        if closes {
+            deco.push(Prim::Line {
+                a: pos2(l, bottom),
+                b: pos2(r, bottom),
+                stroke,
+            });
+        }
+    }
+
     // decorations first (painted below text); shift link prim indices accordingly
     let shift = deco.len();
     let mut prims = deco;
@@ -2675,23 +2793,6 @@ pub fn layout_item(
             l
         })
         .collect();
-    // ---- the editor-only empty paragraph after the item (caret in it)
-    let mut height = content_bottom;
-    let mut virtual_caret = None;
-    if p.focus.is_some_and(|f| f.virtual_after) {
-        height += t.block_spacing;
-        let mut vx = x;
-        let mut left = p.focus.map_or(0, |f| f.virtual_exit);
-        for &(xb, n) in level_x.iter().rev() {
-            if left < n {
-                break;
-            }
-            left -= n;
-            vx = xb;
-        }
-        virtual_caret = Some(Rect::from_min_size(pos2(vx, height), vec2(0.0, line_px)));
-        height += line_px;
-    }
     BlockLayout {
         height,
         gap,

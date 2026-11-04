@@ -94,6 +94,9 @@ impl View {
             + s.code_blocks as f32 * 2.0 * t.code_block.padding;
         h += s.table_rows as f32 * (line + 2.0 * t.table_cell_padding);
         h += s.front as f32 * (line + 2.0 * t.meta_block.padding) + s.simple as f32 * line;
+        // a closer has no gap before it, unlike every item counted above
+        h += s.card_openers as f32 * crate::block::card_opener_height(t)
+            + s.card_closers as f32 * (crate::block::card_padding(t) - t.block_spacing);
         // a TOC lists the whole outline, one line per entry
         h += s.tocs as f32 * self.model.outline.len().max(1) as f32 * line;
         h += s.para_lines_at(per_line) * line;
