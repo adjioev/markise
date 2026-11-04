@@ -526,3 +526,36 @@ fn a_checkbox_over_a_wrong_type_keeps_it() {
     assert!(h.query_by_label("This value cannot be edited here").is_some());
     assert_eq!(value_of(&h, "rows")[0]["on"], json!("yes"));
 }
+
+#[test]
+fn moving_to_another_field_ends_a_composition() {
+    let mut h = harness("single");
+    h.run();
+    h.get_by_label("Items 1").focus();
+    h.run();
+    h.event(Event::Ime(ImeEvent::Preedit {
+        text: "n".into(),
+        active_range_chars: None,
+    }));
+    h.run();
+    assert!(h.state().form.is_composing());
+    h.get_by_label("Title").focus();
+    h.run();
+    assert!(
+        !h.state().form.is_composing(),
+        "another editor of the same form has the focus"
+    );
+    let reported = h.state().changes;
+    assert!(reported >= 1, "what the composition left is reported");
+    h.get_by_label("Title").type_text("!");
+    h.run();
+    assert_eq!(value_of(&h, "title"), json!("A title!"));
+    assert_eq!(h.state().changes, reported + 1, "later edits are reported");
+    // a new composition there is its own
+    h.event(Event::Ime(ImeEvent::Preedit {
+        text: "x".into(),
+        active_range_chars: None,
+    }));
+    h.run();
+    assert!(h.state().form.is_composing());
+}

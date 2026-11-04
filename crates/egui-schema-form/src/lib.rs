@@ -83,7 +83,7 @@ pub struct SchemaForm {
     pub(crate) rows: Rows,
     errors: Vec<FieldError>,
     texts: Texts,
-    composing: bool,
+    composing: Option<Id>,
     /// Changed during the composition, not yet reported.
     held_change: bool,
     /// Values from [`SchemaForm::set_values`] waiting for the composition to end.
@@ -111,7 +111,7 @@ impl SchemaForm {
             rows: Rows::default(),
             errors,
             texts: Texts::default(),
-            composing: false,
+            composing: None,
             held_change: false,
             pending: None,
             focus_rows: HashMap::new(),
@@ -140,13 +140,13 @@ impl SchemaForm {
 
     /// An IME composition is going on in the form.
     pub fn is_composing(&self) -> bool {
-        self.composing
+        self.composing.is_some()
     }
 
     /// New values from outside. Rows keep their keys by `id` or equal content, then in order, so
     /// focus and caret stay where they were. During a composition this waits for its end.
     pub fn set_values(&mut self, values: Value) {
-        if self.composing {
+        if self.composing.is_some() {
             self.pending = Some(values);
             return;
         }
@@ -164,7 +164,7 @@ impl SchemaForm {
         }
         self.held_change |= changed;
         let mut out = FormOutput::default();
-        if !self.composing {
+        if self.composing.is_none() {
             out.changed = std::mem::take(&mut self.held_change);
             if let Some(v) = self.pending.take() {
                 self.set_values(v);
@@ -173,19 +173,24 @@ impl SchemaForm {
         out
     }
 
-    /// IME events go to whatever has the focus, so only an editor of this form makes them ours.
-    /// Focus leaving the form ends a composition here: egui interrupts it on a focus change.
+    /// IME events go to whatever has the focus, so only an editor of this form makes them ours,
+    /// and a composition is that editor's: egui interrupts it when the focus moves, to another
+    /// field of this form as well.
     fn track_composition(&mut self, ui: &Ui) {
-        let focused = ui.memory(egui::Memory::focused);
-        if !focused.is_some_and(|f| self.editors.contains(&f)) {
-            self.composing = false;
-            return;
+        let focused = ui.memory(egui::Memory::focused).filter(|f| self.editors.contains(f));
+        if self.composing != focused {
+            self.composing = None;
         }
+        let Some(editor) = focused else {
+            return;
+        };
         ui.input(|i| {
             for e in &i.events {
                 match e {
-                    Event::Ime(ImeEvent::Preedit { text, .. }) => self.composing = !text.is_empty(),
-                    Event::Ime(ImeEvent::Commit(_)) => self.composing = false,
+                    Event::Ime(ImeEvent::Preedit { text, .. }) => {
+                        self.composing = (!text.is_empty()).then_some(editor);
+                    }
+                    Event::Ime(ImeEvent::Commit(_)) => self.composing = None,
                     _ => {}
                 }
             }
