@@ -4,6 +4,7 @@
 //! links its own executable.
 
 mod block_gaps;
+mod block_packages;
 mod code_tools;
 mod common;
 mod common_html;

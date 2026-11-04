@@ -17,6 +17,7 @@ markise-theme.workspace = true
 markise-layout.workspace = true
 markise-text.workspace = true
 markise-blocks.workspace = true
+markise-package.workspace = true
 markise-engine.workspace = true
 markise-export.workspace = true
 egui.workspace = true
@@ -44,6 +45,9 @@ egui_kittest.workspace = true
 markise-corpus.workspace = true
 image.workspace = true
 tempfile.workspace = true
+# block package archives (tests/it/block_packages.rs)
+flate2.workspace = true
+tar.workspace = true
 
 [[bench]]
 name = "viewer"
