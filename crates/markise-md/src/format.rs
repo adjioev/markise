@@ -1950,7 +1950,7 @@ impl Document {
             ))
         };
         if key == planners::DELETE_FORWARD
-            && let Some(n) = next
+            && let Some(n) = next.filter(|n| !matches!(n.kind, LeafKind::ContainerMarker { .. }))
         {
             let nls = line_start(text, n.span.start);
             let into = n.lines.first().map_or(n.span.start, |l| l.start).max(nls) - nls;
@@ -2225,11 +2225,21 @@ impl EditBehavior for Document {
 
     fn plan(&self, id: PlannerId, req: &PlanRequest) -> Result<Plan, PlanError> {
         // the marker lines of a directive are structure: outside source mode no command turns
-        // them into something else (inline styles skip them; Enter leaves them)
-        if !req.source_mode && id != planners::NEWLINE && style_of(id).is_none() && {
-            let r = req.selection.primary().range();
-            self.touches_marker(r.start, r.end)
-        } {
+        // them into something else (inline styles and Clear Format skip them, selecting only
+        // selects, Enter leaves them)
+        if !req.source_mode
+            && id != planners::NEWLINE
+            && id != planners::CLEAR_FORMAT
+            && !matches!(
+                id,
+                planners::SELECT_WORD | planners::SELECT_LINE | planners::SELECT_SCOPE | planners::SELECT_BLOCK
+            )
+            && style_of(id).is_none()
+            && {
+                let r = req.selection.primary().range();
+                self.touches_marker(r.start, r.end)
+            }
+        {
             return Err(PlanError::NotApplicable("directive marker"));
         }
         if id.0.starts_with("table.") {

@@ -389,6 +389,83 @@ fn enter_at_the_start_of_the_first_line_inside() {
     assert_eq!(t.text(), ":::note\n\nx\n\ntext\n\n:::\n");
 }
 
+/// Enter at the start of a block next to a marker: an empty paragraph above it, on the same
+/// side of the marker, as next to any other block.
+#[test]
+fn enter_at_the_start_of_a_block_after_a_marker() {
+    // the first block inside: the paragraph stands inside
+    for (src, typed) in [
+        (":::note\n\n‸text\n\n:::\n", ":::note\n\nnew\n\ntext\n\n:::\n"),
+        (":::note\n‸text\n:::\n", ":::note\n\nnew\n\ntext\n:::\n"),
+        (":::note\n\n# ‸title\n\n:::\n", ":::note\n\nnew\n\n# title\n\n:::\n"),
+        // after a block: outside it
+        (":::note\nx\n:::\n\n‸after\n", ":::note\nx\n:::\n\nnew\n\nafter\n"),
+    ] {
+        let mut t = T::at(src);
+        let at = t.caret().offset;
+        t.run("edit.newline");
+        assert!(t.caret().virt > 0, "{src:?}: {}", t.shown());
+        t.typ("new");
+        assert_eq!(t.text(), typed, "{src:?}");
+        let inside = t.ed.session.doc().named_containers_at(t.caret().offset).len();
+        assert_eq!(inside, usize::from(src.find("after").is_none()), "{src:?}");
+        while t.ed.session.undo() {}
+        assert_eq!(t.text(), src.replace('‸', ""), "{at}");
+    }
+    // Shift+Enter there acts the same way or waits; it never writes into the marker
+    let mut t = T::at(":::note\n\n‸text\n\n:::\n");
+    t.run("edit.softBreak");
+    t.typ("n");
+    assert_eq!(markers(&t), (1, 0), "{}", t.shown());
+}
+
+/// An empty heading next to a marker: it goes, the marker stays, the caret lands off it.
+#[test]
+fn an_empty_heading_next_to_a_marker() {
+    let mut t = T::at(":::note\n\n## ‸\n\n:::\n");
+    t.run("edit.newline");
+    assert_eq!(markers(&t), (1, 0), "{}", t.shown());
+    assert_eq!(t.caret(), DocPos::with_virt(":::note".len(), 1), "{}", t.shown());
+    let mut t = T::at(":::note\n\n## ‸\n\n:::\n");
+    t.run("edit.deleteBackward");
+    assert_eq!(markers(&t), (1, 0), "{}", t.shown());
+    assert_eq!(t.caret(), DocPos::with_virt(":::note".len(), 1), "{}", t.shown());
+    // Delete: the block after it is the closer, which takes no caret
+    let mut t = T::at(":::note\n\n## ‸\n\n:::\n");
+    t.run("edit.deleteForward");
+    assert_eq!(markers(&t), (1, 0), "{}", t.shown());
+    assert!(
+        !t.ed.session.doc().leaf(t.caret().offset).is_some_and(|l| {
+            matches!(l.kind, markise_doc::LeafKind::ContainerMarker { .. }) && t.caret().virt == 0
+        }),
+        "{}",
+        t.shown()
+    );
+}
+
+/// Commands that change no structure work over a selection holding markers.
+#[test]
+fn selecting_and_clearing_format_work_over_markers() {
+    let mut t = open("⟦**one**\n\n:::note\n\n**two**⟧\n\n:::\n");
+    t.run("format.clear");
+    assert_eq!(t.text(), "one\n\n:::note\n\ntwo\n\n:::\n");
+    // selecting further from a selection that reached a marker
+    for id in ["select.line", "select.block", "select.word", "select.scope"] {
+        let t = open("⟦one\n\n:::note\n\ntwo⟧\n\n:::\n");
+        // as over the same selection with a paragraph in place of the marker
+        let plain = open("⟦one\n\nnote\n\ntwo⟧\n\nend\n");
+        assert_eq!(
+            t.ed.registry.enabled(&t.ed.session, id).is_ok(),
+            plain.ed.registry.enabled(&plain.ed.session, id).is_ok(),
+            "{id}"
+        );
+    }
+    let mut t = T::at("o‸ne\n\n:::note\n\ntwo\n\n:::\n");
+    t.run("select.block");
+    t.run("select.block");
+    assert_eq!(markers(&t), (1, 0));
+}
+
 // ---- properties ----------------------------------------------------------------------------
 
 /// `(pairs, marker lines that pair with nothing)`.
