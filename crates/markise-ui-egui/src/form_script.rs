@@ -114,6 +114,23 @@ fn closed_same(what: &str) -> S {
 fn plan(text: &str) -> VecDeque<S> {
     let blocks = bf::all_blocks(text);
     let mut p: Vec<S> = Vec::new();
+    // `MARKISE_PROTO_FORM_LOOK=<block>:<args>`: only open that block and take a picture; a form
+    // with an unsupported field then goes to the Markdown view
+    if let Ok(look) = std::env::var("MARKISE_PROTO_FORM_LOOK") {
+        let (name, args) = look.split_once(':').unwrap_or((&look, ""));
+        p.extend([open(name, args, 0), S::Wait(1200), shot("look")]);
+        if std::env::var_os("MARKISE_PROTO_FORM_MD").is_some() {
+            p.extend([
+                click("$markdown"),
+                S::Wait(1000),
+                check("Open as Markdown closes the form, writes nothing", |w| {
+                    !w.is_open() && w.same()
+                }),
+                shot("look-markdown"),
+            ]);
+        }
+        return p.into();
+    }
     let has = |n: &str, a: &str| blocks.iter().any(|b| b.name == n && b.args == a);
     // every block opens; an unchanged save writes nothing
     let mut counts = std::collections::HashMap::<(String, String), usize>::new();
@@ -446,7 +463,7 @@ impl FormScript {
                     v.pending_edit = off;
                     self.open_since = Some(now);
                 }
-                if v.snaps.as_ref().is_some_and(|s| s.form.native.is_some()) {
+                if v.snaps.as_ref().is_some_and(|s| s.form.is_open()) {
                     self.open_since = None;
                 } else {
                     let err = v

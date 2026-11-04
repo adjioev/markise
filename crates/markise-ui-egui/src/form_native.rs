@@ -226,9 +226,7 @@ fn show(ui: &mut Ui, rect: Rect, f: &mut NativeForm, dir: Option<&Path>, images:
         )
         .inner;
     if let Some(b) = f.banner.clone() {
-        let r = foot.label(RichText::new(b).size(12.5).color(style.danger));
-        foot.painter()
-            .hline(r.rect.x_range(), r.rect.top() - 3.0, Stroke::new(1.0, style.line));
+        foot.label(RichText::new(b).size(12.5).color(style.danger));
     }
     let foot_h = foot.min_rect().height();
     // ---- body
@@ -275,8 +273,12 @@ fn show(ui: &mut Ui, rect: Rect, f: &mut NativeForm, dir: Option<&Path>, images:
         };
         let r = Rect::from_min_size(egui::pos2(inner.left(), body.bottom() - 34.0), vec2(180.0, 32.0));
         let mut b = ui.new_child(egui::UiBuilder::new().max_rect(r).id_salt("native-form-md"));
-        if !f.is_draft && sf::button(&mut b, t, false, style).clicked() {
-            *md = true;
+        if !f.is_draft {
+            let btn = sf::button(&mut b, t, false, style);
+            f.state.name("$markdown", btn.rect);
+            if btn.clicked() {
+                *md = true;
+            }
         }
     }
     if !f.shown {
