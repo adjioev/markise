@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use crate::error::Issues;
-use crate::limits::MAX_FIELDS;
+use crate::limits::{MAX_FIELDS, MAX_NAME_BYTES};
 use crate::value::{Localized, is_block_name, opt_localized};
 
 /// What a field holds in the block's Markdown. These are generic primitives; a package names
@@ -58,6 +58,11 @@ pub(crate) fn parse(file: &str, name: &str, map: serde_json::Map<String, Value>,
         match variants {
             Value::Object(variants) => {
                 for (variant, text) in variants {
+                    // before the name is copied into a message per language below
+                    if variant.len() > MAX_NAME_BYTES {
+                        issues.push(file, format!("a variant name is longer than {MAX_NAME_BYTES} bytes"));
+                        continue;
+                    }
                     let what = format!("variant \"{variant}\"");
                     opt_localized(file, &what, Some(text), issues);
                 }

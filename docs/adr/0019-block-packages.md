@@ -139,24 +139,34 @@ until the user has accepted it. The `tar` crate is used to read entries only, ne
 Per user, in the config folder, `<config>/markise/block-packages/`:
 
 ```text
-trust.json                                 what the user accepted
-packages/<sha256>/files/...                the unpacked files, by archive hash
-packages/<sha256>/integrity.json           sha256 of every file
+trust.json                         what the user accepted
+packages/<sha256>/files/...        the unpacked files, by archive hash
 ```
 
 A package appears whole: it is unpacked in a staging folder and renamed into place. Files are
 created new, without executable bits from the archive. After that the package works without its
-archive (offline, or a removed file).
+archive (offline, or a removed file). A staging folder over an hour old was left by a crash and is
+removed, best effort, at the next install.
 
-The hash covers the archive; `integrity.json` extends that to the files, and they are hashed against
-it on every load. Anything changed, added, removed or not a regular file counts as damage: the
-package is removed and unpacked again from a verified source, or the binding reports an error. The
-config folder rather than the OS cache folder holds this, since an OS cache can be purged under an
-author who works offline. Tests and measurements without a config folder look nothing up at all.
+Hashes reach the store as a validated type (64 hexadecimal digits, lowercase), so no store operation
+can name another folder. A record in `trust.json` with any other value is dropped.
+
+Everything next to a package can be replaced along with it, so nothing there is trusted. On every
+load the unpacked files are hashed into one digest of their paths and contents, and compared with
+the digest held in the consent record. A difference, an added or removed file, or anything on the
+way that is not a real folder or regular file (the `files` root included) counts as damage: the
+package is removed and unpacked again from a verified source, or the binding reports an error. A
+self-consistent replacement of the cache therefore does not inherit consent, as long as `trust.json`
+itself is intact. Someone who can rewrite that file can also accept any package; the store does not
+defend against code already running as the user.
+
+The config folder rather than the OS cache folder holds this, since an OS cache can be purged under
+an author who works offline. Tests and measurements without a config folder look nothing up at all.
 
 ### Trust
 
-Consent is recorded against the package's identity and hash: `(library, version, sha256)`.
+Consent is recorded against the package's identity and hash: `library`, `version`, `sha256`, and
+`files_digest`, the digest of the files that archive unpacks to.
 
 - **Nothing is written before yes.** A document can only cause reads of its binding and archive,
   off the UI thread. The archive is validated before the question, so a broken package shows its
@@ -173,6 +183,11 @@ Consent is recorded against the package's identity and hash: `(library, version,
 - A missing or damaged `trust.json` grants nothing and leads to a question. A record from a newer
   Markise is neither used nor overwritten. Two running copies writing at once can lose a record,
   which at worst asks again.
+- **Accepted limit: the source path can race.** `source` is checked with links resolved and then
+  read by that path, so a link swapped in between could redirect the read outside the folder. This
+  stays: the bytes read must still match the pinned hash, so the swap can only cause a read of a
+  file that is identical to the pinned archive or fail. Traversal through directory handles would
+  close it at a cost across platforms that this does not justify.
 - An archive changed under an unchanged pin is an error when it is read. While the cache holds that
   hash the archive is not read at all: the pin is what counts, and the cache already matches it.
 

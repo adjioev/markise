@@ -59,7 +59,7 @@ fn parses_a_binding() {
     assert_eq!(b.library, "sample");
     assert_eq!(b.version, "1.2.0");
     assert_eq!(b.source, "blocks/x.tar.gz");
-    assert_eq!(b.sha256, SHA, "lowercase");
+    assert_eq!(b.sha256.as_str(), SHA, "lowercase");
     assert_eq!(b.folder(), Path::new("/p"));
 }
 
