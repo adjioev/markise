@@ -48,6 +48,6 @@ pub use source::{SourceTok, SourceToken};
 pub use text::{LineEnding, Span};
 pub use view::{
     CalloutKind, CodeFenceView, ColumnAlign, ContainerKind, CriticKind, FlatContainer, FlatEvent, FlatLeaf,
-    HeadingInfo, InlineKind, InlineNode, InlineSource, LeafKind, LeafView, ListMarker, MapPiece, PieceKind,
-    RawPresentation, RichInline, SourceMap, TableView,
+    HeadingInfo, InlineKind, InlineNode, InlineSource, LeafKind, LeafView, ListMarker, MapPiece, NamedContainer,
+    PieceKind, RawPresentation, RichInline, SourceMap, TableView,
 };

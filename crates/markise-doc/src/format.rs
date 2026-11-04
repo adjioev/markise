@@ -15,7 +15,9 @@ use crate::plan::{Plan, PlanError, PlanRequest, TypingPlan, plain_typing};
 use crate::pos::{Affinity, DocPos, VirtualSlot};
 use crate::source::SourceToken;
 use crate::text::{LineEnding, Span};
-use crate::view::{CodeFenceView, FlatEvent, HeadingInfo, InlineSource, LeafView, RichInline, TableView};
+use crate::view::{
+    CodeFenceView, FlatEvent, HeadingInfo, InlineSource, LeafView, NamedContainer, RichInline, TableView,
+};
 
 /// Format-neutral options for opening a document. Format-specific settings (e.g. Markdown's
 /// parse options) live in the `DocumentFormat` instance.
@@ -510,6 +512,19 @@ pub trait EditBehavior {
     /// typing there materialises a paragraph like on any virtual paragraph. Default: none.
     fn gap_virt(&self, end: usize) -> Option<u16> {
         let _ = end;
+        None
+    }
+    /// The named containers around `at` (Markdown: `:::name` blocks, ADR 0018), outermost first.
+    /// Unlike [`FormatDoc::containers_at`] these put nothing on the lines they hold.
+    fn named_containers_at(&self, at: usize) -> Vec<NamedContainer> {
+        let _ = at;
+        Vec::new()
+    }
+    /// The patches that delete the selected `range` when deleting it as one range would cut
+    /// structure the format keeps paired (ADR 0018): what is selected goes, the part of the
+    /// structure whose other half lies outside the selection stays. `None`: delete `range`.
+    fn selection_deletion(&self, range: Range<usize>) -> Option<PatchSet> {
+        let _ = range;
         None
     }
     /// Container prefix to repeat on a new line at `at` (e.g. `> `).

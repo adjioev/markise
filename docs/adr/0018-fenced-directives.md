@@ -115,12 +115,34 @@ not.
 - **Pairing the next bare `:::` (the prototype).** Simple, but a forgotten closer takes the next
   block's opener in as text and closes on its closer, silently, and has no nesting.
 
+### Editing
+
+Paired marker lines are `LeafKind::ContainerMarker` leaves: structure, not text. Planners keep
+working with `LeafView::containers`, which stays the containers that put a prefix on a line; a
+directive puts none, so inside one everything edits as at the top level. The neutral query for
+the directives around a position is `FormatDoc::named_containers_at`. Outside source mode:
+
+- Backspace at the first line inside and Delete at the last line inside do nothing: joins only
+  reach paragraphs and headings. The same holds from outside, next to a block.
+- The keyboard does not edit a marker line. Enter on it goes to the virtual paragraph after the
+  line; after an opener that is the first line inside, which is also how an empty block takes
+  its content. Other commands are not applicable on a marker or over a selection touching one,
+  except inline styles, which skip it.
+- A selection replaced or deleted across a marker keeps the markers whose pair it does not hold
+  whole, each on its own line, and deletes all the other selected text. A selection holding a
+  pair whole removes the block. So half a pair is never left behind. When typing or Enter
+  replaces such a selection, the deletion is an undo step of its own.
+- `:::name` typed on a new line at the document level is literal until Enter (as code fences),
+  which writes the closer with the same fence and puts the caret inside. If the caret leaves
+  the line instead, the line is escaped (`\:::name`) as other block syntax is.
+
+Source mode edits the text as text. The pairing rule then decides what a line is, and an edit
+that breaks a pair shows immediately: the other marker reads as plain text.
+
 ## Consequences
 
 - Round trip is byte-exact by construction: the text remains the source of truth, and markers
   are ordinary spans in it.
-- Code that walks `blocks()` or `tops()` meets marker leaves. Until a consumer knows them they
-  behave as the text they are; phase 1 of the epic adds caret and edit rules, layout and export
-  on top of this.
+- Code that walks `blocks()` or `tops()` meets marker leaves.
 - Prose lines that look like markers now split a paragraph. A file relying on a line such as
   `:::x` inside a paragraph renders as three paragraphs; its bytes do not change.

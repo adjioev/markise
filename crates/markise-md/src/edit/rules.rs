@@ -52,6 +52,14 @@ pub(crate) fn opener_of(line: &str, opts: &crate::ParseOptions) -> Option<Opener
     None
 }
 
+/// `line` would be a directive marker (ADR 0018). Apart from [`opener_of`], since that is true
+/// only at the document level: elsewhere the same text is ordinary text with no hint to give.
+pub(crate) fn is_directive_line(line: &str) -> bool {
+    let b = line.as_bytes();
+    let p = scan::skip_ws(b, 0, b.len());
+    p <= 3 && p < b.len() && b[p] == b':' && scan::directive_marker(line, p, line.len()).is_some()
+}
+
 /// `[label]:` at the start (a link reference definition once the paragraph closes).
 pub(crate) fn link_def_like(s: &str) -> bool {
     let Some(rest) = s.strip_prefix('[') else { return false };
@@ -345,12 +353,14 @@ impl Document {
         let line_after = format!("{before}{rest}");
         let col = (cs - ls) as u32;
         let hinted = self.hints().get(ls).copied().filter(|h| h.origin.is_literal());
-        let opener = opener_of(&line_after, self.options()).or_else(|| {
-            // a task box / callout tag already closed by its auto-paired `]` while the caret is
-            // still inside it: the line stays literal until the trigger is typed (§2.1, §4.2)
-            pending_rule(&line_after, before.len(), item_first, quote_first, self.options())
-                .then_some(Opener::Immediate)
-        });
+        let opener = opener_of(&line_after, self.options())
+            .or_else(|| {
+                // a task box / callout tag already closed by its auto-paired `]` while the caret
+                // is still inside it: the line stays literal until the trigger is typed (§2.1, §4.2)
+                pending_rule(&line_after, before.len(), item_first, quote_first, self.options())
+                    .then_some(Opener::Immediate)
+            })
+            .or_else(|| (cs == ls && is_directive_line(&line_after)).then_some(Opener::EnterOnly));
         let mut hints = self.hints().clone();
         match (opener, hinted) {
             (Some(o), None) => {
@@ -446,7 +456,9 @@ impl Document {
         let after = format!("{}{typed}{}", &text[line.start..r.start], &text[r.end..line.end]);
         let t = after.trim();
         let setext = !t.is_empty() && (t.bytes().all(|c| c == b'=') || t.bytes().all(|c| c == b'-'));
-        let opens = setext || opener_of(&after, self.options()).is_some();
+        let opens = setext
+            || opener_of(&after, self.options()).is_some()
+            || (leaf.containers.is_empty() && is_directive_line(&after));
         let mut hints = self.hints().clone();
         let had = hints.get(ls).is_some_and(|h| h.origin.is_literal());
         if opens && !had {
