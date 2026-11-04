@@ -2191,12 +2191,42 @@ impl DocViewer {
         }
         // the I-beam only while the pointer is over the surface itself (not over the sidebar,
         // the toolbar or a window on top of it: `hovered` honours layers; issue #36)
+        // (block chrome over the document is not text: this frame's rectangles)
+        let chrome = resp.hover_pos().and_then(|p| {
+            let writable = self.ed.session.read_only().is_none();
+            if egui::DragAndDrop::payload::<MoveBlock>(&ctx).is_some() {
+                return Some(CursorIcon::Grabbing);
+            }
+            if on_plus.is_some() {
+                return Some(CursorIcon::PointingHand);
+            }
+            self.block_ctl.iter().find_map(|c| {
+                if view_button_rect(c.rect).contains(p)
+                    || (writable
+                        && c.view != crate::block_snap::BlockView::Markdown
+                        && edit_button_rect(c.rect).contains(p))
+                {
+                    return Some(CursorIcon::Default);
+                }
+                if editable && !self.snap_blocks && writable && handle_rect(c.rect).contains(p) {
+                    return Some(CursorIcon::Grab);
+                }
+                if self.snap_rects.iter().any(|(r, o)| *o == c.offset && r.contains(p)) {
+                    return Some(CursorIcon::PointingHand);
+                }
+                // a card's header row
+                let native = c.view == crate::block_snap::BlockView::Native;
+                let head = Rect::from_min_size(c.rect.min, vec2(c.rect.width(), crate::block_snap::CARD_HEADER));
+                (native && head.contains(p)).then_some(CursorIcon::Default)
+            })
+        });
         if resp.hovered() {
-            ctx.set_cursor_icon(CursorIcon::Text);
+            ctx.set_cursor_icon(chrome.unwrap_or(CursorIcon::Text));
         }
 
         // ---- pointer: link / toggle hover
-        if let Some(p) = resp.hover_pos()
+        if chrome.is_none()
+            && let Some(p) = resp.hover_pos()
             && let Some((_, local, layout)) = hit(&visible, p, left, rect.top())
         {
             let link = layout.link_at(local).is_some() && (modifiers.command || !focused);
