@@ -128,7 +128,7 @@ impl FormSchema {
             }
             let v = &values[f.id.as_str()];
             check(&f.schema, v, &f.id, &self.texts, &mut out);
-            if f.kind == FieldKind::Choices {
+            if f.options.get("correct").is_some() {
                 let n = v
                     .as_array()
                     .map_or(0, |a| a.iter().filter(|x| x["correct"] == true).count());

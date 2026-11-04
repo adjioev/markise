@@ -123,7 +123,7 @@ fn plan(text: &str) -> VecDeque<S> {
             p.extend([
                 click("$markdown"),
                 S::Wait(1000),
-                check("Open as Markdown closes the form, writes nothing", |w| {
+                check("Open as Markdown closes the form, writes nothing", move |w| {
                     !w.is_open() && w.same()
                 }),
                 shot("look-markdown"),
@@ -132,6 +132,20 @@ fn plan(text: &str) -> VecDeque<S> {
         return p.into();
     }
     let has = |n: &str, a: &str| blocks.iter().any(|b| b.name == n && b.args == a);
+    // The lesson's vocabulary comes from `MARKISE_PROTO_FORM_NAMES`:
+    // `<list block>,<field>;<choices block>,<field>,<single-line field>;<image block>,<field>;
+    //  <icon-choices block>,<args>,<field>,<exclusive index>,<index>,<index>`.
+    let names: &'static str = Box::leak(
+        std::env::var("MARKISE_PROTO_FORM_NAMES")
+            .unwrap_or_default()
+            .into_boxed_str(),
+    );
+    let parts: Vec<Vec<&'static str>> = names.split(';').map(|x| x.split(',').collect()).collect();
+    let name = |i: usize, j: usize| -> &'static str { parts.get(i).and_then(|p| p.get(j)).copied().unwrap_or("") };
+    let (lb, lf) = (name(0, 0), name(0, 1));
+    let (cb, cf, ch) = (name(1, 0), name(1, 1), name(1, 2));
+    let (ib, if_) = (name(2, 0), name(2, 1));
+    let (kb, ka, kf, kx, k1, k2) = (name(3, 0), name(3, 1), name(3, 2), name(3, 3), name(3, 4), name(3, 5));
     // every block opens; an unchanged save writes nothing
     let mut counts = std::collections::HashMap::<(String, String), usize>::new();
     let mut seen = std::collections::HashSet::new();
@@ -145,7 +159,7 @@ fn plan(text: &str) -> VecDeque<S> {
             p.push(shot(&format!(
                 "form-{}{}",
                 b.name,
-                if b.args.is_empty() || b.name == "scene" {
+                if b.args.is_empty() || b.args.contains('/') {
                     String::new()
                 } else {
                     format!("-{}", b.args)
@@ -161,93 +175,93 @@ fn plan(text: &str) -> VecDeque<S> {
         }));
     }
     // string list: edit, live preview without a write, add, reorder, remove
-    if has("goals", "") {
+    if !lb.is_empty() && has(lb, "") {
         p.extend([
-            open("goals", "", 0),
+            open(lb, "", 0),
             S::Wait(200),
-            check("the first field has the keyboard", |w| {
+            check("the first field has the keyboard", move |w| {
                 w.native().is_some_and(|n| n.state.had_focus())
             }),
-            click("items/0/text"),
+            click(&format!("{lf}/0/text")),
             typ(" ПРАВКА"),
-            check("no preview before the debounce", |w| {
+            check("no preview before the debounce", move |w| {
                 w.v.snaps.as_ref().is_some_and(|s| s.form.preview.is_none())
             }),
             S::Wait(350),
-            check("preview shows the value, document not written", |w| {
+            check("preview shows the value, document not written", move |w| {
                 let p = w.v.snaps.as_ref().and_then(|s| s.form.preview.clone());
                 w.same() && p.is_some_and(|p| p.markdown.contains("ПРАВКА"))
             }),
             shot("form-preview"),
-            click("items/add"),
+            click(&format!("{lf}/add")),
             S::Wait(200),
             typ("новый пункт"),
             S::Wait(60),
-            check("add: the new row has the keyboard", |w| {
-                w.val("items").as_array().and_then(|a| a.last().cloned()) == Some(Value::from("новый пункт"))
+            check("add: the new row has the keyboard", move |w| {
+                w.val(lf).as_array().and_then(|a| a.last().cloned()) == Some(Value::from("новый пункт"))
             }),
-            click("items/0/down"),
+            click(&format!("{lf}/0/down")),
             S::Wait(100),
-            check("down: first and second swapped", |w| {
-                w.val("items")[1].as_str().is_some_and(|x| x.contains("ПРАВКА"))
+            check("down: first and second swapped", move |w| {
+                w.val(lf)[1].as_str().is_some_and(|x| x.contains("ПРАВКА"))
             }),
             shot("form-list"),
-            click("items/2/remove"),
+            click(&format!("{lf}/2/remove")),
             S::Wait(100),
-            check("a row removed; document still not written", |w| w.same()),
+            check("a row removed; document still not written", move |w| w.same()),
             cmd_enter(),
             S::Wait(200),
-            check("saved as one step", |w| {
+            check("saved as one step", move |w| {
                 !w.is_open()
                     && w.v.ed.session.text().contains("ПРАВКА")
                     && w.v.ed.session.text().contains("новый пункт")
             }),
             S::Undo,
-            check("undo: byte-identical", |w| w.same()),
+            check("undo: byte-identical", move |w| w.same()),
         ]);
     }
     // answers
-    if has("question", "") {
+    if !cb.is_empty() && has(cb, "") {
         p.extend([
-            open("question", "", 0),
+            open(cb, "", 0),
             S::Wait(200),
-            click("options/1/correct"),
-            check("radio: exactly one correct", |w| {
-                w.val("options")
+            click(&format!("{cf}/1/correct")),
+            check("radio: exactly one correct", move |w| {
+                w.val(cf)
                     .as_array()
                     .is_some_and(|a| a.iter().filter(|x| x["correct"] == true).count() == 1)
-                    && w.val("options")[1]["correct"] == true
+                    && w.val(cf)[1]["correct"] == true
             }),
             shot("form-question"),
-            click("options/0/text"),
+            click(&format!("{cf}/0/text")),
             S::Do(Box::new(|w| *w.saved = Some(w.focus()))),
             S::Key(Key::ArrowDown, Modifiers::ALT),
             S::Wait(100),
-            check("⌥↓: the row moved and kept the keyboard", |w| {
+            check("⌥↓: the row moved and kept the keyboard", move |w| {
                 Some(w.focus()) == *w.saved
             }),
             typ("Ж"),
             S::Wait(60),
-            check("typing goes to the moved row; ids kept", |w| {
-                let o = w.val("options");
+            check("typing goes to the moved row; ids kept", move |w| {
+                let o = w.val(cf);
                 o[1]["text"].as_str().is_some_and(|t| t.contains('Ж')) && o[1]["id"] != o[0]["id"]
             }),
             cmd_enter(),
             S::Wait(200),
-            check("saved", |w| !w.is_open() && w.v.ed.session.text().contains('Ж')),
+            check("saved", move |w| !w.is_open() && w.v.ed.session.text().contains('Ж')),
             S::Undo,
-            check("undo: byte-identical", |w| w.same()),
+            check("undo: byte-identical", move |w| w.same()),
             // shortcuts and focus
-            open("question", "", 0),
+            open(cb, "", 0),
             S::Wait(200),
             S::Key(Key::B, Modifiers::COMMAND),
             S::Key(Key::A, Modifiers::COMMAND),
             S::Wait(100),
-            check("⌘B, ⌘A in a field do not reach the document", |w| w.same()),
+            check("⌘B, ⌘A in a field do not reach the document", move |w| w.same()),
             S::Do(Box::new(|w| *w.saved = Some(w.focus()))),
             S::Key(Key::Tab, Modifiers::NONE),
             S::Wait(100),
-            check("Tab moves to another control of the form", |w| {
+            check("Tab moves to another control of the form", move |w| {
                 Some(w.focus()) != *w.saved && w.native().is_some_and(|n| n.state.had_focus())
             }),
         ]);
@@ -256,24 +270,24 @@ fn plan(text: &str) -> VecDeque<S> {
         }
         p.extend([
             S::Wait(150),
-            check("many Tabs stay in the form", |w| {
+            check("many Tabs stay in the form", move |w| {
                 w.native().is_some_and(|n| n.state.had_focus())
             }),
             S::Key(Key::Tab, Modifiers::SHIFT),
             S::Wait(100),
-            check("Shift+Tab stays in the form", |w| {
+            check("Shift+Tab stays in the form", move |w| {
                 w.native().is_some_and(|n| n.state.had_focus())
             }),
-            click("prompt/text"),
+            click(&format!("{ch}/text")),
             S::Ime("ИМЕ".to_string()),
             S::Wait(60),
-            check("IME commit reaches the field", |w| {
-                w.val("prompt").as_str().is_some_and(|t| t.contains("ИМЕ"))
+            check("IME commit reaches the field", move |w| {
+                w.val(ch).as_str().is_some_and(|t| t.contains("ИМЕ"))
             }),
             S::ClickDoc,
             S::Wait(150),
-            check("click outside keeps the draft", |w| {
-                w.is_open() && w.val("prompt").as_str().is_some_and(|t| t.contains("ИМЕ"))
+            check("click outside keeps the draft", move |w| {
+                w.is_open() && w.val(ch).as_str().is_some_and(|t| t.contains("ИМЕ"))
             }),
             S::Do(Box::new(|w| {
                 let ps =
@@ -283,7 +297,7 @@ fn plan(text: &str) -> VecDeque<S> {
             S::Wait(100),
             click("$save"),
             S::Wait(200),
-            check("stale revision: rejected, banner, form open", |w| {
+            check("stale revision: rejected, banner, form open", move |w| {
                 let banner = w.native().and_then(|n| n.banner.clone());
                 eprintln!("    banner: {banner:?}");
                 w.is_open() && banner.is_some_and(|b| !b.is_empty())
@@ -296,43 +310,35 @@ fn plan(text: &str) -> VecDeque<S> {
         ]);
     }
     // pictures
-    if blocks.iter().any(|b| b.name == "scene") {
+    if !ib.is_empty() && blocks.iter().any(|b| b.name == ib) {
         p.extend([
-            open(
-                "scene",
-                blocks.iter().find(|b| b.name == "scene").map_or("", |b| &b.args),
-                0,
-            ),
+            open(ib, blocks.iter().find(|b| b.name == ib).map_or("", |b| &b.args), 0),
             S::Wait(800),
             shot("form-scene"),
-            click("pictures/0/alt"),
+            click(&format!("{if_}/0/alt")),
             typ(" АЛЬТ"),
-            click("pictures/0/src"),
+            click(&format!("{if_}/0/src")),
             typ("x"),
             S::Wait(300),
             shot("form-scene-nopreview"),
             cmd_enter(),
             S::Wait(200),
-            check("picture alt and path saved", |w| {
+            check("picture alt and path saved", move |w| {
                 w.v.ed.session.text().contains("АЛЬТ") && !w.is_open()
             }),
             S::Undo,
-            check("undo: byte-identical", |w| w.same()),
-            open(
-                "scene",
-                blocks.iter().find(|b| b.name == "scene").map_or("", |b| &b.args),
-                0,
-            ),
+            check("undo: byte-identical", move |w| w.same()),
+            open(ib, blocks.iter().find(|b| b.name == ib).map_or("", |b| &b.args), 0),
             S::Wait(200),
-            click("pictures/add"),
+            click(&format!("{if_}/add")),
             S::Wait(150),
-            check("an added picture without a path is an error", |w| {
+            check("an added picture without a path is an error", move |w| {
                 w.native()
                     .is_some_and(|n| n.errors.iter().any(|e| e.path.ends_with("/src")))
             }),
             cmd_enter(),
             S::Wait(150),
-            check("save refused with errors: banner, nothing written", |w| {
+            check("save refused with errors: banner, nothing written", move |w| {
                 w.same() && w.native().is_some_and(|n| n.banner.is_some())
             }),
             shot("form-scene-error"),
@@ -341,59 +347,59 @@ fn plan(text: &str) -> VecDeque<S> {
             closed_same("Esc: nothing written"),
         ]);
     }
-    // direction buttons
-    if has("question", "directions") {
+    // icon choices
+    if !kb.is_empty() && has(kb, ka) {
         p.extend([
-            open("question", "directions", 0),
+            open(kb, ka, 0),
             S::Wait(300),
-            shot("form-directions"),
-            click("options/dir/stop"),
-            check("exclusive «cannot go» clears the arrows", |w| {
-                w.val("options")
+            shot("form-icon-choices"),
+            click(&format!("{kf}/{kx}/choice")),
+            check("an exclusive answer clears the others", move |w| {
+                w.val(kf)
                     .as_array()
                     .is_some_and(|a| a.iter().filter(|x| x["correct"] == true).count() == 1)
             }),
-            shot("form-directions-stop"),
-            click("options/dir/left"),
-            click("options/dir/right"),
-            check("arrows clear the exclusive answer", |w| {
-                w.val("options")
+            shot("form-icon-choices-exclusive"),
+            click(&format!("{kf}/{k1}/choice")),
+            click(&format!("{kf}/{k2}/choice")),
+            check("other answers clear the exclusive one", move |w| {
+                w.val(kf)
                     .as_array()
                     .is_some_and(|a| a.iter().filter(|x| x["correct"] == true).count() == 2)
             }),
             cmd_enter(),
             S::Wait(200),
-            check(":::question directions saved", |w| !w.is_open() && !w.same()),
+            check("icon choices saved", move |w| !w.is_open() && !w.same()),
             S::Undo,
-            check("undo: byte-identical", |w| w.same()),
+            check("undo: byte-identical", move |w| w.same()),
         ]);
     }
     // a draft from the palette
     p.extend([
-        S::Do(Box::new(|w| choose(w, "question"))),
+        S::Do(Box::new(move |w| choose(w, cb))),
         S::Wait(600),
-        check("palette: a draft opens, document not written", |w| {
+        check("palette: a draft opens, document not written", move |w| {
             w.is_open() && w.same()
         }),
         shot("form-draft"),
         esc(),
         S::Wait(200),
         closed_same("Cancel on a draft writes nothing"),
-        S::Do(Box::new(|w| choose(w, "question"))),
+        S::Do(Box::new(move |w| choose(w, cb))),
         S::Wait(600),
         cmd_enter(),
         S::Wait(200),
-        check("draft without a correct answer: refused", |w| {
+        check("draft without a correct answer: refused", move |w| {
             w.is_open() && w.same() && w.native().is_some_and(|n| n.banner.is_some())
         }),
-        click("options/1/correct"),
+        click(&format!("{cf}/1/correct")),
         cmd_enter(),
         S::Wait(250),
-        check("draft saved: one block more", |w| {
+        check("draft saved: one block more", move |w| {
             !w.is_open() && bf::all_blocks(w.v.ed.session.text()).len() == bf::all_blocks(w.original).len() + 1
         }),
         S::Undo,
-        check("undo: byte-identical", |w| w.same()),
+        check("undo: byte-identical", move |w| w.same()),
     ]);
     p.into()
 }

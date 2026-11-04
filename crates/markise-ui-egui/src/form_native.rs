@@ -1,7 +1,8 @@
 //! PROTOTYPE: the block form drawn natively in the right side panel: the host side of
 //! [`egui_schema_form`]. The crate draws the fields from JSON; this module adds what belongs to
-//! Markise: the panel (title, footer, banner, shortcuts, preview debounce), and the two widgets
-//! that need the host, pictures (thumbnails, native file picker) and direction buttons.
+//! Markise: the panel (title, footer, banner, shortcuts, preview debounce), and the two
+//! primitives that need the host: `image` (thumbnail, alt, path, native file picker) and
+//! `icon-choices` (choice buttons whose icons are files of the package).
 //! `MARKISE_FORM=web` keeps the JSON Forms WebView ([`crate::form_panel`]) for comparison.
 //!
 //! Save / draft / cancel go through the same event channel as the WebView's, so
@@ -9,6 +10,7 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -77,12 +79,24 @@ pub struct NativeForm {
     shown: bool,
     /// Whether a picture path is a file (asked once per path).
     files: HashMap<String, bool>,
+    /// The library's root (`icon` paths are relative to it) and icons rasterized so far.
+    root: Option<PathBuf>,
+    icons: HashMap<String, Option<egui::TextureHandle>>,
     /// Current errors (last frame), for scripts.
     pub errors: Vec<sf::FieldError>,
 }
 
 impl NativeForm {
-    pub fn new(id: u64, req: &Value, schema: &Value, ui_schema: &Value, values: Value, tx: Sender<Value>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: u64,
+        req: &Value,
+        schema: &Value,
+        ui_schema: &Value,
+        values: Value,
+        root: Option<PathBuf>,
+        tx: Sender<Value>,
+    ) -> Self {
         let lang = req["lang"].as_str().unwrap_or("en");
         let mut state = sf::FormState::new();
         if std::env::var_os("MARKISE_PROTO_FORM_SCRIPT").is_some() {
@@ -103,6 +117,8 @@ impl NativeForm {
             dirty: None,
             shown: false,
             files: HashMap::new(),
+            root,
+            icons: HashMap::new(),
             errors: Vec::new(),
         }
     }
@@ -245,17 +261,25 @@ fn show(ui: &mut Ui, rect: Rect, f: &mut NativeForm, dir: Option<&Path>, images:
         values,
         state,
         files,
+        icons,
+        root,
         ..
     } = &mut *f;
+    let root = root.as_deref();
     let resp = egui::ScrollArea::vertical()
         .id_salt(("native-form-scroll", id))
         .auto_shrink([false, false])
         .show(&mut body_ui, |ui| {
             ui.set_width(ui.available_width() - 10.0);
+            let imgs = std::cell::RefCell::new(&mut *images);
             let mut widgets = sf::Widgets::default();
             widgets
-                .add("pictures", |ui, c| pictures(ui, c, dir, images, files))
-                .add("direction-picker", directions);
+                .add("image", |ui, c| {
+                    image_field(ui, c, dir, imgs.borrow_mut().deref_mut(), files)
+                })
+                .add("icon-choices", |ui, c| {
+                    icon_choices(ui, c, root, imgs.borrow_mut().deref_mut(), icons)
+                });
             sf::show(ui, schema, values, state, &mut widgets)
         })
         .inner;
@@ -331,9 +355,9 @@ pub fn frame_start() {
     FOCUSED.with(|c| c.set(false));
 }
 
-// ---------------------------------------------------------------- pictures
+// ---------------------------------------------------------------- image
 
-fn pictures(
+fn image_field(
     ui: &mut Ui,
     c: &mut sf::WidgetCtx<'_>,
     dir: Option<&Path>,
@@ -495,109 +519,90 @@ fn thumbnail(
     }
 }
 
-// ---------------------------------------------------------------- direction buttons
+// ---------------------------------------------------------------- icon choices
 
-/// The fixed answers as arrows on a crossroads (`options.answers`: `{icon, exclusive}` per
-/// answer); an exclusive answer clears the arrows and vice versa.
-fn directions(ui: &mut Ui, c: &mut sf::WidgetCtx<'_>) {
+/// A multiple-choice field drawn as buttons, all from the package: `options.answers` is
+/// `[{label, icon?, exclusive?}]` per answer in order, `options.columns` the grid. `icon` is a
+/// file of the package (SVG or PNG); an answer without one takes a whole row. `exclusive`:
+/// selecting it clears the others and vice versa.
+fn icon_choices(
+    ui: &mut Ui,
+    c: &mut sf::WidgetCtx<'_>,
+    root: Option<&Path>,
+    images: &mut TextureStore,
+    icons: &mut HashMap<String, Option<egui::TextureHandle>>,
+) {
     let s = c.style;
-    let ru = c.texts.lang == "ru";
     let meta = c.field.options["answers"].as_array().cloned().unwrap_or_default();
-    let idx = |icon: &str| meta.iter().position(|m| m["icon"] == icon);
+    let columns = c.field.options["columns"].as_u64().unwrap_or(3).clamp(1, 8) as usize;
     let gap = 8.0;
-    let cell = vec2(((ui.available_width().min(320.0) - 2.0 * gap) / 3.0).floor(), 64.0);
-    let left =
-        ui.available_rect_before_wrap().left() + ((ui.available_width() - 3.0 * cell.x - 2.0 * gap) / 2.0).max(0.0);
-    let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), 3.0 * cell.y + 2.0 * gap), Sense::hover());
-    let at = |col: f32, row: f32| {
-        Rect::from_min_size(
-            egui::pos2(left + col * (cell.x + gap), area.top() + row * (cell.y + gap)),
-            cell,
-        )
-    };
-    // the road and the car: decoration
-    let mid = at(1.0, 1.0);
-    let road = s.line;
-    ui.painter().rect_filled(
-        Rect::from_center_size(mid.center(), vec2(cell.x, cell.y * 0.3)),
-        0.0,
-        road,
-    );
-    ui.painter().rect_filled(
-        Rect::from_center_size(mid.center(), vec2(cell.x * 0.3, cell.y)),
-        0.0,
-        road,
-    );
-    let car = Rect::from_center_size(at(1.0, 2.0).center(), vec2(18.0, 26.0));
-    ui.painter().rect_filled(car, 5.0, s.muted);
+    let total = ui.available_width();
+    let cell_w = ((total - gap * (columns as f32 - 1.0)) / columns as f32).floor();
+    let n = c.items().len();
     let mut toggled = None;
-    let slots = [
-        ("straight", 1.0, 0.0),
-        ("left", 0.0, 1.0),
-        ("right", 2.0, 1.0),
-        ("u-turn", 0.0, 2.0),
-    ];
-    for (icon, col, row) in slots {
-        let Some(i) = idx(icon) else { continue };
-        let on = c.items().get(i).is_some_and(|x| x["correct"] == true);
-        let text = c
-            .items()
-            .get(i)
-            .and_then(|x| x["text"].as_str())
-            .unwrap_or("")
-            .to_string();
-        let r = at(col, row);
-        let resp = ui.interact(r, c.id_of(("dir", icon)), Sense::click());
-        c.add_control(&resp);
-        c.rec(r, || format!("dir/{icon}"));
-        let (fill, stroke, fg) = if on {
-            (s.accent_soft, Stroke::new(1.5, s.accent), s.accent)
-        } else if resp.hovered() {
-            (s.hover, Stroke::new(1.0, s.line), s.muted)
+    let mut i = 0;
+    while i < n {
+        let has_icon = |j: usize| meta.get(j).is_some_and(|m| m["icon"].is_string());
+        // one row: consecutive answers with icons up to `columns`, or one without
+        let end = if has_icon(i) {
+            (i..n).take(columns).take_while(|&j| has_icon(j)).last().unwrap_or(i) + 1
         } else {
-            (s.field, Stroke::new(1.0, s.line), s.muted)
+            i + 1
         };
-        ui.painter().rect(r, 10.0, fill, stroke, egui::StrokeKind::Inside);
-        sf::focus_ring(ui, &resp, s);
-        paint_arrow(ui, r.center() + vec2(0.0, -8.0), icon, fg);
-        ui.painter().text(
-            r.center() + vec2(0.0, 18.0),
-            egui::Align2::CENTER_CENTER,
-            &text,
-            FontId::proportional(12.0),
-            if on { s.fg } else { s.muted },
-        );
-        if resp.clicked() {
-            toggled = Some(i);
+        let h = if has_icon(i) { 64.0 } else { 36.0 };
+        let (row, _) = ui.allocate_exact_size(vec2(total, h), Sense::hover());
+        for j in i..end {
+            let r = if has_icon(j) {
+                Rect::from_min_size(row.min + vec2((j - i) as f32 * (cell_w + gap), 0.0), vec2(cell_w, h))
+            } else {
+                row
+            };
+            let m = meta.get(j).cloned().unwrap_or(Value::Null);
+            let on = c.items()[j]["correct"] == true;
+            let text = c.items()[j]["text"]
+                .as_str()
+                .or(m["label"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let resp = ui.interact(r, c.id_of(("choice", j)), Sense::click());
+            c.add_control(&resp);
+            c.rec(r, || format!("{j}/choice"));
+            let (fill, stroke) = if on {
+                (s.accent_soft, Stroke::new(1.5, s.accent))
+            } else if resp.hovered() {
+                (s.hover, Stroke::new(1.0, s.line))
+            } else {
+                (s.field, Stroke::new(1.0, s.line))
+            };
+            ui.painter().rect(r, 10.0, fill, stroke, egui::StrokeKind::Inside);
+            sf::focus_ring(ui, &resp, s);
+            let fg = if on { s.fg } else { s.muted };
+            let mut text_at = r.center();
+            if let Some(icon) = m["icon"].as_str() {
+                text_at += vec2(0.0, 18.0);
+                let square = Rect::from_center_size(r.center() + vec2(0.0, -8.0), vec2(26.0, 26.0));
+                paint_package_icon(
+                    ui,
+                    square,
+                    icon,
+                    root,
+                    images,
+                    icons,
+                    if on { s.accent } else { s.muted },
+                );
+            }
+            let g = ui.painter().layout(
+                text,
+                FontId::proportional(if m["icon"].is_string() { 12.0 } else { 13.0 }),
+                fg,
+                r.width() - 8.0,
+            );
+            ui.painter().galley(text_at - g.size() / 2.0, g, fg);
+            if resp.clicked() {
+                toggled = Some(j);
+            }
         }
-    }
-    if let Some(i) = idx("stop")
-        && c.items().get(i).is_some()
-    {
-        let on = c.items()[i]["correct"] == true;
-        let text = c.items()[i]["text"].as_str().unwrap_or("").to_string();
-        let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
-        c.add_control(&resp);
-        c.rec(r, || "dir/stop".into());
-        let (fill, stroke) = if on {
-            (s.danger.gamma_multiply(0.15), Stroke::new(1.5, s.danger))
-        } else if resp.hovered() {
-            (s.hover, Stroke::new(1.0, s.line))
-        } else {
-            (s.field, Stroke::new(1.0, s.line))
-        };
-        ui.painter().rect(r, 10.0, fill, stroke, egui::StrokeKind::Inside);
-        sf::focus_ring(ui, &resp, s);
-        ui.painter().text(
-            r.center(),
-            egui::Align2::CENTER_CENTER,
-            &text,
-            FontId::proportional(13.0),
-            s.fg,
-        );
-        if resp.clicked() {
-            toggled = Some(i);
-        }
+        i = end;
     }
     if let Some(i) = toggled {
         let exclusive = |j: usize| meta.get(j).is_some_and(|m| m["exclusive"] == true);
@@ -612,48 +617,54 @@ fn directions(ui: &mut Ui, c: &mut sf::WidgetCtx<'_>) {
         }
         c.changed = true;
     }
-    if !c.items().iter().any(|x| x["correct"] == true) {
-        let msg = if ru {
-            "Отметьте хотя бы одно направление или «Ехать нельзя»."
-        } else {
-            "Pick at least one direction."
-        };
-        // the codec's own rule says the same; one message is enough
-        c.errors.clear();
-        c.error(msg);
+}
+
+/// Draws a file of the package in `r`: an SVG (its `currentColor` follows `col`) or a raster
+/// image. A missing file draws nothing.
+fn paint_package_icon(
+    ui: &Ui,
+    r: Rect,
+    icon: &str,
+    root: Option<&Path>,
+    images: &mut TextureStore,
+    icons: &mut HashMap<String, Option<egui::TextureHandle>>,
+    col: Color32,
+) {
+    let Some(root) = root else { return };
+    let rel = Path::new(icon);
+    if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return;
+    }
+    let path = root.join(rel);
+    if icon.ends_with(".svg") {
+        let tex = icons
+            .entry(icon.to_string())
+            .or_insert_with(|| svg_texture(ui.ctx(), &path, icon));
+        if let Some(t) = tex {
+            egui::Image::new(&*t).tint(col).paint_at(ui, r);
+        }
+    } else {
+        let key = path.to_string_lossy().to_string();
+        images.request(ui.ctx(), &key);
+        if let Some(t) = images.texture(&key) {
+            egui::Image::new(&t).paint_at(ui, r);
+        }
     }
 }
 
-fn paint_arrow(ui: &Ui, c: egui::Pos2, icon: &str, col: Color32) {
-    let st = Stroke::new(2.2, col);
-    let p = ui.painter();
-    let seg = |pts: &[(f32, f32)]| {
-        let v: Vec<egui::Pos2> = pts.iter().map(|&(x, y)| c + vec2(x, y)).collect();
-        p.add(egui::Shape::line(v, st));
-    };
-    match icon {
-        "left" => {
-            seg(&[(9.0, 0.0), (-9.0, 0.0)]);
-            seg(&[(-3.0, -6.0), (-9.0, 0.0), (-3.0, 6.0)]);
-        }
-        "right" => {
-            seg(&[(-9.0, 0.0), (9.0, 0.0)]);
-            seg(&[(3.0, -6.0), (9.0, 0.0), (3.0, 6.0)]);
-        }
-        "straight" => {
-            seg(&[(0.0, 9.0), (0.0, -9.0)]);
-            seg(&[(-6.0, -3.0), (0.0, -9.0), (6.0, -3.0)]);
-        }
-        _ => {
-            // u-turn: up, over the top to the left, down with an arrow head
-            let mut v = vec![(5.0, 10.0), (5.0, -2.0)];
-            for k in 1..=8 {
-                let a = std::f32::consts::PI * k as f32 / 8.0;
-                v.push((5.0 * a.cos(), -2.0 - 5.0 * a.sin()));
-            }
-            v.push((-5.0, 2.0));
-            seg(&v);
-            seg(&[(-9.0, -2.0), (-5.0, 2.0), (-1.0, -2.0)]);
-        }
-    }
+/// Rasterizes an SVG file white on transparent, for tinting (`currentColor` becomes white).
+fn svg_texture(ctx: &egui::Context, path: &Path, name: &str) -> Option<egui::TextureHandle> {
+    const PX: u32 = 72;
+    let text = std::fs::read_to_string(path).ok()?.replace("currentColor", "#ffffff");
+    let tree = resvg::usvg::Tree::from_str(&text, &resvg::usvg::Options::default()).ok()?;
+    let mut pix = resvg::tiny_skia::Pixmap::new(PX, PX)?;
+    let size = tree.size();
+    let scale = PX as f32 / size.width().max(size.height());
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pix.as_mut(),
+    );
+    let img = egui::ColorImage::from_rgba_premultiplied([PX as usize, PX as usize], pix.data());
+    Some(ctx.load_texture(format!("form-icon-{name}"), img, egui::TextureOptions::LINEAR))
 }

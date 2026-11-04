@@ -278,26 +278,26 @@ impl FormState {
         };
         let over: Option<Value> = read("json").and_then(|s| serde_json::from_str(&s).ok());
         let (title, schema, mut uischema) = bf::form(&dec, &lang, over.as_ref());
-        // a variant with a site-declared built-in widget (`:::question directions` → the direction
-        // picker): the answers are picked with that widget
-        if block.name == "question"
-            && let Some(w) = crate::block_lib::widget_for(
-                &root,
-                &lang,
-                &block.name,
-                block.args.split_whitespace().next().unwrap_or(""),
-            )
-            && let Some(els) = uischema["elements"].as_array_mut()
+        // a preset of this block and variant may give its choices field a presentation (hints
+        // from the package only): applied to the field it names, else the first choices field
+        if let Some(w) = crate::block_lib::widget_for(
+            &root,
+            &lang,
+            &block.name,
+            block.args.split_whitespace().next().unwrap_or(""),
+        ) && let Some(els) = uischema["elements"].as_array_mut()
         {
-            for e in els.iter_mut() {
-                if e["scope"] == "#/properties/options" {
-                    e["options"]["format"] = json!(w["widget"]);
-                    e["options"]["answers"] = w["answers"].clone();
-                    e["label"] = json!(if ru {
-                        "Разрешённые направления"
-                    } else {
-                        "Allowed directions"
-                    });
+            let scope = w["field"].as_str().map(|f| format!("#/properties/{f}"));
+            let target = els.iter_mut().find(|e| match &scope {
+                Some(s) => e["scope"] == s.as_str(),
+                None => e["options"]["format"] == "choices",
+            });
+            if let Some(e) = target {
+                e["options"]["format"] = w["widget"].clone();
+                e["options"]["answers"] = w["answers"].clone();
+                e["options"]["columns"] = w["columns"].clone();
+                if let Some(l) = w["label"].as_str().filter(|l| !l.is_empty()) {
+                    e["label"] = json!(l);
                 }
             }
         }
@@ -306,7 +306,8 @@ impl FormState {
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_default();
         // a lesson contract nearby may reject changed answers at build time (not rewritten here)
-        let warning = if block.name == "question" {
+        // (the WebView comparison keeps this site-specific note; the native form has no such vocabulary)
+        let warning = if !crate::form_native::enabled() && block.name == "question" {
             contract_of(doc, doc_text).map(|c| {
                 if ru {
                     format!("Контракт урока {c} может отклонить изменения ответов (состав, верность) при сборке сайта.")
@@ -345,7 +346,9 @@ impl FormState {
             "op": "form_open", "id": id,
             "title": if draft.is_some() { format!("{} {title}", if ru { "Новый блок:" } else { "New block:" }) } else { title },
             "block": block.name, "draft": draft.is_some(), "warning": warning,
-            "schema": schema, "uischema": uischema, "data": dec.data, "lang": lang,
+            "schema": schema,
+            "uischema": if crate::form_native::enabled() { uischema.clone() } else { crate::form_panel::adapt_uischema(&uischema) },
+            "data": dec.data, "lang": lang,
             "theme": if theme.dark { "dark" } else { "light" }, "vars": theme.vars,
             "note": note,
             // packages: declarative forms only (no site form JS)
@@ -373,6 +376,7 @@ impl FormState {
                 &schema,
                 &uischema,
                 dec.data.clone(),
+                Some(root.clone()),
                 self.tx.clone(),
             ));
         } else {

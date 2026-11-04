@@ -40,6 +40,29 @@ mod other {
 #[cfg(not(target_os = "macos"))]
 pub use other::{forward, frame_end, frame_start, handle, place, set_sink};
 
+/// The bundled page (kept for comparison, not rebuilt) knows older widget names: generic
+/// primitives are translated for it here, and only here.
+pub fn adapt_uischema(ui: &Value) -> Value {
+    let mut ui = ui.clone();
+    for e in ui["elements"].as_array_mut().into_iter().flatten() {
+        match e["options"]["format"].as_str() {
+            Some("image") => e["options"]["format"] = "pictures".into(),
+            Some("icon-choices") => {
+                e["options"]["format"] = "direction-picker".into();
+                for a in e["options"]["answers"].as_array_mut().into_iter().flatten() {
+                    let stem = a["icon"]
+                        .as_str()
+                        .and_then(|i| std::path::Path::new(i).file_stem())
+                        .map(|s| s.to_string_lossy().to_string());
+                    a["icon"] = stem.unwrap_or_else(|| "stop".into()).into();
+                }
+            }
+            _ => {}
+        }
+    }
+    ui
+}
+
 /// Width of the panel in egui points.
 pub const WIDTH: f32 = 440.0;
 

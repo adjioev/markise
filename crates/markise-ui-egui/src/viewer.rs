@@ -816,7 +816,11 @@ impl DocViewer {
         let press_on_comment = ui
             .input(|i| i.pointer.press_origin())
             .is_some_and(|p| self.comment_at(p).is_some() || self.on_edited_card(p));
-        if ((resp.clicked() || resp.drag_started()) && !press_on_comment) || std::mem::take(&mut self.refocus) {
+        if ((resp.clicked() || resp.drag_started()) && !press_on_comment)
+            || (std::mem::take(&mut self.refocus)
+                // PROTOTYPE: a native form opened meanwhile keeps the keyboard it just took
+                && !self.snaps.as_ref().is_some_and(|s| s.form.native.is_some()))
+        {
             resp.request_focus();
         }
         let focused = resp.has_focus();

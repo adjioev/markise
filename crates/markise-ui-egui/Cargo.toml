@@ -21,6 +21,7 @@ markise-engine.workspace = true
 markise-export.workspace = true
 egui.workspace = true
 egui-schema-form = { path = "../egui-schema-form" }
+resvg = { version = "0.45", default-features = false }
 rfd.workspace = true
 ttf-parser.workspace = true
 memmap2.workspace = true

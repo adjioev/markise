@@ -602,7 +602,7 @@ pub fn form(dec: &Decoded, lang: &str, over: Option<&Value>) -> (String, Value, 
                 }
                 props.insert(f.name.clone(), sch);
                 els.push(json!({"type": "Control", "scope": scope, "label": label,
-                    "options": opts_of(f, json!({"format": "pictures"}))}));
+                    "options": opts_of(f, json!({"format": "image"}))}));
             }
             _ => {}
         }

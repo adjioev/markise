@@ -404,7 +404,8 @@ pub fn presets(root: &Path, lang: &str) -> Vec<Preset> {
                 block_label: tr(&manifest[&block]["label"]),
                 keywords: x["keywords"].as_str().unwrap_or("").into(),
                 widget: x.get("widget").and_then(Value::as_str).map(|w| {
-                    json!({"widget": w, "variant": x["variant"], "answers": x.get("answers").cloned().unwrap_or(json!([]))})
+                    json!({"widget": w, "variant": x["variant"], "field": x["field"], "columns": x["columns"],
+                        "label": tr(&x["field_label"]), "answers": x.get("answers").cloned().unwrap_or(json!([]))})
                 }),
                 icon: icon(&block),
                 group,
