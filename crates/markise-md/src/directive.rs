@@ -321,7 +321,8 @@ impl Document {
         let first = x.markers.partition_point(|m| m.origin < a).saturating_sub(1);
         let mut out = Vec::new();
         for (k, m) in x.markers.range(first..x.markers.len()).enumerate() {
-            if m.origin > b {
+            // the line starts before the first colon (at most three columns of indentation)
+            if crate::line_start(self.text(), m.origin) > b {
                 break;
             }
             if m.item.partner != NONE && line_end(self.text(), m.origin).0 >= a {
