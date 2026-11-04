@@ -192,3 +192,140 @@ proptest! {
         }
     }
 }
+
+fn parse(schema: Value, hints: Value) -> FormSpec {
+    FormSpec::parse(&schema, &hints, None).expect("in the subset")
+}
+
+fn reasons(spec: &FormSpec, v: Value) -> Vec<(String, ErrorKind)> {
+    spec.validate(&v).into_iter().map(|e| (e.path, e.kind)).collect()
+}
+
+fn s(path: &str, kind: ErrorKind) -> (String, ErrorKind) {
+    (path.to_string(), kind)
+}
+
+#[test]
+fn entries_of_choices_and_images_answer_to_their_schemas() {
+    let spec = parse(
+        json!({"type": "object", "properties": {
+            "a": {"type": "array", "items": {"type": "object", "required": ["id"], "properties": {
+                "id": {"type": "string"},
+                "text": {"type": "string", "minLength": 2},
+                "correct": {"type": "boolean"},
+            }}},
+            "p": {"type": "array", "items": {"type": "object", "properties": {
+                "alt": {"type": "string", "maxLength": 1},
+                "path": {"type": "string"},
+            }}},
+        }}),
+        json!({"version": 1, "fields": {"a": {"widget": "choices"}, "p": {"widget": "images"}}}),
+    );
+    assert_eq!(
+        reasons(&spec, json!({"a": [{"id": "x", "text": 42, "correct": "yes"}]})),
+        [
+            s("a/0/correct", ErrorKind::WrongType),
+            s("a/0/text", ErrorKind::WrongType)
+        ]
+    );
+    assert_eq!(
+        reasons(
+            &spec,
+            json!({"a": [{"id": "x", "text": "t", "correct": true}, {"id": "y", "text": "", "correct": false}]})
+        ),
+        [
+            s("a/0/text", ErrorKind::TooShort { min: 2 }),
+            s("a/1/text", ErrorKind::Required)
+        ]
+    );
+    assert_eq!(
+        reasons(&spec, json!({"p": [{"alt": "long", "path": 1}, 7]})),
+        [
+            s("p/0/alt", ErrorKind::TooLong { max: 1 }),
+            s("p/0/path", ErrorKind::WrongType),
+            s("p/1", ErrorKind::WrongType),
+        ]
+    );
+}
+
+#[test]
+fn additional_properties_hold_at_any_depth() {
+    let spec = parse(
+        json!({"type": "object", "properties": {
+            "g": {"type": "object", "additionalProperties": false, "properties": {"k": {"type": "string"}}},
+            "r": {"type": "array", "items": {
+                "type": "object", "additionalProperties": false, "properties": {"k": {"type": "string"}},
+            }},
+            "open": {"type": "object", "properties": {"k": {"type": "string"}}},
+        }}),
+        json!({"version": 1}),
+    );
+    assert_eq!(
+        reasons(
+            &spec,
+            json!({"g": {"x": 1}, "r": [{"k": "v", "y": 2}], "open": {"z": 3}, "top": 4})
+        ),
+        [s("g/x", ErrorKind::UnknownKey), s("r/0/y", ErrorKind::UnknownKey)]
+    );
+}
+
+#[test]
+fn a_custom_widgets_schema_still_holds() {
+    let hints = json!({"version": 1, "fields": {
+        "o": {"widget": "custom", "custom": "w"},
+        "l": {"widget": "custom", "custom": "w"},
+        "t": {"widget": "custom", "custom": "w"},
+    }});
+    let spec = parse(
+        json!({"type": "object", "properties": {
+            "o": {"type": "object", "required": ["n"], "properties": {"n": {"type": "string"}}},
+            "l": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+            "t": {"type": "string", "maxLength": 1},
+        }}),
+        hints,
+    );
+    assert_eq!(
+        reasons(&spec, json!({"o": {}, "l": [1], "t": "long"})),
+        [
+            s("l", ErrorKind::TooFew { min: 2 }),
+            s("l/0", ErrorKind::WrongType),
+            s("o/n", ErrorKind::Required),
+            s("t", ErrorKind::TooLong { max: 1 }),
+        ]
+    );
+    assert_eq!(reasons(&spec, json!({"o": 1})), [s("o", ErrorKind::WrongType)]);
+}
+
+#[test]
+fn an_empty_optional_value_passes_its_limits() {
+    let spec = parse(
+        json!({"type": "object", "properties": {
+            "a": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+            "t": {"type": "string", "minLength": 2},
+        }}),
+        json!({"version": 1}),
+    );
+    assert_eq!(reasons(&spec, json!({"a": [], "t": ""})), []);
+    assert_eq!(
+        reasons(&spec, json!({"a": ["x"], "t": "x"})),
+        [
+            s("a", ErrorKind::TooFew { min: 2 }),
+            s("t", ErrorKind::TooShort { min: 2 }),
+        ]
+    );
+}
+
+#[test]
+fn a_large_list_of_answers_names_its_one_duplicate() {
+    // 20,000 entries stay cheap only through a set; the assertion is on the result, not on time
+    let schema = json!({"type": "object", "properties": {"a": {"type": "array", "items": {"type": "object", "properties": {
+        "id": {"type": "string"}, "text": {"type": "string"}, "correct": {"type": "boolean"},
+    }}}}});
+    let spec = parse(schema, json!({"version": 1, "fields": {"a": {"widget": "choices"}}}));
+    let mut list: Vec<Value> = (0..20_000).map(|i| a(&format!("i{i}"), false)).collect();
+    list.push(a("i7", false));
+    assert_eq!(
+        reasons(&spec, json!({ "a": list })),
+        [s("a/20000", ErrorKind::DuplicateId { id: "i7".into() })]
+    );
+}

@@ -39,7 +39,7 @@ The identity of a field is its declared name. An item (list item, answer, image)
 goes by anchor, then equal content, then position.
 
 A persistent answer id is the `{#id}` in the file. A new answer gets `a<N>` above every number in
-use and every number removed through this model. A removed id does not come back while the model
+use anywhere in the block and every number removed through this model. A removed id does not come back while the model
 lives; after a reload the file is all there is.
 
 ### Encoding: old bytes plus a diff
@@ -49,6 +49,8 @@ from the old bytes of everything still the same, and a line diff of old and new 
 patches, narrowed to the differing characters on a changed line. Therefore:
 
 - No change gives no patch, and a patch can hold only what differs.
+- A value nobody changed is written as its old bytes, even when it reads as empty: `## {#q}` keeps
+  its id until its field is really edited.
 - A line that stays in a value keeps its bytes: prefix, trailing spaces, line terminator, in
   mixed-ending files too (C23). New lines take the block's line ending.
 - A move is a deleted and an inserted line. A character diff over the whole text would be smaller
@@ -95,7 +97,9 @@ name, so an arbitrary schema cannot silently become a promise:
 
 - JSON Schema: `type` (one of string, boolean, array, object), `properties`, `required`, `items`,
   `minLength`, `maxLength`, `minItems`, `maxItems`, `additionalProperties` as true or false.
-  Annotations are ignored. `enum`, `pattern`, `format`, `$ref` and combinators are refused.
+  Annotations are ignored. `enum`, `pattern`, `format`, `$ref` and combinators are refused, and so
+  is a keyword that would mean nothing on its type. This holds at any depth, in the entries of
+  choices and images and below a custom widget too; a custom widget may only leave `type` out.
 - UI hints, our own small format and not JSON Forms: `version`, `order`, `fields`, and per field
   `label`, `help`, `widget`, `multiline`, `add_label`, `selection`, `correct`, nested `fields` and
   `order`, and `custom` for a host's widget. `variants` overlays the hints by a host's name.
@@ -104,8 +108,9 @@ name, so an arbitrary schema cannot silently become a promise:
 - Correctness (`exactly-one`, `at-least-one`), missing and duplicate answer ids: these are not
   JSON Schema, so a validator would not have given them anyway.
 
-Empty is how missing content looks in a document, so an empty string or array fails `required`
-and passes the other limits.
+Empty is how missing content looks in a document, so an empty string or array as a field's value
+fails `required` and passes the other limits. An entry of an array exists, so its strings answer
+to their limits even when empty.
 
 **Own validator, not the `jsonschema` crate.** The crate is MIT, and with default features off its
 tree has no HTTP or TLS. Measured on this machine with 0.60.2 against a binary using only

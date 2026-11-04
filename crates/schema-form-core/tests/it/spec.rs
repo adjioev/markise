@@ -140,3 +140,70 @@ fn a_custom_widget_is_a_name_and_nothing_else() {
         }
     );
 }
+
+#[test]
+fn a_variant_that_is_no_object_is_refused_not_a_panic() {
+    let cases = [
+        json!({"version": SPEC_VERSION, "variants": {"bad": null}}),
+        json!({"version": SPEC_VERSION, "variants": {"bad": 3}}),
+        json!({"version": SPEC_VERSION, "variants": 3}),
+        json!({"version": SPEC_VERSION, "variants": {"bad": {"version": 2}}}),
+        json!({"version": SPEC_VERSION, "variants": {"bad": {"elements": []}}}),
+    ];
+    for h in cases {
+        for variant in [Some("bad"), None] {
+            assert!(FormSpec::parse(&schema(), &h, variant).is_err(), "{h} with {variant:?}");
+        }
+    }
+}
+
+#[test]
+fn the_subset_holds_at_any_depth() {
+    let inner = |item: Value, widget: &str| {
+        let schema = json!({"type": "object", "properties": {"a": {"type": "array", "items": item}}});
+        let hints = json!({"version": 1, "fields": {"a": {"widget": widget}}});
+        FormSpec::parse(&schema, &hints, None)
+    };
+    let props = |extra: Value| json!({"id": {"type": "string"}, "text": extra, "correct": {"type": "boolean"}});
+    let choices = |extra: Value| json!({"type": "object", "properties": props(extra)});
+    let refused = inner(choices(json!({"type": "string", "pattern": "x"})), "choices").expect_err("refused");
+    assert_eq!(refused.path, "a/items/text/pattern");
+    assert!(inner(choices(json!({"type": "string", "enum": ["x"]})), "choices").is_err());
+    let images = json!({"type": "object", "pattern": "x", "properties": {
+        "alt": {"type": "string"}, "path": {"type": "string"},
+    }});
+    assert!(inner(images, "images").is_err());
+    assert!(inner(choices(json!({"type": "string"})), "choices").is_ok());
+    // a keyword that would mean nothing on its type is no quiet promise
+    let bad = json!({"type": "object", "properties": {"t": {"type": "string", "minItems": 1}}});
+    assert!(FormSpec::parse(&bad, &json!({"version": 1}), None).is_err());
+}
+
+#[test]
+fn required_must_be_a_list_of_names() {
+    for required in [
+        json!("title"),
+        json!([1]),
+        json!(["title", null]),
+        json!({"title": true}),
+    ] {
+        let s = json!({"type": "object", "required": required, "properties": {"title": {"type": "string"}}});
+        let e = FormSpec::parse(&s, &json!({"version": 1}), None).expect_err("refused");
+        assert_eq!(e.path, "required", "{s}");
+    }
+}
+
+#[test]
+fn a_custom_widget_cannot_declare_what_the_subset_lacks() {
+    let hints = json!({"version": 1, "fields": {"c": {"widget": "custom", "custom": "w"}}});
+    for c in [
+        json!({"type": "integer"}),
+        json!({"type": ["string", "null"]}),
+        json!({"type": "string", "pattern": "x"}),
+        json!({"type": "object", "properties": {"n": {"type": "integer"}}}),
+        json!({"type": "array", "items": {"type": "number"}}),
+    ] {
+        let s = json!({"type": "object", "properties": {"c": c}});
+        assert!(FormSpec::parse(&s, &hints, None).is_err(), "{s}");
+    }
+}

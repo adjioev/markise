@@ -1012,3 +1012,142 @@ fn a_block_outside_its_schema_reports_per_field_and_stays_editable() {
     fixed.retain(|e| e.path == "prompt");
     assert!(fixed.is_empty());
 }
+
+// ---------------------------------------------------------------- review regressions
+
+fn heading_decl() -> Vec<FieldDecl> {
+    vec![FieldDecl::new("h", FieldKind::Heading { level: Some(2) })]
+}
+
+#[test]
+fn a_tab_after_the_marker_is_columns_not_bytes() {
+    let src = ":::x\n\n-\t中\n\n:::";
+    let b = dec(src, &list_decls());
+    assert_eq!(b.values()["items"], json!(["中"]));
+    assert!(b.apply(&[]).expect("applies").patches.is_empty());
+    // a continuation line hangs at the tab's column, so it survives a blank line
+    let id = ids(&b, "items")[0];
+    let next = run(
+        &b,
+        &[FieldEdit::SetItemText {
+            field: "items".into(),
+            item: id,
+            text: "中\n\nmore".into(),
+        }],
+    );
+    assert_eq!(next.values()["items"], json!(["中\n\nmore"]), "{}", next.source());
+    let b = dec(":::x\n\n1.\tab\n\tcd\n\n:::", &list_decls());
+    assert_eq!(b.values()["items"], json!(["ab\ncd"]));
+}
+
+#[test]
+fn an_empty_heading_with_an_id_survives_when_nobody_edits_it() {
+    let src = ":::x\n\n## {#q}\n\ntext\n\n:::";
+    let decls = [heading_decl(), vec![FieldDecl::new("t", FieldKind::Text)]].concat();
+    let b = dec(src, &decls);
+    assert_eq!(b.values()["h"], json!(""));
+    assert!(b.apply(&[]).expect("applies").patches.is_empty());
+    let next = run(
+        &b,
+        &[FieldEdit::SetText {
+            field: "t".into(),
+            text: "other".into(),
+        }],
+    );
+    assert_eq!(next.source(), src.replace("text", "other"));
+    let next = run(
+        &b,
+        &[FieldEdit::SetText {
+            field: "h".into(),
+            text: "Now".into(),
+        }],
+    );
+    assert_eq!(next.source(), src.replace("## {#q}", "## Now {#q}"));
+    // an empty quote the same way
+    let src = ":::x\n\n>\n\n:::";
+    let b = dec(src, &[FieldDecl::new("q", FieldKind::Quote)]);
+    assert!(b.apply(&[]).expect("applies").patches.is_empty());
+}
+
+#[test]
+fn an_empty_marker_gets_its_space_with_its_first_text() {
+    let b = dec(":::x\n\n-\n\n:::", &list_decls());
+    let id = ids(&b, "items")[0];
+    let next = run(
+        &b,
+        &[FieldEdit::SetItemText {
+            field: "items".into(),
+            item: id,
+            text: "hello".into(),
+        }],
+    );
+    assert_eq!(next.source(), ":::x\n\n- hello\n\n:::");
+    assert_eq!(ids(&next, "items"), vec![id], "still that item");
+    // a new item copying that marker too
+    let b = dec(":::x\n\n-\n\n:::", &list_decls());
+    let next = run(
+        &b,
+        &[FieldEdit::InsertItem {
+            field: "items".into(),
+            at: 1,
+            item: ItemData::Text("b".into()),
+        }],
+    );
+    assert_eq!(next.values()["items"], json!(["", "b"]), "{}", next.source());
+}
+
+#[test]
+fn a_new_id_is_unique_in_the_whole_block() {
+    let src = ":::x\n\n## Q {#a7}\n\n- [ ] A {#a1}\n\n> w\n\n- [ ] B {#a2}\n- [ ] C {#a5}\n\n:::";
+    let decls = vec![
+        FieldDecl::new("h", FieldKind::Heading { level: Some(2) }),
+        FieldDecl::new("one", FieldKind::Choices),
+        FieldDecl::new("why", FieldKind::Quote),
+        FieldDecl::new("two", FieldKind::Choices),
+    ];
+    let b = dec(src, &decls);
+    let insert = |wanted: Option<&str>| FieldEdit::InsertItem {
+        field: "one".into(),
+        at: 1,
+        item: ItemData::Choice {
+            anchor: wanted.map(str::to_string),
+            text: "N".into(),
+            correct: false,
+        },
+    };
+    let next = run(&b, &[insert(None)]);
+    assert_eq!(
+        anchors_of(&next, "one"),
+        ["a1", "a8"],
+        "above the other field's and the heading's"
+    );
+    // an id wanted but taken elsewhere in the block is not granted
+    let next = run(&b, &[insert(Some("a5"))]);
+    assert_eq!(anchors_of(&next, "one"), ["a1", "a8"]);
+    let next = run(&b, &[insert(Some("q"))]);
+    assert_eq!(anchors_of(&next, "one"), ["a1", "q"], "a free one is");
+}
+
+fn anchors_of(b: &BlockFields, field: &str) -> Vec<String> {
+    (b.values()[field].as_array().expect("array").iter())
+        .map(|a| a["id"].as_str().expect("id").to_string())
+        .collect()
+}
+
+#[test]
+fn a_typed_backslash_before_closing_hashes_stays() {
+    let b = dec(":::x\n\n## Q\n\n:::", &heading_decl());
+    for typed in ["Q ##", "Q \\##", "Q \\\\##", "\\#", "#", "Q#", "Q \\# {#x}"] {
+        let next = run(
+            &b,
+            &[FieldEdit::SetText {
+                field: "h".into(),
+                text: typed.into(),
+            }],
+        );
+        assert_eq!(next.values()["h"], json!(typed), "{}", next.source());
+        let fresh = dec(next.source(), &heading_decl());
+        assert_eq!(fresh.values()["h"], json!(typed));
+        assert!(fresh.apply(&[]).expect("applies").patches.is_empty());
+    }
+}
