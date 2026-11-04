@@ -216,7 +216,7 @@ pub fn paint_icon(p: &egui::Painter, r: Rect, icon: &str, c: Color32) {
             ]);
             line(&[(14.0, 20.0), (14.0, 15.0), (19.0, 15.0)]);
         }
-        "lightbulb" | "takeaway" => {
+        "lightbulb" => {
             line(&[(9.0, 18.0), (15.0, 18.0)]);
             line(&[(10.0, 21.0), (14.0, 21.0)]);
             // bulb: arc approximated by a polyline
@@ -228,7 +228,7 @@ pub fn paint_icon(p: &egui::Painter, r: Rect, icon: &str, c: Color32) {
             pts.extend([(15.5, 13.9), (15.5, 16.0), (8.5, 16.0)]);
             line(&pts);
         }
-        "flag" | "goals" => {
+        "flag" => {
             line(&[(5.0, 21.0), (5.0, 4.0)]);
             line(&[(5.0, 4.0), (16.0, 4.0), (14.0, 8.0), (16.0, 12.0), (5.0, 12.0)]);
         }
@@ -236,7 +236,7 @@ pub fn paint_icon(p: &egui::Painter, r: Rect, icon: &str, c: Color32) {
             rrect(3.0, 4.0, 11.0, 20.0);
             rrect(13.0, 4.0, 21.0, 20.0);
         }
-        "image" | "scene" => {
+        "image" => {
             rrect(3.0, 5.0, 21.0, 19.0);
             p.circle_stroke(at(9.0, 10.0), 1.6 * k, s);
             line(&[(21.0, 16.0), (16.0, 11.0), (8.0, 19.0)]);

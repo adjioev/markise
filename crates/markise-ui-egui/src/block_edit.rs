@@ -1965,3 +1965,682 @@ impl PagedScript {
         }
     }
 }
+
+// ---------------------------------------------------------------- native blocks check
+
+thread_local! {
+    static RAW_QUEUE: std::cell::RefCell<std::collections::VecDeque<Vec<egui::Event>>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    static NATIVE_SCRIPT: std::cell::RefCell<Option<NativeScript>> = const { std::cell::RefCell::new(None) };
+}
+
+/// PROTOTYPE: scripted input for the next frames (`eframe::App::raw_input_hook`).
+pub fn proto_raw_input(raw: &mut egui::RawInput) {
+    if let Some(batch) = RAW_QUEUE.with(|q| q.borrow_mut().pop_front()) {
+        raw.events.extend(batch);
+    }
+}
+
+fn q_click(p: egui::Pos2) {
+    use egui::{Event, Modifiers, PointerButton};
+    let btn = |pressed| Event::PointerButton {
+        pos: p,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    RAW_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        q.push_back(vec![Event::PointerMoved(p)]);
+        q.push_back(vec![]);
+        q.push_back(vec![btn(true)]);
+        q.push_back(vec![btn(false)]);
+        q.push_back(vec![]);
+    });
+}
+
+fn q_events(ev: Vec<egui::Event>) {
+    RAW_QUEUE.with(|q| q.borrow_mut().push_back(ev));
+}
+
+fn q_key(key: egui::Key, modifiers: egui::Modifiers) {
+    q_events(vec![
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        },
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers,
+        },
+    ]);
+}
+
+/// The package's block names the native script works on (see below).
+fn proto_name(i: usize) -> String {
+    std::env::var("MARKISE_PROTO_NAMES")
+        .ok()
+        .and_then(|v| v.split(',').nth(i).map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// PROTOTYPE measurement driver (`MARKISE_PROTO_NATIVE=1`, on a copy of a lesson): native blocks
+/// through real pointer and key events; every step says what it saw. Screenshots go to
+/// `MARKISE_PROTO_SHOTS`, the process exits at the end. The package's names come from
+/// `MARKISE_PROTO_NAMES=<callout with text>,<choices>,<block without a view>,<callout with a list>,<its form field>`.
+#[derive(Default)]
+struct NativeScript {
+    step: u32,
+    since: Option<Instant>,
+    original: String,
+    walked: u32,
+    in_marker: u32,
+    furthest: usize,
+    saves: usize,
+    natives: usize,
+    fails: u32,
+    probe: usize,
+    revision: u64,
+    find_range: std::ops::Range<usize>,
+    walk_from: Option<Instant>,
+}
+
+pub fn native_script(ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
+    if !std::env::var_os("MARKISE_PROTO_NATIVE").is_some_and(|v| v != "0") {
+        return;
+    }
+    NATIVE_SCRIPT.with(|s| s.borrow_mut().get_or_insert_with(Default::default).frame(ctx, viewer));
+}
+
+impl NativeScript {
+    fn check(&mut self, what: &str, ok: bool) {
+        eprintln!("[proto-native] {} {what}", if ok { "OK  " } else { "FAIL" });
+        if !ok {
+            self.fails += 1;
+        }
+    }
+
+    /// Scrolls so that the block at `off` is in the upper part of the window.
+    fn scroll_to(viewer: &mut crate::viewer::DocViewer, off: usize) {
+        viewer.ed.view.ensure_offset(off);
+        let i = viewer.ed.view.model().item_at_offset(off);
+        viewer.ed.view.scroll_to_item(i);
+    }
+
+    fn block_off(viewer: &crate::viewer::DocViewer, name: &str) -> usize {
+        markise_engine::block_form::all_blocks(viewer.ed.session.text())
+            .iter()
+            .find(|b| b.name == name)
+            .map_or(0, |b| b.range.start)
+    }
+
+    fn frame(&mut self, ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
+        use crate::block_snap::BlockView as V;
+        use egui::{Key, Modifiers};
+        use markise_doc::Selection;
+        ctx.request_repaint();
+        let now = Instant::now();
+        let since = *self.since.get_or_insert(now);
+        let after = |ms: u64| now - since >= std::time::Duration::from_millis(ms);
+        if RAW_QUEUE.with(|q| !q.borrow().is_empty()) {
+            self.since = Some(now);
+            return;
+        }
+        let Some(snaps) = viewer.snaps.as_ref() else { return };
+        let pending = snaps.pending();
+        let form_open = snaps.form.is_open();
+        let n_saves = snaps.form.saves.len();
+        let shot = |name: &str| crate::block_snap::ProtoScript::default().shot(ctx, name);
+        let text = viewer.ed.session.text().to_string();
+        let same = text == self.original;
+        let ctl_view = |viewer: &crate::viewer::DocViewer, off: usize| {
+            viewer.block_ctl.iter().find(|c| c.offset == off).map(|c| c.view)
+        };
+        let next = |me: &mut Self| {
+            me.step += 1;
+            me.since = Some(Instant::now());
+        };
+        match self.step {
+            0 => {
+                if !viewer.partial && !snaps.blocks.is_empty() && pending == 0 && after(1500) {
+                    self.original = text.clone();
+                    let path = viewer.ed.path().map(|p| p.to_path_buf());
+                    let disk = path.and_then(|p| std::fs::read_to_string(p).ok());
+                    self.check("document = file on open", disk.as_deref() == Some(text.as_str()));
+                    eprintln!(
+                        "[proto-native] blocks on the pages in: native {:?}; site images {}",
+                        snaps.native.iter().map(|n| n.spec.title.clone()).collect::<Vec<_>>(),
+                        viewer.block_ctl.iter().filter(|c| c.view == V::Site).count()
+                    );
+                    shot("n-01-top");
+                    self.walked = 0;
+                    self.in_marker = 0;
+                    self.step = 120;
+                    self.since = Some(now);
+                } else if pending != 0 || snaps.blocks.is_empty() {
+                    self.since = Some(now);
+                }
+            }
+            // the whole document in small scrolls: a block in the painted items has its view
+            120 | 121 => {
+                let down = self.step == 120;
+                let painted: Vec<usize> = viewer.painted().iter().map(|((s, _), _)| *s).collect();
+                let vh = viewer.surface_rect().map_or(800.0, |r| r.height());
+                let bare = markise_engine::block_form::all_blocks(&text)
+                    .iter()
+                    .filter(|b| painted.contains(&b.range.start))
+                    .filter(|b| !viewer.block_ctl.iter().any(|c| c.offset == b.range.start))
+                    .count();
+                if bare > 0 && self.walked > 0 {
+                    self.in_marker += 1;
+                }
+                self.walked += 1;
+                let (y, total) = (viewer.ed.view.scroll_y(), viewer.ed.view.total_height());
+                let done = if down { y + vh as f64 >= total - 2.0 } else { y <= 1.0 };
+                if done {
+                    eprintln!(
+                        "[proto-native] pass {}: {} frames, total height {total:.0}, frames with a block without a view {}, evicted {}",
+                        if down { "down" } else { "up" },
+                        self.walked,
+                        self.in_marker,
+                        viewer.ed.view.paging_stats().evicted
+                    );
+                    self.check("scroll pass: every painted block has its view", self.in_marker <= 2);
+                    self.walked = 0;
+                    self.in_marker = 0;
+                    self.step = if down { 121 } else { 1 };
+                    self.since = Some(now);
+                } else {
+                    viewer.ed.view.scroll_by(if down { vh * 0.3 } else { -vh * 0.3 });
+                }
+            }
+            1 if after(500) => {
+                Self::scroll_to(viewer, Self::block_off(viewer, &proto_name(0)));
+                next(self);
+            }
+            2 if after(500) => {
+                shot("n-02-note");
+                let off = Self::block_off(viewer, &proto_name(0));
+                self.check("callout shown natively", ctl_view(viewer, off) == Some(V::Native));
+                let vt = viewer.visible_text();
+                eprintln!("[proto-native] note unit: {:?}", viewer.native_units.iter().find(|u| u.0 == off));
+                let _ = vt;
+                let b = markise_engine::block_form::block_at(&text, off).expect("note");
+                // the last paragraph of the note: click into its text
+                let last = text[b.inner.clone()].trim_end().rfind("\n\n").map_or(b.inner.start, |i| b.inner.start + i + 2);
+                self.probe = last;
+                if let Some(r) = viewer.item_screen_rect(last) {
+                    q_click(egui::pos2(r.left() + 60.0, r.bottom() - 10.0));
+                }
+                next(self);
+            }
+            3 if after(150) => {
+                let c = viewer.ed.session.selection().primary().focus.offset;
+                self.check(&format!("click put the caret in the note text ({c})"), c >= self.probe);
+                q_events(vec![egui::Event::Text("ЙЖ".into())]);
+                next(self);
+            }
+            4 if after(200) => {
+                self.check("typed in place", text.len() == self.original.len() + 4 && text.contains("ЙЖ"));
+                let off = Self::block_off(viewer, &proto_name(0));
+                self.check("still native after typing", ctl_view(viewer, off) == Some(V::Native));
+                shot("n-03-typed");
+                q_events(vec![egui::Event::Text("Q".into())]);
+                next(self);
+            }
+            5 if after(200) => {
+                viewer.ed.edit(|s| s.undo());
+                next(self);
+            }
+            6 if after(200) => {
+                self.check("typing undone: byte-identical", same);
+                // Backspace at the start of the first inner item, Delete at the end of the last
+                let off = Self::block_off(viewer, &proto_name(0));
+                let b = markise_engine::block_form::block_at(&text, off).expect("block");
+                let first = b.inner.start + text[b.inner.clone()].len() - text[b.inner.clone()].trim_start().len();
+                viewer.ed.set_selection(Selection::caret(first));
+                q_key(Key::Backspace, Modifiers::NONE);
+                next(self);
+            }
+            7 if after(150) => {
+                self.check("Backspace at the card's start changes nothing", same);
+                let off = Self::block_off(viewer, &proto_name(0));
+                let b = markise_engine::block_form::block_at(&text, off).expect("block");
+                let last = b.inner.start + text[b.inner.clone()].trim_end().len();
+                viewer.ed.set_selection(Selection::caret(last));
+                q_key(Key::Delete, Modifiers::NONE);
+                next(self);
+            }
+            8 if after(150) => {
+                self.check("Delete at the card's end changes nothing", same);
+                // find highlights inside the card
+                let off = Self::block_off(viewer, &proto_name(0));
+                let (at, len) = {
+                    let b = markise_engine::block_form::block_at(&text, off).expect("block");
+                    let inner = text[b.inner.clone()].trim_end();
+                    let para = inner.rfind("\n\n").map_or(0, |i| i + 2);
+                    let word = inner[para..].split_whitespace().next().unwrap_or("");
+                    (b.inner.start + para, word.len())
+                };
+                self.find_range = at..at + len;
+                self.step = 130;
+                self.since = Some(now);
+            }
+            // (the app sets the find matches every frame: hold them here)
+            130 if !after(200) => {
+                let rev = viewer.ed.session.revision().counter;
+                viewer.find_matches = Some((rev, std::sync::Arc::new(vec![self.find_range.clone()]), Some(0)));
+            }
+            130 if after(200) => {
+                let off = Self::block_off(viewer, &proto_name(0));
+                let card = viewer.block_ctl.iter().find(|c| c.offset == off).map(|c| c.rect);
+                let rects = viewer.find_rects.clone();
+                self.check(
+                    &format!("find highlight inside the card ({} rects)", rects.len()),
+                    !rects.is_empty() && card.is_some_and(|c| rects.iter().all(|r| c.contains_rect(*r))),
+                );
+                shot("n-20-find");
+                viewer.find_matches = None;
+                // a comment typed at the end of the note's text
+                let b = markise_engine::block_form::block_at(&text, off).expect("note");
+                let last = b.inner.start + text[b.inner.clone()].trim_end().len();
+                viewer.ed.set_selection(Selection::caret(last));
+                q_events(vec![egui::Event::Text("{>>комментарий<<}".into())]);
+                self.step = 131;
+                self.since = Some(now);
+            }
+            131 if after(400) => {
+                self.check("comment typed in a card is listed", !viewer.shown_comments().is_empty());
+                shot("n-21-comment");
+                while viewer.ed.session.text() != self.original && viewer.ed.session.can_undo() {
+                    viewer.ed.edit(|s| s.undo());
+                }
+                self.step = 132;
+                self.since = Some(now);
+            }
+            132 if after(200) => {
+                self.check("comment undone: byte-identical", same);
+                // Enter at the end of the card's text stays in the card
+                let off = Self::block_off(viewer, &proto_name(0));
+                let b = markise_engine::block_form::block_at(&text, off).expect("block");
+                let last = b.inner.start + text[b.inner.clone()].trim_end().len();
+                viewer.ed.set_selection(Selection::caret(last));
+                q_key(Key::Enter, Modifiers::NONE);
+                self.step = 133;
+                self.since = Some(now);
+            }
+            133 if after(300) => {
+                shot("n-22-enter");
+                q_events(vec![egui::Event::Text("Ж".into())]);
+                self.step = 134;
+                self.since = Some(now);
+            }
+            134 if after(300) => {
+                let off = Self::block_off(viewer, &proto_name(0));
+                let b = markise_engine::block_form::block_at(&text, off).expect("block");
+                self.check(
+                    "Enter + typing at the end of a card stays inside it",
+                    text[b.inner.clone()].contains('Ж') && ctl_view(viewer, off) == Some(V::Native),
+                );
+                shot("n-23-enter-typed");
+                while viewer.ed.session.text() != self.original && viewer.ed.session.can_undo() {
+                    viewer.ed.edit(|s| s.undo());
+                }
+                self.step = 135;
+                self.since = Some(now);
+            }
+            135 if after(200) => {
+                self.check("Enter undone: byte-identical", same);
+                self.walk_from = Some(now);
+                viewer.ed.set_selection(Selection::caret(0));
+                viewer.ed.view.scroll_to_item(0);
+                self.walked = 0;
+                self.in_marker = 0;
+                self.furthest = 0;
+                self.step = 9;
+                self.since = Some(now);
+            }
+            // the caret walks down the document
+            9 => {
+                let c = viewer.ed.session.selection().primary().focus.offset;
+                let bad = viewer
+                    .native_markers
+                    .iter()
+                    .any(|a| c >= a.0 && c <= a.1);
+                self.in_marker += bad as u32;
+                if bad {
+                    eprintln!(
+                        "[proto-native] caret {c} on a marker: {:?}, next text {:?}",
+                        viewer.native_markers.iter().find(|a| c >= a.0 && c <= a.1),
+                        text.get(c..).map(|t| t.chars().take(12).collect::<String>())
+                    );
+                }
+                self.furthest = self.furthest.max(c);
+                if self.walked < 200 {
+                    self.walked += 1;
+                    q_key(Key::ArrowDown, Modifiers::NONE);
+                } else {
+                    self.check(
+                        &format!(
+                            "caret walk: 200 ↓, furthest offset {} of {}, frames on a marker line {}",
+                            self.furthest,
+                            text.len(),
+                            self.in_marker
+                        ),
+                        self.in_marker == 0 && self.furthest > text.len() / 2,
+                    );
+                    eprintln!(
+                        "[proto-native] caret walk took {:.1} s",
+                        self.walk_from.map_or(0.0, |t| t.elapsed().as_secs_f32())
+                    );
+                    self.check("caret walk: byte-identical", same);
+                    self.walked = 0;
+                    self.in_marker = 0;
+                    next(self);
+                }
+            }
+            10 => {
+                let c = viewer.ed.session.selection().primary().focus.offset;
+                self.in_marker += viewer.native_markers.iter().any(|a| c >= a.0 && c <= a.1) as u32;
+                if self.walked < 200 {
+                    self.walked += 1;
+                    q_key(Key::ArrowUp, Modifiers::NONE);
+                } else {
+                    self.check(
+                        &format!("caret walk back: ends at {c}, frames on a marker line {}", self.in_marker),
+                        self.in_marker == 0,
+                    );
+                    self.step = 100;
+                    self.since = Some(now);
+                }
+            }
+            100 if after(500) => {
+                Self::scroll_to(viewer, Self::block_off(viewer, &proto_name(1)));
+                self.step = 11;
+                self.since = Some(now);
+            }
+            // a question: answer rows, hidden labels, toggling
+            11 if after(500) => {
+                shot("n-04-question");
+                let off = Self::block_off(viewer, &proto_name(1));
+                self.check("choices shown natively", ctl_view(viewer, off) == Some(V::Native));
+                let vt = viewer.visible_text();
+                self.check("no {#id} label on screen", !vt.contains("{#a"));
+                self.check("the labels are in the file", text.contains("{#a1}"));
+                let n = snaps.native.iter().find(|n| n.offset == off).cloned();
+                let Some(n) = n else {
+                    next(self);
+                    return;
+                };
+                let (a, _) = n.answers[0];
+                self.probe = a;
+                let i = viewer.ed.view.model().item_at_offset(a);
+                let l = viewer.ed.view.cache_peek(i).cloned();
+                let r = viewer.item_screen_rect(a);
+                if let (Some(l), Some(r)) = (l, r)
+                    && let Some((b, _)) = l.tasks.first()
+                {
+                    q_click(r.min + b.center().to_vec2());
+                } else {
+                    self.check("answer's checkbox found", false);
+                }
+                next(self);
+            }
+            12 if after(200) => {
+                self.check(
+                    "click on the box toggled the answer, nothing else",
+                    text.len() == self.original.len() && !same && text.contains("{#a1}"),
+                );
+                shot("n-05-toggled");
+                viewer.ed.edit(|s| s.undo());
+                next(self);
+            }
+            13 if after(200) => {
+                self.check("toggle undone: byte-identical", same);
+                // Enter at an answer's end: its label stays with it
+                let off = Self::block_off(viewer, &proto_name(1));
+                let hid = snaps.native.iter().find(|n| n.offset == off).and_then(|n| n.hidden.first().cloned());
+                if let Some(h) = hid {
+                    self.probe = h.end;
+                    viewer.ed.set_selection(Selection::caret(h.start));
+                    q_key(Key::Enter, Modifiers::NONE);
+                }
+                self.step = 140;
+                self.since = Some(now);
+            }
+            140 if after(300) => {
+                let label = text.get(..self.probe).unwrap_or("");
+                self.check("Enter at an answer's end leaves the label on it", label.ends_with("{#a1}") && !same);
+                shot("n-24-answer-enter");
+                while viewer.ed.session.text() != self.original && viewer.ed.session.can_undo() {
+                    viewer.ed.edit(|s| s.undo());
+                }
+                self.step = 141;
+                self.since = Some(now);
+            }
+            141 if after(200) => {
+                self.check("answer's Enter undone: byte-identical", same);
+                let off = Self::block_off(viewer, &proto_name(1));
+                let vb = viewer.block_ctl.iter().find(|c| c.offset == off).map(|c| c.rect);
+                if let Some(r) = vb {
+                    // the view switch at the block's top right
+                    q_click(egui::pos2(r.right() - 45.0, r.top() + 17.0));
+                }
+                self.revision = viewer.ed.session.revision().counter;
+                next(self);
+            }
+            // rotation by real clicks: native → site → markdown → native
+            14 if after(200) && pending == 0 => {
+                let off = Self::block_off(viewer, &proto_name(1));
+                self.check("rotate 1: question on Site", ctl_view(viewer, off) == Some(V::Site));
+                shot("n-06-question-site");
+                if let Some(c) = viewer.block_ctl.iter().find(|c| c.offset == off) {
+                    q_click(egui::pos2(c.rect.right() - 45.0, c.rect.top() + 17.0));
+                }
+                next(self);
+            }
+            15 if after(300) => {
+                let off = Self::block_off(viewer, &proto_name(1));
+                self.check("rotate 2: question as Markdown", ctl_view(viewer, off) == Some(V::Markdown));
+                let vt = viewer.visible_text();
+                self.check("its raw source is on screen", vt.contains(&format!(":::{}", proto_name(1))) && vt.contains("{#a1}"));
+                shot("n-07-question-markdown");
+                if let Some(c) = viewer.block_ctl.iter().find(|c| c.offset == off) {
+                    q_click(egui::pos2(c.rect.right() - 45.0, c.rect.top() + 17.0));
+                }
+                next(self);
+            }
+            16 if after(300) => {
+                let off = Self::block_off(viewer, &proto_name(1));
+                self.check("rotate 3: question back to Native", ctl_view(viewer, off) == Some(V::Native));
+                self.check(
+                    "rotating never touched the document",
+                    same && viewer.ed.session.revision().counter == self.revision,
+                );
+                let scene = Self::block_off(viewer, &proto_name(2));
+                Self::scroll_to(viewer, scene);
+                next(self);
+            }
+            17 if after(500) && pending == 0 => {
+                let off = Self::block_off(viewer, &proto_name(2));
+                self.check("block without a view on Site", ctl_view(viewer, off) == Some(V::Site));
+                if let Some(c) = viewer.block_ctl.iter().find(|c| c.offset == off) {
+                    q_click(egui::pos2(c.rect.right() - 45.0, c.rect.top() + 17.0));
+                }
+                next(self);
+            }
+            18 if after(300) => {
+                let off = Self::block_off(viewer, &proto_name(2));
+                self.check("it rotated to Markdown", ctl_view(viewer, off) == Some(V::Markdown));
+                // the state survives going to the end of the document (pages evicted) and back
+                let n = viewer.ed.view.len();
+                viewer.ed.view.scroll_to_item(n - 1);
+                next(self);
+            }
+            19 if after(800) => {
+                eprintln!(
+                    "[proto-native] at the end: {}",
+                    viewer.ed.view.paging_stats().evicted
+                );
+                Self::scroll_to(viewer, Self::block_off(viewer, &proto_name(2)));
+                next(self);
+            }
+            20 if after(600) => {
+                let off = Self::block_off(viewer, &proto_name(2));
+                self.check("still Markdown after the trip", ctl_view(viewer, off) == Some(V::Markdown));
+                // an edit above moves the block; the state follows
+                viewer.ed.set_selection(Selection::caret(2));
+                q_events(vec![egui::Event::Text("ЙЖ".into())]);
+                next(self);
+            }
+            21 if after(300) => {
+                let off = Self::block_off(viewer, &proto_name(2));
+                self.check("… and after an edit above it", ctl_view(viewer, off) == Some(V::Markdown));
+                viewer.ed.edit(|s| s.undo());
+                next(self);
+            }
+            22 if after(300) => {
+                let off = Self::block_off(viewer, &proto_name(2));
+                self.check("… and after its undo", ctl_view(viewer, off) == Some(V::Markdown));
+                self.check("byte-identical", same);
+                viewer.snaps.as_mut().expect("snaps").set_all_views(V::Site);
+                next(self);
+            }
+            // the global switch
+            23 if after(400) && pending == 0 => {
+                self.check("all on Site: nothing native", snaps.native.is_empty());
+                shot("n-08-all-site");
+                viewer.snaps.as_mut().expect("snaps").set_all_views(V::Markdown);
+                next(self);
+            }
+            24 if after(400) => {
+                self.check("all Markdown: nothing native, no images", snaps.native.is_empty() && viewer.atomic.is_empty());
+                shot("n-09-all-markdown");
+                viewer.snaps.as_mut().expect("snaps").set_all_views(V::Native);
+                next(self);
+            }
+            25 if after(400) && pending == 0 => {
+                let scene = Self::block_off(viewer, &proto_name(2));
+                self.check(
+                    "all Native: blocks without a view stay on Site",
+                    !snaps.native.is_empty() && ctl_view(viewer, scene).is_none_or(|v| v == V::Site),
+                );
+                self.check("byte-identical", same);
+                // the form from a native block, through its button
+                let off = Self::block_off(viewer, &proto_name(3));
+                Self::scroll_to(viewer, off);
+                next(self);
+            }
+            26 if after(500) => {
+                let off = Self::block_off(viewer, &proto_name(3));
+                if let Some(c) = viewer.block_ctl.iter().find(|c| c.offset == off) {
+                    q_click(egui::pos2(c.rect.right() - 125.0, c.rect.top() + 17.0));
+                }
+                self.saves = n_saves;
+                next(self);
+            }
+            27 if form_open && after(1500) => {
+                snaps.form.eval("window.markiseForm.save()");
+                next(self);
+            }
+            28 if n_saves > self.saves && after(300) => {
+                self.check(&format!("form from a native block, unchanged save: {:?}", snaps.form.saves.last()), same);
+                self.saves = n_saves;
+                let off = Self::block_off(viewer, &proto_name(3));
+                if form_open {
+                    viewer.snaps.as_mut().expect("snaps").form.close();
+                }
+                if let Some(c) = viewer.block_ctl.iter().find(|c| c.offset == off) {
+                    q_click(egui::pos2(c.rect.right() - 125.0, c.rect.top() + 17.0));
+                }
+                self.step = 110;
+                self.since = Some(now);
+            }
+            110 if form_open && after(1500) => {
+                snaps.form.eval(
+                    &format!(
+                        "{{ const d = window.markiseForm.data(); window.markiseForm.set('{f}.0', d.{f}[0] + ' (ред.)'); setTimeout(() => window.markiseForm.save(), 80); }}",
+                        f = proto_name(4)
+                    ),
+                );
+                self.step = 29;
+                self.since = Some(now);
+            }
+            29 if n_saves > self.saves && after(600) => {
+                self.check("form edit applied", text.contains("(ред.)"));
+                viewer.snaps.as_mut().expect("snaps").form.close();
+                next(self);
+            }
+            30 if after(400) => {
+                let off = Self::block_off(viewer, &proto_name(3));
+                self.check("native again after the form", ctl_view(viewer, off) == Some(V::Native));
+                shot("n-10-goals-after-form");
+                viewer.ed.edit(|s| s.undo());
+                next(self);
+            }
+            31 if after(300) => {
+                self.check("form edit undone: byte-identical", same);
+                // palette: a new note after the goals gives a native card
+                let root = snaps.form.root().map(Path::to_path_buf);
+                let presets = root.map(|r| crate::block_lib::presets(&r, &lang())).unwrap_or_default();
+                let p = presets.iter().find(|p| p.block == proto_name(0)).cloned();
+                let gap = viewer.native_units.first().map_or(0, |a| a.1);
+                let rev = viewer.ed.session.revision().counter;
+                self.natives = markise_engine::block_form::all_blocks(&text).len();
+                if let Some(p) = p {
+                    crate::block_palette::choose(p, Some(InsertTarget::new(&text, gap, gap, rev)));
+                } else {
+                    self.check("note preset found", false);
+                }
+                self.saves = n_saves;
+                next(self);
+            }
+            32 if form_open && after(1500) => {
+                shot("n-11-palette-draft");
+                snaps.form.eval("window.markiseForm.save()");
+                next(self);
+            }
+            33 if n_saves > self.saves && after(800) => {
+                let blocks = markise_engine::block_form::all_blocks(&text).len();
+                self.check(&format!("palette: block inserted ({:?})", snaps.form.saves.last()), blocks == self.natives + 1);
+                viewer.snaps.as_mut().expect("snaps").form.close();
+                next(self);
+            }
+            34 if after(600) => {
+                let gap = viewer.native_units.get(1).copied();
+                eprintln!("[proto-native] after insert: {gap:?}");
+                let off = viewer.native_units.first().map_or(0, |a| a.3);
+                self.check("the inserted note is native", snaps.native.iter().any(|n| n.offset == off));
+                shot("n-12-palette-inserted");
+                viewer.ed.edit(|s| s.undo());
+                next(self);
+            }
+            35 if after(400) => {
+                self.check("insertion undone: byte-identical", same);
+                // save: must write back exactly the opened bytes
+                viewer.ed.set_selection(Selection::caret(0));
+                q_key(Key::S, Modifiers::COMMAND);
+                next(self);
+            }
+            36 if after(1000) => {
+                let path = viewer.ed.path().map(|p| p.to_path_buf());
+                let disk = path.and_then(|p| std::fs::read_to_string(p).ok());
+                self.check("file on disk = what was opened", disk.as_deref() == Some(self.original.as_str()));
+                eprintln!("[proto-native] done, failures: {}", self.fails);
+                std::process::exit(if self.fails == 0 { 0 } else { 1 });
+            }
+            _ => {
+                if after(30000) {
+                    self.check(&format!("step {} timed out (form open {form_open})", self.step), false);
+                    self.step += 1;
+                    self.since = Some(now);
+                }
+            }
+        }
+    }
+}

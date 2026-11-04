@@ -2857,8 +2857,42 @@ impl MarkiseApp {
                 }
                 self.word_count_label(ui);
                 self.comment_view_switch(ui);
+                self.blocks_view_switch(ui);
             });
         });
+    }
+
+    /// PROTOTYPE (native blocks): the view of all blocks of the document (`None`: no blocks UI).
+    pub(crate) fn blocks_view(&self) -> Option<crate::block_snap::BlockView> {
+        self.doc.as_ref()?.viewer.snaps.as_ref().map(|s| s.global_view)
+    }
+
+    pub(crate) fn set_blocks_view(&mut self, v: crate::block_snap::BlockView) {
+        if let Some(s) = self.doc.as_mut().and_then(|d| d.viewer.snaps.as_mut()) {
+            s.set_all_views(v);
+        }
+        if let Some(c) = &self.ctx {
+            c.request_repaint();
+        }
+    }
+
+    /// PROTOTYPE (native blocks): the status bar's switch of all blocks' view.
+    fn blocks_view_switch(&mut self, ui: &mut egui::Ui) {
+        let Some(cur) = self.blocks_view() else { return };
+        let mut picked = None;
+        let r = ui.menu_button(egui::RichText::new(format!("Blocks: {}", cur.label())).weak(), |ui| {
+            for v in crate::block_snap::BlockView::ALL {
+                if ui.radio(v == cur, v.label()).clicked() {
+                    picked = Some(v);
+                    ui.close();
+                }
+            }
+        });
+        r.response
+            .on_hover_text("How all blocks are shown (display only; a block's own switch overrides this)");
+        if let Some(v) = picked {
+            self.set_blocks_view(v);
+        }
     }
 
     /// The status bar's review-view switch (issue #88): the current view, a click picks
@@ -3105,6 +3139,7 @@ impl MarkiseApp {
                         crate::block_edit::insert_script(ctx, &mut d.viewer);
                         crate::block_edit::dir_script(ctx, &mut d.viewer);
                         crate::block_edit::paged_script(ctx, &mut d.viewer);
+                        crate::block_edit::native_script(ctx, &mut d.viewer);
                         let mut vrect = ui.available_rect_before_wrap();
                         if d.viewer.snaps.as_ref().is_some_and(|s| s.form.is_open()) {
                             vrect = crate::form_panel::reserve(ui, vrect);

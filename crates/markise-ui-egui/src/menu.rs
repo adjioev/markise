@@ -339,6 +339,10 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("view.commentsSimple", "Simple Markup", &[]),
     app("view.commentsFinal", "No Markup (Final)", &[]),
     app("view.commentsOriginal", "Original", &[]),
+    // PROTOTYPE (native blocks): View → Blocks: all blocks' view (display only)
+    app("view.blocksNative", "Native", &[]),
+    app("view.blocksSite", "Site", &[]),
+    app("view.blocksMarkdown", "Markdown", &[]),
     app("file.saveCopyClean", "Save Copy Without Comments…", &[]),
     app("export.comments", "Include Comments", &[]),
     // Back / Forward between opened notes (spec 06 §2.7): ⌥⌘← / ⌥⌘→ on macOS (⌘[ / ⌘] are

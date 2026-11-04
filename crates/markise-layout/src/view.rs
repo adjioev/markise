@@ -83,6 +83,9 @@ pub struct View {
     /// start → height without the column padding); the UI paints them itself. By source
     /// position: item indices shift whenever a page is materialized or evicted (ADR 0016).
     overrides: std::collections::HashMap<usize, f32>,
+    /// PROTOTYPE (native blocks): items drawn inside a card (source start → inset). Also keeps
+    /// a card's items on one page: eviction never cuts in front of them.
+    insets: std::collections::HashMap<usize, crate::block::ItemInset>,
     caret_item: Option<usize>,
     /// What a paged model keeps materialized ([`paging`]).
     paging: paging::PagingState,
@@ -123,6 +126,7 @@ impl View {
             refs: Default::default(),
             focus: None,
             overrides: Default::default(),
+            insets: Default::default(),
             caret_item: None,
             paging: Default::default(),
             pre_edit_anchor: None,
@@ -991,6 +995,11 @@ impl View {
                 .wrapping_mul(0x5851_f42d_4c95_7f2d)
                 .rotate_left(29);
         }
+        if !self.insets.is_empty()
+            && let Some(ins) = self.insets.get(&self.model.item_start(i))
+        {
+            extra ^= ins.fingerprint().rotate_left(23);
+        }
         if let Some(group) = self.disclosures.groups.get(&i) {
             use std::hash::{Hash, Hasher};
             let mut h = crate::model::hasher();
@@ -1153,9 +1162,12 @@ impl View {
                 // evicted between `ready` and `runs`: lay out plain, but not under the
                 // "highlighted" key
                 let cacheable = ready != Some(true) || runs.is_some();
+                let inset = self.insets.get(&self.model.item_start(i)).copied();
                 let params = LayoutParams {
                     theme: &self.theme,
-                    width: self.width,
+                    width: self.width - inset.map_or(0.0, |n| n.left + n.right),
+                    hide_ids: inset.is_some_and(|n| n.hide_ids),
+                    heading_level: inset.and_then(|n| n.heading_level),
                     disclosure: self.disclosures.groups.get(&i).map(|g| (g.title.as_str(), g.open)),
                     disclosure_depth: self.disclosures.depth(i),
                     expanded: self.expanded.contains(&i),
@@ -1171,7 +1183,11 @@ impl View {
                     math: Cell::new(false),
                     images: RefCell::new(Vec::new()),
                 };
-                let l = Arc::new(layout_item(&*self.doc, &self.model, i, &params, shaper, &rec));
+                let mut laid = layout_item(&*self.doc, &self.model, i, &params, shaper, &rec);
+                if let Some(n) = &inset {
+                    laid.apply_inset(n);
+                }
+                let l = Arc::new(laid);
                 if !self.missing_glyphs {
                     self.missing_glyphs = lacks_glyphs(&l, shaper);
                 }
@@ -1209,9 +1225,41 @@ impl View {
 
     /// PROTOTYPE (block snapshots): item `i` is painted by the image of a block opened earlier.
     pub(super) fn override_is_zero(&self, i: usize) -> bool {
-        !self.overrides.is_empty()
-            && !self.model.is_page(i)
-            && self.overrides.get(&self.model.item_start(i)) == Some(&0.0)
+        if self.model.is_page(i) {
+            return false;
+        }
+        let st = self.model.item_start(i);
+        self.overrides.get(&st) == Some(&0.0) || self.insets.contains_key(&st)
+    }
+
+    /// PROTOTYPE (native blocks): the items drawn inside cards (source start → inset; the full
+    /// set every frame, before [`View::set_height_overrides`]). Items that changed are
+    /// measured again when they are next laid out.
+    pub fn set_item_insets(&mut self, map: std::collections::HashMap<usize, crate::block::ItemInset>) {
+        if map == self.insets {
+            return;
+        }
+        let frac = self.anchor_frac();
+        let old = std::mem::replace(&mut self.insets, map);
+        let mut starts: Vec<usize> = old
+            .iter()
+            .filter(|(s, v)| self.insets.get(s) != Some(v))
+            .map(|(s, _)| *s)
+            .collect();
+        starts.extend(
+            self.insets
+                .iter()
+                .filter(|(s, v)| old.get(s) != Some(v))
+                .map(|(s, _)| *s),
+        );
+        for start in starts {
+            for i in self.items_at_start(start) {
+                let (v, e) = self.initial_height(i);
+                self.heights.set(i, v);
+                self.exact[i] = e;
+            }
+        }
+        self.anchor_off = frac * self.height(self.anchor);
     }
 
     /// PROTOTYPE (block snapshots): the real items starting at source offset `start` (segments

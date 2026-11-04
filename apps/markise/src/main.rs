@@ -76,6 +76,7 @@ impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &eframe::egui::Context, raw_input: &mut eframe::egui::RawInput) {
         // wheel events over a document pane belong to its smooth scrolling (issue #86)
         markise_ui_egui::smooth_scroll::claim_wheel_events(ctx, raw_input);
+        markise_ui_egui::block_edit::proto_raw_input(raw_input);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

@@ -163,6 +163,205 @@ impl ThemeVars {
     }
 }
 
+// ---------------------------------------------------------------- views of a block
+
+/// PROTOTYPE (native blocks): how a block is shown. Display only; the file never changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockView {
+    /// Drawn by Markise from the package's `view` (the text is edited in place).
+    Native,
+    /// A snapshot image from the site's code (edited through the form).
+    Site,
+    /// The raw `:::` source, editable inline.
+    Markdown,
+}
+
+impl BlockView {
+    pub const ALL: [BlockView; 3] = [BlockView::Native, BlockView::Site, BlockView::Markdown];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BlockView::Native => "Native",
+            BlockView::Site => "Site",
+            BlockView::Markdown => "Markdown",
+        }
+    }
+}
+
+/// The kinds of native view a package can name: a closed, generic set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewKind {
+    /// A tinted panel with an accent-coloured header.
+    Callout,
+    /// A neutral panel with a header.
+    Card,
+    /// A heading, task items as answer rows and a quote as the explanation.
+    Choices,
+    /// A neutral panel whose content (a picture) spans its width.
+    Media,
+}
+
+/// A block's entry in the package's `editor/views.json`:
+/// `{"note":{"kind":"callout","accent":"blue","icon":"note"},"question":{"kind":"choices"}}`.
+#[derive(Clone, Debug)]
+pub struct ViewSpec {
+    pub kind: ViewKind,
+    pub accent: String,
+    pub icon: String,
+    /// The block's label in the author's language (from its definition).
+    pub title: String,
+}
+
+/// The library's `editor/views.json`: which of its blocks Markise draws itself.
+fn load_views(root: &std::path::Path) -> HashMap<String, ViewSpec> {
+    let lang = crate::block_edit::lang();
+    let mut out = HashMap::new();
+    let views: Value = std::fs::read_to_string(root.join("editor/views.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(Value::Null);
+    let Some(views) = views.as_object() else { return out };
+    let defs = markise_engine::block_form::load_manifest(root).unwrap_or(Value::Null);
+    for (name, v) in views {
+        let kind = match v["kind"].as_str() {
+            Some("callout") => ViewKind::Callout,
+            Some("card") => ViewKind::Card,
+            Some("choices") => ViewKind::Choices,
+            Some("media") => ViewKind::Media,
+            _ => continue,
+        };
+        let default_icon = match kind {
+            ViewKind::Choices => "question",
+            ViewKind::Media => "image",
+            _ => "note",
+        };
+        out.insert(
+            name.clone(),
+            ViewSpec {
+                kind,
+                accent: v["accent"].as_str().unwrap_or("slate").to_string(),
+                icon: v["icon"].as_str().unwrap_or(default_icon).to_string(),
+                title: defs[name]["label"][lang.as_str()].as_str().unwrap_or(name).to_string(),
+            },
+        );
+    }
+    out
+}
+
+/// Geometry of a card, in points.
+pub const CARD_PAD: f32 = 16.0;
+pub const CARD_HEADER: f32 = 34.0;
+pub const CARD_BOTTOM: f32 = 12.0;
+pub const ROW_PAD: f32 = 10.0;
+pub const EXPLAIN_LABEL: f32 = 26.0;
+
+/// A block drawn natively this frame (all by source position: indices shift with paging).
+#[derive(Clone, Debug)]
+pub struct NativeBlock {
+    pub offset: usize,
+    pub end: usize,
+    pub spec: ViewSpec,
+    /// Start of the closing `:::` line.
+    pub close_start: usize,
+    /// Start of the first and end of the last inner item.
+    pub first_inner: usize,
+    pub last_inner_end: usize,
+    /// Answer rows: (item start, correct).
+    pub answers: Vec<(usize, bool)>,
+    /// Items of the explanation (the quote).
+    pub explain: Vec<usize>,
+    /// Source of the hidden ` {#id}` labels.
+    pub hidden: Vec<std::ops::Range<usize>>,
+    insets: Vec<(usize, markise_layout::block::ItemInset)>,
+}
+
+/// The source of an item's trailing ` {#id}` (spaces included).
+fn id_range(text: &str, span: std::ops::Range<usize>) -> Option<std::ops::Range<usize>> {
+    let line = text.get(span.clone())?;
+    let t = line.trim_end();
+    let at = t.rfind("{#")?;
+    t[at..].ends_with('}').then(|| span.start + t[..at].trim_end().len()..span.start + t.len())
+}
+
+/// The native view of a block, when its content allows one.
+fn classify(model: &DocModel, text: &str, b: &Block, spec: &ViewSpec) -> Option<NativeBlock> {
+    use markise_layout::block::ItemInset;
+    use markise_layout::model::{Container, Marker};
+    if b.close <= b.open + 1 {
+        return None;
+    }
+    let pad = if spec.kind == ViewKind::Media { 0.0 } else { CARD_PAD };
+    let card = ItemInset {
+        left: pad,
+        right: pad,
+        ..Default::default()
+    };
+    let mut n = NativeBlock {
+        offset: b.offset,
+        end: b.end,
+        spec: spec.clone(),
+        close_start: model.item_start(b.close),
+        first_inner: model.item_start(b.open + 1),
+        last_inner_end: model.item_span(b.close - 1).end,
+        answers: Vec::new(),
+        explain: Vec::new(),
+        hidden: Vec::new(),
+        insets: Vec::new(),
+    };
+    let mut quote_last = None;
+    for j in b.open + 1..b.close {
+        let it = &model.items[j];
+        if it.is_page() {
+            return None;
+        }
+        let start = model.item_start(j);
+        let mut ins = card;
+        if spec.kind == ViewKind::Choices {
+            ins.heading_level = Some(4);
+            let task = it.containers.iter().find_map(|c| match c {
+                Container::ListItem {
+                    marker: Some(Marker::Task { checked }),
+                    ..
+                } => Some(*checked),
+                _ => None,
+            });
+            if let Some(checked) = task {
+                n.answers.push((start, checked));
+                ins.left += ROW_PAD;
+                ins.right += ROW_PAD;
+                ins.top = 7.0;
+                ins.bottom = 7.0;
+                ins.hide_ids = true;
+                let sp = model.item_span(j);
+                if let Some(r) = id_range(text, sp.start..sp.end) {
+                    n.hidden.push(r);
+                }
+            } else if it.containers.iter().any(|c| matches!(c, Container::Quote { .. })) {
+                ins.left += ROW_PAD;
+                ins.right += ROW_PAD;
+                if n.explain.is_empty() {
+                    ins.top = EXPLAIN_LABEL;
+                }
+                n.explain.push(start);
+                quote_last = Some(n.insets.len());
+            }
+        }
+        if j == b.open + 1 {
+            ins.no_gap = true;
+        }
+        n.insets.push((start, ins));
+    }
+    if let Some(i) = quote_last {
+        n.insets[i].1.bottom = 8.0;
+    }
+    if spec.kind == ViewKind::Choices && n.answers.is_empty() {
+        return None;
+    }
+    // the closer stays with the rest of the card (eviction, see `View::set_item_insets`)
+    n.insets.push((n.close_start, ItemInset::default()));
+    Some(n)
+}
+
 /// A request to the worker.
 #[derive(Clone, Debug)]
 struct Job {
@@ -246,6 +445,19 @@ pub struct BlockSnaps {
     last_theme: Option<ThemeVars>,
     last_scale: f32,
     pending: usize,
+    /// PROTOTYPE (native blocks): the library's `view`s.
+    views: HashMap<String, ViewSpec>,
+    /// Per block of the scan: its native view, when it has one and its content allows it.
+    native_of: Vec<Option<NativeBlock>>,
+    /// All blocks' setting (View menu, status bar) …
+    pub global_view: BlockView,
+    /// … and the blocks rotated by hand (their source offset; session only).
+    view_of: HashMap<usize, BlockView>,
+    /// This frame: blocks drawn natively, the items inside their cards, and blocks shown as
+    /// Markdown text (the raw view, or a snapshot not rendered yet).
+    pub native: Vec<NativeBlock>,
+    pub insets: HashMap<usize, markise_layout::block::ItemInset>,
+    pub raw: Vec<(usize, usize, BlockView)>,
 }
 
 /// Where the image of a block is painted this frame.
@@ -282,6 +494,14 @@ impl BlockSnaps {
         let (events, events_rx) = mpsc::channel();
         let live: LiveStdin = Default::default();
         drop(events_rx);
+        let views = root
+            .clone()
+            .or_else(|| site.root.clone())
+            .map(|r| load_views(&r))
+            .unwrap_or_default();
+        if log_on() {
+            eprintln!("[blocksnap] native views: {:?}", views.keys().collect::<Vec<_>>());
+        }
         let form = crate::block_edit::FormState::new(doc.clone(), root, ctx);
         let ctx = ctx.clone();
         let log = log_on();
@@ -322,12 +542,62 @@ impl BlockSnaps {
             last_theme: None,
             last_scale: 2.0,
             pending: 0,
+            views,
+            native_of: Vec::new(),
+            global_view: match std::env::var("MARKISE_BLOCK_VIEW").as_deref() {
+                Ok("site") => BlockView::Site,
+                Ok("markdown") => BlockView::Markdown,
+                _ => BlockView::Native,
+            },
+            view_of: HashMap::new(),
+            native: Vec::new(),
+            insets: HashMap::new(),
+            raw: Vec::new(),
         })
     }
 
     /// Blocks of the last frame still waiting for their current image (not failed).
     pub fn pending(&self) -> usize {
         self.pending
+    }
+
+    /// The view block `i` of the scan is shown in.
+    fn view_at(&self, i: usize) -> BlockView {
+        let b = &self.blocks[i];
+        let v = self.view_of.get(&b.offset).copied().unwrap_or(self.global_view);
+        if v == BlockView::Native && self.native_of[i].is_none() {
+            BlockView::Site
+        } else {
+            v
+        }
+    }
+
+    /// The block at `offset` goes on to its next view: Native → Site → Markdown → Native, or
+    /// Site → Markdown → Site without a native one.
+    pub fn rotate_view(&mut self, offset: usize) {
+        let Some(i) = self.blocks.iter().position(|b| b.offset == offset) else {
+            return;
+        };
+        let next = match self.view_at(i) {
+            BlockView::Native => BlockView::Site,
+            BlockView::Site => BlockView::Markdown,
+            BlockView::Markdown if self.native_of[i].is_some() => BlockView::Native,
+            BlockView::Markdown => BlockView::Site,
+        };
+        self.view_of.insert(offset, next);
+    }
+
+    /// Every block to `v` (blocks without a native view stay on Site for Native).
+    pub fn set_all_views(&mut self, v: BlockView) {
+        self.global_view = v;
+        self.view_of.clear();
+    }
+
+    /// Moves the rotated blocks' offsets through the edits since the last frame.
+    pub fn remap_views(&mut self, map: impl Fn(usize) -> Option<usize>) {
+        if !self.view_of.is_empty() {
+            self.view_of = self.view_of.drain().filter_map(|(o, v)| Some((map(o)?, v))).collect();
+        }
     }
 
     fn key_of(b: &Block, width: f32, scale: f32, theme: &ThemeVars) -> u64 {
@@ -403,6 +673,24 @@ impl BlockSnaps {
                     crate::block_edit::PreviewAt::Insert(..) => self.draft_block = Some(pb),
                 }
             }
+            // what the form previews is a snapshot until it is saved
+            let previewed = match &self.preview_applied {
+                Some(crate::block_edit::Preview {
+                    at: crate::block_edit::PreviewAt::Edit(off),
+                    ..
+                }) => Some(*off),
+                _ => None,
+            };
+            self.native_of = self
+                .blocks
+                .iter()
+                .map(|b| {
+                    if Some(b.offset) == previewed {
+                        return None;
+                    }
+                    classify(model, text, b, self.views.get(&b.name)?)
+                })
+                .collect();
             self.scanned = Some(id);
             if self.log {
                 eprintln!(
@@ -490,6 +778,9 @@ impl BlockSnaps {
             }
         }
         for &i in &order {
+            if self.view_at(i) != BlockView::Site {
+                continue;
+            }
             let b = &self.blocks[i];
             let key = Self::key_of(b, kw, scale, theme);
             if self.folder == 0
@@ -546,7 +837,29 @@ impl BlockSnaps {
         let mut missing = 0;
         let mut pending = 0;
         self.current.clear();
+        self.native.clear();
+        self.raw.clear();
+        self.insets.clear();
+        let mut sites = 0;
+        let modes: Vec<BlockView> = (0..self.blocks.len()).map(|i| self.view_at(i)).collect();
         for (i, b) in self.blocks.iter().enumerate() {
+            match modes[i] {
+                BlockView::Native => {
+                    let n = self.native_of[i].clone().expect("view_at: native");
+                    over.insert(model.item_start(b.open), spacing + CARD_HEADER);
+                    over.insert(n.close_start, CARD_BOTTOM);
+                    self.insets.extend(n.insets.iter().copied());
+                    self.native.push(n);
+                    self.current.push(true);
+                    continue;
+                }
+                BlockView::Markdown => {
+                    self.raw.push((b.offset, b.end, BlockView::Markdown));
+                    self.current.push(true);
+                    continue;
+                }
+                BlockView::Site => sites += 1,
+            }
             let key = Self::key_of(b, kw, scale, theme);
             let cur = (key, self.folder);
             let shown = if self.cache.contains_key(&cur) {
@@ -587,7 +900,10 @@ impl BlockSnaps {
                 }
                 None => match known {
                     Some((w, h)) => (None, w, h),
-                    None => continue,
+                    None => {
+                        self.raw.push((b.offset, b.end, BlockView::Site));
+                        continue;
+                    }
                 },
             };
             // a stale image of another width is scaled to the column until its new one arrives
@@ -605,7 +921,7 @@ impl BlockSnaps {
                 size: egui::vec2(width, h),
             });
         }
-        self.pending = if self.folder == 0 { self.blocks.len() } else { pending };
+        self.pending = if self.folder == 0 { sites } else { pending };
         // the new block's preview (its last image while the next one renders)
         self.draft_image = None;
         if let Some(b) = &self.draft_block {

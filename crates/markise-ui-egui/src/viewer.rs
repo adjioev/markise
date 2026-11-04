@@ -229,6 +229,16 @@ pub struct DocViewer {
     snaps_tried: bool,
     /// Screen rectangles of the block images at the last frame, with their source offsets.
     snap_rects: Vec<(Rect, usize)>,
+    /// PROTOTYPE (native blocks): blocks on screen at the last frame with their controls.
+    pub block_ctl: Vec<BlockCtl>,
+    /// Natively drawn blocks as units (like `atomic`), their marker lines (caret stops are
+    /// skipped), and what editing must not cross: first inner item starts (Backspace), last
+    /// inner item ends (Delete) and hidden `{#id}` labels.
+    pub native_units: Vec<(usize, usize, usize, usize)>,
+    pub native_markers: Vec<(usize, usize, usize, usize)>,
+    native_first: Vec<usize>,
+    native_last: Vec<usize>,
+    native_hidden: Vec<std::ops::Range<usize>>,
     /// PROTOTYPE (block forms): "✎ Edit" was clicked on the block at this offset.
     pub pending_edit: Option<usize>,
     /// PROTOTYPE (block forms): show the Edit button on this block ordinal without hover
@@ -277,9 +287,107 @@ fn live_snaps() -> bool {
     std::env::var_os("MARKISE_LIVE_SNAPS").is_none_or(|v| v != "0")
 }
 
-/// PROTOTYPE (block forms): the "✎ Edit" button of a block image.
+/// PROTOTYPE (block forms): the "✎ Edit" button of a block.
 fn edit_button_rect(r: Rect) -> Rect {
+    Rect::from_min_size(pos2(r.right() - 166.0, r.top() + 6.0), vec2(78.0, 22.0))
+}
+
+/// PROTOTYPE (native blocks): the view switch of a block (always in the same place: a block's
+/// top stays put while it is rotated, so it can be clicked repeatedly).
+fn view_button_rect(r: Rect) -> Rect {
     Rect::from_min_size(pos2(r.right() - 84.0, r.top() + 6.0), vec2(78.0, 22.0))
+}
+
+/// PROTOTYPE (native blocks): a block on screen with its controls.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockCtl {
+    pub rect: Rect,
+    pub offset: usize,
+    pub view: crate::block_snap::BlockView,
+}
+
+/// PROTOTYPE (native blocks): the accents a package's `view` can name (near the site's tokens).
+fn accent_color(name: &str, dark: bool) -> Color32 {
+    let (l, d) = match name {
+        "blue" => ((37, 99, 235), (124, 176, 255)),
+        "purple" => ((93, 63, 186), (179, 157, 255)),
+        "green" => ((35, 107, 81), (111, 208, 168)),
+        "amber" => ((183, 121, 31), (232, 180, 90)),
+        "red" => ((166, 56, 69), (240, 138, 151)),
+        _ => ((82, 101, 124), (167, 182, 201)),
+    };
+    let (r, g, b) = if dark { d } else { l };
+    Color32::from_rgb(r, g, b)
+}
+
+/// PROTOTYPE (native blocks): the small icons a package's `view` can name.
+fn paint_view_icon(p: &egui::Painter, c: Pos2, icon: &str, col: Color32) {
+    let s = Stroke::new(1.5, col);
+    match icon {
+        "lightbulb" => {
+            p.circle_stroke(c + vec2(0.0, -1.5), 4.5, s);
+            p.line_segment([c + vec2(-2.0, 5.0), c + vec2(2.0, 5.0)], s);
+        }
+        "flag" => {
+            p.line_segment([c + vec2(-4.0, -6.0), c + vec2(-4.0, 6.0)], s);
+            p.add(egui::Shape::convex_polygon(
+                vec![c + vec2(-4.0, -6.0), c + vec2(5.0, -3.0), c + vec2(-4.0, 0.5)],
+                col,
+                Stroke::NONE,
+            ));
+        }
+        "image" => {
+            p.rect_stroke(
+                Rect::from_center_size(c, vec2(13.0, 10.0)),
+                1.5,
+                s,
+                StrokeKind::Middle,
+            );
+            p.line_segment([c + vec2(-5.0, 3.5), c + vec2(-1.0, -1.0)], Stroke::new(1.0, col));
+            p.line_segment([c + vec2(-1.0, -1.0), c + vec2(3.0, 3.5)], Stroke::new(1.0, col));
+        }
+        "question" => {
+            p.circle_stroke(c, 6.0, s);
+            p.text(c, egui::Align2::CENTER_CENTER, "?", egui::FontId::proportional(10.0), col);
+        }
+        _ => {
+            // a sheet with lines
+            p.rect_stroke(
+                Rect::from_center_size(c, vec2(9.0, 12.0)),
+                1.5,
+                s,
+                StrokeKind::Middle,
+            );
+            p.line_segment([c + vec2(-2.0, -2.0), c + vec2(2.0, -2.0)], Stroke::new(1.0, col));
+            p.line_segment([c + vec2(-2.0, 1.5), c + vec2(2.0, 1.5)], Stroke::new(1.0, col));
+        }
+    }
+}
+
+/// PROTOTYPE (native blocks): where the content of the item at `start` begins, after its
+/// Markdown syntax (`### `, `> `, `- [ ] `, `1. `).
+fn content_start(text: &str, start: usize) -> usize {
+    let rest = text.get(start..).unwrap_or("");
+    let line = rest.split('\n').next().unwrap_or("");
+    let mut i = 0;
+    let b = line.as_bytes();
+    let hashes = b.iter().take_while(|c| **c == b'#').count();
+    if hashes > 0 && b.get(hashes) == Some(&b' ') {
+        i = hashes + 1;
+    } else if b.first() == Some(&b'>') {
+        i = 1 + usize::from(b.get(1) == Some(&b' '));
+    } else if matches!(b.first(), Some(b'-' | b'*' | b'+')) && b.get(1) == Some(&b' ') {
+        i = 2;
+        if line[2..].starts_with("[ ] ") || line[2..].starts_with("[x] ") || line[2..].starts_with("[X] ") {
+            i = 6;
+        }
+    } else {
+        let d = b.iter().take_while(|c| c.is_ascii_digit()).count();
+        if d > 0 && matches!(b.get(d), Some(b'.' | b')')) && b.get(d + 1) == Some(&b' ') {
+            i = d + 2;
+        }
+    }
+    start + i
 }
 
 impl DocViewer {
@@ -339,6 +447,12 @@ impl DocViewer {
             snaps: None,
             snaps_tried: false,
             snap_rects: Vec::new(),
+            block_ctl: Vec::new(),
+            native_units: Vec::new(),
+            native_markers: Vec::new(),
+            native_first: Vec::new(),
+            native_last: Vec::new(),
+            native_hidden: Vec::new(),
             pending_edit: None,
             force_edit_button: None,
             atomic: Vec::new(),
@@ -808,7 +922,13 @@ impl DocViewer {
             // PROTOTYPE (live mode): Backspace after a block / Delete before it selects the
             // block; Backspace/Delete on a selected block deletes it whole (one undo step) —
             // never merges text into its `:::` lines
-            if editable && !self.snap_blocks && !self.atomic.is_empty() && self.ed.session.read_only().is_none() {
+            if editable
+                && !self.snap_blocks
+                && (!self.atomic.is_empty() || !self.native_units.is_empty())
+                && self.ed.session.read_only().is_none()
+            {
+                let units: Vec<(usize, usize, usize, usize)> =
+                    self.atomic.iter().chain(self.native_units.iter()).copied().collect();
                 let sel = self.ed.session.selection().primary();
                 let caret = (sel.anchor == sel.focus).then_some(sel.focus.offset);
                 let mut consumed = false;
@@ -820,7 +940,7 @@ impl DocViewer {
                         continue;
                     }
                     if let Some(fb) = self.focused_block
-                        && let Some(&(start, _, _, after)) = self.atomic.iter().find(|a| a.0 == fb)
+                        && let Some(&(start, _, _, after)) = units.iter().find(|a| a.0 == fb)
                     {
                         let ps = PatchSet::new(vec![markise_doc::Patch::verbatim(start..after, "")]);
                         if let Ok(ps) = ps {
@@ -832,10 +952,20 @@ impl DocViewer {
                         consumed = true;
                     } else if let Some(c) = caret {
                         let t = self.ed.session.text();
-                        let hit = if *key == egui::Key::Backspace {
-                            self.atomic.iter().find(|a| near_start(t, a.3, c))
+                        // never into a card's marker lines or a hidden `{#id}` label
+                        let guarded = if *key == egui::Key::Backspace {
+                            self.native_first.iter().any(|&f| c >= f && c <= content_start(t, f))
                         } else {
-                            self.atomic.iter().find(|a| a.2 == c)
+                            self.native_last.contains(&c) || self.native_hidden.iter().any(|h| h.start == c)
+                        };
+                        if guarded {
+                            consumed = true;
+                            continue;
+                        }
+                        let hit = if *key == egui::Key::Backspace {
+                            units.iter().find(|a| near_start(t, a.3, c))
+                        } else {
+                            units.iter().find(|a| a.2 == c)
                         };
                         if let Some(&(start, _, _, after)) = hit {
                             self.focused_block = Some(start);
@@ -855,6 +985,21 @@ impl DocViewer {
                         )
                     });
                     ran = true;
+                }
+            }
+            // PROTOTYPE (native blocks): Enter at the end of an answer: the new answer comes after
+            // its hidden label
+            if editable && !self.native_hidden.is_empty() {
+                let sel = self.ed.session.selection().primary();
+                let enter = events.iter().any(|e| {
+                    matches!(e, Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. } if !modifiers.any())
+                });
+                if enter
+                    && sel.anchor == sel.focus
+                    && let Some(h) = self.native_hidden.iter().find(|h| h.start == sel.focus.offset)
+                {
+                    let to = h.end;
+                    self.ed.set_selection(Selection::caret(to));
                 }
             }
             // PROTOTYPE (block move): ⌥⌘↑ / ⌥⌘↓ move the selected block past its neighbour
@@ -966,10 +1111,10 @@ impl DocViewer {
         let on_handle = if editable && !self.snap_blocks && self.ed.session.read_only().is_none() {
             ui.input(|i| i.pointer.press_origin().or(i.pointer.interact_pos()))
                 .and_then(|p| {
-                    self.snap_rects
+                    self.block_ctl
                         .iter()
-                        .find(|(r, _)| handle_rect(*r).contains(p))
-                        .map(|(_, o)| *o)
+                        .find(|c| handle_rect(c.rect).contains(p))
+                        .map(|c| c.offset)
                 })
         } else {
             None
@@ -978,25 +1123,53 @@ impl DocViewer {
             ctx.set_cursor_icon(CursorIcon::Grab);
             if resp.drag_started() {
                 egui::DragAndDrop::set_payload(&ctx, MoveBlock(off));
+            } else if resp.clicked()
+                && let Some(&(start, _, _, after)) = self.native_units.iter().find(|a| a.0 == off)
+            {
+                // a click on the handle selects a native block (a click on an image does)
+                self.focused_block = Some(start);
+                self.ed.set_selection(Selection::caret(after));
+                out.edited = true;
             }
         }
-        let on_snap = ui
-            .input(|i| i.pointer.interact_pos())
-            .and_then(|p| self.snap_rects.iter().find(|(r, _)| r.contains(p)).map(|(_, o)| *o));
-        let on_edit = ui.input(|i| i.pointer.interact_pos()).and_then(|p| {
-            self.snap_rects
+        // PROTOTYPE (native blocks): the view switch and the form button of any block
+        let on_view = ui.input(|i| i.pointer.interact_pos()).and_then(|p| {
+            self.block_ctl
                 .iter()
-                .find(|(r, _)| edit_button_rect(*r).contains(p))
-                .map(|(_, o)| *o)
+                .find(|c| view_button_rect(c.rect).contains(p))
+                .map(|c| c.offset)
         });
+        let on_form = ui.input(|i| i.pointer.interact_pos()).and_then(|p| {
+            self.block_ctl
+                .iter()
+                .find(|c| c.view != crate::block_snap::BlockView::Markdown && edit_button_rect(c.rect).contains(p))
+                .map(|c| c.offset)
+        });
+        if on_view.is_some() || on_form.is_some() {
+            if resp.hovered() {
+                ctx.set_cursor_icon(CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                if let (Some(off), Some(s)) = (on_view, self.snaps.as_mut()) {
+                    s.rotate_view(off);
+                } else if on_form.is_some() && self.ed.session.read_only().is_none() {
+                    self.pending_edit = on_form;
+                }
+                ctx.request_repaint();
+            }
+        }
+        let on_snap = if on_view.is_some() || on_form.is_some() {
+            None
+        } else {
+            ui.input(|i| i.pointer.interact_pos())
+                .and_then(|p| self.snap_rects.iter().find(|(r, _)| r.contains(p)).map(|(_, o)| *o))
+        };
         if on_snap.is_some() && resp.hovered() {
             ctx.set_cursor_icon(CursorIcon::PointingHand);
             if resp.double_clicked() && editable && !self.snap_blocks {
                 self.pending_edit = on_snap;
             } else if resp.clicked() {
-                if on_edit.is_some() {
-                    self.pending_edit = on_edit;
-                } else if editable && !self.snap_blocks {
+                if editable && !self.snap_blocks {
                     // live mode: the click selects the block (caret parked after it, source not
                     // revealed)
                     if let Some(&(start, _, _, after)) = self.atomic.iter().find(|a| Some(a.0) == on_snap) {
@@ -1013,7 +1186,9 @@ impl DocViewer {
             && resp.hovered()
             && on_snap.is_none()
             && on_plus.is_none()
-            && on_handle.is_none();
+            && on_handle.is_none()
+            && on_view.is_none()
+            && on_form.is_none();
         // a click on a task checkbox toggles it (spec 02 §9): the press neither places the caret
         // nor starts a selection; the toggle happens on release over the same box (a press
         // dragged off the box does nothing)
@@ -1136,8 +1311,14 @@ impl DocViewer {
         }
 
         // PROTOTYPE (live mode): block images are atomic for the caret
-        if editable && !self.snap_blocks && self.keep_caret_out_of_blocks(self.last_focus) {
-            out.edited = true;
+        if editable && !self.snap_blocks {
+            // (a stop just after a block can be the next block's marker line)
+            for _ in 0..6 {
+                if !self.keep_caret_out_of_blocks(self.last_focus) {
+                    break;
+                }
+                out.edited = true;
+            }
         }
         self.last_focus = self.ed.session.selection().primary().focus.offset;
         if out.edited {
@@ -1151,7 +1332,7 @@ impl DocViewer {
         }
 
         // ---- PROTOTYPE: block snapshots replace their items' heights
-        let placed = if self.snap_blocks || (editable && live_snaps()) {
+        let (placed, native_now, raw_now) = if self.snap_blocks || (editable && live_snaps()) {
             if self.snaps.is_none() && !self.snaps_tried {
                 use crate::block_lib::Lib;
                 let path = self.ed.path().map(|p| p.to_path_buf());
@@ -1274,6 +1455,10 @@ impl DocViewer {
                         }
                     }
                     let vis: Vec<usize> = self.last_visible.iter().map(|v| v.0.0).collect();
+                    {
+                        let ed = &self.ed;
+                        s.remap_views(|o| ed.map_recent(o));
+                    }
                     let model = self.ed.view.model().clone();
                     let width = self.ed.view.width();
                     let paging = self.ed.view.paging_generation();
@@ -1324,14 +1509,16 @@ impl DocViewer {
                             }
                         }
                     }
+                    self.ed.view.set_item_insets(std::mem::take(&mut s.insets));
                     self.ed.view.set_height_overrides(over);
-                    placed
+                    (placed, s.native.clone(), s.raw.clone())
                 }
-                None => Vec::new(),
+                None => (Vec::new(), Vec::new(), Vec::new()),
             }
         } else {
+            self.ed.view.set_item_insets(Default::default());
             self.ed.view.set_height_overrides(Default::default());
-            Vec::new()
+            (Vec::new(), Vec::new(), Vec::new())
         };
 
         // keyboard scrolling, the scrollbar or a caret / find reveal in this frame took over
@@ -1463,7 +1650,13 @@ impl DocViewer {
                 // a moved block: not at its own position
                 let own = moving
                     .as_ref()
-                    .and_then(|m| self.atomic.iter().find(|a| a.0 == m.0).copied());
+                    .and_then(|m| {
+                        self.atomic
+                            .iter()
+                            .chain(self.native_units.iter())
+                            .find(|a| a.0 == m.0)
+                            .copied()
+                    });
                 let valid: Vec<(usize, f32)> = self
                     .gaps
                     .iter()
@@ -1555,101 +1748,247 @@ impl DocViewer {
         }
         // block images: their items are not painted as Markdown
         self.snap_rects.clear();
-        if !placed.is_empty() {
-            let model = self.ed.view.model().clone();
-            for p in &placed {
-                if let Some(v) = visible.iter().find(|v| model.item_start(v.idx) == p.offset) {
-                    let r = Rect::from_min_size(pos2(left, rect.top() + v.y + theme.block_spacing), p.size);
-                    self.snap_rects.push((r, p.offset));
-                    match p.tex {
-                        Some(tex) => painter.image(
-                            tex,
-                            r,
-                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                            Color32::WHITE,
-                        ),
-                        // being rendered again (its texture was evicted with its page)
-                        None => painter.rect_filled(r, 8.0, theme_color(theme.meta_text).gamma_multiply(0.08)),
-                    };
-                }
+        self.block_ctl.clear();
+        let model = self.ed.view.model().clone();
+        for p in &placed {
+            if let Some(v) = visible.iter().find(|v| model.item_start(v.idx) == p.offset) {
+                let r = Rect::from_min_size(pos2(left, rect.top() + v.y + theme.block_spacing), p.size);
+                self.snap_rects.push((r, p.offset));
+                self.block_ctl.push(BlockCtl {
+                    rect: r,
+                    offset: p.offset,
+                    view: crate::block_snap::BlockView::Site,
+                });
+                match p.tex {
+                    Some(tex) => painter.image(
+                        tex,
+                        r,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    ),
+                    // being rendered again (its texture was evicted with its page)
+                    None => painter.rect_filled(r, 8.0, theme_color(theme.meta_text).gamma_multiply(0.08)),
+                };
             }
-            // PROTOTYPE (live mode): atomic caret units and the selected block's outline
-            {
-                let model = self.ed.view.model().clone();
-                let text_len = self.ed.session.text().len();
-                self.atomic = placed
+        }
+        // PROTOTYPE (native blocks): cards behind their items (the items are painted below)
+        {
+            use crate::block_snap::{CARD_BOTTOM, CARD_HEADER, CARD_PAD};
+            let width = self.ed.view.width();
+            let text_len = self.ed.session.text().len();
+            self.native_units.clear();
+            self.native_markers.clear();
+            self.native_first.clear();
+            self.native_last.clear();
+            self.native_hidden.clear();
+            let item_of = |vis: &[markise_layout::Visible], st: usize| -> Option<(f32, f32, f32)> {
+                vis.iter()
+                    .find(|v| model.item_start(v.idx) == st)
+                    .map(|v| (rect.top() + v.y, v.layout.gap, v.layout.height))
+            };
+            for n in &native_now {
+                let open = model.items.partition_point_start(n.offset);
+                let next = model.items.partition_point_start(n.end);
+                let before = if open > 0 {
+                    model.item_span(open - 1).end
+                } else {
+                    n.offset
+                };
+                let after = if next < model.items.len() {
+                    model.item_start(next)
+                } else {
+                    text_len
+                };
+                let open_end = model.item_span(open).end;
+                self.native_units.push((n.offset, n.end, before, after));
+                self.native_markers.push((n.offset, open_end, before, n.first_inner));
+                self.native_markers
+                    .push((n.close_start, n.end, n.last_inner_end, after));
+                self.native_first.push(n.first_inner);
+                self.native_last.push(n.last_inner_end);
+                self.native_hidden.extend(n.hidden.iter().cloned());
+                // the part of the card in the laid-out items
+                let ys: Vec<f32> = visible
                     .iter()
-                    .map(|p| {
-                        // by source position: pages may have come and gone since the scan
-                        let open = model.items.partition_point_start(p.offset);
-                        let before = if open > 0 {
-                            model.item_span(open - 1).end
-                        } else {
-                            p.offset
-                        };
-                        let next = model.items.partition_point_start(p.end);
-                        let after = if next < model.items.len() {
-                            model.item_start(next)
-                        } else {
-                            text_len
-                        };
-                        (p.offset, p.end, before, after)
+                    .filter(|v| {
+                        let st = model.item_start(v.idx);
+                        st >= n.offset && st < n.end
                     })
+                    .map(|v| rect.top() + v.y)
                     .collect();
-                let caret = self.ed.session.selection().primary().focus.offset;
-                if let Some(fb) = self.focused_block {
-                    let t = self.ed.session.text();
-                    let still = self.atomic.iter().any(|a| a.0 == fb && near_start(t, a.3, caret));
-                    if !still {
-                        self.focused_block = None;
-                    } else if let Some((r, _)) = self.snap_rects.iter().find(|(_, o)| *o == fb) {
-                        painter.rect_stroke(
-                            r.expand(3.0),
-                            8.0,
-                            Stroke::new(2.0, theme_color(theme.link)),
-                            StrokeKind::Outside,
+                let (Some(&ymin), Some(&ymax)) = (ys.first(), ys.last()) else {
+                    continue;
+                };
+                let top = match item_of(&visible, n.offset) {
+                    Some((y, ..)) => y + theme.block_spacing,
+                    None => ymin - 40.0,
+                };
+                let bottom = match item_of(&visible, n.close_start) {
+                    Some((y, ..)) => y + CARD_BOTTOM,
+                    None => ymax + rect.height() + 40.0,
+                };
+                let card = Rect::from_min_max(pos2(left, top), pos2(left + width, bottom));
+                let accent = accent_color(&n.spec.accent, theme.dark);
+                let tint = if n.spec.kind == crate::block_snap::ViewKind::Callout || n.spec.kind == crate::block_snap::ViewKind::Choices {
+                    accent
+                } else {
+                    theme_color(theme.meta_text)
+                };
+                painter.rect_filled(card, 12.0, tint.gamma_multiply(if theme.dark { 0.10 } else { 0.06 }));
+                painter.rect_stroke(
+                    card,
+                    12.0,
+                    Stroke::new(1.0, tint.gamma_multiply(0.35)),
+                    StrokeKind::Inside,
+                );
+                let hc = pos2(left + CARD_PAD + 6.0, top + CARD_HEADER * 0.5);
+                paint_view_icon(&painter, hc, &n.spec.icon, accent);
+                painter.text(
+                    hc + vec2(13.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    &n.spec.title,
+                    egui::FontId::proportional(13.0),
+                    accent,
+                );
+                // answer rows and the explanation area
+                let (rl, rr) = (left + CARD_PAD, left + width - CARD_PAD);
+                for (st, correct) in &n.answers {
+                    if let Some((y, gap, h)) = item_of(&visible, *st) {
+                        let r = Rect::from_min_max(pos2(rl, y + gap), pos2(rr, y + h));
+                        let (fill, line) = if *correct {
+                            let g = accent_color("green", theme.dark);
+                            (g.gamma_multiply(0.14), g.gamma_multiply(0.6))
+                        } else {
+                            (
+                                theme_color(theme.page_bg),
+                                theme_color(theme.meta_text).gamma_multiply(0.35),
+                            )
+                        };
+                        painter.rect_filled(r, 8.0, fill);
+                        painter.rect_stroke(r, 8.0, Stroke::new(1.0, line), StrokeKind::Inside);
+                    }
+                }
+                let ex: Vec<(f32, f32, f32)> = n.explain.iter().filter_map(|st| item_of(&visible, *st)).collect();
+                if let (Some(a), Some(b)) = (ex.first(), ex.last()) {
+                    let r = Rect::from_min_max(pos2(rl, a.0 + a.1), pos2(rr, b.0 + b.2));
+                    painter.rect_filled(r, 8.0, theme_color(theme.meta_text).gamma_multiply(0.10));
+                    if n.explain.first().is_some_and(|f| item_of(&visible, *f).is_some()) {
+                        painter.text(
+                            pos2(r.left() + crate::block_snap::ROW_PAD, r.top() + 15.0),
+                            egui::Align2::LEFT_CENTER,
+                            if crate::block_edit::lang() == "ru" {
+                                "Объяснение"
+                            } else {
+                                "Explanation"
+                            },
+                            egui::FontId::proportional(12.5),
+                            theme_color(theme.meta_text),
                         );
                     }
                 }
+                self.block_ctl.push(BlockCtl {
+                    rect: card,
+                    offset: n.offset,
+                    view: crate::block_snap::BlockView::Native,
+                });
             }
-            // PROTOTYPE (block forms): "✎ Edit" on the hovered block image
-            let hover = ctx.input(|i| i.pointer.hover_pos());
-            let ru = crate::block_edit::lang() == "ru";
-            for (i, (r, _)) in self.snap_rects.iter().enumerate() {
-                // ⠿ move handle (live mode)
-                if editable
-                    && !self.snap_blocks
-                    && self.ed.session.read_only().is_none()
-                    && (hover.is_some_and(|h| r.expand2(vec2(28.0, 0.0)).contains(h))
-                        || self.force_edit_button == Some(i))
+            // blocks shown as their text: the controls sit on their lines
+            for &(st, end, view) in &raw_now {
+                let on: Vec<(f32, f32)> = visible
+                    .iter()
+                    .filter(|v| {
+                        let s = model.item_start(v.idx);
+                        s >= st && s < end
+                    })
+                    .map(|v| (rect.top() + v.y, rect.top() + v.y + v.layout.height))
+                    .collect();
+                if let (Some(a), Some(b)) = (on.first(), on.last())
+                    && item_of(&visible, st).is_some()
                 {
-                    let hr = handle_rect(*r);
-                    let hot = hover.is_some_and(|h| hr.contains(h));
-                    if hot {
-                        painter.rect_filled(hr, 5.0, theme_color(theme.link).gamma_multiply(0.18));
-                    }
-                    let c = if hot {
-                        theme_color(theme.link)
+                    let top = a.0 + theme.block_spacing * 0.5;
+                    self.block_ctl.push(BlockCtl {
+                        rect: Rect::from_min_max(pos2(left, top), pos2(left + width, b.1)),
+                        offset: st,
+                        view,
+                    });
+                }
+            }
+        }
+        // PROTOTYPE (live mode): atomic caret units and the selected block's outline
+        {
+            let text_len = self.ed.session.text().len();
+            self.atomic = placed
+                .iter()
+                .map(|p| {
+                    // by source position: pages may have come and gone since the scan
+                    let open = model.items.partition_point_start(p.offset);
+                    let before = if open > 0 {
+                        model.item_span(open - 1).end
                     } else {
-                        theme_color(theme.meta_text)
+                        p.offset
                     };
-                    for row in 0..3 {
-                        for col in 0..2 {
-                            painter.circle_filled(
-                                hr.min + vec2(6.0 + 6.0 * col as f32, 6.0 + 6.0 * row as f32),
-                                1.6,
-                                c,
-                            );
-                        }
+                    let next = model.items.partition_point_start(p.end);
+                    let after = if next < model.items.len() {
+                        model.item_start(next)
+                    } else {
+                        text_len
+                    };
+                    (p.offset, p.end, before, after)
+                })
+                .collect();
+            let caret = self.ed.session.selection().primary().focus.offset;
+            if let Some(fb) = self.focused_block {
+                let t = self.ed.session.text();
+                let still = self
+                    .atomic
+                    .iter()
+                    .chain(self.native_units.iter())
+                    .any(|a| a.0 == fb && near_start(t, a.3, caret));
+                if !still {
+                    self.focused_block = None;
+                } else if let Some(c) = self.block_ctl.iter().find(|c| c.offset == fb) {
+                    painter.rect_stroke(
+                        c.rect.expand(3.0),
+                        8.0,
+                        Stroke::new(2.0, theme_color(theme.link)),
+                        StrokeKind::Outside,
+                    );
+                }
+            }
+        }
+        // PROTOTYPE: the controls of the hovered block: ⠿ move, view switch, "✎ Edit" (forms)
+        let hover = ctx.input(|i| i.pointer.hover_pos());
+        let ru = crate::block_edit::lang() == "ru";
+        let writable = self.ed.session.read_only().is_none();
+        for (i, c) in self.block_ctl.iter().enumerate() {
+            let r = &c.rect;
+            let forced = self.force_edit_button == Some(i);
+            // ⠿ move handle (live mode)
+            if editable
+                && !self.snap_blocks
+                && writable
+                && (hover.is_some_and(|h| r.expand2(vec2(28.0, 0.0)).contains(h)) || forced)
+            {
+                let hr = handle_rect(*r);
+                let hot = hover.is_some_and(|h| hr.contains(h));
+                if hot {
+                    painter.rect_filled(hr, 5.0, theme_color(theme.link).gamma_multiply(0.18));
+                }
+                let col = if hot {
+                    theme_color(theme.link)
+                } else {
+                    theme_color(theme.meta_text)
+                };
+                for row in 0..3 {
+                    for k in 0..2 {
+                        painter.circle_filled(hr.min + vec2(6.0 + 6.0 * k as f32, 6.0 + 6.0 * row as f32), 1.6, col);
                     }
                 }
-                let forced = self.force_edit_button == Some(i);
-                if (!forced && !hover.is_some_and(|h| r.contains(h) && rect.contains(h)))
-                    || self.ed.session.read_only().is_some()
-                {
-                    continue;
-                }
-                let b = edit_button_rect(*r);
+            }
+            if !forced && !hover.is_some_and(|h| r.contains(h) && rect.contains(h)) {
+                continue;
+            }
+            let pill = |b: Rect, label: &str, pencil: bool| {
                 let hot = hover.is_some_and(|h| b.contains(h));
                 let fill = if hot {
                     theme_color(theme.link)
@@ -1657,41 +1996,50 @@ impl DocViewer {
                     Color32::from_black_alpha(170)
                 };
                 painter.rect_filled(b, 6.0, fill);
-                // a small pencil (the UI font has no ✎ glyph)
-                let o = b.left_center() + vec2(10.0, 0.0);
-                painter.line_segment(
-                    [o + vec2(0.0, 5.0), o + vec2(8.0, -3.0)],
-                    Stroke::new(2.2, Color32::WHITE),
-                );
-                painter.line_segment(
-                    [o + vec2(-1.0, 6.5), o + vec2(0.6, 4.4)],
-                    Stroke::new(1.4, Color32::WHITE),
-                );
+                if pencil {
+                    // a small pencil (the UI font has no ✎ glyph)
+                    let o = b.left_center() + vec2(10.0, 0.0);
+                    painter.line_segment(
+                        [o + vec2(0.0, 5.0), o + vec2(8.0, -3.0)],
+                        Stroke::new(2.2, Color32::WHITE),
+                    );
+                    painter.line_segment(
+                        [o + vec2(-1.0, 6.5), o + vec2(0.6, 4.4)],
+                        Stroke::new(1.4, Color32::WHITE),
+                    );
+                }
                 painter.text(
-                    b.center() + vec2(8.0, 0.0),
+                    b.center() + vec2(if pencil { 8.0 } else { 0.0 }, 0.0),
                     egui::Align2::CENTER_CENTER,
-                    if ru { "Правка" } else { "Edit" },
+                    label,
                     egui::FontId::proportional(12.5),
                     Color32::WHITE,
                 );
+            };
+            pill(view_button_rect(*r), c.view.label(), false);
+            if c.view != crate::block_snap::BlockView::Markdown && writable {
+                pill(edit_button_rect(*r), if ru { "Правка" } else { "Edit" }, true);
             }
-            if let Some((e, at)) = self.snaps.as_ref().and_then(|s| s.form.error.clone())
-                && at.elapsed().as_secs_f32() < 5.0
-            {
-                let r = Rect::from_min_size(pos2(left, rect.top() + 4.0), vec2(rect.width().min(600.0), 22.0));
-                painter.rect_filled(r, 4.0, Color32::from_rgb(180, 40, 40));
-                painter.text(
-                    r.left_center() + vec2(8.0, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    e,
-                    egui::FontId::proportional(12.5),
-                    Color32::WHITE,
-                );
-                ctx.request_repaint_after(std::time::Duration::from_millis(500));
-            }
+        }
+        if let Some((e, at)) = self.snaps.as_ref().and_then(|s| s.form.error.clone())
+            && at.elapsed().as_secs_f32() < 5.0
+        {
+            let r = Rect::from_min_size(pos2(left, rect.top() + 4.0), vec2(rect.width().min(600.0), 22.0));
+            painter.rect_filled(r, 4.0, Color32::from_rgb(180, 40, 40));
+            painter.text(
+                r.left_center() + vec2(8.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                e,
+                egui::FontId::proportional(12.5),
+                Color32::WHITE,
+            );
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        if !placed.is_empty() || !native_now.is_empty() {
             visible.retain(|v| {
                 let st = model.item_start(v.idx);
                 !placed.iter().any(|p| st >= p.offset && st < p.end)
+                    && !native_now.iter().any(|n| st == n.offset || st == n.close_start)
             });
         }
         // PROTOTYPE (live preview): the new block's image at its insertion point
@@ -3162,7 +3510,19 @@ impl DocViewer {
     fn keep_caret_out_of_blocks(&mut self, prev: usize) -> bool {
         let sel = self.ed.session.selection().primary();
         let f = sel.focus.offset;
-        let Some(&(start, end, before, after)) = self.atomic.iter().find(|a| f >= a.0 && f <= a.1) else {
+        // (the card's lines as of the last frame: moved by the edits since)
+        let mv = |o: usize| self.ed.map_recent(o).unwrap_or(o);
+        let markers: Vec<_> = self
+            .native_markers
+            .iter()
+            .map(|a| (mv(a.0), mv(a.1), mv(a.2), mv(a.3)))
+            .collect();
+        let Some(&(start, end, before, after)) = self
+            .atomic
+            .iter()
+            .chain(markers.iter())
+            .find(|a| f >= a.0 && f <= a.1)
+        else {
             return false;
         };
         if self.focused_block == Some(start) && near_start(self.ed.session.text(), after, f) {

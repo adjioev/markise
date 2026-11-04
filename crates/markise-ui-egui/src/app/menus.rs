@@ -56,6 +56,13 @@ const COMMENT_VIEWS: [(&str, CommentView); 4] = [
     ("view.commentsOriginal", CommentView::Original),
 ];
 
+/// PROTOTYPE (native blocks): View → Blocks items.
+const BLOCK_VIEWS: [(&str, crate::block_snap::BlockView); 3] = [
+    ("view.blocksNative", crate::block_snap::BlockView::Native),
+    ("view.blocksSite", crate::block_snap::BlockView::Site),
+    ("view.blocksMarkdown", crate::block_snap::BlockView::Markdown),
+];
+
 /// Why Save Copy Without Comments is disabled while CriticMarkup is off (menu label suffix).
 pub(crate) const CLEAN_COPY_OFF_HINT: &str = "turn on View → Comments & Suggestions";
 
@@ -498,6 +505,7 @@ impl MarkiseApp {
             self.app_item("view.highlightCode", true, Check::Toggle(self.highlight_code)),
             Entry::Submenu(self.theme_menu()),
             Entry::Submenu(self.comments_view_menu()),
+            Entry::Submenu(self.blocks_view_menu()),
             Entry::Separator,
             self.app_item("view.zoomIn", self.zoom() < ZOOM_RANGE.1, Check::None),
             self.app_item("view.zoomOut", self.zoom() > ZOOM_RANGE.0, Check::None),
@@ -534,6 +542,18 @@ impl MarkiseApp {
             COMMENT_VIEWS
                 .iter()
                 .map(|(id, v)| self.app_item(id, on, Check::Radio(cur == *v)))
+                .collect(),
+        )
+    }
+
+    /// PROTOTYPE (native blocks): View → Blocks: the view of all blocks.
+    fn blocks_view_menu(&self) -> Menu {
+        let cur = self.blocks_view();
+        Menu::new(
+            "Blocks",
+            BLOCK_VIEWS
+                .iter()
+                .map(|(id, v)| self.app_item(id, cur.is_some(), Check::Radio(cur == Some(*v))))
                 .collect(),
         )
     }
@@ -713,6 +733,11 @@ impl MarkiseApp {
             id if COMMENT_VIEWS.iter().any(|(c, _)| *c == id) => {
                 if let Some((_, v)) = COMMENT_VIEWS.iter().find(|(c, _)| *c == id) {
                     self.set_comment_view(*v);
+                }
+            }
+            id if BLOCK_VIEWS.iter().any(|(c, _)| *c == id) => {
+                if let Some((_, v)) = BLOCK_VIEWS.iter().find(|(c, _)| *c == id) {
+                    self.set_blocks_view(*v);
                 }
             }
             "file.saveCopyClean" if self.doc.is_some() => self.save_copy_without_comments(),

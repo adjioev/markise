@@ -316,6 +316,98 @@ pub struct LayoutParams<'a> {
     pub links: &'a dyn crate::links::LinkTargets,
     /// How review marks are shown (issue #88).
     pub review: ReviewView,
+    /// PROTOTYPE (native blocks): a trailing `{#id}` of a paragraph is not shown.
+    pub hide_ids: bool,
+    /// PROTOTYPE (native blocks): a heading is styled as this level.
+    pub heading_level: Option<u8>,
+}
+
+/// PROTOTYPE (native blocks): an item drawn inside a card the UI paints behind it. The content
+/// is laid out narrower and moved; everything item-local (caret, hit tests) moves with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ItemInset {
+    pub left: f32,
+    pub right: f32,
+    /// Extra room above the content (after the gap) and below it.
+    pub top: f32,
+    pub bottom: f32,
+    /// Drop the item's own gap (first item of a card).
+    pub no_gap: bool,
+    pub hide_ids: bool,
+    pub heading_level: Option<u8>,
+}
+
+impl ItemInset {
+    pub fn fingerprint(&self) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for v in [
+            self.left.to_bits(),
+            self.right.to_bits(),
+            self.top.to_bits(),
+            self.bottom.to_bits(),
+            self.no_gap as u32,
+            self.hide_ids as u32,
+            self.heading_level.map_or(0, u32::from),
+        ] {
+            h = (h ^ v as u64).wrapping_mul(0x0100_0000_01b3);
+        }
+        h
+    }
+}
+
+impl BlockLayout {
+    /// PROTOTYPE (native blocks): applies `i` to a layout made at the narrower width.
+    pub fn apply_inset(&mut self, i: &ItemInset) {
+        let dy = i.top - if i.no_gap { self.gap } else { 0.0 };
+        let d = vec2(i.left, dy);
+        for p in &mut self.prims {
+            match p {
+                Prim::Text { pos, .. } => *pos += d,
+                Prim::Rect { rect, .. } | Prim::Checkbox { rect, .. } | Prim::Image { rect, .. } => {
+                    *rect = rect.translate(d)
+                }
+                Prim::Line { a, b, .. } => {
+                    *a += d;
+                    *b += d;
+                }
+                Prim::Circle { center, .. } => *center += d,
+                Prim::Path { points, .. } => points.iter_mut().for_each(|q| *q += d),
+                Prim::Math { rect, clip, .. } => {
+                    *rect = rect.translate(d);
+                    *clip = clip.map(|c| c.translate(d));
+                }
+            }
+        }
+        self.toggle = self.toggle.map(|r| r.translate(d));
+        for (r, _) in &mut self.tasks {
+            *r = r.translate(d);
+        }
+        if let Some((r, _)) = &mut self.empty_anchor {
+            *r = r.translate(d);
+        }
+        self.virtual_caret = self.virtual_caret.map(|r| r.translate(d));
+        for c in &mut self.comments {
+            c.rect = c.rect.translate(d);
+        }
+        self.height = self.height + dy + i.bottom;
+        if i.no_gap {
+            self.gap = 0.0;
+        }
+    }
+}
+
+/// PROTOTYPE (native blocks): item-relative source of a paragraph's trailing ` {#id}`.
+fn trailing_id(text: &str, last: &Span, origin: usize) -> Option<Range<u32>> {
+    let line = text.get(last.start..last.end)?;
+    let t = line.trim_end();
+    let at = t.rfind("{#")?;
+    let id = t[at + 2..].strip_suffix('}')?;
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return None;
+    }
+    let keep = t[..at].trim_end().len();
+    let abs = last.start + keep;
+    Some((abs - origin) as u32..(last.end - origin) as u32)
 }
 
 /// How review marks (CriticMarkup, ADR 0012) are shown in the rendered view (issue #88). Display
@@ -697,6 +789,8 @@ struct InlineBuilder<'a> {
     link_targets: Option<&'a dyn crate::links::LinkTargets>,
     /// How review marks are shown (issue #88).
     review: ReviewView,
+    /// PROTOTYPE (native blocks): item-relative source not shown (a trailing `{#id}`).
+    hide: Option<Range<u32>>,
 }
 
 impl<'a> InlineBuilder<'a> {
@@ -721,6 +815,7 @@ impl<'a> InlineBuilder<'a> {
             measure: false,
             link_targets: None,
             review: ReviewView::All,
+            hide: None,
         }
     }
 
@@ -1228,7 +1323,22 @@ impl<'a> InlineBuilder<'a> {
     fn node_inner(&mut self, r: &RichInline, n: &InlineNode, st: &Style, top: bool) {
         let t = self.theme;
         match &n.kind {
-            InlineKind::Text => self.push_src(r.value(n), st, &n.source, st.transform == TextTransform::None),
+            InlineKind::Text => {
+                let verbatim = st.transform == TextTransform::None;
+                match self.hide.clone() {
+                    Some(h) if n.source.start >= h.start => {}
+                    Some(h) if n.source.end > h.start => {
+                        let v = r.value(n);
+                        let keep = (h.start - n.source.start) as usize;
+                        if v.len() == n.source.len() && v.is_char_boundary(keep) {
+                            self.push_src(&v[..keep], st, &(n.source.start..h.start), verbatim);
+                        } else {
+                            self.push_src(v, st, &n.source, verbatim);
+                        }
+                    }
+                    _ => self.push_src(r.value(n), st, &n.source, verbatim),
+                }
+            }
             InlineKind::Atom => self.push_src(r.value(n), st, &n.source, false),
             InlineKind::Comment => {} // handled before generic marker reveal
             InlineKind::Keyboard => {
@@ -2079,6 +2189,9 @@ pub fn layout_item(
                     .with_links(p.links)
                     .review_view(p.review)
                     .reveal(&text[origin..], p.focus);
+                if p.hide_ids {
+                    b.hide = content_lines.last().and_then(|l| trailing_id(text, l, origin));
+                }
                 if quote_prefix_here
                     && item.segment.as_ref().is_none_or(BlockSegment::first)
                     && let Some(pre) = &t.quote_prefix
@@ -2141,7 +2254,7 @@ pub fn layout_item(
             }
         }
         ItemKind::Heading { level } => {
-            let li = (*level as usize - 1).min(5);
+            let li = (p.heading_level.unwrap_or(*level) as usize - 1).min(5);
             let hs = &t.headings[li];
             let d = &t.heading_decor[li];
             let rich = doc.inline(InlineSource::Lines(&lines), origin);
