@@ -186,9 +186,8 @@ pub(crate) fn build_theme(c: &Computed, dom: &Dom, sheet: &Sheet, name: &str, va
         t.mono_scale = (code.font_size / p.font_size).clamp(0.5, 1.5);
         t.code_block_scale = t.mono_scale;
     }
-    // sized by the theme, not just inherited from the column
     let block = st(dom.fences);
-    if block.font_size_set && p.font_size > 0.0 && (block.font_size - st(dom.write).font_size).abs() > 0.01 {
+    if block.font_size_own && p.font_size > 0.0 {
         t.code_block_scale = (block.font_size / p.font_size).clamp(0.5, 1.5);
     }
 

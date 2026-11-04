@@ -210,6 +210,10 @@ fn code_block_size_comes_from_the_defaults_or_the_theme() {
     let r = imp("#write { font-size: 16px } code { font-size: 0.95em } .md-fences { font-size: 0.75em }");
     assert!((r.theme.mono_scale - 0.95).abs() < 1e-4);
     assert!((r.theme.code_block_scale - 0.75).abs() < 1e-4);
+    // a declaration equal to the parent's size is still the theme's own
+    let r = imp("#write { font-size: 16px } code { font-size: .75em } .md-fences { font-size: 1em }");
+    assert!((r.theme.mono_scale - 0.75).abs() < 1e-4);
+    assert!((r.theme.code_block_scale - 1.0).abs() < 1e-4);
 }
 
 #[test]
