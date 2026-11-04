@@ -11,8 +11,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{ColorImage, Context, Key, KeyboardShortcut, Modifiers, RichText, TextureHandle, Ui, UiBuilder, vec2};
 use egui_schema_form::{FileRequest, FormHost, SchemaForm, Thumbnail};
+use markise_doc::{Affinity, DocPos};
 use markise_doc::{FormatDoc, NamedContainer};
 use markise_engine::block_fields::{BlockFields, FieldsError, decls_from_spec};
+use markise_engine::editor::{EditorSession, MarkId};
 use markise_layout::block::{ImageState, Images};
 use markise_md::ParseOptions;
 use markise_package::{InstalledPackage, PackageIndex};
@@ -73,6 +75,9 @@ pub struct OpenForm {
     doc: u64,
     /// The block's opener in the document, kept current.
     key: usize,
+    /// Live marks at the block's two ends: edits move them, and only edits do. A block with the
+    /// same text elsewhere is another block.
+    marks: [MarkId; 2],
     name: String,
     args: String,
     title: String,
@@ -82,7 +87,6 @@ pub struct OpenForm {
     /// What a refused Save or a refused file has to say.
     message: Option<String>,
     picking: Vec<FileRequest>,
-    icons: IconCache,
     /// The panel's rectangle in the last frame: the keyboard is in it when the focused widget is.
     rect: Option<egui::Rect>,
     /// The keyboard was in the panel at the end of the last frame. Esc takes the focus away
@@ -112,11 +116,10 @@ impl OpenForm {
     pub fn open(
         doc_id: u64,
         c: &NamedContainer,
-        text: &str,
+        session: &mut EditorSession,
         index: &PackageIndex,
-        package: InstalledPackage,
-        changes: u64,
     ) -> Option<OpenForm> {
+        let changes = session.revision().counter;
         let entry = index.block(&c.name)?;
         let schema = entry.schema;
         let args = c.args.to_string();
@@ -141,7 +144,10 @@ impl OpenForm {
                 .map_err(|e| e.to_string())?;
             let spec = FormSpec::parse(&input.schema, &input.hints, variant).map_err(|e| e.to_string())?;
             let decls = decls_from_spec(&spec).map_err(|f| format!("field `{f}` has no place in the block"))?;
-            let source = text.get(range.clone()).ok_or("the block is not where it was")?;
+            let source = session
+                .text()
+                .get(range.clone())
+                .ok_or("the block is not where it was")?;
             let model = BlockFields::decode(source, range.start, &decls, &ParseOptions::default())
                 .map_err(|e| e.to_string())?;
             Ok((model, spec))
@@ -162,9 +168,17 @@ impl OpenForm {
             }
             Err(why) => Content::Refused(why),
         };
+        let marks = [
+            session.add_mark(DocPos::new(range.start)),
+            session.add_mark(DocPos {
+                affinity: Affinity::Upstream,
+                ..DocPos::new(range.end)
+            }),
+        ];
         Some(OpenForm {
             doc: doc_id,
             key: range.start,
+            marks,
             name: c.name.to_string(),
             args,
             title,
@@ -172,7 +186,6 @@ impl OpenForm {
             changes,
             message: None,
             picking: Vec::new(),
-            icons: IconCache::new(package),
             rect: None,
             had_focus: false,
         })
@@ -218,6 +231,18 @@ impl OpenForm {
         self.message = Some(message.into());
     }
 
+    /// A composition is going on in a field: its text is not final, so nothing acts on the draft.
+    pub fn is_composing(&self) -> bool {
+        matches!(&self.content, Content::Form(r) if r.form.is_composing())
+    }
+
+    /// Gives back what the form holds in the session of its document.
+    pub fn release(&self, session: &mut EditorSession) {
+        for m in self.marks {
+            session.remove_mark(m);
+        }
+    }
+
     /// The keyboard is in the panel.
     pub fn is_focused(&self, ctx: &Context) -> bool {
         let Some(rect) = self.rect else { return false };
@@ -226,72 +251,63 @@ impl OpenForm {
             .is_some_and(|r| rect.intersects(r.rect))
     }
 
-    /// Follows the document. Returns false when the panel has nothing left to show. Costs a
-    /// comparison unless the document changed; then the text is searched for the block only if
-    /// it is not where it was.
-    pub fn follow(&mut self, doc: &dyn FormatDoc, text: &str, changes: u64) -> bool {
-        if changes == self.changes {
+    /// Follows the document through its edits. Returns false when the panel has nothing left to
+    /// show. Costs a comparison unless the text changed.
+    pub fn follow(&mut self, session: &EditorSession) -> bool {
+        let revision = session.revision().counter;
+        if revision == self.changes {
             return true;
         }
-        self.changes = changes;
+        self.changes = revision;
+        let (Some(start), Some(end)) = (session.mark(self.marks[0]), session.mark(self.marks[1])) else {
+            return false;
+        };
+        let (start, end) = (start.offset, end.offset);
+        self.key = start;
+        // still a block from one mark to the other, of the same name
+        let here = session.doc().named_containers_at(start);
+        let same = (here.iter()).find(|c| c.opener.start == start && c.closer.end == end && *c.name == *self.name);
         let dirty = self.is_dirty();
         let Content::Form(r) = &mut self.content else {
-            let here = doc.named_containers_at(self.key);
-            return here.iter().any(|c| c.opener.start == self.key && *c.name == *self.name);
+            return same.is_some();
         };
-        let source = r.model.source().to_string();
-        let base = r.model.base();
-        if text.get(base..base + source.len()) == Some(source.as_str()) {
-            return true;
-        }
-        // moved, unchanged: the nearest place that holds it
-        let nearest = (text.match_indices(source.as_str()).map(|(i, _)| i)).min_by_key(|i| i.abs_diff(base));
-        if let Some(at) = nearest
-            && let Ok(m) = r.model.refreshed(&source, at)
-        {
-            r.model = m;
-            self.key = at;
-            return true;
-        }
-        // changed where it stands: the same opener at the same place
-        let here = doc.named_containers_at(self.key);
-        let same = here
-            .iter()
-            .find(|c| c.opener.start == self.key && *c.name == *self.name);
-        match same {
-            None if dirty => {
+        let Some(c) = same else {
+            if dirty {
                 r.track = Track::Gone;
-                true
             }
-            None => false,
-            Some(_) if dirty => {
-                r.track = Track::Stale;
-                true
+            return dirty;
+        };
+        let text = session.text();
+        let source = text.get(start..end).unwrap_or("");
+        if source == r.model.source() {
+            match r.model.refreshed(source, start) {
+                Ok(m) => r.model = m,
+                Err(_) => return dirty,
             }
-            Some(c) => {
-                let range = block_range_at_container(c);
-                let same_args = *c.args == *self.args;
-                match text.get(range.clone()).map(|s| r.model.refreshed(s, range.start)) {
-                    Some(Ok(m)) if same_args => {
-                        let values = m.values();
-                        r.model = m;
-                        r.block_reasons.retain(|x| !x.starts_with(IN_NO_FIELD));
-                        add_extras(&r.model, &mut r.block_reasons);
-                        r.form.set_values(values.clone());
-                        r.baseline = values;
-                        r.track = Track::Live;
-                        true
-                    }
-                    // another variant has another form: the caller opens it anew
-                    Some(Ok(_)) => {
-                        r.track = Track::Stale;
-                        self.message = None;
-                        true
-                    }
-                    _ => false,
-                }
+            if r.track == Track::Stale {
+                r.track = Track::Live;
             }
+            return true;
         }
+        if dirty {
+            r.track = Track::Stale;
+            return true;
+        }
+        let Ok(m) = r.model.refreshed(source, start) else {
+            return false;
+        };
+        if *c.args == *self.args {
+            let values = m.values();
+            r.model = m;
+            r.block_reasons.retain(|x| !x.starts_with(IN_NO_FIELD));
+            add_extras(&r.model, &mut r.block_reasons);
+            r.form.set_values(values.clone());
+            r.baseline = values;
+        } else {
+            // another variant has another form: the caller opens it anew
+            r.track = Track::Stale;
+        }
+        true
     }
 
     /// The arguments in the document differ from what this form was built for, with no draft to
@@ -343,7 +359,7 @@ impl OpenForm {
         if !self.had_focus && !self.is_focused(ctx) {
             return None;
         }
-        if matches!(&self.content, Content::Form(r) if r.form.is_composing()) {
+        if self.is_composing() {
             return None;
         }
         ctx.input_mut(|i| {
@@ -364,7 +380,6 @@ impl OpenForm {
         let spacing = ui.spacing().item_spacing.y;
         let full = ui.available_rect_before_wrap();
         self.rect = Some(full);
-        self.icons.poll(&ctx);
         let footer_h = ui.spacing().interact_size.y + spacing * 2.0;
         let body = egui::Rect::from_min_max(full.min, egui::pos2(full.right(), full.bottom() - footer_h));
         let foot = egui::Rect::from_min_max(egui::pos2(full.left(), body.bottom()), full.max);
@@ -410,7 +425,6 @@ impl OpenForm {
                 body_ui.separator();
                 let mut host = FrameHost {
                     host,
-                    icons: &mut self.icons,
                     picking: &mut self.picking,
                 };
                 egui::ScrollArea::vertical()
@@ -476,6 +490,7 @@ pub fn panel_widths(window: f32) -> (f32, f32, f32) {
 pub struct PanelHost<'a> {
     pub ctx: &'a Context,
     pub images: &'a mut TextureStore,
+    pub assets: &'a mut FormAssets,
     /// The folder of the document, which image paths are relative to.
     pub folder: Option<&'a Path>,
     pub root_url: Option<&'a str>,
@@ -483,7 +498,6 @@ pub struct PanelHost<'a> {
 
 struct FrameHost<'a, 'b> {
     host: &'a mut PanelHost<'b>,
-    icons: &'a mut IconCache,
     picking: &'a mut Vec<FileRequest>,
 }
 
@@ -518,17 +532,19 @@ impl FormHost for FrameHost<'_, '_> {
         let Some(folder) = self.host.folder else {
             return Thumbnail::None;
         };
-        match markise_doc::resource::local_file(folder, self.host.root_url, path) {
-            Some(l) => self.host.picture(&l.path.to_string_lossy()),
-            None => Thumbnail::None,
+        let (ctx, root) = (self.host.ctx, self.host.root_url);
+        match self.host.assets.resolve(ctx, folder, root, path) {
+            None => Thumbnail::Loading,
+            Some(None) => Thumbnail::None,
+            Some(Some(file)) => self.host.picture(&file),
         }
     }
 
     fn icon(&mut self, name: &str) -> Thumbnail {
         if name.ends_with(".svg") {
-            return self.icons.svg(self.host.ctx, name);
+            return self.host.assets.svg(self.host.ctx, name);
         }
-        match self.icons.package.asset_path(name) {
+        match self.host.assets.asset_path(name) {
             Ok(path) => self.host.picture(&path.to_string_lossy()),
             Err(why) => Thumbnail::Failed(why),
         }
@@ -550,6 +566,9 @@ const MAX_ICON_BYTES: u64 = 256 << 10;
 /// The side of an icon's bitmap; zoomed up it stays sharp enough for a button.
 const ICON_PIXELS: u32 = 128;
 
+/// Paths remembered before starting over: one for each thing typed into a path field.
+const MAX_PATHS: usize = 4096;
+
 enum IconEntry {
     Loading,
     Mask(TextureHandle),
@@ -557,82 +576,189 @@ enum IconEntry {
     Failed(String),
 }
 
-/// An icon's name and its bitmap, with whether that is a mask.
-type IconResult = (String, Result<(ColorImage, bool), String>);
-
-/// A package's SVG icons, drawn on a worker thread so that no frame waits for them.
-struct IconCache {
-    package: InstalledPackage,
-    entries: HashMap<String, IconEntry>,
-    tx: Sender<IconResult>,
-    rx: Receiver<IconResult>,
+enum Job {
+    Icon {
+        name: String,
+        file: PathBuf,
+    },
+    /// What a reference in the document means on this disk: it looks at the disk, so not here.
+    Resolve {
+        key: PathKey,
+        src: String,
+    },
 }
 
-impl IconCache {
-    fn new(package: InstalledPackage) -> IconCache {
-        let (tx, rx) = channel();
-        IconCache {
-            package,
-            entries: HashMap::new(),
-            tx,
-            rx,
+enum Done {
+    Icon(String, Result<(ColorImage, bool), String>),
+    Resolved(PathKey, Option<String>),
+}
+
+/// The folder and root a reference is read against, and the reference.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PathKey {
+    folder: PathBuf,
+    root_url: Option<String>,
+    src: String,
+}
+
+/// What forms need from the disk: a package's SVG icons and where image references lead. It lives
+/// as long as the session, with one worker working through one queue in turn, so opening a form
+/// again costs nothing and never adds to what is running. An idle worker waits without waking.
+#[derive(Default)]
+pub struct FormAssets {
+    package: Option<InstalledPackage>,
+    icons: HashMap<String, IconEntry>,
+    /// `None`: asked, no answer yet. Then the file, if the reference is a file at all.
+    paths: HashMap<PathKey, Option<Option<String>>>,
+    jobs: Option<Sender<Job>>,
+    done: Option<Receiver<Done>>,
+    /// Jobs not yet taken back.
+    pending: usize,
+}
+
+impl FormAssets {
+    /// The package icons come from from now on. Another one starts over.
+    pub fn use_package(&mut self, package: InstalledPackage) {
+        if self.package.as_ref().is_none_or(|p| p.sha256 != package.sha256) {
+            self.icons.clear();
+            // the old queue runs out, and its answers go nowhere
+            self.jobs = None;
+            self.done = None;
+            self.pending = 0;
+        }
+        self.package = Some(package);
+    }
+
+    /// A form opens: what the disk said about paths may be out of date by now.
+    pub fn forget_paths(&mut self) {
+        self.paths.clear();
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.pending == 0
+    }
+
+    fn asset_path(&self, name: &str) -> Result<PathBuf, String> {
+        match &self.package {
+            Some(p) => p.asset_path(name),
+            None => Err("no package in use".to_string()),
         }
     }
 
-    fn poll(&mut self, ctx: &Context) {
-        while let Ok((name, result)) = self.rx.try_recv() {
-            let entry = match result {
-                Ok((image, mask)) => {
+    fn send(&mut self, ctx: &Context, job: Job) {
+        if self.jobs.is_none() {
+            let (jobs, queue) = channel::<Job>();
+            let (answers, done) = channel();
+            let wake = ctx.clone();
+            let spawned = std::thread::Builder::new()
+                .name("markise-block-form".into())
+                .spawn(move || {
+                    while let Ok(job) = queue.recv() {
+                        let answer = run_job(job);
+                        let published = crate::wake_track::publishing();
+                        if answers.send(answer).is_err() {
+                            return;
+                        }
+                        wake.request_repaint();
+                        drop(published);
+                    }
+                });
+            if spawned.is_err() {
+                eprintln!("markise: no thread for block form files");
+                return;
+            }
+            self.jobs = Some(jobs);
+            self.done = Some(done);
+        }
+        if self.jobs.as_ref().is_some_and(|j| j.send(job).is_ok()) {
+            self.pending += 1;
+        }
+    }
+
+    /// Takes in what the worker finished.
+    pub fn poll(&mut self, ctx: &Context) {
+        let Some(rx) = &self.done else { return };
+        while let Ok(answer) = rx.try_recv() {
+            self.pending = self.pending.saturating_sub(1);
+            match answer {
+                Done::Icon(name, Ok((image, mask))) => {
                     let t = ctx.load_texture(format!("block-icon-{name}"), image, egui::TextureOptions::LINEAR);
-                    if mask {
+                    let entry = if mask {
                         IconEntry::Mask(t)
                     } else {
                         IconEntry::Colored(t)
-                    }
+                    };
+                    self.icons.insert(name, entry);
                 }
-                Err(why) => IconEntry::Failed(why),
-            };
-            self.entries.insert(name, entry);
+                Done::Icon(name, Err(why)) => {
+                    self.icons.insert(name, IconEntry::Failed(why));
+                }
+                Done::Resolved(key, file) => {
+                    self.paths.insert(key, Some(file));
+                }
+            }
         }
+    }
+
+    /// Where `src` leads: `None` while the worker looks, then the file, if it is a file at all.
+    /// Asked once per reference; every frame after that is a lookup.
+    fn resolve(&mut self, ctx: &Context, folder: &Path, root_url: Option<&str>, src: &str) -> Option<Option<String>> {
+        let key = PathKey {
+            folder: folder.to_path_buf(),
+            root_url: root_url.map(str::to_string),
+            src: src.to_string(),
+        };
+        if let Some(known) = self.paths.get(&key) {
+            return known.clone();
+        }
+        if self.paths.len() >= MAX_PATHS {
+            self.paths.clear();
+        }
+        self.paths.insert(key.clone(), None);
+        let src = src.to_string();
+        self.send(ctx, Job::Resolve { key, src });
+        None
     }
 
     fn svg(&mut self, ctx: &Context, name: &str) -> Thumbnail {
         let size = vec2(ICON_PIXELS as f32, ICON_PIXELS as f32);
-        match self.entries.get(name) {
+        match self.icons.get(name) {
             Some(IconEntry::Loading) => Thumbnail::Loading,
             Some(IconEntry::Mask(t)) => Thumbnail::Mask { texture: t.id(), size },
             Some(IconEntry::Colored(t)) => Thumbnail::Ready { texture: t.id(), size },
             Some(IconEntry::Failed(why)) => Thumbnail::Failed(why.clone()),
             None => {
-                self.entries.insert(name.to_string(), IconEntry::Loading);
-                match self.package.asset_path(name) {
-                    Ok(path) => self.start(ctx, name, path),
+                match self.asset_path(name) {
+                    Ok(file) => {
+                        self.icons.insert(name.to_string(), IconEntry::Loading);
+                        let name = name.to_string();
+                        self.send(ctx, Job::Icon { name, file });
+                    }
                     Err(why) => {
-                        self.entries.insert(name.to_string(), IconEntry::Failed(why));
+                        self.icons.insert(name.to_string(), IconEntry::Failed(why));
                     }
                 }
                 Thumbnail::Loading
             }
         }
     }
+}
 
-    fn start(&self, ctx: &Context, name: &str, path: PathBuf) {
-        let (tx, ctx, name) = (self.tx.clone(), ctx.clone(), name.to_string());
-        let spawned = std::thread::Builder::new()
-            .name("markise-block-icon".into())
-            .spawn(move || {
-                let _ = tx.send((name, rasterize_svg(&path)));
-                ctx.request_repaint();
-            });
-        if spawned.is_err() {
-            eprintln!("markise: no thread for a block icon");
+fn run_job(job: Job) -> Done {
+    match job {
+        Job::Icon { name, file } => Done::Icon(name, rasterize_svg(&file)),
+        Job::Resolve { key, src } => {
+            let file = markise_doc::resource::local_file(&key.folder, key.root_url.as_deref(), &src);
+            Done::Resolved(key, file.map(|l| l.path.to_string_lossy().into_owned()))
         }
     }
 }
 
 /// An SVG file to pixels. `currentColor` becomes white and the result a mask that takes the colour
 /// of the text around it; an icon with colours of its own stays as it is. Nothing outside the file
-/// is read: linked images are refused.
+/// is read: images are not loaded, this build of the parser has no text and so no fonts, and it
+/// follows no reference outside the file. Filters are refused, since their cost has no bound that
+/// file or picture size would set, and an icon has no need of them.
 fn rasterize_svg(path: &Path) -> Result<(ColorImage, bool), String> {
     use resvg::{tiny_skia, usvg};
     let bytes = markise_doc::resource::read_regular(path, MAX_ICON_BYTES).map_err(|e| e.to_string())?;
@@ -647,6 +773,9 @@ fn rasterize_svg(path: &Path) -> Result<(ColorImage, bool), String> {
         ..Default::default()
     };
     let tree = usvg::Tree::from_str(&text, &options).map_err(|e| e.to_string())?;
+    if !tree.filters().is_empty() {
+        return Err("an icon may not use a filter".to_string());
+    }
     let mut pixmap = tiny_skia::Pixmap::new(ICON_PIXELS, ICON_PIXELS).ok_or("no room for the icon")?;
     let size = tree.size();
     let scale = ICON_PIXELS as f32 / size.width().max(size.height()).max(1.0);
@@ -698,6 +827,14 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_is_refused_before_it_can_run() {
+        let (_d, path) = svg(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feTurbulence numOctaves="1000000000" baseFrequency="1"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##,
+        );
+        assert!(rasterize_svg(&path).unwrap_err().contains("filter"));
+    }
+
+    #[test]
     fn an_icon_reads_nothing_outside_its_file() {
         let dir = tempfile::tempdir().unwrap();
         let other = dir.path().join("other.svg");
@@ -714,6 +851,62 @@ mod tests {
         std::fs::write(&path, body).unwrap();
         let (image, _) = rasterize_svg(&path).unwrap();
         assert!(image.pixels.iter().all(|p| *p == egui::Color32::TRANSPARENT));
+    }
+
+    #[test]
+    fn data_images_fonts_and_references_outside_load_nothing() {
+        let head = r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 10 10">"#;
+        let nested = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1 1'%3E%3Crect width='1' height='1' fill='red'/%3E%3C/svg%3E";
+        for body in [
+            format!(r#"<image width="10" height="10" xlink:href="{nested}"/>"#),
+            r#"<use xlink:href="other.svg#x"/>"#.to_string(),
+            r#"<style>@import url("other.css"); @font-face { src: url("other.ttf") }</style>"#.to_string(),
+            r#"<text x="1" y="9" font-family="Other">T</text>"#.to_string(),
+        ] {
+            let (_d, path) = svg(&format!("{head}{body}</svg>"));
+            let (image, _) = rasterize_svg(&path).unwrap_or_else(|e| panic!("{body}: {e}"));
+            assert!(image.pixels.iter().all(|p| *p == egui::Color32::TRANSPARENT), "{body}");
+        }
+    }
+
+    /// The worker's answers for `assets`, on a context of its own.
+    fn run_until_idle(assets: &mut FormAssets, ctx: &Context) {
+        let started = std::time::Instant::now();
+        while !assets.is_idle() {
+            assert!(started.elapsed().as_secs() < 180, "the worker did not answer");
+            assets.poll(ctx);
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn a_reference_is_resolved_off_the_frame_and_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a b.png"), "x").unwrap();
+        let ctx = Context::default();
+        let mut assets = FormAssets::default();
+        assert_eq!(
+            assets.resolve(&ctx, dir.path(), None, "a%20b.png"),
+            None,
+            "no answer on the frame"
+        );
+        assert_eq!(assets.pending, 1);
+        assert_eq!(assets.resolve(&ctx, dir.path(), None, "a%20b.png"), None);
+        assert_eq!(assets.pending, 1, "asked once");
+        run_until_idle(&mut assets, &ctx);
+        let file = assets.resolve(&ctx, dir.path(), None, "a%20b.png").unwrap().unwrap();
+        assert!(file.ends_with("a b.png"), "{file}");
+        assert_eq!(assets.pending, 0, "known from now on");
+        // not a local file at all
+        assert_eq!(
+            assets.resolve(&ctx, dir.path(), None, "https://example.org/a.png"),
+            None
+        );
+        run_until_idle(&mut assets, &ctx);
+        assert_eq!(
+            assets.resolve(&ctx, dir.path(), None, "https://example.org/a.png"),
+            Some(None)
+        );
     }
 
     #[test]

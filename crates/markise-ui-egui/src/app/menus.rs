@@ -663,6 +663,10 @@ impl MarkiseApp {
             self.cheat_sheet.close(ctx);
         }
         if self.block_form_focused(ctx) {
+            // a composition's text is not final: nothing acts on the draft, as with Esc
+            if matches!(id, "file.save" | "file.close") && self.block_form_composing() {
+                return true;
+            }
             match id {
                 "file.save" => {
                     self.block_form_save(ctx);

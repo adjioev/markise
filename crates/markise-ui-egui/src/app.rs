@@ -977,6 +977,7 @@ impl MarkiseApp {
             && !self.export.is_running()
             && self.updates.running.is_none()
             && self.package.is_idle()
+            && self.block_form.is_idle()
             && self.word_count.as_ref().is_none_or(|(_, w)| w.settled())
             && self.doc.as_ref().is_none_or(|d| d.viewer.comments_settled())
             // every published result's wake-up has returned (a result can be taken before

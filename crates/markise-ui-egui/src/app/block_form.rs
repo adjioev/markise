@@ -8,7 +8,7 @@ use egui::Context;
 use markise_layout::block::color;
 
 use super::MarkiseApp;
-use crate::block_form::{OpenForm, PanelAction, PanelHost, block_at, panel_widths, relative_to_folder};
+use crate::block_form::{FormAssets, OpenForm, PanelAction, PanelHost, block_at, panel_widths, relative_to_folder};
 
 /// Chooses a file, starting in the given folder.
 pub type ImagePicker = Arc<dyn Fn(&Path) -> Option<PathBuf> + Send + Sync>;
@@ -19,6 +19,7 @@ pub(super) struct BlockFormState {
     /// Asked for by the document's drawing: opens on the next frame.
     requested: Option<usize>,
     picker: ImagePicker,
+    assets: FormAssets,
 }
 
 impl BlockFormState {
@@ -26,6 +27,7 @@ impl BlockFormState {
         BlockFormState {
             open: None,
             requested: None,
+            assets: FormAssets::default(),
             picker: picker.unwrap_or_else(|| {
                 Arc::new(|folder: &Path| {
                     rfd::FileDialog::new()
@@ -39,6 +41,11 @@ impl BlockFormState {
 }
 
 impl BlockFormState {
+    /// The worker has nothing outstanding (tests: [`MarkiseApp::background_settled`]).
+    pub(super) fn is_idle(&self) -> bool {
+        self.assets.is_idle()
+    }
+
     pub(super) fn request(&mut self, at: Option<usize>) {
         if at.is_some() {
             self.requested = at;
@@ -77,9 +84,8 @@ impl MarkiseApp {
         let Some(package) = self.block_package().cloned() else {
             return false;
         };
-        let Some(d) = &self.doc else { return false };
-        let s = &d.viewer.ed.session;
-        let Some(c) = block_at(s.doc(), at, &package.index) else {
+        let Some(d) = &mut self.doc else { return false };
+        let Some(c) = block_at(d.viewer.ed.session.doc(), at, &package.index) else {
             return false;
         };
         if let Some(open) = &mut self.block_form.open
@@ -92,35 +98,60 @@ impl MarkiseApp {
                 open.set_message("Save or cancel this draft before opening another block.");
                 return false;
             }
+            open.release(&mut d.viewer.ed.session);
         }
         let index = package.index.clone();
-        let opened = OpenForm::open(d.id, &c, s.text(), &index, package, s.revision().counter);
-        self.block_form.open = opened;
+        self.block_form.assets.use_package(package);
+        self.block_form.assets.forget_paths();
+        self.block_form.open = OpenForm::open(d.id, &c, &mut d.viewer.ed.session, &index);
         self.block_form.open.is_some()
+    }
+
+    /// Closes the form, giving back what it holds in its document's session.
+    fn block_form_close(&mut self) {
+        if let Some(open) = self.block_form.open.take()
+            && let Some(d) = self.doc.as_mut()
+            && d.id == open.doc()
+        {
+            open.release(&mut d.viewer.ed.session);
+        }
     }
 
     /// Cancels the draft (the Cancel button and its keys).
     pub fn block_form_cancel(&mut self) {
-        if self.block_form.open.take().is_some()
-            && let Some(d) = &mut self.doc
-        {
-            d.viewer.request_refocus();
+        if self.block_form.open.is_some() {
+            self.block_form_close();
+            if let Some(d) = &mut self.doc {
+                d.viewer.request_refocus();
+            }
         }
     }
 
     /// Saves the draft: one undo step, then the panel closes and the keyboard goes back to the
-    /// document. A refusal stays in the panel with its reason.
+    /// document. A refusal stays in the panel with its reason. A draft of another document, one
+    /// that was just replaced before the panel could notice, goes nowhere.
     pub fn block_form_save(&mut self, _ctx: &Context) {
         let (Some(open), Some(d)) = (self.block_form.open.as_mut(), self.doc.as_mut()) else {
             return;
         };
+        if open.doc() != d.id {
+            self.block_form.open = None;
+            return;
+        }
         match d.viewer.ed.edit(|s| open.save(s)) {
             Ok(()) => {
-                self.block_form.open = None;
-                d.viewer.request_refocus();
+                self.block_form_close();
+                if let Some(d) = &mut self.doc {
+                    d.viewer.request_refocus();
+                }
             }
             Err(why) => open.set_message(why),
         }
+    }
+
+    /// The keyboard is in a form with a composition going on.
+    pub(super) fn block_form_composing(&self) -> bool {
+        self.block_form.open.as_ref().is_some_and(OpenForm::is_composing)
     }
 
     /// Reads the block again, losing the draft.
@@ -128,7 +159,7 @@ impl MarkiseApp {
         let Some(key) = self.block_form.open.as_ref().map(OpenForm::key) else {
             return;
         };
-        self.block_form.open = None;
+        self.block_form_close();
         self.open_block_form(key);
     }
 
@@ -138,6 +169,7 @@ impl MarkiseApp {
         if let Some(d) = self.doc.as_mut() {
             d.viewer.set_block_index(index.clone());
         }
+        self.block_form.assets.poll(ui.ctx());
         if let Some(at) = self.block_form.requested.take() {
             self.open_block_form(at);
         }
@@ -145,14 +177,11 @@ impl MarkiseApp {
             return;
         }
         let keep = match (self.doc.as_mut(), self.block_form.open.as_mut(), index) {
-            (Some(d), Some(open), Some(_)) if open.doc() == d.id => {
-                let s = &d.viewer.ed.session;
-                open.follow(s.doc(), s.text(), s.revision().counter)
-            }
+            (Some(d), Some(open), Some(_)) if open.doc() == d.id => open.follow(&d.viewer.ed.session),
             _ => false,
         };
         if !keep {
-            self.block_form.open = None;
+            self.block_form_close();
             return;
         }
         if self.block_form.open.as_ref().is_some_and(OpenForm::needs_reopen) {
@@ -181,6 +210,7 @@ impl MarkiseApp {
                 let mut host = PanelHost {
                     ctx: &ctx,
                     images: &mut self.images,
+                    assets: &mut self.block_form.assets,
                     folder,
                     root_url: root_url.as_deref(),
                 };

@@ -268,13 +268,15 @@ own: it decides which block, and what becomes of a draft when the document chang
   unchanged draft writes nothing. Save does not write the file.
 - **Keys, while the keyboard is in the panel.** ⌘Enter and ⌘S save the form. Esc and ⌘W cancel it. So a
   second ⌘S writes the file, since the first gave the keyboard back. Other document commands wait, as
-  they do for a comment being written, and neither key acts during an IME composition.
+  they do for a comment being written, and none of these keys acts during an IME composition.
 - **Undo in a field is the field's.** egui's text editor keeps its own history, and the existing
   rule that a focused text field takes ⌘Z and ⇧⌘Z applies. On a button of the panel, ⌘Z does nothing rather
   than reach past it into the document.
-- **Following the document.** The block is looked for when the text's revision moves: where it
-  was; else the nearest place holding the same source, so an edit above only moves it; else a block
-  of the same name at the same place, which is a change inside.
+- **Following the document.** Two live marks in the session hold the block's ends, moved by every
+  edit, undo and reload (a reload's diff). When the text's revision moves, the block is what stands
+  from one mark to the other, if that is still a block of the same name. It is never looked for by
+  its text: an identical block elsewhere is another block, and a draft must not go there.
+  An edit over the whole of it, or a deletion, leaves no block.
   - Inside, with an unchanged draft: the panel reads the block again, and opens anew if the
     arguments changed, since another variant has another form.
   - Inside, with a changed draft: the panel says so and refuses Save (`Stale` from the engine is the
@@ -283,6 +285,7 @@ own: it decides which block, and what becomes of a draft when the document chang
     offers only Cancel, so the text can still be read and copied.
   - A reload is the same as any other change. The document switching or the package being withdrawn
     closes the panel, **and a draft goes with it**: a question at that moment is left for later.
+    Save itself checks the document's identity, as a load can land on the very frame of a Save.
 - **A draft is not thrown away for another block.** Opening another block with a changed draft
   refuses and says why.
 - **Outside the schema.** The fields show their reasons, the top says the block does not fit and can
@@ -290,10 +293,13 @@ own: it decides which block, and what becomes of a draft when the document chang
 - **Files.** The file dialog runs between frames, as the app's others do, and starts in the document's
   folder. A file inside gets a path relative to it with `/`, as documents write them. A file
   outside is refused with a message, and nothing is copied. Thumbnails come from the document's
-  image store: decoded off the UI thread, same limits, same resolver.
-- **Icons.** An answer's `icon` is a file of the package. SVG goes through `resvg` on a worker thread, at
-  most 256 KiB, and `currentColor` makes it a mask that follows the theme; linked images in it are not
-  read. Other formats go through the image store. New dependency: `resvg` 0.45 with default
+  image store: decoded off the UI thread, same limits, same resolver. That resolver looks at the disk
+  for some paths, so the form's worker asks it, once per reference, and frames read the answer.
+- **Icons.** An answer's `icon` is a file of the package. SVG goes through `resvg` at most 256 KiB, and
+  `currentColor` makes it a mask that follows the theme. Filters are refused, as their cost has no
+  bound that file or picture size would set; images are not loaded, there are no fonts in this
+  build, and no reference leaves the file. One worker with one queue serves all forms of a session, so
+  opening a form again adds nothing to what runs. Other formats go through the image store. New dependency: `resvg` 0.45 with default
   features off (Apache-2.0 OR MIT; its tree adds `usvg`, `tiny-skia`, `roxmltree` and a few small
   crates, all MIT, Apache-2.0 or BSD).
 - **Theme and zoom.** Colours come from the egui visuals the app derives from the theme, sizes from the

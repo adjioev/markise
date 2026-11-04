@@ -432,6 +432,120 @@ fn a_clean_panel_follows_the_document() {
     assert!(text(&h).contains("New Hello!\n"));
 }
 
+const TWINS: &str = "Top.\n\n:::tip\n\nSame\n\n:::\n\nMiddle.\n\n:::tip\n\nSame\n\n:::\n";
+
+fn twin_offsets() -> (usize, usize) {
+    let first = TWINS.find(":::tip").unwrap();
+    (first, TWINS.rfind(":::tip").unwrap())
+}
+
+#[test]
+fn a_changed_block_goes_stale_and_never_moves_to_a_look_alike() {
+    let f = Fixture::new(TWINS);
+    let mut h = f.ready();
+    let (first, _) = twin_offsets();
+    assert!(h.state_mut().open_block_form(first));
+    h.run();
+    h.get_by_label("Body").click();
+    h.run();
+    h.get_by_label("Body").type_text("!");
+    h.run();
+    let at = first + TWINS[first..].find("Same").unwrap();
+    edit_document(&mut h, at..at, "Changed ");
+    assert!(has(&h, "The block changed in the document"));
+    assert_eq!(h.state().block_form().unwrap().key(), first);
+    let doc = text(&h);
+    h.get_by_label("Save").click();
+    h.run();
+    assert_eq!(text(&h), doc, "nothing goes anywhere, the twin least of all");
+}
+
+#[test]
+fn a_look_alike_above_does_not_take_the_draft() {
+    let f = Fixture::new(TWINS);
+    let mut h = f.ready();
+    let (_, second) = twin_offsets();
+    assert!(h.state_mut().open_block_form(second));
+    h.run();
+    h.get_by_label("Body").click();
+    h.run();
+    h.get_by_label("Body").type_text("!");
+    h.run();
+    // the same block's text again, at the top; the nearest copy of it may be any
+    let copy = ":::tip\n\nSame\n\n:::\n\n";
+    edit_document(&mut h, second..second, copy);
+    assert!(!has(&h, "The block changed"));
+    h.get_by_label("Save").click();
+    h.run();
+    let saved = text(&h);
+    let expected = format!("{}{copy}:::tip\n\nSame!\n\n:::\n", &TWINS[..second]);
+    assert_eq!(saved, expected);
+}
+
+#[test]
+fn a_deleted_block_does_not_become_the_twin_right_after_it() {
+    let doc = ":::tip\n\nSame\n\n:::\n:::tip\n\nSame\n\n:::\n";
+    let f = Fixture::new(doc);
+    let mut h = f.ready();
+    assert!(h.state_mut().open_block_form(0));
+    h.run();
+    h.get_by_label("Body").click();
+    h.run();
+    h.get_by_label("Body").type_text("!");
+    h.run();
+    let end = doc.rfind(":::tip").unwrap();
+    edit_document(&mut h, 0..end, "");
+    assert!(has(&h, "no longer in the document"));
+    let left = text(&h);
+    h.get_by_label("Save").click();
+    h.run();
+    assert_eq!(text(&h), left);
+}
+
+#[test]
+fn a_draft_does_not_go_into_the_document_that_took_its_place() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    open_form(&mut h, "tip");
+    h.get_by_label("Body").click();
+    h.run();
+    h.get_by_label("Body").type_text("!");
+    h.run();
+    // another document with the same bytes, with no frame in between: what happens when a load
+    // is polled and Save comes on that same frame
+    h.state_mut().new_document();
+    let patches = PatchSet::new(vec![Patch::verbatim(0..0, DOC.to_string())]).unwrap();
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| s.apply_external(&patches, "Edit", false)).unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().block_form_save(&ctx);
+    assert_eq!(text(&h), DOC, "the draft stays out of it");
+    assert!(h.state().block_form().is_none());
+}
+
+#[test]
+fn the_keys_of_the_form_wait_for_a_composition() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    open_form(&mut h, "tip");
+    h.get_by_label("Body").click();
+    h.run();
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit {
+        text: "n".into(),
+        active_range_chars: Some(0..1),
+    }));
+    h.run();
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("file.close")));
+    h.run();
+    assert!(h.state().block_form().is_some(), "Cmd+W waits, as Esc does");
+    assert_eq!(text(&h), DOC);
+    assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("file.save")));
+    h.run();
+    assert!(h.state().block_form().is_some(), "and so does Cmd+S");
+    assert_eq!(text(&h), DOC);
+}
+
 #[test]
 fn another_variant_in_the_document_gets_its_own_form() {
     let f = Fixture::new(DOC);
@@ -476,18 +590,12 @@ fn a_deleted_block_closes_a_clean_panel_and_warns_a_draft() {
 }
 
 #[test]
-fn replacing_the_whole_text_as_a_reload_does() {
+fn an_edit_over_the_whole_text_leaves_no_block_to_follow() {
     let f = Fixture::new(DOC);
     let mut h = f.ready();
     open_form(&mut h, "tip");
-    // the block stays, elsewhere: the panel stays with it
-    let replaced = format!("New top.\n\n{DOC}");
-    edit_document(&mut h, 0..DOC.len(), &replaced);
-    let key = h.state().block_form().expect("still open").key();
-    assert_eq!(&replaced[key..key + 6], ":::tip");
-
-    // gone from the new text: nothing to lose, so it closes
-    edit_document(&mut h, 0..replaced.len(), "Nothing here.\n");
+    // nothing says the block is still the block, even if a copy is there now
+    edit_document(&mut h, 0..DOC.len(), &format!("New top.\n\n{DOC}"));
     assert!(h.state().block_form().is_none());
 }
 
