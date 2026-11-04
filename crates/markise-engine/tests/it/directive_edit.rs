@@ -207,6 +207,23 @@ fn a_selection_cutting_a_block_keeps_the_markers_and_deletes_the_rest() {
     );
 }
 
+/// A selection reaching only the indentation of a marker line still touches that line.
+#[test]
+fn a_selection_ending_in_a_markers_indentation_keeps_its_line() {
+    let src = "before\n  :::note\nx\n:::\n";
+    let mut t = T::new(src);
+    t.ed.session.set_selection(Selection::range(6, 8));
+    t.run("edit.deleteBackward");
+    assert_eq!(t.text(), src);
+    assert_eq!(markers(&t), (1, 0));
+    // typing there does not pull the marker into the line above either, nor does a caret
+    // in the indentation edit the line
+    let mut t = T::new(src);
+    t.set(8);
+    t.typ("z");
+    assert_eq!(t.text(), src);
+}
+
 #[test]
 fn a_selection_holding_a_whole_block_deletes_it() {
     script(
