@@ -754,7 +754,14 @@ impl FormAssets {
 
 fn run_job(job: Job) -> Done {
     match job {
-        Job::Icon { name, file } => Done::Icon(name, rasterize_svg(&file)),
+        // whatever this file does to the renderer, the queue goes on and the icon has its reason
+        Job::Icon { name, file } => {
+            let drawn = std::panic::catch_unwind(|| rasterize_svg(&file));
+            Done::Icon(
+                name,
+                drawn.unwrap_or_else(|_| Err("the icon could not be drawn".to_string())),
+            )
+        }
         Job::Resolve { key, src } => {
             let file = markise_doc::resource::local_file(&key.folder, key.root_url.as_deref(), &src);
             Done::Resolved(key, file.map(|l| l.path.to_string_lossy().into_owned()))
@@ -765,40 +772,95 @@ fn run_job(job: Job) -> Done {
 const NO_FILTER: &str = "an icon may not use a filter";
 const NO_MASK: &str = "an icon may not use a mask";
 const NO_IMAGE: &str = "an icon may not hold an image";
+const NO_PATTERN: &str = "an icon may not use a pattern";
+const NO_DASH: &str = "an icon may not use a dashed stroke";
+const TOO_DEEP: &str = "an icon may not nest so deep";
+const TOO_MANY: &str = "an icon may not hold so many shapes";
+const TOO_LARGE: &str = "an icon may not draw a layer that large";
+/// The widest layer in pixels, before the renderer cuts it to size. Its own sums overflow far beyond
+/// this, so it must not get there.
+const MAX_ICON_LAYER: f32 = 1_000_000.0;
+/// Elements of the XML the scan reads at all; the file's size bounds them, this says it earlier.
+const MAX_ICON_ELEMENTS: u32 = 1 << 16;
+/// Parts of the parsed picture. Each can cost a layer's worth of blending, so the file's size is
+/// not bound enough.
+const MAX_ICON_PARTS: usize = 4096;
+/// Nested layers are alive together, each up to the renderer's limit of five times the canvas each
+/// way: 1.6 MB here.
+const MAX_ICON_DEPTH: usize = 16;
 
-/// The source as the parser will read it (entities and all): `filter` and `fe*` elements, a
-/// `filter` attribute, and the CSS property in a `style` attribute or element.
+/// The source as written: no DTD, so no entity can multiply it, and none of the elements, attributes
+/// or CSS whose cost the picture's size would not bound. `use` and `marker` copy their content once
+/// per reference, so a small file parses into something of any size; `pattern` renders a whole
+/// tile whatever its size; filters are `filter`, `fe*`, the attribute and the CSS property.
 fn refuse_in_source(text: &str) -> Result<(), String> {
     let options = resvg::usvg::roxmltree::ParsingOptions {
-        allow_dtd: true,
-        ..Default::default()
+        allow_dtd: false,
+        nodes_limit: MAX_ICON_ELEMENTS,
     };
     let doc = resvg::usvg::roxmltree::Document::parse_with_options(text, options).map_err(|e| e.to_string())?;
     for node in doc.descendants() {
-        let filtering = if node.is_element() {
-            let name = node.tag_name().name();
-            let style = node
-                .attribute("style")
-                .is_some_and(|s| s.to_ascii_lowercase().contains("filter"));
-            name == "filter" || name.starts_with("fe") || style || node.attributes().any(|a| a.name() == "filter")
-        } else {
+        if node.is_text() {
             // the text of a `style` element, CDATA included
-            node.is_text()
-                && node.parent().is_some_and(|p| p.tag_name().name() == "style")
+            if node.parent().is_some_and(|p| p.tag_name().name() == "style")
                 && node.text().is_some_and(|s| s.to_ascii_lowercase().contains("filter"))
-        };
-        if filtering {
+            {
+                return Err(NO_FILTER.to_string());
+            }
+            continue;
+        }
+        if !node.is_element() {
+            continue;
+        }
+        let name = node.tag_name().name();
+        let style = node
+            .attribute("style")
+            .is_some_and(|s| s.to_ascii_lowercase().contains("filter"));
+        if name == "filter" || name.starts_with("fe") || style || node.attributes().any(|a| a.name() == "filter") {
             return Err(NO_FILTER.to_string());
+        }
+        if name == "pattern" {
+            return Err(NO_PATTERN.to_string());
+        }
+        if name == "use" || name == "marker" {
+            return Err(format!("an icon may not use `{name}`"));
         }
     }
     Ok(())
 }
 
-/// The parsed picture, everywhere the renderer would go: groups, clip paths and their chains,
-/// patterns, the shapes of text. The tree's own list of filters does not follow a chain of masks, and
-/// the renderer does. So every mask is refused, not just a mask holding a filter.
-fn refuse_in_tree(group: &resvg::usvg::Group) -> Result<(), String> {
+/// The parsed picture, everywhere the renderer would go: groups, clip paths and their chains, the
+/// paint of shapes, the shapes of text. The tree's own list of filters does not follow a chain of
+/// masks, and the renderer does. So every mask is refused, not just a mask holding a filter.
+fn refuse_in_tree(root: &resvg::usvg::Group, to_pixels: resvg::tiny_skia::Transform) -> Result<(), String> {
+    let mut parts = 0;
+    walk_tree(root, to_pixels, 0, &mut parts)
+}
+
+fn walk_tree(
+    group: &resvg::usvg::Group,
+    outer: resvg::tiny_skia::Transform,
+    depth: usize,
+    parts: &mut usize,
+) -> Result<(), String> {
     use resvg::usvg::{Node, Paint};
+    let transform = outer.pre_concat(group.transform());
+    // the sum the renderer does for a layer, before it cuts the layer to size
+    if group.should_isolate()
+        && let Some(b) = group.layer_bounding_box().transform(transform)
+        && [b.x(), b.y(), b.width(), b.height()]
+            .iter()
+            .any(|v| v.abs() > MAX_ICON_LAYER)
+    {
+        return Err(TOO_LARGE.to_string());
+    }
+    if depth > MAX_ICON_DEPTH {
+        return Err(TOO_DEEP.to_string());
+    }
+    *parts += 1;
+    if *parts > MAX_ICON_PARTS {
+        return Err(TOO_MANY.to_string());
+    }
     if !group.filters().is_empty() {
         return Err(NO_FILTER.to_string());
     }
@@ -806,22 +868,34 @@ fn refuse_in_tree(group: &resvg::usvg::Group) -> Result<(), String> {
         return Err(NO_MASK.to_string());
     }
     let mut clip = group.clip_path();
+    let mut chain = depth;
     while let Some(c) = clip {
-        refuse_in_tree(c.root())?;
+        chain += 1;
+        walk_tree(c.root(), transform.pre_concat(c.transform()), chain, parts)?;
         clip = c.clip_path();
     }
     for node in group.children() {
         match node {
-            Node::Group(g) => refuse_in_tree(g)?,
-            Node::Text(t) => refuse_in_tree(t.flattened())?,
+            Node::Group(g) => walk_tree(g, transform, depth + 1, parts)?,
+            Node::Text(t) => walk_tree(t.flattened(), transform, depth + 1, parts)?,
             Node::Image(_) => return Err(NO_IMAGE.to_string()),
             Node::Path(p) => {
+                *parts += 1;
+                if *parts > MAX_ICON_PARTS {
+                    return Err(TOO_MANY.to_string());
+                }
+                // the dashes of a stroke are as many as its length allows, up to a million a path
+                if p.stroke().is_some_and(|s| s.dasharray().is_some()) {
+                    return Err(NO_DASH.to_string());
+                }
                 let fill = p.fill().map(|f| f.paint());
                 let stroke = p.stroke().map(|s| s.paint());
-                for paint in [fill, stroke].into_iter().flatten() {
-                    if let Paint::Pattern(pattern) = paint {
-                        refuse_in_tree(pattern.root())?;
-                    }
+                if [fill, stroke]
+                    .into_iter()
+                    .flatten()
+                    .any(|x| matches!(x, Paint::Pattern(_)))
+                {
+                    return Err(NO_PATTERN.to_string());
                 }
             }
         }
@@ -832,9 +906,8 @@ fn refuse_in_tree(group: &resvg::usvg::Group) -> Result<(), String> {
 /// An SVG file to pixels. `currentColor` becomes white and the result a mask that takes the colour
 /// of the text around it; an icon with colours of its own stays as it is. Nothing outside the file
 /// is read: images are not loaded, this build of the parser has no text and so no fonts, and it
-/// follows no reference outside the file. Filters and masks are refused ([`refuse_in_source`],
-/// [`refuse_in_tree`]), since the cost of a filter has no bound that file or picture size would set,
-/// and an icon has no need of either.
+/// follows no reference outside the file. Whatever costs more than the 128 by 128 output would
+/// bound is refused by name ([`refuse_in_source`], [`refuse_in_tree`]); an icon has no need of it.
 fn rasterize_svg(path: &Path) -> Result<(ColorImage, bool), String> {
     use resvg::{tiny_skia, usvg};
     let bytes = markise_doc::resource::read_regular(path, MAX_ICON_BYTES).map_err(|e| e.to_string())?;
@@ -850,7 +923,10 @@ fn rasterize_svg(path: &Path) -> Result<(ColorImage, bool), String> {
         ..Default::default()
     };
     let tree = usvg::Tree::from_str(&text, &options).map_err(|e| e.to_string())?;
-    refuse_in_tree(tree.root())?;
+    let size = tree.size();
+    let scale = ICON_PIXELS as f32 / size.width().max(size.height()).max(1.0);
+    let to_pixels = tiny_skia::Transform::from_scale(scale, scale);
+    refuse_in_tree(tree.root(), to_pixels)?;
     let mut pixmap = tiny_skia::Pixmap::new(ICON_PIXELS, ICON_PIXELS).ok_or("no room for the icon")?;
     let size = tree.size();
     let scale = ICON_PIXELS as f32 / size.width().max(size.height()).max(1.0);
@@ -910,11 +986,11 @@ mod tests {
     }
 
     #[test]
-    fn a_filter_hidden_behind_an_entity_is_found() {
+    fn a_dtd_is_refused_so_no_entity_can_hide_anything() {
         let (_d, path) = svg(
             r#"<!DOCTYPE svg [<!ENTITY s "filter: blur(5px)">]><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="9" height="9" style="&s;"/></svg>"#,
         );
-        assert!(rasterize_svg(&path).unwrap_err().contains("filter"));
+        assert!(rasterize_svg(&path).is_err());
     }
 
     fn refused_with(body: &str) -> String {
@@ -941,12 +1017,6 @@ mod tests {
                 format!(r#"<mask id="m">{rect}</mask><rect width="9" height="9" mask="url(#m)"/>"#),
                 "mask",
             ),
-            (
-                format!(
-                    r#"<pattern id="p" width="5" height="5" patternUnits="userSpaceOnUse"><g><mask id="m">{rect}</mask><rect width="5" height="5" mask="url(#m)"/></g></pattern><rect width="9" height="9" fill="url(#p)"/>"#
-                ),
-                "mask",
-            ),
             (TURBULENCE.to_string(), "filter"),
             (r#"<feTurbulence/>"#.to_string(), "filter"),
             (
@@ -968,12 +1038,101 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_icon_with_clip_and_pattern_still_draws() {
+    fn a_plain_icon_with_a_clip_still_draws() {
         let head = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">"#;
-        let body = r##"<clipPath id="c"><rect width="10" height="10"/></clipPath><pattern id="p" width="5" height="5" patternUnits="userSpaceOnUse"><rect width="5" height="5" fill="#ff0000"/></pattern><g clip-path="url(#c)"><rect width="10" height="10" fill="url(#p)"/></g>"##;
+        let body = r##"<clipPath id="c"><rect width="10" height="10"/></clipPath><g clip-path="url(#c)"><rect width="10" height="10" fill="#ff0000"/></g>"##;
         let (_d, path) = svg(&format!("{head}{body}</svg>"));
         let (image, _) = rasterize_svg(&path).unwrap();
         assert!(image.pixels.iter().any(|p| *p != egui::Color32::TRANSPARENT));
+    }
+
+    /// A tile this size would ask the renderer for tens of gigabytes: refused without drawing.
+    const HUGE_TILE: &str = r##"<pattern id="p" width="100000" height="100000" patternUnits="userSpaceOnUse"><rect width="5" height="5" fill="#ff0000"/></pattern>"##;
+
+    #[test]
+    fn a_pattern_is_refused_in_the_source_and_in_the_tree() {
+        let drawn = |paint: &str| format!(r#"{HUGE_TILE}<rect width="9" height="9" {paint}/>"#);
+        for paint in [r#"fill="url(#p)""#, r##"stroke="url(#p)" fill="none""##] {
+            assert!(refused_with(&drawn(paint)).contains("pattern"), "{paint}");
+            // the tree too, should anything ever get past the scan
+            let text = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">{}</svg>"#,
+                drawn(paint)
+            );
+            let tree = resvg::usvg::Tree::from_str(&text, &Default::default()).unwrap();
+            let to_pixels = resvg::tiny_skia::Transform::identity();
+            assert!(
+                refuse_in_tree(tree.root(), to_pixels).unwrap_err().contains("pattern"),
+                "{paint}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_small_file_cannot_grow_when_parsed() {
+        let rect = r#"<rect id="r" width="9" height="9"/>"#;
+        assert!(refused_with(&format!(r##"{rect}<use href="#r"/>"##)).contains("`use`"));
+        assert!(refused_with(r#"<marker id="m"/>"#).contains("`marker`"));
+        let bomb = r#"<!DOCTYPE svg [<!ENTITY a "<g/><g/>"><!ENTITY b "&a;&a;">]><svg xmlns="http://www.w3.org/2000/svg">&b;</svg>"#;
+        let (_d, path) = svg(bomb);
+        assert!(rasterize_svg(&path).is_err());
+    }
+
+    #[test]
+    fn what_a_file_can_repeat_has_a_limit() {
+        let dashed = r#"<path d="M0 0H9" stroke="red" stroke-dasharray="0.001"/>"#;
+        assert!(refused_with(dashed).contains("dashed"));
+        let deep = format!(
+            "{}{}{}",
+            r#"<g opacity="0.5">"#.repeat(MAX_ICON_DEPTH + 2),
+            r#"<rect width="9" height="9"/>"#,
+            "</g>".repeat(MAX_ICON_DEPTH + 2)
+        );
+        assert!(refused_with(&deep).contains("deep"));
+        let many = r#"<rect width="9" height="9"/>"#.repeat(MAX_ICON_PARTS + 1);
+        assert!(refused_with(&many).contains("many"));
+    }
+
+    #[test]
+    fn a_layer_beyond_the_renderers_sums_is_refused() {
+        let why =
+            refused_with(r##"<g opacity="0.5"><rect width="1000000000" height="1000000000" fill="#ff0000"/></g>"##);
+        assert!(why.contains("large"), "{why}");
+        let why = refused_with(
+            r##"<g opacity="0.5" transform="translate(-1000000 0)"><rect width="9" height="9"/><rect x="1" width="9" height="9"/></g>"##,
+        );
+        assert!(why.contains("large"), "{why}");
+    }
+
+    #[test]
+    fn what_a_file_declares_does_not_size_the_output() {
+        let rect = r##"<rect width="10" height="10" fill="#ff0000"/>"##;
+        let ns = r#"xmlns="http://www.w3.org/2000/svg""#;
+        for body in [
+            format!(r#"<svg {ns} width="1000000000" height="1000000000">{rect}</svg>"#),
+            format!(r#"<svg {ns} width="1000000000" height="1" viewBox="0 0 10 10">{rect}</svg>"#),
+            format!(r#"<svg {ns} width="0.001" height="0.001" viewBox="0 0 1000000000 1000000000">{rect}</svg>"#),
+            format!(r#"<svg {ns} width="1000000" height="1000000" viewBox="0 0 0.001 0.001">{rect}</svg>"#),
+            // a nested picture and an isolated layer, both declaring far more than the canvas
+            format!(r#"<svg {ns} viewBox="0 0 10 10"><svg width="1000000000" height="1000000000">{rect}</svg></svg>"#),
+            format!(
+                r##"<svg {ns} viewBox="0 0 10 10"><g opacity="0.5"><rect width="1000000000" height="1000000000" fill="#ff0000"/></g></svg>"##
+            ),
+            // strokes and clips far larger than the canvas
+            format!(
+                r##"<svg {ns} viewBox="0 0 10 10"><path d="M-1000000 -1000000L1000000 1000000" stroke="#ff0000" stroke-width="1000000"/></svg>"##
+            ),
+            format!(
+                r##"<svg {ns} viewBox="0 0 10 10"><clipPath id="c"><rect width="1000000000" height="1000000000"/></clipPath><g clip-path="url(#c)">{rect}</g></svg>"##
+            ),
+        ] {
+            let (_d, path) = svg(&body);
+            // refusing is fine; what it may not do is draw anything bigger, or fall over
+            if let Ok((image, _)) = rasterize_svg(&path) {
+                let side = ICON_PIXELS as usize;
+                assert_eq!(image.size, [side, side], "{body}");
+            }
+        }
     }
 
     #[test]
@@ -1001,7 +1160,6 @@ mod tests {
         let nested = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1 1'%3E%3Crect width='1' height='1' fill='red'/%3E%3C/svg%3E";
         for body in [
             format!(r#"<image width="10" height="10" xlink:href="{nested}"/>"#),
-            r#"<use xlink:href="other.svg#x"/>"#.to_string(),
             r#"<style>@import url("other.css"); @font-face { src: url("other.ttf") }</style>"#.to_string(),
             r#"<text x="1" y="9" font-family="Other">T</text>"#.to_string(),
         ] {

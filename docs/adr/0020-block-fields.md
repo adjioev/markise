@@ -303,12 +303,20 @@ own: it decides which block, and what becomes of a draft when the document chang
   image store: decoded off the UI thread, same limits, same resolver. That resolver looks at the disk
   for some paths, so the form's worker asks it, once per reference, and frames read the answer.
 - **Icons.** An answer's `icon` is a file of the package. SVG goes through `resvg` at most 256 KiB, and
-  `currentColor` makes it a mask that follows the theme. Filters and masks are refused, as a filter's
-  cost has no bound that file or picture size would set: a scan of the XML finds `filter` and `fe*`
-  elements, the `filter` attribute and the CSS property, and a walk of the parsed tree goes through groups,
-  clip paths, patterns and text. The tree's own list of filters is not used, because it does not
-  follow a chain of masks and the renderer does. Images are not loaded, there are no fonts in
-  this build, and no reference leaves the file. One worker with one queue serves all forms of a session, so
+  `currentColor` makes it a mask that follows the theme. The output is 128 by 128 whatever the file
+  declares, and the renderer limits a layer to five times that each way, so what is refused by name is
+  what that bound does not cover:
+  - a DTD, `use` and `marker`, which make a small file parse into something of any size;
+  - filters, as their cost has no bound: `filter` and `fe*` elements, the `filter` attribute and the
+    CSS property;
+  - patterns, as the renderer draws a whole tile whatever its declared size;
+  - masks and images, and dashed strokes, which run to a million dashes a path;
+  - more than 4096 parts or 16 levels of nesting, as each can be a layer's worth of blending.
+
+  A scan of the XML and a walk of the parsed tree both check, through groups, clip paths, paint and
+  text. The tree's own list of filters is not used, because it does not follow a chain of masks and
+  the renderer does. Images are not loaded, there are no fonts in this build, and no reference
+  leaves the file. One worker with one queue serves all forms of a session, so
   opening a form again adds nothing to what runs. Other formats go through the image store. New dependency: `resvg` 0.45 with default
   features off (Apache-2.0 OR MIT; its tree adds `usvg`, `tiny-skia`, `roxmltree` and a few small
   crates, all MIT, Apache-2.0 or BSD).
