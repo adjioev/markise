@@ -1310,6 +1310,47 @@ fn evicted_page_heights_follow_the_review_view() {
     }
 }
 
+/// A huge label is shortened for display, as one line of a bounded size; the source is not
+/// touched (Codex review of #182).
+#[test]
+fn a_huge_label_is_shown_shortened() {
+    use markise_layout::Prim;
+    let args = "word ".repeat(2_000).trim_end().to_string();
+    let src = format!(":::note {args}\n\nbody\n\n:::\n");
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(&src));
+    let m = Arc::new(full(&*doc));
+    let mut v = View::new(doc.clone(), m, Theme::light(), 600.0, 1.0);
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let l = v.layout(0, &mut f, &NoImages);
+    let shown: Vec<String> = l
+        .prims
+        .iter()
+        .filter_map(|p| match p {
+            Prim::Text { text, .. } => Some(text.text().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shown.len(), 1);
+    assert!(
+        shown[0].chars().count() <= 200 && shown[0].starts_with("note word") && shown[0].ends_with('…'),
+        "{}",
+        shown[0].len()
+    );
+    assert_eq!(doc.text(), src);
+    // a label of a normal length is not touched, in any script
+    let src = ":::заметка один два\n\nbody\n\n:::\n";
+    let doc: Arc<dyn FormatDoc> = Arc::new(md(src));
+    let m = Arc::new(full(&*doc));
+    let mut v = View::new(doc.clone(), m, Theme::light(), 600.0, 1.0);
+    let l = v.layout(0, &mut f, &NoImages);
+    assert!(
+        l.prims
+            .iter()
+            .any(|p| matches!(p, Prim::Text { text, .. } if text.text() == "заметка один два"))
+    );
+}
+
 /// A closer line with a huge run of trailing whitespace, followed by many blocks: asking which
 /// directives are around each block must not read that line again (Codex review of #181).
 /// The bound is a hang guard for what was quadratic, not a speed budget.

@@ -679,6 +679,35 @@ impl<'a> Ctx<'a> {
         self.render_write_limited(None).map(|r| r.0).unwrap_or_default()
     }
 
+    /// Between blocks: starts counting the next block's TOCs from the current output.
+    fn begin_block(&mut self, out: &str) {
+        self.kept_base = out.len() as u64 + self.stored_fn_bytes;
+        self.block_toc_bytes = 0;
+    }
+
+    /// Between blocks of a limited render: past the limit, everything so far is only counted.
+    fn end_block(&mut self, out: &mut String) {
+        #[cfg(test)]
+        {
+            tests::PEAK_OUT.with(|p| p.set(p.get().max(out.len())));
+            if tests::CANCEL_AT.with(|c| c.get() > 0 && c.replace(c.get() - 1) == 1)
+                && let Some(control) = &self.opts.control
+            {
+                control.cancel();
+            }
+        }
+        if let Some(l) = self.limit
+            && (self.counting || self.counted + out.len() as u64 + self.stored_fn_bytes > l)
+        {
+            self.counting = true;
+            self.counted += out.len() as u64 + self.stored_fn_bytes;
+            out.clear();
+            out.shrink_to(1 << 20);
+            self.footnotes = Vec::new();
+            self.stored_fn_bytes = 0;
+        }
+    }
+
     fn cancelled(&self) -> bool {
         self.opts.control.as_ref().is_some_and(job::JobControl::is_cancelled)
     }
@@ -695,19 +724,13 @@ impl<'a> Ctx<'a> {
             if self.cancelled() {
                 return Err(job::Cancelled);
             }
-            self.kept_base = out.len() as u64 + self.stored_fn_bytes;
-            self.block_toc_bytes = 0;
+            self.begin_block(&out);
             self.block(b, &mut out, false);
-            if let Some(l) = limit
-                && (self.counting || self.counted + out.len() as u64 + self.stored_fn_bytes > l)
-            {
-                self.counting = true;
-                self.counted += out.len() as u64 + self.stored_fn_bytes;
-                out.clear();
-                out.shrink_to(1 << 20);
-                self.footnotes = Vec::new();
-                self.stored_fn_bytes = 0;
-            }
+            self.end_block(&mut out);
+        }
+        // the last block may have been a `:::` block that stopped early
+        if self.cancelled() {
+            return Err(job::Cancelled);
         }
         if self.fn_count > 0 {
             const HEAD: &str = "<div class='footnotes-area'><hr/>\n";
@@ -869,8 +892,16 @@ impl<'a> Ctx<'a> {
                     esc(args)
                 );
                 let _ = writeln!(out, "<p class='md-directive-label'>{}</p>", esc(label.trim_end()));
+                // the blocks inside are what a document's blocks are elsewhere: same checkpoints
+                // (a cancelled render is reported by the loop over the top-level blocks)
+                self.end_block(out);
                 for c in &b.children {
+                    if self.cancelled() {
+                        return;
+                    }
+                    self.begin_block(out);
                     self.block(c, out, false);
+                    self.end_block(out);
                 }
                 out.push_str("</div>\n");
             }
@@ -1438,6 +1469,13 @@ fn anchor_names(html: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    thread_local! {
+        /// The largest output held between blocks of a render on this thread.
+        pub(super) static PEAK_OUT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// Cancels the render at this many checkpoints from now (0: never).
+        pub(super) static CANCEL_AT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     use super::*;
     use markise_md::parse;
 
@@ -1663,6 +1701,53 @@ mod tests {
         let mut ctx = Ctx::new(&doc, &plain);
         let (kept, _) = ctx.render_write_limited(Some(limit)).unwrap();
         assert!(kept.len() < size as usize / 10, "kept {} of {size}", kept.len());
+    }
+
+    fn big_directive(fences: usize) -> String {
+        let mut md = String::from(":::note\n\n");
+        for i in 0..fences {
+            md.push_str(&format!("```rust\nfn main() {{ let x = {i}; }}\n```\n\n"));
+        }
+        md.push_str(":::\n");
+        md
+    }
+
+    /// The content of a `:::` block goes through the limit's checkpoints: past the limit the
+    /// output is dropped as it goes, the size stays exact.
+    #[test]
+    fn a_limited_render_checks_the_limit_inside_a_directive() {
+        let opts = HtmlOptions {
+            no_style: true,
+            highlight: CodeHighlight::Classes,
+            ..Default::default()
+        };
+        let md = big_directive(2_000);
+        let doc = parse(&md);
+        let mut ctx = Ctx::new(&doc, &opts);
+        PEAK_OUT.with(|p| p.set(0));
+        let (_, counted) = ctx.render_write_limited(Some(1_000)).unwrap();
+        assert!(counted > 100_000, "{counted}");
+        let peak = PEAK_OUT.with(|p| p.get());
+        assert!(peak < 10_000, "held {peak} bytes with a limit of 1,000");
+        check_limited(&md, &opts, 1_000);
+    }
+
+    /// Cancellation is checked between the blocks inside a `:::` block too.
+    #[test]
+    fn a_render_is_cancellable_inside_a_directive() {
+        let control = job::JobControl::new();
+        let opts = HtmlOptions {
+            no_style: true,
+            control: Some(control),
+            ..Default::default()
+        };
+        let doc = parse(&big_directive(100));
+        // the third checkpoint inside the block cancels
+        CANCEL_AT.with(|c| c.set(3));
+        let r = render_document_limited(&doc, &opts, u64::MAX);
+        let left = CANCEL_AT.with(|c| c.replace(0));
+        assert_eq!(r.unwrap_err(), LimitedError::Cancelled);
+        assert_eq!(left, 0, "reached the checkpoints");
     }
 
     /// Codex round 3 on #93: a cancelled limited render stops between top-level blocks.

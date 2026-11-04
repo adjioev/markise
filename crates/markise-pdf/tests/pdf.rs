@@ -448,3 +448,24 @@ fn a_directive_shows_its_label_and_content() {
     assert!(t.contains("Inside text"), "{t}");
     assert!(!t.contains(":::"), "{t}");
 }
+
+/// `break_before_h1` holds inside `:::` blocks (they are top-level structure, not nesting), and
+/// a block starting with an h1 breaks before the block, so its label stays with the heading.
+#[test]
+fn h1_page_breaks_apply_inside_directives() {
+    let opts = || PdfOptions {
+        break_before_h1: true,
+        ..PdfOptions::default()
+    };
+    let (_, pages) = pdf_of(":::note\n\n# One\n\ntext\n\n# Two\n\ntext\n\n:::\n", opts());
+    assert_eq!(pages, 2, "a break before the second h1");
+    let (bytes, pages) = pdf_of("before\n\n:::note\n\n# One\n\ntext\n\n:::\n", opts());
+    assert_eq!(pages, 2, "a break before the block");
+    let pdf = Pdf::load_mem(&bytes).unwrap();
+    let second: Vec<u32> = pdf.get_pages().keys().copied().skip(1).collect();
+    assert!(pdf.extract_text(&second).unwrap().contains("note"));
+    let (_, pages) = pdf_of("::::a\n\nx\n\n:::b\n\n# One\n\n:::\n\n::::\n", opts());
+    assert_eq!(pages, 2, "a nested block starting with an h1");
+    let (_, pages) = pdf_of(":::note\n\n# One\n\n# Two\n\n:::\n", PdfOptions::default());
+    assert_eq!(pages, 1, "no breaks without the option");
+}

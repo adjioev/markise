@@ -445,12 +445,7 @@ pub fn layout(eng: &mut TextEngine, doc: &ExDoc, o: &LayoutOptions, control: &Jo
         image_bytes: 0,
     };
     let ctx = f.base_ctx();
-    for (i, b) in doc.blocks.iter().enumerate() {
-        if o.break_before_h1 && i > 0 && matches!(b, ExBlock::Heading { level: 1, .. }) && !f.at_page_top {
-            f.new_page();
-        }
-        f.block(b, ctx)?;
-    }
+    f.h1_blocks(&doc.blocks, ctx)?;
     if !doc.footnotes.is_empty() {
         f.footnotes(ctx)?;
     }
@@ -1381,6 +1376,26 @@ impl Flow<'_> {
         r
     }
 
+    /// Blocks at the document level, which `:::` blocks' content is too: an h1 after the first
+    /// one starts a new page with `break_before_h1`. A `:::` block starting with an h1 counts
+    /// as one, so its label stays with the heading.
+    fn h1_blocks(&mut self, blocks: &[ExBlock], ctx: Ctx) -> Result<(), Cancelled> {
+        fn starts_with_h1(b: &ExBlock) -> bool {
+            match b {
+                ExBlock::Heading { level: 1, .. } => true,
+                ExBlock::Directive { blocks, .. } => blocks.first().is_some_and(starts_with_h1),
+                _ => false,
+            }
+        }
+        for (i, b) in blocks.iter().enumerate() {
+            if self.o.break_before_h1 && i > 0 && starts_with_h1(b) && !self.at_page_top {
+                self.new_page();
+            }
+            self.block(b, ctx)?;
+        }
+        Ok(())
+    }
+
     fn blocks(&mut self, blocks: &[ExBlock], ctx: Ctx, tight: bool) -> Result<(), Cancelled> {
         for b in blocks {
             if tight && let ExBlock::Paragraph(c) = b {
@@ -1676,7 +1691,7 @@ impl Flow<'_> {
             let label = format!("{name} {args}");
             f.paragraph(c, &[ExInline::Text(label.trim_end().to_string())], SKind::P)?;
             f.space(f.u(t.block_spacing) * 0.4);
-            f.blocks(inner, ctx, false)
+            f.h1_blocks(inner, ctx)
         });
         self.pending = 0.0;
         self.x0 = ox0;

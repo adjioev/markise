@@ -1895,6 +1895,26 @@ fn callout_title(k: &CalloutKind) -> String {
     t
 }
 
+const CARD_LABEL_CHARS: usize = 200;
+
+/// The shown label of a named container: name and arguments, at most [`CARD_LABEL_CHARS`]
+/// characters. The source keeps them whole.
+fn card_label(name: &str, args: &str) -> String {
+    let mut out = String::with_capacity(name.len().min(CARD_LABEL_CHARS) + args.len().min(CARD_LABEL_CHARS) + 4);
+    let joined = name
+        .chars()
+        .chain(" ".chars().filter(|_| !args.is_empty()))
+        .chain(args.chars());
+    for (i, c) in joined.enumerate() {
+        if i + 1 == CARD_LABEL_CHARS {
+            out.push('…');
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Lays out item `idx` of `model` (a view model of `doc`). The result is item-relative: it
 /// does not depend on where the item is in the document (positions, fragment ids and source
 /// maps are relative to the item's start), so it is cached by content.
@@ -2433,11 +2453,12 @@ pub fn layout_item(
         }
         ItemKind::ContainerMarker { close: true } => y += line_px * 0.5,
         ItemKind::ContainerMarker { close: false } => {
-            // the name and arguments as written: uninterpreted
+            // the name and arguments as written: uninterpreted, cut for display at a size that
+            // lays out at once (a marker is one item, not segmented like a long paragraph)
             let label = doc
                 .named_containers_at(origin)
                 .last()
-                .map_or_else(String::new, |c| format!("{} {}", c.name, c.args).trim_end().to_string());
+                .map_or_else(String::new, |c| card_label(&c.name, &c.args));
             let size = t.font_size * 0.85;
             let mut st = Style::base(size, size * 1.4, color(t.meta_block.text));
             st.fam = FontRole::Bold;
