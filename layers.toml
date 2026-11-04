@@ -31,6 +31,7 @@ markise-doc = 1
 markise-layout = 2
 markise-theme = 2
 markise-blocks = 2
+markise-package = 2
 markise-text = 2
 markise-render = 3
 markise-export = 3

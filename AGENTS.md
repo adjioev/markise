@@ -42,6 +42,7 @@ Layered workspace (`crates/*`, `apps/*`), lower layers never depend on higher on
 | L2 | `markise-layout` | shaping, line breaking, block layout, tables, hit testing |
 | L2 | `markise-theme` | native theme model + CSS-subset importer (spec 03 §2) |
 | L2 | `markise-blocks` | code highlighting, math, diagrams, images |
+| L2 | `markise-package` | block packages: format validation and index (ADR 0019) |
 | L2 | `markise-text` | GUI-free text shaping, font matching, paragraph layout (ADR 0005) |
 | L3 | `markise-render`, `markise-export`, `markise-pdf` | rasterising; HTML (spec 03 DOM contract), export model, Pandoc bridge; paginated PDF/PNG export |
 | L4 | `markise-engine` | session, undo, commands, files, autosave, search, file watching |
