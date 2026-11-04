@@ -177,7 +177,7 @@ fn manifest_token(manifest: &serde_json::Map<String, Value>, key: &str, issues: 
 
 /// A token that may also carry SemVer's `+` build part.
 fn is_version(s: &str) -> bool {
-    s.split('+').count() <= 2 && s.split('+').all(is_token)
+    s.len() <= MAX_NAME_BYTES && s.split('+').count() <= 2 && s.split('+').all(is_token)
 }
 
 fn manifest_blocks(manifest: &serde_json::Map<String, Value>, issues: &mut Issues) -> Vec<String> {

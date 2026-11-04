@@ -271,3 +271,59 @@ fn deeply_nested_json_is_an_error_not_a_crash() {
     let deep = "[".repeat(100_000);
     assert!(refusal(&with("editor/views.json", &deep)).contains("not valid JSON"));
 }
+
+#[test]
+fn a_long_variant_name_is_refused_before_its_texts_are_read() {
+    // 500 KB of name and 30,000 language keys: the shape that copied the name per key
+    let long = "v".repeat(500_000);
+    let languages: Vec<String> = (0..30_000).map(|i| format!(r#""l{i}":"x""#)).collect();
+    let schema = format!(r#"{{"variants":{{"{long}":{{{}}}}},"fields":[]}}"#, languages.join(","));
+    assert!(schema.len() < limits::MAX_JSON_BYTES);
+    let text = refusal(&with("components/tip/tip.json", &schema));
+    assert!(
+        text.contains("variant name is longer than"),
+        "{}",
+        &text[..text.len().min(200)]
+    );
+    assert!(text.len() < 1000, "the name is not echoed: {} bytes", text.len());
+}
+
+#[test]
+fn a_long_palette_block_name_does_not_multiply_its_description() {
+    let long = "b".repeat(500_000);
+    let languages: Vec<String> = (0..30_000).map(|i| format!(r#""l{i}":"x""#)).collect();
+    let palette = format!(
+        r#"{{"blocks":{{"{long}":{{"description":{{{}}}}}}}}}"#,
+        languages.join(",")
+    );
+    assert!(palette.len() < limits::MAX_JSON_BYTES);
+    let text = refusal(&with("editor/palette.json", &palette));
+    assert!(text.contains("unknown block"), "{}", &text[..text.len().min(200)]);
+}
+
+#[test]
+fn palette_block_definitions_must_be_objects() {
+    for palette in [
+        r#"{"blocks":{"tip":42}}"#,
+        r#"{"blocks":{"tip":[]}}"#,
+        r#"{"blocks":{"tip":"broken"}}"#,
+        r#"{"blocks":{"tip":null}}"#,
+    ] {
+        let text = refusal(&with("editor/palette.json", palette));
+        assert!(text.contains("must be an object"), "{palette}: {text}");
+    }
+    assert!(PackageIndex::from_files(&with("editor/palette.json", r#"{"blocks":{"tip":{}}}"#)).is_ok());
+}
+
+#[test]
+fn a_version_is_limited_as_a_whole() {
+    let manifest = |version: &str| {
+        format!(
+            r#"{{"format":"markise-block-package/2","library":"sample","version":"{version}","blocks":["tip","poll","gallery"]}}"#
+        )
+    };
+    let split = format!("{}+{}", "a".repeat(128), "b".repeat(128));
+    assert!(refusal(&with("manifest.json", &manifest(&split))).contains("is not valid"));
+    let fits = format!("{}+{}", "a".repeat(64), "b".repeat(63));
+    assert!(PackageIndex::from_files(&with("manifest.json", &manifest(&fits))).is_ok());
+}
