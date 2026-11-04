@@ -466,6 +466,75 @@ fn selecting_and_clearing_format_work_over_markers() {
     assert_eq!(markers(&t), (1, 0));
 }
 
+/// With the caret on a virtual paragraph, the frame goes on through that line: the item it
+/// follows draws its side edges to its full height, at any depth; a closer's own card ends at
+/// its bottom edge and the paragraph after it stands outside.
+#[test]
+fn card_frames_run_through_virtual_paragraphs() {
+    use markise_layout::Prim;
+    use markise_layout::block::NoImages;
+    let sides = |t: &mut T| -> (usize, f32, Vec<(f32, f32)>, f32) {
+        t.frame();
+        let m = t.ed.view.model().clone();
+        let at = t.caret().offset;
+        let i = (0..m.items.len())
+            .rfind(|&i| m.item_start(i) <= at)
+            .expect("an item at the caret");
+        let mut f = t.fonts.with_pixels_per_point(1.0);
+        let l = t.ed.view.layout(i, &mut f, &NoImages);
+        let vc = l.virtual_caret.expect("the virtual paragraph is laid out");
+        let v: Vec<(f32, f32)> = l
+            .prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Line { a, b, .. } if a.x == b.x => Some((a.x, b.y)),
+                _ => None,
+            })
+            .collect();
+        (i, l.height, v, vc.min.x)
+    };
+    let src = "::::outer\n\n:::inner\n\ntext\n\n```\ncode\n```\n\n:::\n\nend\n\n::::\n\nout\n";
+    // Enter at the end of a paragraph in the inner card: both cards go through the new line
+    let mut t = T::at(&src.replace("text\n", "text‸\n"));
+    t.run("edit.newline");
+    assert!(t.caret().virt > 0);
+    let (_, h, v, _) = sides(&mut t);
+    assert_eq!(v.len(), 4);
+    assert!(v.iter().all(|&(_, b)| b == h), "{v:?} to {h}");
+    // the slot after a code block, the last line inside
+    let gap = src.find("```\n\n:::").unwrap() + 3;
+    t.ed.session
+        .set_selection(Selection::caret_at(DocPos::with_virt(gap, 1)));
+    let (_, h, v, _) = sides(&mut t);
+    assert_eq!(v.len(), 4);
+    assert!(v.iter().all(|&(_, b)| b == h), "{v:?} to {h}");
+    // an empty card: after its opener, the first line inside
+    let mut t = T::new(":::note\n:::\n");
+    t.ed.session.set_selection(Selection::caret_at(DocPos::with_virt(7, 1)));
+    let (_, h, v, x) = sides(&mut t);
+    assert_eq!(v.len(), 2);
+    assert!(v.iter().all(|&(_, b)| b == h), "{v:?} to {h}");
+    assert!(x > v[0].0 && x < v[1].0, "the caret inside the edges");
+    // after an inner closer: the outer card goes on, the inner one has ended; the caret is
+    // inside the outer card and outside the inner one
+    let src = "::::outer\n\n:::inner\n\nx\n\n:::\n\n```\ncode\n```\n\n::::\n";
+    let mut t = T::new(src);
+    let gap = src.find(":::\n\n```").unwrap() + 3;
+    t.ed.session
+        .set_selection(Selection::caret_at(DocPos::with_virt(gap, 1)));
+    let (_, h, v, x) = sides(&mut t);
+    assert_eq!(v.len(), 4);
+    let mut xs = v.clone();
+    xs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (outer_l, inner_l) = (xs[0], xs[1]);
+    assert_eq!(outer_l.1, h, "the outer card reaches the bottom");
+    assert!(inner_l.1 < h, "the inner card ended above the paragraph");
+    assert_eq!(
+        x, inner_l.0,
+        "the caret lines up with the inner card's edge, in the outer card"
+    );
+}
+
 // ---- properties ----------------------------------------------------------------------------
 
 /// `(pairs, marker lines that pair with nothing)`.

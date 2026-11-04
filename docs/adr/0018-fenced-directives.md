@@ -155,7 +155,9 @@ pairs across the boundary, and this has no effect on `:::` pairing.
 ### On screen and in export
 
 The rendered view draws a simple card, the same for every name: edges around the content,
-`name args` as a label, no per-name behaviour. Marker lines have no caret stops; the virtual
+`name args` as a label, no per-name behaviour. The padding is the same at the top, the sides and
+the bottom, and each item draws the side edges over its whole height, a virtual paragraph
+included. Marker lines have no caret stops; the virtual
 paragraph in an empty block takes the caret. Source mode shows the lines as they are. The label
 is cut at 200 characters for display, because a marker is one item and is not segmented like a
 long paragraph; the source keeps it whole.

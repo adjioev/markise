@@ -91,6 +91,9 @@ pub struct PageStats {
     pub front: u32,
     /// Rules, empty list items.
     pub simple: u32,
+    /// Opening and closing lines of cards (ADR 0018).
+    pub card_openers: u32,
+    pub card_closers: u32,
     /// `[toc]` blocks (each lists the whole outline).
     pub tocs: u32,
     /// Headings whose text may use a reference definition (their outline entries are
@@ -182,7 +185,9 @@ impl PageStats {
                 self.table_rows += it.est_lines.saturating_sub(1).max(1);
             }
             ItemKind::FrontMatter => self.front += 1,
-            ItemKind::Rule | ItemKind::Empty | ItemKind::ContainerMarker { .. } => self.simple += 1,
+            ItemKind::Rule | ItemKind::Empty => self.simple += 1,
+            ItemKind::ContainerMarker { close: false } => self.card_openers += 1,
+            ItemKind::ContainerMarker { close: true } => self.card_closers += 1,
             ItemKind::Toc => {
                 // a segmented TOC counts once (its segments share the block)
                 if it.segment.as_ref().is_none_or(Segment::first) {
