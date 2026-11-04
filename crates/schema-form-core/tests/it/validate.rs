@@ -430,12 +430,29 @@ mod choice_options {
     }
 
     #[test]
-    fn pressing_an_option_takes_only_its_own_row_of_strings() {
+    fn repeated_strings_are_one_selected_option() {
         let o = options("many");
         let mut v = json!(["a", "a", "b"]);
-        assert_eq!(unknown_rows(ChoiceShape::Strings, &o, &v), [1]);
+        assert_eq!(
+            unknown_rows(ChoiceShape::Strings, &o, &v),
+            [] as [usize; 0],
+            "no rows kept aside"
+        );
+        assert_eq!(selected_options(ChoiceShape::Strings, &o, &v), [false, true, true]);
+        // pressing it deselects it, whatever else the rows hold
         write_selected(ChoiceShape::Strings, &o, &[false, false, true], &mut v);
-        assert_eq!(v, json!(["a", "b"]), "the second `a` stays until it is removed");
+        assert_eq!(v, json!(["b"]));
+    }
+
+    #[test]
+    fn an_exclusive_press_leaves_no_copy_behind() {
+        let o = options("many");
+        let mut selected = vec![false, true, false];
+        toggle_option(&o, Selection::Multiple, &mut selected, 0);
+        let mut v = json!(["a", "a"]);
+        write_selected(ChoiceShape::Strings, &o, &selected, &mut v);
+        assert_eq!(v, json!(["z"]));
+        assert_eq!(kinds(json!({"many": v})), []);
     }
 
     #[test]
