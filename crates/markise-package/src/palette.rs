@@ -132,8 +132,17 @@ fn parse_blocks(
     };
     let mut out = BTreeMap::new();
     for (name, def) in map {
-        check_block(file, "blocks", name, known, issues);
+        // known names are short; an unknown one must not be copied into a message per language
+        if !known.contains(name) {
+            let shown: String = name.chars().take(64).collect();
+            issues.push(file, format!("blocks names the unknown block \"{shown}\""));
+            continue;
+        }
         let what = format!("block \"{name}\"");
+        if !def.is_object() {
+            issues.push(file, format!("{what} must be an object"));
+            continue;
+        }
         out.insert(
             name.clone(),
             PaletteBlock {
