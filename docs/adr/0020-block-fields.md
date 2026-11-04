@@ -145,6 +145,28 @@ any site's vocabulary lives here.
 - **Theme and zoom.** Colours and sizes come from the `Ui`; icons are painted, so no font is needed.
 - A value of an unexpected type is shown as not editable and kept. The form never coerces it.
 
+### Images and host widgets
+
+The form opens no dialog, reads no file and decodes no image. It asks `FormHost`:
+
+- `request_file` gets a token and returns at once; the answer comes later through `deliver_file`.
+  The token belongs to the row, not its place: a row may move while the dialog is open and takes
+  the file there. A removed row drops the answer, and cancelling changes nothing.
+- `thumbnail(path)` returns loading, ready, failed or none and must not block. Called each frame
+  for each image with a path, so loading and caching stay with the host, which repaints when
+  a picture arrives. A failed picture is a message, not an edit.
+
+The only extension point is a **named host widget**: `register_widget(name, widget)`, referred to
+by the hints as `"widget": "custom", "custom": name`. The form passes it the value, label, a stable
+id and the reasons, and shows its reasons as well. An unregistered name shows a notice and keeps
+the value. This repository holds no such widget except one in the tests, and no site's vocabulary:
+a site's particular picker is a host's or a package's business.
+
+Known limits of that contract: the form does not see inside a host widget. Inside an array row, Alt+Up
+and Alt+Down do not work from the widget's own controls, and a composition in its own text editor
+is not the form's: `is_composing` stays false, so a host widget owns that. No host widget exists in
+the repository yet, so this stays as it is until one needs more.
+
 ### Limits
 
 - A text value holding a line that is only an image reads back as the image field when the block

@@ -4,3 +4,4 @@
 
 mod common;
 mod form;
+mod media;
