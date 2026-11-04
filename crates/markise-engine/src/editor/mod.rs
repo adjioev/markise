@@ -659,6 +659,27 @@ impl EditorSession {
         }
     }
 
+    /// A selection about to be replaced that would cut a paired structure (ADR 0018) has its
+    /// text deleted around that structure, as its own transaction, leaving a caret; `true` then.
+    fn delete_selection_around_structure(&mut self) -> Result<bool, EditError> {
+        let p = self.sel.primary();
+        let r = p.range();
+        if p.is_caret() || self.sel.ranges().len() != 1 {
+            return Ok(false);
+        }
+        let Some(patches) = self.doc.selection_deletion(r.clone()) else {
+            return Ok(false);
+        };
+        let caret = patches.patches().first().map_or(r.start, |x| x.range.start);
+        self.apply_plan(
+            "Delete",
+            TxKind::Structural,
+            Plan::single(PlanStep::patches(patches), Some(Selection::caret(caret))),
+        )?;
+        self.set_selection(Selection::caret(caret));
+        Ok(true)
+    }
+
     fn widen_whole_document_selection(&mut self) {
         let p = self.sel.primary();
         let r = p.range();
@@ -827,6 +848,7 @@ impl EditorSession {
             self.close_typing();
         }
         self.widen_replaced_selection();
+        self.delete_selection_around_structure()?;
         let req = self.request(Params::new());
         let tp = self.doc.on_text(&req, typed);
         let leaf_before = self.leaf_info(self.sel.primary().start().offset);
@@ -866,6 +888,9 @@ impl EditorSession {
     /// rules (lists, quotes, HR, empty blocks, tables) are M2c/M2d.
     pub fn delete_backward_to(&mut self, prev_stop: Option<usize>) -> Result<(), EditError> {
         self.widen_replaced_selection();
+        if self.delete_selection_around_structure()? {
+            return Ok(());
+        }
         let p = self.sel.primary();
         if p.is_caret() && p.focus.virt > 0 {
             self.set_selection(Selection::caret(p.focus.offset));
@@ -935,6 +960,9 @@ impl EditorSession {
     /// next block's text is merged (C48, M2b subset); at the end of other blocks a no-op.
     pub fn delete_forward_to(&mut self, next_stop: Option<usize>) -> Result<(), EditError> {
         self.widen_replaced_selection();
+        if self.delete_selection_around_structure()? {
+            return Ok(());
+        }
         let p = self.sel.primary();
         if p.is_caret() && p.focus.virt > 0 {
             return Ok(());
@@ -1455,6 +1483,9 @@ impl EditorSession {
         if !self.sel.is_caret() {
             // Enter over a selection: delete it, then Enter at the caret — one transaction
             self.widen_replaced_selection();
+            if self.delete_selection_around_structure()? {
+                return self.newline();
+            }
             let r = self.sel.primary().range();
             return self.transact("New Line", TxKind::Structural, |tx| {
                 tx.step(PlanStep::patches(PatchSet::delete(r.clone())))?;

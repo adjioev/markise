@@ -2050,6 +2050,7 @@ fn item_kind(k: &LeafKind) -> ItemKind {
         LeafKind::Metadata => ItemKind::FrontMatter,
         LeafKind::Toc => ItemKind::Toc,
         LeafKind::Definition => ItemKind::Hidden,
+        LeafKind::ContainerMarker { .. } => ItemKind::Paragraph,
     }
 }
 

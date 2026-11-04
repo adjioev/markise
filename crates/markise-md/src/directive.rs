@@ -311,6 +311,81 @@ impl Document {
         })
     }
 
+    /// Indices of the paired markers whose line overlaps `a..=b`. O(log markers + found).
+    fn paired_markers_in(&self, a: usize, b: usize) -> Vec<usize> {
+        let x = &self.directives;
+        if x.paired == 0 {
+            return Vec::new();
+        }
+        // a marker before `a` may still reach it on its line
+        let first = x.markers.partition_point(|m| m.origin < a).saturating_sub(1);
+        let mut out = Vec::new();
+        for (k, m) in x.markers.range(first..x.markers.len()).enumerate() {
+            // the line starts before the first colon (at most three columns of indentation)
+            if crate::line_start(self.text(), m.origin) > b {
+                break;
+            }
+            if m.item.partner != NONE && line_end(self.text(), m.origin).0 >= a {
+                out.push(first + k);
+            }
+        }
+        out
+    }
+
+    /// `true` when `a..=b` overlaps the line of a paired directive marker.
+    pub(crate) fn touches_marker(&self, a: usize, b: usize) -> bool {
+        !self.paired_markers_in(a, b).is_empty()
+    }
+
+    /// The virtual paragraph at `gap` stands at the document level (or in directives only).
+    pub(crate) fn gap_at_document_level(&self, gap: usize, virt: u16) -> bool {
+        use markise_doc::FormatDoc;
+        let probe = gap.saturating_sub(1);
+        self.containers_at(probe).len() < virt as usize
+    }
+
+    /// See `FormatDoc::selection_deletion`: `None` when no marker is cut; otherwise the patches
+    /// deleting `range` except the lines of markers whose pair is not wholly inside it. Each
+    /// kept line keeps its own line terminators, so it stays a line of its own.
+    pub(crate) fn directive_safe_deletion(&self, range: Range<usize>) -> Option<markise_doc::PatchSet> {
+        let text = self.text();
+        let x = &self.directives;
+        let whole = |at: usize| {
+            let start = crate::line_start(text, at);
+            let (end, _) = line_end(text, at);
+            range.start <= start.min(at) && end <= range.end
+        };
+        let mut keep: Vec<(usize, usize)> = Vec::new();
+        for i in self.paired_markers_in(range.start, range.end) {
+            let m = x.markers.get(i)?;
+            let partner = x.at(m.item.partner);
+            if !(whole(m.origin) && whole(partner)) {
+                keep.push((crate::line_start(text, m.origin), line_end(text, m.origin).1));
+            }
+        }
+        if keep.is_empty() {
+            return None;
+        }
+        let mut patches = Vec::new();
+        let mut pos = range.start;
+        for (ls, next) in keep {
+            // up to the end of the line before the kept one (its terminator stays)
+            let stop = if ls == 0 {
+                0
+            } else {
+                crate::text::prev_line_content_end(text, ls)
+            };
+            if pos < stop {
+                patches.push(markise_doc::Patch::verbatim(pos..stop, ""));
+            }
+            pos = pos.max(next);
+        }
+        if pos < range.end {
+            patches.push(markise_doc::Patch::verbatim(pos..range.end, ""));
+        }
+        markise_doc::PatchSet::new(patches).ok()
+    }
+
     /// `true` when the document holds at least one paired directive.
     pub fn has_directives(&self) -> bool {
         self.directives.paired > 0

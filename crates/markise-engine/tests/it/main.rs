@@ -6,6 +6,7 @@
 mod block_gaps;
 mod block_ownership;
 mod common;
+mod directive_edit;
 mod editor;
 mod editor_props;
 mod graphemes;

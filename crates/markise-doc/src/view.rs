@@ -36,6 +36,18 @@ pub enum ContainerKind {
     Footnote,
 }
 
+/// A named container around a position ([`crate::FormatDoc::named_containers_at`]). Its name
+/// and arguments are uninterpreted: Markise has no list of names. Absolute spans.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedContainer {
+    pub name: Box<str>,
+    pub args: Box<str>,
+    /// The opening line (its syntax only, no line terminator).
+    pub opener: Span,
+    /// The closing line (its syntax only, no line terminator).
+    pub closer: Span,
+}
+
 /// Optional display semantics supplied by a format for otherwise raw markup.
 /// These describe presentation, not a parser change; source spans remain authoritative.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -68,6 +80,12 @@ pub enum LeafKind {
     Toc,
     /// A reference/link definition (usually hidden).
     Definition,
+    /// The opening or closing line of a named container that holds its content as sibling
+    /// leaves (Markdown: a paired `:::name` … `:::`, ADR 0018). Structure, not text: joins never
+    /// reach into it and the keyboard does not edit it outside source mode.
+    ContainerMarker {
+        close: bool,
+    },
 }
 
 impl LeafKind {
@@ -84,6 +102,8 @@ impl LeafKind {
             LeafKind::Metadata => "meta".into(),
             LeafKind::Toc => "toc".into(),
             LeafKind::Definition => "def".into(),
+            LeafKind::ContainerMarker { close: false } => "marker-open".into(),
+            LeafKind::ContainerMarker { close: true } => "marker-close".into(),
         }
     }
 }

@@ -729,10 +729,9 @@ pub(crate) fn container_kind(b: &Block) -> ContainerKind {
 
 fn leaf_kind(text: &str, b: &Block) -> LeafKind {
     match &b.kind {
-        // a marker line shows as the text it is until the layout knows directives
-        BlockKind::Paragraph | BlockKind::DirectiveOpen { .. } | BlockKind::DirectiveClose { .. } => {
-            LeafKind::Paragraph
-        }
+        BlockKind::Paragraph => LeafKind::Paragraph,
+        BlockKind::DirectiveOpen { .. } => LeafKind::ContainerMarker { close: false },
+        BlockKind::DirectiveClose { .. } => LeafKind::ContainerMarker { close: true },
         BlockKind::Heading { level, .. } => LeafKind::Heading { level: *level },
         BlockKind::FencedCode { info, .. } => LeafKind::CodeBlock {
             info: info.slice(text).into(),
@@ -1483,7 +1482,7 @@ impl Document {
     }
 }
 
-use crate::edit::rules::opener_of;
+use crate::edit::rules::{is_directive_line, opener_of};
 
 impl Document {
     fn plan_newline(&self, req: &PlanRequest) -> Result<Plan, PlanError> {
@@ -1520,6 +1519,21 @@ impl Document {
         let prefix = crate::edit::blocks::cont_prefix(text, ls, from);
         let b = line.as_bytes();
         let p = scan::skip_ws(b, 0, b.len());
+        if prefix.is_empty()
+            && p <= 3
+            && let Some(m) = scan::directive_marker(line, p, line.len()).filter(|m| !m.close)
+        {
+            // like a code fence: the closer is written with it, the caret on the virtual
+            // paragraph inside (ADR 0018)
+            let insert = format!("{eol}{eol}{}", ":".repeat(m.fence));
+            return Ok(Plan::single(
+                PlanStep {
+                    patches: PatchSet::single_verbatim(at..at, insert),
+                    hints_after: Some(hints),
+                },
+                Some(Selection::caret_at(markise_doc::DocPos::with_virt(at, 1))),
+            ));
+        }
         if let Some((ch, len, _)) = scan::fence_open(b, p, b.len()) {
             // S-2.5: code block, caret on its first (empty) line
             let blank = prefix.trim_end();
@@ -1666,6 +1680,14 @@ impl Document {
         };
         match leaf.kind {
             LeafKind::Paragraph | LeafKind::Heading { .. } => {}
+            // never split: Enter goes to the virtual paragraph after the line (after an opener
+            // that is the first line inside the block)
+            LeafKind::ContainerMarker { .. } if at >= leaf.span.start => {
+                return Ok(Plan::single(
+                    PlanStep::patches(PatchSet::default()),
+                    Some(Selection::caret_at(markise_doc::DocPos::with_virt(leaf.span.end, 1))),
+                ));
+            }
             LeafKind::CodeBlock { .. } | LeafKind::Math | LeafKind::RawBlock | LeafKind::Metadata => {
                 if at < first.start || at > last.end {
                     return nothing;
@@ -1822,6 +1844,7 @@ impl Document {
                         | LeafKind::Table { .. }
                         | LeafKind::Math
                         | LeafKind::RawBlock
+                        | LeafKind::ContainerMarker { .. }
                 )
             {
                 return Ok(Plan::single(
@@ -1908,7 +1931,7 @@ impl Document {
             ))
         };
         if key == planners::DELETE_FORWARD
-            && let Some(n) = next
+            && let Some(n) = next.filter(|n| !matches!(n.kind, LeafKind::ContainerMarker { .. }))
         {
             let nls = line_start(text, n.span.start);
             let into = n.lines.first().map_or(n.span.start, |l| l.start).max(nls) - nls;
@@ -2182,6 +2205,24 @@ impl EditBehavior for Document {
     }
 
     fn plan(&self, id: PlannerId, req: &PlanRequest) -> Result<Plan, PlanError> {
+        // the marker lines of a directive are structure: outside source mode no command turns
+        // them into something else (inline styles and Clear Format skip them, selecting only
+        // selects, Enter leaves them)
+        if !req.source_mode
+            && id != planners::NEWLINE
+            && id != planners::CLEAR_FORMAT
+            && !matches!(
+                id,
+                planners::SELECT_WORD | planners::SELECT_LINE | planners::SELECT_SCOPE | planners::SELECT_BLOCK
+            )
+            && style_of(id).is_none()
+            && {
+                let r = req.selection.primary().range();
+                self.touches_marker(r.start, r.end)
+            }
+        {
+            return Err(PlanError::NotApplicable("directive marker"));
+        }
         if id.0.starts_with("table.") {
             return self.plan_table_op(id.0, req);
         }
@@ -2261,11 +2302,26 @@ impl EditBehavior for Document {
 
     fn on_text(&self, req: &PlanRequest, typed: &str) -> TypingPlan {
         let sel = req.selection.primary();
+        if sel.is_caret()
+            && sel.focus.virt == 0
+            && !req.source_mode
+            && self.touches_marker(sel.focus.offset, sel.focus.offset)
+        {
+            return TypingPlan {
+                step: PlanStep::default(),
+                selection_after: None,
+                rule: None,
+            };
+        }
         if sel.is_caret() && sel.focus.virt > 0 && !req.source_mode {
             let mut tp = self.typing_virtual(sel.focus.offset, sel.focus.virt, typed);
             // the new paragraph's first character may start block syntax (`#`, `-`, `>`):
             // it gets its literal hint like any block start (ADR 0006 §2.6)
-            if let (Some(o), Some(p)) = (opener_of(typed, self.options()), tp.step.patches.patches().first()) {
+            let opener = opener_of(typed, self.options()).or_else(|| {
+                (self.gap_at_document_level(sel.focus.offset, sel.focus.virt) && is_directive_line(typed))
+                    .then_some(crate::edit::rules::Opener::EnterOnly)
+            });
+            if let (Some(o), Some(p)) = (opener, tp.step.patches.patches().first()) {
                 let ins = &p.insert;
                 let line_off = ins.len() - typed.len();
                 let ls = p.range.start + ins[..line_off].rfind(['\n', '\r']).map_or(0, |i| i + 1);
@@ -2308,7 +2364,10 @@ impl EditBehavior for Document {
             let t = line.trim();
             !t.is_empty() && (t.bytes().all(|c| c == b'=') || t.bytes().all(|c| c == b'-'))
         };
-        if opener_of(line, self.options()).is_none() && !setext {
+        if opener_of(line, self.options()).is_none()
+            && !setext
+            && !(is_directive_line(line) && self.containers_at(from).is_empty())
+        {
             return None;
         }
         let b = line.as_bytes();
@@ -2325,6 +2384,23 @@ impl EditBehavior for Document {
 
     fn gap_virt(&self, end: usize) -> Option<u16> {
         self.gap_slot(end)
+    }
+
+    fn named_containers_at(&self, at: usize) -> Vec<markise_doc::NamedContainer> {
+        let text = self.text();
+        self.directives_at(at)
+            .iter()
+            .map(|d| markise_doc::NamedContainer {
+                name: d.name.slice(text).into(),
+                args: d.args.slice(text).into(),
+                opener: d.opener,
+                closer: d.closer,
+            })
+            .collect()
+    }
+
+    fn selection_deletion(&self, range: Range<usize>) -> Option<PatchSet> {
+        self.directive_safe_deletion(range)
     }
 
     fn continuation_prefix(&self, at: usize) -> String {
