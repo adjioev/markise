@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use markise_package::{Store, sha256_hex};
+use markise_package::{Sha256Hex, Store};
 use markise_ui_egui::package_ui::{PackageAction, PackageStatus};
 use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp};
 
@@ -67,9 +67,9 @@ impl Fixture {
         }
     }
 
-    fn bind(&self, version: &str) -> String {
+    fn bind(&self, version: &str) -> Sha256Hex {
         let bytes = archive(version);
-        let sha = sha256_hex(&bytes);
+        let sha = Sha256Hex::of(&bytes);
         fs::write(self.folder.join("p.tar.gz"), &bytes).unwrap();
         fs::write(
             self.folder.join(markise_package::BINDING_FILE),
@@ -242,7 +242,7 @@ fn problems_show_in_the_status_bar_and_leave_the_document_alone() {
     item.click();
     h.run();
     assert!(has(&h, "not the one the binding names"), "the menu says why");
-    assert!(has(&h, &sha));
+    assert!(has(&h, sha.as_str()));
     assert!(!f.store().root().exists());
 
     // a future format
@@ -261,7 +261,7 @@ fn problems_show_in_the_status_bar_and_leave_the_document_alone() {
         f.folder.join(markise_package::BINDING_FILE),
         format!(
             r#"{{"library":"sample","version":"1.0.0","source":"p.tar.gz","sha256":"{}"}}"#,
-            sha256_hex(&bytes)
+            Sha256Hex::of(&bytes)
         ),
     )
     .unwrap();
@@ -334,4 +334,56 @@ fn documents_stay_idle_bound_or_not() {
             "the lookup finished"
         );
     }
+}
+
+/// A consent withdrawn on one document while another document bound to the same hash opens: the
+/// other document must not end up using files that are gone.
+#[test]
+fn stop_using_is_ordered_before_the_next_documents_lookup() {
+    use std::sync::{Arc, Mutex};
+    let f = Fixture::new();
+    let sha = f.bind("1.0.0");
+    let other = f.folder.join("other.md");
+    fs::write(&other, "text\n").unwrap();
+
+    // holds the withdrawal until the gate's lock is released
+    let gate = Arc::new(Mutex::new(()));
+    let held = gate.lock().unwrap();
+    let in_hook = gate.clone();
+    let hooks = markise_engine::jobs::JobHooks {
+        before_package_forget: Some(Box::new(move || drop(in_hook.lock()))),
+        ..Default::default()
+    };
+    let opts = AppOptions {
+        config: ConfigDir::Dir(f.config.clone()),
+        hooks: Arc::new(hooks),
+        ..common::no_watch()
+    };
+    let mut h: H = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), MarkiseApp::new(opts));
+    f.open(&mut h);
+    h.state_mut().block_package_action(PackageAction::Accept);
+    wait_until(&mut h, "the install", |a| a.block_package().is_some());
+
+    h.state_mut().block_package_action(PackageAction::Forget);
+    h.state_mut().open(other.clone());
+    wait_until(&mut h, "the other document", |a| {
+        a.document_path() == Some(other.as_path()) && !a.is_loading()
+    });
+    // room for a lookup that does not wait for the withdrawal to answer
+    for _ in 0..50 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    drop(held);
+    settle(&mut h);
+    h.run();
+    assert!(!f.store().is_accepted("sample", &sha));
+    assert!(
+        h.state().block_package().is_none(),
+        "{:?}",
+        h.state().block_package_status()
+    );
+    assert!(matches!(h.state().block_package_status(), PackageStatus::NotInUse(_)));
 }

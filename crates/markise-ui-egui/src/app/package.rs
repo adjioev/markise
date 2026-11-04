@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 
 use egui::Context;
-use markise_package::{InstalledPackage, Problem, Resolution, Store};
+use markise_package::{InstalledPackage, Problem, Resolution, Sha256Hex, Store};
 
 use super::MarkiseApp;
 use crate::package_ui::{self, PackageAction, PackageStatus};
@@ -25,9 +25,11 @@ pub(super) struct PackageState {
     /// The file the state was looked up for.
     file: Option<PathBuf>,
     running: Option<Receiver<Done>>,
+    /// The newest job's thread: the next job waits for it.
+    last_job: Option<std::thread::JoinHandle<()>>,
     pub(super) status: PackageStatus,
     /// Hashes answered with Not Now in this session: no second card for them.
-    not_now: std::collections::HashSet<String>,
+    not_now: std::collections::HashSet<Sha256Hex>,
 }
 
 impl PackageState {
@@ -69,9 +71,16 @@ impl MarkiseApp {
         };
         let (tx, rx) = channel();
         let wake = self.wake_handle();
+        // Jobs run in the order they were started, also across documents: a lookup must see the
+        // store as an earlier Stop Using or Use Package leaves it, whatever became of that job's
+        // receiver.
+        let earlier = self.package.last_job.take();
         let spawned = std::thread::Builder::new()
             .name("markise-block-package".into())
             .spawn(move || {
+                if let Some(earlier) = earlier {
+                    let _ = earlier.join();
+                }
                 // `None`: nothing to report, so no frame is spent on the common unbound case
                 match job(&store) {
                     Some(done) => {
@@ -81,9 +90,15 @@ impl MarkiseApp {
                     None => drop(tx),
                 }
             });
-        self.package.running = spawned.is_ok().then_some(rx);
-        if spawned.is_err() {
-            self.package_job_lost();
+        match spawned {
+            Ok(handle) => {
+                self.package.running = Some(rx);
+                self.package.last_job = Some(handle);
+            }
+            Err(_) => {
+                self.package.running = None;
+                self.package_job_lost();
+            }
         }
     }
 
@@ -180,7 +195,13 @@ impl MarkiseApp {
             (PackageAction::Forget, PackageStatus::Ready(p)) => {
                 self.package.not_now.insert(p.sha256.clone());
                 let (library, sha256) = (p.index.id().library.clone(), p.sha256.clone());
-                self.package_job(move |store| Some(Done::Forgot(store.forget(&library, &sha256))));
+                let hooks = self.hooks.clone();
+                self.package_job(move |store| {
+                    if let Some(hook) = &hooks.before_package_forget {
+                        hook();
+                    }
+                    Some(Done::Forgot(store.forget(&library, &sha256)))
+                });
             }
             (_, status) => self.package.status = status,
         }

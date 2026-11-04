@@ -178,6 +178,8 @@ Consent is recorded against the package's identity and hash: `library`, `version
   renderer only the block at hand, without access to files or the network.
 - **Not Now** holds for the session and is not stored. The status bar offers the question again.
 - **Stop Using This Package** removes the record and the unpacked files.
+- **Store changes and lookups run in the order they were started,** also across a document switch,
+  so a document opened right after Stop Using cannot be handed files that are about to go.
 - **A hash is not a publisher.** It says these are the bytes the binding names, not who made them.
   Signatures are left out for now; consent is about trusting where a folder came from.
 - A missing or damaged `trust.json` grants nothing and leads to a question. A record from a newer

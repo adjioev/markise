@@ -4,7 +4,7 @@
 //! app glue is `app/package.rs`.
 
 use egui::{Context, RichText, Ui};
-use markise_package::{InstalledPackage, Pending, Problem};
+use markise_package::{InstalledPackage, Pending, Problem, Sha256Hex};
 
 /// Error text from a package can be long, and the package chooses it.
 const MAX_SHOWN_CHARS: usize = 1200;
@@ -36,7 +36,8 @@ pub enum PackageAction {
     Forget,
 }
 
-fn short_hash(sha256: &str) -> String {
+fn short_hash(sha256: &Sha256Hex) -> String {
+    let sha256 = sha256.as_str();
     format!(
         "{}…{}",
         &sha256[..8.min(sha256.len())],
