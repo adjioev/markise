@@ -131,7 +131,7 @@ impl Fixture {
         h.step();
         wait_until(&mut h, "the install", |a| a.block_package().is_some());
         settle(&mut h);
-        h.run();
+        common::run(&mut h);
         h
     }
 }
@@ -142,7 +142,7 @@ fn open(h: &mut H, doc: &Path) {
         a.document_path() == Some(doc) && !a.is_loading()
     });
     settle(h);
-    h.run();
+    common::run(h);
 }
 
 fn has(h: &H, text: &str) -> bool {
@@ -162,16 +162,16 @@ fn open_form(h: &mut H, name: &str) {
         .next()
         .unwrap()
         .click();
-    h.run();
+    common::run(h);
     assert!(h.state().block_form().is_some(), "{name} opens");
 }
 
-/// With a picture loading, a spinner keeps asking for frames: wait for it instead of a quiet UI.
+/// With a picture or an icon on its way, the worker wakes the UI when it comes, and a spinner
+/// keeps asking for frames: wait for the background instead of a quiet UI.
 fn wait(h: &mut H) {
     h.step();
     h.step();
-    settle(h);
-    h.run();
+    common::run(h);
 }
 
 fn offset(text: &str, needle: &str) -> usize {
@@ -183,7 +183,7 @@ fn edit_document(h: &mut H, at: std::ops::Range<usize>, insert: &str) {
     let patches = PatchSet::new(vec![Patch::verbatim(at, insert.to_string())]).unwrap();
     let v = h.state_mut().viewer().unwrap();
     v.ed.edit(|s| s.apply_external(&patches, "Edit", false)).unwrap();
-    h.run();
+    common::run(h);
 }
 
 #[test]
@@ -226,21 +226,21 @@ fn edit_and_save_is_one_undo_step() {
     assert_eq!(text(&h), DOC, "opening changes nothing");
 
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     assert_eq!(draft(&h)["body"], json!("Hello!"));
     assert_eq!(text(&h), DOC, "a draft stays out of the document");
 
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_none(), "Save closes");
     let saved = text(&h);
     assert_eq!(saved, DOC.replacen("Hello\n", "Hello!\n", 1));
     let v = h.state_mut().viewer().unwrap();
     assert_eq!(v.ed.session.history().undo_len(), undo_before + 1);
     assert!(v.ed.edit(|s| s.undo()));
-    h.run();
+    common::run(&mut h);
     assert_eq!(text(&h), DOC);
 }
 
@@ -251,7 +251,7 @@ fn an_unchanged_save_writes_nothing() {
     let before = h.state_mut().viewer().unwrap().ed.changes();
     open_form(&mut h, "poll");
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_none());
     assert_eq!(text(&h), DOC);
     assert_eq!(h.state_mut().viewer().unwrap().ed.changes(), before);
@@ -264,19 +264,19 @@ fn cancel_and_its_keys_leave_the_document_alone() {
     let mut h = f.ready();
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Cancel").click();
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_none());
     assert_eq!(text(&h), DOC);
 
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.key_press(Key::Escape);
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_none(), "Esc cancels");
     assert_eq!(text(&h), DOC);
 }
@@ -287,23 +287,23 @@ fn the_command_shortcuts_save_and_close_only_the_form() {
     let mut h = f.ready();
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     h.key_press_modifiers(Modifiers::COMMAND, Key::Enter);
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_none(), "Cmd+Enter saves");
     assert!(text(&h).contains("Hello!\n"));
 
     // the file itself is not written by Save of a form, Cmd+S goes to the form first
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("?");
-    h.run();
+    common::run(&mut h);
     let ctx = h.ctx.clone();
     assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("file.save")));
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_none());
     assert!(text(&h).contains("Hello!?\n"));
     assert_eq!(
@@ -314,10 +314,10 @@ fn the_command_shortcuts_save_and_close_only_the_form() {
 
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     let ctx = h.ctx.clone();
     assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("file.close")));
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_none(), "Cmd+W cancels the form");
     assert_eq!(h.state().document_path(), Some(f.doc.as_path()), "the document stays");
 }
@@ -331,7 +331,7 @@ fn the_keyboard_opens_the_form_at_the_caret_and_lands_in_it() {
     v.ed.edit(|s| s.set_selection(markise_doc::Selection::caret(inside)));
     let ctx = h.ctx.clone();
     assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("block.editForm")));
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_some());
     assert!(
         h.get_by_label("Title").accesskit_node().is_focused(),
@@ -351,12 +351,12 @@ fn undo_in_a_field_stays_in_the_field() {
     let doc = text(&h);
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("abc");
-    h.run();
+    common::run(&mut h);
     assert_eq!(draft(&h)["body"], json!("Helloabc"));
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
-    h.run();
+    common::run(&mut h);
     assert_eq!(draft(&h)["body"], json!("Hello"), "the field's own undo");
     assert_eq!(text(&h), doc, "the document's undo did not run");
     assert!(h.state().block_form().is_some());
@@ -368,14 +368,14 @@ fn document_commands_wait_while_the_keyboard_is_in_the_form() {
     let mut h = f.ready();
     open_form(&mut h, "poll");
     h.get_by_label("Add").click();
-    h.run();
+    common::run(&mut h);
     // the focus on a button, not in a text field
     h.get_by_label("Move up: Answers 3").focus();
-    h.run();
+    common::run(&mut h);
     let ctx = h.ctx.clone();
     let before = text(&h);
     assert!(!h.state_mut().menu_action(&ctx, &MenuAction::Command("format.strong")));
-    h.run();
+    common::run(&mut h);
     assert_eq!(text(&h), before);
 }
 
@@ -385,24 +385,24 @@ fn a_block_that_changed_refuses_a_draft_clearly() {
     let mut h = f.ready();
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     let at = offset(DOC, "Hello");
     edit_document(&mut h, at..at, "Changed ");
     assert!(has(&h, "The block changed in the document"));
     let after_edit = text(&h);
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert_eq!(text(&h), after_edit, "refused");
     assert!(h.state().block_form().is_some(), "the draft is still there");
     assert_eq!(draft(&h)["body"], json!("Hello!"));
 
     h.get_by_label("Read the Block Again").click();
-    h.run();
+    common::run(&mut h);
     assert_eq!(draft(&h)["body"], json!("Changed Hello"));
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_none());
     assert_eq!(text(&h), after_edit);
 }
@@ -420,14 +420,14 @@ fn a_clean_panel_follows_the_document() {
 
     // a change above only moves the block; a draft survives it and saves in the right place
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     edit_document(&mut h, 0..0, "Above\n\n");
     assert!(!has(&h, "The block changed"));
     assert!(h.state().block_form().unwrap().key() > offset(DOC, ":::tip"));
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert!(text(&h).starts_with("Above\n\n# Doc"));
     assert!(text(&h).contains("New Hello!\n"));
 }
@@ -445,18 +445,18 @@ fn a_changed_block_goes_stale_and_never_moves_to_a_look_alike() {
     let mut h = f.ready();
     let (first, _) = twin_offsets();
     assert!(h.state_mut().open_block_form(first));
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     let at = first + TWINS[first..].find("Same").unwrap();
     edit_document(&mut h, at..at, "Changed ");
     assert!(has(&h, "The block changed in the document"));
     assert_eq!(h.state().block_form().unwrap().key(), first);
     let doc = text(&h);
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert_eq!(text(&h), doc, "nothing goes anywhere, the twin least of all");
 }
 
@@ -466,17 +466,17 @@ fn a_look_alike_above_does_not_take_the_draft() {
     let mut h = f.ready();
     let (_, second) = twin_offsets();
     assert!(h.state_mut().open_block_form(second));
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     // the same block's text again, at the top; the nearest copy of it may be any
     let copy = ":::tip\n\nSame\n\n:::\n\n";
     edit_document(&mut h, second..second, copy);
     assert!(!has(&h, "The block changed"));
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     let saved = text(&h);
     let expected = format!("{}{copy}:::tip\n\nSame!\n\n:::\n", &TWINS[..second]);
     assert_eq!(saved, expected);
@@ -488,18 +488,84 @@ fn a_deleted_block_does_not_become_the_twin_right_after_it() {
     let f = Fixture::new(doc);
     let mut h = f.ready();
     assert!(h.state_mut().open_block_form(0));
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     let end = doc.rfind(":::tip").unwrap();
     edit_document(&mut h, 0..end, "");
     assert!(has(&h, "no longer in the document"));
     let left = text(&h);
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert_eq!(text(&h), left);
+}
+
+#[test]
+fn save_finds_the_block_by_its_marks_even_before_a_frame() {
+    let doc = ":::tip\n\nSame\n\n:::\n:::tip\n\nSame\n\n:::\n";
+    let f = Fixture::new(doc);
+    let mut h = f.ready();
+    assert!(h.state_mut().open_block_form(0));
+    common::run(&mut h);
+    h.get_by_label("Body").click();
+    common::run(&mut h);
+    h.get_by_label("Body").type_text("!");
+    common::run(&mut h);
+    // the twin moves into the place the form last read, and Save comes before the panel looks
+    let end = doc.rfind(":::tip").unwrap();
+    let patches = PatchSet::new(vec![Patch::verbatim(0..end, String::new())]).unwrap();
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| s.apply_external(&patches, "Edit", false)).unwrap();
+    let left = text(&h);
+    let ctx = h.ctx.clone();
+    h.state_mut().block_form_save(&ctx);
+    assert_eq!(text(&h), left, "the twin keeps its text");
+    assert!(
+        h.state()
+            .block_form()
+            .unwrap()
+            .message()
+            .is_some_and(|m| m.contains("no longer"))
+    );
+}
+
+#[test]
+fn a_reload_landing_before_save_is_seen_by_save() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    open_form(&mut h, "tip");
+    h.get_by_label("Body").click();
+    common::run(&mut h);
+    h.get_by_label("Body").type_text("!");
+    common::run(&mut h);
+    // moved: saved where it stands now
+    let moved = format!("New top.\n\n{DOC}");
+    reload_no_frame(&mut h, &f, &moved);
+    let ctx = h.ctx.clone();
+    h.state_mut().block_form_save(&ctx);
+    assert_eq!(text(&h), moved.replacen("Hello\n", "Hello!\n", 1));
+    assert!(h.state().block_form().is_none());
+
+    // changed under the draft: refused
+    common::run(&mut h);
+    open_form(&mut h, "tip");
+    h.get_by_label("Body").click();
+    common::run(&mut h);
+    h.get_by_label("Body").type_text("?");
+    common::run(&mut h);
+    let other = text(&h).replacen("Hello!", "Third", 1);
+    reload_no_frame(&mut h, &f, &other);
+    h.state_mut().block_form_save(&ctx);
+    assert_eq!(text(&h), other);
+    assert!(
+        h.state()
+            .block_form()
+            .unwrap()
+            .message()
+            .is_some_and(|m| m.contains("changed"))
+    );
 }
 
 #[test]
@@ -508,9 +574,9 @@ fn a_draft_does_not_go_into_the_document_that_took_its_place() {
     let mut h = f.ready();
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     // another document with the same bytes, with no frame in between: what happens when a load
     // is polled and Save comes on that same frame
     h.state_mut().new_document();
@@ -529,19 +595,19 @@ fn the_keys_of_the_form_wait_for_a_composition() {
     let mut h = f.ready();
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.event(egui::Event::Ime(egui::ImeEvent::Preedit {
         text: "n".into(),
         active_range_chars: Some(0..1),
     }));
-    h.run();
+    common::run(&mut h);
     let ctx = h.ctx.clone();
     assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("file.close")));
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_some(), "Cmd+W waits, as Esc does");
     assert_eq!(text(&h), DOC);
     assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("file.save")));
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_some(), "and so does Cmd+S");
     assert_eq!(text(&h), DOC);
 }
@@ -554,7 +620,7 @@ fn another_variant_in_the_document_gets_its_own_form() {
     assert!(has(&h, "Poll · one answer"));
     let at = offset(DOC, ":::poll\n") + ":::poll".len();
     edit_document(&mut h, at..at, " many");
-    h.run();
+    common::run(&mut h);
     assert!(has(&h, "Poll · several"), "opened anew");
     assert_eq!(h.state().block_form().unwrap().args(), "many");
 }
@@ -571,21 +637,21 @@ fn a_deleted_block_closes_a_clean_panel_and_warns_a_draft() {
 
     let v = h.state_mut().viewer().unwrap();
     assert!(v.ed.edit(|s| s.undo()));
-    h.run();
+    common::run(&mut h);
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     edit_document(&mut h, start..end, "");
     assert!(has(&h, "no longer in the document"));
     assert_eq!(draft(&h)["body"], json!("Hello!"), "still readable");
     let doc = text(&h);
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert_eq!(text(&h), doc);
     h.get_by_label("Cancel").click();
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_none());
 }
 
@@ -601,12 +667,16 @@ fn an_edit_over_the_whole_text_leaves_no_block_to_follow() {
 
 /// Replaces the document the way a reload from disk does: it is not an edit of the session.
 fn reload(h: &mut H, f: &Fixture, new: &str) {
+    reload_no_frame(h, f, new);
+    common::run(h);
+}
+
+fn reload_no_frame(h: &mut H, f: &Fixture, new: &str) {
     let doc = markise_md::Document::parse(new.to_string(), markise_md::ParseOptions::default());
     let model = markise_layout::DocModel::build(&doc, Some(&f.doc));
     let doc: Arc<dyn markise_doc::FormatDoc> = Arc::new(doc);
     let v = h.state_mut().viewer().unwrap();
     v.install(doc, model, "Reload from Disk", false).unwrap();
-    h.run();
 }
 
 #[test]
@@ -622,33 +692,33 @@ fn a_reload_from_disk_is_followed_like_any_change() {
 
     // moved: a draft goes along and saves where the block is now
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     let moved = format!("New top.\n\n{changed}");
     reload(&mut h, &f, &moved);
     assert_eq!(draft(&h)["body"], json!("From disk!"));
     assert!(!has(&h, "The block changed"));
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert_eq!(text(&h), moved.replacen("From disk", "From disk!", 1));
 
     // changed under a draft: refused, clearly
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("?");
-    h.run();
+    common::run(&mut h);
     let other = text(&h).replacen("From disk!", "Third", 1);
     reload(&mut h, &f, &other);
     assert!(has(&h, "The block changed in the document"));
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert_eq!(text(&h), other);
 
     // gone, no draft: closed
     h.get_by_label("Read the Block Again").click();
-    h.run();
+    common::run(&mut h);
     reload(&mut h, &f, "Nothing here.\n");
     assert!(h.state().block_form().is_none());
 }
@@ -668,7 +738,7 @@ fn a_document_switch_and_a_withdrawn_package_close_the_panel() {
     open_form(&mut h, "tip");
     h.state_mut()
         .block_package_action(markise_ui_egui::package_ui::PackageAction::Forget);
-    h.run();
+    wait(&mut h);
     assert!(h.state().block_form().is_none());
     assert!(!has(&h, "Edit Block"));
 }
@@ -679,11 +749,11 @@ fn a_draft_is_not_thrown_away_for_another_block() {
     let mut h = f.ready();
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     assert!(!h.state_mut().open_block_form(offset(DOC, ":::gallery")));
-    h.run();
+    common::run(&mut h);
     assert_eq!(h.state().block_form().unwrap().name(), "tip");
     assert!(has(&h, "Save or cancel this draft"));
 }
@@ -699,11 +769,11 @@ fn a_block_outside_its_schema_shows_reasons_and_can_be_saved() {
     assert!(has(&h, "Has no id"));
     assert!(has(&h, "In no field, kept as it is: Stray text."));
     h.get_by_label("Question").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Question").type_text("Asked?");
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_none(), "saved all the same");
     let saved = text(&h);
     assert!(saved.contains("Asked?") && saved.contains("Stray text."), "{saved}");
@@ -728,7 +798,7 @@ fn a_form_the_package_makes_impossible_says_why() {
     assert!(has(&h, "`max` 3"));
     assert!(h.state().block_form().unwrap().values().is_none());
     h.get_by_label("Cancel").click();
-    h.run();
+    common::run(&mut h);
     assert!(h.state().block_form().is_none());
     assert_eq!(text(&h), doc);
 }
@@ -739,10 +809,11 @@ fn icon_choices_write_their_marks_and_exclusive_clears() {
     let mut h = f.ready();
     let at = offset(DOC, ":::poll ways");
     assert!(h.state_mut().open_block_form(at));
-    h.run();
+    // the worker's answers wake the UI whenever they come: a wait for them, not for a quiet UI
+    wait(&mut h);
     assert!(has(&h, "Ways"), "the label comes from the package");
     h.get_by_label("Left").click();
-    h.run();
+    common::run(&mut h);
     let marks = |h: &H| {
         (draft(h)["answers"].as_array().unwrap().iter())
             .map(|a| a["correct"].as_bool().unwrap())
@@ -750,10 +821,10 @@ fn icon_choices_write_their_marks_and_exclusive_clears() {
     };
     assert_eq!(marks(&h), [true, true, false]);
     h.get_by_label("No way").click();
-    h.run();
+    common::run(&mut h);
     assert_eq!(marks(&h), [false, false, true]);
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     let saved = text(&h);
     assert!(
         saved.contains("- [ ] Left {#a1}\n- [ ] Right {#a2}\n- [x] No way {#a3}"),
@@ -767,12 +838,12 @@ fn a_new_answer_gets_its_id_on_save() {
     let mut h = f.ready();
     open_form(&mut h, "poll");
     h.get_by_label("Add").click();
-    h.run();
+    common::run(&mut h);
     assert!(!has(&h, "Has no id"), "a new row is not missing one");
     h.get_by_label("Answers 3").type_text("Three");
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert!(text(&h).contains("- [ ] Three {#a3}"), "{}", text(&h));
 }
 
@@ -813,28 +884,28 @@ fn the_form_works_from_source_mode_and_side_by_side() {
     let f = Fixture::new(DOC);
     let mut h = f.ready();
     h.state_mut().set_view_mode(ViewMode::SideBySide);
-    h.run();
+    common::run(&mut h);
     open_form(&mut h, "tip");
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("!");
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert!(text(&h).contains("Hello!\n"));
 
     h.state_mut().set_view_mode(ViewMode::Source);
-    h.run();
+    common::run(&mut h);
     assert!(!has(&h, "Edit Block"), "no cards to put a button on");
     let at = offset(&text(&h), ":::tip");
     assert!(h.state_mut().open_block_form(at));
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").click();
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Body").type_text("?");
-    h.run();
+    common::run(&mut h);
     h.get_by_label("Save").click();
-    h.run();
+    common::run(&mut h);
     assert!(text(&h).contains("Hello!?\n"), "{}", text(&h));
     assert!(h.state().block_form().is_none());
 }
@@ -845,7 +916,7 @@ fn a_nested_block_opens_its_own_form() {
     let f = Fixture::new(doc);
     let mut h = f.ready();
     assert!(h.state_mut().open_block_form(offset(doc, ":::tip")));
-    h.run();
+    common::run(&mut h);
     assert_eq!(h.state().block_form().unwrap().name(), "tip");
     assert_eq!(draft(&h)["body"], json!("Inner"));
 }

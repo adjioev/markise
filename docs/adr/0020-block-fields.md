@@ -281,7 +281,9 @@ own: it decides which block, and what becomes of a draft when the document chang
   edit, undo and reload (a reload's diff). When the text's revision moves, the block is what stands
   from one mark to the other, if that is still a block of the same name. It is never looked for by
   its text: an identical block elsewhere is another block, and a draft must not go there.
-  An edit over the whole of it, or a deletion, leaves no block.
+  An edit over the whole of it, or a deletion, leaves no block. Save looks again itself before
+  writing, so a change landing just before it cannot be missed. A reload knows the block only by its
+  diff, so of two identical blocks with one gone, it may be the other that counts as staying.
   - Inside, with an unchanged draft: the panel reads the block again, and opens anew if the
     arguments changed, since another variant has another form.
   - Inside, with a changed draft: the panel says so and refuses Save (`Stale` from the engine is the
@@ -301,9 +303,12 @@ own: it decides which block, and what becomes of a draft when the document chang
   image store: decoded off the UI thread, same limits, same resolver. That resolver looks at the disk
   for some paths, so the form's worker asks it, once per reference, and frames read the answer.
 - **Icons.** An answer's `icon` is a file of the package. SVG goes through `resvg` at most 256 KiB, and
-  `currentColor` makes it a mask that follows the theme. Filters are refused, as their cost has no
-  bound that file or picture size would set; images are not loaded, there are no fonts in this
-  build, and no reference leaves the file. One worker with one queue serves all forms of a session, so
+  `currentColor` makes it a mask that follows the theme. Filters and masks are refused, as a filter's
+  cost has no bound that file or picture size would set: a scan of the XML finds `filter` and `fe*`
+  elements, the `filter` attribute and the CSS property, and a walk of the parsed tree goes through groups,
+  clip paths, patterns and text. The tree's own list of filters is not used, because it does not
+  follow a chain of masks and the renderer does. Images are not loaded, there are no fonts in
+  this build, and no reference leaves the file. One worker with one queue serves all forms of a session, so
   opening a form again adds nothing to what runs. Other formats go through the image store. New dependency: `resvg` 0.45 with default
   features off (Apache-2.0 OR MIT; its tree adds `usvg`, `tiny-skia`, `roxmltree` and a few small
   crates, all MIT, Apache-2.0 or BSD).

@@ -317,12 +317,20 @@ impl OpenForm {
     }
 
     /// Writes the draft, as one undo step. Refuses a block that changed.
-    pub fn save(&mut self, session: &mut markise_engine::editor::EditorSession) -> Result<(), String> {
+    pub fn save(&mut self, session: &mut EditorSession) -> Result<(), String> {
+        // where the block stands right now: a change can land between the last frame and this one
+        if !self.follow(session) {
+            return Ok(());
+        }
+        let dirty = self.is_dirty();
         let Content::Form(r) = &mut self.content else {
             return Err("This block has no form.".to_string());
         };
         if r.form.is_composing() {
             return Err("Finish the text being composed first.".to_string());
+        }
+        if !dirty {
+            return Ok(());
         }
         match r.track {
             Track::Live => {}
@@ -754,15 +762,84 @@ fn run_job(job: Job) -> Done {
     }
 }
 
+const NO_FILTER: &str = "an icon may not use a filter";
+const NO_MASK: &str = "an icon may not use a mask";
+const NO_IMAGE: &str = "an icon may not hold an image";
+
+/// The source as the parser will read it (entities and all): `filter` and `fe*` elements, a
+/// `filter` attribute, and the CSS property in a `style` attribute or element.
+fn refuse_in_source(text: &str) -> Result<(), String> {
+    let options = resvg::usvg::roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let doc = resvg::usvg::roxmltree::Document::parse_with_options(text, options).map_err(|e| e.to_string())?;
+    for node in doc.descendants() {
+        let filtering = if node.is_element() {
+            let name = node.tag_name().name();
+            let style = node
+                .attribute("style")
+                .is_some_and(|s| s.to_ascii_lowercase().contains("filter"));
+            name == "filter" || name.starts_with("fe") || style || node.attributes().any(|a| a.name() == "filter")
+        } else {
+            // the text of a `style` element, CDATA included
+            node.is_text()
+                && node.parent().is_some_and(|p| p.tag_name().name() == "style")
+                && node.text().is_some_and(|s| s.to_ascii_lowercase().contains("filter"))
+        };
+        if filtering {
+            return Err(NO_FILTER.to_string());
+        }
+    }
+    Ok(())
+}
+
+/// The parsed picture, everywhere the renderer would go: groups, clip paths and their chains,
+/// patterns, the shapes of text. The tree's own list of filters does not follow a chain of masks, and
+/// the renderer does. So every mask is refused, not just a mask holding a filter.
+fn refuse_in_tree(group: &resvg::usvg::Group) -> Result<(), String> {
+    use resvg::usvg::{Node, Paint};
+    if !group.filters().is_empty() {
+        return Err(NO_FILTER.to_string());
+    }
+    if group.mask().is_some() {
+        return Err(NO_MASK.to_string());
+    }
+    let mut clip = group.clip_path();
+    while let Some(c) = clip {
+        refuse_in_tree(c.root())?;
+        clip = c.clip_path();
+    }
+    for node in group.children() {
+        match node {
+            Node::Group(g) => refuse_in_tree(g)?,
+            Node::Text(t) => refuse_in_tree(t.flattened())?,
+            Node::Image(_) => return Err(NO_IMAGE.to_string()),
+            Node::Path(p) => {
+                let fill = p.fill().map(|f| f.paint());
+                let stroke = p.stroke().map(|s| s.paint());
+                for paint in [fill, stroke].into_iter().flatten() {
+                    if let Paint::Pattern(pattern) = paint {
+                        refuse_in_tree(pattern.root())?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An SVG file to pixels. `currentColor` becomes white and the result a mask that takes the colour
 /// of the text around it; an icon with colours of its own stays as it is. Nothing outside the file
 /// is read: images are not loaded, this build of the parser has no text and so no fonts, and it
-/// follows no reference outside the file. Filters are refused, since their cost has no bound that
-/// file or picture size would set, and an icon has no need of them.
+/// follows no reference outside the file. Filters and masks are refused ([`refuse_in_source`],
+/// [`refuse_in_tree`]), since the cost of a filter has no bound that file or picture size would set,
+/// and an icon has no need of either.
 fn rasterize_svg(path: &Path) -> Result<(ColorImage, bool), String> {
     use resvg::{tiny_skia, usvg};
     let bytes = markise_doc::resource::read_regular(path, MAX_ICON_BYTES).map_err(|e| e.to_string())?;
     let text = String::from_utf8(bytes).map_err(|_| "the icon is not text".to_string())?;
+    refuse_in_source(&text)?;
     let mask = text.contains("currentColor");
     let text = text.replace("currentColor", "#ffffff");
     let options = usvg::Options {
@@ -773,9 +850,7 @@ fn rasterize_svg(path: &Path) -> Result<(ColorImage, bool), String> {
         ..Default::default()
     };
     let tree = usvg::Tree::from_str(&text, &options).map_err(|e| e.to_string())?;
-    if !tree.filters().is_empty() {
-        return Err("an icon may not use a filter".to_string());
-    }
+    refuse_in_tree(tree.root())?;
     let mut pixmap = tiny_skia::Pixmap::new(ICON_PIXELS, ICON_PIXELS).ok_or("no room for the icon")?;
     let size = tree.size();
     let scale = ICON_PIXELS as f32 / size.width().max(size.height()).max(1.0);
@@ -832,6 +907,73 @@ mod tests {
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feTurbulence numOctaves="1000000000" baseFrequency="1"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##,
         );
         assert!(rasterize_svg(&path).unwrap_err().contains("filter"));
+    }
+
+    #[test]
+    fn a_filter_hidden_behind_an_entity_is_found() {
+        let (_d, path) = svg(
+            r#"<!DOCTYPE svg [<!ENTITY s "filter: blur(5px)">]><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="9" height="9" style="&s;"/></svg>"#,
+        );
+        assert!(rasterize_svg(&path).unwrap_err().contains("filter"));
+    }
+
+    fn refused_with(body: &str) -> String {
+        let head = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">"#;
+        let (_d, path) = svg(&format!("{head}{body}</svg>"));
+        rasterize_svg(&path).expect_err(body)
+    }
+
+    const TURBULENCE: &str = r#"<filter id="f"><feTurbulence numOctaves="1000000000" baseFrequency="1"/></filter>"#;
+
+    #[test]
+    fn a_filter_at_the_end_of_a_mask_chain_is_refused() {
+        let why = refused_with(&format!(
+            r#"{TURBULENCE}<mask id="c"><rect width="10" height="10" fill="white" filter="url(#f)"/></mask><mask id="b" mask="url(#c)"><rect width="10" height="10" fill="white"/></mask><mask id="a" mask="url(#b)"><rect width="10" height="10" fill="white"/></mask><rect width="10" height="10" mask="url(#a)"/>"#
+        ));
+        assert!(why.contains("filter"), "{why}");
+    }
+
+    #[test]
+    fn what_an_icon_has_no_need_of_is_refused_by_name() {
+        let rect = r#"<rect width="10" height="10"/>"#;
+        for (body, word) in [
+            (
+                format!(r#"<mask id="m">{rect}</mask><rect width="9" height="9" mask="url(#m)"/>"#),
+                "mask",
+            ),
+            (
+                format!(
+                    r#"<pattern id="p" width="5" height="5" patternUnits="userSpaceOnUse"><g><mask id="m">{rect}</mask><rect width="5" height="5" mask="url(#m)"/></g></pattern><rect width="9" height="9" fill="url(#p)"/>"#
+                ),
+                "mask",
+            ),
+            (TURBULENCE.to_string(), "filter"),
+            (r#"<feTurbulence/>"#.to_string(), "filter"),
+            (
+                r#"<style>rect { filter: blur(5px) }</style><rect width="9" height="9"/>"#.to_string(),
+                "filter",
+            ),
+            (
+                r#"<rect width="9" height="9" style="filter: blur(5px)"/>"#.to_string(),
+                "filter",
+            ),
+            (
+                r#"<rect width="9" height="9" filter="blur(5px)"/>"#.to_string(),
+                "filter",
+            ),
+        ] {
+            let why = refused_with(&body);
+            assert!(why.contains(word), "{body}: {why}");
+        }
+    }
+
+    #[test]
+    fn a_plain_icon_with_clip_and_pattern_still_draws() {
+        let head = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">"#;
+        let body = r##"<clipPath id="c"><rect width="10" height="10"/></clipPath><pattern id="p" width="5" height="5" patternUnits="userSpaceOnUse"><rect width="5" height="5" fill="#ff0000"/></pattern><g clip-path="url(#c)"><rect width="10" height="10" fill="url(#p)"/></g>"##;
+        let (_d, path) = svg(&format!("{head}{body}</svg>"));
+        let (image, _) = rasterize_svg(&path).unwrap();
+        assert!(image.pixels.iter().any(|p| *p != egui::Color32::TRANSPARENT));
     }
 
     #[test]
