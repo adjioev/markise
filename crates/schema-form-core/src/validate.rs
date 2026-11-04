@@ -109,6 +109,22 @@ fn check_prop(p: &PropRule, v: Option<&Value>, path: &str, in_item: bool, out: &
     let empty_string_in_item = in_item && v.is_string();
     if !empty || empty_string_in_item {
         check_value(&p.rule, v, path, in_item, out);
+    } else if !type_fits(p.rule.json_type, v) {
+        // empty is exempt from the limits, not from the type
+        out.push(FieldError {
+            path: path.to_string(),
+            kind: ErrorKind::WrongType,
+        });
+    }
+}
+
+fn type_fits(ty: JsonType, v: &Value) -> bool {
+    match ty {
+        JsonType::String => v.is_string(),
+        JsonType::Boolean => v.is_boolean(),
+        JsonType::Array => v.is_array(),
+        JsonType::Object => v.is_object(),
+        JsonType::Any => true,
     }
 }
 
@@ -134,14 +150,7 @@ fn check_string(s: &str, l: &Limits, path: &str, out: &mut Vec<FieldError>) {
 }
 
 fn check_value(rule: &ValueRule, v: &Value, path: &str, in_item: bool, out: &mut Vec<FieldError>) {
-    let type_ok = match rule.json_type {
-        JsonType::String => v.is_string(),
-        JsonType::Boolean => v.is_boolean(),
-        JsonType::Array => v.is_array(),
-        JsonType::Object => v.is_object(),
-        JsonType::Any => true,
-    };
-    if !type_ok {
+    if !type_fits(rule.json_type, v) {
         out.push(FieldError {
             path: path.to_string(),
             kind: ErrorKind::WrongType,
