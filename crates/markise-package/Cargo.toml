@@ -1,0 +1,15 @@
+[package]
+name = "markise-package"
+description = "Markise L2: block packages — format validation and index (ADR 0019)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

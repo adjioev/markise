@@ -2878,6 +2878,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "markise-package"
+version = "0.1.0-beta.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "markise-pdf"
 version = "0.1.0-beta.1"
 dependencies = [
