@@ -529,7 +529,7 @@ impl FormScript {
     }
 
     pub fn frame(&mut self, ctx: &egui::Context, viewer: &mut crate::viewer::DocViewer) {
-        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        ctx.request_repaint();
         {
             thread_local!(static LAST: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) });
             if LAST.with(|l| l.get().is_none_or(|t| t.elapsed().as_secs_f32() > 2.0)) {
@@ -2432,7 +2432,8 @@ impl NativeScript {
                     q_click(egui::pos2(r.right() - 45.0, r.top() + 17.0));
                 }
                 self.revision = viewer.ed.session.revision().counter;
-                next(self);
+                self.step = 14;
+                self.since = Some(now);
             }
             // rotation by real clicks: native → site → markdown → native
             14 if after(200) && pending == 0 => {
@@ -2637,8 +2638,8 @@ impl NativeScript {
             _ => {
                 if after(30000) {
                     self.check(&format!("step {} timed out (form open {form_open})", self.step), false);
-                    self.step += 1;
-                    self.since = Some(now);
+                    eprintln!("[proto-native] done, failures: {}", self.fails);
+                    std::process::exit(2);
                 }
             }
         }
