@@ -555,8 +555,9 @@ fn overlay(base: &mut Value, over: &Value) {
 
 impl FormSpec {
     /// `variant` picks the hints' `variants[variant]` overlay: a host's way of saying this block
-    /// allows one mark and that one many. Unknown variants use the base hints. Every variant is
-    /// checked, picked or not.
+    /// allows one mark and that one many. No variant picks the overlay named `""`, if any, which
+    /// no named variant inherits. Unknown variants use the base hints. Every variant is checked,
+    /// picked or not.
     pub fn parse(schema: &Value, hints: &Value, variant: Option<&str>) -> Result<FormSpec, SpecError> {
         let h = object("hints", hints, "hints")?;
         let version = match h.get("version").and_then(Value::as_u64) {
@@ -572,7 +573,7 @@ impl FormSpec {
             }
         }
         let mut merged = hints.clone();
-        if let Some(over) = variant.and_then(|n| hints.get("variants")?.get(n)) {
+        if let Some(over) = hints.get("variants").and_then(|v| v.get(variant.unwrap_or(""))) {
             overlay(&mut merged, over);
         }
         let s = object("schema", schema, "the schema")?;

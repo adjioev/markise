@@ -102,7 +102,8 @@ name, so an arbitrary schema cannot silently become a promise:
   choices and images and below a custom widget too; a custom widget may only leave `type` out.
 - UI hints, our own small format and not JSON Forms: `version`, `order`, `fields`, and per field
   `label`, `help`, `widget`, `multiline`, `add_label`, `selection`, `correct`, `options`, `columns`,
-  nested `fields` and `order`, and `custom` for a host's widget. `variants` overlays the hints by a host's name.
+  nested `fields` and `order`, and `custom` for a host's widget. `variants` overlays the hints by a host's name; the overlay named `""` is for
+  no variant, and a named variant does not inherit it.
   Layouts and rules are not offered. `x-` keys are ignored; the engine reads `x-markdown` (heading,
   quote) there, so the rest stays free of Markdown.
 - Correctness (`exactly-one`, `at-least-one`), missing and duplicate answer ids, an option that
@@ -219,7 +220,8 @@ field lives, so the form and the field declarations come from one source.
   later versions and is ignored (ADR 0019). The panel shows the reason; the block stays a card.
 - **Icon choices.** A preset can say how a variant's answers are chosen: `widget: "icon-choices"`,
   `variant`, `field`, `answers: [{label, icon, exclusive}]`, `columns`, `field_label`. These become
-  choice buttons in that variant's hints. An option's value is its `label`, the text the answer has
+  choice buttons in that variant's hints; `variant: ""` is the block with no variant and no key at all
+  is every variant. A `field` or `variant` that is not a string is refused. An option's value is its `label`, the text the answer has
   in the Markdown. `icon` is a file of the package, which the host resolves. Other `widget`
   values stay data for later.
 - **The block's `argument` is not checked in this phase**: it is not a field, and the subset has no

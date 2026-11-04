@@ -271,6 +271,16 @@ fn icon_choice_hints(
     Ok(())
 }
 
+/// A key of a preset that names something: absent or null, or a string; anything else would
+/// quietly mean something wider than was written.
+fn preset_text<'a>(p: &'a Preset, key: &str) -> Result<Option<&'a str>, FormRefusal> {
+    match p.extra.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s)),
+        Some(v) => refuse("", format!("preset \"{}\": `{key}` {v} must be a string", p.id)),
+    }
+}
+
 impl BlockSchema {
     /// The form of this block. `presets` are the block's own: one can ask that a variant's choice
     /// is drawn as icon buttons.
@@ -305,7 +315,7 @@ impl BlockSchema {
             if p.extra.get("widget").and_then(Value::as_str) != Some(ICON_CHOICES) {
                 continue;
             }
-            let wanted = p.extra.get("field").and_then(Value::as_str);
+            let wanted = preset_text(p, "field")?;
             let field = self
                 .fields
                 .iter()
@@ -316,7 +326,8 @@ impl BlockSchema {
                     format!("preset \"{}\" asks for icon choices on no choices field", p.id),
                 );
             };
-            match p.extra.get("variant").and_then(Value::as_str).filter(|v| !v.is_empty()) {
+            // no key: every variant, through the base hints; `""`: the block without one
+            match preset_text(p, "variant")? {
                 Some(v) => icon_choice_hints(p, field, language, variant_field(&mut variants, v, &field.name))?,
                 None => {
                     let hint = fields[&field.name].as_object_mut().expect("built above");
