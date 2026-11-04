@@ -29,6 +29,9 @@ pub struct JobHooks {
     /// On the file watcher's worker before it applies changed watch targets (tests stall it to
     /// prove that registering watches never holds up the caller).
     pub before_watch: Option<Box<dyn Fn() + Send + Sync>>,
+    /// On the block package worker before it withdraws a consent (tests hold it there to switch
+    /// documents meanwhile).
+    pub before_package_forget: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 pub type Hooks = Arc<JobHooks>;

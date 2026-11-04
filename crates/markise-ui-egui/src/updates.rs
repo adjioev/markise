@@ -98,6 +98,15 @@ impl UpdateState {
         self.asking || self.notice.is_some() || self.message.is_some()
     }
 
+    /// The height of the card with a gap, so another card can sit above it; 0 without a card.
+    pub fn card_height(&self, ctx: &Context) -> f32 {
+        if !self.visible() {
+            return 0.0;
+        }
+        let id = egui::Id::unique("markise-update-card");
+        ctx.memory(|m| m.area_rect(id)).map_or(0.0, |r| r.height() + 8.0)
+    }
+
     /// Draws the card (nothing when there is nothing to say).
     pub fn show(&self, ctx: &Context, out: &mut Vec<CardAction>) {
         if !self.visible() {

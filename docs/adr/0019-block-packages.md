@@ -184,6 +184,8 @@ Consent is recorded against the package's identity and hash: `library`, `version
   renderer only the block at hand, without access to files or the network.
 - **Not Now** holds for the session and is not stored. The status bar offers the question again.
 - **Stop Using This Package** removes the record and the unpacked files.
+- **Store changes and lookups run in the order they were started,** also across a document switch,
+  so a document opened right after Stop Using cannot be handed files that are about to go.
 - **A hash is not a publisher.** It says these are the bytes the binding names, not who made them.
   Signatures are left out for now; consent is about trusting where a folder came from.
 - A missing or damaged `trust.json` grants nothing and leads to a question. A record from a newer
@@ -196,6 +198,16 @@ Consent is recorded against the package's identity and hash: `library`, `version
   close it at a cost across platforms that this does not justify.
 - An archive changed under an unchanged pin is an error when it is read. While the cache holds that
   hash the archive is not read at all: the pin is what counts, and the cache already matches it.
+
+### On screen
+
+The question is a non-modal card above the status bar, like the first-launch question about
+updates, and has no default button: the document is usable meanwhile, and blocks stay simple cards
+until the answer. Return cannot accept a package by accident. It names the package, its source, its
+hash and the binding file, and says when it differs from what was accepted before. The status bar
+shows `Blocks: <library> <version>`, or `not in use`, or `Block package problem` in the warning
+color; its menu holds the details and the actions. An unbound document shows none of this. Nothing
+in how a document renders changes in this phase.
 
 ### Cost for other documents
 

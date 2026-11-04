@@ -14,6 +14,7 @@ pub mod icons;
 pub mod images;
 pub mod menu;
 pub mod menu_sync;
+pub mod package_ui;
 pub mod prefs;
 pub mod shortcuts;
 pub mod side_by_side;

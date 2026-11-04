@@ -58,6 +58,7 @@ mod full_view;
 mod help;
 mod insert_table;
 mod menus;
+mod package;
 mod prefs;
 mod progressive;
 mod quick_open;
@@ -594,10 +595,13 @@ pub struct MarkiseApp {
     cheat_sheet: crate::shortcuts::CheatSheet,
     /// Update check: the launch check, Check for Updates…, the notice (issue #70).
     updates: crate::updates::UpdateState,
+    /// The open document's block package (ADR 0019).
+    package: package::PackageState,
 }
 
 impl MarkiseApp {
     pub fn new(mut opts: AppOptions) -> Self {
+        let package = package::PackageState::new(&opts.config);
         let mut themes = ThemeManager::new(opts.config, opts.system_fonts);
         themes.set_watch(opts.watch);
         let diagrams = themes.diagrams();
@@ -702,6 +706,7 @@ impl MarkiseApp {
             welcome_pending: opts.welcome,
             cheat_sheet: Default::default(),
             updates: crate::updates::UpdateState::new(opts.updates),
+            package,
         }
     }
 
@@ -962,6 +967,7 @@ impl MarkiseApp {
             && !self.diagram_renderer.as_ref().is_some_and(|d| d.busy())
             && !self.export.is_running()
             && self.updates.running.is_none()
+            && self.package.is_idle()
             && self.word_count.as_ref().is_none_or(|(_, w)| w.settled())
             && self.doc.as_ref().is_none_or(|d| d.viewer.comments_settled())
             // every published result's wake-up has returned (a result can be taken before
@@ -2346,6 +2352,7 @@ impl MarkiseApp {
         self.first_launch_tutorial();
         self.launch_update_check();
         self.poll_update_check();
+        self.poll_block_package();
         if self.export.poll() && self.export.is_asking_large() {
             self.opened_export_question();
         }
@@ -2454,6 +2461,7 @@ impl MarkiseApp {
         self.recovery_window(ctx);
         self.about.show(ctx, self.commit.as_deref());
         self.update_card(ctx);
+        self.package_card(ctx);
         self.dialogs(ctx);
         self.update_title(ctx);
         self.sync_native_menu();
@@ -2857,6 +2865,7 @@ impl MarkiseApp {
                 }
                 self.word_count_label(ui);
                 self.comment_view_switch(ui);
+                self.package_status_item(ui);
             });
         });
     }
