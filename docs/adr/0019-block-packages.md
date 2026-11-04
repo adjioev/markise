@@ -130,8 +130,10 @@ A document finds its package through `blocks.config.json`, in its folder or in a
 
 ### Archive
 
-An archive may hold regular files and folders only. Any link, device or FIFO entry, unsafe path, or
-two paths that differ only by case refuses it whole. It is read into memory, and nothing is written,
+An archive may hold regular files and folders only. Any link, device or FIFO entry, or unsafe path
+refuses it whole. So do two names, of files or of folders on the way to them, that differ only by
+case or Unicode form, and a name used for both a file and a folder: a disk could make those one
+entry, and the files read back would not be the files accepted. It is read into memory, and nothing is written,
 until the user has accepted it. The `tar` crate is used to read entries only, never to unpack.
 
 ### Store
@@ -145,8 +147,12 @@ packages/<sha256>/files/...        the unpacked files, by archive hash
 
 A package appears whole: it is unpacked in a staging folder and renamed into place. Files are
 created new, without executable bits from the archive. After that the package works without its
-archive (offline, or a removed file). A staging folder over an hour old was left by a crash and is
-removed, best effort, at the next install.
+archive (offline, or a removed file). An install and every removal refuse a `packages` folder that is
+a link, so they cannot act outside the store.
+
+Known gap: a crash during an install leaves a `.staging-*` folder behind. It is harmless, since
+nothing reads it, and it is not cleaned up: no age tells a leftover from the live folder of a
+suspended install, and removing one is not worth that risk.
 
 Hashes reach the store as a validated type (64 hexadecimal digits, lowercase), so no store operation
 can name another folder. A record in `trust.json` with any other value is dropped.

@@ -10,7 +10,6 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -23,11 +22,6 @@ use crate::paths::clean_relative;
 const TRUST_FILE: &str = "trust.json";
 const TRUST_VERSION: u64 = 1;
 const MAX_TRUST_BYTES: u64 = 4 << 20;
-const STAGING_PREFIX: &str = ".staging-";
-/// A staging folder older than this was left behind by a crash; a younger one may be another
-/// running Markise's.
-const STALE_STAGING: Duration = Duration::from_secs(3600);
-
 /// A sha256 as 64 lowercase hexadecimal digits: safe as a file name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Sha256Hex(String);
@@ -101,6 +95,18 @@ impl Store {
         &self.root
     }
 
+    /// The `packages` folder, if it can be written to or removed from: absent or a real folder,
+    /// never a link that would carry those operations elsewhere.
+    fn packages_folder(&self) -> Result<PathBuf, String> {
+        let packages = self.root.join("packages");
+        match std::fs::symlink_metadata(&packages) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(packages),
+            Err(e) => Err(format!("{}: {e}", packages.display())),
+            Ok(m) if m.is_dir() => Ok(packages),
+            Ok(_) => Err(format!("{} is not a real folder", packages.display())),
+        }
+    }
+
     fn package_dir(&self, sha256: &Sha256Hex) -> PathBuf {
         self.root.join("packages").join(sha256.as_str())
     }
@@ -151,7 +157,7 @@ impl Store {
             .retain(|a| !(a.id.library == library && a.sha256 == *sha256));
         self.write_trust(&trust)?;
         if !trust.accepted.iter().any(|a| a.sha256 == *sha256) {
-            remove_if_present(&self.package_dir(sha256))?;
+            self.remove_package(sha256)?;
         }
         Ok(())
     }
@@ -189,11 +195,10 @@ impl Store {
 
     /// Unpacks `files` as the package `sha256`, whole or not at all. Returns their digest.
     pub fn install(&self, sha256: &Sha256Hex, files: &Files) -> Result<Sha256Hex, String> {
-        let packages = self.root.join("packages");
+        let packages = self.packages_folder()?;
         std::fs::create_dir_all(&packages).map_err(|e| format!("{}: {e}", packages.display()))?;
-        self.sweep_staging(STALE_STAGING);
         let staging = tempfile::Builder::new()
-            .prefix(STAGING_PREFIX)
+            .prefix(".staging-")
             .tempdir_in(&packages)
             .map_err(|e| format!("{}: {e}", packages.display()))?;
         let files_dir = staging.path().join("files");
@@ -219,25 +224,6 @@ impl Store {
             return Err(format!("{}: {e}", target.display()));
         }
         Ok(files_digest(files))
-    }
-
-    /// Removes staging folders older than `older_than`, best effort: a crash during an install
-    /// leaves one behind, and it is never read.
-    #[doc(hidden)]
-    pub fn sweep_staging(&self, older_than: Duration) {
-        let Ok(entries) = std::fs::read_dir(self.root.join("packages")) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let stale = entry.file_name().to_string_lossy().starts_with(STAGING_PREFIX)
-                && entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|t| t.elapsed().is_ok_and(|age| age >= older_than));
-            if stale {
-                let _ = remove_if_present(&entry.path());
-            }
-        }
     }
 
     /// Reads an installed package back and checks it against the digest the user's consent
@@ -266,6 +252,7 @@ impl Store {
 
     /// Removes a damaged package so that it can be installed again.
     pub fn remove_package(&self, sha256: &Sha256Hex) -> Result<(), String> {
+        self.packages_folder()?;
         remove_if_present(&self.package_dir(sha256))
     }
 }
