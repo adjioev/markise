@@ -506,6 +506,8 @@ pub struct MarkiseApp {
     insert_table: Option<insert_table::InsertTable>,
     /// The full-window view, while it is open.
     full_view: Option<full_view::FullView>,
+    /// Decodes whole images for the full-window view.
+    whole_images: full_view::WholeImages,
     /// A surface asked for a full-window view of this in this frame.
     full_view_request: Option<crate::viewer::ViewTarget>,
     /// A command the document view handed over this frame (its shortcut or context menu item
@@ -645,6 +647,7 @@ impl MarkiseApp {
             font_window: false,
             insert_table: None,
             full_view: None,
+            whole_images: Default::default(),
             full_view_request: None,
             pending_command: None,
             prefs: Default::default(),

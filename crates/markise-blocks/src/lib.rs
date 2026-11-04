@@ -128,6 +128,24 @@ pub fn decode(src: &str, max_side: u32) -> Result<DecodedImage, String> {
 
 /// [`decode`] with explicit limits and a shared budget.
 pub fn decode_with(src: &str, max_side: u32, limits: DecodeLimits, budget: &MemBudget) -> Result<DecodedImage, String> {
+    decode_unless(src, max_side, limits, budget, &|| false)
+}
+
+/// What [`decode_unless`] answers when `stale` stopped it.
+pub const DECODE_STALE: &str = "no longer wanted";
+
+/// [`decode_with`] that gives up with [`DECODE_STALE`] once `stale` says the result is no longer
+/// wanted, checked before each costly step (reading the file, decoding the pixels, converting
+/// them).
+pub fn decode_unless(
+    src: &str,
+    max_side: u32,
+    limits: DecodeLimits,
+    budget: &MemBudget,
+    stale: &dyn Fn() -> bool,
+) -> Result<DecodedImage, String> {
+    let give_up = || if stale() { Err(DECODE_STALE.to_string()) } else { Ok(()) };
+    give_up()?;
     if src.contains("://") || src.starts_with("data:") {
         return Err("remote/inline images are not loaded yet".into());
     }
@@ -166,7 +184,9 @@ pub fn decode_with(src: &str, max_side: u32, limits: DecodeLimits, budget: &MemB
     let need = len.saturating_mul(2) + decoder.total_bytes() + w as u64 * h as u64 * 4;
     drop(input_guard);
     let _guard = budget.acquire(need);
+    give_up()?;
     let img = image::DynamicImage::from_decoder(decoder).map_err(|e| format!("cannot decode: {e}"))?;
+    give_up()?;
     let size = [img.width(), img.height()];
     let img = if img.width() > max_side || img.height() > max_side {
         img.thumbnail(max_side, max_side)
@@ -295,6 +315,30 @@ mod tests {
             }
         }
         v
+    }
+
+    #[test]
+    fn a_stale_decode_gives_up_at_each_step() {
+        let d = std::env::temp_dir().join(format!("markise-decode-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("a.png");
+        image::RgbaImage::new(4, 4).save(&p).unwrap();
+        let src = p.to_str().unwrap();
+        let budget = MemBudget::new(DECODE_BUDGET);
+        let run = |after: usize| {
+            let asked = std::cell::Cell::new(0);
+            let stale = || {
+                asked.set(asked.get() + 1);
+                asked.get() > after
+            };
+            decode_unless(src, 16, DecodeLimits::default(), &budget, &stale).map(|i| i.size)
+        };
+        // before the file, before the pixels, before the conversion
+        for after in 0..3 {
+            assert_eq!(run(after), Err(DECODE_STALE.to_string()), "check {after}");
+        }
+        assert_eq!(run(3), Ok([4, 4]));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

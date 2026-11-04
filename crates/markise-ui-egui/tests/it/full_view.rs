@@ -525,6 +525,27 @@ fn a_downscaled_image_is_loaded_whole_and_zooms_past_its_pixels() {
     assert_eq!(text(&h), md);
 }
 
+/// Codex review of #175: opening and dismissing a large image repeatedly, then opening it once
+/// more, still brings the whole image.
+#[test]
+fn reopening_a_large_image_still_loads_it_whole() {
+    let md = "![pic](pic.png)\n";
+    let mut h = image_harness(md, [3000, 1000], "reopen");
+    let center = item_rect(&h, "![pic]").center();
+    let tools = image_tools(&mut h, center);
+    for _ in 0..4 {
+        click(&mut h, tools[0].center());
+        assert!(h.state().full_view().is_some());
+        key(&mut h, Key::Escape);
+        assert!(h.state().full_view().is_none());
+        h.hover_at(center);
+        h.run_steps(2);
+    }
+    click(&mut h, tools[0].center());
+    wait_full(&mut h, [3000, 1000]);
+    common::settle(&mut h);
+}
+
 #[test]
 fn an_image_that_failed_to_load_offers_no_view() {
     let md = "![gone](missing.png)\n\nafter\n";

@@ -8,14 +8,16 @@
 //!   are snapped to steps, so a gesture shapes the labels at a limited number of sizes (each size
 //!   fills the glyph atlas).
 //! - An image is drawn from the document's texture, which is downscaled for a large image
-//!   (`MAX_TEXTURE_SIDE`): the whole image is then decoded on a thread of its own and shown once
+//!   (`MAX_TEXTURE_SIDE`): the whole image is then decoded by one background worker ([`WholeImages`]: one decode at a
+//!   time, the latest request wins, a closed view's decode is abandoned) and shown once
 //!   the document's texture has too few pixels for the shown scale. One image point at scale 1 is
 //!   one image pixel, as in the document.
 //!
 //! Nothing here animates: an untouched view schedules no repaint.
 
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::{Mutex, MutexGuard};
 
 use egui::{
     Color32, ColorImage, Context, CornerRadius, Event, Key, MouseWheelSource, MouseWheelUnit, Pos2, Rect, Sense,
@@ -183,7 +185,7 @@ enum Content {
         /// The whole image, when the document's texture is smaller.
         full: Option<TextureHandle>,
         /// The decode of the whole image in progress.
-        decode: Option<Receiver<Result<ColorImage, String>>>,
+        decode: Option<WholeDecode>,
     },
 }
 
@@ -195,24 +197,151 @@ pub struct FullView {
     transform: ViewTransform,
 }
 
-/// Decodes `src` on its own thread (dropping the receiver abandons the result).
-fn decode_whole(ctx: &Context, src: String) -> Receiver<Result<ColorImage, String>> {
-    let (tx, rx) = channel();
-    // never above what the renderer takes (`load_texture` would panic)
-    let max_side = ctx.input(|i| i.max_texture_side) as u32;
-    let ctx = ctx.clone();
-    let spawned = std::thread::Builder::new()
-        .name("markise-full-image".into())
-        .spawn(move || {
-            let r = markise_blocks::decode(&src, max_side)
-                .map(|d| ColorImage::from_rgba_unmultiplied(d.pixels_size, &d.rgba));
-            let _published = crate::wake_track::publishing();
-            let _ = tx.send(r);
-            ctx.request_repaint();
+/// Decodes a source, giving up when the given check says the result is no longer wanted.
+type DecodeFn = dyn Fn(&str, u32, &dyn Fn() -> bool) -> Result<ColorImage, String> + Send + Sync;
+
+/// A decode waiting for the worker.
+struct WholeJob {
+    id: u64,
+    src: String,
+    max_side: u32,
+    tx: Sender<Result<ColorImage, String>>,
+    wake: Box<dyn FnOnce() + Send>,
+}
+
+#[derive(Default)]
+struct WholeState {
+    /// The request whose result is wanted (0: none).
+    wanted: u64,
+    last_id: u64,
+    pending: Option<WholeJob>,
+    /// The worker thread exists (it ends when nothing is pending).
+    running: bool,
+}
+
+struct WholeShared {
+    state: Mutex<WholeState>,
+    decode: Box<DecodeFn>,
+}
+
+impl WholeShared {
+    fn lock(&self) -> MutexGuard<'_, WholeState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn wanted(&self, id: u64) -> bool {
+        self.lock().wanted == id
+    }
+}
+
+/// The whole-image decoder of the full-window view: at most one decode runs, a new request
+/// replaces the one waiting and makes the running one stale, and a stale decode stops at its next
+/// step. Opening and dismissing a large image repeatedly therefore holds one image's memory.
+pub struct WholeImages(Arc<WholeShared>);
+
+impl Default for WholeImages {
+    fn default() -> Self {
+        Self::with_decoder(Box::new(|src, max_side, stale| {
+            let budget = markise_blocks::MemBudget::new(markise_blocks::DECODE_BUDGET);
+            let d = markise_blocks::decode_unless(src, max_side, Default::default(), &budget, stale)?;
+            if stale() {
+                return Err(markise_blocks::DECODE_STALE.into());
+            }
+            Ok(ColorImage::from_rgba_unmultiplied(d.pixels_size, &d.rgba))
+        }))
+    }
+}
+
+impl WholeImages {
+    fn with_decoder(decode: Box<DecodeFn>) -> Self {
+        WholeImages(Arc::new(WholeShared {
+            state: Mutex::default(),
+            decode,
+        }))
+    }
+
+    /// Asks for `src`; `wake` runs after a wanted result was sent. Replaces any earlier request.
+    fn request(&self, src: String, max_side: u32, wake: Box<dyn FnOnce() + Send>) -> WholeDecode {
+        let (tx, rx) = channel();
+        let mut st = self.0.lock();
+        st.last_id += 1;
+        let id = st.last_id;
+        st.wanted = id;
+        st.pending = Some(WholeJob {
+            id,
+            src,
+            max_side,
+            tx,
+            wake,
         });
-    // (not spawned: the sender is gone, the receiver reports it disconnected)
-    drop(spawned);
-    rx
+        if !st.running {
+            let shared = self.0.clone();
+            let spawned = std::thread::Builder::new()
+                .name("markise-whole-image".into())
+                .spawn(move || whole_worker(&shared));
+            if spawned.is_ok() {
+                st.running = true;
+            } else {
+                // (the sender goes with the job: the receiver reports it disconnected)
+                st.pending = None;
+            }
+        }
+        WholeDecode {
+            rx,
+            id,
+            shared: self.0.clone(),
+        }
+    }
+}
+
+/// Lets the next request start a worker if this one dies in a decode.
+struct WorkerAlive<'a>(&'a WholeShared);
+
+impl Drop for WorkerAlive<'_> {
+    fn drop(&mut self) {
+        self.0.lock().running = false;
+    }
+}
+
+fn whole_worker(shared: &WholeShared) {
+    let alive = WorkerAlive(shared);
+    loop {
+        let job = {
+            let mut st = shared.lock();
+            match st.pending.take() {
+                Some(j) => j,
+                None => {
+                    // (decided under the lock: a request after this starts a new worker)
+                    st.running = false;
+                    std::mem::forget(alive);
+                    return;
+                }
+            }
+        };
+        let r = (shared.decode)(&job.src, job.max_side, &|| !shared.wanted(job.id));
+        if shared.wanted(job.id) {
+            let _published = crate::wake_track::publishing();
+            let _ = job.tx.send(r);
+            (job.wake)();
+        }
+    }
+}
+
+/// One request of [`WholeImages`]; dropping it (the view closed) abandons the decode.
+pub struct WholeDecode {
+    rx: Receiver<Result<ColorImage, String>>,
+    id: u64,
+    shared: Arc<WholeShared>,
+}
+
+impl Drop for WholeDecode {
+    fn drop(&mut self) {
+        let mut st = self.shared.lock();
+        if st.wanted == self.id {
+            st.wanted = 0;
+            st.pending = None;
+        }
+    }
 }
 
 impl MarkiseApp {
@@ -289,7 +418,13 @@ impl MarkiseApp {
                 let content = Content::Image {
                     preview,
                     full: None,
-                    decode: (!whole).then(|| decode_whole(ctx, src)),
+                    decode: (!whole).then(|| {
+                        // never above what the renderer takes (`load_texture` would panic)
+                        let max_side = ctx.input(|i| i.max_texture_side) as u32;
+                        let c = ctx.clone();
+                        self.whole_images
+                            .request(src, max_side, Box::new(move || c.request_repaint()))
+                    }),
                 };
                 (content, vec2(size[0].max(1) as f32, size[1].max(1) as f32))
             }
@@ -361,9 +496,9 @@ impl MarkiseApp {
         // ---- the whole image arrived
         let mut failed = false;
         if let Content::Image { preview, full, decode } = &mut v.content
-            && let Some(rx) = decode
+            && let Some(d) = decode
         {
-            match rx.try_recv() {
+            match d.rx.try_recv() {
                 Err(TryRecvError::Empty) => {}
                 Ok(Ok(img)) => {
                     *full = Some(ctx.load_texture("markise-full-view", img, TextureOptions::LINEAR));
@@ -529,6 +664,87 @@ fn trackpad_scroll(events: &[Event]) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// A decoder whose runs wait for the gate, recording what ran and how many at once.
+    #[derive(Default)]
+    struct Probe {
+        ran: Mutex<Vec<String>>,
+        now: AtomicUsize,
+        most: AtomicUsize,
+        open: AtomicUsize,
+        stale_seen: AtomicUsize,
+    }
+
+    fn probed() -> (WholeImages, Arc<Probe>) {
+        let p = Arc::new(Probe::default());
+        let q = p.clone();
+        let w = WholeImages::with_decoder(Box::new(move |src, _, stale| {
+            q.ran.lock().unwrap().push(src.to_string());
+            let n = q.now.fetch_add(1, Ordering::SeqCst) + 1;
+            q.most.fetch_max(n, Ordering::SeqCst);
+            while q.open.load(Ordering::SeqCst) == 0 {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            q.now.fetch_sub(1, Ordering::SeqCst);
+            if stale() {
+                q.stale_seen.fetch_add(1, Ordering::SeqCst);
+                return Err("stale".into());
+            }
+            Ok(ColorImage::new([1, 1], vec![Color32::WHITE]))
+        }));
+        (w, p)
+    }
+
+    fn until(what: &str, f: impl Fn() -> bool) {
+        let t = Instant::now();
+        while !f() {
+            assert!(t.elapsed() < Duration::from_secs(60), "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn req(w: &WholeImages, src: &str) -> WholeDecode {
+        w.request(src.into(), 16, Box::new(|| {}))
+    }
+
+    /// Codex review of #175: opening and dismissing a large image repeatedly must not pile up
+    /// decodes: one runs, the requests in between are never decoded, only the latest answers.
+    #[test]
+    fn one_decode_runs_and_the_latest_request_wins() {
+        let (w, p) = probed();
+        let first = req(&w, "first");
+        until("the first decode started", || p.now.load(Ordering::SeqCst) == 1);
+        for n in 0..20 {
+            drop(req(&w, &format!("dismissed {n}")));
+        }
+        let last = req(&w, "last");
+        p.open.store(1, Ordering::SeqCst);
+        let r = last
+            .rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the latest answers");
+        assert!(r.is_ok());
+        assert_eq!(*p.ran.lock().unwrap(), ["first", "last"], "those in between never ran");
+        assert_eq!(p.most.load(Ordering::SeqCst), 1, "one at a time");
+        assert_eq!(p.stale_seen.load(Ordering::SeqCst), 1, "the first gave up");
+        assert!(first.rx.try_recv().is_err(), "a stale result is not delivered");
+    }
+
+    #[test]
+    fn a_closed_view_abandons_its_decode_and_the_worker_ends() {
+        let (w, p) = probed();
+        let d = req(&w, "running");
+        until("started", || p.now.load(Ordering::SeqCst) == 1);
+        drop(d);
+        p.open.store(1, Ordering::SeqCst);
+        until("the stale decode stopped", || p.stale_seen.load(Ordering::SeqCst) == 1);
+        until("the worker ended", || !w.0.lock().running);
+        // a later request starts a worker again
+        let again = req(&w, "again");
+        assert!(again.rx.recv_timeout(Duration::from_secs(60)).unwrap().is_ok());
+    }
 
     fn t() -> ViewTransform {
         ViewTransform::new(vec2(2000.0, 400.0), vec2(1000.0, 700.0))
