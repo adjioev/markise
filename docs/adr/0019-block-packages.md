@@ -10,7 +10,7 @@ belongs to the site and must reach Markise as data, so that Markise gains no voc
 site. It also has to arrive safely: a document can come from anyone, and a package holds code a
 later phase will run in an isolated helper.
 
-This phase validates, indexes and binds packages. It changes nothing in how a document renders
+This phase validates, indexes and binds packages and asks for consent. It changes nothing in how a document renders
 and runs nothing from a package. Script and style files are opaque here.
 
 ## Decision
@@ -89,13 +89,126 @@ stay simple cards.
 | A label, description or keyword text | 4 KiB |
 | The Markdown of a preset | 64 KiB |
 
-JSON nesting is bounded by the parser's recursion limit, which is an error, not a crash.
+| The archive, compressed | 32 MiB |
+| All files, unpacked | 64 MiB |
+| One file, unpacked | 32 MiB |
+| Entries in the archive | 4096 |
+| A path | 1024 bytes, 16 levels, 255 bytes per name |
+| The binding file | 64 KiB |
+
+JSON nesting is bounded by the parser's recursion limit, which is an error, not a crash. The size
+limits are enforced while decompressing, so sizes stated in an archive are not trusted.
+
+### Binding
+
+A document finds its package through `blocks.config.json`, in its folder or in a folder above it:
+
+```json
+{ "library": "sample", "version": "1.2.0",
+  "source": "blocks/sample-1.2.0.tar.gz",
+  "sha256": "<64 hexadecimal digits>" }
+```
+
+- **Discovery** looks at one file name per folder, from the document's folder up to and including
+  the home folder (for a document outside it, up to the root; 64 levels at most). It lists no
+  folder. The nearest binding wins, also when it is broken: a broken binding is an error to show,
+  not a reason to use one farther up.
+- **`source`** is a `.tar.gz` archive given by a relative path below the binding's folder. Refused:
+  absolute paths, `~`, `..`, backslashes, colons, control characters and names Windows reserves.
+  With links resolved, the file must still be inside the folder. A link file as the binding is
+  refused too.
+- **No network.** A `source` with a scheme is refused with a message. A later phase can add one;
+  the pin below is what would make that safe.
+- **`sha256` pins the archive.** It is hashed and validated from one read of its bytes, so nothing
+  can change in between. `library` and `version` must equal the manifest's, so that a question
+  never names something the package is not.
+- **When it is looked up:** on a worker thread, when the document's file changes (open, Save As).
+  An edit of the binding takes effect the next time the document is opened. No file is watched.
+- The throwaway prototype also read a `blocks:` key in front matter and accepted folders as a
+  source. Neither is adopted: a document should not choose its own package, and a folder has no
+  hash to pin.
+
+### Archive
+
+An archive may hold regular files and folders only. Any link, device or FIFO entry, or unsafe path
+refuses it whole. So do two names, of files or of folders on the way to them, that differ only by
+case or Unicode form, and a name used for both a file and a folder: a disk could make those one
+entry, and the files read back would not be the files accepted. It is read into memory, and nothing is written,
+until the user has accepted it. The `tar` crate is used to read entries only, never to unpack.
+
+### Store
+
+Per user, in the config folder, `<config>/markise/block-packages/`:
+
+```text
+trust.json                         what the user accepted
+packages/<sha256>/files/...        the unpacked files, by archive hash
+```
+
+A package appears whole: it is unpacked in a staging folder and renamed into place. Files are
+created new, without executable bits from the archive. After that the package works without its
+archive (offline, or a removed file). An install and every removal refuse a `packages` folder that is
+a link, so they cannot act outside the store.
+
+Known gap: a crash during an install leaves a `.staging-*` folder behind. It is harmless, since
+nothing reads it, and it is not cleaned up: no age tells a leftover from the live folder of a
+suspended install, and removing one is not worth that risk.
+
+Hashes reach the store as a validated type (64 hexadecimal digits, lowercase), so no store operation
+can name another folder. A record in `trust.json` with any other value is dropped.
+
+Everything next to a package can be replaced along with it, so nothing there is trusted. On every
+load the unpacked files are hashed into one digest of their paths and contents, and compared with
+the digest held in the consent record. A difference, an added or removed file, or anything on the
+way that is not a real folder or regular file (the `files` root included) counts as damage: the
+package is removed and unpacked again from a verified source, or the binding reports an error. A
+self-consistent replacement of the cache therefore does not inherit consent, as long as `trust.json`
+itself is intact. Someone who can rewrite that file can also accept any package; the store does not
+defend against code already running as the user.
+
+The config folder rather than the OS cache folder holds this, since an OS cache can be purged under
+an author who works offline. Tests and measurements without a config folder look nothing up at all.
+
+### Trust
+
+Consent is recorded against the package's identity and hash: `library`, `version`, `sha256`, and
+`files_digest`, the digest of the files that archive unpacks to.
+
+- **Nothing is written before yes.** A document can only cause reads of its binding and archive,
+  off the UI thread. The archive is validated before the question, so a broken package shows its
+  error rather than a question.
+- **A changed hash asks again,** whatever the version says. The question then says it differs from
+  the version accepted before. An older accepted hash stays accepted, for folders still bound to it.
+- **Consent follows the hash, not the folder.** A second folder binding the same bytes does not ask
+  again: the user decided on those bytes. Its documents are its own, and a later phase hands a
+  renderer only the block at hand, without access to files or the network.
+- **Not Now** holds for the session and is not stored. The status bar offers the question again.
+- **Stop Using This Package** removes the record and the unpacked files.
+- **A hash is not a publisher.** It says these are the bytes the binding names, not who made them.
+  Signatures are left out for now; consent is about trusting where a folder came from.
+- A missing or damaged `trust.json` grants nothing and leads to a question. A record from a newer
+  Markise is neither used nor overwritten. Two running copies writing at once can lose a record,
+  which at worst asks again.
+- **Accepted limit: the source path can race.** `source` is checked with links resolved and then
+  read by that path, so a link swapped in between could redirect the read outside the folder. This
+  stays: the bytes read must still match the pinned hash, so the swap can only cause a read of a
+  file that is identical to the pinned archive or fail. Traversal through directory handles would
+  close it at a cost across platforms that this does not justify.
+- An archive changed under an unchanged pin is an error when it is read. While the cache holds that
+  hash the archive is not read at all: the pin is what counts, and the cache already matches it.
+
+### Cost for other documents
+
+A document with no binding costs one short-lived thread and a few `lstat` calls when it is opened,
+and nothing per frame beyond comparing a path. Neither wakes the UI. All file access is off the UI
+thread.
 
 ### Crate
 
-`markise-package` (L2) holds this. It depends on no layer above and no UI toolkit. `markise-blocks`
+`markise-package` (L2) holds all of this. It depends on no layer above and no UI toolkit. `markise-blocks`
 stays what it is, the renderers of code, math, diagrams and images: a package is not a renderer.
 The index, `PackageIndex`, answers by block name with its schema, optional view and palette entry.
+`resolve` goes from a document path to a question, a ready package or a problem; `accept` installs.
 
 ## Consequences
 
@@ -103,3 +216,5 @@ The index, `PackageIndex`, answers by block name with its schema, optional view 
   wants to say travels as package data.
 - A new field type or view kind is a Markise change. That is deliberate.
 - A package made for a later format shows a clear message and leaves documents as they are.
+- New dependency: `tar` (with `filetime`), both MIT or Apache-2.0 and pure Rust. `sha2` and `flate2`
+  were in the tree already.

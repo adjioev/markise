@@ -1649,6 +1649,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f4beca3cb2444e3304ac30843cc091f44ed58932353cd492ce740067bfce6b12"
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2881,7 +2891,13 @@ dependencies = [
 name = "markise-package"
 version = "0.1.0-beta.1"
 dependencies = [
+ "flate2",
+ "markise-doc",
  "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -4964,6 +4980,16 @@ dependencies = [
  "serde_derive",
  "thiserror 2.0.21",
  "walkdir",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
 ]
 
 [[package]]
