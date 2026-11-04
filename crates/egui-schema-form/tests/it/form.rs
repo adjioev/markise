@@ -587,3 +587,91 @@ fn a_checkbox_field_still_answers_to_mouse_and_keyboard() {
     h.run();
     assert_eq!(value_of(&h, "on"), json!(false));
 }
+
+fn long_text() -> String {
+    "A rather long piece of text that cannot fit on one line of a narrow form at all ".repeat(4)
+}
+
+fn line_field_harness(text: &str) -> egui_kittest::Harness<'static, crate::common::S> {
+    let schema = json!({"type": "object", "properties": {"title": {"type": "string"}}});
+    let hints = json!({"version": 2, "fields": {"title": {"label": "Title"}}});
+    harness_with(&schema, &hints, json!({"title": text}))
+}
+
+#[test]
+fn a_one_line_field_grows_with_its_text() {
+    let mut short = line_field_harness("Short");
+    short.run();
+    let low = short
+        .get_by_label("Title")
+        .accesskit_node()
+        .bounding_box()
+        .expect("box")
+        .height();
+    let mut long = line_field_harness(&long_text());
+    long.run();
+    let high = long
+        .get_by_label("Title")
+        .accesskit_node()
+        .bounding_box()
+        .expect("box")
+        .height();
+    assert!(high > low * 2.0, "{low} {high}");
+}
+
+#[test]
+fn enter_in_a_one_line_field_keeps_it_one_line_and_leaves_the_field() {
+    let mut h = line_field_harness("Short");
+    h.run();
+    h.get_by_label("Title").click();
+    h.run();
+    h.key_press(Key::Enter);
+    h.run();
+    assert_eq!(value_of(&h, "title"), json!("Short"), "no line break");
+    assert!(
+        !h.get_by_label("Title").accesskit_node().is_focused(),
+        "as a one-line field does"
+    );
+}
+
+#[test]
+fn a_paste_into_a_one_line_field_has_no_line_breaks() {
+    let mut h = line_field_harness("Short");
+    h.run();
+    h.get_by_label("Title").click();
+    h.run();
+    h.event(Event::Paste(" one\ntwo\r\nthree".into()));
+    h.run();
+    assert_eq!(value_of(&h, "title"), json!("Short one two  three"));
+}
+
+#[test]
+fn a_long_row_wraps_and_keeps_its_caret_through_a_reorder() {
+    let long = long_text();
+    let v = json!({"title": "", "items": [long, "two"]});
+    let mut h = harness_with(&schema(), &hints("single"), v);
+    h.run();
+    h.get_by_label("Items 1").click();
+    h.run();
+    h.get_by_label("Items 1").type_text("X");
+    h.run();
+    h.key_press_modifiers(Modifiers::ALT, Key::ArrowDown);
+    h.run();
+    h.get_by_label("Items 2").type_text("Y");
+    h.run();
+    assert!(texts(&h, "items")[1].contains('Y'), "the caret stayed in its row");
+    assert!(texts(&h, "items")[1].contains('X'));
+}
+
+#[test]
+fn a_long_checkbox_label_stays_inside_a_narrow_form() {
+    let long = "A checkbox label far too long to fit on one line of this narrow form";
+    let schema = json!({"type": "object", "properties": {"on": {"type": "boolean"}}});
+    let hints = json!({"version": 2, "fields": {"on": {"label": long}}});
+    let mut h = harness_with(&schema, &hints, json!({"on": false}));
+    h.set_size(egui::vec2(160.0, 400.0));
+    h.run();
+    let b = h.get_by_label(long).accesskit_node().bounding_box().expect("box");
+    assert!(b.x1 <= 160.0, "{b:?}");
+    assert!(b.height() > 30.0, "it wrapped: {b:?}");
+}

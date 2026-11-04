@@ -151,6 +151,9 @@ any site's vocabulary lives here.
   radio buttons and checkboxes, accent-soft fill on marked rows, framed sub-cards, quiet glyph buttons,
   and small muted labels close to their field with a clear gap between fields. All in points, so the
   host's zoom scales them.
+- **Long text.** A field of one value (a heading, an answer, a list item) wraps on as many lines as its
+  text takes, and its height follows. It stays one value: Enter ends the input as in a one-line field, and a
+  pasted line break becomes a space.
 - **Colours.** `Style` holds `fg`, `muted`, `field`, `line`, `hover`, `accent`, `accent_soft`, `danger`
   and `on_accent`. A host gives its own (`with_style`, `set_style`); otherwise the form takes the light
   or dark default for the `Ui`'s visuals each frame. Markise's panel takes the default for the theme

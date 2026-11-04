@@ -323,6 +323,28 @@ fn the_command_shortcuts_save_and_close_only_the_form() {
 }
 
 #[test]
+fn the_footers_note_going_away_does_not_move_the_focus_to_save() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    open_form(&mut h, "tip");
+    h.get_by_label("Body").click();
+    common::run(&mut h);
+    h.get_by_label("Body").type_text("!");
+    common::run(&mut h);
+    h.get_by_label("Cancel").focus();
+    common::run(&mut h);
+    assert!(h.query_by_label_contains("Esc cancels").is_some(), "the note is there");
+    // narrow enough that the note in front of the buttons goes away
+    h.set_size(egui::vec2(520.0, 1400.0));
+    common::run(&mut h);
+    assert!(h.query_by_label_contains("Esc cancels").is_none(), "the note is gone");
+    h.key_press(Key::Space);
+    common::run(&mut h);
+    assert!(h.state().block_form().is_none(), "Cancel took it");
+    assert_eq!(text(&h), DOC, "and it was not Save");
+}
+
+#[test]
 fn the_keyboard_opens_the_form_at_the_caret_and_lands_in_it() {
     let f = Fixture::new(DOC);
     let mut h = f.ready();
