@@ -59,14 +59,16 @@ first language there is.
 **Palette** (`editor/palette.json`, required): optional `format` (`1`), `groups` (`id`, `label`,
 `blocks`), `blocks` (name to `description` and `icon`), `presets` (`id`, `block`, `label`,
 `keywords`, `markdown`). A preset's Markdown must open the block it names. Any other key of a preset
-is kept untouched for later phases.
+is kept untouched for later phases; the form reads a few of them (ADR 0020, icon choices).
 
 **Views** (`editor/views.json`, optional): block name to `kind`, one of `callout`, `card`,
 `choices`, `media`, with optional `accent` and `icon`. Other keys are kept. A block without a view
 stays what it is today, a simple card. An unknown kind is an error.
 
 **Icons and accents are names**, ASCII tokens like `library`. Only the package gives them meaning;
-the token form means later code can use one as a key or a file stem without another check.
+the token form means later code can use one as a key or a file stem without another check. The one
+exception is an answer's `icon` in a preset for icon choices: a path of a file in the package, which
+goes through `InstalledPackage::asset_path` like any other.
 
 Every reference is checked: a palette group, palette block, preset or view naming a block outside
 `blocks` is an error.

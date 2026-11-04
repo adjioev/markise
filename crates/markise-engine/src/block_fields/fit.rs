@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use schema_form_core::{Control, FieldError, FieldSpec, FormSpec};
+use schema_form_core::{ChoiceShape, Control, FieldError, FieldSpec, FormSpec};
 use serde_json::Value;
 
 use super::{BlockFields, FieldDecl, FieldKind};
@@ -54,6 +54,10 @@ fn kind_of(f: &FieldSpec) -> Option<FieldKind> {
             Control::Text { .. } => Some(FieldKind::Text),
             Control::StringList { .. } => Some(FieldKind::List),
             Control::Choices { .. } => Some(FieldKind::Choices),
+            Control::ChoiceButtons {
+                shape: ChoiceShape::Marks,
+                ..
+            } => Some(FieldKind::Choices),
             Control::Images => Some(FieldKind::Image),
             _ => None,
         },
