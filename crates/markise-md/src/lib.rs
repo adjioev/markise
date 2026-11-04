@@ -13,6 +13,7 @@
 //! - Inline content is parsed lazily, per block ([`inline`]).
 
 pub mod block;
+mod directive;
 mod edit;
 pub mod format;
 pub mod frontmatter;
@@ -39,6 +40,7 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 pub use block::{AlertKind, Align, Block, BlockKind, MathDelim};
+pub use directive::{DirectiveView, MAX_DIRECTIVE_DEPTH};
 pub use edit::inline_fmt::{EXACT_QUERY_LIMIT, FORMAT_SELECTION_LIMIT};
 pub use edit::tables::{INSERT_TABLE_DEFAULT, INSERT_TABLE_MAX};
 pub use format::MarkdownFormat;
@@ -71,6 +73,8 @@ pub struct Document {
     opts: ParseOptions,
     /// Literal-line hints (ADR 0006 §2.6): editor-only; hinted lines parse as paragraph text.
     hints: HintSet,
+    /// The marker lines of fenced directives, paired document-wide (ADR 0018).
+    directives: directive::DirectiveIndex,
 }
 
 /// What an [`Document::edit`] changed in the top-level block list.
@@ -231,7 +235,7 @@ impl Document {
         let eol = LineEnding::detect(&text).unwrap_or(default_eol);
         let hints = HintSet::new();
         let out = parser::parse_blocks(&text, &opts, parser::bom_len(&text), None, &hints);
-        Document {
+        let mut doc = Document {
             text,
             top: TopBlocks::from_abs(out.blocks),
             abs: OnceLock::new(),
@@ -240,7 +244,10 @@ impl Document {
             eol,
             opts,
             hints,
-        }
+            directives: directive::DirectiveIndex::from_raw(out.markers),
+        };
+        doc.label_all_markers();
+        doc
     }
 
     /// A new, empty document. `prefer_final_newline` is applied by [`Document::serialize`]
@@ -371,6 +378,8 @@ impl Document {
         self.abs = OnceLock::new();
         self.ctx = OnceLock::new();
         self.failed_openers = out.failed_openers;
+        self.directives = directive::DirectiveIndex::from_raw(out.markers);
+        self.label_all_markers();
     }
 
     /// Re-parses everything with new options (e.g. a syntax preference changed).
@@ -677,6 +686,7 @@ impl Document {
         };
         let new_count = out.blocks.len();
         let replaced = resume_idx - start_idx;
+        let markers = out.markers;
         // Dependencies (ADR 0006 §7.4): a definition among the replaced or the new blocks
         // may change reference resolution; a new first block may change the resource root.
         // (a superset of the labels whose definition changed: every definition among the
@@ -716,14 +726,21 @@ impl Document {
         fo.dedup();
         self.failed_openers = fo;
 
-        EditResult {
+        let mut r = EditResult {
             new_blocks: start_idx..start_idx + new_count,
             replaced,
             reparsed: from..reparsed_end,
             deps,
             inline_leaf: None,
             nested_from: None,
-        }
+        };
+        let old_end = if out.stopped_at.is_some() {
+            old_resume
+        } else {
+            usize::MAX
+        };
+        self.splice_directives(from..old_end, markers, delta, &mut r);
+        r
     }
 
     /// The top-level block index and leaf start of an edit eligible for the intra-line fast
@@ -856,6 +873,8 @@ impl Document {
             b.stretch(range.end - origin, delta);
         }
         self.top.shift_after(top, delta);
+        // nothing here is a marker: the rule keeps every marker line out of the fast path
+        self.directives.shift_from(range.end, delta);
         for f in &mut self.failed_openers {
             if *f > range.start {
                 *f = (*f as isize + delta) as usize;
@@ -1024,7 +1043,7 @@ pub fn parse(text: &str) -> Document {
 /// Compact textual dump of the block tree, for tests and debugging.
 pub fn debug_tree(doc: &Document) -> String {
     let mut out = String::new();
-    for b in doc.blocks() {
+    for b in &doc.tree() {
         b.walk(&mut |b, depth| {
             let name = match &b.kind {
                 BlockKind::Paragraph => "para".to_string(),
@@ -1052,6 +1071,10 @@ pub fn debug_tree(doc: &Document) -> String {
                 BlockKind::Toc => "toc".into(),
                 BlockKind::FootnoteDef { label } => format!("fn[{}]", label.slice(doc.text())),
                 BlockKind::LinkRefDef { label, .. } => format!("def[{}]", label.slice(doc.text())),
+                BlockKind::Directive { name, args, .. } => {
+                    format!("directive[{}|{}]", name.slice(doc.text()), args.slice(doc.text()))
+                }
+                BlockKind::DirectiveOpen { .. } | BlockKind::DirectiveClose { .. } => "marker".into(),
             };
             out.push_str(&"  ".repeat(depth));
             out.push_str(&name);

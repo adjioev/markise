@@ -334,7 +334,8 @@ impl Builder<'_> {
     fn block(&mut self, b: &Block, out: &mut Vec<ExBlock>) {
         let text = self.text;
         match &b.kind {
-            BlockKind::Paragraph => {
+            // a marker line exports as the text it is until exporters know directives
+            BlockKind::Paragraph | BlockKind::DirectiveOpen { .. } | BlockKind::DirectiveClose { .. } => {
                 let c = self.inline_content(&b.content(text));
                 if !c.is_empty() {
                     out.push(ExBlock::Paragraph(c));
@@ -459,6 +460,8 @@ impl Builder<'_> {
             }
             BlockKind::FrontMatter { .. } | BlockKind::LinkRefDef { .. } => {}
             BlockKind::Toc => out.push(ExBlock::Toc),
+            // only in `Document::tree`, which the exporter does not read
+            BlockKind::Directive { .. } => {}
             BlockKind::FootnoteDef { label } => {
                 let key = markise_md::inline::normalize_label(label.slice(text));
                 let n = self.footnote_numbers.get(&key).copied().unwrap_or(0);

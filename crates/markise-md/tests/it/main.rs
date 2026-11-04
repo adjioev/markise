@@ -9,6 +9,7 @@ mod block_owner;
 mod code_fence;
 mod critic;
 mod critic_edit;
+mod directive;
 mod edit_format;
 mod fastpath;
 mod hints;

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 18973d0c438a58caba0f2fecee877f4fa6b7adb002b7566d44a768c1224da4fc # shrinks to s = ":::a\n::: not\n::: not\n:::a\n:::a\n:::a\n:::a\n:::b x y\n:::a\n   :::\n:::a\n:::b x y\n:::a\n::: not\n:::b x y\n:::a\n:::a\n:::a\n:::a\n:::b x y\n:::a\n:::a\n:::a\n:::a\n:::b x y\n:::a\n", ops = [(Index(5693439528922701117), 0, ":::a", false), (Index(0), 0, ":::a", false), (Index(0), 0, ":::a", false)]
