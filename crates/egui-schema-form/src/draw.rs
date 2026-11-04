@@ -37,6 +37,8 @@ pub(crate) struct Cx<'a> {
     errors: &'a [FieldError],
     pub texts: &'a crate::Texts,
     pub style: Style,
+    /// An IME composition is going on in the form.
+    composing: bool,
     focus_rows: std::collections::HashMap<Id, Id>,
     /// Every text editor of this frame: what a composition can belong to.
     editors: HashSet<Id>,
@@ -143,6 +145,7 @@ impl SchemaForm {
             errors: &self.errors,
             texts: &self.texts,
             style: self.style.unwrap_or_else(|| Style::for_visuals(ui.visuals())),
+            composing: self.composing.is_some(),
             focus_rows: std::collections::HashMap::new(),
             editors: HashSet::new(),
             focus_row: &mut self.focus_row,
@@ -338,13 +341,24 @@ pub(crate) fn text_editor(
         let outer = egui::Rect::from_min_size(out.inner_rect.min, egui::vec2(out.inner_rect.width(), h));
         (out.inner, outer)
     } else {
+        // one value, shown on as many lines as it takes: a long heading or answer stays readable
+        let had_breaks = s.contains(['\r', '\n']);
         let r = ui.add(
-            TextEdit::singleline(s)
+            TextEdit::multiline(s)
                 .id(editor_id)
                 .frame(frame)
                 .text_color(st.fg)
-                .desired_width(width),
+                .desired_width(width)
+                .desired_rows(1)
+                .return_key(None),
         );
+        // what a one-line field does: Enter ends the input, and a pasted line break is a space
+        if r.changed() && !had_breaks && s.contains(['\r', '\n']) {
+            *s = s.replace(['\r', '\n'], " ");
+        }
+        if r.has_focus() && !cx.composing && ui.input(enter_pressed) {
+            ui.memory_mut(|m| m.surrender_focus(r.id));
+        }
         let outer = r.rect;
         (r, outer)
     };
@@ -356,6 +370,13 @@ pub(crate) fn text_editor(
     cx.editors.insert(r.id);
     cx.track_control(&r);
     r
+}
+
+fn enter_pressed(i: &egui::InputState) -> bool {
+    i.events.iter().any(|e| {
+        matches!(e, egui::Event::Key { key: Key::Enter, pressed: true, modifiers, .. }
+            if modifiers.matches_logically(Modifiers::NONE))
+    })
 }
 
 fn new_row(c: &Control) -> Value {

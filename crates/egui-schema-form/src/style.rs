@@ -233,9 +233,10 @@ pub(crate) fn mark_control(ui: &mut Ui, round: bool, on: bool, enabled: bool, na
 
 /// A checkbox with its label beside it, the whole of it taking the click.
 pub(crate) fn labelled_checkbox(ui: &mut Ui, on: bool, label: &str, s: Style) -> Response {
+    let room = (ui.available_width() - 24.0).max(1.0);
     let g = ui
         .painter()
-        .layout_no_wrap(label.to_string(), FontId::proportional(14.0), s.fg);
+        .layout(label.to_string(), FontId::proportional(14.0), s.fg, room);
     let size = vec2(24.0 + g.size().x, g.size().y.max(20.0));
     let r = ui.allocate_response(size, Sense::click());
     r.widget_info(|| WidgetInfo::selected(Role::CheckBox, true, on, label));

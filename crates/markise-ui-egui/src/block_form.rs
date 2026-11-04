@@ -488,12 +488,17 @@ impl OpenForm {
             } else {
                 ui.add_space(room.max(0.0));
             }
-            if egui_schema_form::button(ui, "Cancel", false, true, st).clicked() {
-                action = Some(PanelAction::Cancel);
-            }
-            if egui_schema_form::button(ui, "Save", true, can_save, st).clicked() {
-                action = Some(PanelAction::Save);
-            }
+            // ids of their own: the note before them comes and goes with the width, and the
+            // focus must stay on the button it is on
+            let mut footer = |ui: &mut Ui, label: &str, primary: bool, enabled: bool, then: PanelAction| {
+                let scope = UiBuilder::new().scope_id(egui::Id::unique(("markise-block-form-button", label)));
+                let r = ui.scope_builder(scope, |ui| egui_schema_form::button(ui, label, primary, enabled, st));
+                if r.inner.clicked() {
+                    action = Some(then);
+                }
+            };
+            footer(ui, "Cancel", false, true, PanelAction::Cancel);
+            footer(ui, "Save", true, can_save, PanelAction::Save);
         });
         ui.advance_cursor_after_rect(full);
         self.had_focus = self.is_focused(&ctx);
