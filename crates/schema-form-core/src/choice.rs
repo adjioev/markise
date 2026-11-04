@@ -127,7 +127,12 @@ pub fn write_selected(shape: ChoiceShape, options: &[ChoiceOption], selected: &[
         let at = rows.iter().position(later).unwrap_or(rows.len());
         match shape {
             ChoiceShape::Strings if selected[i] => rows.insert(at, json!(o.value)),
-            ChoiceShape::Strings => rows.retain(|r| r.as_str() != Some(&o.value)),
+            // the option's own row: a second one stays until it is removed (`unknown_rows`)
+            ChoiceShape::Strings => {
+                if let Some(row) = rows.iter().position(|r| r.as_str() == Some(&o.value)) {
+                    rows.remove(row);
+                }
+            }
             _ => match row_of(rows, &o.value) {
                 Some(row) => {
                     if let Some(r) = rows[row]

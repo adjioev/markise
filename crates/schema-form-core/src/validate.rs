@@ -178,7 +178,8 @@ fn check_value(rule: &ValueRule, v: &Value, path: &str, in_item: bool, out: &mut
     match v {
         Value::String(s) if rule.json_type == JsonType::String => {
             check_string(s, &rule.limits, path, out);
-            if rule.one_of.as_ref().is_some_and(|o| !s.is_empty() && !o.contains(s)) {
+            // an empty field never gets here: check_prop lets it pass; an empty entry is a value
+            if rule.one_of.as_ref().is_some_and(|o| !o.contains(s)) {
                 out.push(FieldError {
                     path: path.to_string(),
                     kind: ErrorKind::NotAnOption,
@@ -250,26 +251,33 @@ fn check_choices(a: &[Value], rule: CorrectRule, path: &str, out: &mut Vec<Field
     }
 }
 
-/// Answers must be options, and an exclusive option stands alone among what is selected. An
-/// array of strings holds what is selected; of answers, those marked.
+/// Answers must be options, a second row of one is not its option, and an exclusive option stands
+/// alone among what is selected. An array of strings holds what is selected; of answers, those
+/// marked.
 fn check_options(a: &[Value], options: &OptionsRule, path: &str, out: &mut Vec<FieldError>) {
+    let mut seen: HashSet<&str> = HashSet::with_capacity(a.len());
     let mut selected = Vec::with_capacity(a.len());
     for (i, e) in a.iter().enumerate() {
-        match e {
-            Value::String(s) => selected.push(s.as_str()),
-            Value::Object(o) => {
-                let text = o.get("text").and_then(Value::as_str).unwrap_or("");
-                if !options.values.iter().any(|v| v == text) {
-                    out.push(FieldError {
-                        path: join(path, i),
-                        kind: ErrorKind::NotAnOption,
-                    });
-                }
-                if o.get("correct") == Some(&Value::Bool(true)) {
-                    selected.push(text);
-                }
-            }
-            _ => {}
+        let (value, marked, answer) = match e {
+            Value::String(s) => (s.as_str(), true, false),
+            Value::Object(o) => (
+                o.get("text").and_then(Value::as_str).unwrap_or(""),
+                o.get("correct") == Some(&Value::Bool(true)),
+                true,
+            ),
+            _ => continue,
+        };
+        let known = options.values.iter().any(|v| v == value);
+        let first = seen.insert(value);
+        // a string outside the options has its reason from the `enum` already
+        if (known && !first) || (answer && !known) {
+            out.push(FieldError {
+                path: join(path, i),
+                kind: ErrorKind::NotAnOption,
+            });
+        }
+        if marked && first {
+            selected.push(value);
         }
     }
     if selected.len() > 1
