@@ -12,9 +12,11 @@ mod encode;
 mod escape;
 mod fit;
 mod identity;
+mod slots;
 mod values;
 
 pub use fit::{BlockFit, decls_from_spec};
+pub use slots::{Refused, Slot, SlotAt, SlotCaret, SlotEdit};
 
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -113,6 +115,11 @@ pub enum FieldEdit {
         field: String,
         text: String,
     },
+    /// Empties a heading and keeps it in the source, with its marks and its id: it has a place
+    /// for the caret, and the text typed next goes there.
+    ClearHeading {
+        field: String,
+    },
     /// A list item's or an answer's text.
     SetItemText {
         field: String,
@@ -198,6 +205,10 @@ pub struct BlockFields {
     fields: Vec<Field>,
     /// The regions of the block in source order.
     chunks: Vec<decode::Chunk>,
+    /// What each body block parses as, in order, and which field took it.
+    shapes: Vec<(decode::Shape, Option<usize>)>,
+    /// What stands below the body blocks, in order, apart from paragraphs and list items.
+    nested: Vec<std::mem::Discriminant<markise_md::BlockKind>>,
     next_item: u32,
     /// Anchors removed through this model and its predecessors: never given out again.
     retired: BTreeSet<String>,
@@ -291,6 +302,25 @@ impl BlockFields {
             .map_err(FieldsError::Edit)?;
         out.fields.base = self.base;
         Ok(out)
+    }
+
+    /// Whether the two read as the same block, apart from the text in its fields.
+    pub fn same_structure(&self, other: &BlockFields) -> bool {
+        self.name() == other.name()
+            && self.args() == other.args()
+            && self.structure() == other.structure()
+            && self.nested == other.nested
+    }
+
+    /// What the body parses as, apart from how many paragraphs a text field has.
+    fn structure(&self) -> Vec<(decode::Shape, Option<usize>)> {
+        let mut out: Vec<(decode::Shape, Option<usize>)> = Vec::new();
+        for s in &self.shapes {
+            if !(s.0 == decode::Shape::Paragraph && out.last() == Some(s)) {
+                out.push(*s);
+            }
+        }
+        out
     }
 
     fn field_index(&self, name: &str) -> Result<usize, FieldsError> {

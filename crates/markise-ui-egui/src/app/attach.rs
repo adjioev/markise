@@ -628,6 +628,9 @@ impl MarkiseApp {
                 .map(|p| p.sel.primary().range())
                 .unwrap_or(0..0);
             let _ = d.viewer.ed.source_insert(md, true);
+        } else if d.viewer.ed.in_native_block() {
+            // a block's pictures are its form's to change: a field holds only its text
+            return Err("A picture goes into this block through its form (Edit Block).".to_string());
         } else {
             let mut r0 = 0..0;
             d.viewer

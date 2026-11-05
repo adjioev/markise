@@ -9,6 +9,7 @@
 
 pub mod command;
 pub mod history;
+mod inplace;
 pub mod keymap;
 pub mod source;
 pub mod surface;
@@ -836,17 +837,7 @@ impl EditorSession {
         if typed.is_empty() {
             return Ok(());
         }
-        // C56: whitespace typed after a non-whitespace character of the group starts a new group.
-        if self.open.as_ref().is_some_and(|o| o.dir == TypingDir::Insert)
-            && typed.starts_with([' ', '\t'])
-            && self.sel.is_caret()
-            && self.doc.text()[..self.sel.primary().focus.offset]
-                .chars()
-                .next_back()
-                .is_some_and(|c| c != ' ' && c != '\t')
-        {
-            self.close_typing();
-        }
+        self.break_group_at_a_blank(typed);
         self.widen_replaced_selection();
         self.delete_selection_around_structure()?;
         let req = self.request(Params::new());
@@ -870,6 +861,36 @@ impl EditorSession {
             self.apply_plan(rule.label, TxKind::Auto, rule.plan)?;
         }
         Ok(())
+    }
+
+    /// A keystroke in a block's field (ADR 0021): patches a checked field edit made, with their
+    /// caret. Typing groups and undo steps are those of typing anywhere: this is typing.
+    pub(crate) fn field_keystroke(
+        &mut self,
+        dir: TypingDir,
+        patches: PatchSet,
+        sel_after: Selection,
+    ) -> Result<(), EditError> {
+        if dir == TypingDir::Insert {
+            let typed = (patches.patches().first()).map_or("", |p| p.insert.as_str());
+            self.break_group_at_a_blank(typed);
+        }
+        let leaf = self.leaf_info(self.sel.primary().start().offset).map(|l| l.0);
+        self.keystroke(dir, PlanStep::patches(patches), Some(sel_after), leaf)
+    }
+
+    /// C56: whitespace typed after a non-whitespace character of the group starts a new group.
+    fn break_group_at_a_blank(&mut self, typed: &str) {
+        if self.open.as_ref().is_some_and(|o| o.dir == TypingDir::Insert)
+            && typed.starts_with([' ', '\t'])
+            && self.sel.is_caret()
+            && self.doc.text()[..self.sel.primary().focus.offset]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c != ' ' && c != '\t')
+        {
+            self.close_typing();
+        }
     }
 
     /// `edit.deleteBackward` without layout: the previous grapheme (see

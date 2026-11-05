@@ -49,7 +49,10 @@ impl BlockViews for Stand {
     }
     fn look(&self, _name: &str, args: &str, source: &str) -> BlockLook {
         if args == "misfit" {
-            return BlockLook::Outside(vec!["First reason".to_string(), "Second reason".to_string()]);
+            return BlockLook::Outside {
+                reasons: vec!["First reason".to_string(), "Second reason".to_string()],
+                native: None,
+            };
         }
         if args == "plain" {
             return BlockLook::Generic;
@@ -303,7 +306,10 @@ fn a_warning_is_cut_to_its_row_and_keeps_the_height() {
             true
         }
         fn look(&self, _: &str, _: &str, _: &str) -> BlockLook {
-            BlockLook::Outside(vec![self.0.clone()])
+            BlockLook::Outside {
+                reasons: vec![self.0.clone()],
+                native: None,
+            }
         }
     }
     let src = ":::any\n\nBody.\n\n:::\n";
@@ -416,7 +422,10 @@ fn a_long_name_leaves_room_for_the_warning_and_an_icon_for_the_label() {
         }
         fn look(&self, name: &str, _: &str, source: &str) -> BlockLook {
             if name != "shown" {
-                return BlockLook::Outside(vec!["The reason".to_string()]);
+                return BlockLook::Outside {
+                    reasons: vec!["The reason".to_string()],
+                    native: None,
+                };
             }
             BlockLook::Native(NativeBlock {
                 view: Arc::new(NativeView {

@@ -106,7 +106,68 @@ the document, and the layout cache already keys on them.
 A trailing `{#id}` is no text of any field, so a native view never shows it, also with the caret on the
 line. The generic card keeps the rule of ADR 0018.
 
-### Editing
+### Editing in place
 
-A native block's text is not edited in place yet: commands and typing that would reach into one, with a
-selection that does not hold it whole, do nothing. Its form, undo and redo work as anywhere else.
+The text of a native block is edited where it stands. There is no second text surface: the caret,
+selection, hit testing, IME and undo are the rendered surface's, since a view is the same items. What is
+different is what a keystroke means there. `markise_engine::editor::inplace` takes the commands that
+would change the text and turns them into an edit of one field's value. Everything else that changes text
+(the form, Find, undo, Source mode, the file on disk) works as it does anywhere, and the next keystroke
+reads what is there.
+
+**Slots.** `BlockFields::slots` lists the places to type: a heading, a text field (its paragraphs are one
+value), a quote, a list item, an answer. Pictures are not slots: the form has them. A slot maps source
+offsets to value offsets line by line. A value line lacks only the escapes of its source line (`\# x`
+reads `# x`), so the mapping is a walk over both, and a stop never falls between an escape and what it
+escapes.
+
+**An edit** (`BlockFields::edit_slot`) replaces a value range through `FieldEdit`, so markup typed at the
+start of a line becomes the escaped form the form would write, and the patches are the codec's minimal
+diff. Then, before anything is applied, the result has to pass all of this or the keystroke does nothing:
+
+- the block has the same name and arguments, and what no field took has the same bytes;
+- every other field and every other item reads the same, and the item keeps its id and mark;
+- the value reads back as asked, leading blanks of a line aside (a typed leading blank is not kept, ADR
+  0020, and no text then means no change and no caret move);
+- the body parses to the same sequence of kinds. A chunk count does not say this: `[r]x:` over `/url` is
+  a paragraph until the `x` goes, and then it is a reference definition that changes links elsewhere,
+  while each line alone reads as a paragraph;
+- every patch lies inside the lines of the edit, or inside the field's region when it goes away.
+
+The codec needed changes for that last rule, which also hold for the form: a line of blanks stays as
+written while it stays, a line rewritten in place keeps its prefix and its terminator (a tab-indented
+continuation, CRLF in a mixed file), and `02.` stays as written when it still says 2.
+
+**Read-only parts.** A text field can take a code block or a list as it stands, and an edited line of it
+would become escaped text. So what is not a paragraph below a field, a quote or an item is protected. The
+caret can stand on it and a keystroke there does nothing, and a selection touching it does nothing either.
+The Markdown view has it. Similarly a trailing id is only cut where the reader's view hides it too, at the
+line's start or after a blank, so the codec and the screen agree on what is an id.
+
+**The caret.** Markers have no stops, and hidden ids are not revealed here. Inline marks (`**`) still show
+with the caret on them, since a field's value is a Markdown string. Plain arrows cross fields freely and
+leave the block at its ends. A gap the layout offers between two items is passed over. A selection that
+starts in a slot stays in that slot, however far it is dragged. One from outside into a block holds the
+whole block: the block is then deleted or replaced as a whole, by the rule of ADR 0018.
+
+**Undo.** A keystroke goes through the session's own keystroke path, so typing groups (their pause, the
+break at a blank, direction), undo steps and the selection restored are the document's. It is typing.
+Inline marks run their usual planners with a selection inside one slot, and are taken back if the block
+then reads differently. Every other mutating command is refused in a block.
+
+**A place with no text.** An emptied heading stays in the source as `## ` with its id (`FieldEdit::
+ClearHeading`). An emptied item stays an empty item. An emptied text or quote has nothing to stand on in the
+source, so the caret goes on a virtual paragraph where it was, and the session's in-place state remembers
+which field that position stands for: `DocPos::virt` cannot say (two absent fields can share a gap). Only the
+caret an edit put there has that meaning. Typing on it fills that field in its declared place.
+
+**A block being edited stays native.** Emptying a required field makes `.check` fail, and such a block is a
+card. So the block the caret is editing stays native until the selection leaves it, marked by a live mark at
+its opener. Then the rule applies: a block left outside its schema is a card with a warning. This lives in
+the view by opener, not in the look cache, which is by content: another block with the same text is another
+block.
+
+**The sticky state, the cached model and limits.** One model is kept between keystrokes, through `refreshed`,
+so that retired ids live on while it does. Blocks over 64 KiB are generic, which also bounds the cost per
+keystroke: a decode, a diff and a decode of one block. An optional field with no text in the file has no place
+in the view: the form adds it. A picture dropped or pasted into a field asks for the form instead.

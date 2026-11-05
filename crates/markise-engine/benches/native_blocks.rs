@@ -36,7 +36,7 @@ fn report(name: &str, mut v: Vec<Duration>) {
     );
 }
 
-fn package() -> Arc<dyn BlockViews> {
+fn package() -> Arc<PackageViews> {
     let mut files = BTreeMap::new();
     let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1","blocks":["tip","poll"]}"#;
     files.insert("manifest.json".to_string(), manifest.as_bytes().to_vec());
@@ -81,7 +81,8 @@ fn with_blocks(text: &str, every: usize) -> String {
     out
 }
 
-fn run(label: &str, text: String, views: Option<Arc<dyn BlockViews>>) {
+fn run(label: &str, text: String, views: Option<Arc<PackageViews>>) {
+    let fields = views.clone();
     let blocks = text.lines().filter(|l| l.starts_with(":::") && l.len() > 3).count();
     println!(
         "{label}: {:.1} MiB, {blocks} blocks",
@@ -91,7 +92,8 @@ fn run(label: &str, text: String, views: Option<Arc<dyn BlockViews>>) {
     let format: Arc<dyn DocumentFormat> = Arc::new(MarkdownFormat::default());
     let t = Instant::now();
     let mut ed = EditorView::open(format, text, Theme::light(), 700.0);
-    ed.view.set_block_views(views);
+    ed.view.set_block_views(views.map(|v| v as Arc<dyn BlockViews>));
+    ed.set_block_fields(fields);
     let open = t.elapsed();
     let t = Instant::now();
     {
@@ -150,6 +152,39 @@ fn run(label: &str, text: String, views: Option<Arc<dyn BlockViews>>) {
         letters.push(t0.elapsed());
     }
     report("typing in prose", letters);
+    // a field of the block nearest to the middle
+    let in_field = {
+        let s = ed.session.text();
+        s[s.len() / 2..]
+            .find("The body of the tip")
+            .map(|i| s.len() / 2 + i + 3)
+    };
+    if let Some(at) = in_field.filter(|&at| ed.view.native_block(at).is_some()) {
+        {
+            let mut f = fonts.with_pixels_per_point(2.0);
+            ed.set_caret(DocPos::new(at), false);
+            ed.refresh_focus();
+            ed.scroll_to_caret(VH, &mut f, &NoImages);
+            ed.view.frame(VH, VH * 0.5, &mut f, &NoImages);
+        }
+        let mut field = Vec::new();
+        for c in "the quick brown fox jumps over the lazy dog ".repeat(5).chars() {
+            let mut f = fonts.with_pixels_per_point(2.0);
+            let t0 = Instant::now();
+            let _ = ed.execute(
+                "edit.insertText",
+                &Params::text("text", c.to_string()),
+                &mut f,
+                &NoImages,
+                VH,
+            );
+            ed.refresh_focus();
+            ed.scroll_to_caret(VH, &mut f, &NoImages);
+            ed.view.frame(VH, VH * 0.5, &mut f, &NoImages);
+            field.push(t0.elapsed());
+        }
+        report("typing in a field", field);
+    }
 }
 
 fn main() {
