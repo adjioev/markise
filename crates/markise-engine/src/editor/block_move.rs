@@ -389,7 +389,6 @@ impl EditorView {
     }
 
     fn delete_range(&mut self, b: Range<usize>) -> Result<(), MoveRefused> {
-        self.release();
         let doc = self.session.doc();
         let text = doc.text();
         let eol = doc.line_ending().as_str();
@@ -414,6 +413,8 @@ impl EditorView {
         let caret_goes = holds(sel.anchor) && holds(sel.focus);
         let at = remove.start + keep.len();
         let was_sticky = self.sticky_at().is_some_and(|s| b.contains(&s));
+        // last before the edit: it leaves the view with no document until the sync after it
+        self.release();
         let done = self.session.transact(DELETE_LABEL, TxKind::Structural, |tx| {
             tx.step(PlanStep { patches, hints_after })?;
             if blocks_of(tx.doc()) != want {
@@ -443,7 +444,6 @@ impl EditorView {
     }
 
     fn move_range(&mut self, b: Range<usize>, to: usize) -> Result<bool, MoveRefused> {
-        self.release();
         let doc = self.session.doc();
         let eol = doc.line_ending().as_str();
         let Some(planned) = plan(doc.text(), &b, to, eol) else {
@@ -468,6 +468,8 @@ impl EditorView {
             .collect();
         let was_sticky = self.sticky_at().is_some_and(|at| b.contains(&at));
         let body_len = body.len();
+        // last before the edit: it leaves the view with no document until the sync after it
+        self.release();
         let done = self.session.transact(MOVE_LABEL, TxKind::Structural, |tx| {
             tx.step(PlanStep { patches, hints_after })?;
             let doc = tx.doc();
