@@ -190,9 +190,10 @@ impl BlockViews for PackageViews {
         });
         let fit = fields.check(&variant.spec);
         if !fit.fits() {
-            return BlockLook::Outside {
-                reasons: reasons(&variant.spec, &fit, source),
-                native,
+            let reasons = reasons(&variant.spec, &fit, source);
+            return match native {
+                Some(block) if fit.only_unfilled(&fields.values()) => BlockLook::Unfilled { reasons, block },
+                native => BlockLook::Outside { reasons, native },
             };
         }
         native.map_or(BlockLook::Generic, BlockLook::Native)

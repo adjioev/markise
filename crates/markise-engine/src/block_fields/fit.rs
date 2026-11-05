@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use schema_form_core::{ChoiceShape, Control, FieldError, FieldSpec, FormSpec};
+use schema_form_core::{ChoiceShape, Control, ErrorKind, FieldError, FieldSpec, FormSpec};
 use serde_json::Value;
 
 use super::{BlockFields, FieldDecl, FieldKind};
@@ -20,6 +20,26 @@ pub struct BlockFit {
 impl BlockFit {
     pub fn fits(&self) -> bool {
         self.errors.is_empty() && self.extras.is_empty()
+    }
+
+    /// All that is wrong is that the author has yet to fill it in: an empty required field, too few
+    /// items or characters, no marked answer. Any other reason, and content in no field, is a matter
+    /// of the block's structure. `values` are those the fit was checked for.
+    pub fn only_unfilled(&self, values: &Value) -> bool {
+        self.extras.is_empty() && self.errors.iter().all(|e| unfilled(e, values))
+    }
+}
+
+fn unfilled(e: &FieldError, values: &Value) -> bool {
+    match e.kind {
+        ErrorKind::Required | ErrorKind::TooShort { .. } | ErrorKind::TooFew { .. } | ErrorKind::AtLeastOneCorrect => {
+            true
+        }
+        // none marked is yet to come; two marked where one can be is something else
+        ErrorKind::ExactlyOneCorrect => values[e.path.as_str()]
+            .as_array()
+            .is_none_or(|answers| !answers.iter().any(|a| a.get("correct") == Some(&Value::Bool(true)))),
+        _ => false,
     }
 }
 

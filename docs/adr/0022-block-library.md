@@ -102,8 +102,9 @@ refused: an unclosed code fence holds whatever is put after it, for example.
 **The caret and the view.** It starts native, whatever state the document's view is in, not as a card and not as a
 picture. The caret goes to the end of its first place to type (ADR 0021), before a hidden id; with no view, to the
 end of its first content, or the place inside an empty block. A block just inserted may not fit its schema: a
-preset of a question has no answer marked yet. The rule of ADR 0021 applies: it stays native while the caret is
-in it. Once left in that state it is a card with its warning, as any block.
+preset of a question has no answer marked yet. By the rule of ADR 0021 that only means it is not filled in: it stays
+native with its warning, also once it is left. A preset whose structure does not fit stays native while the caret is
+in it, and is a card with its warning once left, as any block.
 
 **A large file** still opening has a part of its text, where an id could not be seen, so until the rest is in, `/` is
 a character and the command is disabled.
