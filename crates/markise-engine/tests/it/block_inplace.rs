@@ -336,13 +336,13 @@ fn bytes_nobody_edited_stay() {
     s.typed("!");
     assert_eq!(s.text(), doc.replace("second", "second!"));
 
-    let doc = ":::goals\n\n02. a\n03. b\n\n:::\n";
+    let doc = ":::steps\n\n02. a\n03. b\n\n:::\n";
     let mut s = surface(doc);
     s.caret_at("b", 1);
     s.typed("!");
     assert_eq!(s.text(), doc.replace("03. b", "03. b!"));
 
-    let doc = ":::goals\n\n- a\n\tb\n- c\n\n:::\n";
+    let doc = ":::steps\n\n- a\n\tb\n- c\n\n:::\n";
     let mut s = surface(doc);
     s.caret_at("b", 1);
     s.typed("!");
@@ -448,17 +448,17 @@ fn an_emptied_text_field_keeps_a_place_for_the_caret() {
 
 #[test]
 fn enter_in_a_list_makes_an_item() {
-    let doc = ":::goals\n\n- First\n- Second\n\n:::\n";
+    let doc = ":::steps\n\n- First\n- Second\n\n:::\n";
     let mut s = surface(doc);
     s.caret_at("First", 5);
     s.key("edit.newline");
-    assert_eq!(s.text(), ":::goals\n\n- First\n- \n- Second\n\n:::\n");
+    assert_eq!(s.text(), ":::steps\n\n- First\n- \n- Second\n\n:::\n");
     s.typed("New");
-    assert_eq!(s.text(), ":::goals\n\n- First\n- New\n- Second\n\n:::\n");
+    assert_eq!(s.text(), ":::steps\n\n- First\n- New\n- Second\n\n:::\n");
     // in the middle it splits, and markup stays text
     s.caret_at("New", 1);
     s.key("edit.newline");
-    assert_eq!(s.text(), ":::goals\n\n- First\n- N\n- ew\n- Second\n\n:::\n");
+    assert_eq!(s.text(), ":::steps\n\n- First\n- N\n- ew\n- Second\n\n:::\n");
     s.typed("# ");
     assert!(s.text().contains("- \\# ew\n"), "{}", s.text());
 }
@@ -517,20 +517,20 @@ fn enter_on_an_empty_last_item_leaves_the_list() {
 /// A list with an empty second item made in place: a block like this only stays native while
 /// it is being edited.
 fn with_an_empty_item() -> Surface {
-    let mut s = surface(":::goals\n\n- First\n- Third\n\n:::\n");
+    let mut s = surface(":::steps\n\n- First\n- Third\n\n:::\n");
     s.caret_at("First", 5);
     s.key("edit.newline");
     assert_eq!(s.text(), EMPTY_ITEM);
     s
 }
 
-const EMPTY_ITEM: &str = ":::goals\n\n- First\n- \n- Third\n\n:::\n";
+const EMPTY_ITEM: &str = ":::steps\n\n- First\n- \n- Third\n\n:::\n";
 
 #[test]
 fn backspace_and_delete_remove_an_empty_item_and_nothing_else() {
     let mut s = with_an_empty_item();
     s.key("edit.deleteBackward");
-    assert_eq!(s.text(), ":::goals\n\n- First\n- Third\n\n:::\n");
+    assert_eq!(s.text(), ":::steps\n\n- First\n- Third\n\n:::\n");
     assert_eq!(
         s.offset(),
         EMPTY_ITEM.find("First").unwrap() + 5,
@@ -541,7 +541,7 @@ fn backspace_and_delete_remove_an_empty_item_and_nothing_else() {
 
     let mut s = with_an_empty_item();
     s.key("edit.deleteForward");
-    assert_eq!(s.text(), ":::goals\n\n- First\n- Third\n\n:::\n");
+    assert_eq!(s.text(), ":::steps\n\n- First\n- Third\n\n:::\n");
     assert_eq!(
         &s.text()[s.offset()..s.offset() + 5],
         "Third",
@@ -549,7 +549,7 @@ fn backspace_and_delete_remove_an_empty_item_and_nothing_else() {
     );
 
     // an item with text is not joined to its neighbour: nothing happens at its edge
-    let doc = ":::goals\n\n- First\n- Third\n\n:::\n";
+    let doc = ":::steps\n\n- First\n- Third\n\n:::\n";
     let mut s = surface(doc);
     s.caret_at("Third", 0);
     s.key("edit.deleteBackward");
@@ -559,13 +559,13 @@ fn backspace_and_delete_remove_an_empty_item_and_nothing_else() {
     assert_eq!(s.text(), doc);
 
     // the only item stays
-    let doc = ":::goals\n\n- a\n\n:::\n";
+    let doc = ":::steps\n\n- a\n\n:::\n";
     let mut s = surface(doc);
     s.caret_at("- a", 3);
     s.key("edit.deleteBackward");
-    assert_eq!(s.text(), ":::goals\n\n- \n\n:::\n");
+    assert_eq!(s.text(), ":::steps\n\n- \n\n:::\n");
     s.key("edit.deleteBackward");
-    assert_eq!(s.text(), ":::goals\n\n- \n\n:::\n");
+    assert_eq!(s.text(), ":::steps\n\n- \n\n:::\n");
 }
 
 #[test]
@@ -720,7 +720,7 @@ const TYPED: &[&str] = &[
 ];
 
 fn doc_for_props() -> String {
-    "Top.\n\n:::poll\n\n## Which? {#q}\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> Because.\n> Yes.\n\n:::\n\nMiddle \\# x.\n\n:::tip\n\n### Title\n\nHello there\nsecond line\n\nAnother {#p}\n\n:::\n\n:::goals\n\n1. First\n2. Second\n\n:::\n\nEnd.\n".to_string()
+    "Top.\n\n:::poll\n\n## Which? {#q}\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> Because.\n> Yes.\n\n:::\n\nMiddle \\# x.\n\n:::tip\n\n### Title\n\nHello there\nsecond line\n\nAnother {#p}\n\n:::\n\n:::steps\n\n1. First\n2. Second\n\n:::\n\nEnd.\n".to_string()
 }
 
 fn outside_blocks(doc: &str) -> Vec<String> {

@@ -27,14 +27,14 @@ const POLL: &str = r#"{"label": "Poll", "variants": {"": "one answer", "many": "
          "correct": {"": "exactly-one", "many": "at-least-one"}},
         {"name": "why", "type": "quote", "min": 0}
     ]}"#;
-const GOALS: &str = r#"{"label": "Goals", "fields": [{"name": "items", "type": "list", "minItems": 1}]}"#;
+const STEPS: &str = r#"{"label": "Steps", "fields": [{"name": "items", "type": "list", "minItems": 1}]}"#;
 const PLAIN: &str = r#"{"label": "Plain", "fields": [{"name": "body", "type": "text"}]}"#;
 const VIEWS: &str = r#"{"tip": {"kind": "callout", "accent": "green", "icon": "bulb"},
     "poll": {"kind": "choices", "accent": "purple"},
-    "goals": {"kind": "card", "accent": "blue", "icon": "no-such-file"}}"#;
+    "steps": {"kind": "card", "accent": "blue", "icon": "no-such-file"}}"#;
 const ICON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M19 12H5"/></svg>"#;
 
-pub(crate) const DOC: &str = "# Doc\n\nBefore.\n\n:::tip\n\n### A title\n\nHello\n\n:::\n\n:::poll\n\n## Which?\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> Because.\n\n:::\n\n:::goals\n\n- First\n- Second\n\n:::\n\n:::plain\n\nNo view.\n\n:::\n\n:::poll\n\n## Outside\n\n- [x] Marked {#b1}\n- [x] Marked too {#b2}\n\n:::\n\n:::unknown\n\nNot in the package.\n\n:::\n";
+pub(crate) const DOC: &str = "# Doc\n\nBefore.\n\n:::tip\n\n### A title\n\nHello\n\n:::\n\n:::poll\n\n## Which?\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> Because.\n\n:::\n\n:::steps\n\n- First\n- Second\n\n:::\n\n:::plain\n\nNo view.\n\n:::\n\n:::poll\n\n## Outside\n\n- [x] Marked {#b1}\n- [x] Marked too {#b2}\n\n:::\n\n:::unknown\n\nNot in the package.\n\n:::\n";
 
 pub(crate) struct Fixture {
     _dir: tempfile::TempDir,
@@ -43,12 +43,12 @@ pub(crate) struct Fixture {
 }
 
 fn archive() -> Vec<u8> {
-    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip","poll","goals","plain"]}"#;
+    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip","poll","steps","plain"]}"#;
     let files = [
         ("manifest.json", manifest),
         ("components/tip/tip.json", TIP),
         ("components/poll/poll.json", POLL),
-        ("components/goals/goals.json", GOALS),
+        ("components/steps/steps.json", STEPS),
         ("components/plain/plain.json", PLAIN),
         ("editor/palette.json", r#"{"format": 1}"#),
         ("editor/views.json", VIEWS),
@@ -149,7 +149,7 @@ fn blocks_with_a_view_show_it_and_the_rest_stay_cards() {
     let f = Fixture::new(DOC);
     let mut h = f.ready();
     let s = shown(&mut h);
-    for label in ["Tip", "Poll", "Goals"] {
+    for label in ["Tip", "Poll", "Steps"] {
         assert!(s.contains(label), "{label} in {s}");
     }
     assert!(s.contains("plain"), "a schema and no view: a card: {s}");
