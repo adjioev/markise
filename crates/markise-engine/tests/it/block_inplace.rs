@@ -336,13 +336,13 @@ fn bytes_nobody_edited_stay() {
     s.typed("!");
     assert_eq!(s.text(), doc.replace("second", "second!"));
 
-    let doc = ":::goals\n\n02. a\n03. b\n\n:::\n";
+    let doc = ":::steps\n\n02. a\n03. b\n\n:::\n";
     let mut s = surface(doc);
     s.caret_at("b", 1);
     s.typed("!");
     assert_eq!(s.text(), doc.replace("03. b", "03. b!"));
 
-    let doc = ":::goals\n\n- a\n\tb\n- c\n\n:::\n";
+    let doc = ":::steps\n\n- a\n\tb\n- c\n\n:::\n";
     let mut s = surface(doc);
     s.caret_at("b", 1);
     s.typed("!");
@@ -485,7 +485,7 @@ const TYPED: &[&str] = &[
 ];
 
 fn doc_for_props() -> String {
-    "Top.\n\n:::poll\n\n## Which? {#q}\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> Because.\n> Yes.\n\n:::\n\nMiddle \\# x.\n\n:::tip\n\n### Title\n\nHello there\nsecond line\n\nAnother {#p}\n\n:::\n\n:::goals\n\n1. First\n2. Second\n\n:::\n\nEnd.\n".to_string()
+    "Top.\n\n:::poll\n\n## Which? {#q}\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> Because.\n> Yes.\n\n:::\n\nMiddle \\# x.\n\n:::tip\n\n### Title\n\nHello there\nsecond line\n\nAnother {#p}\n\n:::\n\n:::steps\n\n1. First\n2. Second\n\n:::\n\nEnd.\n".to_string()
 }
 
 fn outside_blocks(doc: &str) -> Vec<String> {
