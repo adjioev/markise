@@ -302,9 +302,16 @@ own: it decides which block, and what becomes of a draft when the document chang
     last check). Read the Block Again loses the draft; so does Cancel.
   - Gone, with an unchanged draft: the panel closes. With a changed one, it stays, says so, and
     offers only Cancel, so the text can still be read and copied.
-  - A reload is the same as any other change. The document switching or the package being withdrawn
-    closes the panel, **and a draft goes with it**: a question at that moment is left for later.
-    Save itself checks the document's identity, as a load can land on the very frame of a Save.
+  - A reload is the same as any other change.
+  - **A changed draft is not lost silently** (owner's decision, phase 4). Opening another document, New,
+    the tutorial, closing the window and Stop Using This Package first ask, in the app's dialog: Save
+    (into the document; the document then asks about its own unsaved edit as usual), Discard or Cancel.
+    A refused Save stays in the panel with its reason, and the action does not go on. What cannot be
+    cancelled has the safest behaviour left: a lookup that loses the package (Save As into a folder
+    without the binding, a lookup failing) keeps the panel, the draft and its Save; a document replaced
+    with no question (a load already answered for, landing after the draft changed) leaves the draft
+    readable with only Cancel, and it goes nowhere. An unchanged draft closes as before. Save itself
+    checks the document's identity, as a load can land on the very frame of a Save.
 - **A draft is not thrown away for another block.** Opening another block with a changed draft
   refuses and says why.
 - **Outside the schema.** The fields show their reasons, the top says the block does not fit and can

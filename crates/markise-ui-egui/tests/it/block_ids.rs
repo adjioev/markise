@@ -111,29 +111,71 @@ fn the_outline_has_the_headings_without_their_ids() {
     assert_eq!(anchors, ["out", "asked"], "anchors from what shows");
 }
 
-#[test]
-fn search_finds_it_in_the_source_and_does_not_light_it_up() {
-    let (_d, _p, mut h) = open(DOC);
-    caret(&mut h, DOC.find("Plain").unwrap());
-    h.state_mut().open_find(false);
+fn search_for(h: &mut H, what: &str) {
+    h.state_mut().open_find(true);
     h.state_mut().set_find_query(markise_engine::search::Query {
-        text: "{#q}".into(),
+        text: what.into(),
         case_sensitive: false,
         whole_word: false,
         regex: false,
     });
-    wait_until(&mut h, "the search", |a| {
+    wait_until(h, "the search", |a| a.find_results().is_some());
+    common::run(h);
+}
+
+#[test]
+fn search_finds_a_hidden_id_in_source_mode_only() {
+    let (_d, _p, mut h) = open(DOC);
+    caret(&mut h, DOC.find("Plain").unwrap());
+    // a query of an id, of its blank, and of the part of one that shows
+    search_for(&mut h, "{#q}");
+    assert_eq!(
+        h.state().find_results().unwrap().matches.len(),
+        0,
+        "not in the rendered view"
+    );
+    assert!(h.state_mut().viewer().unwrap().search_highlights().is_empty());
+    search_for(&mut h, "Asked {#q");
+    assert_eq!(
+        h.state().find_results().unwrap().matches.len(),
+        1,
+        "what also shows is a hit"
+    );
+    // an id on a plain paragraph or an ordinary list item is text
+    search_for(&mut h, "{#p}");
+    assert_eq!(h.state().find_results().unwrap().matches.len(), 1);
+    search_for(&mut h, "{#l}");
+    assert_eq!(h.state().find_results().unwrap().matches.len(), 1);
+
+    search_for(&mut h, "{#q}");
+    h.state_mut().set_view_mode(ViewMode::Source);
+    wait_until(&mut h, "the search again", |a| {
         a.find_results().is_some_and(|r| r.matches.len() == 1)
     });
-    common::run(&mut h);
-    // the caret is elsewhere: a hit in the source, and nothing to light up on screen
-    h.state_mut()
-        .viewer()
-        .unwrap()
-        .ed
-        .set_selection(Selection::caret(DOC.find("Plain").unwrap()));
-    common::run(&mut h);
-    assert!(h.state_mut().viewer().unwrap().search_highlights().is_empty());
+    h.state_mut().set_view_mode(ViewMode::Rendered);
+    wait_until(&mut h, "and back", |a| {
+        a.find_results().is_some_and(|r| r.matches.is_empty())
+    });
+}
+
+#[test]
+fn replacing_in_the_rendered_view_does_not_touch_a_hidden_id() {
+    let text = "## a1 {#a1}\n\nsome a1\n\n:::q\n\n- [ ] a1 {#a1}\n\n:::\n";
+    let (_d, _p, mut h) = open(text);
+    search_for(&mut h, "a1");
+    assert_eq!(h.state().find_results().unwrap().matches.len(), 3);
+    // the last one shown, past both ids before it in the search's own numbering
+    h.state_mut().find_next(true);
+    h.state_mut().replace_find("b".into(), false);
+    wait_until(&mut h, "the replacement", |a| {
+        a.document_text().unwrap().contains("- [ ] b {#a1}")
+    });
+    h.state_mut().replace_find("c".into(), true);
+    wait_until(&mut h, "all of them", |a| a.document_text().unwrap().contains("some c"));
+    assert_eq!(
+        h.state().document_text().unwrap(),
+        "## c {#a1}\n\nsome c\n\n:::q\n\n- [ ] b {#a1}\n\n:::\n"
+    );
 }
 
 #[test]

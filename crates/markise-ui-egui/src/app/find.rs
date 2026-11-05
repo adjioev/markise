@@ -1,7 +1,7 @@
 //! In-document search UI; source chunks are bounded and never share the editable document.
 use super::*;
 use markise_doc::Selection;
-use markise_engine::search::{Completion, Key, Query, Results, SNAPSHOT_CHUNK, SearchWorker};
+use markise_engine::search::{Completion, Key, Query, Replacement, Results, SNAPSHOT_CHUNK, SearchWorker};
 
 #[derive(Default)]
 pub(super) struct FindState {
@@ -18,7 +18,10 @@ pub(super) struct FindState {
     submitted: bool,
     results: Option<Results>,
     active: Option<usize>,
-    operation: Option<(String, Option<usize>)>,
+    operation: Option<Replacement>,
+    /// The search looks at everything the source holds: Source and Side by Side show it all, the
+    /// rendered view leaves out what it hides (ADR 0018).
+    all_of_source: bool,
     navigation: Option<bool>,
     query_id: Option<egui::Id>,
     /// Only the exact post-Replace-All revision can be undone by the panel button.
@@ -153,10 +156,15 @@ impl MarkiseApp {
                 self.replace_find(replacement, false);
                 return;
             };
-            Some(i)
+            self.find_results().map(|r| r.search_index(i))
         };
+        let skip = self.find_results().map_or_else(Default::default, |r| r.dropped.clone());
         self.find_invalidate();
-        self.find.operation = Some((replacement, only));
+        self.find.operation = Some(Replacement {
+            text: replacement,
+            only,
+            skip,
+        });
     }
     pub fn undo_replace_all(&mut self) -> bool {
         let Some((id, revision)) = self.find.undo.take() else {
@@ -180,6 +188,11 @@ impl MarkiseApp {
             return;
         };
         let identity = (d.id, d.viewer.ed.session.revision().counter);
+        let all_of_source = self.source_visible || self.side_by_side;
+        if all_of_source != self.find.all_of_source {
+            self.find.all_of_source = all_of_source;
+            self.find_invalidate();
+        }
         if self.find.key.is_some_and(|k| (k.document, k.revision) != identity) {
             self.find_invalidate();
         }
@@ -195,7 +208,10 @@ impl MarkiseApp {
         }
         while let Some(c) = self.find.worker.as_ref().and_then(SearchWorker::poll) {
             match c {
-                Completion::Found(r) if self.find_current(r.key) => {
+                Completion::Found(mut r) if self.find_current(r.key) => {
+                    if !all_of_source && let Some(d) = &self.doc {
+                        r.drop_hidden(d.viewer.ed.session.doc());
+                    }
                     self.find.error = r.error.clone();
                     self.find.results = Some(r);
                 }
@@ -203,7 +219,7 @@ impl MarkiseApp {
                     match patches {
                         Ok(patches) if !patches.is_empty() => {
                             let d = self.doc.as_mut().unwrap();
-                            let all = self.find.operation.as_ref().is_some_and(|(_, only)| only.is_none());
+                            let all = self.find.operation.as_ref().is_some_and(|o| o.only.is_none());
                             match d.viewer.ed.edit(|s| {
                                 s.apply_external(&patches, if all { "Replace All" } else { "Replace" }, false)
                             }) {
@@ -496,7 +512,10 @@ mod tests {
             stale,
             vec!["x".into()],
             app.find.query.clone(),
-            Some(("bad".into(), None)),
+            Some(Replacement {
+                text: "bad".into(),
+                ..Default::default()
+            }),
         );
         rx.recv_timeout(Duration::from_secs(10))
             .expect("replacement completion");
@@ -515,6 +534,8 @@ mod tests {
             key: stale,
             matches: Arc::new(std::iter::once(0..1).collect()),
             error: None,
+            candidates: Vec::new(),
+            dropped: Arc::default(),
         });
         app.find_next(false);
         app.replace_find("bad".into(), true);

@@ -65,6 +65,7 @@ pub struct Button {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     UnsavedChanges,
+    BlockDraft,
     MoveToTrash,
     OpenLink,
     ReplaceTheme,
@@ -123,6 +124,23 @@ impl Question {
             buttons: vec![
                 button(Choice::Save, "Save", Role::Primary),
                 button(Choice::DontSave, "Don’t Save", Role::Destructive),
+                cancel(),
+            ],
+            default: Choice::Save,
+        }
+    }
+
+    /// A block's form holds changes and the document or package under it is about to go. Save
+    /// is the default: it loses nothing. Save here means into the document, as the form's own.
+    pub fn block_draft(block: &str) -> Question {
+        Question {
+            id: 0,
+            kind: Kind::BlockDraft,
+            message: format!("Do you want to save your changes to the block “{block}”?"),
+            detail: "They are in its form and not in the document yet.".into(),
+            buttons: vec![
+                button(Choice::Save, "Save", Role::Primary),
+                button(Choice::DontSave, "Discard", Role::Destructive),
                 cancel(),
             ],
             default: Choice::Save,

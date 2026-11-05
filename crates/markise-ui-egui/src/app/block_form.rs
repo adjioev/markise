@@ -7,13 +7,20 @@ use std::sync::Arc;
 use egui::Context;
 use markise_layout::block::color;
 
-use super::MarkiseApp;
+use super::{MarkiseApp, Then};
 use crate::block_form::{
     FormAssets, OpenForm, PanelAction, PanelHost, block_at, panel_widths, relative_to_folder, style_for,
 };
 
 /// Chooses a file, starting in the given folder.
 pub type ImagePicker = Arc<dyn Fn(&Path) -> Option<PathBuf> + Send + Sync>;
+
+/// What waits for a changed draft to be saved or discarded.
+pub(super) enum DraftNext {
+    Then(Then),
+    /// Stop Using This Package.
+    StopPackage,
+}
 
 /// The form of the session.
 pub(super) struct BlockFormState {
@@ -70,6 +77,11 @@ impl MarkiseApp {
         block_at(s.doc(), s.selection().primary().focus.offset, &p.index).is_some()
     }
 
+    /// A form holds changes the document does not.
+    pub(super) fn block_draft_changed(&self) -> bool {
+        self.block_form.open.as_ref().is_some_and(OpenForm::is_dirty)
+    }
+
     /// The keyboard is in the form.
     pub(super) fn block_form_focused(&self, ctx: &Context) -> bool {
         self.block_form.open.as_ref().is_some_and(|f| f.is_focused(ctx))
@@ -109,6 +121,11 @@ impl MarkiseApp {
         self.block_form.open.is_some()
     }
 
+    /// Drops the draft that was answered for: the document or package goes next.
+    pub(super) fn block_form_discard(&mut self) {
+        self.block_form_close();
+    }
+
     /// Closes the form, giving back what it holds in its document's session.
     fn block_form_close(&mut self) {
         if let Some(open) = self.block_form.open.take()
@@ -130,16 +147,23 @@ impl MarkiseApp {
     }
 
     /// Saves the draft: one undo step, then the panel closes and the keyboard goes back to the
-    /// document. A refusal stays in the panel with its reason. A draft of another document, one
-    /// that was just replaced before the panel could notice, goes nowhere.
+    /// document. A refusal stays in the panel with its reason.
     pub fn block_form_save(&mut self, _ctx: &Context) {
-        let (Some(open), Some(d)) = (self.block_form.open.as_mut(), self.doc.as_mut()) else {
+        self.block_form_write();
+    }
+
+    /// [`Self::block_form_save`]. A draft of another document, one that was replaced without a
+    /// question (the panel may not have noticed yet), goes nowhere and stays readable.
+    pub(super) fn block_form_write(&mut self) {
+        let Some(open) = self.block_form.open.as_mut() else {
             return;
         };
-        if open.doc() != d.id {
-            self.block_form.open = None;
+        let Some(d) = self.doc.as_mut().filter(|d| d.id == open.doc()) else {
+            if !open.orphan() {
+                self.block_form.open = None;
+            }
             return;
-        }
+        };
         match d.viewer.ed.edit(|s| open.save(s)) {
             Ok(()) => {
                 self.block_form_close();
@@ -178,8 +202,14 @@ impl MarkiseApp {
         if self.block_form.open.is_none() {
             return;
         }
+        // Anything that can be cancelled asked before getting here. What is left cannot be: a
+        // lookup that lost the package (Save As into a folder without it) keeps the draft and its
+        // Save, a document replaced without a question keeps the draft to read and copy.
         let keep = match (self.doc.as_mut(), self.block_form.open.as_mut(), index) {
-            (Some(d), Some(open), Some(_)) if open.doc() == d.id => open.follow(&d.viewer.ed.session),
+            (Some(d), Some(open), index) if open.doc() == d.id => {
+                (index.is_some() || open.is_dirty()) && open.follow(&d.viewer.ed.session)
+            }
+            (_, Some(open), _) => open.orphan(),
             _ => false,
         };
         if !keep {

@@ -201,8 +201,12 @@ packages, and nothing else about them.
 - **The file.** No bytes change, and Source mode shows it as written. A selection copies source, here
   as everywhere. The field model reads the plain tree, so `## {#q}`, a heading of only an id, shows
   nothing and keeps its id for the model.
-- **Counts and search.** It is no word or character. Search runs on the source, as it does for all
-  hidden marks: a query can find it, and it gets no highlight while it is hidden.
+- **Counts and search.** It is no word or character. Search runs on the source, and what it finds
+  depends on what the reader sees (owner's decision, phase 4). In Source mode and Side by Side an id is a
+  hit like any text. In the rendered view a match wholly inside a hidden id does not count: not in the
+  number of matches, not for Next, and Replace and Replace All leave it alone, so nothing changes where
+  nobody is looking. A match that also covers text that shows counts. The worker marks candidates by the
+  text of their line, and `FormatDoc::hidden_note` decides for those only.
 - **Outline and anchors.** A heading's entry and its anchor come from what shows, so `## Intro {#x}` is
   anchored `intro`, as `## Intro` is.
 - **Exports.** `Document::export_tree` leaves it out, so HTML, PDF, PNG and Pandoc do not show it.

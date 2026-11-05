@@ -398,6 +398,8 @@ struct Saving {
 enum Ask {
     /// Unsaved changes: Save / Discard / Cancel, then continue with the action.
     Unsaved(Then),
+    /// A changed draft in a block's form: Save / Discard / Cancel, then continue.
+    BlockDraft(block_form::DraftNext),
     /// A link with a non-web scheme.
     Link(String),
     /// "Import theme…": a theme of that name exists; replace it?
@@ -1102,11 +1104,9 @@ impl MarkiseApp {
         if self.doc.as_ref().is_some_and(|d| d.file() == Some(path.as_path())) {
             return;
         }
-        if self.is_dirty() {
-            self.set_ask(Ask::Unsaved(Then::Open(path)));
-            return;
+        if let Some(then) = self.ask_before_leaving(Then::Open(path)) {
+            self.perform_open(then);
         }
-        self.open_now(path, LoadReason::Open);
     }
 
     /// Opens a file whose path is already canonical and known to name a file (a vault index
@@ -1116,11 +1116,30 @@ impl MarkiseApp {
         if self.doc.as_ref().is_some_and(|d| d.file() == Some(path.as_path())) {
             return;
         }
-        if self.is_dirty() {
-            self.set_ask(Ask::Unsaved(Then::Open(path)));
-            return;
+        if let Some(then) = self.ask_before_leaving(Then::Open(path)) {
+            self.perform_open(then);
         }
-        self.open_now(path, LoadReason::Open);
+    }
+
+    /// Continues an open nobody has to be asked about.
+    fn perform_open(&mut self, then: Then) {
+        if let Then::Open(path) = then {
+            self.open_now(path, LoadReason::Open);
+        }
+    }
+
+    /// Asks what becomes of a changed block draft, then of unsaved edits, before `then`; `then`
+    /// comes back when there is nothing to ask.
+    fn ask_before_leaving(&mut self, then: Then) -> Option<Then> {
+        if self.block_draft_changed() {
+            self.set_ask(Ask::BlockDraft(block_form::DraftNext::Then(then)));
+            None
+        } else if self.is_dirty() {
+            self.set_ask(Ask::Unsaved(then));
+            None
+        } else {
+            Some(then)
+        }
     }
 
     fn open_now(&mut self, path: PathBuf, reason: LoadReason) {
@@ -1219,11 +1238,9 @@ impl MarkiseApp {
                 self.log_loaded(&loaded, l.started);
                 match l.reason {
                     LoadReason::Open => {
-                        if self.is_dirty() {
-                            // edits were made while the open was pending
-                            self.set_ask(Ask::Unsaved(Then::Install(Box::new(loaded))));
-                        } else {
-                            self.install(loaded);
+                        // edits may have been made while the open was pending
+                        if let Some(Then::Install(loaded)) = self.ask_before_leaving(Then::Install(Box::new(loaded))) {
+                            self.install(*loaded);
                         }
                     }
                     LoadReason::OpenDiscarding => self.install(loaded),
@@ -1913,6 +1930,24 @@ impl MarkiseApp {
         }
     }
 
+    /// Goes on after a block draft was answered for.
+    fn block_draft_next(&mut self, next: block_form::DraftNext) {
+        match next {
+            block_form::DraftNext::StopPackage => {
+                self.block_package_action(crate::package_ui::PackageAction::Forget);
+            }
+            block_form::DraftNext::Then(Then::Close) => {
+                if self.request_close() {
+                    self.allow_close = true;
+                    if let Some(c) = &self.ctx {
+                        c.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+            }
+            block_form::DraftNext::Then(then) => self.finish_then(then),
+        }
+    }
+
     /// Runs a save continuation if its precondition holds: the saved revision covers the
     /// current text. Otherwise (the user kept typing) the question is asked again.
     fn finish_then(&mut self, then: Then) {
@@ -1957,6 +1992,10 @@ impl MarkiseApp {
         // (an open comment draft makes the document dirty: Save / Discard / Cancel is asked)
         if let Some(d) = &mut self.doc {
             d.sync();
+        }
+        if !self.allow_close && self.block_draft_changed() {
+            self.set_ask(Ask::BlockDraft(block_form::DraftNext::Then(Then::Close)));
+            return false;
         }
         if self.allow_close || !self.is_dirty() {
             self.forget_backup();
@@ -2503,6 +2542,7 @@ impl MarkiseApp {
             Some(Ask::Unsaved(_)) => {
                 Question::unsaved(&self.doc.as_ref().map(DocState::display_name).unwrap_or_default())
             }
+            Some(Ask::BlockDraft(_)) => Question::block_draft(self.block_form().map_or("", |f| f.title())),
             Some(Ask::Link(url)) => Question::open_link(url),
             Some(Ask::ReplaceTheme { src, existing }) => {
                 let files: Vec<String> = existing.iter().map(|p| file_name(p)).collect();
@@ -2563,6 +2603,17 @@ impl MarkiseApp {
                 target: None,
                 then,
             }),
+            (Choice::Save, Some(Ask::BlockDraft(next))) => {
+                self.block_form_write();
+                // a refusal stays in the panel with its reason, and the action waits for another try
+                if self.block_form().is_none() {
+                    self.block_draft_next(next);
+                }
+            }
+            (Choice::DontSave, Some(Ask::BlockDraft(next))) => {
+                self.block_form_discard();
+                self.block_draft_next(next);
+            }
             (Choice::MoveToTrash, Some(Ask::Trash(p))) => self.move_to_trash(&p),
             (Choice::Create, Some(Ask::CreateNote { rel })) => self.create_note(rel),
             (Choice::AcceptAll | Choice::RejectAll, Some(Ask::CleanCopy { doc, counter, .. })) => {

@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use markise_engine::load::{Loaded, Partial, Rest};
 
-use super::{Ask, Banner, LoadReason, MarkiseApp, SaveRequest, Then, text_fp};
+use super::{Banner, LoadReason, MarkiseApp, SaveRequest, Then, text_fp};
 
 /// A progressive open whose whole document has not arrived yet.
 pub(super) struct Progressive {
@@ -66,7 +66,7 @@ impl MarkiseApp {
         let path = loaded.path.clone();
         // an open over unsaved edits asks first (with the whole document, as a normal open)
         let show = match reason {
-            LoadReason::Open => !self.is_dirty(),
+            LoadReason::Open => !self.is_dirty() && !self.block_draft_changed(),
             LoadReason::OpenDiscarding => true,
             LoadReason::Reload | LoadReason::AcceptReload => false,
         };
@@ -123,12 +123,12 @@ impl MarkiseApp {
                     // (renamed meanwhile: `p.path` followed the file)
                     full.path = p.path.clone();
                     self.log_loaded(&full, p.started);
-                    if p.reason == LoadReason::Open && self.is_dirty() {
-                        // installing it (Discard, or after a covering save) replaces the
-                        // current document and only then drops its continuation
-                        self.set_ask(Ask::Unsaved(Then::Install(Box::new(full))));
-                    } else {
+                    // installing it (Discard, or after a covering save) replaces the current
+                    // document and only then drops its continuation
+                    if p.reason != LoadReason::Open {
                         self.install(full);
+                    } else if let Some(Then::Install(full)) = self.ask_before_leaving(Then::Install(Box::new(full))) {
+                        self.install(*full);
                     }
                 }
             }
