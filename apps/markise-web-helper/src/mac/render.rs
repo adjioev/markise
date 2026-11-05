@@ -675,9 +675,48 @@ fn snapshot(height: f64, wait_for_paint: bool, generation: u64) {
             px_height,
             ms,
         };
-        finish(Ok((rendered, bytes)));
+        checked(rendered, bytes, wait_for_paint, generation);
     });
     unsafe { web.takeSnapshotWithConfiguration_completionHandler(Some(&config), &done) };
+}
+
+/// The last word on an image: the page may have added a picture since it settled, and one that failed
+/// makes this no picture of the block. One still on its way, or the first of a page with none before,
+/// gets another look within the bound; a look gone past that counts it as not come.
+fn checked(rendered: Rendered, bytes: Vec<u8>, wait_for_paint: bool, generation: u64) {
+    let web = with(|s| s.page.as_ref().expect("the page").web.clone());
+    let height = rendered.css_height;
+    call(
+        &web,
+        page::CHECK,
+        "unused",
+        "",
+        &isolated_world(),
+        generation,
+        move |answer| {
+            if !proceed(generation) {
+                return;
+            }
+            let numbers: Option<Vec<u64>> = answer
+                .ok()
+                .and_then(|text| text.split(' ').map(|n| n.parse().ok()).collect());
+            let Some(&[images, broken, open]) = numbers.as_deref() else {
+                return fail(FailKind::Script, "the page gave no count of its pictures");
+            };
+            let time_left = with(|s| {
+                let look = s.current.as_ref().and_then(|c| c.look.as_ref());
+                look.is_none_or(|l| l.1.elapsed().as_millis() < PAINT_LIMIT_MS)
+            });
+            if broken > 0 || open > 0 && !time_left {
+                fail(FailKind::Images, "A picture in this block did not load.");
+            } else if open > 0 || images > 0 && !wait_for_paint {
+                let timer = DispatchTime::NOW.time(PAINT_GAP_MS * 1_000_000);
+                let _ = DispatchQueue::main().after(timer, move || snapshot(height, true, generation));
+            } else {
+                finish(Ok((rendered, bytes)));
+            }
+        },
+    );
 }
 
 /// Whether this look is the same as the last, or the looking has gone on for long enough. If not, it

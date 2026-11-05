@@ -83,17 +83,22 @@ return true;
 pub const SETTLE: &str = r#"
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const root = document.getElementById('markise-root');
-const images = [...root.querySelectorAll('img')];
-const open = images.filter((i) => !i.complete);
+// what a picture's own load adds is waited for too, within the one bound
+const seen = new Set();
+const fresh = () => [...root.querySelectorAll('img')].filter((i) => !seen.has(i));
+const until = performance.now() + 1500;
+for (let now = fresh(); now.length && performance.now() < until; now = fresh()) {
+  now.forEach((i) => seen.add(i));
+  await Promise.race([
+    Promise.all(now.filter((i) => !i.complete).map((i) => new Promise((done) => {
+      i.addEventListener('load', done, { once: true });
+      i.addEventListener('error', done, { once: true });
+    }))),
+    sleep(until - performance.now()),
+  ]);
+}
 await Promise.race([
-  Promise.all(open.map((i) => new Promise((done) => {
-    i.addEventListener('load', done, { once: true });
-    i.addEventListener('error', done, { once: true });
-  }))),
-  sleep(1500),
-]);
-await Promise.race([
-  Promise.all(images.map((i) => i.decode().catch(() => {}))),
+  Promise.all([...root.querySelectorAll('img')].map((i) => i.decode().catch(() => {}))),
   sleep(1500),
 ]);
 // a CSS background: decoded as a picture of the same file is, within the same bound
@@ -113,7 +118,21 @@ await Promise.race([
   sleep(1500),
 ]);
 await Promise.race([document.fonts.ready, sleep(1000)]);
-const asked = (i) => i.getAttribute('src') && !/^(data|blob):/i.test(i.currentSrc || i.src);
-const broken = images.filter((i) => asked(i) && !(i.complete && i.naturalWidth > 0)).length;
-return `${root.getBoundingClientRect().height} ${images.length} ${broken}`;
+const images = [...root.querySelectorAll('img')];
+const chosen = (i) => i.currentSrc || i.getAttribute('src') || i.getAttribute('srcset');
+const asked = (i) => chosen(i) && !/^(data|blob):/i.test(chosen(i));
+const broken = images.filter((i) => asked(i) && i.complete && !(i.naturalWidth > 0)).length;
+const open = images.filter((i) => asked(i) && !i.complete).length;
+return `${root.getBoundingClientRect().height} ${images.length} ${broken + open}`;
+"#;
+
+/// In the same world, last thing before an image goes out: the pictures there are now, the ones that
+/// failed, the ones still on their way. The page may have added some since it settled.
+pub const CHECK: &str = r#"
+const images = [...document.querySelectorAll('#markise-root img')];
+const chosen = (i) => i.currentSrc || i.getAttribute('src') || i.getAttribute('srcset');
+const asked = images.filter((i) => chosen(i) && !/^(data|blob):/i.test(chosen(i)));
+const broken = asked.filter((i) => i.complete && !(i.naturalWidth > 0)).length;
+const open = asked.filter((i) => !i.complete).length;
+return `${images.length} ${broken} ${open}`;
 "#;
