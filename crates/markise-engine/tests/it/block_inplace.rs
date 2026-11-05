@@ -861,6 +861,35 @@ fn tab_and_enter_reach_the_text_of_a_field_that_holds_more() {
     assert_eq!(s.text(), doc);
 }
 
+#[test]
+fn marks_that_would_change_what_a_quote_holds_are_taken_back() {
+    let doc = ":::poll\n\n## Which?\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> `# Heading`\n\n:::\n";
+    let mut s = surface(doc);
+    let at = doc.find('`').unwrap();
+    s.ed.set_selection(Selection::range(at, at + "`# Heading`".len()));
+    s.frame();
+    s.key("format.clear");
+    assert_eq!(s.text(), doc, "a heading in the quote would make it no text any more");
+
+    // and in an answer: below an item is no place for a new kind of block either
+    let doc = ":::poll\n\n## Which?\n\n- [ ] `# One` {#a1}\n- [x] Two {#a2}\n\n:::\n";
+    let mut s = surface(doc);
+    let at = doc.find('`').unwrap();
+    s.ed.set_selection(Selection::range(at, at + "`# One`".len()));
+    s.frame();
+    s.key("format.clear");
+    assert_eq!(s.text(), doc);
+
+    // marks that keep it are marks
+    let doc = ":::poll\n\n## Which?\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> `Plain`\n\n:::\n";
+    let mut s = surface(doc);
+    let at = doc.find('`').unwrap();
+    s.ed.set_selection(Selection::range(at, at + "`Plain`".len()));
+    s.frame();
+    s.key("format.clear");
+    assert!(s.text().contains("\n> Plain\n"), "{}", s.text());
+}
+
 // ---- random edits
 
 const TYPED: &[&str] = &[

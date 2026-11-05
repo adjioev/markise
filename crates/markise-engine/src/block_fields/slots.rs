@@ -552,7 +552,7 @@ impl BlockFields {
             }
             v
         };
-        if without(self) != without(next) {
+        if without(self) != without(next) || self.nested != next.nested {
             return Err("the block would parse differently");
         }
         Ok(())
