@@ -2,6 +2,8 @@
 //! shows: the helper never orders one in.
 
 #[cfg(target_os = "macos")]
+mod client;
+#[cfg(target_os = "macos")]
 mod hostile;
 #[cfg(target_os = "macos")]
 mod render;
