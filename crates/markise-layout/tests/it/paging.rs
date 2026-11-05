@@ -198,6 +198,31 @@ fn the_toy_format_pages_too() {
     materialize_all(&mut m, &doc).unwrap();
 }
 
+/// Issue #219: a block between a `<details>` and its `<summary>` comes or goes with the blank
+/// lines around it left alone, so no marker is touched, and the title still has to follow the
+/// adjacency.
+#[test]
+fn a_block_between_a_start_and_its_summary_decides_the_title() {
+    let doc_with = |between: &str| format!("<details>\n\n{between}\n\n<summary>T</summary>\n\nbody\n\n</details>\n");
+    let at = "<details>\n\n".len();
+    for between in ["para", "- a\n- b", "[r]: /x"] {
+        let edits = [
+            (doc_with(between), at..at + between.len(), ""),
+            (doc_with(""), at..at, between),
+        ];
+        for (src, range, text) in edits {
+            for make in [full as fn(&dyn FormatDoc) -> DocModel, |d| paged(d, 128)] {
+                let mut doc = md(&src);
+                let mut m = make(&doc);
+                let e = doc.apply(&PatchSet::single_verbatim(range.clone(), text));
+                m.apply(&doc, &e);
+                m.diff(&full(&doc))
+                    .unwrap_or_else(|d| panic!("{src:?} {range:?} {text:?}: {d}"));
+            }
+        }
+    }
+}
+
 // ---- random edits and paging operations == full build -------------------------------------
 
 const SNIPPETS: &[&str] = &[

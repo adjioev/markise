@@ -18,7 +18,8 @@
 //! Markers are kept in a chunked relative-offset list (like the items): an edit shifts the ones
 //! after it in O(chunks), and groups refer to markers by index, so ordinary typing (no marker
 //! touched) costs no work per disclosure. Scopes are queried ([`FormatDoc::containers_at`])
-//! only when the markers are paired again, i.e. when an edit touched one.
+//! only when the markers are paired again, i.e. when an edit touched one or lies between a
+//! start and the summary after it (only the adjacency of those two depends on other blocks).
 //!
 //! Format-neutral: markers come from [`FormatDoc::raw_presentation`] through the items.
 
@@ -194,9 +195,21 @@ impl CrossBlockIndex {
         let lo = self.markers.partition_point(|r| r.origin < old.start);
         let hi = self.markers.partition_point(|r| r.origin < old.end).max(lo);
         if lo == hi && fresh.is_empty() {
-            // ordinary typing: only shifts (groups refer to markers by index)
+            // ordinary typing: only shifts (groups refer to markers by index), unless the edit
+            // lies between a start and the summary after it: their adjacency gives the title
+            let between = |k: usize, f: fn(&RawPresentation) -> bool| {
+                self.markers.range(k..k + 1).next().is_some_and(|r| f(&r.item.kind))
+            };
+            let summary_gap = lo > 0
+                && between(lo - 1, |k| matches!(k, RawPresentation::DisclosureStart { .. }))
+                && between(lo, |k| matches!(k, RawPresentation::DisclosureSummary { .. }));
             self.markers.splice(lo..lo, Vec::new(), delta);
-            return false;
+            if !summary_gap {
+                return false;
+            }
+            let generation = self.gens.disclosures;
+            self.pair(doc);
+            return self.gens.disclosures != generation;
         }
         // choices of the replaced markers outside the changed bytes, at their new positions
         let toggles: Vec<(usize, bool)> = self
