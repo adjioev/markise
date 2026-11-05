@@ -1957,9 +1957,8 @@ impl MarkiseApp {
         if let Some(d) = &mut self.doc {
             d.sync();
         }
-        if self.is_dirty() {
-            self.set_ask(Ask::Unsaved(then));
-        } else {
+        // (a draft may have changed while the save ran)
+        if let Some(then) = self.ask_before_leaving(then) {
             self.perform(then);
         }
     }

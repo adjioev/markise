@@ -141,7 +141,9 @@ fn id_candidates(text: &str, matches: &[Range<usize>]) -> Vec<usize> {
         if line.is_none_or(|(end, _)| r.start > end) {
             let start = text[..r.start].rfind('\n').map_or(0, |n| n + 1);
             let end = text[r.start..].find(['\n', '\r']).map_or(text.len(), |n| r.start + n);
-            let tail = markise_md::hidden_block_id(&text[start..end]).map(|cut| start + cut);
+            // (blanks after an id are not in the line a reader of the rendered view has)
+            let line_text = text[start..end].trim_end_matches([' ', '\t']);
+            let tail = markise_md::hidden_block_id(line_text).map(|cut| start + cut);
             line = Some((end, tail));
         }
         if let Some((end, Some(tail))) = line
