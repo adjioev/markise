@@ -4,7 +4,7 @@
 use std::fmt;
 use std::ops::Range;
 
-use markise_doc::{FormatDoc, HintSet, InlineKind, InlineNode, Patch, PatchSet, PlanStep};
+use markise_doc::{FormatDoc, HintSet, InlineKind, InlineNode, InlineSource, Patch, PatchSet, PlanStep};
 
 use super::block_place::blocks_of;
 use super::{EditError, EditorView, TxKind};
@@ -65,13 +65,24 @@ fn image_node(nodes: &[InlineNode], start: u32) -> Option<&InlineNode> {
 /// ends is its to say, as a code span in it may hold anything. `None` for anything else, a reference image
 /// too, whose path stands elsewhere.
 pub fn image_parts_in(doc: &dyn FormatDoc, at: &Range<usize>) -> Option<ImageParts> {
-    let leaf = doc.leaf(at.start)?;
-    let base = leaf.lines.first()?.start;
-    let span = leaf.lines.last()?.end.saturating_sub(base);
-    if span > MAX_LEAF || at.start < base {
-        return None;
-    }
-    let rich = doc.inlines(&leaf);
+    // a table has no inline tree of its own: each cell has
+    let (rich, base) = if let Some(table) = doc.table(at.start) {
+        let row = table.rows.iter().find(|r| r.start <= at.start && at.start < r.end)?;
+        let cell = (doc.table_row_cells(*row).into_iter()).find(|c| c.start <= at.start && at.start < c.end)?;
+        let source = InlineSource::Cell {
+            span: cell,
+            cap: usize::MAX,
+        };
+        (doc.inline(source, cell.start), cell.start)
+    } else {
+        let leaf = doc.leaf(at.start)?;
+        let base = leaf.lines.first()?.start;
+        let span = leaf.lines.last()?.end.saturating_sub(base);
+        if span > MAX_LEAF || at.start < base {
+            return None;
+        }
+        (doc.inlines(&leaf), base)
+    };
     let node = image_node(&rich.nodes, (at.start - base) as u32)?;
     let end = base + node.source.end as usize;
     let text = doc.text();

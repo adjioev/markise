@@ -111,6 +111,35 @@ fn in_a_quote_and_a_list_the_right_bytes_change() {
 }
 
 #[test]
+fn an_image_in_a_table_cell_changes_too() {
+    let doc = "| a | b |\n|---|---|\n| one | ![x](old.png) |\n";
+    let mut s = surface(doc);
+    let start = doc.find("![").unwrap();
+    assert_eq!(s.ed.replace_image_dest(start..start + 14, "new.png"), Ok(true));
+    assert_eq!(s.text(), doc.replace("old.png", "new.png"));
+    s.undo();
+    assert_eq!(s.text(), doc);
+    assert_eq!(s.ed.edit_image(start..start + 14, "y", "new.png"), Ok(true));
+    assert_eq!(s.text(), "| a | b |\n|---|---|\n| one | ![y](new.png) |\n");
+    s.undo();
+    // a pipe written as a cell has it, before the description ends
+    let doc = "| a |\n|---|\n| ![x\\|y](old.png) |\n";
+    let mut s = surface(doc);
+    let start = doc.find("![").unwrap();
+    assert_eq!(s.ed.replace_image_dest(start..start + 16, "new.png"), Ok(true));
+    assert_eq!(s.text(), doc.replace("old.png", "new.png"));
+    // a path that would end the cell does not stand
+    let doc = "| a |\n|---|\n| ![x](old.png) |\n";
+    let mut s = surface(doc);
+    let start = doc.find("![").unwrap();
+    assert_eq!(
+        s.ed.replace_image_dest(start..start + 13, "a|b.png"),
+        Err(ImageRefused::WouldNotStand)
+    );
+    assert_eq!(s.text(), doc);
+}
+
+#[test]
 fn changing_nothing_leaves_the_view_with_its_document() {
     let doc = "a\n\n![x](old.png)\n";
     let mut s = surface(doc);
