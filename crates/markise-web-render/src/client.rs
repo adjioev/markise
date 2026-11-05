@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,6 +21,8 @@ const MAX_FILES: u32 = 1024;
 const MAX_FILE_BYTES: u64 = 256 << 20;
 /// A helper's messages waiting to be read, then its stdin, each at most this long.
 const MAX_OUTGOING: usize = 16;
+/// What a frame counts for over its bytes: a stream of little ones is no cheaper than that.
+const FRAME_COST: usize = 4096;
 
 /// How long things may take.
 #[derive(Clone, Debug)]
@@ -37,6 +39,8 @@ pub struct Limits {
     pub backoff: Duration,
     /// Helpers lost in a row with nothing drawn before this counts as no helper at all.
     pub losses: u32,
+    /// What a helper has said and the client has not yet taken, in bytes: more than this ends it.
+    pub queued_bytes: usize,
 }
 
 impl Default for Limits {
@@ -48,6 +52,7 @@ impl Default for Limits {
             idle: Duration::from_secs(120),
             backoff: Duration::from_millis(250),
             losses: 5,
+            queued_bytes: 256 << 20,
         }
     }
 }
@@ -249,6 +254,8 @@ struct Helper {
     kill: Box<dyn FnMut() + Send>,
     /// Until its first frame.
     start_deadline: Option<Instant>,
+    /// What its reader has handed over and this thread has not taken yet, in bytes.
+    queued: Arc<AtomicUsize>,
 }
 
 struct Flight {
@@ -285,6 +292,8 @@ struct Worker {
 impl Worker {
     fn run(mut self) {
         loop {
+            // first, whatever is coming in: a stream of frames must not hold a deadline off
+            self.timer();
             self.advance();
             let event = match self.next_deadline() {
                 Some(at) => match self.inbox.recv_timeout(at.saturating_duration_since(Instant::now())) {
@@ -296,9 +305,14 @@ impl Worker {
                 None => Some(self.inbox.recv().unwrap_or(Event::Stop)),
             };
             match event {
-                None => self.timer(),
+                None => {}
                 Some(Event::Want(jobs)) => self.want(jobs),
-                Some(Event::Message(generation, message, bytes)) => self.message(generation, message, bytes),
+                Some(Event::Message(generation, message, bytes)) => {
+                    if let Some(h) = self.helper.as_ref().filter(|h| h.generation == generation) {
+                        h.queued.fetch_sub(bytes.len() + FRAME_COST, Ordering::Relaxed);
+                    }
+                    self.message(generation, message, bytes);
+                }
                 Some(Event::Lost(generation)) => {
                     if self.helper.as_ref().is_some_and(|h| h.generation == generation) {
                         self.lost("The helper stopped.");
@@ -430,12 +444,20 @@ impl Worker {
         let Spawned { mut to, mut from, kill } = spawned;
         let (writer, outgoing) = mpsc::sync_channel::<(ToHelper, Vec<u8>)>(MAX_OUTGOING);
         let events = self.events.clone();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let (counted, budget) = (queued.clone(), self.limits.queued_bytes);
         let reading = std::thread::Builder::new()
             .name("markise-web-reader".into())
             .spawn(move || {
                 loop {
                     match proto::read_from_helper(&mut from) {
                         Ok((message, bytes)) => {
+                            // over the budget it is ended, and nothing more of it is read or kept
+                            let cost = bytes.len() + FRAME_COST;
+                            if counted.fetch_add(cost, Ordering::Relaxed) + cost > budget {
+                                let _ = events.send(Event::Lost(generation));
+                                return;
+                            }
                             if events.send(Event::Message(generation, message, bytes)).is_err() {
                                 return;
                             }
@@ -461,6 +483,7 @@ impl Worker {
             to: writer,
             kill,
             start_deadline: Some(Instant::now() + self.limits.start),
+            queued,
         };
         if reading.is_err() || writing.is_err() {
             (helper.kill)();
@@ -483,7 +506,8 @@ impl Worker {
         if self.helper.as_ref().is_none_or(|h| h.start_deadline.is_some()) {
             return;
         }
-        while self.flight.is_none() {
+        // a failed send ends the helper: what is left waits for the next one
+        while self.flight.is_none() && self.helper.is_some() {
             let Some(job) = self.queue.pop_front() else { return };
             match job.source.prepare() {
                 Ok(prepared) => self.fly(job, prepared),
@@ -526,7 +550,6 @@ impl Worker {
         if self.helper.as_ref().is_none_or(|h| h.generation != generation) {
             return;
         }
-        self.idle_since = Instant::now();
         match message {
             FromHelper::Hello { protocol, available } => {
                 if self.helper.as_ref().is_some_and(|h| h.start_deadline.is_none()) {
@@ -539,6 +562,7 @@ impl Worker {
                     h.start_deadline = None;
                 }
                 self.set_availability(Availability::Available);
+                self.idle_since = Instant::now();
             }
             FromHelper::NeedFile { token, id, area, path } => self.need_file(token, id, area, &path),
             FromHelper::Rendered(r) => self.rendered(r, bytes),
@@ -552,6 +576,7 @@ impl Worker {
                     return self.lost("The block took too long to draw.");
                 }
                 self.flight = None;
+                self.idle_since = Instant::now();
                 if !cancelled && kind != FailKind::Cancelled {
                     self.deliver(key, Outcome::Failed(reason));
                 }
@@ -594,6 +619,7 @@ impl Worker {
         }
         let Some(f) = self.flight.take() else { return };
         self.losses = 0;
+        self.idle_since = Instant::now();
         if !f.cancelled {
             let shot = Shot {
                 css_width: f.job.width,

@@ -17,7 +17,53 @@ fn the_page_reaches_nothing_it_must_not() {
     let text = String::from_utf8_lossy(&out.stdout);
     println!("{text}");
     assert!(out.status.success(), "{text}");
-    assert!(text.contains("stopped: fetch") && text.contains("stopped: webrtc") && text.ends_with("ok\n"));
+    assert!(text.contains("stopped: fetch ") && text.contains("stopped: webrtc ") && text.ends_with("ok\n"));
+}
+
+/// What an older macOS does, forced: it has no proxy API, so this helper has no engine, and says so
+/// rather than running a page less closed off. Nothing else about that system can be had here.
+#[test]
+fn a_system_without_what_it_takes_has_no_helper_and_says_so() {
+    let out = Command::new(env!("CARGO_BIN_EXE_markise-web-helper"))
+        .env("MARKISE_WEB_HELPER_NO_PROXY_API", "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the helper starts");
+    assert!(out.status.success(), "{:?}", out.status);
+    let (hello, _) = markise_web_render::proto::read_from_helper(&mut out.stdout.as_slice()).unwrap();
+    assert_eq!(
+        hello,
+        markise_web_render::proto::FromHelper::Hello {
+            protocol: markise_web_render::proto::PROTOCOL,
+            available: false
+        }
+    );
+}
+
+/// Nothing that came with macOS 14 may be linked: on an older system the loader would end the process
+/// before it could say anything. The symbols are looked up when it runs.
+#[test]
+fn nothing_newer_than_the_deployment_target_is_linked() {
+    let out = Command::new("nm")
+        .args(["-u", env!("CARGO_BIN_EXE_markise-web-helper")])
+        .output()
+        .expect("nm");
+    let imports = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && imports.contains("_nw_endpoint_create_host"),
+        "{imports}"
+    );
+    assert!(!imports.contains("nw_proxy_config"), "{imports}");
+}
+
+/// An attempt that runs out of its budget counts against the page, not for it.
+#[test]
+fn the_self_test_counts_what_did_not_finish_against_it() {
+    let page = include_str!("../../src/mac/self_test.js");
+    assert!(!page.contains("'timeout'"), "no way to pass by timing out");
+    assert!(page.contains("'unfinished'"));
+    let runner = include_str!("../../src/mac/self_test.rs");
+    assert!(runner.contains("UNFINISHED") && runner.contains("wrong.push"));
 }
 
 #[test]

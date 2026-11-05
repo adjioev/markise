@@ -134,6 +134,7 @@ fn limits() -> Limits {
         idle: Duration::from_secs(60),
         backoff: Duration::from_millis(10),
         losses: 3,
+        queued_bytes: 256 << 20,
     }
 }
 
@@ -644,5 +645,178 @@ impl Spawner for Stuck {
             from: Box::new(from),
             kill: Box::new(|| {}),
         })
+    }
+}
+
+/// Keeps the client's thread busy: preparing it takes a while.
+struct Slow(Duration);
+
+impl JobSource for Slow {
+    fn prepare(&self) -> Result<Prepared, String> {
+        std::thread::sleep(self.0);
+        Ok(Prepared {
+            html: "<section></section>".to_string(),
+            styles: Vec::new(),
+            module: None,
+        })
+    }
+    fn file(&self, _area: Area, _path: &str) -> Option<Vec<u8>> {
+        std::thread::sleep(self.0);
+        None
+    }
+}
+
+/// Valid frames with an id nobody asked for, each with a large attachment.
+fn stale(peer: &mut Peer, n: usize) {
+    for _ in 0..n {
+        let r = Rendered {
+            id: 999_999,
+            css_height: 512.0,
+            px_width: 512,
+            px_height: 512,
+            ms: 0.0,
+        };
+        if proto::write_frame(
+            &mut peer.to,
+            &FromHelper::Rendered(r).encode(),
+            &vec![0u8; 512 * 512 * 4],
+        )
+        .is_err()
+        {
+            return;
+        }
+    }
+}
+
+#[test]
+fn a_helper_streaming_while_the_client_is_busy_is_ended_not_buffered() {
+    let script = move |peer: &mut Peer, m: ToHelper, _: Vec<u8>| {
+        if let ToHelper::Render(q) = m {
+            // the file holds the client's thread while these come in: about 100 MiB in all
+            let need = FromHelper::NeedFile {
+                token: 1,
+                id: q.id,
+                area: Area::Package,
+                path: "slow".to_string(),
+            };
+            peer.say(need, &[]);
+            stale(peer, 100);
+            peer.draw(q.id, 20, 20);
+        }
+    };
+    let mut l = limits();
+    l.render = Duration::from_secs(10);
+    l.queued_bytes = 8 << 20;
+    let r = rig_with(Arc::new(script), hello(), l, false);
+    let mut j = job(1);
+    j.source = Arc::new(Slow(Duration::from_millis(1500)));
+    r.client.want(vec![j]);
+    until(|| r.killed.load(Ordering::SeqCst) >= 1);
+    let got = results(&r, 1);
+    assert!(matches!(got[0].1, Outcome::Failed(_)), "{got:?}");
+}
+
+#[test]
+fn frames_about_nothing_do_not_hold_a_deadline_off() {
+    let r = rig(|peer, m, _| {
+        if matches!(m, ToHelper::Render(_)) {
+            // for ever, as fast as it can, none about this render
+            loop {
+                let chatter = FromHelper::Failed {
+                    id: 999_999,
+                    kind: FailKind::Script,
+                    reason: "chatter".to_string(),
+                };
+                if proto::write_frame(&mut peer.to, &chatter.encode(), &[]).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    let t = Instant::now();
+    r.client.want(vec![job(1)]);
+    let got = results(&r, 1);
+    assert!(
+        matches!(&got[0].1, Outcome::Failed(why) if why.contains("too long")),
+        "{got:?}"
+    );
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    assert_eq!(r.killed.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_helper_that_stops_taking_input_loses_no_job_behind_it() {
+    // the first frame goes through, the next write finds the pipe gone
+    struct Spawn2(Arc<AtomicUsize>);
+    struct OneFrame(usize);
+    impl Write for OneFrame {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.0 == 0 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0 = self.0.saturating_sub(1);
+            Ok(())
+        }
+    }
+    impl Spawner for Spawn2 {
+        fn spawn(&mut self) -> std::io::Result<Spawned> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let (from, mut to) = std::io::pipe()?;
+            let hello = FromHelper::Hello {
+                protocol: PROTOCOL,
+                available: true,
+            };
+            proto::write_frame(&mut to, &hello.encode(), &[])?;
+            // after the first render: its picture, and a file nobody can be answered about
+            let r = Rendered {
+                id: 1,
+                css_height: 20.0,
+                px_width: 20,
+                px_height: 20,
+                ms: 0.0,
+            };
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                let need = FromHelper::NeedFile {
+                    token: 1,
+                    id: 1,
+                    area: Area::Package,
+                    path: "a.css".to_string(),
+                };
+                let _ = proto::write_frame(&mut to, &need.encode(), &[]);
+                std::thread::sleep(Duration::from_millis(30));
+                let _ = proto::write_frame(&mut to, &FromHelper::Rendered(r).encode(), &[7u8; 1600]);
+                std::thread::sleep(Duration::from_secs(5));
+            });
+            Ok(Spawned {
+                to: Box::new(OneFrame(1)),
+                from: Box::new(from),
+                kill: Box::new(|| {}),
+            })
+        }
+    }
+    let spawned = Arc::new(AtomicUsize::new(0));
+    let mut l = limits();
+    l.losses = 100;
+    let client = Client::new(Box::new(Spawn2(spawned)), l, Arc::new(|| {}));
+    client.want(vec![job(1)]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut got = Vec::new();
+    while got.is_empty() {
+        got.extend(client.take_results());
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // the writer has failed by now: the next jobs have to come to an end all the same
+    std::thread::sleep(Duration::from_millis(50));
+    client.want(vec![job(2), job(3)]);
+    let mut keys: Vec<u64> = got.iter().map(|g| g.0).collect();
+    while !(keys.contains(&2) && keys.contains(&3)) {
+        keys.extend(client.take_results().into_iter().map(|g| g.0));
+        assert!(Instant::now() < deadline, "only {keys:?}");
+        std::thread::sleep(Duration::from_millis(2));
     }
 }

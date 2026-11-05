@@ -298,7 +298,9 @@ fn images_in(html: &str) -> HashSet<String> {
                     .replace("&amp;", "&")
                     .replace("&#39;", "'")
                     .replace("&quot;", "\"");
-                found.insert(clean_dots(&percent_decoded(&value)));
+                // as a page's URL comes to a file: no query or fragment, then decoded
+                let path = value.split(['?', '#']).next().unwrap_or("");
+                found.insert(clean_dots(&percent_decoded(path)));
                 break;
             }
         }

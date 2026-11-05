@@ -238,6 +238,26 @@ fn a_document_gives_this_blocks_images_and_nothing_else() {
     }
 }
 
+#[test]
+fn an_image_with_a_query_or_a_fragment_is_the_same_file() {
+    // a page's URL arrives without them, so the list has to hold the same
+    let r = rig();
+    let block = ":::shot x\n\n![a](images/a.svg#icon)\n\n![b](images/b%20c.png?v=1)\n\n:::";
+    fs::create_dir_all(r.folder.join("images")).unwrap();
+    fs::write(r.folder.join("images/a.svg"), "a").unwrap();
+    fs::write(r.folder.join("images/b c.png"), "b").unwrap();
+    // a literal question mark or hash in a name is percent-encoded, and is part of it
+    let literal = ":::shot x\n\n![a](images/q%3F.png)\n\n:::";
+    fs::write(r.folder.join("images/q?.png"), "q").unwrap();
+    let p = r.page("shot", "x", block);
+    p.prepare().unwrap();
+    assert_eq!(p.file(Area::Document, "images/a.svg").as_deref(), Some(&b"a"[..]));
+    assert_eq!(p.file(Area::Document, "images/b c.png").as_deref(), Some(&b"b"[..]));
+    let p = r.page("shot", "x", literal);
+    p.prepare().unwrap();
+    assert_eq!(p.file(Area::Document, "images/q?.png").as_deref(), Some(&b"q"[..]));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_link_out_of_the_folder_opens_nothing() {

@@ -55,8 +55,8 @@ struct Asked {
     /// What the client was last told.
     told: Vec<u64>,
     failed: HashMap<u64, Arc<str>>,
-    /// The newest picture of the block at this opener: it stands in for the next one.
-    latest: HashMap<usize, u64>,
+    /// The newest picture of each block, by its identity: it stands in for the next one.
+    latest: HashMap<u64, u64>,
     /// A key was seen whose job is gone: the view has to ask again.
     lost_job: bool,
 }
@@ -164,7 +164,7 @@ impl SiteBoard {
         let mut pictures = self.pictures.lock().unwrap_or_else(|e| e.into_inner());
         let mut asked = self.asked.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(p) = pictures.get(key) {
-            asked.latest.insert(q.opener, key);
+            asked.latest.insert(q.identity, key);
             return (key, SiteShot::Ready(p.picture));
         }
         if let Some(why) = asked.failed.get(&key) {
@@ -197,7 +197,7 @@ impl SiteBoard {
         }
         let old = asked
             .latest
-            .get(&q.opener)
+            .get(&q.identity)
             .and_then(|k| pictures.peek(*k))
             .map(|p| p.picture);
         (key, SiteShot::Pending(old))
@@ -237,8 +237,18 @@ impl SiteBoard {
         }
         let now = waiting.len().min(UPLOADS_PER_FRAME);
         let mut pictures = self.pictures.lock().unwrap_or_else(|e| e.into_inner());
+        let limit = ctx.input(|i| i.max_texture_side);
         for (key, shot) in waiting.drain(..now) {
             let size = [shot.px_width as usize, shot.px_height as usize];
+            // refused rather than scaled on this thread or cut in tiles: a limit under the helper's
+            // own is rare, and a card says all there is to say
+            if size[0] > limit || size[1] > limit {
+                asked
+                    .failed
+                    .insert(key, "The picture is larger than this graphics card takes.".into());
+                changed = true;
+                continue;
+            }
             let image = ColorImage::from_rgba_premultiplied(size, &shot.rgba);
             let cost = shot.rgba.len();
             let texture = ctx.load_texture(format!("markise-block-{key:x}"), image, TextureOptions::LINEAR);
@@ -276,14 +286,41 @@ impl SiteBoard {
             .filter(|k| !pictures.contains(*k) && !asked.failed.contains_key(k) && !waiting.contains(k))
             .take(MAX_WANTED)
             .collect();
-        if wanted.iter().any(|k| !asked.jobs.contains_key(k)) {
-            asked.lost_job = true;
-        }
-        if wanted != asked.told {
-            let jobs = wanted.iter().filter_map(|k| asked.jobs.get(k).cloned()).collect();
+        let (submit, lost) = plan_submission(&wanted, |k| asked.jobs.contains_key(&k), &asked.told);
+        asked.lost_job |= lost;
+        if let Some(submit) = submit {
+            let jobs = submit.iter().filter_map(|k| asked.jobs.get(k).cloned()).collect();
             client.want(jobs);
-            asked.told = wanted;
+            asked.told = submit;
         }
+    }
+}
+
+/// What to tell the client, given what is wanted, which of it has a job, and what it was last told:
+/// the list when it changed, and whether a job is missing. What has no job is not told, and so not
+/// recorded as told: it goes out when the view has asked for it again.
+fn plan_submission(wanted: &[u64], has_job: impl Fn(u64) -> bool, told: &[u64]) -> (Option<Vec<u64>>, bool) {
+    let submit: Vec<u64> = wanted.iter().copied().filter(|k| has_job(*k)).collect();
+    let lost = submit.len() != wanted.len();
+    ((submit != told).then_some(submit), lost)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_submission;
+
+    #[test]
+    fn what_has_no_job_is_not_recorded_as_told() {
+        let has = |k: u64| k != 2;
+        let (submit, lost) = plan_submission(&[1, 2], has, &[]);
+        assert_eq!(submit, Some(vec![1]));
+        assert!(lost, "the view has to ask again");
+        // told [1]; the job of 2 is back: it goes out
+        let (submit, lost) = plan_submission(&[1, 2], |_| true, &[1]);
+        assert_eq!(submit, Some(vec![1, 2]));
+        assert!(!lost);
+        // nothing changed: nothing to say
+        assert_eq!(plan_submission(&[1, 2], |_| true, &[1, 2]), (None, false));
     }
 }
 
