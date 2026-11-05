@@ -30,6 +30,10 @@ type SetFailover = unsafe extern "C" fn(*mut c_void, bool);
 /// Looked up when it runs: they came with macOS 14, and the app starts on older ones, where linking
 /// them would stop this program before it could say it has no engine.
 fn proxy_functions() -> Option<(CreateProxy, SetFailover)> {
+    // for a test of what an older system does: it can only take something away
+    if std::env::var_os("MARKISE_WEB_HELPER_NO_PROXY_API").is_some() {
+        return None;
+    }
     // SAFETY: valid names; the signatures are those of Network.framework's headers
     unsafe {
         let create = libc::dlsym(libc::RTLD_DEFAULT, c"nw_proxy_config_create_socksv5".as_ptr());
@@ -57,6 +61,15 @@ const ALSO_OFF: &[&str] = &[
     "LinkPrefetchEnabled",
     "SpeculationRulesPrefetchEnabled",
     "WebTransportEnabled",
+];
+
+/// A page nobody sees is still to run on time: left on, its timers wait for a second or more, and on a
+/// busy machine its process can be held back, and a render runs out of its limit doing nothing.
+const KEEP_ON_TIME: &[&str] = &[
+    "HiddenPageDOMTimerThrottlingEnabled",
+    "DOMTimersThrottlingEnabled",
+    "PageVisibilityBasedProcessSuppressionEnabled",
+    "BackgroundWebContentRunningBoardThrottlingEnabled",
 ];
 
 /// The engine's features with their names.
@@ -106,7 +119,8 @@ pub fn dead_proxy(store: &WKWebsiteDataStore) {
 
 pub fn engine_features_off(prefs: &WKPreferences) {
     for (name, feature) in features() {
-        if MUST_BE_OFF.contains(&name.as_str()) || ALSO_OFF.contains(&name.as_str()) {
+        let name = name.as_str();
+        if MUST_BE_OFF.contains(&name) || ALSO_OFF.contains(&name) || KEEP_ON_TIME.contains(&name) {
             // SAFETY: [`usable`] checked it responds
             let _: () = unsafe { msg_send![prefs, _setEnabled: false, forFeature: &*feature] };
         }

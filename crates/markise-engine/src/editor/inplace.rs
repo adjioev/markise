@@ -139,7 +139,7 @@ impl EditorView {
         self.place.mode = self.place.mode.next_for(true, self.view.can_draw_site());
         self.clear_own_modes();
         self.follow_block_modes();
-        self.leave_block_for_picture();
+        self.leave_block_for_picture(None);
     }
 
     /// Whether a block of this name has a view of its own. With no package to say, nothing is ruled out.
@@ -154,14 +154,16 @@ impl EditorView {
     }
 
     /// A picture shows what no caret can stand in, and a block holding a selection's end shows what it
-    /// holds instead (ADR 0023). So whoever asks for a picture gets one: the caret goes after it.
-    fn leave_block_for_picture(&mut self) {
+    /// holds instead (ADR 0023). So whoever asks for a picture gets one: the caret goes after it. `only`:
+    /// the block asked about; a caret in any other is none of this. `None`: every block was.
+    fn leave_block_for_picture(&mut self, only: Option<usize>) {
         let p = self.session.selection().primary();
         if !p.is_caret() || !self.view.can_draw_site() {
             return;
         }
         let at = p.focus.offset;
-        let Some(c) = self.session.doc().named_containers_at(at).pop() else {
+        let around = self.session.doc().named_containers_at(at);
+        let Some(c) = around.into_iter().rfind(|c| only.is_none_or(|o| c.opener.start == o)) else {
             return;
         };
         let inside = c.opener.start < at && at < c.closer.end;
@@ -199,7 +201,7 @@ impl EditorView {
             }
         }
         self.follow_block_modes();
-        self.leave_block_for_picture();
+        self.leave_block_for_picture(Some(opener));
     }
 
     /// Hands the view where the blocks with a state of their own stand now.

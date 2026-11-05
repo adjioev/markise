@@ -105,8 +105,9 @@ pub struct SiteQuery<'a> {
     pub name: &'a str,
     pub args: &'a str,
     pub source: &'a str,
-    /// Where it opens now. An older picture of the block at this place can stand in for a new one.
-    pub opener: usize,
+    /// Which block this is, through edits: its opener can move and its content change, and it stays
+    /// this. An older picture of the same block can stand in for a new one; another block's cannot.
+    pub identity: u64,
     pub width: f32,
     pub scale: f32,
     pub theme: &'a Theme,

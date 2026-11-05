@@ -6,7 +6,7 @@
 //!
 //! A document whose blocks nothing can draw pays one comparison per item.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -17,6 +17,9 @@ use super::View;
 use super::native::{BlockViewMode, Looked};
 use crate::model::{Container, Item, ItemKind};
 use crate::native::{MAX_NATIVE_BLOCK_BYTES, SitePicture, SiteQuery, SiteShot};
+
+/// Blocks whose identity is kept at most.
+const IDENTITIES_MAX: usize = 4096;
 
 /// What an item is to a picture.
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +49,9 @@ pub(super) struct SiteState {
     roles: RefCell<HashMap<usize, Role>>,
     /// The openers of the blocks around the selection's ends: those show what they hold.
     held: Vec<usize>,
+    /// Which block stands at which opener, with its name and arguments, moved by every edit.
+    identities: RefCell<HashMap<usize, (u64, Box<str>, Box<str>)>>,
+    next_identity: Cell<u64>,
 }
 
 impl SiteState {
@@ -121,12 +127,58 @@ impl View {
             name: &c.name,
             args: &c.args,
             source: bytes,
-            opener: c.opener.start,
+            identity: self.identity_of(c),
             width,
             scale: self.ppp,
             theme: &self.theme,
         });
         Some(answer)
+    }
+
+    /// The block standing at this opener, the same one as before if an edit left it standing and it is
+    /// still of that name and those arguments.
+    fn identity_of(&self, c: &NamedContainer) -> u64 {
+        let mut known = self.site.identities.borrow_mut();
+        if let Some((id, name, args)) = known.get(&c.opener.start)
+            && **name == *c.name
+            && **args == *c.args
+        {
+            return *id;
+        }
+        let id = self.site.next_identity.get() + 1;
+        self.site.next_identity.set(id);
+        if known.len() >= IDENTITIES_MAX {
+            known.clear();
+        }
+        known.insert(c.opener.start, (id, c.name.clone(), c.args.clone()));
+        id
+    }
+
+    /// The document changed: blocks moved with these edits, `(start, end, delta)` each in the
+    /// coordinates after the ones before. One whose opener an edit went over is no longer that block,
+    /// whatever comes to stand there. Empty: the document was replaced, and nothing is known.
+    pub fn site_follow_edits(&mut self, edits: &[(usize, usize, isize)]) {
+        let mut known = self.site.identities.borrow_mut();
+        if known.is_empty() {
+            return;
+        }
+        if edits.is_empty() {
+            known.clear();
+            return;
+        }
+        *known = std::mem::take(&mut *known)
+            .into_iter()
+            .filter_map(|(mut at, value)| {
+                for &(start, end, delta) in edits {
+                    if at >= end {
+                        at = at.saturating_add_signed(delta);
+                    } else if at >= start {
+                        return None;
+                    }
+                }
+                Some((at, value))
+            })
+            .collect();
     }
 
     /// Why the block item `i` opens shows no picture, when it failed to draw.
