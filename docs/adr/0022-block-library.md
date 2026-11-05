@@ -165,6 +165,24 @@ ago goes nowhere if the document or its revision is another by then.
 
 A block whose first row is scrolled off has no handle until that row is back, though a picture cut off at the top keeps it at the view's top.
 
+### Deleting
+
+`EditorView::delete_block(opener, in_source)`. A quiet button with a bin stands with a block's other buttons at its top right, while the pointer is over the block,
+and the command Delete Block (⌥⌘⌫; Ctrl+Shift+Delete, since Ctrl+Shift+Backspace deletes a table row) acts on the block around the caret, the innermost, also in Source mode. It is in the Paragraph menu
+with the other block commands. Native, card or picture, nested or not, with a package or with none: any paired block. A test checks the chord is on nothing else.
+
+**Bytes.** The lines of the block, whatever is inside it, and the blank lines it leaves behind, by the one helper moving uses: only spaces and tabs count as blank, and
+anything else is refused. What it held apart with no blank line stays apart. A file ending without a line ending stays so. If another block would pair differently
+afterwards the transaction rolls back and a message says so.
+
+**One undo step**, named Delete Block, with no question: undo brings back the source, byte for byte.
+
+**The caret**, if it was in the block, goes to the end of the text before it, or the free line after a block before it; with neither, to what follows.
+
+**What goes with it.** A form's changed draft of the block, or of a block inside it, comes first: the question Save, Discard or Cancel, as for leaving a draft. One with
+nothing changed closes, as for any other edit that removes its block. A draft of another block stays. The block's view state and picture identity end with its
+opener, as for any edit going over one: what comes to stand there inherits neither.
+
 ## Consequences
 
 - A package's texts in other languages help find a block before they are shown.

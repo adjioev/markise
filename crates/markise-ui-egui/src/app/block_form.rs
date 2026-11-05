@@ -23,6 +23,8 @@ pub(super) enum DraftNext {
     Then(Then),
     /// Stop Using This Package.
     StopPackage,
+    /// Delete the block with this opener.
+    DeleteBlock(usize),
 }
 
 /// The form of the session.

@@ -4,7 +4,8 @@
 use egui::Context;
 use markise_layout::block::color;
 
-use super::MarkiseApp;
+use super::block_form::DraftNext;
+use super::{Ask, MarkiseApp};
 use crate::block_form::{LANGUAGE, style_for};
 use crate::block_library::{LibraryAct, OpenLibrary, Opened};
 
@@ -16,12 +17,20 @@ pub(super) struct BlockLibraryState {
     requested: Option<String>,
     /// A block was dropped: its opener and the line it goes to, in this document at this revision.
     requested_move: Option<((usize, usize), (u64, u64))>,
+    /// A block's delete button was pressed, by its opener, in this document and revision.
+    requested_delete: Option<(usize, (u64, u64))>,
 }
 
 impl BlockLibraryState {
     pub(super) fn request(&mut self, query: Option<String>) {
         if query.is_some() {
             self.requested = query;
+        }
+    }
+
+    pub(super) fn request_delete(&mut self, opener: Option<usize>, origin: Option<(u64, u64)>) {
+        if let (Some(opener), Some(origin)) = (opener, origin) {
+            self.requested_delete = Some((opener, origin));
         }
     }
 
@@ -71,7 +80,7 @@ impl MarkiseApp {
 
     /// Move Block Up or Down.
     pub(super) fn move_block_at_caret(&mut self, up: bool) -> bool {
-        if !self.block_move_allowed() {
+        if !self.block_move_allowed() || self.keyboard_elsewhere() {
             return false;
         }
         let in_source = self.source_focused();
@@ -123,6 +132,103 @@ impl MarkiseApp {
         let Some(d) = &mut self.doc else { return };
         let result = d.viewer.ed.move_block_to(opener, line);
         self.block_move_done(result);
+    }
+
+    /// The keyboard is in a field of something else, such as Find: what it types and its commands are not
+    /// the document's.
+    fn keyboard_elsewhere(&self) -> bool {
+        let (Some(ctx), Some(d)) = (&self.ctx, &self.doc) else {
+            return false;
+        };
+        let Some(focused) = ctx.memory(|m| m.focused()) else {
+            return false;
+        };
+        // the widget itself: full Source mode counts as the source's whoever has the keyboard
+        d.viewer.surface_id() != Some(focused) && !d.source_ui.has_focus(ctx)
+    }
+
+    /// A block can be deleted now: as for a move, but no package is needed, and a draft is asked about.
+    fn block_delete_allowed(&self) -> bool {
+        self.doc
+            .as_ref()
+            .is_some_and(|d| d.viewer.ed.session.read_only().is_none() && d.viewer.card_edit().is_none())
+    }
+
+    /// Delete Block is possible for the caret.
+    pub(super) fn block_delete_available(&self) -> bool {
+        self.block_delete_allowed()
+            && self
+                .doc
+                .as_ref()
+                .is_some_and(|d| d.viewer.ed.block_opener_at_caret().is_some())
+    }
+
+    /// Delete Block.
+    pub(super) fn delete_block_at_caret(&mut self) -> bool {
+        if !self.block_delete_allowed() || self.keyboard_elsewhere() {
+            return false;
+        }
+        let in_source = self.source_focused();
+        let Some(d) = &mut self.doc else { return false };
+        let Some(opener) = d.viewer.ed.block_opener_in_pane(in_source) else {
+            return false;
+        };
+        self.delete_block_asking(opener)
+    }
+
+    /// Deletes the block with this opener, once a changed draft of it, or of a block inside it, is
+    /// answered for. A form of that block with nothing changed closes as it does when its block goes.
+    pub(super) fn delete_block_asking(&mut self, opener: usize) -> bool {
+        let Some(d) = &self.doc else { return false };
+        let Some(lines) = d.viewer.ed.block_lines(opener) else {
+            return false;
+        };
+        if let Some(open) = self.block_form()
+            && open.doc() == d.id
+            && open.is_dirty()
+            && lines.contains(&open.key())
+        {
+            self.set_ask(Ask::BlockDraft(DraftNext::DeleteBlock(opener)));
+            return true;
+        }
+        self.delete_block_now(opener)
+    }
+
+    /// The draft is answered for, or there was none.
+    pub(super) fn delete_block_now(&mut self, opener: usize) -> bool {
+        if !self.block_delete_allowed() {
+            return false;
+        }
+        let in_source = self.source_focused();
+        let Some(d) = &mut self.doc else { return false };
+        let result = d.viewer.ed.delete_block(opener, in_source);
+        if in_source {
+            d.source_ui.find_reveal = true;
+        } else {
+            d.viewer.request_refocus();
+        }
+        match result {
+            Ok(done) => {
+                if done {
+                    self.remember_block_views();
+                }
+                done
+            }
+            Err(why) => {
+                self.banner = Some(super::Banner::Error(format!("The block was not deleted: {why}.")));
+                false
+            }
+        }
+    }
+
+    /// What a block's delete button asked for in the last frame.
+    fn block_delete_pressed(&mut self) {
+        let Some((opener, origin)) = self.block_library.requested_delete.take() else {
+            return;
+        };
+        if self.block_edit_origin() == Some(origin) {
+            self.delete_block_asking(opener);
+        }
     }
 
     /// Inserts the preset at this place in the package: one undo step, shown natively, the caret in its
@@ -191,6 +297,7 @@ impl MarkiseApp {
     /// Per frame, before the document is drawn, so that the keys it takes do not reach it.
     pub(super) fn block_library_window(&mut self, ctx: &Context) {
         self.block_drop();
+        self.block_delete_pressed();
         if let Some(query) = self.block_library.requested.take() {
             // the rest of a large file is on its way: an id in it could not be seen, so it is typing
             if self.progressive.is_none() {

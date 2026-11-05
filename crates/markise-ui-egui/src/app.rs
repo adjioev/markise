@@ -1949,6 +1949,9 @@ impl MarkiseApp {
             block_form::DraftNext::StopPackage => {
                 self.block_package_action(crate::package_ui::PackageAction::Forget);
             }
+            block_form::DraftNext::DeleteBlock(opener) => {
+                self.delete_block_now(opener);
+            }
             block_form::DraftNext::Then(Then::Close) => {
                 if self.request_close() {
                     self.allow_close = true;
@@ -3192,6 +3195,7 @@ impl MarkiseApp {
                         self.block_library.request(out.open_block_library.take());
                         let origin = (d.id, d.viewer.ed.session.revision().counter);
                         self.block_library.request_move(out.move_block.take(), Some(origin));
+                        self.block_library.request_delete(out.delete_block.take(), Some(origin));
                         if let Some(n) = d.viewer.take_notice() {
                             self.banner = Some(Banner::Info(n));
                         }
@@ -3322,6 +3326,7 @@ impl MarkiseApp {
         self.block_library.request(out.open_block_library);
         let origin = self.block_edit_origin();
         self.block_library.request_move(out.move_block, origin);
+        self.block_library.request_delete(out.delete_block, origin);
         if let Some(link) = out.link {
             self.open_link(&ctx, &link);
         }

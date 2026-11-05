@@ -325,6 +325,11 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
         &[both("Opt+Cmd+Down", "Ctrl+Shift+Down")],
     ),
     app(
+        "block.delete",
+        "Delete Block",
+        &[both("Opt+Cmd+Backspace", "Ctrl+Shift+Delete")],
+    ),
+    app(
         "view.switchBlockView",
         "Switch This Block's View",
         &[both("Shift+Cmd+M", "Ctrl+Shift+M")],

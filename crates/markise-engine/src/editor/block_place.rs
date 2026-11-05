@@ -34,25 +34,56 @@ impl fmt::Display for InsertRefused {
     }
 }
 
+/// Where the next line ending after `at` starts, or the end of the text. A line ends in LF, CRLF or a
+/// lone CR, any of them in one file.
+fn line_end(text: &str, at: usize) -> usize {
+    text.as_bytes()[at..]
+        .iter()
+        .position(|b| matches!(b, b'\r' | b'\n'))
+        .map_or(text.len(), |i| at + i)
+}
+
 /// The start of the line after the one holding `at`, or the end of the text.
 pub(super) fn after_line(text: &str, at: usize) -> usize {
-    text[at..].find('\n').map_or(text.len(), |i| at + i + 1)
+    let end = line_end(text, at);
+    match text.as_bytes().get(end) {
+        Some(b'\r') if text.as_bytes().get(end + 1) == Some(&b'\n') => end + 2,
+        Some(_) => end + 1,
+        None => end,
+    }
 }
 
 pub(super) fn line_start(text: &str, at: usize) -> usize {
-    text[..at].rfind('\n').map_or(0, |i| i + 1)
+    let bytes = text.as_bytes();
+    // between the CR and the LF of one line ending: still the line before it
+    let at = if at > 0 && bytes.get(at) == Some(&b'\n') && bytes[at - 1] == b'\r' {
+        at - 1
+    } else {
+        at
+    };
+    bytes[..at]
+        .iter()
+        .rposition(|b| matches!(b, b'\r' | b'\n'))
+        .map_or(0, |i| i + 1)
 }
 
 /// The line starting at `start` holds nothing but blanks.
 pub(super) fn blank_line_at(text: &str, start: usize) -> bool {
-    let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
     // what the parser calls blank: a no-break space is text
-    text[start..end].trim_matches([' ', '\t', '\r']).is_empty()
+    text[start..line_end(text, start)].trim_matches([' ', '\t']).is_empty()
+}
+
+/// The text before `start`, which starts a line, without the line ending there: `None` with none.
+fn before_line_ending(text: &str, start: usize) -> Option<&str> {
+    let t = &text[..start];
+    t.strip_suffix("\r\n")
+        .or_else(|| t.strip_suffix('\n'))
+        .or_else(|| t.strip_suffix('\r'))
 }
 
 /// The line before the one starting at `start` is blank, or there is none.
 pub(super) fn blank_before(text: &str, start: usize) -> bool {
-    let Some(before) = text[..start].strip_suffix('\n') else {
+    let Some(before) = before_line_ending(text, start) else {
         return start == 0;
     };
     blank_line_at(text, line_start(before, before.len()))
@@ -85,7 +116,7 @@ fn line_for_block(doc: &dyn FormatDoc, at: DocPos) -> usize {
 /// lines there are, and where in it the body starts. A file that ends without a line ending stays so.
 pub(super) fn separated(text: &str, line: usize, body: &str, eol: &str) -> (String, usize) {
     let mut out = String::with_capacity(body.len() + 3 * eol.len());
-    let complete = line == 0 || text[..line].ends_with('\n');
+    let complete = line == 0 || text[..line].ends_with(['\r', '\n']);
     if !complete {
         out.push_str(eol);
         out.push_str(eol);
@@ -99,7 +130,7 @@ pub(super) fn separated(text: &str, line: usize, body: &str, eol: &str) -> (Stri
         if !blank_line_at(text, line) {
             out.push_str(eol);
         }
-    } else if text.is_empty() || text.ends_with('\n') {
+    } else if text.is_empty() || text.ends_with(['\r', '\n']) {
         out.push_str(eol);
     }
     (out, start)
@@ -145,6 +176,24 @@ fn with_free_ids(preset: &dyn FormatDoc, in_document: &str) -> String {
 }
 
 /// Every block of a document, as what must stay the same around an edit.
+/// Of [`blocks_of`], the blocks whose openers stand in these bytes.
+pub(super) fn blocks_in(doc: &dyn FormatDoc, range: &std::ops::Range<usize>) -> Vec<(usize, String, String)> {
+    let Some(d) = doc.as_any().downcast_ref::<Document>() else {
+        return Vec::new();
+    };
+    let text = doc.text();
+    (d.directives().iter())
+        .filter(|b| range.contains(&b.opener.start))
+        .map(|b| {
+            (
+                b.fence_len,
+                b.name.slice(text).to_string(),
+                b.args.slice(text).to_string(),
+            )
+        })
+        .collect()
+}
+
 pub(super) fn blocks_of(doc: &dyn FormatDoc) -> Vec<(usize, String, String)> {
     let Some(d) = doc.as_any().downcast_ref::<Document>() else {
         return Vec::new();
@@ -164,7 +213,7 @@ pub(super) fn blocks_of(doc: &dyn FormatDoc) -> Vec<(usize, String, String)> {
 }
 
 fn with_line_ending(text: &str, eol: &str) -> String {
-    let unified = text.replace("\r\n", "\n");
+    let unified = text.replace("\r\n", "\n").replace('\r', "\n");
     if eol == "\n" {
         unified
     } else {

@@ -1,15 +1,17 @@
 //! Moving a block among its siblings (ADR 0022): as one undo step, with its bytes as they are. The
-//! document's top-level blocks are its siblings, or a parent's when it is nested.
+//! document's top-level blocks are its siblings, or a parent's when it is nested. Deleting one takes it
+//! from its place the same way.
 
 use std::fmt;
 use std::ops::Range;
 
 use markise_doc::{DocPos, FormatDoc, HintSet, LeafKind, NamedContainer, Patch, PatchSet, PlanStep, Selection};
 
-use super::block_place::{after_line, blank_before, blank_line_at, blocks_of, line_start, separated};
+use super::block_place::{after_line, blank_before, blank_line_at, blocks_in, blocks_of, line_start, separated};
 use super::{EditError, EditorView, TxKind};
 
 const MOVE_LABEL: &str = "Move Block";
+const DELETE_LABEL: &str = "Delete Block";
 
 /// Why a block did not move. Nothing changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +35,8 @@ impl fmt::Display for MoveRefused {
 
 /// A block as a thing to move.
 struct Moving {
+    opener: usize,
+    closer_end: usize,
     /// All of its lines, the last line ending not included.
     range: Range<usize>,
     /// How many blocks are around it, and the one directly around it.
@@ -49,6 +53,8 @@ fn moving(doc: &dyn FormatDoc, chain: &[NamedContainer], depth: usize) -> Option
         .find(['\r', '\n'])
         .map_or(text.len(), |i| c.closer.end + i);
     Some(Moving {
+        opener: c.opener.start,
+        closer_end: c.closer.end,
         range: line_start(text, c.opener.start)..end,
         depth,
         parent: depth.checked_sub(1).and_then(|p| chain.get(p)).cloned(),
@@ -109,36 +115,34 @@ fn after(doc: &dyn FormatDoc, m: &Moving) -> Option<usize> {
     }
 }
 
-/// The edits moving `b` to line `to`, and where its first byte ends up. `None`: it is there already.
-#[allow(clippy::type_complexity)]
-fn plan(
-    text: &str,
-    b: &Range<usize>,
-    to: usize,
-    eol: &str,
-) -> Option<Result<(Vec<Patch>, usize, String), MoveRefused>> {
-    // what follows it, blank lines passed over
+/// Its lines are the block and nothing else: blanks at most beside its markers. What a move or a deletion
+/// takes away rests on this, whatever line endings the file has.
+fn only_its_lines(text: &str, m: &Moving) -> bool {
+    let blank = |t: &str| t.chars().all(|c| matches!(c, ' ' | '\t'));
+    blank(&text[m.range.start..m.opener]) && blank(&text[m.closer_end..m.range.end])
+}
+
+/// Around `b`: where what comes before it ends, and where what follows it starts, blank lines passed over.
+fn surroundings(text: &str, b: &Range<usize>) -> (usize, usize) {
     let mut next = after_line(text, b.end);
     while next < text.len() && blank_line_at(text, next) {
         next = after_line(text, next);
     }
-    let at_end = next >= text.len();
-    // what goes before it
     let mut prev = b.start;
     while prev > 0 && blank_before(text, prev) {
         prev = line_start(text, prev - 1);
     }
-    let has_before = prev > 0;
-    if (prev..=next).contains(&to) || (at_end && to == text.len()) {
-        return None;
-    }
-    let body = &text[b.clone()];
-    let (insert, skip) = separated(text, to, body, eol);
-    let (remove, keep) = if at_end {
+    (prev, next)
+}
+
+/// What taking `b` from its place replaces, and with what: it, and the blank lines it leaves behind.
+fn lift<'a>(text: &str, b: &Range<usize>, eol: &'a str) -> Result<(Range<usize>, &'a str), MoveRefused> {
+    let (prev, next) = surroundings(text, b);
+    let (remove, keep) = if next >= text.len() {
         // what stood before it is now the end of the text, and ends as the text did
         let tail = text[..prev].trim_end_matches(['\r', '\n']).len();
         (tail..b.end, "")
-    } else if has_before && !blank_before(text, b.start) {
+    } else if prev > 0 && !blank_before(text, b.start) {
         // two things it held apart must not run together
         (b.start..next, eol)
     } else {
@@ -147,8 +151,51 @@ fn plan(
     // only blank lines go, and the block's own bytes come back
     let blank = |t: &str| t.chars().all(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
     if !blank(&text[remove.start..b.start.max(remove.start)]) || !blank(&text[b.end..remove.end.max(b.end)]) {
-        return Some(Err(MoveRefused::WouldLoseText));
+        return Err(MoveRefused::WouldLoseText);
     }
+    Ok((remove, keep))
+}
+
+/// Where the caret goes when the block is gone and what follows it starts at `at`: the end of the text
+/// before, or the free line after a block before, rather than onto the marker of another block.
+fn caret_after_delete(doc: &dyn FormatDoc, at: usize) -> DocPos {
+    let text = doc.text();
+    let tail = text[..at].trim_end_matches([' ', '\t', '\r', '\n']).len();
+    let Some((last, _)) = text[..tail].char_indices().next_back() else {
+        return DocPos::new(at.min(text.len()));
+    };
+    if let Some(c) = doc.named_containers_at(last).pop() {
+        if c.closer.contains(last) {
+            return DocPos::with_virt(tail, 1);
+        }
+        if c.opener.contains(last) {
+            return DocPos::new(at.min(text.len()));
+        }
+    }
+    if matches!(doc.leaf(last).map(|l| l.kind), Some(LeafKind::Metadata)) {
+        return DocPos::new(at.min(text.len()));
+    }
+    DocPos::new(tail)
+}
+
+/// The edits moving `b` to line `to`, and where its first byte ends up. `None`: it is there already.
+#[allow(clippy::type_complexity)]
+fn plan(
+    text: &str,
+    b: &Range<usize>,
+    to: usize,
+    eol: &str,
+) -> Option<Result<(Vec<Patch>, usize, String), MoveRefused>> {
+    let (prev, next) = surroundings(text, b);
+    if (prev..=next).contains(&to) || (next >= text.len() && to == text.len()) {
+        return None;
+    }
+    let body = &text[b.clone()];
+    let (insert, skip) = separated(text, to, body, eol);
+    let (remove, keep) = match lift(text, b, eol) {
+        Ok(lifted) => lifted,
+        Err(why) => return Some(Err(why)),
+    };
     let moved = remove.len() - keep.len();
     let start = if to > b.start { to + skip - moved } else { to + skip };
     let mut patches = vec![
@@ -204,6 +251,9 @@ impl EditorView {
         let Some(to) = self.line_to(&m, up) else {
             return Ok(false);
         };
+        if !only_its_lines(self.session.text(), &m) {
+            return Err(MoveRefused::WouldLoseText);
+        }
         let moved = self.move_range(m.range, to)?;
         if in_source {
             self.source_selection_from_session();
@@ -218,6 +268,9 @@ impl EditorView {
         };
         if !self.is_drop_line(opener, to) {
             return Ok(false);
+        }
+        if !only_its_lines(self.session.text(), &m) {
+            return Err(MoveRefused::WouldLoseText);
         }
         self.move_range(m.range, to)
     }
@@ -298,8 +351,99 @@ impl EditorView {
         Some(after_line(text, doc.top_span(last)?.end))
     }
 
-    fn move_range(&mut self, b: Range<usize>, to: usize) -> Result<bool, MoveRefused> {
+    /// The block around the caret, the innermost, by its opener.
+    pub fn block_opener_at_caret(&self) -> Option<usize> {
+        self.block_at_caret().map(|m| m.opener)
+    }
+
+    /// [`Self::block_opener_at_caret`], by the caret of the pane the keyboard is in.
+    pub fn block_opener_in_pane(&mut self, in_source: bool) -> Option<usize> {
+        if in_source {
+            self.source_selection_to_session();
+        }
+        self.block_opener_at_caret()
+    }
+
+    /// All the lines of the block with this opener, the last line ending not included.
+    pub fn block_lines(&self, opener: usize) -> Option<Range<usize>> {
+        self.block_with_opener(opener).map(|m| m.range)
+    }
+
+    /// Deletes the block with this opener, with what is inside it: one undo step, with nothing taken but
+    /// its lines and the blank lines it leaves behind. `Ok(false)`: no block stands there.
+    pub fn delete_block(&mut self, opener: usize, in_source: bool) -> Result<bool, MoveRefused> {
+        if in_source {
+            self.source_selection_to_session();
+        }
+        let Some(m) = self.block_with_opener(opener) else {
+            return Ok(false);
+        };
+        if !only_its_lines(self.session.text(), &m) {
+            return Err(MoveRefused::WouldLoseText);
+        }
+        self.delete_range(m.range)?;
+        if in_source {
+            self.source_selection_from_session();
+        }
+        Ok(true)
+    }
+
+    fn delete_range(&mut self, b: Range<usize>) -> Result<(), MoveRefused> {
+        let doc = self.session.doc();
+        let text = doc.text();
+        let eol = doc.line_ending().as_str();
+        let (remove, keep) = lift(text, &b, eol)?;
+        let patches = PatchSet::single_verbatim(remove.clone(), keep);
+        // what pairs is what paired, less what was in it
+        let mut want = blocks_of(doc);
+        let gone = blocks_in(doc, &b);
+        want.retain({
+            let mut gone = gone;
+            move |x| match gone.iter().position(|g| g == x) {
+                Some(i) => {
+                    gone.swap_remove(i);
+                    false
+                }
+                None => true,
+            }
+        });
+        let hints_after = (!doc.hints().is_empty()).then(HintSet::new);
+        let holds = |p: DocPos| p.offset >= b.start && p.offset <= b.end && !(p.virt > 0 && p.offset == b.end);
+        let sel = self.session.selection().primary();
+        let caret_goes = holds(sel.anchor) && holds(sel.focus);
+        let at = remove.start + keep.len();
+        let was_sticky = self.sticky_at().is_some_and(|s| b.contains(&s));
+        // last before the edit: it leaves the view with no document until the sync after it
         self.release();
+        let done = self.session.transact(DELETE_LABEL, TxKind::Structural, |tx| {
+            tx.step(PlanStep { patches, hints_after })?;
+            if blocks_of(tx.doc()) != want {
+                return Err(EditError::Aborted(String::new()));
+            }
+            if caret_goes {
+                let to = caret_after_delete(tx.doc(), at);
+                tx.set_selection(Selection::caret_at(to));
+            }
+            Ok(())
+        });
+        self.sync();
+        match done {
+            Ok(()) => {}
+            Err(EditError::Aborted(_)) => return Err(MoveRefused::WouldNotStand),
+            Err(e) => return Err(MoveRefused::Edit(e)),
+        }
+        if was_sticky {
+            self.end_sticky();
+        }
+        self.follow_sticky();
+        self.follow_block_modes();
+        // the caret may be on a free line, which shows only with the focus on it
+        self.refresh_focus();
+        self.pin_caret();
+        Ok(())
+    }
+
+    fn move_range(&mut self, b: Range<usize>, to: usize) -> Result<bool, MoveRefused> {
         let doc = self.session.doc();
         let eol = doc.line_ending().as_str();
         let Some(planned) = plan(doc.text(), &b, to, eol) else {
@@ -324,6 +468,8 @@ impl EditorView {
             .collect();
         let was_sticky = self.sticky_at().is_some_and(|at| b.contains(&at));
         let body_len = body.len();
+        // last before the edit: it leaves the view with no document until the sync after it
+        self.release();
         let done = self.session.transact(MOVE_LABEL, TxKind::Structural, |tx| {
             tx.step(PlanStep { patches, hints_after })?;
             let doc = tx.doc();

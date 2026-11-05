@@ -62,6 +62,10 @@ impl DocViewer {
         self.block_drag.is_some()
     }
 
+    pub(super) fn block_drag_going(&self) -> bool {
+        self.block_drag.is_some()
+    }
+
     /// What the drag going on shows.
     pub fn block_drag_shown(&self) -> Option<&BlockDragShown> {
         self.block_drag.as_ref()?.shown.as_ref()
@@ -161,7 +165,7 @@ impl DocViewer {
 
     /// The innermost block under the pointer, by its opener. Nothing shows through a window on top. The
     /// margin beside a block counts, and so does its handle, which may reach past its first row.
-    fn hovered_block(&self, ui: &Ui, visible: &[Visible], surface: Rect) -> Option<usize> {
+    pub(super) fn hovered_block(&self, ui: &Ui, visible: &[Visible], surface: Rect) -> Option<usize> {
         let p = ui.input(|i| i.pointer.hover_pos())?;
         if !surface.contains(p) || ui.ctx().layer_id_at(p) != Some(ui.layer_id()) {
             return None;

@@ -376,7 +376,13 @@ impl MarkiseApp {
             paragraph
                 .entries
                 .push(self.app_item("block.moveDown", self.block_move_available(false), Check::None));
+        } else {
+            paragraph.entries.push(Entry::Separator);
         }
+        // any paired block can go, with no package as well
+        paragraph
+            .entries
+            .push(self.app_item("block.delete", self.block_delete_available(), Check::None));
         menus.push(paragraph);
         let format = self.registry_menu("Format", FORMAT_ORDER, text_field);
         if !format.entries.is_empty() {
@@ -720,6 +726,7 @@ impl MarkiseApp {
             "block.insertFromLibrary" => return self.open_block_library_by_command(ctx),
             "block.moveUp" => return self.move_block_at_caret(true),
             "block.moveDown" => return self.move_block_at_caret(false),
+            "block.delete" => return self.delete_block_at_caret(),
             "view.switchBlockView" => return self.switch_block_view_at_caret(),
             "view.switchAllBlockViews" => return self.switch_all_block_views(),
             "file.quickOpen" => self.open_quick(ctx),
