@@ -1062,6 +1062,38 @@ mod deletes {
     }
 
     #[test]
+    fn with_the_keyboard_in_find_the_chord_is_not_the_documents() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        caret(&mut h, d.find("Hello").unwrap() + 1);
+        let ctx = h.ctx.clone();
+        assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("find.open")));
+        frames(&mut h);
+        let (m, k) = chord();
+        h.key_press_modifiers(m, k);
+        frames(&mut h);
+        assert_eq!(text(&h), d, "the block stays");
+    }
+
+    #[test]
+    fn the_caret_goes_to_the_free_line_after_a_block_before() {
+        let d = format!("{POLL}\n\n{PLAIN}\n\nAfter.\n");
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        caret(&mut h, d.find("Plain text.").unwrap() + 1);
+        let ctx = h.ctx.clone();
+        assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("block.delete")));
+        let right_after = h.state_mut().viewer().unwrap().ed.session.selection().primary().focus;
+        frames(&mut h);
+        let t = text(&h);
+        let want = DocPos::with_virt(t.find("\n\nAfter.").unwrap(), 1);
+        assert_eq!(right_after, want);
+        let at = h.state_mut().viewer().unwrap().ed.session.selection().primary().focus;
+        assert_eq!(at, want, "and it stays there");
+    }
+
+    #[test]
     fn the_menu_says_when_it_can_and_the_command_goes_by_it_in_source_as_well() {
         let d = doc();
         let f = Fixture::with_palette(&d, PALETTE);

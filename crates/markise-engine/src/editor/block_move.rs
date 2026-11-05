@@ -36,6 +36,7 @@ impl fmt::Display for MoveRefused {
 /// A block as a thing to move.
 struct Moving {
     opener: usize,
+    closer_end: usize,
     /// All of its lines, the last line ending not included.
     range: Range<usize>,
     /// How many blocks are around it, and the one directly around it.
@@ -53,6 +54,7 @@ fn moving(doc: &dyn FormatDoc, chain: &[NamedContainer], depth: usize) -> Option
         .map_or(text.len(), |i| c.closer.end + i);
     Some(Moving {
         opener: c.opener.start,
+        closer_end: c.closer.end,
         range: line_start(text, c.opener.start)..end,
         depth,
         parent: depth.checked_sub(1).and_then(|p| chain.get(p)).cloned(),
@@ -111,6 +113,13 @@ fn after(doc: &dyn FormatDoc, m: &Moving) -> Option<usize> {
             return Some(range.end);
         }
     }
+}
+
+/// Its lines are the block and nothing else: blanks at most beside its markers. What a move or a deletion
+/// takes away rests on this, whatever line endings the file has.
+fn only_its_lines(text: &str, m: &Moving) -> bool {
+    let blank = |t: &str| t.chars().all(|c| matches!(c, ' ' | '\t'));
+    blank(&text[m.range.start..m.opener]) && blank(&text[m.closer_end..m.range.end])
 }
 
 /// Around `b`: where what comes before it ends, and where what follows it starts, blank lines passed over.
@@ -242,6 +251,9 @@ impl EditorView {
         let Some(to) = self.line_to(&m, up) else {
             return Ok(false);
         };
+        if !only_its_lines(self.session.text(), &m) {
+            return Err(MoveRefused::WouldLoseText);
+        }
         let moved = self.move_range(m.range, to)?;
         if in_source {
             self.source_selection_from_session();
@@ -256,6 +268,9 @@ impl EditorView {
         };
         if !self.is_drop_line(opener, to) {
             return Ok(false);
+        }
+        if !only_its_lines(self.session.text(), &m) {
+            return Err(MoveRefused::WouldLoseText);
         }
         self.move_range(m.range, to)
     }
@@ -363,6 +378,9 @@ impl EditorView {
         let Some(m) = self.block_with_opener(opener) else {
             return Ok(false);
         };
+        if !only_its_lines(self.session.text(), &m) {
+            return Err(MoveRefused::WouldLoseText);
+        }
         self.delete_range(m.range)?;
         if in_source {
             self.source_selection_from_session();
@@ -418,6 +436,8 @@ impl EditorView {
         }
         self.follow_sticky();
         self.follow_block_modes();
+        // the caret may be on a free line, which shows only with the focus on it
+        self.refresh_focus();
         self.pin_caret();
         Ok(())
     }
