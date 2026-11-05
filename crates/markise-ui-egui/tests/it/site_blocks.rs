@@ -405,6 +405,52 @@ fn button_says(h: &H, what: &str) -> bool {
 }
 
 #[test]
+fn a_picture_shows_as_picked_up_on_a_press_and_moves() {
+    use egui::{Modifiers, PointerButton, pos2};
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    let mut h = f.ready_with(Some(p.source()));
+    wait_for(&mut h, "the picture", |h| picture(h, at(":::plain")).is_some());
+    let item = h.state().viewer_item_rect(at(":::plain")).unwrap();
+    let from = pos2(item.left() + 40.0, item.center().y);
+    h.hover_at(from);
+    h.step();
+    h.step();
+    let grip = h.get_by_label("Move Block").rect().center();
+    for i in 1..=10 {
+        h.hover_at(from + (grip - from) * (i as f32 / 10.0));
+        h.step();
+    }
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    h.event(button(grip, true));
+    h.step();
+    h.step();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing);
+    let s = h.state_mut().viewer().unwrap().block_drag_shown().cloned().unwrap();
+    let outline = s.outline.unwrap();
+    assert!(outline.height() >= 120.0 && outline.top() <= grip.y, "{outline:?}");
+    assert!(!s.moves);
+    let to = h.state().viewer_item_rect(at("After.")).unwrap().left_top();
+    let to = pos2(grip.x, to.y);
+    for i in 1..=8 {
+        h.hover_at(grip + (to - grip) * (i as f32 / 8.0));
+        h.step();
+    }
+    assert!(h.state_mut().viewer().unwrap().block_drag_shown().unwrap().moves);
+    h.event(button(to, false));
+    h.step();
+    h.step();
+    common::run(&mut h);
+    let t = text(&h);
+    assert!(t.find(":::tip").unwrap() < t.find(":::plain").unwrap(), "{t}");
+}
+
+#[test]
 fn a_block_with_a_view_goes_native_site_markdown_and_back() {
     let f = Fixture::new(DOC);
     let p = played(120);

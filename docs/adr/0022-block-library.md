@@ -145,13 +145,25 @@ again after, and so is the state of being edited. A form's changed draft holds i
 silently (ADR 0020): while there is one, the commands are disabled and a drop says why in the panel. An unchanged panel
 closes as for any other edit that removes its block. After undoing a move, a block's own view state is back to the document's.
 
-**The handle.** While the pointer is over a block, a grip of six dots stands to the left of its first row, in the weak text colour. The
-innermost block under the pointer has it, and nothing shows otherwise: no button in the document, no floating control.
-Pressing it starts a drag, with the pointer an arrow. A thin accent line shows where it would land, among the
-places on screen at the block's level. Its own place is one of those, where it lands nowhere, so a press and release moves
-nothing. Near the top or bottom edge the view scrolls, faster nearer the edge, and pages come in as they do for any scroll.
-A list or a quote is one thing here: its items are no places. Esc or any change of the document cancels. Release moves
-it, and a request from a frame ago goes nowhere if the document or its revision is another by then. A read-only view has no handle.
+**The handle.** While the pointer is over a block or the margin beside it, a grip of six dots stands to the left of its first row, in the weak text colour. The
+innermost block under the pointer has it, and nothing shows otherwise: no button in the document, no floating control. It takes a press in more than it
+shows, up to the block's edge. Over it the grip stands out and the pointer is a grab hand. A read-only view has no handle.
+
+**The drag answers at once.** The first test in a real window found a gesture that worked and looked dead: nothing showed until the pointer had passed the
+block's own height and half of what came next. So a press starts the drag, with no movement needed, and from that frame to the end:
+
+- the pointer is a closed hand;
+- the block is picked up: an accent outline and a light tint on all of it that is on screen, native, card or picture;
+- a line says what a release does: the accent line at the place it would land, or, while it would stay, a quiet dashed line along its own place;
+- a small label by the pointer says it in words, by the package's label for the block, else its name.
+
+**Where it lands.** Near where it was picked up and over the block, within two rows, it stays. A press and a release move nothing and leave no undo step, and so
+does Esc. Past that, up or down, it lands at the nearest place on screen on that side of the block, among the places at its level, so a tall block is no distance
+to pull and a short way into what follows it already goes past that. Near the top or bottom edge the view scrolls, faster nearer the edge, and pages come in as they
+do for any scroll. A list or a quote is one thing here: its items are no places. Any change of the document cancels too. Release moves it, and a request from a frame
+ago goes nowhere if the document or its revision is another by then.
+
+A block whose first row is scrolled off has no handle until that row is back, though a picture cut off at the top keeps it at the view's top.
 
 ## Consequences
 

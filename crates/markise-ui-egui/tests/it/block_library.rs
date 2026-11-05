@@ -448,6 +448,186 @@ mod moves {
         frames(h);
     }
 
+    /// The cursor the last frame asked for, from a frame that has run.
+    fn cursor(h: &mut H) -> egui::CursorIcon {
+        h.step();
+        h.output().platform_output.cursor_icon
+    }
+
+    /// As a hand moves: a frame per position, on the way from one place to another.
+    fn walk(h: &mut H, from: Pos2, to: Pos2, steps: usize) {
+        for i in 1..=steps {
+            h.hover_at(from + (to - from) * (i as f32 / steps as f32));
+            h.step();
+        }
+    }
+
+    /// As a person does it: from inside the block to the handle over frames in which the pointer
+    /// hovers, and a press there. The handle is there all the way. The caller goes on from the point.
+    fn pick_up(h: &mut H, inside: &str) -> Pos2 {
+        let body = opener_rect(h, inside);
+        let from = pos2(body.left() + 40.0, body.center().y);
+        h.hover_at(from);
+        h.step();
+        h.step();
+        let handle = h.get_by_label("Move Block").rect();
+        let at = handle.center();
+        for i in 1..=10 {
+            h.hover_at(from + (at - from) * (i as f32 / 10.0));
+            h.step();
+            assert_eq!(h.get_by_label("Move Block").rect(), handle, "step {i}");
+        }
+        h.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+        at
+    }
+
+    fn release(h: &mut H, at: Pos2) {
+        h.event(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+        h.step();
+        frames(h);
+    }
+
+    fn shown_drag(h: &mut H) -> markise_ui_egui::viewer::BlockDragShown {
+        let v = h.state_mut().viewer().unwrap();
+        v.block_drag_shown().expect("a drag shows").clone()
+    }
+
+    fn nothing_to_undo(h: &mut H) -> bool {
+        !h.state_mut().viewer().unwrap().ed.session.can_undo()
+    }
+
+    /// `:::plain` has no view: a card.
+    const PLAIN: &str = ":::plain\n\nPlain text.\n\n:::";
+
+    #[test]
+    fn a_press_shows_at_once_that_the_block_is_picked_up() {
+        for (block, inside, label) in [
+            (TIP, "Hello", "Tip stays here"),
+            (PLAIN, "Plain text.", "Plain stays here"),
+        ] {
+            let d = format!("Before.\n\n{block}\n\nAfter.\n");
+            let f = Fixture::with_palette(&d, PALETTE);
+            let mut h = f.ready();
+            let body = opener_rect(&h, inside);
+            pick_up(&mut h, inside);
+            // no movement yet
+            let s = shown_drag(&mut h);
+            let outline = s.outline.expect("the block is outlined");
+            assert!(
+                outline.top() < body.top() && outline.bottom() > body.bottom(),
+                "{outline:?}"
+            );
+            assert!(
+                outline.left() <= body.left() && outline.right() >= body.right(),
+                "{outline:?}"
+            );
+            assert!(!s.moves, "it stays until it goes somewhere");
+            assert_eq!(s.label, label);
+            assert_eq!(cursor(&mut h), egui::CursorIcon::Grabbing);
+        }
+    }
+
+    #[test]
+    fn a_short_pull_shows_a_place_also_from_a_tall_block() {
+        let tall = format!(":::plain\n\n{}:::", "A paragraph.\n\n".repeat(12));
+        let d = format!("{tall}\n\nMiddle.\n\nAfter.\n");
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        let at = pick_up(&mut h, "A paragraph.");
+        let row = opener_rect(&h, "A paragraph.").height();
+        let to = at + egui::vec2(0.0, 3.0 * row);
+        walk(&mut h, at, to, 6);
+        let s = shown_drag(&mut h);
+        assert!(s.moves, "the line is there, with the block's end still far: {s:?}");
+        assert_eq!(s.label, "Move Plain here");
+        release(&mut h, to);
+        assert_eq!(text(&h), format!("Middle.\n\n{tall}\n\nAfter.\n"));
+    }
+
+    #[test]
+    fn just_out_of_a_block_lands_past_what_is_next() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        let middle = opener_rect(&h, "Middle.");
+        let at = pick_up(&mut h, "Hello");
+        let to = pos2(at.x, middle.top() + 2.0);
+        walk(&mut h, at, to, 8);
+        let s = shown_drag(&mut h);
+        assert!(s.moves && s.line_y > middle.top(), "{s:?}");
+        release(&mut h, to);
+        assert_eq!(text(&h), format!("Before.\n\nMiddle.\n\n{TIP}\n\n{POLL}\n\nAfter.\n"));
+    }
+
+    #[test]
+    fn going_back_shows_it_stays_and_a_release_or_esc_leaves_no_undo_step() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        let top = opener_rect(&h, "Before.").center();
+        let at = pick_up(&mut h, "Hello");
+        walk(&mut h, at, top, 6);
+        assert!(shown_drag(&mut h).moves);
+        walk(&mut h, top, at, 6);
+        let s = shown_drag(&mut h);
+        assert!(!s.moves && s.label.ends_with("stays here"), "{s:?}");
+        release(&mut h, at);
+        assert_eq!(text(&h), d);
+        assert!(nothing_to_undo(&mut h) && !h.state().is_dirty());
+
+        let at = pick_up(&mut h, "Hello");
+        walk(&mut h, at, top, 6);
+        h.key_press(Key::Escape);
+        frames(&mut h);
+        assert!(!h.state_mut().viewer().unwrap().is_dragging_block());
+        release(&mut h, top);
+        assert_eq!(text(&h), d);
+        assert!(nothing_to_undo(&mut h) && !h.state().is_dirty());
+    }
+
+    #[test]
+    fn the_handle_has_more_to_hit_than_to_see_and_the_margin_keeps_it() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        let body = opener_rect(&h, "Hello");
+        h.hover_at(body.center());
+        h.step();
+        h.step();
+        let hit = h.get_by_label("Move Block").rect();
+        assert!(hit.width() >= 26.0 && hit.height() >= 24.0, "{hit:?}");
+        // past it in the margin, it still shows
+        let margin = pos2(hit.left() - 10.0, body.center().y);
+        h.hover_at(margin);
+        h.step();
+        assert_eq!(h.get_by_label("Move Block").rect(), hit);
+        // the corner of what takes a press, up to the block's edge
+        let corner = hit.right_bottom() - egui::vec2(1.0, 1.0);
+        walk(&mut h, margin, corner, 4);
+        h.event(Event::PointerButton {
+            pos: corner,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+        assert!(h.state_mut().viewer().unwrap().is_dragging_block());
+        release(&mut h, corner);
+        assert_eq!(text(&h), d);
+    }
+
     /// Presses the handle of the block with this opener line.
     fn grab(h: &mut H, needle: &str) -> Pos2 {
         let r = opener_rect(h, needle);
@@ -557,7 +737,7 @@ mod moves {
     }
 
     #[test]
-    fn the_handle_shows_only_over_a_block_and_the_pointer_is_an_arrow_on_it() {
+    fn the_handle_shows_only_over_a_block_and_the_pointer_is_a_hand_on_it() {
         let d = doc();
         let f = Fixture::with_palette(&d, PALETTE);
         let mut h = f.ready();
@@ -579,7 +759,10 @@ mod moves {
             h.query_by_label("Move Block").is_some(),
             "it stays when the pointer goes to it"
         );
-        assert_eq!(h.ctx.output(|o| o.cursor_icon), egui::CursorIcon::Default);
+        assert_eq!(cursor(&mut h), egui::CursorIcon::Grab);
+        assert!(h.state_mut().viewer().unwrap().on_block_handle(), "it stands out");
+        pointer_to(&mut h, hello);
+        assert!(!h.state_mut().viewer().unwrap().on_block_handle());
     }
 
     #[test]
@@ -600,7 +783,7 @@ mod moves {
         assert!(viewer.is_dragging_block());
         assert_eq!(viewer.block_drag_target(), Some(d.find("After.").unwrap()));
         assert_eq!(text(&h), d, "nothing changes before the drop");
-        assert_eq!(h.ctx.output(|o| o.cursor_icon), egui::CursorIcon::Default);
+        assert_eq!(cursor(&mut h), egui::CursorIcon::Grabbing);
         button(&mut h, to, false);
         assert_eq!(text(&h), format!("Before.\n\nMiddle.\n\n{POLL}\n\n{TIP}\n\nAfter.\n"));
         let v = h.state_mut().viewer().unwrap();
