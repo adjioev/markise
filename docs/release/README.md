@@ -7,7 +7,7 @@ platform. Publishing is always a manual, owner-approved step: the workflow only 
 
 | Platform | Artifact | Contents |
 |---|---|---|
-| `macos-universal` | `markise-macos-universal.dmg` | `Markise.app` (aarch64 + x86_64, ad-hoc signed, `.md`/`.markdown` document types), `/Applications` link, `markise-cli`, licences |
+| `macos-universal` | `markise-macos-universal.dmg` | `Markise.app` (aarch64 + x86_64, ad-hoc signed, `.md`/`.markdown` document types, the web helper of ADR 0023), `/Applications` link, `markise-cli`, licences |
 | `windows-x86_64` | `markise-windows-x86_64.zip` | `markise.exe` (icon embedded, no console window), `markise-cli.exe`, licences |
 | `linux-x86_64` | `markise-linux-x86_64.tar.gz` | `markise`, `markise-cli`, `share/` (desktop entry, hicolor icons, AppStream metainfo), licences |
 | | `markise-x86_64.AppImage` | the same files in an AppDir (`AppRun`, desktop entry, icon), AppImage type 2 runtime; no bundled libraries |

@@ -228,8 +228,15 @@ session, by a live mark on the opener. A block just inserted starts in what its 
 
 ### Distribution
 
-The helper goes in the app bundle, signed before the bundle (see below for the phase's last step). Ad-hoc today, as
-the app is; Developer ID and notarization come with the app's. No entitlement is needed for any of this.
+The helper ships on macOS only, as `Markise.app/Contents/MacOS/markise-web-helper`, next to the app's executable, which is where the app looks for it (`system_web_helpers`), in a
+development build as much as in a bundle. A build that has none has no Site state, and its blocks stay cards. On Windows and Linux no helper is shipped, and the app does not look.
+
+`scripts/package.sh` signs it before the bundle, as a bundle's signature covers what is in it. Ad-hoc today, as the app is; Developer ID and notarization come with the app's. Under hardened
+runtime it needs no entitlement: it allocates no executable memory of its own, and WebKit's processes are the system's. It has no bundle of its own and needs none: the code sets its activation
+policy before anything else, so it is never in the Dock, and no window of it is ever ordered in. It is built for the two architectures with the app. `cargo xtask dist`, the release workflow and CI's
+full matrix all build and package it, and `scripts/smoke-web-helper.sh` mounts the disk image, verifies the signature and runs `--self-test` on the packaged helper: the fixture block and the forbidden page, on the runner's own engine.
+
+The proxy's functions are looked up when it runs: the app starts on macOS 11, and linking what came with 14 would stop the helper before it could say it has no engine.
 
 ## Alternatives
 

@@ -1,6 +1,7 @@
 //! `cargo xtask dist <platform> [--label <label>] [--out <dir>]`: release artifacts.
 //!
-//! Builds `markise` and `markise-cli` with the `dist` profile (release + thin LTO + strip) for
+//! Builds `markise` and `markise-cli`, and on macOS `markise-web-helper` (ADR 0023; no other
+//! platform has an engine wired up, so none ships it), with the `dist` profile (release + thin LTO + strip) for
 //! the platform's Rust target(s), joins the two macOS architectures with `lipo` for
 //! `macos-universal`, then packages them with `scripts/package.sh` (archive layout, Info.plist,
 //! .dmg, Linux .tar.gz/.deb/.AppImage, desktop entry, licences, reproducibility rules: see that
@@ -32,6 +33,15 @@ Environment: SOURCE_DATE_EPOCH, PACKAGE_STABLE_NAME, MACOS_FORMAT, BUILD_NUMBER,
 const MACOS_DEPLOYMENT_TARGET: &str = "11.0";
 const PROFILE: &str = "dist";
 const BINS: &[&str] = &["markise", "markise-cli"];
+const MACOS_BINS: &[&str] = &["markise", "markise-cli", "markise-web-helper"];
+
+fn bins(platform: &str) -> &'static [&'static str] {
+    if platform.starts_with("macos-") {
+        MACOS_BINS
+    } else {
+        BINS
+    }
+}
 
 fn targets(platform: &str) -> Option<&'static [&'static str]> {
     Some(match platform {
@@ -78,7 +88,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         println!("==> cargo build --profile {PROFILE} --target {target}");
         let mut cmd = crate::cargo();
         cmd.args(["build", "--locked", "--profile", PROFILE, "--target", target]);
-        for b in BINS {
+        for b in bins(&platform) {
             cmd.args(["-p", b]);
         }
         if target.ends_with("-apple-darwin") {
@@ -92,7 +102,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         // universal binaries via lipo
         let dir = target_dir.join("universal-apple-darwin").join(PROFILE);
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        for b in BINS {
+        for b in bins(&platform) {
             let mut cmd = Command::new("lipo");
             cmd.arg("-create").arg("-output").arg(dir.join(b));
             for t in targets {
@@ -105,7 +115,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     } else {
         target_dir.join(targets[0]).join(PROFILE)
     };
-    for b in BINS {
+    for b in bins(&platform) {
         let f = bin_dir.join(format!("{b}{exe}"));
         let len = std::fs::metadata(&f)
             .map_err(|e| format!("{}: {e}", f.display()))?
@@ -184,6 +194,14 @@ pub fn workspace_version(root: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_macos_ships_the_web_helper() {
+        assert!(bins("macos-universal").contains(&"markise-web-helper"));
+        assert!(bins("macos-aarch64").contains(&"markise-web-helper"));
+        assert!(!bins("linux-x86_64").contains(&"markise-web-helper"));
+        assert!(!bins("windows-x86_64").contains(&"markise-web-helper"));
+    }
 
     #[test]
     fn platforms_map_to_targets() {

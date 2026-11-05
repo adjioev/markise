@@ -22,8 +22,26 @@ use objc2_web_kit::{WKPreferences, WKWebsiteDataStore};
 #[link(name = "Network", kind = "framework")]
 unsafe extern "C" {
     fn nw_endpoint_create_host(hostname: *const c_char, port: *const c_char) -> *mut c_void;
-    fn nw_proxy_config_create_socksv5(proxy: *mut c_void) -> *mut c_void;
-    fn nw_proxy_config_set_failover_allowed(config: *mut c_void, allowed: bool);
+}
+
+type CreateProxy = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type SetFailover = unsafe extern "C" fn(*mut c_void, bool);
+
+/// Looked up when it runs: they came with macOS 14, and the app starts on older ones, where linking
+/// them would stop this program before it could say it has no engine.
+fn proxy_functions() -> Option<(CreateProxy, SetFailover)> {
+    // SAFETY: valid names; the signatures are those of Network.framework's headers
+    unsafe {
+        let create = libc::dlsym(libc::RTLD_DEFAULT, c"nw_proxy_config_create_socksv5".as_ptr());
+        let failover = libc::dlsym(libc::RTLD_DEFAULT, c"nw_proxy_config_set_failover_allowed".as_ptr());
+        if create.is_null() || failover.is_null() {
+            return None;
+        }
+        Some((
+            std::mem::transmute::<*mut c_void, CreateProxy>(create),
+            std::mem::transmute::<*mut c_void, SetFailover>(failover),
+        ))
+    }
 }
 
 unsafe extern "C" {
@@ -62,7 +80,8 @@ fn features() -> Vec<(String, Retained<NSObject>)> {
 /// Whether this system has what it takes (macOS 14 for the proxy).
 pub fn usable(store: &WKWebsiteDataStore, prefs: &WKPreferences) -> bool {
     let known = features();
-    store.respondsToSelector(objc2::sel!(setProxyConfigurations:))
+    proxy_functions().is_some()
+        && store.respondsToSelector(objc2::sel!(setProxyConfigurations:))
         && prefs.respondsToSelector(objc2::sel!(_setEnabled:forFeature:))
         && MUST_BE_OFF.iter().all(|name| known.iter().any(|(k, _)| k == name))
 }
@@ -70,12 +89,15 @@ pub fn usable(store: &WKWebsiteDataStore, prefs: &WKPreferences) -> bool {
 /// Everything HTTP-like of this store goes to a port nothing listens on, with no failover.
 pub fn dead_proxy(store: &WKWebsiteDataStore) {
     let (host, port): (&CStr, &CStr) = (c"127.0.0.1", c"9");
+    let Some((create_proxy, set_failover)) = proxy_functions() else {
+        return; // [`usable`] said so already
+    };
     // SAFETY: valid C strings; the three objects are retained by what they are handed to, and the
     // few that stay for the life of a store are no leak to speak of in a process of one purpose
     unsafe {
         let endpoint = nw_endpoint_create_host(host.as_ptr(), port.as_ptr());
-        let proxy = nw_proxy_config_create_socksv5(endpoint);
-        nw_proxy_config_set_failover_allowed(proxy, false);
+        let proxy = create_proxy(endpoint);
+        set_failover(proxy, false);
         let object: &AnyObject = &*(proxy as *const AnyObject);
         let list = NSArray::from_slice(&[object]);
         let _: () = msg_send![store, setProxyConfigurations: &*list];

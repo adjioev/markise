@@ -176,6 +176,9 @@ jobs:
           fi
           cargo xtask dist "$PLATFORM" --label "$LABEL" --out dist
           ls -l dist
+      - name: Smoke start (packaged web helper)
+        if: runner.os == 'macOS'
+        run: ./scripts/smoke-web-helper.sh dist/markise-*.dmg
       - name: Inspect the Linux packages
         if: runner.os == 'Linux'
         run: |
