@@ -246,14 +246,20 @@ fn an_image_with_a_query_or_a_fragment_is_the_same_file() {
     fs::create_dir_all(r.folder.join("images")).unwrap();
     fs::write(r.folder.join("images/a.svg"), "a").unwrap();
     fs::write(r.folder.join("images/b c.png"), "b").unwrap();
-    // a literal question mark or hash in a name is percent-encoded, and is part of it
-    let literal = ":::shot x\n\n![a](images/q%3F.png)\n\n:::";
-    fs::write(r.folder.join("images/q?.png"), "q").unwrap();
     let p = r.page("shot", "x", block);
     p.prepare().unwrap();
     assert_eq!(p.file(Area::Document, "images/a.svg").as_deref(), Some(&b"a"[..]));
     assert_eq!(p.file(Area::Document, "images/b c.png").as_deref(), Some(&b"b"[..]));
-    let p = r.page("shot", "x", literal);
+}
+
+/// No such file name on Windows.
+#[cfg(unix)]
+#[test]
+fn a_percent_encoded_question_mark_is_part_of_the_name() {
+    let r = rig();
+    fs::create_dir_all(r.folder.join("images")).unwrap();
+    fs::write(r.folder.join("images/q?.png"), "q").unwrap();
+    let p = r.page("shot", "x", ":::shot x\n\n![a](images/q%3F.png)\n\n:::");
     p.prepare().unwrap();
     assert_eq!(p.file(Area::Document, "images/q?.png").as_deref(), Some(&b"q"[..]));
 }
