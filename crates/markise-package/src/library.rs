@@ -14,7 +14,8 @@ pub struct LibraryEntry {
     pub block: String,
     pub title: String,
     pub detail: Option<String>,
-    /// An icon name; the package supplies what it means.
+    /// The icon's file in the package, if the block names one: `assets/<name>.svg` (ADR 0019). It may
+    /// not be there.
     pub icon: Option<String>,
     /// The group's place in [`Library::groups`]; `None` for a block in no group.
     pub group: Option<usize>,
@@ -107,7 +108,9 @@ impl PackageIndex {
             block: block.to_string(),
             title,
             detail,
-            icon: entry.palette.and_then(|p| p.icon.clone()),
+            icon: (entry.palette.and_then(|p| p.icon.as_deref()))
+                .or_else(|| entry.view.and_then(|v| v.icon.as_deref()))
+                .map(|n| format!("assets/{n}.svg")),
             group,
             search: fold(&search),
         });
