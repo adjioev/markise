@@ -13,6 +13,7 @@ markise-doc.workspace = true
 markise-md.workspace = true
 schema-form-core.workspace = true
 markise-package.workspace = true
+markise-web-render.workspace = true
 markise-layout.workspace = true
 notify.workspace = true
 trash.workspace = true

@@ -2853,6 +2853,7 @@ dependencies = [
  "markise-testfmt",
  "markise-text",
  "markise-theme",
+ "markise-web-render",
  "notify",
  "png 0.18.1",
  "proptest",
