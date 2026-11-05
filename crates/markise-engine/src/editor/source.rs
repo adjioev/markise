@@ -457,7 +457,7 @@ impl EditorView {
     }
 
     /// Hands the pane's selection to the session (before a session operation).
-    fn source_selection_to_session(&mut self) {
+    pub(super) fn source_selection_to_session(&mut self) {
         // guard: the pane's selection is always on caret positions of the current text
         self.source_store_selection();
         if let Some(pane) = &self.source

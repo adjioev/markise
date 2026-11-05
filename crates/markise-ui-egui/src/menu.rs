@@ -314,6 +314,11 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("edit.smartDashesEm", "Smart Dashes: -- as Em Dash", &[]),
     app("block.editForm", "Edit Block…", &[both("Shift+Cmd+E", "Ctrl+Shift+E")]),
     app(
+        "block.insertFromLibrary",
+        "Insert Block…",
+        &[both("Opt+Cmd+B", "Ctrl+Alt+B")],
+    ),
+    app(
         "view.switchBlockView",
         "Switch This Block's View",
         &[both("Shift+Cmd+M", "Ctrl+Shift+M")],

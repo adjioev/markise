@@ -25,6 +25,7 @@ use markise_doc::{
     Patch, PatchError, PatchSet, Plan, PlanError, PlanRequest, PlanStep, PlannerId, Selection, planners,
 };
 
+pub use block_place::InsertRefused;
 pub use history::{History, HistoryLimits, StateId, Step, Transaction, TxKind, TypingDir};
 pub use source::{SourceCaret, SourcePane};
 pub use surface::{CaretGeometry, Continued, EditorView, ViewCaret};

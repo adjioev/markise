@@ -78,6 +78,17 @@ still in the menu.
 Add Row Above, Add Column Before and After, Delete Column and the column alignments have no
 default key.
 
+## Blocks
+
+These need a block package in use.
+
+| Command | macOS | Windows and Linux |
+|---|---|---|
+| Insert Block… (or `/` on an empty line) | Alt+Cmd+B | Ctrl+Alt+B |
+| Edit Block… | Shift+Cmd+E | Ctrl+Shift+E |
+| Switch This Block's View | Shift+Cmd+M | Ctrl+Shift+M |
+| Switch All Blocks' Views | Shift+Alt+Cmd+M | Ctrl+Shift+Alt+M |
+
 ## Format
 
 | Command | macOS | Windows and Linux |

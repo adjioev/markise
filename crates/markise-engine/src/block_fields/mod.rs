@@ -15,6 +15,7 @@ mod identity;
 mod slots;
 mod values;
 
+pub(crate) use encode::{ids_in, new_anchor};
 pub use fit::{BlockFit, decls_from_spec};
 pub use slots::{Refused, Slot, SlotAt, SlotCaret, SlotEdit};
 
