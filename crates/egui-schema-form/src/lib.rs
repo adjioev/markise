@@ -107,6 +107,8 @@ pub struct SchemaForm {
     editors: HashSet<Id>,
     /// A new row whose first real control is to take the focus.
     focus_row: Option<Id>,
+    /// The first real control is to take the focus.
+    focus_first: bool,
     /// Up, down and remove of each row, to pass the focus on when one of them goes away.
     buttons: HashMap<Id, [Id; 3]>,
     /// The widgets the host registered, by name.
@@ -141,6 +143,7 @@ impl SchemaForm {
             delivered: HashMap::new(),
             editors: HashSet::new(),
             focus_row: None,
+            focus_first: false,
         }
     }
 
@@ -161,6 +164,11 @@ impl SchemaForm {
         if let (Some(row), Some(path)) = (self.file_requests.remove(&request.0), path) {
             self.delivered.insert(row, path);
         }
+    }
+
+    /// The first real control takes the keyboard focus when the form is next drawn.
+    pub fn request_focus(&mut self) {
+        self.focus_first = true;
     }
 
     /// The values now. During a composition they hold its unfinished text; see

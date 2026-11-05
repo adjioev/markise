@@ -312,6 +312,7 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("edit.autoPairMarkdown", "Auto Pair Markdown Syntax", &[]),
     app("edit.smartPunctuation", "Smart Punctuation: Convert on Input", &[]),
     app("edit.smartDashesEm", "Smart Dashes: -- as Em Dash", &[]),
+    app("block.editForm", "Edit Block…", &[both("Shift+Cmd+E", "Ctrl+Shift+E")]),
     app("view.rendered", "Rendered", &[]),
     // spec 04 §3.3: ⌃⌘/ on macOS, Ctrl+Alt+/ elsewhere (Ctrl+/ is Source Code Mode)
     app("view.sideBySide", "Side by Side", &[both("Ctrl+Cmd+/", "Ctrl+Alt+/")]),

@@ -263,6 +263,8 @@ pub struct SbsOutput {
     pub right: Option<Rect>,
     /// The rendered pane asks for a full-window view.
     pub open_view: Option<crate::viewer::ViewTarget>,
+    /// The rendered pane asks for the form of the block at this offset.
+    pub open_block_form: Option<usize>,
 }
 
 /// Per-document Side by Side state (the divider position lives in the settings).
@@ -436,6 +438,7 @@ impl SideBySide {
             let vo = viewer.show(&mut rui, f.images, f.theme, parley, false);
             out.link = vo.link;
             out.open_view = vo.open_view;
+            out.open_block_form = vo.open_block_form;
             out.right = Some(pane);
             user_scrolls_rendered |= vo.wheel_scrolled;
         }

@@ -18,10 +18,14 @@ markise-layout.workspace = true
 markise-text.workspace = true
 markise-blocks.workspace = true
 markise-package.workspace = true
+schema-form-core.workspace = true
+egui-schema-form.workspace = true
 markise-engine.workspace = true
 markise-export.workspace = true
 egui.workspace = true
 rfd.workspace = true
+resvg.workspace = true
+serde_json.workspace = true
 ttf-parser.workspace = true
 memmap2.workspace = true
 skrifa.workspace = true
@@ -38,8 +42,6 @@ embed-resource.workspace = true
 
 [dev-dependencies]
 libc.workspace = true
-# settings file assertions (tests/it/updates.rs)
-serde_json.workspace = true
 markise-theme.workspace = true
 egui_kittest.workspace = true
 markise-corpus.workspace = true

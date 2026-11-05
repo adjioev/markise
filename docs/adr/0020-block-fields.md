@@ -258,6 +258,75 @@ and Alt+Down do not work from the widget's own controls, and a composition in it
 is not the form's: `is_composing` stays false, so a host widget owns that. No host widget exists in
 the repository yet, so this stays as it is until one needs more.
 
+### The panel
+
+`markise-ui-egui` holds the form in a right-hand panel, in every view mode. It holds no rule of its
+own: it decides which block, and what becomes of a draft when the document changes under it.
+
+- **Opening.** A button on the card's top edge, or the command Edit Block (⇧⌘E, for the block around
+  the caret, innermost first). A document with no package or one not accepted shows neither. A block with no
+  schema in the package has no form. A package that says something a form cannot honour gives a
+  panel with the reason. The keyboard lands in the first field. Full Source mode has no cards, so
+  there the command opens it.
+- **The draft stays in the panel.** Save applies `edits_from_values` through `apply_to_session`, one
+  undo step named Edit Block, closes the panel and gives the keyboard back to the document. An
+  unchanged draft writes nothing. Save does not write the file.
+- **Keys, while the keyboard is in the panel.** ⌘Enter and ⌘S save the form. Esc and ⌘W cancel it. So a
+  second ⌘S writes the file, since the first gave the keyboard back. Other document commands wait, as
+  they do for a comment being written, and none of these keys acts during an IME composition.
+- **Undo in a field is the field's.** egui's text editor keeps its own history, and the existing
+  rule that a focused text field takes ⌘Z and ⇧⌘Z applies. On a button of the panel, ⌘Z does nothing rather
+  than reach past it into the document.
+- **Following the document.** Two live marks in the session hold the block's ends, moved by every
+  edit, undo and reload (a reload's diff). When the text's revision moves, the block is what stands
+  from one mark to the other, if that is still a block of the same name. It is never looked for by
+  its text: an identical block elsewhere is another block, and a draft must not go there.
+  An edit over the whole of it, or a deletion, leaves no block. Save looks again itself before
+  writing, so a change landing just before it cannot be missed. A reload knows the block only by its
+  diff, so of two identical blocks with one gone, it may be the other that counts as staying.
+  - Inside, with an unchanged draft: the panel reads the block again, and opens anew if the
+    arguments changed, since another variant has another form.
+  - Inside, with a changed draft: the panel says so and refuses Save (`Stale` from the engine is the
+    last check). Read the Block Again loses the draft; so does Cancel.
+  - Gone, with an unchanged draft: the panel closes. With a changed one, it stays, says so, and
+    offers only Cancel, so the text can still be read and copied.
+  - A reload is the same as any other change. The document switching or the package being withdrawn
+    closes the panel, **and a draft goes with it**: a question at that moment is left for later.
+    Save itself checks the document's identity, as a load can land on the very frame of a Save.
+- **A draft is not thrown away for another block.** Opening another block with a changed draft
+  refuses and says why.
+- **Outside the schema.** The fields show their reasons, the top says the block does not fit and can
+  still be saved, content in no field is listed and kept, and an argument naming no variant is a reason.
+- **Files.** The file dialog runs between frames, as the app's others do, and starts in the document's
+  folder. A file inside gets a path relative to it with `/`, as documents write them. A file
+  outside is refused with a message, and nothing is copied. Thumbnails come from the document's
+  image store: decoded off the UI thread, same limits, same resolver. That resolver looks at the disk
+  for some paths, so the form's worker asks it, once per reference, and frames read the answer.
+- **Icons.** An answer's `icon` is a file of the package. SVG goes through `resvg` at most 256 KiB, and
+  `currentColor` makes it a mask that follows the theme. The output is 128 by 128 whatever the file
+  declares, and the renderer limits a layer to five times that each way, so what is refused by name is
+  what that bound does not cover:
+  - a DTD, `use` and `marker`, which make a small file parse into something of any size;
+  - filters, as their cost has no bound: `filter` and `fe*` elements, the `filter` attribute and the
+    CSS property;
+  - patterns, as the renderer draws a whole tile whatever its declared size;
+  - masks and images, and dashed strokes, which run to a million dashes a path;
+  - more than 4096 parts or 16 levels of nesting, as each can be a layer's worth of blending.
+
+  A scan of the XML and a walk of the parsed tree both check, through groups, clip paths, paint and
+  text. The tree's own list of filters is not used, because it does not follow a chain of masks and
+  the renderer does. Images are not loaded, there are no fonts in this build, and no reference
+  leaves the file. One worker with one queue serves all forms of a session, so
+  opening a form again adds nothing to what runs. Other formats go through the image store. New dependency: `resvg` 0.45 with default
+  features off (Apache-2.0 OR MIT; its tree adds `usvg`, `tiny-skia`, `roxmltree` and a few small
+  crates, all MIT, Apache-2.0 or BSD).
+- **Theme and zoom.** Colours come from the egui visuals the app derives from the theme, sizes from the
+  whole-window zoom. The width is the user's for the session, from 280 points up to 60 % of the window.
+- **Cost.** A document with no package pays one comparison per frame. With a package, one index
+  lookup per block opener on screen. An open panel adds a search of the text only when the document
+  changed and the block is not where it was.
+- **Language.** Package texts are looked up as English, the app's only language so far.
+
 ### Limits
 
 - A text value holding a line that is only an image reads back as the image field when the block
@@ -276,7 +345,7 @@ the repository yet, so this stays as it is until one needs more.
 
 ## Consequences
 
-- The form crate and the panel get JSON and need no Markdown. The panel is a later PR.
+- The form crate and the panel get JSON and need no Markdown.
 - `egui-schema-form` could leave the repository as it is: nothing in it is ours.
 - The decode cost is one parse of the block and the encode cost one line diff of it, per apply.
   Neither depends on the document's size.
