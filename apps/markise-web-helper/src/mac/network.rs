@@ -63,6 +63,18 @@ const ALSO_OFF: &[&str] = &[
     "WebTransportEnabled",
 ];
 
+/// What can ask a person, or the system on their behalf: nobody is there, and a request can wait for ever
+/// (capture did, on a CI runner). A page has none of these to ask with.
+const NOTHING_TO_ASK: &[&str] = &[
+    "MediaDevicesEnabled",
+    "ScreenCaptureEnabled",
+    "SpeechRecognitionEnabled",
+    "GeolocationAPIEnabled",
+    "NotificationsEnabled",
+    "WebShareEnabled",
+    "AsyncClipboardAPIEnabled",
+];
+
 /// A page nobody sees is still to run on time: left on, its timers wait for a second or more, and on a
 /// busy machine its process can be held back, and a render runs out of its limit doing nothing.
 const KEEP_ON_TIME: &[&str] = &[
@@ -120,7 +132,8 @@ pub fn dead_proxy(store: &WKWebsiteDataStore) {
 pub fn engine_features_off(prefs: &WKPreferences) {
     for (name, feature) in features() {
         let name = name.as_str();
-        if MUST_BE_OFF.contains(&name) || ALSO_OFF.contains(&name) || KEEP_ON_TIME.contains(&name) {
+        let off = [MUST_BE_OFF, ALSO_OFF, NOTHING_TO_ASK, KEEP_ON_TIME];
+        if off.iter().any(|list| list.contains(&name)) {
             // SAFETY: [`usable`] checked it responds
             let _: () = unsafe { msg_send![prefs, _setEnabled: false, forFeature: &*feature] };
         }

@@ -33,6 +33,7 @@ html,body{{margin:0;padding:0;background:transparent;overflow:hidden;max-width:n
 /// sheet that does not come in time does not hold the block back.
 pub const PREPARE: &str = r#"
 if ('RTCPeerConnection' in window || 'webkitRTCPeerConnection' in window) throw new Error('peer connections are on');
+if ('mediaDevices' in navigator) throw new Error('capture is on');
 // nothing here is interactive: no click anyone sends gets to what a click does
 window.addEventListener('click', (e) => e.preventDefault(), true);
 window.addEventListener('submit', (e) => e.preventDefault(), true);
