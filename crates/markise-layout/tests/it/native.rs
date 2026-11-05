@@ -359,3 +359,106 @@ fn an_icon_takes_its_place_when_the_host_has_it_and_only_then() {
         "the same height"
     );
 }
+
+#[test]
+fn a_label_is_one_row_whatever_the_package_wrote() {
+    struct Labelled(String);
+    impl BlockViews for Labelled {
+        fn id(&self) -> u64 {
+            5
+        }
+        fn has_view(&self, _: &str) -> bool {
+            true
+        }
+        fn look(&self, _: &str, _: &str, source: &str) -> BlockLook {
+            BlockLook::Native(NativeBlock {
+                view: Arc::new(NativeView {
+                    kind: NativeKind::Callout,
+                    accent: None,
+                    icon: None,
+                    label: self.0.as_str().into(),
+                    single_answer: true,
+                }),
+                parts: role_ranges(source),
+            })
+        }
+    }
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut plain = view_of(BLOCK);
+    let h0 = plain.frame(4000.0, 0.0, &mut f, &NoImages)[0].layout.height;
+    for label in ["Tip\n".repeat(1024), "word ".repeat(1000)] {
+        let mut v = view_of(BLOCK);
+        v.set_block_views(Some(Arc::new(Labelled(label.clone()))));
+        let vis = v.frame(4000.0, 0.0, &mut f, &NoImages);
+        assert_eq!(vis[0].layout.height, h0, "the opener keeps its height");
+        let shown: Vec<_> = (vis[0].layout.prims.iter())
+            .filter_map(|p| match p {
+                Prim::Text { text, pos, .. } => Some((text.text().to_string(), pos.x + text.size().x)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(!shown[0].0.contains('\n'), "{:?}", shown[0].0);
+        assert!(shown[0].1 < 700.0, "inside the card: {shown:?}");
+    }
+}
+
+#[test]
+fn a_long_name_leaves_room_for_the_warning_and_an_icon_for_the_label() {
+    struct Long;
+    impl BlockViews for Long {
+        fn id(&self) -> u64 {
+            6
+        }
+        fn has_view(&self, name: &str) -> bool {
+            name == "shown"
+        }
+        fn has_schema(&self, _: &str) -> bool {
+            true
+        }
+        fn icon_ready(&self, _: &str) -> bool {
+            true
+        }
+        fn look(&self, name: &str, _: &str, source: &str) -> BlockLook {
+            if name != "shown" {
+                return BlockLook::Outside(vec!["The reason".to_string()]);
+            }
+            BlockLook::Native(NativeBlock {
+                view: Arc::new(NativeView {
+                    kind: NativeKind::Callout,
+                    accent: None,
+                    icon: Some("assets/a.svg".into()),
+                    label: "word ".repeat(1000).into(),
+                    single_answer: true,
+                }),
+                parts: role_ranges(source),
+            })
+        }
+    }
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    // a name far wider than the card: the warning is still there, with its symbol
+    let name = "n".repeat(400);
+    let src = format!(":::{name} and some more arguments\n\nBody.\n\n:::\n");
+    let mut v = view_of(&src);
+    v.set_block_views(Some(Arc::new(Long)));
+    let vis = v.frame(4000.0, 0.0, &mut f, &NoImages);
+    let opener = &vis[0].layout;
+    let r = opener.warning.expect("the warning stays");
+    assert!(r.max.x <= 700.0, "{r:?}");
+    assert!(texts(&mut v).iter().any(|t| t.starts_with('⚠')), "the symbol shows");
+    assert!(v.block_warnings(0).is_some(), "and the reasons for the tooltip");
+
+    // an icon's width comes out of the label's
+    let mut v = view_of(BLOCK);
+    v.set_block_views(Some(Arc::new(Long)));
+    let vis = v.frame(4000.0, 0.0, &mut f, &NoImages);
+    let right = (vis[0].layout.prims.iter())
+        .filter_map(|p| match p {
+            Prim::Text { text, pos, .. } => Some(pos.x + text.size().x),
+            _ => None,
+        })
+        .fold(0.0, f32::max);
+    assert!(right <= 700.0 - 34.0, "{right}");
+}

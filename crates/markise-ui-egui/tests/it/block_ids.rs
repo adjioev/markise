@@ -159,6 +159,19 @@ fn search_finds_a_hidden_id_in_source_mode_only() {
 }
 
 #[test]
+fn an_id_with_blanks_after_it_is_hidden_all_the_same() {
+    let text = "## Title {#secret}  \n\nsecret\n";
+    let (_d, _p, mut h) = open(text);
+    search_for(&mut h, "secret");
+    assert_eq!(h.state().find_results().unwrap().matches.len(), 1, "only what shows");
+    h.state_mut().replace_find("x".into(), true);
+    wait_until(&mut h, "the replacement", |a| {
+        a.document_text().unwrap().contains("\nx\n")
+    });
+    assert_eq!(h.state().document_text().unwrap(), "## Title {#secret}  \n\nx\n");
+}
+
+#[test]
 fn replacing_in_the_rendered_view_does_not_touch_a_hidden_id() {
     let text = "## a1 {#a1}\n\nsome a1\n\n:::q\n\n- [ ] a1 {#a1}\n\n:::\n";
     let (_d, _p, mut h) = open(text);
