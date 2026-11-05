@@ -44,14 +44,8 @@ fn bad(what: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, what.into())
 }
 
-fn read_part(r: &mut impl Read, max: usize) -> io::Result<Vec<u8>> {
-    let mut len = [0u8; 4];
-    r.read_exact(&mut len)?;
-    let n = u32::from_le_bytes(len) as usize;
-    if n > max {
-        return Err(bad(format!("a frame part of {n} bytes")));
-    }
-    // grown as it comes, so a false length costs nothing before the bytes are there
+/// `n` bytes, grown as they come, so a false length costs nothing before the bytes are there.
+fn read_bytes(r: &mut impl Read, n: usize) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     r.take(n as u64).read_to_end(&mut buf)?;
     if buf.len() != n {
@@ -60,31 +54,66 @@ fn read_part(r: &mut impl Read, max: usize) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// One frame. The bytes are read only as far as its kind allows, so what says it is a little
-/// message cannot have a large attachment: `max_bytes` looks at the JSON first.
-fn read_frame(r: &mut impl Read, max_bytes: impl FnOnce(&Value) -> usize) -> io::Result<(Value, Vec<u8>)> {
+fn read_part(r: &mut impl Read, max: usize) -> io::Result<Vec<u8>> {
+    let mut len = [0u8; 4];
+    r.read_exact(&mut len)?;
+    let n = u32::from_le_bytes(len) as usize;
+    if n > max {
+        return Err(bad(format!("a frame part of {n} bytes")));
+    }
+    read_bytes(r, n)
+}
+
+/// How many bytes a message may come with.
+enum Attachment {
+    Exactly(usize),
+    AtMost(usize),
+}
+
+/// One frame. Its JSON is read and judged first: only then is the length of its bytes looked at, and
+/// only a length its message allows is read. So what is wrong costs no more than its JSON.
+fn read_frame<M>(
+    r: &mut impl Read,
+    decode: impl FnOnce(&Value) -> io::Result<(M, Attachment)>,
+) -> io::Result<(M, Vec<u8>)> {
     let json = read_part(r, MAX_JSON)?;
     let value: Value = serde_json::from_slice(&json).map_err(|e| bad(e.to_string()))?;
-    let bytes = read_part(r, max_bytes(&value))?;
-    Ok((value, bytes))
+    let (message, attachment) = decode(&value)?;
+    let mut len = [0u8; 4];
+    r.read_exact(&mut len)?;
+    let n = u32::from_le_bytes(len) as usize;
+    let fine = match attachment {
+        Attachment::Exactly(m) => n == m,
+        Attachment::AtMost(m) => n <= m,
+    };
+    if !fine {
+        return Err(bad(format!("an attachment of {n} bytes")));
+    }
+    Ok((message, read_bytes(r, n)?))
 }
 
 /// The next message for a helper, with its bytes.
 pub fn read_to_helper(r: &mut impl Read) -> io::Result<(ToHelper, Vec<u8>)> {
-    let (value, bytes) = read_frame(r, |v| if v["t"] == "file" { MAX_FILE } else { 0 })?;
-    Ok((ToHelper::decode(&value)?, bytes))
+    read_frame(r, |v| {
+        let message = ToHelper::decode(v)?;
+        let attachment = match message {
+            ToHelper::File { found: true, .. } => Attachment::AtMost(MAX_FILE),
+            _ => Attachment::Exactly(0),
+        };
+        Ok((message, attachment))
+    })
 }
 
 /// The next message from a helper, with its bytes.
 pub fn read_from_helper(r: &mut impl Read) -> io::Result<(FromHelper, Vec<u8>)> {
-    let (value, bytes) = read_frame(r, |v| {
-        if v["t"] == "rendered" {
-            MAX_PIXELS as usize * 4
-        } else {
-            0
-        }
-    })?;
-    Ok((FromHelper::decode(&value, &bytes)?, bytes))
+    read_frame(r, |v| {
+        let message = FromHelper::decode(v)?;
+        let attachment = match &message {
+            FromHelper::Rendered(i) => Attachment::Exactly(i.px_width as usize * i.px_height as usize * 4),
+            _ => Attachment::Exactly(0),
+        };
+        Ok((message, attachment))
+    })
 }
 
 pub fn write_frame(w: &mut impl Write, json: &Value, bytes: &[u8]) -> io::Result<()> {
@@ -337,26 +366,31 @@ impl ToHelper {
         let o = v.as_object().ok_or_else(|| bad("not an object"))?;
         match get_str(o, "t", 16)? {
             "render" => {
-                let strings = |k: &str| -> io::Result<Vec<&Value>> {
-                    Ok(o.get(k)
+                // counted and measured before anything of them is copied
+                let list = |k: &str, max: usize| -> io::Result<&[Value]> {
+                    let l = o
+                        .get(k)
                         .and_then(Value::as_array)
-                        .ok_or_else(|| bad(format!("no {k}")))?
-                        .iter()
-                        .collect())
+                        .ok_or_else(|| bad(format!("no {k}")))?;
+                    if l.len() > max {
+                        return Err(bad(format!("{k}: too many")));
+                    }
+                    Ok(l)
                 };
-                let vars = strings("vars")?
-                    .into_iter()
+                let vars = list("vars", MAX_VARS)?
+                    .iter()
                     .map(|p| match p.as_array().map(Vec::as_slice) {
-                        Some([Value::String(k), Value::String(v)]) => Ok((k.clone(), v.clone())),
+                        Some([Value::String(k), Value::String(v)]) if k.len() <= 64 && v.len() <= 1024 => {
+                            Ok((k.clone(), v.clone()))
+                        }
                         _ => Err(bad("a variable of the wrong shape")),
                     })
                     .collect::<io::Result<Vec<_>>>()?;
-                let styles = strings("styles")?
-                    .into_iter()
-                    .map(|s| {
-                        s.as_str()
-                            .map(str::to_string)
-                            .ok_or_else(|| bad("a style of the wrong shape"))
+                let styles = list("styles", MAX_STYLES)?
+                    .iter()
+                    .map(|s| match s.as_str() {
+                        Some(s) if s.len() <= MAX_PATH => Ok(s.to_string()),
+                        _ => Err(bad("a style of the wrong shape")),
                     })
                     .collect::<io::Result<Vec<_>>>()?;
                 let module = match o.get("module") {
@@ -409,9 +443,8 @@ impl FromHelper {
         }
     }
 
-    /// With the frame's bytes: an image's length has to be what its measures say, and those have to
-    /// be within the bounds.
-    pub fn decode(v: &Value, bytes: &[u8]) -> io::Result<FromHelper> {
+    /// An image's measures have to be within the bounds: its bytes are then read by them.
+    pub fn decode(v: &Value) -> io::Result<FromHelper> {
         let o = v.as_object().ok_or_else(|| bad("not an object"))?;
         match get_str(o, "t", 16)? {
             "hello" => Ok(FromHelper::Hello {
@@ -437,8 +470,8 @@ impl FromHelper {
                 };
                 let (px_width, px_height) = (side("px_width")?, side("px_height")?);
                 let pixels = px_width as u64 * px_height as u64;
-                if pixels > MAX_PIXELS || bytes.len() as u64 != pixels * 4 {
-                    return Err(bad("an image whose bytes are not its measures"));
+                if pixels > MAX_PIXELS {
+                    return Err(bad("an image over the bounds"));
                 }
                 let number = |k: &str| o.get(k).and_then(Value::as_f64).ok_or_else(|| bad(format!("no {k}")));
                 let css_height = number("css_height")?;

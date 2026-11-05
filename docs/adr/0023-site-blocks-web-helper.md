@@ -92,8 +92,9 @@ jobs only from a package in use (ADR 0019).
 
 **A process of its own, nobody's window.** The helper never activates (`NSApplicationActivationPolicyProhibited`), and its
 window is never ordered in, so nothing can appear on any screen, whatever the page does. WebKit is happy to snapshot in
-such a window, at any scale asked for (checked at 1× and 3× on a 2× screen), and with the web view's inactive scheduling
-policy off it does not throttle for not being on screen. The whole process is confined by `sandbox_init` once it starts:
+such a window, at any scale asked for (checked at 1× and 3× on a 2× screen). A page nobody sees would have its timers held to a second or
+more and could have its process held back, so the inactive scheduling policy and the engine's throttling features are off (they made a render run out of its
+limit on a CI runner, doing nothing). The whole process is confined by `sandbox_init` once it starts:
 no network, no reading the home folder, no writing outside the temporary folders. It is not an App Sandbox: that needs
 a container tied to a signature, and an ad-hoc signature that changes with every build would make macOS ask the user about
 the helper's own data. WebKit's own processes have sandboxes of their own.
@@ -119,6 +120,8 @@ next document. Every render is a fresh document in that web view: what the last 
 The feature switches are private API, there being no public ones; the proxy needs macOS 14. **Without them there is no
 helper**: it says `available: false`, and blocks stay cards. The check in the page also fails closed, so an OS that ignores the
 switch draws nothing. This goes through Developer ID distribution, not the App Store, where private API would be refused.
+
+An attempt that runs out of its own budget counts against the page, not for it: what did not finish was not seen to be stopped.
 
 `markise-web-helper --self-test` is that test page: about forty attempts, aimed at this machine's address and then at loopback, at a
 listener on all interfaces, TCP and UDP. The page cannot tell it anything, there being no way to, so it paints a cell per attempt and
