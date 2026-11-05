@@ -221,7 +221,16 @@ fn the_mouse_chooses_a_press_outside_closes_and_the_pointer_is_an_arrow() {
     let row = h.get_by_label("One answer").rect();
     h.hover_at(row.center());
     frames(&mut h);
-    assert_eq!(h.ctx.output(|o| o.cursor_icon), egui::CursorIcon::Default);
+    h.step();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Default);
+    // over the text beside it the pointer is what it is there: this reads a real answer
+    let beyond = h.get_by_label("One answer").rect().right_center() + egui::vec2(60.0, 0.0);
+    h.hover_at(beyond);
+    h.step();
+    h.step();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Text);
+    h.hover_at(row.center());
+    frames(&mut h);
     assert_eq!(
         h.state().block_library().unwrap().selected_title(),
         Some("One answer"),
