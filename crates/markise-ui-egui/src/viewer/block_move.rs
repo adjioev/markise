@@ -17,6 +17,8 @@ use super::{DocViewer, ViewerOutput};
 /// How near an edge the pointer has to be for the view to scroll, and how fast at the very edge.
 const SCROLL_EDGE: f32 = 48.0;
 const SCROLL_SPEED: f32 = 900.0;
+/// How far from the press the pointer has to go for the edges to count.
+const MOVED: f32 = 6.0;
 /// How far from where it was picked up, in rows, the pointer still means "it stays", also over a tall
 /// block: a block's own height is no distance to pull before anything answers.
 const STAY_ROWS: f32 = 2.0;
@@ -30,6 +32,10 @@ pub(super) struct BlockDrag {
     target: Option<(usize, f32)>,
     /// Where the pointer picked it up, in the document's coordinates: the view may scroll.
     grabbed_y: f64,
+    /// Where on screen it was pressed, and that the pointer has left there: a press near an edge, or on a
+    /// handle held at the view's top, is not yet a wish to scroll.
+    pressed_at: f32,
+    has_moved: bool,
     shown: Option<BlockDragShown>,
 }
 
@@ -121,6 +127,8 @@ impl DocViewer {
                     changes: self.ed.changes(),
                     target: None,
                     grabbed_y: f64::from(y - surface.top()) + self.ed.view.scroll_y(),
+                    pressed_at: y,
+                    has_moved: false,
                     shown: None,
                 });
             }
@@ -201,7 +209,10 @@ impl DocViewer {
             ui.ctx().request_repaint();
             return;
         }
-        if let Some(p) = pos {
+        if let (Some(p), Some(d)) = (pos, &mut self.block_drag) {
+            d.has_moved |= (p.y - d.pressed_at).abs() > MOVED;
+        }
+        if let Some(p) = pos.filter(|_| self.block_drag.as_ref().is_some_and(|d| d.has_moved)) {
             let up = SCROLL_EDGE - (p.y - surface.top());
             let below = SCROLL_EDGE - (surface.bottom() - p.y);
             let speed = SCROLL_SPEED / SCROLL_EDGE;
@@ -253,7 +264,7 @@ impl DocViewer {
             }
             // it stays: a quiet line along its own place, not a place to land
             None => {
-                let y = outline.map_or(surface.top() + 1.0, |r| r.top()) - 4.0;
+                let y = (outline.map_or(surface.top(), |r| r.top()) - 4.0).max(surface.top() + 1.0);
                 let weak = ui.visuals().weak_text_color();
                 let dashes = egui::Shape::dashed_line(&[pos2(x0, y), pos2(x1, y)], Stroke::new(1.5, weak), 6.0, 5.0);
                 painter.extend(dashes);
@@ -376,6 +387,8 @@ impl DocViewer {
         let down = y > grabbed;
         places
             .into_iter()
+            // only where the line can show: a place above or below the view is no place to land yet
+            .filter(|(_, at)| *at >= surface.top() && *at <= surface.bottom())
             .filter(|(_, at)| if down { *at >= own_bottom } else { *at <= own_top })
             .min_by(|a, b| (a.1 - y).abs().total_cmp(&(b.1 - y).abs()))
     }
