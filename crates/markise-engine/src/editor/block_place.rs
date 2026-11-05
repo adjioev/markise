@@ -145,6 +145,24 @@ fn with_free_ids(preset: &dyn FormatDoc, in_document: &str) -> String {
 }
 
 /// Every block of a document, as what must stay the same around an edit.
+/// Of [`blocks_of`], the blocks whose openers stand in these bytes.
+pub(super) fn blocks_in(doc: &dyn FormatDoc, range: &std::ops::Range<usize>) -> Vec<(usize, String, String)> {
+    let Some(d) = doc.as_any().downcast_ref::<Document>() else {
+        return Vec::new();
+    };
+    let text = doc.text();
+    (d.directives().iter())
+        .filter(|b| range.contains(&b.opener.start))
+        .map(|b| {
+            (
+                b.fence_len,
+                b.name.slice(text).to_string(),
+                b.args.slice(text).to_string(),
+            )
+        })
+        .collect()
+}
+
 pub(super) fn blocks_of(doc: &dyn FormatDoc) -> Vec<(usize, String, String)> {
     let Some(d) = doc.as_any().downcast_ref::<Document>() else {
         return Vec::new();

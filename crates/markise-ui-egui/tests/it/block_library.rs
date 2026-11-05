@@ -643,7 +643,12 @@ mod moves {
         for platform in [Platform::Mac, Platform::Other] {
             let keymap = Keymap::new(&Registry::for_format(&MarkdownFormat::default()), platform);
             let reserved = reserved_chords(platform);
-            for id in ["block.insertFromLibrary", "block.moveUp", "block.moveDown"] {
+            for id in [
+                "block.insertFromLibrary",
+                "block.moveUp",
+                "block.moveDown",
+                "block.delete",
+            ] {
                 let d = markise_ui_egui::menu::app_command(id).unwrap();
                 let c = descriptor_chord(d, platform).expect("a chord");
                 assert!(
@@ -907,6 +912,251 @@ mod moves {
             "the block is whole among the paragraphs"
         );
         assert_eq!(t.len(), d.len());
+    }
+}
+
+mod deletes {
+    use egui::{Modifiers, PointerButton, Pos2};
+    use markise_doc::{DocPos, Selection};
+    use markise_ui_egui::confirm::{Choice, Kind};
+    use markise_ui_egui::menu::MenuAction;
+
+    use super::*;
+
+    const TIP: &str = ":::tip\n\n### A title\n\nHello\n\n:::";
+    const POLL: &str = ":::poll\n\n## Which?\n\n- [x] One {#a1}\n- [ ] Two {#a2}\n\n:::";
+    const PLAIN: &str = ":::plain\n\nPlain text.\n\n:::";
+
+    fn doc() -> String {
+        format!("Before.\n\n{TIP}\n\nMiddle.\n\n{POLL}\n\n{PLAIN}\n\nAfter.\n")
+    }
+
+    fn rect_of(h: &H, needle: &str) -> egui::Rect {
+        let at = text(h).find(needle).unwrap();
+        h.state().viewer_item_rect(at).unwrap()
+    }
+
+    fn hover(h: &mut H, p: Pos2) {
+        h.hover_at(p);
+        frames(h);
+    }
+
+    /// Goes to the block's text, then its button, and clicks.
+    fn click_delete(h: &mut H, inside: &str, label: &str) {
+        let r = rect_of(h, inside);
+        hover(h, r.center());
+        let p = h.get_by_label(label).rect().center();
+        hover(h, p);
+        for pressed in [true, false] {
+            h.event(Event::PointerButton {
+                pos: p,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Modifiers::NONE,
+            });
+            h.step();
+        }
+        frames(h);
+    }
+
+    fn chord() -> (Modifiers, Key) {
+        if cfg!(target_os = "macos") {
+            (Modifiers::ALT | Modifiers::MAC_CMD, Key::Backspace)
+        } else {
+            (Modifiers::CTRL | Modifiers::SHIFT, Key::Delete)
+        }
+    }
+
+    fn undo(h: &mut H) {
+        h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+        frames(h);
+    }
+
+    #[test]
+    fn the_button_shows_by_the_others_with_a_label_and_an_arrow_and_one_undo_brings_it_back() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        assert!(
+            h.query_by_label("Delete Block: tip").is_none(),
+            "quiet until the block is under the pointer"
+        );
+        let r = rect_of(&h, "Hello");
+        hover(&mut h, r.center());
+        let bin = h.get_by_label("Delete Block: tip").rect();
+        let pencil = h.get_by_label("Edit Block: tip").rect();
+        assert_eq!(bin.top(), pencil.top());
+        assert!(bin.right() < pencil.left(), "{bin:?} {pencil:?}");
+        assert!(
+            bin.right() >= pencil.left() - 2.0 * pencil.width() - 12.0,
+            "next to the others"
+        );
+        hover(&mut h, bin.center());
+        h.step();
+        assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Default);
+
+        click_delete(&mut h, "Hello", "Delete Block: tip");
+        assert_eq!(text(&h), format!("Before.\n\nMiddle.\n\n{POLL}\n\n{PLAIN}\n\nAfter.\n"));
+        undo(&mut h);
+        assert_eq!(text(&h), d, "one step, exact");
+    }
+
+    #[test]
+    fn a_card_and_a_nested_block_go_by_the_button_too() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        click_delete(&mut h, "Plain text.", "Delete Block: plain");
+        assert_eq!(text(&h), format!("Before.\n\n{TIP}\n\nMiddle.\n\n{POLL}\n\nAfter.\n"));
+
+        let d = format!("Before.\n\n::::tip\n\nOuter.\n\n{PLAIN}\n\n::::\n\nAfter.\n");
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        click_delete(&mut h, "Plain text.", "Delete Block: plain");
+        assert_eq!(text(&h), "Before.\n\n::::tip\n\nOuter.\n\n::::\n\nAfter.\n");
+    }
+
+    #[test]
+    fn with_no_package_the_button_and_the_command_work_and_the_caret_lands() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.opened();
+        assert!(h.state().block_package().is_none());
+        click_delete(&mut h, "Hello", "Delete Block: tip");
+        assert_eq!(text(&h), format!("Before.\n\nMiddle.\n\n{POLL}\n\n{PLAIN}\n\nAfter.\n"));
+
+        let t = text(&h);
+        caret(&mut h, t.find("Plain text.").unwrap() + 1);
+        let (m, k) = chord();
+        h.key_press_modifiers(m, k);
+        frames(&mut h);
+        assert_eq!(text(&h), format!("Before.\n\nMiddle.\n\n{POLL}\n\nAfter.\n"));
+        let t = text(&h);
+        let at = h
+            .state_mut()
+            .viewer()
+            .unwrap()
+            .ed
+            .session
+            .selection()
+            .primary()
+            .focus
+            .offset;
+        let after = t.find("After.").unwrap();
+        assert!(
+            (after - 2..=after).contains(&at),
+            "between the block before and what follows: {at}"
+        );
+        undo(&mut h);
+        undo(&mut h);
+        assert_eq!(text(&h), d);
+    }
+
+    #[test]
+    fn the_menu_says_when_it_can_and_the_command_goes_by_it_in_source_as_well() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        let enabled = |h: &H| h.state().menu_model().item("block.delete").map(|i| i.enabled);
+        caret(&mut h, 2);
+        assert_eq!(enabled(&h), Some(false), "not in a block");
+        caret(&mut h, d.find("Hello").unwrap() + 1);
+        assert_eq!(enabled(&h), Some(true));
+        let ctx = h.ctx.clone();
+        assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("block.delete")));
+        frames(&mut h);
+        assert!(!text(&h).contains(":::tip"));
+        let v = h.state_mut().viewer().unwrap();
+        let sel = v.ed.session.selection().primary();
+        assert_eq!(sel.focus.offset, "Before.".len(), "the end of the text before");
+        // no package, the entry is there
+        let g = Fixture::with_palette(&d, PALETTE);
+        let plain = g.opened();
+        assert!(plain.state().menu_model().item("block.delete").is_some());
+    }
+
+    #[test]
+    fn a_changed_draft_of_it_asks_first_and_a_clean_panel_closes() {
+        let d = doc();
+        // nothing changed: the panel closes with the block
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        assert!(h.state_mut().open_block_form(d.find("Hello").unwrap()));
+        frames(&mut h);
+        click_delete(&mut h, "Hello", "Delete Block: tip");
+        assert!(!text(&h).contains(":::tip"));
+        assert!(h.state().block_form().is_none());
+
+        // a change: the question, and Cancel keeps both
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        assert!(h.state_mut().open_block_form(d.find("Hello").unwrap()));
+        frames(&mut h);
+        h.get_by_label("Body").click();
+        frames(&mut h);
+        h.get_by_label("Body").type_text("!");
+        frames(&mut h);
+        assert!(h.state().block_form().unwrap().is_dirty());
+        click_delete(&mut h, "Hello", "Delete Block: tip");
+        assert_eq!(text(&h), d, "not yet");
+        assert_eq!(
+            h.state().question().expect("the draft's question").kind,
+            Kind::BlockDraft
+        );
+        h.state_mut().answer_question(Choice::Cancel);
+        frames(&mut h);
+        assert_eq!(text(&h), d);
+        assert!(h.state().block_form().unwrap().is_dirty());
+        // Discard goes on
+        click_delete(&mut h, "Hello", "Delete Block: tip");
+        h.state_mut().answer_question(Choice::DontSave);
+        frames(&mut h);
+        assert!(h.state().block_form().is_none());
+        let without = format!("Before.\n\nMiddle.\n\n{POLL}\n\n{PLAIN}\n\nAfter.\n");
+        assert_eq!(text(&h), without);
+        undo(&mut h);
+        assert_eq!(text(&h), d, "the draft is gone, the source is back");
+
+        // Save writes it, and the block goes all the same
+        assert!(h.state_mut().open_block_form(d.find("Hello").unwrap()));
+        frames(&mut h);
+        h.get_by_label("Body").click();
+        frames(&mut h);
+        h.get_by_label("Body").type_text("!");
+        frames(&mut h);
+        click_delete(&mut h, "Hello", "Delete Block: tip");
+        h.state_mut().answer_question(Choice::Save);
+        frames(&mut h);
+        assert!(h.state().block_form().is_none());
+        assert_eq!(text(&h), without);
+        undo(&mut h);
+        assert!(text(&h).contains("Hello!"), "one step back: as saved");
+    }
+
+    #[test]
+    fn a_draft_of_another_block_stays_and_a_selection_elsewhere_stays_too() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        let (a, b) = (d.find("Before").unwrap(), "Before.".len());
+        h.state_mut()
+            .viewer()
+            .unwrap()
+            .ed
+            .set_selection(Selection::single(DocPos::new(a), DocPos::new(b)));
+        frames(&mut h);
+        assert!(h.state_mut().open_block_form(d.find("Hello").unwrap()));
+        frames(&mut h);
+        h.get_by_label("Body").click();
+        frames(&mut h);
+        h.get_by_label("Body").type_text("!");
+        frames(&mut h);
+        click_delete(&mut h, "Plain text.", "Delete Block: plain");
+        assert!(!text(&h).contains(":::plain"));
+        assert!(
+            h.state().block_form().unwrap().is_dirty(),
+            "the draft is not this block's"
+        );
     }
 }
 

@@ -373,13 +373,13 @@ impl DocViewer {
         theme: &Theme,
         out: &mut ViewerOutput,
     ) {
+        self.pointer_on_block_control = false;
         let Some(index) = self.block_index.clone() else {
             return;
         };
         if self.block_icons.take_fresh() {
             ui.ctx().request_repaint();
         }
-        self.pointer_on_block_control = false;
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let model = self.ed.view.model().clone();
         let side = theme.line_px().min(22.0);
@@ -467,5 +467,91 @@ impl DocViewer {
             painter.line_segment([c0 + vec2(-s * 0.6, s * 0.6), c0 + vec2(-s, s)], stroke);
             painter.line_segment([c0 + vec2(s * 0.45, -s * 1.1), c0 + vec2(s * 1.1, -s * 0.45)], stroke);
         }
+    }
+
+    /// The delete button of the block under the pointer, next to its other buttons. It shows for any
+    /// paired block, with no package as well: a press takes one undo step away from nothing lost.
+    pub(super) fn block_delete_ui(
+        &mut self,
+        ui: &mut Ui,
+        visible: &[Visible],
+        surface: Rect,
+        left: f32,
+        theme: &Theme,
+        out: &mut ViewerOutput,
+    ) {
+        self.block_delete_button = None;
+        if self.ed.session.read_only().is_some() || self.review_preview() || self.block_drag_going() {
+            return;
+        }
+        let Some(hovered) = self.hovered_block(ui, visible, surface) else {
+            return;
+        };
+        let model = self.ed.view.model().clone();
+        let Some(v) = visible.iter().find(|v| model.item_start(v.idx) == hovered) else {
+            return;
+        };
+        let Some((_, b)) = v.layout.card_top else { return };
+        let containers = self.ed.session.doc().named_containers_at(hovered);
+        let Some(c) = containers.last().filter(|c| c.opener.start == hovered) else {
+            return;
+        };
+        // after the buttons the block has
+        let entry = self.block_index.as_ref().and_then(|i| i.block(&c.name));
+        let mut before = 0.0;
+        if let Some(e) = entry {
+            before += 1.0;
+            if (e.view.is_some() || self.ed.view.can_draw_site()) && !self.ed.view.block_outside(v.idx) {
+                before += 1.0;
+            }
+        }
+        let side = theme.line_px().min(22.0);
+        let top_right = b + vec2(left, surface.top() + v.y);
+        let r = Rect::from_min_size(
+            pos2(top_right.x - side - 4.0 - before * (side + 4.0), top_right.y + 4.0),
+            vec2(side, side),
+        );
+        if !surface.contains_rect(r) {
+            return;
+        }
+        let name = c.name.clone();
+        let id = ui.scope_id().with(("markise-block-delete", hovered));
+        let resp = ui.interact(r, id, Sense::click()).on_hover_text("Delete Block");
+        let label = format!("Delete Block: {name}");
+        resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+        self.block_delete_button = Some(r);
+        if resp.hovered() {
+            self.pointer_on_block_control = true;
+        }
+        if resp.clicked() {
+            out.delete_block = Some(hovered);
+            ui.ctx().request_repaint();
+        }
+        let tone = if resp.hovered() {
+            ui.visuals().text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        let painter = ui.painter_at(surface);
+        if resp.hovered() {
+            painter.rect_filled(r, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+        } else if v.layout.has_picture() {
+            painter.rect_filled(r, 4.0, ui.visuals().window_fill().gamma_multiply(0.85));
+        }
+        // a bin: a lid, and a body narrowing to its foot
+        let (c0, s) = (r.center(), side * 0.26);
+        let stroke = Stroke::new((side * 0.08).max(1.0), tone);
+        painter.line_segment(
+            [c0 + vec2(-s * 1.15, -s * 0.75), c0 + vec2(s * 1.15, -s * 0.75)],
+            stroke,
+        );
+        painter.line_segment([c0 + vec2(-s * 0.4, -s * 1.1), c0 + vec2(s * 0.4, -s * 1.1)], stroke);
+        let body = [
+            c0 + vec2(-s * 0.85, -s * 0.75),
+            c0 + vec2(-s * 0.6, s * 1.15),
+            c0 + vec2(s * 0.6, s * 1.15),
+            c0 + vec2(s * 0.85, -s * 0.75),
+        ];
+        painter.add(egui::Shape::line(body.to_vec(), stroke));
     }
 }

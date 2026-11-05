@@ -76,6 +76,8 @@ pub struct ViewerOutput {
     pub open_block_library: Option<String>,
     /// A block was dropped: its opener and the line it goes to.
     pub move_block: Option<(usize, usize)>,
+    /// A block's delete button was pressed: its opener.
+    pub delete_block: Option<usize>,
 }
 
 /// What the full-window view can show (issue #174).
@@ -233,6 +235,8 @@ pub struct DocViewer {
     block_drag: Option<block_move::BlockDrag>,
     /// The handle shown in the last frame, and what of it takes a press.
     block_handle: Option<(usize, Rect)>,
+    /// The delete button shown in the last frame: a press there places no caret.
+    block_delete_button: Option<Rect>,
     /// The pointer is on that handle: it says so with its own cursor.
     pointer_on_block_handle: bool,
     /// The comment whose text is being edited in its card (issue #87).
@@ -323,6 +327,7 @@ impl DocViewer {
             typed_for_library: None,
             block_drag: None,
             block_handle: None,
+            block_delete_button: None,
             pointer_on_block_handle: false,
             comment_view: Default::default(),
             card_edit_size: None,
@@ -819,7 +824,10 @@ impl DocViewer {
 
         // ---- input: pointer (hit tests against the last frame's layout)
         let modifiers = ui.input(|i| i.modifiers);
-        let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.hovered();
+        let on_delete = ui
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|p| self.block_delete_button.is_some_and(|r| r.contains(p)));
+        let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.hovered() && !on_delete;
         // a click on a task checkbox toggles it (spec 02 §9): the press neither places the caret
         // nor starts a selection; the toggle happens on release over the same box (a press
         // dragged off the box does nothing)
@@ -1064,6 +1072,7 @@ impl DocViewer {
             self.code_tools_ui(ui, &visible, rect, left, theme, focused, editable, &mut out, &mut sh);
             self.image_tools_ui(ui, &visible, rect, left, theme, imgs, &mut out);
             self.block_tools_ui(ui, &visible, rect, left, theme, &mut out);
+            self.block_delete_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_move_ui(ui, &visible, rect, left, theme, &mut out);
         }
 

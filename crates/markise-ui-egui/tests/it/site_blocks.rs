@@ -451,6 +451,42 @@ fn a_picture_shows_as_picked_up_on_a_press_and_moves() {
 }
 
 #[test]
+fn a_picture_goes_by_its_button_and_undo_brings_back_the_source() {
+    use egui::{Modifiers, PointerButton};
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    let mut h = f.ready_with(Some(p.source()));
+    wait_for(&mut h, "the picture", |h| picture(h, at(":::plain")).is_some());
+    let item = h.state().viewer_item_rect(at(":::plain")).unwrap();
+    h.hover_at(item.center());
+    h.step();
+    h.step();
+    let bin = h.get_by_label("Delete Block: plain").rect().center();
+    h.hover_at(bin);
+    h.step();
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: bin,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.step();
+    h.step();
+    common::run(&mut h);
+    assert_eq!(
+        text(&h),
+        "# Doc\n\nBefore.\n\nBetween.\n\n:::tip\n\nHas a view.\n\n:::\n\nAfter.\n"
+    );
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    common::run(&mut h);
+    assert_eq!(text(&h), DOC);
+}
+
+#[test]
 fn a_block_with_a_view_goes_native_site_markdown_and_back() {
     let f = Fixture::new(DOC);
     let p = played(120);
