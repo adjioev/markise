@@ -178,6 +178,10 @@ impl MarkiseApp {
 
     /// Applies an answer (tests drive it directly too).
     pub fn block_package_action(&mut self, action: PackageAction) {
+        if action == PackageAction::Forget && self.block_draft_changed() {
+            self.set_ask(super::Ask::BlockDraft(super::block_form::DraftNext::StopPackage));
+            return;
+        }
         match (action, std::mem::take(&mut self.package.status)) {
             (PackageAction::Accept, PackageStatus::Asking(p) | PackageStatus::NotInUse(p)) => {
                 self.package.not_now.remove(&p.sha256);

@@ -2463,6 +2463,23 @@ impl EditBehavior for Document {
         self.gap_slot(end)
     }
 
+    fn hidden_note(&self, at: usize) -> Option<Span> {
+        let leaf = self.leaf(at)?;
+        let (first, last) = (leaf.lines.first()?, leaf.lines.last()?);
+        if !self.text()[last.start..last.end].ends_with('}') || !self.hides_block_id_at(first.start) {
+            return None;
+        }
+        let mut content = String::new();
+        for (i, l) in leaf.lines.iter().enumerate() {
+            if i > 0 {
+                content.push('\n');
+            }
+            content.push_str(l.slice(self.text()));
+        }
+        let cut = self.block_id_cut(&content)?;
+        let in_line = cut - content.rfind('\n').map_or(0, |i| i + 1);
+        Some(Span::new(last.start + in_line, last.end))
+    }
     fn named_containers_at(&self, at: usize) -> Vec<markise_doc::NamedContainer> {
         let text = self.text();
         self.directives_at(at)

@@ -214,6 +214,11 @@ impl OpenForm {
         &self.name
     }
 
+    /// The block's label.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
     pub fn args(&self) -> &str {
         &self.args
     }
@@ -319,6 +324,16 @@ impl OpenForm {
             r.track = Track::Stale;
         }
         true
+    }
+
+    /// The document it belongs to is gone. A changed draft stays to be read and copied, and has
+    /// nowhere to go; returns false when there is nothing to keep.
+    pub fn orphan(&mut self) -> bool {
+        let dirty = self.is_dirty();
+        if dirty && let Content::Form(r) = &mut self.content {
+            r.track = Track::Gone;
+        }
+        dirty
     }
 
     /// The arguments in the document differ from what this form was built for, with no draft to
@@ -509,7 +524,8 @@ impl OpenForm {
 const IN_NO_FIELD: &str = "In no field, kept as it is";
 const STALE: &str = "The block changed in the document, so the draft was not saved. Read the block again \
                      to lose the draft, or Cancel.";
-const GONE: &str = "The block is no longer in the document, so there is nothing to save to.";
+const GONE: &str =
+    "The block is no longer in the document, so there is nothing to save to. You can still copy the text.";
 
 fn paint_title_icon(ui: &mut Ui, texture: egui::TextureId, tint: egui::Color32) {
     let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());

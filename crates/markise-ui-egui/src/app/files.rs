@@ -83,11 +83,9 @@ impl MarkiseApp {
         if let Some(d) = &mut self.doc {
             d.sync();
         }
-        if self.is_dirty() {
-            self.set_ask(Ask::Unsaved(Then::New));
-            return;
+        if self.ask_before_leaving(Then::New).is_some() {
+            self.new_document_now();
         }
-        self.new_document_now();
     }
 
     /// The folder Save As proposes for an untitled document (and that its relative links
@@ -223,6 +221,28 @@ impl MarkiseApp {
             .add_filter("Markdown", MARKDOWN_EXTENSIONS)
             .add_filter("Plain text", TEXT_EXTENSIONS)
             .save_file()
+    }
+
+    /// Tests: another document takes this one's place with no question asked, as a load already
+    /// answered for does when it lands.
+    #[doc(hidden)]
+    pub fn replace_document_for_test(&mut self) {
+        self.new_document_now();
+    }
+
+    /// Tests: an open that was answered for before a draft changed, landing now.
+    #[doc(hidden)]
+    pub fn open_answered_for_test(&mut self, path: PathBuf) {
+        self.open_now(path, super::LoadReason::OpenDiscarding);
+    }
+
+    /// Tests: the document's file is now at `path`, as after a Save As.
+    #[doc(hidden)]
+    pub fn move_document_for_test(&mut self, path: PathBuf) {
+        if let Some(d) = self.doc.as_mut() {
+            d.path = path.clone();
+        }
+        self.document_moved(&path, None);
     }
 
     /// The document's file is now `path` (Save As, rename): watch it, resolve relative
@@ -430,7 +450,8 @@ impl MarkiseApp {
         {
             w.path = p;
         }
-        if let Some(Ask::Unsaved(then)) = self.ask.as_mut() {
+        if let Some(Ask::Unsaved(then) | Ask::BlockDraft(super::block_form::DraftNext::Then(then))) = self.ask.as_mut()
+        {
             rebase_then(then, from, to);
         }
         for then in [

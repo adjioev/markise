@@ -3,17 +3,15 @@
 
 use egui::Context;
 
-use super::{Ask, MarkiseApp, Then};
+use super::{MarkiseApp, Then};
 
 impl MarkiseApp {
     /// Help → Tutorial: the tutorial as an untitled scratch copy (asks to save unsaved edits
     /// of the current document first). Nothing on disk is read or written.
     pub fn open_tutorial(&mut self) {
-        if self.is_dirty() {
-            self.set_ask(Ask::Unsaved(Then::Tutorial));
-            return;
+        if self.ask_before_leaving(Then::Tutorial).is_some() {
+            self.open_tutorial_now();
         }
-        self.open_tutorial_now();
     }
 
     pub(super) fn open_tutorial_now(&mut self) {

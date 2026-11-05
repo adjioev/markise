@@ -520,6 +520,13 @@ pub trait EditBehavior {
         let _ = at;
         Vec::new()
     }
+    /// The hidden note at the end of the leaf holding `at` (Markdown: a trailing `{#id}`, ADR
+    /// 0018), when there is one: its source range, blanks before it included. The rendered view
+    /// does not show it unless the caret is on it. Default: none.
+    fn hidden_note(&self, at: usize) -> Option<Span> {
+        let _ = at;
+        None
+    }
     /// The patches that delete the selected `range` when deleting it as one range would cut
     /// structure the format keeps paired (ADR 0018): what is selected goes, the part of the
     /// structure whose other half lies outside the selection stays. `None`: delete `range`.

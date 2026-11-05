@@ -9,7 +9,9 @@ use egui::{Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use markise_doc::{Patch, PatchSet};
+use markise_engine::jobs::JobHooks;
 use markise_package::Sha256Hex;
+use markise_ui_egui::confirm::{Choice, Kind};
 use markise_ui_egui::menu::MenuAction;
 use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp, ViewMode};
 use serde_json::{Value, json};
@@ -112,10 +114,15 @@ impl Fixture {
     }
 
     fn harness(&self) -> H {
+        self.harness_with(Default::default())
+    }
+
+    fn harness_with(&self, hooks: JobHooks) -> H {
         let picks = self.picks.clone();
         let opts = AppOptions {
             config: ConfigDir::Dir(self.config.clone()),
             block_image_picker: Some(Arc::new(move |_: &Path| picks.lock().unwrap().clone())),
+            hooks: std::sync::Arc::new(hooks),
             ..common::no_watch()
         };
         Harness::builder()
@@ -599,15 +606,19 @@ fn a_draft_does_not_go_into_the_document_that_took_its_place() {
     common::run(&mut h);
     h.get_by_label("Body").type_text("!");
     common::run(&mut h);
-    // another document with the same bytes, with no frame in between: what happens when a load
-    // is polled and Save comes on that same frame
-    h.state_mut().new_document();
+    // another document with the same bytes, with no frame in between and no question: what
+    // happens when a load is polled and Save comes on that same frame
+    h.state_mut().replace_document_for_test();
     let patches = PatchSet::new(vec![Patch::verbatim(0..0, DOC.to_string())]).unwrap();
     let v = h.state_mut().viewer().unwrap();
     v.ed.edit(|s| s.apply_external(&patches, "Edit", false)).unwrap();
     let ctx = h.ctx.clone();
     h.state_mut().block_form_save(&ctx);
     assert_eq!(text(&h), DOC, "the draft stays out of it");
+    assert_eq!(draft(&h)["body"], json!("Hello!"), "and can still be read");
+    common::run(&mut h);
+    assert!(has(&h, "copy the text"), "and says so");
+    h.state_mut().block_form_cancel();
     assert!(h.state().block_form().is_none());
 }
 
@@ -746,7 +757,7 @@ fn a_reload_from_disk_is_followed_like_any_change() {
 }
 
 #[test]
-fn a_document_switch_and_a_withdrawn_package_close_the_panel() {
+fn a_document_switch_and_a_withdrawn_package_close_a_clean_panel() {
     let f = Fixture::new(DOC);
     let other = f.folder.join("other.md");
     fs::write(&other, "No blocks.\n").unwrap();
@@ -763,6 +774,171 @@ fn a_document_switch_and_a_withdrawn_package_close_the_panel() {
     wait(&mut h);
     assert!(h.state().block_form().is_none());
     assert!(!has(&h, "Edit Block"));
+}
+
+fn changed_draft(h: &mut H) {
+    open_form(h, "tip");
+    h.get_by_label("Body").click();
+    common::run(h);
+    h.get_by_label("Body").type_text("!");
+    common::run(h);
+}
+
+fn asked(h: &H) -> Kind {
+    h.state().question().expect("a question").kind
+}
+
+#[test]
+fn a_document_switch_asks_about_a_changed_draft() {
+    let f = Fixture::new(DOC);
+    let other = f.folder.join("other.md");
+    fs::write(&other, "No blocks.\n").unwrap();
+    let mut h = f.ready();
+    changed_draft(&mut h);
+
+    // Cancel: nothing happened
+    h.state_mut().open(other.clone());
+    assert_eq!(asked(&h), Kind::BlockDraft);
+    h.state_mut().answer_question(Choice::Cancel);
+    common::run(&mut h);
+    assert_eq!(h.state().document_path(), Some(f.doc.as_path()));
+    assert_eq!(draft(&h)["body"], json!("Hello!"));
+
+    // Discard: on to the other document; the document itself never changed
+    h.state_mut().open(other.clone());
+    h.state_mut().answer_question(Choice::DontSave);
+    wait_until(&mut h, "the other document", |a| {
+        a.document_path() == Some(other.as_path()) && !a.is_loading()
+    });
+    assert!(h.state().block_form().is_none());
+
+    // Save: into the document, which then has an unsaved edit of its own to ask about
+    open(&mut h, &f.doc);
+    changed_draft(&mut h);
+    h.state_mut().open(other.clone());
+    h.state_mut().answer_question(Choice::Save);
+    assert!(h.state().block_form().is_none());
+    assert!(text(&h).contains("Hello!"));
+    assert_eq!(asked(&h), Kind::UnsavedChanges);
+    h.state_mut().answer_question(Choice::Cancel);
+    common::run(&mut h);
+    assert_eq!(h.state().document_path(), Some(f.doc.as_path()));
+    assert!(h.state().is_dirty());
+}
+
+#[test]
+fn a_draft_with_nowhere_to_go_is_not_overwritten_by_another_form() {
+    let f = Fixture::new(DOC);
+    let other = f.folder.join("other.md");
+    fs::write(&other, DOC).unwrap();
+    let mut h = f.ready();
+    changed_draft(&mut h);
+    // another document takes its place with no question, and it has blocks too
+    h.state_mut().open_answered_for_test(other.clone());
+    wait_until(&mut h, "the other document", |a| {
+        a.document_path() == Some(other.as_path()) && !a.is_loading() && a.block_package().is_some()
+    });
+    common::run(&mut h);
+    assert_eq!(draft(&h)["body"], json!("Hello!"));
+    let tip = text(&h).find("Hello").unwrap();
+    assert!(!h.state_mut().open_block_form(tip), "refused");
+    assert_eq!(draft(&h)["body"], json!("Hello!"), "still there");
+    common::run(&mut h);
+    assert!(has(&h, "Cancel this draft"), "and it says why");
+}
+
+#[test]
+fn a_draft_changed_during_the_save_that_closes_the_window_is_asked_about() {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let rx = Mutex::new(rx);
+    let f = Fixture::new(DOC);
+    let mut h = f.harness_with(JobHooks {
+        before_save: Some(Box::new(move |_| {
+            let _ = rx.lock().unwrap().recv();
+        })),
+        ..Default::default()
+    });
+    open(&mut h, &f.doc);
+    h.get_by_label("Use Package").click();
+    h.step();
+    wait_until(&mut h, "the install", |a| a.block_package().is_some());
+    settle(&mut h);
+    common::run(&mut h);
+    open_form(&mut h, "tip");
+    // the document has an edit of its own; the draft has none yet
+    let patches = PatchSet::new(vec![Patch::verbatim(0..0, "x".to_string())]).unwrap();
+    h.state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .edit(|s| s.apply_external(&patches, "Edit", false))
+        .unwrap();
+    h.step();
+    assert!(!h.state_mut().request_close());
+    assert_eq!(asked(&h), Kind::UnsavedChanges);
+    h.state_mut().answer_question(Choice::Save);
+    // while it saves, the draft changes
+    h.get_by_label("Body").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    h.get_by_label("Body").type_text("!");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(draft(&h)["body"], json!("Hello!"));
+    tx.send(()).unwrap();
+    wait_until(&mut h, "the question", |a| a.is_asking());
+    assert_eq!(asked(&h), Kind::BlockDraft, "not closed");
+}
+
+#[test]
+fn closing_the_window_asks_about_a_changed_draft() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    changed_draft(&mut h);
+    assert!(!h.state_mut().request_close());
+    assert_eq!(asked(&h), Kind::BlockDraft);
+    h.state_mut().answer_question(Choice::Cancel);
+    assert_eq!(draft(&h)["body"], json!("Hello!"));
+}
+
+#[test]
+fn stopping_the_package_asks_about_a_changed_draft() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    changed_draft(&mut h);
+    let stop = markise_ui_egui::package_ui::PackageAction::Forget;
+    h.state_mut().block_package_action(stop);
+    assert_eq!(asked(&h), Kind::BlockDraft);
+    h.state_mut().answer_question(Choice::Cancel);
+    wait(&mut h);
+    assert!(h.state().block_package().is_some(), "still in use");
+    assert_eq!(draft(&h)["body"], json!("Hello!"));
+
+    h.state_mut().block_package_action(stop);
+    h.state_mut().answer_question(Choice::Save);
+    wait(&mut h);
+    assert!(h.state().block_package().is_none(), "stopped after the save");
+    assert!(text(&h).contains("Hello!"));
+}
+
+#[test]
+fn a_package_lost_without_a_question_keeps_the_draft_and_its_save() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    changed_draft(&mut h);
+    // what a Save As into a folder without the package does: the lookup finds nothing there
+    let elsewhere = tempfile::tempdir().unwrap();
+    let moved = fs::canonicalize(elsewhere.path()).unwrap().join("moved.md");
+    h.state_mut().move_document_for_test(moved);
+    wait(&mut h);
+    assert!(h.state().block_package().is_none());
+    assert_eq!(draft(&h)["body"], json!("Hello!"), "kept");
+    let ctx = h.ctx.clone();
+    h.state_mut().block_form_save(&ctx);
+    assert!(h.state().block_form().is_none());
+    assert!(text(&h).contains("Hello!"), "saved");
 }
 
 #[test]

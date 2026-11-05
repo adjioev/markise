@@ -1,6 +1,6 @@
 //! In-document source search. See ADR 0013 for matching and snapshot semantics.
 use crate::Wake;
-use markise_doc::{Patch, PatchSet};
+use markise_doc::{FormatDoc, Patch, PatchSet};
 use regex::{Regex, RegexBuilder};
 use std::{
     ops::Range,
@@ -35,8 +35,53 @@ pub struct Results {
     pub key: Key,
     pub matches: Arc<Vec<Range<usize>>>,
     pub error: Option<String>,
+    /// Indexes of the matches that lie in what reads as a hidden id on its line. Only the
+    /// document can tell whether it is hidden there ([`Results::drop_hidden`]).
+    pub candidates: Vec<usize>,
+    /// Indexes, in the search's own numbering, of the matches [`Results::drop_hidden`] took out.
+    pub dropped: Arc<Vec<usize>>,
+}
+/// What a replacement replaces: the search's own numbering of the matches.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Replacement {
+    pub text: String,
+    /// One match, or all of them.
+    pub only: Option<usize>,
+    /// Matches left alone, ascending.
+    pub skip: Arc<Vec<usize>>,
 }
 impl Results {
+    /// Takes out the matches inside a note the rendered view does not show: a reader of that
+    /// view has no way to see them, and Replace All must not change them unseen (ADR 0018).
+    pub fn drop_hidden(&mut self, doc: &dyn FormatDoc) {
+        let hidden = |r: &Range<usize>| {
+            doc.hidden_note(r.start)
+                .is_some_and(|n| n.start <= r.start && r.end <= n.end)
+        };
+        let dropped: Vec<usize> = (self.candidates.iter().copied())
+            .filter(|&i| self.matches.get(i).is_some_and(hidden))
+            .collect();
+        if dropped.is_empty() {
+            return;
+        }
+        let mut next = dropped.iter().copied().peekable();
+        let kept = (self.matches.iter().enumerate())
+            .filter(|(i, _)| {
+                let gone = next.peek() == Some(i);
+                if gone {
+                    next.next();
+                }
+                !gone
+            })
+            .map(|(_, r)| r.clone())
+            .collect();
+        self.matches = Arc::new(kept);
+        self.dropped = Arc::new(dropped);
+    }
+    /// Match `i` as the search itself numbers it (for [`Replacement::only`]).
+    pub fn search_index(&self, i: usize) -> usize {
+        self.dropped.iter().fold(i, |at, &d| if d <= at { at + 1 } else { at })
+    }
     /// Wrap around the document, starting from the caret when there is no active result.
     pub fn next(&self, active: Option<usize>, caret: usize, backwards: bool) -> Option<usize> {
         let n = self.matches.len();
@@ -85,18 +130,48 @@ fn find_cancellable(text: &str, q: &Query, cancelled: impl Fn() -> bool) -> Resu
     }
     Ok(out)
 }
+/// The matches that lie wholly in what has the exact form of a hidden id at the end of its line
+/// ([`markise_md::hidden_block_id`]). Text only: each line is looked at once, however many matches
+/// it holds.
+fn id_candidates(text: &str, matches: &[Range<usize>]) -> Vec<usize> {
+    let mut out = Vec::new();
+    // the end of the line last looked at and where a tail starts on it
+    let mut line: Option<(usize, Option<usize>)> = None;
+    for (i, r) in matches.iter().enumerate() {
+        if line.is_none_or(|(end, _)| r.start > end) {
+            let start = text[..r.start].rfind('\n').map_or(0, |n| n + 1);
+            let end = text[r.start..].find(['\n', '\r']).map_or(text.len(), |n| r.start + n);
+            // (blanks after an id are not in the line a reader of the rendered view has)
+            let line_text = text[start..end].trim_end_matches([' ', '\t']);
+            let tail = markise_md::hidden_block_id(line_text).map(|cut| start + cut);
+            line = Some((end, tail));
+        }
+        if let Some((end, Some(tail))) = line
+            && r.start >= tail
+            && r.end <= end
+        {
+            out.push(i);
+        }
+    }
+    out
+}
 /// Regex replacements expand `$1`/`${name}`/`$$`; literal mode preserves all bytes.
 /// Nothing is returned on overflow, cancellation or an invalid expression.
 pub fn replacements(text: &str, q: &Query, replacement: &str, only: Option<usize>) -> Result<PatchSet, String> {
-    replacement_cancellable(text, q, replacement, only, || false)
+    let what = Replacement {
+        text: replacement.to_string(),
+        only,
+        skip: Arc::default(),
+    };
+    replacement_cancellable(text, q, &what, || false)
 }
 fn replacement_cancellable(
     text: &str,
     q: &Query,
-    replacement: &str,
-    only: Option<usize>,
+    what: &Replacement,
     cancelled: impl Fn() -> bool,
 ) -> Result<PatchSet, String> {
+    let (replacement, only) = (what.text.as_str(), what.only);
     if q.text.is_empty() {
         return Ok(PatchSet::default());
     }
@@ -110,7 +185,7 @@ fn replacement_cancellable(
         if i == MAX_MATCHES {
             return Err(format!("More than {MAX_MATCHES} matches; narrow the search"));
         }
-        if only.is_some_and(|j| i != j) {
+        if only.is_some_and(|j| i != j) || what.skip.binary_search(&i).is_ok() {
             continue;
         }
         let m = c.get(0).unwrap();
@@ -194,7 +269,7 @@ struct Snapshot {
 }
 enum Job {
     Find(Snapshot),
-    Replace(Snapshot, String, Option<usize>),
+    Replace(Snapshot, Replacement),
 }
 #[derive(Debug)]
 pub enum Completion {
@@ -241,21 +316,28 @@ impl SearchWorker {
                         continue;
                     }
                     let result = match job {
-                        Job::Find(s) => match find_cancellable(&s.chunks.concat(), &s.query, cancelled) {
-                            Ok(matches) => Completion::Found(Results {
-                                key,
-                                matches: Arc::new(matches),
-                                error: None,
-                            }),
-                            Err(error) => Completion::Found(Results {
-                                key,
-                                matches: Arc::new(Vec::new()),
-                                error: Some(error),
-                            }),
-                        },
-                        Job::Replace(s, replacement, only) => Completion::Replaced(
+                        Job::Find(s) => {
+                            let text = s.chunks.concat();
+                            match find_cancellable(&text, &s.query, cancelled) {
+                                Ok(matches) => Completion::Found(Results {
+                                    key,
+                                    candidates: id_candidates(&text, &matches),
+                                    matches: Arc::new(matches),
+                                    error: None,
+                                    dropped: Arc::default(),
+                                }),
+                                Err(error) => Completion::Found(Results {
+                                    key,
+                                    matches: Arc::new(Vec::new()),
+                                    error: Some(error),
+                                    candidates: Vec::new(),
+                                    dropped: Arc::default(),
+                                }),
+                            }
+                        }
+                        Job::Replace(s, what) => Completion::Replaced(
                             key,
-                            replacement_cancellable(&s.chunks.concat(), &s.query, &replacement, only, cancelled),
+                            replacement_cancellable(&s.chunks.concat(), &s.query, &what, cancelled),
                         ),
                     };
                     if !cancelled() {
@@ -273,11 +355,11 @@ impl SearchWorker {
         self.generation.store(generation, Ordering::Relaxed);
         self.shared.0.lock().unwrap().job = None;
     }
-    pub fn submit(&self, key: Key, chunks: Vec<String>, query: Query, replacement: Option<(String, Option<usize>)>) {
+    pub fn submit(&self, key: Key, chunks: Vec<String>, query: Query, replacement: Option<Replacement>) {
         self.generation.store(key.generation, Ordering::Relaxed);
         let snap = Snapshot { key, chunks, query };
         let job = match replacement {
-            Some((r, i)) => Job::Replace(snap, r, i),
+            Some(what) => Job::Replace(snap, what),
             None => Job::Find(snap),
         };
         self.shared.0.lock().unwrap().job = Some(job);
@@ -317,6 +399,8 @@ mod tests {
             },
             matches: Arc::new(matches),
             error: None,
+            candidates: Vec::new(),
+            dropped: Arc::default(),
         };
         assert_eq!(r.next(None, 3, false), Some(1));
         assert_eq!(r.next(Some(1), 0, false), Some(0));
@@ -419,6 +503,42 @@ mod tests {
             rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                 .expect("worker completion");
         }
+    }
+    #[test]
+    fn candidates_are_matches_in_the_form_of_a_trailing_id() {
+        let text = "## one {#one}\none {#one} more\r\nx {#one}\r\n";
+        let q = Query {
+            text: "one".into(),
+            ..Default::default()
+        };
+        let m = find(text, &q).unwrap();
+        assert_eq!(m.len(), 5);
+        // the id at the end of the first and third lines, not the text before it or the middle one
+        assert_eq!(id_candidates(text, &m), vec![1, 4]);
+        let q = Query {
+            text: "\\{#one\\}\\n".into(),
+            regex: true,
+            ..Default::default()
+        };
+        assert!(
+            id_candidates(text, &find(text, &q).unwrap()).is_empty(),
+            "past the line's end"
+        );
+    }
+    #[test]
+    fn replacing_skips_what_it_is_told_to() {
+        let what = Replacement {
+            text: "b".into(),
+            only: None,
+            skip: Arc::new(vec![1]),
+        };
+        let q = Query {
+            text: "a".into(),
+            ..Default::default()
+        };
+        let p = replacement_cancellable("a a a", &q, &what, || false).unwrap();
+        let at: Vec<usize> = p.patches().iter().map(|p| p.range.start).collect();
+        assert_eq!(at, [0, 4]);
     }
     #[test]
     #[ignore = "heavy: multi-MB search workload"]

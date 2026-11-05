@@ -104,7 +104,7 @@ fn open(h: &mut H, doc: &Path) {
         a.document_path() == Some(doc) && !a.is_loading()
     });
     settle(h);
-    h.run();
+    common::run(h);
 }
 
 fn has(h: &H, text: &str) -> bool {
@@ -150,7 +150,7 @@ fn asks_once_then_uses_the_package_on_the_next_launch() {
     h.step();
     wait_until(&mut h, "the install", |a| a.block_package().is_some());
     settle(&mut h);
-    h.run();
+    common::run(&mut h);
     assert!(!has(&h, USE));
     assert!(has(&h, "Blocks: sample 1.0.0"));
     assert!(!has(&h, "not in use"));
@@ -195,7 +195,7 @@ fn not_now_holds_for_the_session_and_the_status_bar_offers_it_again() {
     let mut h = f.harness();
     f.open(&mut h);
     h.get_by_label(NOT_NOW).click();
-    h.run();
+    common::run(&mut h);
     assert!(!has(&h, USE));
     assert!(has(&h, "Blocks: sample 1.0.0 · not in use"));
     assert!(!f.store().root().exists());
@@ -208,7 +208,7 @@ fn not_now_holds_for_the_session_and_the_status_bar_offers_it_again() {
     assert!(!has(&h, USE));
 
     h.state_mut().block_package_action(PackageAction::Review);
-    h.run();
+    common::run(&mut h);
     assert!(has(&h, USE));
 }
 
@@ -240,7 +240,7 @@ fn problems_show_in_the_status_bar_and_leave_the_document_alone() {
     assert!(!has(&h, USE));
     let item = h.get_by_label("Block package problem");
     item.click();
-    h.run();
+    common::run(&mut h);
     assert!(has(&h, "not the one the binding names"), "the menu says why");
     assert!(has(&h, sha.as_str()));
     assert!(!f.store().root().exists());
@@ -267,7 +267,7 @@ fn problems_show_in_the_status_bar_and_leave_the_document_alone() {
     .unwrap();
     f.open(&mut h);
     h.get_by_label("Block package problem").click();
-    h.run();
+    common::run(&mut h);
     assert!(has(&h, "not supported by this version of Markise"));
 }
 
@@ -378,7 +378,7 @@ fn stop_using_is_ordered_before_the_next_documents_lookup() {
     }
     drop(held);
     settle(&mut h);
-    h.run();
+    common::run(&mut h);
     assert!(!f.store().is_accepted("sample", &sha));
     assert!(
         h.state().block_package().is_none(),
