@@ -263,10 +263,13 @@ impl EditorView {
     /// The selection reaches into a block shown natively without holding it whole. Its text is
     /// not edited there yet: the form is (ADR 0021).
     pub fn in_native_block(&self) -> bool {
-        let r = self.session.selection().primary().range();
-        [r.start, r.end].into_iter().any(|at| {
+        let p = self.session.selection().primary();
+        let r = p.range();
+        [p.anchor, p.focus].into_iter().any(|at| {
             self.view
-                .native_block(at)
+                .native_block(at.offset)
+                // the virtual paragraph after a closer shares its end, and is outside the block
+                .filter(|n| at.virt == 0 || at.offset < n.range.end)
                 .is_some_and(|n| r.start > n.range.start || r.end < n.range.end)
         })
     }

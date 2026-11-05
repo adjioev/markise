@@ -208,6 +208,24 @@ fn a_native_block_is_edited_through_its_form_for_now_and_undo_still_works() {
 }
 
 #[test]
+fn typing_on_the_place_after_a_native_block_is_outside_it() {
+    let doc = ":::tip\n\nBody.\n\n:::\n";
+    let f = Fixture::new(doc);
+    let mut h = f.ready();
+    let v = h.state_mut().viewer().unwrap();
+    let end = doc.rfind(":::").unwrap() + 3;
+    assert!(v.ed.view.native_block(2).is_some());
+    v.ed.set_selection(Selection::caret_at(markise_doc::DocPos::with_virt(end, 1)));
+    v.ed.refresh_focus();
+    v.request_refocus();
+    common::run(&mut h);
+    h.event(Event::Text("After".into()));
+    common::run(&mut h);
+    assert!(text(&h).starts_with(":::tip\n\nBody.\n\n:::\n"), "{}", text(&h));
+    assert!(text(&h).contains("After"), "{}", text(&h));
+}
+
+#[test]
 fn a_withdrawn_package_brings_the_cards_back() {
     let f = Fixture::new(DOC);
     let mut h = f.ready();

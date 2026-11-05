@@ -275,3 +275,46 @@ fn a_page_estimate_follows_the_names_with_views() {
         after / in_page
     );
 }
+
+#[test]
+fn a_label_is_one_row_whatever_the_package_wrote() {
+    struct Labelled(String);
+    impl BlockViews for Labelled {
+        fn id(&self) -> u64 {
+            5
+        }
+        fn has_view(&self, _: &str) -> bool {
+            true
+        }
+        fn look(&self, _: &str, _: &str, source: &str) -> BlockLook {
+            BlockLook::Native(NativeBlock {
+                view: Arc::new(NativeView {
+                    kind: NativeKind::Callout,
+                    accent: None,
+                    label: self.0.as_str().into(),
+                    single_answer: true,
+                }),
+                parts: role_ranges(source),
+            })
+        }
+    }
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut plain = view_of(BLOCK);
+    let h0 = plain.frame(4000.0, 0.0, &mut f, &NoImages)[0].layout.height;
+    for label in ["Tip\n".repeat(1024), "word ".repeat(1000)] {
+        let mut v = view_of(BLOCK);
+        v.set_block_views(Some(Arc::new(Labelled(label.clone()))));
+        let vis = v.frame(4000.0, 0.0, &mut f, &NoImages);
+        assert_eq!(vis[0].layout.height, h0, "the opener keeps its height");
+        let shown: Vec<_> = (vis[0].layout.prims.iter())
+            .filter_map(|p| match p {
+                Prim::Text { text, pos, .. } => Some((text.text().to_string(), pos.x + text.size().x)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(!shown[0].0.contains('\n'), "{:?}", shown[0].0);
+        assert!(shown[0].1 < 700.0, "inside the card: {shown:?}");
+    }
+}
