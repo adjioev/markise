@@ -58,6 +58,7 @@ mod files;
 mod find;
 mod full_view;
 mod help;
+mod image_edit;
 mod insert_table;
 mod menus;
 mod package;
@@ -598,6 +599,7 @@ pub struct MarkiseApp {
     review: review::ReviewState,
     /// Pasted and dropped images and files being written (spec 04 §7.1).
     attach: attach::AttachState,
+    image_edit: image_edit::ImageEditState,
     /// How long the first frame waits for the selected theme ([`FIRST_THEME_WAIT`]; tests).
     first_theme_wait: Duration,
     /// [`AppOptions::watch`]: create the document/folder watcher on the first frame.
@@ -721,6 +723,7 @@ impl MarkiseApp {
             vault,
             review,
             attach: attach::AttachState::new(opts.clipboard_files),
+            image_edit: Default::default(),
             first_theme_wait: FIRST_THEME_WAIT,
             welcome_pending: opts.welcome,
             cheat_sheet: Default::default(),
@@ -981,6 +984,7 @@ impl MarkiseApp {
             && self.vault_settled()
             && self.review_settled()
             && self.attach_settled()
+            && self.image_edit.is_settled()
             && self.images.is_idle()
             && self.doc.as_ref().is_none_or(|d| !d.viewer.site_busy())
             && self.full_view_settled()
@@ -2510,6 +2514,7 @@ impl MarkiseApp {
         self.rename_blur(ctx);
         self.complete_pre_input(ctx);
         self.attach_pre_input(ctx);
+        self.image_edit_frame(ctx);
         self.quick_window(ctx);
         self.block_library_window(ctx);
         self.shortcuts_window(ctx);
@@ -3196,6 +3201,7 @@ impl MarkiseApp {
                         let origin = (d.id, d.viewer.ed.session.revision().counter);
                         self.block_library.request_move(out.move_block.take(), Some(origin));
                         self.block_library.request_delete(out.delete_block.take(), Some(origin));
+                        self.image_edit.request(out.replace_image.take(), out.edit_image.take(), Some(origin));
                         if let Some(n) = d.viewer.take_notice() {
                             self.banner = Some(Banner::Info(n));
                         }
@@ -3327,6 +3333,7 @@ impl MarkiseApp {
         let origin = self.block_edit_origin();
         self.block_library.request_move(out.move_block, origin);
         self.block_library.request_delete(out.delete_block, origin);
+        self.image_edit.request(out.replace_image, out.edit_image, origin);
         if let Some(link) = out.link {
             self.open_link(&ctx, &link);
         }

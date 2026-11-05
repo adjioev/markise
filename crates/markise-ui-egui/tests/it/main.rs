@@ -22,6 +22,7 @@ mod full_view;
 mod help;
 mod highlight;
 mod idle;
+mod image_edit;
 mod images_paste;
 mod keyboard_zoom;
 mod lifecycle;

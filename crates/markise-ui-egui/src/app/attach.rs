@@ -47,7 +47,7 @@ const JOB_TIMEOUT: Duration = Duration::from_secs(30);
 pub type JobHook = Arc<dyn Fn() + Send + Sync>;
 
 /// What an entry still waits for, or what it inserts.
-enum Stage {
+pub(super) enum Stage {
     /// A text paste whose clipboard file list is being read.
     Clipboard { text: String, rx: Receiver<Vec<PathBuf>> },
     /// Files or image data being written (since `Instant`).
@@ -350,7 +350,7 @@ impl MarkiseApp {
 
     /// The destination context of the open document (no items yet): note, vault root handle,
     /// settings, resource root.
-    fn attach_request(&self) -> Option<Request> {
+    pub(super) fn attach_request(&self) -> Option<Request> {
         let d = self.doc.as_ref()?;
         let note = d.file().map(|p| p.to_path_buf());
         let index = self.vault_index().cloned();
@@ -375,7 +375,7 @@ impl MarkiseApp {
     }
 
     /// Starts writing `items` to the destination `req` on a worker.
-    fn job(&self, mut req: Request, items: Vec<Item>) -> Stage {
+    pub(super) fn job(&self, mut req: Request, items: Vec<Item>) -> Stage {
         req.items = items;
         let (tx, rx) = std::sync::mpsc::channel();
         let (wake, hook) = (self.wake_handle(), self.attach.job_hook.clone());
@@ -397,6 +397,37 @@ impl MarkiseApp {
                 errors: vec![format!("cannot start a thread: {e}")],
                 ..Default::default()
             }),
+        }
+    }
+
+    /// What a job of [`Self::job`] came to, when it has: a job taking too long is given up.
+    pub(super) fn job_outcome(&self, stage: &mut Stage) -> Option<Outcome> {
+        match stage {
+            Stage::Done(o) => Some(std::mem::take(o)),
+            Stage::Job(rx, since) => match rx.try_recv() {
+                Ok(o) => Some(o),
+                Err(TryRecvError::Disconnected) => Some(Outcome {
+                    errors: vec!["the worker stopped".into()],
+                    ..Default::default()
+                }),
+                Err(TryRecvError::Empty) => {
+                    let waited = since.elapsed();
+                    if waited >= self.attach.job_timeout {
+                        return Some(Outcome {
+                            errors: vec![format!(
+                                "Copying the file took longer than {} s and was given up.",
+                                self.attach.job_timeout.as_secs_f32().round()
+                            )],
+                            ..Default::default()
+                        });
+                    }
+                    if let Some(c) = &self.ctx {
+                        c.request_repaint_after(self.attach.job_timeout - waited);
+                    }
+                    None
+                }
+            },
+            _ => Some(Outcome::default()),
         }
     }
 

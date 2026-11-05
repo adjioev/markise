@@ -269,6 +269,8 @@ pub struct SbsOutput {
     pub open_block_library: Option<String>,
     pub move_block: Option<(usize, usize)>,
     pub delete_block: Option<usize>,
+    pub replace_image: Option<std::ops::Range<usize>>,
+    pub edit_image: Option<std::ops::Range<usize>>,
 }
 
 /// Per-document Side by Side state (the divider position lives in the settings).
@@ -447,6 +449,8 @@ impl SideBySide {
             out.open_block_library = vo.open_block_library;
             out.move_block = vo.move_block;
             out.delete_block = vo.delete_block;
+            out.replace_image = vo.replace_image;
+            out.edit_image = vo.edit_image;
             out.right = Some(pane);
             user_scrolls_rendered |= vo.wheel_scrolled;
         }

@@ -18,7 +18,9 @@
 
 use std::sync::Arc;
 
-use egui::{Color32, CornerRadius, Event, EventFilter, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{
+    Color32, CornerRadius, Event, EventFilter, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
+};
 use markise_doc::{CodeFenceView, PlanStep, Selection};
 use markise_layout::block::{Prim, color};
 use markise_layout::text::FragmentKind;
@@ -391,21 +393,95 @@ impl DocViewer {
         for v in visible {
             let origin = vec2(left, surface.top() + v.y);
             for prim in &v.layout.prims {
-                let Prim::Image { rect, src, .. } = prim else { continue };
-                let rect = rect.translate(origin);
-                if !ui.rect_contains_pointer(rect.intersect(surface)) {
-                    continue;
-                }
-                let Some(target) = super::loaded_image(images, src) else {
+                let Prim::Image { rect, src, source, .. } = prim else {
                     continue;
                 };
-                let r = Rect::from_min_size(pos2(rect.right() - s - 6.0, rect.top() + 6.0), vec2(s, s));
-                let id = ui.scope_id().with(("markise-image-expand", v.idx, src));
-                if expand_button(ui, &painter, r, id, theme) {
-                    out.open_view = Some(target);
-                    ui.ctx().request_repaint();
+                let rect = rect.translate(origin);
+                // (nothing below is worth asking for an image the pointer is nowhere near)
+                if !ui.rect_contains_pointer(rect.expand2(vec2(160.0, 0.0)).intersect(surface)) {
+                    continue;
                 }
-                self.code.shown_images.push(r);
+                let target = super::loaded_image(images, src);
+                // what stands left of the expand button, right to left; only what can be edited
+                let start = self.ed.view.model().item_start(v.idx);
+                let at = start + source.start as usize..start + source.end as usize;
+                let editable = self.ed.session.read_only().is_none()
+                    && !self.review_preview()
+                    && self.ed.view.native_item(v.idx).is_none()
+                    && self.ed.image_parts(at.clone()).is_some();
+                let y = rect.top() + 6.0;
+                let mut right = rect.right() - 6.0;
+                let expand = target.as_ref().map(|_| {
+                    right -= s + 4.0;
+                    Rect::from_min_size(pos2(right + 4.0, y), vec2(s, s))
+                });
+                let mut pills = Vec::new();
+                if editable {
+                    for (text, tip, label, edit) in [
+                        ("Replace…", "Choose another image", "Replace Image…", false),
+                        ("Edit…", "Edit the description and the path", "Edit Image…", true),
+                    ] {
+                        let w = ui.fonts_mut(|f| {
+                            f.layout_no_wrap(text.to_string(), FontId::proportional(12.0), Color32::WHITE)
+                                .size()
+                                .x
+                        }) + 12.0;
+                        right -= w + 4.0;
+                        pills.push((
+                            Rect::from_min_size(pos2(right + 4.0, y), vec2(w, s)),
+                            text,
+                            tip,
+                            label,
+                            edit,
+                        ));
+                    }
+                }
+                // the buttons of a small image may stand past it, and are still in reach
+                let reach = pills.iter().fold(rect, |r, p| r.union(p.0));
+                if !ui.rect_contains_pointer(reach.intersect(surface)) {
+                    continue;
+                }
+                if let (Some(target), Some(r)) = (target, expand) {
+                    let id = ui.scope_id().with(("markise-image-expand", v.idx, src));
+                    if expand_button(ui, &painter, r, id, theme) {
+                        out.open_view = Some(target);
+                        ui.ctx().request_repaint();
+                    }
+                    self.code.shown_images.push(r);
+                }
+                for (r, text, tip, label, edit) in pills {
+                    let id = ui.scope_id().with(("markise-image-tool", v.idx, src, edit));
+                    // click-and-drag: on top of the surface for presses too (the caret stays)
+                    let resp = ui.interact(r, id, Sense::click_and_drag()).on_hover_text(tip);
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+                    let (bg, fg) = (color(theme.code_block.background), color(theme.meta_text));
+                    let hot = resp.hovered();
+                    painter.rect(
+                        r,
+                        CornerRadius::same(4),
+                        if hot { mix(bg, fg, 0.12) } else { bg },
+                        Stroke::new(1.0, mix(bg, fg, 0.35)),
+                        StrokeKind::Inside,
+                    );
+                    painter.text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        text,
+                        FontId::proportional(12.0),
+                        if hot { color(theme.text) } else { fg },
+                    );
+                    if hot {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+                    }
+                    if resp.clicked() {
+                        if edit {
+                            out.edit_image = Some(at.clone());
+                        } else {
+                            out.replace_image = Some(at.clone());
+                        }
+                        ui.ctx().request_repaint();
+                    }
+                }
             }
         }
     }

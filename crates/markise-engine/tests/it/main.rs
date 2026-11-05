@@ -18,6 +18,7 @@ mod directive_edit;
 mod editor;
 mod editor_props;
 mod graphemes;
+mod image_edit;
 mod input_rules;
 mod list_props;
 mod lists;

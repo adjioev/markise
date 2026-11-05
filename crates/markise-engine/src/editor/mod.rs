@@ -11,6 +11,7 @@ mod block_move;
 mod block_place;
 pub mod command;
 pub mod history;
+mod image_edit;
 mod inplace;
 pub mod keymap;
 pub mod source;
@@ -29,6 +30,7 @@ use markise_doc::{
 pub use block_move::MoveRefused;
 pub use block_place::InsertRefused;
 pub use history::{History, HistoryLimits, StateId, Step, Transaction, TxKind, TypingDir};
+pub use image_edit::{ImageParts, ImageRefused, image_dest_for};
 pub use source::{SourceCaret, SourcePane};
 pub use surface::{CaretGeometry, Continued, EditorView, ViewCaret};
 
