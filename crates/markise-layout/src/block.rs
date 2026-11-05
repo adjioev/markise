@@ -1929,22 +1929,52 @@ pub(crate) fn card_opener_height(t: &Theme) -> f32 {
     card_padding(t) + size * 1.4
 }
 
-/// The shown label of a named container: name and arguments, at most [`CARD_LABEL_CHARS`]
-/// characters. The source keeps them whole.
+/// The shown label of a named container: name and arguments on one line, at most
+/// [`CARD_LABEL_CHARS`] characters. The source keeps them whole.
 fn card_label(name: &str, args: &str) -> String {
     let mut out = String::with_capacity(name.len().min(CARD_LABEL_CHARS) + args.len().min(CARD_LABEL_CHARS) + 4);
     let joined = name
         .chars()
         .chain(" ".chars().filter(|_| !args.is_empty()))
         .chain(args.chars());
-    for (i, c) in joined.enumerate() {
-        if i + 1 == CARD_LABEL_CHARS {
+    let mut count = 0;
+    let mut blank = false;
+    for c in joined {
+        if c.is_whitespace() || c.is_control() {
+            blank = !out.is_empty();
+            continue;
+        }
+        count += 1 + usize::from(blank);
+        if count >= CARD_LABEL_CHARS {
             out.push('…');
             break;
+        }
+        if blank {
+            out.push(' ');
+            blank = false;
         }
         out.push(c);
     }
     out
+}
+
+/// Room at the right end of a card's first row for its buttons.
+const CARD_BUTTONS_ROOM: f32 = 60.0;
+
+/// `text` shaped on one row of at most `room` points, cut with `…` to fit. The shaper has the last
+/// word on what fits: it is cut in proportion until it does.
+fn one_row(shaper: &mut dyn TextShaper, text: &str, st: &Style, room: f32) -> Arc<dyn TextBlock> {
+    let mut g = shaper.shape(&StyledText::single(text.to_string(), st.text_style()), None);
+    let mut chars = text.chars().count();
+    while g.size().x > room && chars > 1 {
+        chars = (chars - 1).min((chars as f32 * room / g.size().x) as usize).max(1);
+        let cut: String = text.chars().take(chars).chain(['…']).collect();
+        g = shaper.shape(&StyledText::single(cut, st.text_style()), None);
+        if chars == 1 {
+            break;
+        }
+    }
+    g
 }
 
 /// Lays out item `idx` of `model` (a view model of `doc`). The result is item-relative: it
@@ -2511,7 +2541,8 @@ pub fn layout_item(
             // the name and arguments as written: uninterpreted, cut for display at a size that
             // lays out at once (a marker is one item, not segmented like a long paragraph)
             let label = match p.native {
-                Some(n) => n.view.label.to_string(),
+                // data from a package: one row of it, whatever it holds
+                Some(n) => card_label(&n.view.label, ""),
                 None => doc
                     .named_containers_at(origin)
                     .last()
@@ -2524,6 +2555,14 @@ pub fn layout_item(
             });
             let mut st = Style::base(size, size * 1.4, ink);
             st.fam = FontRole::Bold;
+            // what the row holds, from the left: the icon, the label, the warning. The row is one line
+            // in a native view or with a warning, and then each part keeps to its room.
+            let row_right = x + width
+                - if p.native.is_some() {
+                    CARD_BUTTONS_ROOM
+                } else {
+                    BADGE_RIGHT_ROOM
+                };
             let mut label_x = x;
             if let Some(name) = (p.native.filter(|n| n.icon_ready)).and_then(|n| n.view.icon.as_deref()) {
                 let side = size * 1.2;
@@ -2535,12 +2574,24 @@ pub fn layout_item(
                 });
                 label_x += side + size * 0.4;
             }
-            let g = shaper.shape(&StyledText::single(label, st.text_style()), wrapped(width));
-            let h = g.size().y;
+            let room = (row_right - label_x).max(size);
+            let why = p.warnings.and_then(|w| w.first().map(|first| (first, w.len())));
+            // with a warning the label leaves room for it: at least the symbol and a few words
+            let label_room = if why.is_some() {
+                (room - size * 12.0).max(room * 0.4)
+            } else {
+                room
+            };
+            let g = if p.native.is_some() || why.is_some() {
+                one_row(shaper, &label, &st, label_room)
+            } else {
+                shaper.shape(&StyledText::single(label, st.text_style()), wrapped(width))
+            };
+            let h = g.size().y.max(size * 1.4);
             let label_w = g.size().x;
             out.text(pos2(label_x, y), g, Vec::new(), FragmentId::label());
-            if let Some(why) = p.warnings.and_then(|w| w.first().map(|first| (first, w.len()))) {
-                warning = warning_badge(&mut out, shaper, t, why, pos2(label_x + label_w + size, y), x + width);
+            if let Some(why) = why {
+                warning = warning_badge(&mut out, shaper, t, why, pos2(label_x + label_w + size, y), row_right);
             }
             y += h;
         }
@@ -2902,8 +2953,8 @@ pub fn layout_item(
 /// Room for the card's button at its right end.
 const BADGE_RIGHT_ROOM: f32 = 34.0;
 
-/// `⚠` and the first reason on a card's first row, cut to the room there. It does not wrap: a
-/// card's first row has one height. Returns where it is.
+/// `⚠` and the first reason on a card's first row, cut to the room there: the symbol always shows.
+/// It does not wrap: a card's first row has one height. Returns where it is.
 fn warning_badge(
     out: &mut Out,
     shaper: &mut dyn TextShaper,
@@ -2913,23 +2964,13 @@ fn warning_badge(
     right: f32,
 ) -> Option<Rect> {
     let size = t.font_size * 0.85;
-    let room = right - BADGE_RIGHT_ROOM - at.x;
-    if room <= size * 2.0 {
-        return None;
-    }
+    let room = (right - at.x).max(size * 2.0);
     let st = Style::base(size, size * 1.4, color(t.alert[3]));
-    let mut text = format!("⚠ {first}");
+    let mut text = format!("⚠ {}", card_label(first, ""));
     if count > 1 {
         text.push_str(&format!(" (+{})", count - 1));
     }
-    // the shaper has the last word on what fits: cut in proportion until it does
-    let mut g = shaper.shape(&StyledText::single(text.clone(), st.text_style()), None);
-    let mut chars = text.chars().count();
-    while g.size().x > room && chars > 2 {
-        chars = (chars - 1).min((chars as f32 * room / g.size().x) as usize);
-        let cut: String = text.chars().take(chars).chain(['…']).collect();
-        g = shaper.shape(&StyledText::single(cut, st.text_style()), None);
-    }
+    let g = one_row(shaper, &text, &st, room);
     let rect = Rect::from_min_size(at, g.size());
     out.text(at, g, Vec::new(), FragmentId::label());
     Some(rect)

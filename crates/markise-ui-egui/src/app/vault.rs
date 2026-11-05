@@ -862,6 +862,20 @@ impl MarkiseApp {
         } else {
             caret
         };
+        // in a block's field it goes through the field's checks like any other text
+        match d.viewer.ed.field_replace(c.anchor..end, &insert) {
+            Some(Ok(())) => {
+                if insert.starts_with("[[") && insert.ends_with("]]") {
+                    let at = d.viewer.ed.session.selection().primary().focus.offset - 2;
+                    d.viewer.ed.set_selection(Selection::caret(at));
+                }
+                d.viewer.ed.refresh_focus();
+                self.vault.dismissed = None;
+                return;
+            }
+            Some(Err(_)) => return,
+            None => {}
+        }
         d.viewer
             .ed
             .edit(|s| {

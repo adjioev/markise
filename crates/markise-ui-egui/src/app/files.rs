@@ -230,6 +230,12 @@ impl MarkiseApp {
         self.new_document_now();
     }
 
+    /// Tests: an open that was answered for before a draft changed, landing now.
+    #[doc(hidden)]
+    pub fn open_answered_for_test(&mut self, path: PathBuf) {
+        self.open_now(path, super::LoadReason::OpenDiscarding);
+    }
+
     /// Tests: the document's file is now at `path`, as after a Save As.
     #[doc(hidden)]
     pub fn move_document_for_test(&mut self, path: PathBuf) {

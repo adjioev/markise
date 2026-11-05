@@ -167,6 +167,14 @@ impl MarkiseApp {
         let Some(c) = block_at(d.viewer.ed.session.doc(), at, &package.index) else {
             return false;
         };
+        // a draft of a document that is gone has nowhere to go, and only Cancel can end it
+        if let Some(open) = &mut self.block_form.open
+            && open.doc() != d.id
+            && open.is_dirty()
+        {
+            open.set_message("Copy what you need and Cancel this draft before opening another block.");
+            return false;
+        }
         if let Some(open) = &mut self.block_form.open
             && open.doc() == d.id
         {
