@@ -110,7 +110,6 @@ impl EditorView {
     pub fn restore_block_view_state(&mut self, mode: BlockViewMode, own: &[(usize, BlockViewMode)]) {
         self.place.mode = mode;
         self.clear_own_modes();
-        self.place.pending_modes.clear();
         for &(opener, m) in own {
             if !self.add_own_mode(opener, m) {
                 self.place.pending_modes.push((opener, m));
@@ -132,6 +131,7 @@ impl EditorView {
         for o in std::mem::take(&mut self.place.own_modes) {
             self.session.remove_mark(o.mark);
         }
+        self.place.pending_modes.clear();
     }
 
     /// The next state for the whole document. Blocks that differed follow it.
