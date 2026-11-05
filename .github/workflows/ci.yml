@@ -155,7 +155,12 @@ jobs:
       # property coverage runs on the separate heavy path.
       - name: Build release binaries
         if: env.FULL_CI == 'true'
-        run: cargo build --release --locked -p markise -p markise-cli
+        run: |
+          cargo build --release --locked -p markise -p markise-cli
+          # the helper that draws blocks ships on macOS only so far (ADR 0023)
+          if [ "$RUNNER_OS" = macOS ]; then
+            cargo build --release --locked -p markise-web-helper
+          fi
       # The desktop app starts with its default renderer (wgpu: Metal / DX12 / Vulkan or GL), or
       # falls back to glow, renders a document and quits by itself (issue #86). Linux runs it
       # under Xvfb with Mesa's software Vulkan/GL drivers (and libxkbcommon-x11, which winit loads on X11).
@@ -176,6 +181,9 @@ jobs:
           export BUNDLE_VERSION
           ./scripts/package.sh "$PLATFORM" "$BUNDLE_VERSION-${GITHUB_SHA::7}" target/release dist
           ls -l dist
+      - name: Smoke start (packaged web helper)
+        if: env.FULL_CI == 'true' && runner.os == 'macOS'
+        run: ./scripts/smoke-web-helper.sh dist/markise-*.dmg
       # Artifacts only from pushes to main (full-ci PR and manual runs still build and package,
       # which is what they check, but upload nothing): per-run binaries of every PR push filled
       # the repository's Actions storage. Nothing downstream consumes them; releases are built by

@@ -6,7 +6,8 @@
 #             (the prefix selects the format, the whole string goes into the file name)
 #   label:    archive/folder label, e.g. v0.1.0-beta.1 or 0.1.0-beta.1-abcdef0 (a leading "v"
 #             is stripped)
-#   bin-dir:  folder with the release binaries markise and markise-cli (.exe on Windows)
+#   bin-dir:  folder with the release binaries markise and markise-cli (.exe on Windows), and on
+#             macOS markise-web-helper (ADR 0023)
 #   out-dir:  where the archive is written
 #
 # Environment:
@@ -29,7 +30,8 @@
 # NOTICE, THIRD_PARTY/ (full license texts of bundled third-party data, e.g. syntax
 # definitions) and BUILD-INFO.txt (commit, toolchain, runner image):
 #   macOS    markise-<label>-<platform>.dmg: Markise.app (icon, .md/.markdown document types,
-#            licences also in Contents/Resources), an /Applications link, markise-cli
+#            licences also in Contents/Resources, markise-web-helper next to the app's executable
+#            in Contents/MacOS), an /Applications link, markise-cli
 #            (or .zip with MACOS_FORMAT=zip)
 #   Windows  markise-<label>-<platform>.zip: markise.exe (icon embedded), markise-cli.exe
 #   Linux    markise-<label>-<platform>.tar.gz: markise, markise-cli and share/ (desktop entry,
@@ -136,6 +138,7 @@ case "$platform" in
     app="$dest/Markise.app/Contents"
     mkdir -p "$app/MacOS" "$app/Resources"
     cp "$bin_dir/markise" "$app/MacOS/markise"
+    cp "$bin_dir/markise-web-helper" "$app/MacOS/markise-web-helper"
     cp "$root/assets/brand/markise.icns" "$app/Resources/markise.icns"
     cp "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$root/NOTICE" "$app/Resources/"
     cp -R "$root/THIRD_PARTY" "$app/Resources/THIRD_PARTY"
@@ -192,9 +195,11 @@ case "$platform" in
 PLIST
     plutil -lint "$app/Info.plist" >/dev/null
     cp "$bin_dir/markise-cli" "$dest/markise-cli"
-    normalise "Markise.app/Contents/MacOS/markise" "markise-cli"
+    normalise "Markise.app/Contents/MacOS/markise" "Markise.app/Contents/MacOS/markise-web-helper" "markise-cli"
     # Ad-hoc signature so Apple Silicon runs the (lipo'd) binaries; not a Developer ID signature.
+    # The helper first: a bundle's signature covers what is in it. It needs no entitlement (ADR 0023).
     codesign --force --sign - "$dest/markise-cli" 2>/dev/null
+    codesign --force --sign - "$app/MacOS/markise-web-helper" 2>/dev/null
     codesign --force --deep --sign - "$dest/Markise.app" 2>/dev/null
     find "$dest" -exec touch -h -t "$stamp" {} +
     case "${MACOS_FORMAT:-dmg}" in
