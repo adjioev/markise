@@ -135,6 +135,11 @@ pub(crate) fn image_row(
     } else {
         cx.host.thumbnail(&file)
     };
+    let note = if file.is_empty() {
+        None
+    } else {
+        cx.host.path_note(&file)
+    };
     let t = cx.texts;
     let st = cx.style;
     let (alt_label, path_label, choose) = (&t.alt, &t.path, &t.choose_file);
@@ -147,6 +152,9 @@ pub(crate) fn image_row(
             })
             .inner;
         thumbnail(ui, &state, &alt, cx);
+        if let Some(note) = &note {
+            ui.add(egui::Label::new(RichText::new(note).size(NOTE_SIZE).color(st.muted)).wrap());
+        }
         let width = ui.available_width();
         for (key, label) in [("alt", alt_label), ("path", path_label)] {
             let at = join(path, key);

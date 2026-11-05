@@ -1267,3 +1267,66 @@ fn a_nested_block_opens_its_own_form() {
     assert_eq!(h.state().block_form().unwrap().name(), "tip");
     assert_eq!(draft(&h)["body"], json!("Inner"));
 }
+
+fn form_on(f: &Fixture, web_helpers: Option<markise_ui_egui::viewer::HelperSource>) -> H {
+    let opts = AppOptions {
+        config: ConfigDir::Dir(f.config.clone()),
+        web_helpers,
+        ..common::no_watch()
+    };
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 1400.0))
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), MarkiseApp::new(opts));
+    open(&mut h, &f.doc);
+    h.get_by_label("Use Package").click();
+    h.step();
+    wait_until(&mut h, "the install", |a| a.block_package().is_some());
+    settle(&mut h);
+    common::run(&mut h);
+    assert!(h.state_mut().open_block_form(0));
+    h
+}
+
+fn wait_for_text(h: &mut H, text: &str) {
+    for _ in 0..400 {
+        h.step();
+        if has(h, text) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("no {text}");
+}
+
+#[test]
+fn a_missing_image_says_so_in_plain_words_with_its_path() {
+    let f = Fixture::new(":::gallery\n\n![Alt](images/none.png)\n\n:::\n");
+    let mut h = form_on(&f, None);
+    wait_for_text(&mut h, "File not found: images/none.png");
+    assert!(!has(&h, "os error"));
+    assert!(!has(&h, "cannot open"));
+}
+
+/// The editor shows an image a site's picture cannot have: `../` is common in ordinary documents.
+#[test]
+fn the_form_says_when_a_picture_of_the_block_cannot_reach_a_file_it_shows() {
+    const NOTE: &str = "The block's picture cannot use this file. Outside the document's folder: ../up.png";
+    let fixture = || {
+        let f = Fixture::new(":::gallery\n\n![Alt](../up.png)\n\n:::\n");
+        fs::write(f.folder.parent().unwrap().join("up.png"), one_pixel_png()).unwrap();
+        f
+    };
+
+    let source: markise_ui_egui::viewer::HelperSource = Arc::new(|| None);
+    let f = fixture();
+    let mut h = form_on(&f, Some(source));
+    wait_for_text(&mut h, NOTE);
+    assert!(!has(&h, "File not found"), "the thumbnail still reads it");
+
+    let f = fixture();
+    let mut h = form_on(&f, None);
+    for _ in 0..40 {
+        h.step();
+    }
+    assert!(!has(&h, NOTE), "with nothing to draw a picture, nothing to say");
+}

@@ -699,6 +699,8 @@ enum Segment {
     /// `link`: the target of a link wrapping only this image.
     Image {
         src: String,
+        /// The path as the document has it, which is what a person knows it by.
+        written: String,
         alt: String,
         link: Option<String>,
         /// The image's own source, relative as an inline node's.
@@ -1409,6 +1411,7 @@ impl<'a> InlineBuilder<'a> {
                     let src = self.resolve(isrc);
                     self.segments.push(Segment::Image {
                         src,
+                        written: isrc.to_string(),
                         alt,
                         link: Some(target.to_string()),
                         source: n.children[0].source.clone(),
@@ -1433,9 +1436,11 @@ impl<'a> InlineBuilder<'a> {
                 if top && self.split_images {
                     let alt = alt.to_string();
                     self.flush();
+                    let written = src.to_string();
                     let src = self.resolve(src);
                     self.segments.push(Segment::Image {
                         src,
+                        written,
                         alt,
                         link: None,
                         source: n.source.clone(),
@@ -2274,7 +2279,13 @@ pub fn layout_item(
                             }
                             y += h;
                         }
-                        Segment::Image { src, alt, link, source } => {
+                        Segment::Image {
+                            src,
+                            written,
+                            alt,
+                            link,
+                            source,
+                        } => {
                             if let Some(target) = link {
                                 // (the image's primitive comes first in `layout_image`)
                                 out.links.push(LinkHit {
@@ -2283,8 +2294,9 @@ pub fn layout_item(
                                     target,
                                 });
                             }
-                            let h =
-                                layout_image(&mut out, shaper, images, t, &src, &alt, x, y, width, only_image, source);
+                            let h = layout_image(
+                                &mut out, shaper, images, t, &src, &written, &alt, x, y, width, only_image, source,
+                            );
                             if first {
                                 first_line_h = h.min(line_px);
                                 first_is_text = false;
@@ -3645,6 +3657,7 @@ fn layout_image(
     images: &dyn Images,
     t: &Theme,
     src: &str,
+    written: &str,
     alt: &str,
     x: f32,
     y: f32,
@@ -3670,7 +3683,7 @@ fn layout_image(
         state => {
             let failed = matches!(state, ImageState::Failed(_));
             let label = match &state {
-                ImageState::Failed(why) => format!("⚠ {} — {why}", if alt.is_empty() { src } else { alt }),
+                ImageState::Failed(why) => format!("⚠ {why}: {written}"),
                 _ => format!("Loading image… {}", if alt.is_empty() { "" } else { alt }),
             };
             let h = if failed { t.line_px() * 1.8 } else { 120.0 };

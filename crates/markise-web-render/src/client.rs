@@ -71,6 +71,11 @@ pub trait JobSource: Send + Sync {
     fn prepare(&self) -> Result<Prepared, String>;
     /// The file a page asks for, or none. The path is untrusted: this is what decides.
     fn file(&self, area: Area, path: &str) -> Option<Vec<u8>>;
+    /// Which images of this job's own could not be had and why, in plain words, for when a page says
+    /// that one did not come. `None`: nothing more to say than the helper did.
+    fn images_note(&self) -> Option<String> {
+        None
+    }
 }
 
 /// One image wanted.
@@ -570,7 +575,7 @@ impl Worker {
                 let Some(f) = self.flight.as_ref().filter(|f| f.id == id) else {
                     return;
                 };
-                let (key, cancelled) = (f.job.key, f.cancelled);
+                let (key, cancelled, source) = (f.job.key, f.cancelled, f.job.source.clone());
                 // a helper hung exits by itself: nothing to wait for but its end
                 if kind == FailKind::Hung {
                     return self.lost("The block took too long to draw.");
@@ -578,7 +583,9 @@ impl Worker {
                 self.flight = None;
                 self.idle_since = Instant::now();
                 if !cancelled && kind != FailKind::Cancelled {
-                    self.deliver(key, Outcome::Failed(reason));
+                    // the page's word is that one did not come; what it was, this side knows
+                    let note = (kind == FailKind::Images).then(|| source.images_note()).flatten();
+                    self.deliver(key, Outcome::Failed(note.unwrap_or(reason)));
                 }
             }
         }

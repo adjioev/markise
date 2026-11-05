@@ -220,7 +220,13 @@ impl MarkiseApp {
             return; // a question is open: nothing competes with it
         }
         let mut actions = Vec::new();
-        package_ui::show_card(ctx, pending, self.updates.card_height(ctx), &mut actions);
+        package_ui::show_card(
+            ctx,
+            pending,
+            self.web_helpers.is_some(),
+            self.updates.card_height(ctx),
+            &mut actions,
+        );
         for a in actions {
             self.block_package_action(a);
         }

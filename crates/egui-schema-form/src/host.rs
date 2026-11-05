@@ -41,6 +41,11 @@ pub trait FormHost {
     /// The thumbnail of `path`, called every frame for every image with a path, so it must be
     /// cheap: start the loading once, answer [`Thumbnail::Loading`] meanwhile.
     fn thumbnail(&mut self, path: &str) -> Thumbnail;
+    /// Something the author should know about `path`, quietly, whether or not its thumbnail shows.
+    /// Called every frame like [`FormHost::thumbnail`], so it must be cheap.
+    fn path_note(&mut self, _path: &str) -> Option<String> {
+        None
+    }
     /// The picture of an option's icon, called every frame for every option with one, under the
     /// same rules as [`FormHost::thumbnail`]. The name comes from the hints and means nothing to
     /// the form. Without one, the option shows its label alone.

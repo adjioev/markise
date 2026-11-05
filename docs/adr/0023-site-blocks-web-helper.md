@@ -178,6 +178,12 @@ the block's first large picture or nearly so, and a small picture never. A look 
 - **Two looks.** For a page with pictures (an `<img>` or a picture file asked for, so a CSS background too), the snapshot is taken again after 40 ms until two agree, within the bound above. A page with no picture has one look, and pays nothing. It costs a picture's block about 60 ms and a second snapshot.
 - **A picture that did not come is not a picture of the block.** A `src` that failed or was still not answered at the bound is `images`: no image is sent, nothing is cached, and the block stays a card with a quiet reason. `data:` and `blob:` are the page's own business. A canvas of the block's code's making, or a background that did not come, cannot be seen from here.
 
+**Saying which, and why.** The helper says only that one did not come. The client asks the job, and the block's note names the path and the reason in plain words: "File not found: images/x.png". A path no page can ever have is refused
+before a helper is asked, as `prepare`'s answer: a page's address would lose its dots, and could name another file. "Outside the document's folder: ../x.png".
+
+**`../` stays as it is.** The rule above stands: a page gets files inside the document's folder and nothing else. It is not the editor's rule: a document's ordinary image display, a card's and a form's thumbnail read any file the document names, and documents commonly write `../` for
+their images. So a block can show its image as a card and not as a picture. The note says so on the card, and where a picture can be drawn the form says so under the thumbnail, while the author can still act on it.
+
 ### Showing a picture
 
 A picture changes nothing about a block's items (ADR 0021): they stay flat, pages split them as ever (ADR 0016), and every source
