@@ -241,6 +241,8 @@ pub enum FailKind {
     Snapshot,
     /// The page's process died.
     Crashed,
+    /// A picture it asked for did not come: what could be drawn would be incomplete.
+    Images,
     Cancelled,
 }
 
@@ -252,6 +254,7 @@ impl FailKind {
             FailKind::Size => "size",
             FailKind::Snapshot => "snapshot",
             FailKind::Crashed => "crashed",
+            FailKind::Images => "images",
             FailKind::Cancelled => "cancelled",
         }
     }
@@ -263,6 +266,7 @@ impl FailKind {
             "size" => FailKind::Size,
             "snapshot" => FailKind::Snapshot,
             "crashed" => FailKind::Crashed,
+            "images" => FailKind::Images,
             "cancelled" => FailKind::Cancelled,
             _ => return None,
         })

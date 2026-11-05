@@ -242,3 +242,15 @@ fn lists_are_counted_before_anything_of_them_is_copied() {
     r["vars"] = json!([["--a", "x".repeat(4096)]]);
     assert!(ToHelper::decode(&r).is_err());
 }
+
+#[test]
+fn a_picture_that_did_not_come_has_a_kind_of_its_own() {
+    let failed = FromHelper::Failed {
+        id: 7,
+        kind: FailKind::Images,
+        reason: "why".to_string(),
+    };
+    let mut out = Vec::new();
+    write_frame(&mut out, &failed.encode(), &[]).unwrap();
+    assert_eq!(read_from_helper(&mut Cursor::new(out)).unwrap().0, failed);
+}

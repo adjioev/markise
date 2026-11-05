@@ -37,11 +37,20 @@ const FILES_LIMIT: u32 = 512;
 const QUEUE_LIMIT: usize = 64;
 /// How long a page left behind has to stop: longer means its script is spinning.
 const PARK_LIMIT_MS: i64 = 1500;
+/// Between two looks at a page with pictures.
+const PAINT_GAP_MS: i64 = 40;
+/// How long a page with pictures may take to look the same twice. A page still changing by then is
+/// taken as it stands: that is a page animating itself, not a picture missing.
+const PAINT_LIMIT_MS: u128 = 1500;
 
 struct Current {
     req: RenderRequest,
     started: Instant,
     files: u32,
+    /// Files it asked for that a picture can be.
+    image_files: u32,
+    /// The last look at a page with pictures, and when the looking began.
+    look: Option<(Vec<u8>, Instant)>,
     cancelled: bool,
 }
 
@@ -313,6 +322,8 @@ fn begin(req: RenderRequest) {
             req,
             started: Instant::now(),
             files: 0,
+            image_files: 0,
+            look: None,
             cancelled: false,
         });
     });
@@ -525,14 +536,36 @@ fn settle(generation: u64) {
         &isolated_world(),
         generation,
         move |answer| {
-            let height = answer.ok().and_then(|text| text.parse::<f64>().ok());
-            match height {
-                Some(h) if h.is_finite() && h >= 1.0 => snapshot(h.ceil(), generation),
+            let measures = answer.ok().and_then(|text| parse_settled(&text));
+            match measures {
+                Some(m) if m.broken > 0 => fail(FailKind::Images, "A picture in this block did not load."),
+                Some(m) if m.height.is_finite() && m.height >= 1.0 => {
+                    let wait_for_paint =
+                        m.images > 0 || with(|s| s.current.as_ref().is_some_and(|c| c.image_files > 0));
+                    snapshot(m.height.ceil(), wait_for_paint, generation);
+                }
                 Some(_) => fail(FailKind::Size, "the block has no height"),
                 None => fail(FailKind::Script, "the page gave no height"),
             }
         },
     );
+}
+
+struct Settled {
+    height: f64,
+    images: u64,
+    broken: u64,
+}
+
+/// What the page's own world said: three numbers and nothing else.
+fn parse_settled(text: &str) -> Option<Settled> {
+    let mut parts = text.split(' ');
+    let settled = Settled {
+        height: parts.next()?.parse().ok()?,
+        images: parts.next()?.parse().ok()?,
+        broken: parts.next()?.parse().ok()?,
+    };
+    parts.next().is_none().then_some(settled)
 }
 
 /// Calls a script with one string argument; the answer comes as text, if its render still goes.
@@ -584,7 +617,10 @@ fn call(
     }
 }
 
-fn snapshot(height: f64, generation: u64) {
+/// A window never ordered in has no frames: a page's `requestAnimationFrame` does not run there, so
+/// nothing in it can say that a paint was done, and a snapshot is the only paint there is. So for a
+/// page with pictures it is taken until two looks agree (`wait_for_paint`).
+fn snapshot(height: f64, wait_for_paint: bool, generation: u64) {
     if !proceed(generation) {
         return;
     }
@@ -627,6 +663,11 @@ fn snapshot(height: f64, generation: u64) {
             let c = s.current.as_ref().expect("the render");
             (c.req.id, c.started.elapsed().as_secs_f64() * 1e3)
         });
+        if wait_for_paint && !painted(&bytes) {
+            let timer = DispatchTime::NOW.time(PAINT_GAP_MS * 1_000_000);
+            let _ = DispatchQueue::main().after(timer, move || snapshot(height, true, generation));
+            return;
+        }
         let rendered = Rendered {
             id,
             css_height: height,
@@ -634,9 +675,62 @@ fn snapshot(height: f64, generation: u64) {
             px_height,
             ms,
         };
-        finish(Ok((rendered, bytes)));
+        checked(rendered, bytes, wait_for_paint, generation);
     });
     unsafe { web.takeSnapshotWithConfiguration_completionHandler(Some(&config), &done) };
+}
+
+/// The last word on an image: the page may have added a picture since it settled, and one that failed
+/// makes this no picture of the block. One still on its way, or the first of a page with none before,
+/// gets another look within the bound; a look gone past that counts it as not come.
+fn checked(rendered: Rendered, bytes: Vec<u8>, wait_for_paint: bool, generation: u64) {
+    let web = with(|s| s.page.as_ref().expect("the page").web.clone());
+    let height = rendered.css_height;
+    call(
+        &web,
+        page::CHECK,
+        "unused",
+        "",
+        &isolated_world(),
+        generation,
+        move |answer| {
+            if !proceed(generation) {
+                return;
+            }
+            let numbers: Option<Vec<u64>> = answer
+                .ok()
+                .and_then(|text| text.split(' ').map(|n| n.parse().ok()).collect());
+            let Some(&[images, broken, open]) = numbers.as_deref() else {
+                return fail(FailKind::Script, "the page gave no count of its pictures");
+            };
+            let time_left = with(|s| {
+                let look = s.current.as_ref().and_then(|c| c.look.as_ref());
+                look.is_none_or(|l| l.1.elapsed().as_millis() < PAINT_LIMIT_MS)
+            });
+            if broken > 0 || open > 0 && !time_left {
+                fail(FailKind::Images, "A picture in this block did not load.");
+            } else if open > 0 || images > 0 && !wait_for_paint {
+                let timer = DispatchTime::NOW.time(PAINT_GAP_MS * 1_000_000);
+                let _ = DispatchQueue::main().after(timer, move || snapshot(height, true, generation));
+            } else {
+                finish(Ok((rendered, bytes)));
+            }
+        },
+    );
+}
+
+/// Whether this look is the same as the last, or the looking has gone on for long enough. If not, it
+/// is kept for the next one to compare with.
+fn painted(bytes: &[u8]) -> bool {
+    with(|s| {
+        let Some(c) = s.current.as_mut() else { return true };
+        let began = c.look.as_ref().map_or_else(Instant::now, |l| l.1);
+        if c.look.as_ref().is_some_and(|l| l.0 == bytes) || began.elapsed().as_millis() >= PAINT_LIMIT_MS {
+            return true;
+        }
+        c.look = Some((bytes.to_vec(), began));
+        false
+    })
 }
 
 pub fn start_task(task: Retained<ProtocolObject<dyn WKURLSchemeTask>>) {
@@ -658,6 +752,9 @@ pub fn start_task(task: Retained<ProtocolObject<dyn WKURLSchemeTask>>) {
                 return None;
             }
             c.files += 1;
+            if mime_of(&url).starts_with("image/") {
+                c.image_files += 1;
+            }
             let token = s.next_token;
             s.next_token += 1;
             let id = c.req.id;

@@ -15,6 +15,8 @@ pub struct Helper {
     pub files: HashMap<(Area, String), Vec<u8>>,
     /// What the page asked for.
     pub asked: Vec<(Area, String)>,
+    /// What is never answered, by path.
+    pub silent: Vec<String>,
     next_id: u64,
 }
 
@@ -55,6 +57,7 @@ impl Helper {
             from,
             files: HashMap::new(),
             asked: Vec::new(),
+            silent: Vec::new(),
             next_id: 1,
         }
     }
@@ -94,6 +97,9 @@ impl Helper {
             match message {
                 FromHelper::NeedFile { token, area, path, .. } => {
                     self.asked.push((area, path.clone()));
+                    if self.silent.contains(&path) {
+                        continue;
+                    }
                     let file = self.files.get(&(area, path));
                     let m = ToHelper::File {
                         token,
