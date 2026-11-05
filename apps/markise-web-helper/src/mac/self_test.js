@@ -57,7 +57,9 @@ const attempts = [
   () => refused(async () => { eval('1'); }),
   async () => { alert('a'); const c = confirm('c'); const p = prompt('p'); return c === false && p === null ? 'stopped' : 'managed'; },
   () => nothing(() => add(el('input', { type: 'file' })).click()),
-  () => refused(async () => { if (!navigator.mediaDevices) throw 0; await navigator.mediaDevices.getUserMedia({ audio: true }); }),
+  // there must be nothing to ask with: a request could wait on a system prompt for ever
+  async () => (navigator.mediaDevices ? 'managed' : 'stopped'),
+  async () => (navigator.geolocation || navigator.share || navigator.clipboard || window.Notification || window.webkitSpeechRecognition || window.SpeechRecognition ? 'managed' : 'stopped'),
 ];
 export default async function init(root) {
   const cells = document.createElement('div');
