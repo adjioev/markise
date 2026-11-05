@@ -145,6 +145,45 @@ fn nor_is_one_that_never_comes() {
 }
 
 #[test]
+fn nor_is_one_chosen_from_a_srcset() {
+    let mut h = Helper::start();
+    let r = h.request(
+        r#"<div style="height:10px"><img srcset="images/none.png 1x"></div>"#,
+        None,
+        &[],
+    );
+    assert_eq!(failed(h.render(r)).0, FailKind::Images);
+    assert!(h.asked.contains(&(Area::Document, "images/none.png".to_string())));
+}
+
+#[test]
+fn nor_is_one_added_when_another_has_loaded() {
+    let mut h = Helper::start();
+    h.file(Area::Document, "images/p.png", one_pixel_png());
+    h.file(
+        Area::Package,
+        "m.js",
+        "export default function(root){ const a=new Image(); a.onload=()=>{ const b=new Image(); b.src='images/none.png'; root.append(b); }; a.src='images/p.png'; root.append(a); }",
+    );
+    let r = h.request("<section></section>", Some("m.js"), &[]);
+    assert_eq!(failed(h.render(r)).0, FailKind::Images);
+}
+
+#[test]
+fn nor_is_one_added_while_the_block_is_being_looked_at() {
+    let mut h = Helper::start();
+    h.file(Area::Document, "images/p.png", one_pixel_png());
+    // a timer, so after the waiting is over: only the last check before the answer sees this one
+    h.file(
+        Area::Package,
+        "m.js",
+        "export default function(root){ const a=new Image(); a.onload=()=>setTimeout(()=>{ const b=new Image(); b.src='images/none.png'; root.append(b); }, 15); a.src='images/p.png'; root.append(a); }",
+    );
+    let r = h.request("<section></section>", Some("m.js"), &[]);
+    assert_eq!(failed(h.render(r)).0, FailKind::Images);
+}
+
+#[test]
 fn a_block_hiding_a_picture_it_loaded_still_draws() {
     let mut h = Helper::start();
     h.file(Area::Document, "images/p.png", one_pixel_png());
