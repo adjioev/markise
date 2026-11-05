@@ -10,6 +10,7 @@ mod block_inplace;
 mod block_insert;
 mod block_move;
 mod block_ownership;
+mod block_page;
 mod block_place;
 mod block_views;
 mod common;

@@ -154,6 +154,15 @@ impl PackageViews {
     }
 }
 
+impl PackageViews {
+    /// The field model and form of a block, with a view or without: what its markup comes from.
+    pub fn block_model(&self, name: &str, args: &str, source: &str) -> Option<(BlockFields, FormSpec)> {
+        let variant = self.variant_of(name, args).ok()??;
+        let fields = BlockFields::decode(source, 0, &variant.decls, &ParseOptions::default()).ok()?;
+        Some((fields, variant.spec.clone()))
+    }
+}
+
 impl BlockViews for PackageViews {
     fn id(&self) -> u64 {
         self.id
