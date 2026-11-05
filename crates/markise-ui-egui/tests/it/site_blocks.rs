@@ -27,6 +27,7 @@ struct Played {
     renders: Mutex<Vec<RenderRequest>>,
     fail: Mutex<Option<String>>,
     hold: AtomicBool,
+    fail_images: AtomicBool,
     height: AtomicU32,
 }
 
@@ -64,7 +65,11 @@ impl Spawner for Spawn {
                 if let Some(reason) = played.fail.lock().unwrap().clone() {
                     let failed = FromHelper::Failed {
                         id: r.id,
-                        kind: FailKind::Script,
+                        kind: if played.fail_images.load(Ordering::SeqCst) {
+                            FailKind::Images
+                        } else {
+                            FailKind::Script
+                        },
                         reason,
                     };
                     let _ = proto::write_frame(&mut to_client, &failed.encode(), &[]);
@@ -239,6 +244,54 @@ fn saving_the_form_refreshes_the_picture_and_the_old_one_stays_meanwhile() {
         picture(h, at(":::plain")).is_some_and(|r| r.height() == 200.0)
     });
     assert!(p.renders.lock().unwrap().last().unwrap().html.contains("site.!"));
+}
+
+fn focus(h: &mut H, focused: bool) {
+    h.input_mut().focused = focused;
+    common::run(h);
+}
+
+#[test]
+fn a_picture_missing_a_file_is_asked_for_again_when_the_window_comes_back() {
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    p.fail_images.store(true, Ordering::SeqCst);
+    *p.fail.lock().unwrap() = Some("File not found: x.png".to_string());
+    let mut h = f.ready_with(Some(p.source()));
+    let label = "Not drawn by its site's code: File not found: x.png";
+    wait_for(&mut h, "its reason", |h| h.query_by_label(label).is_some());
+    common::run(&mut h);
+    let renders = p.count();
+
+    focus(&mut h, false);
+    assert_eq!(p.count(), renders, "going away asks for nothing");
+    focus(&mut h, true);
+    wait_for(&mut h, "still its reason", |h| {
+        p.count() > renders && h.query_by_label(label).is_some()
+    });
+    common::run(&mut h);
+
+    // the file came
+    *p.fail.lock().unwrap() = None;
+    focus(&mut h, false);
+    focus(&mut h, true);
+    wait_for(&mut h, "its picture", |h| picture(h, at(":::plain")).is_some());
+    assert!(h.query_by_label(label).is_none());
+}
+
+#[test]
+fn any_other_failure_stays_when_the_window_comes_back() {
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    *p.fail.lock().unwrap() = Some("The block threw.".to_string());
+    let mut h = f.ready_with(Some(p.source()));
+    let label = "Not drawn by its site's code: The block threw.";
+    wait_for(&mut h, "its reason", |h| h.query_by_label(label).is_some());
+    common::run(&mut h);
+    let renders = p.count();
+    focus(&mut h, false);
+    focus(&mut h, true);
+    assert_eq!(p.count(), renders);
 }
 
 #[test]

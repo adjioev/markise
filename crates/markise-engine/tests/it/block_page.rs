@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Arc;
 
-use markise_engine::block_page::{BlockPage, document_language};
+use markise_engine::block_page::{BlockPage, document_language, unreachable_image};
 use markise_engine::block_view::PackageViews;
 use markise_package::{InstalledPackage, PackageIndex};
 use markise_web_render::JobSource;
@@ -200,7 +200,7 @@ fn a_package_gives_its_own_files_and_nothing_above_them() {
 #[test]
 fn a_document_gives_this_blocks_images_and_nothing_else() {
     let r = rig();
-    let block = ":::shot x\n\n![a](images/a%20b.png)\n\n![b](./images/c.png)\n\n![c](../outside/d.png)\n\n![d](notes.txt)\n\n:::";
+    let block = ":::shot x\n\n![a](images/a%20b.png)\n\n![b](./images/c.png)\n\n![d](notes.txt)\n\n:::";
     fs::create_dir_all(r.folder.join("images")).unwrap();
     for f in [
         "images/a b.png",
@@ -236,6 +236,11 @@ fn a_document_gives_this_blocks_images_and_nothing_else() {
     ] {
         assert_eq!(p.file(Area::Document, bad), None, "{bad}");
     }
+    // named by the block, and still not given
+    let p = r.page("shot", "x", ":::shot x\n\n![d](../outside/d.png)\n\n:::");
+    assert!(p.prepare().is_err());
+    assert_eq!(p.file(Area::Document, "../outside/d.png"), None);
+    assert_eq!(p.file(Area::Document, "outside/d.png"), None);
 }
 
 #[test]
@@ -278,6 +283,108 @@ fn a_link_out_of_the_folder_opens_nothing() {
     p.prepare().unwrap();
     assert_eq!(p.file(Area::Document, "images/link.png"), None);
     assert_eq!(p.file(Area::Document, "dir/in.png"), None);
+}
+
+#[test]
+fn a_note_names_the_file_and_the_reason_in_plain_words() {
+    let r = rig();
+    fs::create_dir_all(r.folder.join("images")).unwrap();
+    fs::write(r.folder.join("images/here.png"), "here").unwrap();
+    let p = r.page(
+        "shot",
+        "x",
+        ":::shot x\n\n![a](images/x.png)\n\n![b](images/here.png)\n\n:::",
+    );
+    p.prepare().unwrap();
+    assert_eq!(p.images_note().as_deref(), Some("File not found: images/x.png"));
+
+    let p = r.page("shot", "x", ":::shot x\n\n![b](images/here.png)\n\n:::");
+    p.prepare().unwrap();
+    assert_eq!(p.images_note(), None, "nothing to say about what is there");
+}
+
+#[test]
+fn several_are_named_up_to_a_length_to_read() {
+    let r = rig();
+    let images: String = (0..5).map(|i| format!("![a](i{i}.png)\n\n")).collect();
+    let p = r.page("shot", "x", &format!(":::shot x\n\n{images}:::"));
+    p.prepare().unwrap();
+    assert_eq!(
+        p.images_note().as_deref(),
+        Some("File not found: i0.png; File not found: i1.png; File not found: i2.png; and 2 more")
+    );
+}
+
+#[test]
+fn a_picture_refuses_a_path_outside_the_folder_before_any_page_is_asked() {
+    let r = rig();
+    fs::write(r.folder.join("x.png"), "the wrong file").unwrap();
+    for (src, note) in [
+        ("../x.png", "Outside the document's folder: ../x.png"),
+        ("a/../../x.png", "Outside the document's folder: a/../../x.png"),
+        ("/etc/x.png", "Outside the document's folder: /etc/x.png"),
+        (
+            "https://example.com/x.png",
+            "Not a file in the document's folder: https://example.com/x.png",
+        ),
+    ] {
+        let block = format!(":::shot x\n\n![a]({src})\n\n:::");
+        assert_eq!(
+            r.page("shot", "x", &block).prepare().err().as_deref(),
+            Some(note),
+            "{src}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_out_of_the_folder_is_outside_it_too() {
+    let r = rig();
+    fs::write(r.outside.join("secret.png"), "secret").unwrap();
+    std::os::unix::fs::symlink(r.outside.join("secret.png"), r.folder.join("link.png")).unwrap();
+    let p = r.page("shot", "x", ":::shot x\n\n![a](link.png)\n\n:::");
+    p.prepare().unwrap();
+    assert_eq!(
+        p.images_note().as_deref(),
+        Some("Outside the document's folder: link.png")
+    );
+}
+
+#[test]
+fn a_path_is_decoded_once() {
+    let r = rig();
+    fs::create_dir_all(r.folder.join("%2e%2e")).unwrap();
+    fs::write(r.folder.join("%2e%2e/x.png"), "x").unwrap();
+    let p = r.page("shot", "x", ":::shot x\n\n![a](%252e%252e/x.png)\n\n:::");
+    p.prepare().unwrap();
+    assert_eq!(p.file(Area::Document, "%2e%2e/x.png").as_deref(), Some(&b"x"[..]));
+    assert_eq!(unreachable_image("%252e%252e/x.png"), None);
+    assert!(
+        unreachable_image("%2e%2e/x.png").is_some(),
+        "this one is dots to a page's address"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_there_that_may_not_be_read_is_not_outside_the_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = rig();
+    fs::write(r.folder.join("x.png"), "x").unwrap();
+    fs::set_permissions(r.folder.join("x.png"), fs::Permissions::from_mode(0o000)).unwrap();
+    let p = r.page("shot", "x", ":::shot x\n\n![a](x.png)\n\n:::");
+    p.prepare().unwrap();
+    assert_eq!(p.images_note().as_deref(), Some("Cannot read: x.png"));
+}
+
+#[test]
+fn what_a_picture_can_never_have_is_known_without_the_disk() {
+    for fine in ["a.png", "./a/b.png", "data:image/png;base64,AA", "BLOB:x", "a%20b.png"] {
+        assert_eq!(unreachable_image(fine), None, "{fine}");
+    }
+    assert!(unreachable_image("..%2Fx.png").is_some(), "encoded");
+    assert!(unreachable_image("a/../b.png").is_some_and(|n| n.contains("plain path")));
 }
 
 #[test]

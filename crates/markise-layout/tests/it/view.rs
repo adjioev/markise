@@ -157,6 +157,32 @@ fn shown_image(src: &str, size: [u32; 2], width: f32) -> (epaint::Rect, f32) {
 }
 
 #[test]
+fn an_image_that_failed_says_why_with_the_path_as_written() {
+    struct Missing;
+    impl Images for Missing {
+        fn state(&self, _src: &str) -> ImageState {
+            ImageState::Failed("File not found".to_string())
+        }
+    }
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut v = view("![an alt](../images/x.png)\n", 600.0);
+    let vis = v.frame(1500.0, 0.0, &mut f, &Missing);
+    let texts: Vec<String> = vis
+        .iter()
+        .flat_map(|x| &x.layout.prims)
+        .filter_map(|p| match p {
+            Prim::Text { text, .. } => Some(text.text().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.contains(&"⚠ File not found: ../images/x.png".to_string()),
+        "{texts:?}"
+    );
+}
+
+#[test]
 fn a_tall_image_is_capped_a_small_one_stays_and_proportions_hold() {
     use markise_layout::block::IMAGE_MAX_HEIGHT as MAX;
     let md = "para\n\n![a](t.png)\n\nend\n";

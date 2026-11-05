@@ -334,6 +334,7 @@ impl MarkiseApp {
                 let path = self.doc.as_ref().and_then(|d| d.file().map(Path::to_path_buf));
                 let folder = path.as_deref().and_then(Path::parent);
                 let root_url = self.doc.as_ref().and_then(|d| d.viewer.model().root_url.clone());
+                let site_pictures = self.web_helpers.is_some();
                 let mut host = PanelHost {
                     style: style_for(&t),
                     ctx: &ctx,
@@ -341,6 +342,7 @@ impl MarkiseApp {
                     assets: &mut self.block_form.assets,
                     folder,
                     root_url: root_url.as_deref(),
+                    site_pictures,
                 };
                 action = open.ui(ui, &mut host);
             });

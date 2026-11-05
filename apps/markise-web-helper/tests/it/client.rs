@@ -46,6 +46,39 @@ fn results(client: &Client, n: usize) -> Vec<(u64, Outcome)> {
     out
 }
 
+struct MissingPicture;
+
+impl JobSource for MissingPicture {
+    fn prepare(&self) -> Result<Prepared, String> {
+        Ok(Prepared {
+            html: "<section><img src=\"images/x.png\"></section>".to_string(),
+            ..Prepared::default()
+        })
+    }
+    fn file(&self, _area: Area, _path: &str) -> Option<Vec<u8>> {
+        None
+    }
+    fn images_note(&self) -> Option<String> {
+        Some("File not found: images/x.png".to_string())
+    }
+}
+
+#[test]
+fn a_picture_that_did_not_come_reaches_the_block_as_its_reason() {
+    let wake = Arc::new(|| {});
+    let spawner = ProcessSpawner {
+        program: env!("CARGO_BIN_EXE_markise-web-helper").into(),
+    };
+    let client = Client::new(Box::new(spawner), Limits::default(), wake);
+    let mut j = job(1, "");
+    j.source = Arc::new(MissingPicture);
+    client.want(vec![j]);
+    assert_eq!(
+        results(&client, 1),
+        vec![(1, Outcome::MissingImage("File not found: images/x.png".to_string()))]
+    );
+}
+
 #[test]
 fn a_block_that_hangs_costs_a_helper_and_nothing_else() {
     let spawner = ProcessSpawner {

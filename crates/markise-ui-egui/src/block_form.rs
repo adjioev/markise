@@ -575,6 +575,9 @@ pub struct PanelHost<'a> {
     /// The folder of the document, which image paths are relative to.
     pub folder: Option<&'a Path>,
     pub root_url: Option<&'a str>,
+    /// Whether a block can be drawn as a picture here: then a path that picture cannot reach is
+    /// worth a word, though the form and the editor show the image.
+    pub site_pictures: bool,
 }
 
 struct FrameHost<'a, 'b> {
@@ -617,8 +620,20 @@ impl FormHost for FrameHost<'_, '_> {
         match self.host.assets.resolve(ctx, folder, root, path) {
             None => Thumbnail::Loading,
             Some(None) => Thumbnail::None,
-            Some(Some(file)) => self.host.picture(&file),
+            Some(Some(file)) => match self.host.picture(&file) {
+                // a path as the author wrote it: where it resolves to is the same to them
+                Thumbnail::Failed(why) => Thumbnail::Failed(format!("{why}: {path}")),
+                other => other,
+            },
         }
+    }
+
+    fn path_note(&mut self, path: &str) -> Option<String> {
+        if !self.host.site_pictures {
+            return None;
+        }
+        let why = markise_engine::block_page::unreachable_image(path)?;
+        Some(format!("The block's picture cannot use this file. {why}"))
     }
 
     fn icon(&mut self, name: &str) -> Thumbnail {

@@ -16,6 +16,7 @@ struct Host {
     requests: Vec<(FileRequest, String)>,
     asked: Vec<String>,
     answer: Option<Thumbnail>,
+    note: bool,
 }
 
 impl FormHost for Host {
@@ -25,6 +26,9 @@ impl FormHost for Host {
     fn thumbnail(&mut self, path: &str) -> Thumbnail {
         self.asked.push(path.to_string());
         self.answer.clone().unwrap_or(Thumbnail::None)
+    }
+    fn path_note(&mut self, path: &str) -> Option<String> {
+        self.note.then(|| format!("About {path}"))
     }
 }
 
@@ -181,6 +185,21 @@ fn thumbnails_come_from_the_host_in_all_their_states() {
         "the alt text names the picture"
     );
     assert_eq!(h.query_all_by_label("No such file").count(), 0);
+}
+
+#[test]
+fn the_host_can_say_something_about_a_path_and_the_thumbnail_stays() {
+    let mut h = harness(image_spec(), two_pictures());
+    h.state_mut().host.answer = Some(Thumbnail::Ready {
+        texture: egui::TextureId::default(),
+        size: vec2(64.0, 32.0),
+    });
+    h.run();
+    assert_eq!(h.query_all_by_label("About b.png").count(), 0);
+    h.state_mut().host.note = true;
+    h.run();
+    assert_eq!(h.query_all_by_label("About b.png").count(), 1);
+    assert!(h.query_by_role_and_label(Role::Image, "first").is_some());
 }
 
 #[test]

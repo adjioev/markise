@@ -358,6 +358,43 @@ fn a_block_that_cannot_be_prepared_fails_without_a_helper() {
     assert_eq!(results(&r, 1)[0].1, Outcome::Failed("no such thing".to_string()));
 }
 
+struct NoteSource;
+impl JobSource for NoteSource {
+    fn prepare(&self) -> Result<Prepared, String> {
+        Ok(Prepared::default())
+    }
+    fn file(&self, _: Area, _: &str) -> Option<Vec<u8>> {
+        None
+    }
+    fn images_note(&self) -> Option<String> {
+        Some("File not found: x.png".to_string())
+    }
+}
+
+#[test]
+fn a_picture_that_did_not_come_is_named_by_the_job_and_nothing_else_is() {
+    let r = rig(|peer, m, _| {
+        if let ToHelper::Render(q) = m {
+            let kind = if q.width == 21 {
+                FailKind::Images
+            } else {
+                FailKind::Script
+            };
+            let reason = "the helper's words".to_string();
+            peer.say(FromHelper::Failed { id: q.id, kind, reason }, &[]);
+        }
+    });
+    let mut images = job(1);
+    images.width = 21;
+    images.source = Arc::new(NoteSource);
+    let mut script = job(2);
+    script.source = Arc::new(NoteSource);
+    r.client.want(vec![images, script]);
+    let got = results(&r, 2);
+    assert_eq!(got[0], (1, Outcome::MissingImage("File not found: x.png".to_string())));
+    assert_eq!(got[1], (2, Outcome::Failed("the helper's words".to_string())));
+}
+
 #[test]
 fn a_failure_is_for_that_block_and_the_helper_goes_on() {
     let r = rig(|peer, m, _| {

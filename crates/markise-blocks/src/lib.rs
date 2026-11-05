@@ -118,7 +118,12 @@ fn open_regular(path: &Path) -> Result<File, String> {
     // the shared hardened opener: regular files only, never blocking
     markise_doc::resource::open_regular(path)
         .map(|(f, _)| f)
-        .map_err(|e| format!("cannot open: {e}"))
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => "File not found".to_string(),
+            std::io::ErrorKind::PermissionDenied => "No permission to read this file".to_string(),
+            std::io::ErrorKind::InvalidInput => "Not a regular file".to_string(),
+            _ => "This file cannot be opened".to_string(),
+        })
 }
 
 /// Decodes the image at `src` (a local path). URLs are not fetched (M1).
@@ -147,12 +152,12 @@ pub fn decode_unless(
     let give_up = || if stale() { Err(DECODE_STALE.to_string()) } else { Ok(()) };
     give_up()?;
     if src.contains("://") || src.starts_with("data:") {
-        return Err("remote/inline images are not loaded yet".into());
+        return Err("Images from the web are not loaded yet".into());
     }
     let file = open_regular(Path::new(src))?;
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     if len > limits.max_encoded {
-        return Err(format!("image file too large ({} MB)", len >> 20));
+        return Err(format!("File too large ({} MB)", len >> 20));
     }
     // the encoded bytes (read here, and possibly copied once more by the decoder) count
     // against the budget before any decoder exists
@@ -161,9 +166,9 @@ pub fn decode_unless(
     // the bound is enforced while reading too (the file may grow after the size check)
     file.take(limits.max_encoded + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| format!("cannot read: {e}"))?;
+        .map_err(|_| "This file cannot be read".to_string())?;
     if bytes.len() as u64 > limits.max_encoded {
-        return Err("image file too large".into());
+        return Err("File too large".into());
     }
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
@@ -174,10 +179,12 @@ pub fn decode_unless(
     l.max_alloc = Some(limits.max_alloc);
     reader.limits(l);
     // one decoder: header first, then (if acceptable) the pixels
-    let decoder = reader.into_decoder().map_err(|e| format!("cannot decode: {e}"))?;
+    let decoder = reader
+        .into_decoder()
+        .map_err(|_| "Not a picture this can show".to_string())?;
     let (w, h) = decoder.dimensions();
     if w > limits.max_side || h > limits.max_side || w as u64 * h as u64 > limits.max_pixels {
-        return Err(format!("image too large to display ({w}×{h})"));
+        return Err(format!("Too large to show ({w}×{h})"));
     }
     // decoded buffer + RGBA8 conversion + encoded input. Re-acquired as one reservation
     // (releasing first) so two workers can never wait on each other's partial holdings.
@@ -185,7 +192,7 @@ pub fn decode_unless(
     drop(input_guard);
     let _guard = budget.acquire(need);
     give_up()?;
-    let img = image::DynamicImage::from_decoder(decoder).map_err(|e| format!("cannot decode: {e}"))?;
+    let img = image::DynamicImage::from_decoder(decoder).map_err(|_| "Not a picture this can show".to_string())?;
     give_up()?;
     let size = [img.width(), img.height()];
     let img = if img.width() > max_side || img.height() > max_side {
@@ -363,6 +370,17 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_is_in_plain_words_with_no_system_error_in_it() {
+        let d = dir("plain");
+        let e = decode(d.join("none.png").to_str().unwrap(), 64).unwrap_err();
+        assert_eq!(e, "File not found");
+        let not_a_picture = d.join("words.png");
+        std::fs::write(&not_a_picture, "just words").unwrap();
+        let e = decode(not_a_picture.to_str().unwrap(), 64).unwrap_err();
+        assert!(!e.contains("os error"), "{e}");
+    }
+
+    #[test]
     fn oversized_images_are_refused_from_the_header() {
         let d = dir("limits");
         let p = d.join("wide.png");
@@ -375,7 +393,7 @@ mod tests {
             ..Default::default()
         };
         let e = decode_with(p.to_str().unwrap(), 2048, small, &budget).unwrap_err();
-        assert!(e.contains("too large"), "{e}");
+        assert!(e.contains("Too large"), "{e}");
         let side = DecodeLimits {
             max_side: 2000,
             ..Default::default()
@@ -402,7 +420,7 @@ mod tests {
             ..Default::default()
         };
         let e = decode_with(p.to_str().unwrap(), 2048, small, &budget).unwrap_err();
-        assert!(e.contains("file too large"), "{e}");
+        assert!(e.contains("File too large"), "{e}");
         assert_eq!(budget.used(), 0);
         // within the bound it decodes (trailing bytes are ignored by the PNG decoder)
         let img = decode_with(p.to_str().unwrap(), 2048, DecodeLimits::default(), &budget).unwrap();

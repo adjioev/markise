@@ -55,6 +55,9 @@ struct Asked {
     /// What the client was last told.
     told: Vec<u64>,
     failed: HashMap<u64, Arc<str>>,
+    /// Those of them for a file missing: asked for again when the window comes back to the front,
+    /// which is when the file may have come.
+    missing: HashSet<u64>,
     /// The newest picture of each block, by its identity: it stands in for the next one.
     latest: HashMap<u64, u64>,
     /// A key was seen whose job is gone: the view has to ask again.
@@ -73,6 +76,7 @@ pub struct SiteBoard {
     /// Come from the client and not yet textures.
     waiting: Mutex<Vec<(u64, Shot)>>,
     was_available: Mutex<bool>,
+    was_focused: Mutex<bool>,
 }
 
 fn css_color(c: Rgba) -> String {
@@ -123,6 +127,7 @@ impl SiteBoard {
             pictures: Mutex::new(ShotCache::new(MEMORY_LIMIT)),
             waiting: Mutex::default(),
             was_available: Mutex::new(true),
+            was_focused: Mutex::new(true),
         }
     }
 
@@ -229,11 +234,32 @@ impl SiteBoard {
                 Outcome::Failed(why) => {
                     if asked.failed.len() >= REMEMBERED {
                         asked.failed.clear();
+                        asked.missing.clear();
                     }
                     asked.failed.insert(key, why.into());
                     changed = true;
                 }
+                Outcome::MissingImage(why) => {
+                    if asked.failed.len() >= REMEMBERED {
+                        asked.failed.clear();
+                        asked.missing.clear();
+                    }
+                    asked.failed.insert(key, why.into());
+                    asked.missing.insert(key);
+                    changed = true;
+                }
             }
+        }
+        let focused = ctx.input(|i| i.focused);
+        let was_focused = std::mem::replace(
+            &mut *self.was_focused.lock().unwrap_or_else(|e| e.into_inner()),
+            focused,
+        );
+        let came_back = focused && !was_focused;
+        if came_back && !asked.missing.is_empty() {
+            let missing = std::mem::take(&mut asked.missing);
+            asked.failed.retain(|k, _| !missing.contains(k));
+            changed = true;
         }
         let now = waiting.len().min(UPLOADS_PER_FRAME);
         let mut pictures = self.pictures.lock().unwrap_or_else(|e| e.into_inner());

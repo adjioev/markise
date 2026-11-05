@@ -61,8 +61,26 @@ fn small(ui: &mut Ui, text: String) {
     ui.add(egui::Label::new(RichText::new(text).size(12.0).weak()).wrap());
 }
 
-/// Draws the question, `above` points higher than the update card's place.
-pub fn show_card(ctx: &Context, pending: &Pending, above: f32, out: &mut Vec<PackageAction>) {
+/// What accepting a package means, on a system that can run its code or on one that cannot. All of
+/// the wording of this question about what runs is here: it is a consent, and has to stay true.
+fn consent_text(name: &str, runs_code: bool) -> String {
+    if runs_code {
+        format!(
+            "This document uses the block package {name}. If you allow it, Markise runs the package's code in an \
+             isolated background process to draw its blocks, with no network access and no access to your files \
+             except the package and images in this document's folder. Use it if you trust where this folder came from."
+        )
+    } else {
+        format!(
+            "This document uses the block package {name}. If you allow it, its data is used for the views and forms, \
+             and no code runs. Use it if you trust where this folder came from."
+        )
+    }
+}
+
+/// Draws the question, `above` points higher than the update card's place. `runs_code`: there is a
+/// helper here to run the package's code with.
+pub fn show_card(ctx: &Context, pending: &Pending, runs_code: bool, above: f32, out: &mut Vec<PackageAction>) {
     egui::Area::new(egui::Id::unique("markise-package-card"))
         .order(egui::Order::Middle)
         .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -36.0 - above))
@@ -71,14 +89,7 @@ pub fn show_card(ctx: &Context, pending: &Pending, above: f32, out: &mut Vec<Pac
                 ui.set_max_width(360.0);
                 let name = name_of(&pending.id.library, &pending.id.version);
                 ui.label(RichText::new(format!("Use the block package {name}?")).strong());
-                small(
-                    ui,
-                    "This folder asks for it. A package belongs to the site that made it: it \
-                     describes the site's blocks and holds code that later versions of Markise \
-                     may run in isolation. Nothing runs now. Use it if you trust where this \
-                     folder came from."
-                        .to_string(),
-                );
+                small(ui, consent_text(&name, runs_code));
                 if let Some(previous) = &pending.previous {
                     small(
                         ui,
@@ -162,5 +173,28 @@ pub fn status_item(ui: &mut Ui, status: &PackageStatus, out: &mut Vec<PackageAct
                 );
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::consent_text;
+
+    #[test]
+    fn the_question_says_what_runs_where_something_does() {
+        let text = consent_text("lib 1.2.3", true);
+        assert!(text.contains("block package lib 1.2.3"), "{text}");
+        assert!(text.contains("runs the package's code"), "{text}");
+        assert!(text.contains("no network access"), "{text}");
+        assert!(!text.contains("later"), "{text}");
+        assert!(!text.contains("Nothing runs"), "{text}");
+    }
+
+    #[test]
+    fn and_only_what_happens_where_nothing_can() {
+        let text = consent_text("lib 1.2.3", false);
+        assert!(text.contains("no code runs"), "{text}");
+        assert!(!text.contains("background process"), "{text}");
+        assert!(!text.contains("later"), "{text}");
     }
 }

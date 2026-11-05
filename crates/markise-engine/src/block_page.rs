@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
+use markise_doc::resource::{has_scheme, is_absolute_like};
 use markise_export::{HtmlOptions, escape_html, render_body};
 use markise_md::{Document, ParseOptions};
 use markise_package::InstalledPackage;
@@ -21,6 +22,10 @@ use crate::block_view::PackageViews;
 
 /// The kinds of file a block's own images can be.
 const IMAGE_TYPES: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"];
+/// How many images one note names.
+const NOTE_NAMES: usize = 3;
+/// How much of one path a note shows.
+const NOTE_PATH_CHARS: usize = 200;
 
 /// One block, ready to be drawn.
 pub struct BlockPage {
@@ -75,7 +80,14 @@ impl JobSource for BlockPage {
         let variant = schema.schema.variants().any(|v| v == self.args);
         let argument = schema.schema.raw.get("argument").is_some();
         let html = markup(&fields, &spec, variant, argument);
-        *self.images.lock().unwrap_or_else(|e| e.into_inner()) = images_in(&html);
+        let images = images_in(&html);
+        // a page's address would lose the dots and could name another file: such a path never gets there
+        // (these are decoded already)
+        let refused: Vec<String> = sorted(&images).iter().filter_map(|p| unreachable_path(p)).collect();
+        if !refused.is_empty() {
+            return Err(joined(refused));
+        }
+        *self.images.lock().unwrap_or_else(|e| e.into_inner()) = images;
         let shared = self.package_file("styles/styles.css");
         let own = self.package_file(&format!("components/{0}/{0}.css", self.name));
         Ok(Prepared {
@@ -102,6 +114,116 @@ impl JobSource for BlockPage {
             }
         }
     }
+
+    fn images_note(&self) -> Option<String> {
+        let images = self.images.lock().unwrap_or_else(|e| e.into_inner());
+        let notes: Vec<String> = sorted(&images)
+            .iter()
+            .filter(|p| !has_scheme(p))
+            .filter_map(|p| self.why_not_read(p))
+            .collect();
+        (!notes.is_empty()).then(|| joined(notes))
+    }
+}
+
+impl BlockPage {
+    /// Why this image of the block's own list cannot be read, in plain words, with its path.
+    fn why_not_read(&self, path: &str) -> Option<String> {
+        let shown = clipped(path);
+        if !is_image(path) {
+            return Some(format!("Not a picture file: {shown}"));
+        }
+        let Some(folder) = &self.folder else {
+            return Some(format!("The document is not saved in a folder yet: {shown}"));
+        };
+        let dir = Dir::open_ambient_dir(folder, ambient_authority()).ok()?;
+        let file = match dir.open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(format!("File not found: {shown}")),
+            // the system saying no has a number; the handle refusing a link that leads out has none
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && e.raw_os_error().is_some() => {
+                return Some(format!("Cannot read: {shown}"));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Some(outside(&shown)),
+            Err(_) => return Some(format!("This file cannot be opened: {shown}")),
+        };
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() {
+            return Some(format!("Not a file: {shown}"));
+        }
+        (metadata.len() > proto::MAX_FILE as u64).then(|| format!("File too large: {shown}"))
+    }
+}
+
+fn outside(shown: &str) -> String {
+    format!("Outside the document's folder: {shown}")
+}
+
+fn clipped(path: &str) -> String {
+    if path.chars().count() <= NOTE_PATH_CHARS {
+        return path.to_string();
+    }
+    let mut out: String = path.chars().take(NOTE_PATH_CHARS).collect();
+    out.push('…');
+    out
+}
+
+fn sorted(images: &HashSet<String>) -> Vec<&String> {
+    let mut all: Vec<&String> = images.iter().collect();
+    all.sort();
+    all
+}
+
+/// Some reasons as one note, of a length to read.
+fn joined(notes: Vec<String>) -> String {
+    let more = notes.len().saturating_sub(NOTE_NAMES);
+    let mut note = notes.into_iter().take(NOTE_NAMES).collect::<Vec<_>>().join("; ");
+    if more > 0 {
+        note.push_str(&format!("; and {more} more"));
+    }
+    note
+}
+
+/// Why a picture of a block can never have the image at this path, whatever is on disk: a page gets
+/// nothing but files inside the document's folder (ADR 0023). `None` for one that may be there. The
+/// editor's own display of an image goes by its own rule and shows all of these it can read. Cheap,
+/// and touches no disk.
+pub fn unreachable_image(src: &str) -> Option<String> {
+    if has_scheme(src) {
+        return unreachable_path(src);
+    }
+    let path = src.split(['?', '#']).next().unwrap_or("");
+    unreachable_path(&percent_decoded(path))
+}
+
+/// [`unreachable_image`] of a path decoded already, as a page's address comes to one.
+fn unreachable_path(path: &str) -> Option<String> {
+    let shown = clipped(path);
+    if has_scheme(path) {
+        let own = ["data:", "blob:"]
+            .iter()
+            .any(|s| path.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)));
+        return (!own).then(|| format!("Not a file in the document's folder: {shown}"));
+    }
+    if is_absolute_like(path) {
+        return Some(outside(&shown));
+    }
+    let mut depth = 0i32;
+    let mut dots = false;
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                dots = true;
+                depth -= 1;
+                if depth < 0 {
+                    return Some(outside(&shown));
+                }
+            }
+            _ => depth += 1,
+        }
+    }
+    dots.then(|| format!("Not a plain path in the document's folder: {shown}"))
 }
 
 /// Through a handle on the folder: whatever a path or a link says, nothing outside it opens, also if
