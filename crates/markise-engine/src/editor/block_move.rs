@@ -216,15 +216,35 @@ impl EditorView {
         let Some(m) = self.block_with_opener(opener) else {
             return Ok(false);
         };
+        if !self.is_drop_line(opener, to) {
+            return Ok(false);
+        }
         self.move_range(m.range, to)
+    }
+
+    /// `to` is, in the document as it stands, a line this block can land on.
+    fn is_drop_line(&self, opener: usize, to: usize) -> bool {
+        let doc = self.session.doc();
+        if self.drop_line_at_end(opener) == Some(to) {
+            return true;
+        }
+        if doc.text().get(to..).is_none() {
+            return false;
+        }
+        let top = doc.top_at(to).and_then(|t| doc.top_span(t));
+        top.is_some_and(|s| line_start(doc.text(), s.start) == to && self.drop_line(opener, s.start) == Some(to))
     }
 
     /// The line the block with this opener can be dropped on so as to stand before what starts at
     /// `item`: `None` when `item` starts nothing at the block's level, is inside the block or leaves it
-    /// where it is.
+    /// where it is. A list or a quote is one thing there: its items are no places.
     pub fn drop_line(&self, opener: usize, item: usize) -> Option<usize> {
         let doc = self.session.doc();
         let m = self.block_with_opener(opener)?;
+        let top = doc.top_span(doc.top_at(item)?)?;
+        if line_start(doc.text(), top.start) != line_start(doc.text(), item) {
+            return None;
+        }
         let chain = doc.named_containers_at(item);
         // the same parent, or the parent's closer: the end of its body
         let same_parent = match &m.parent {
@@ -325,6 +345,7 @@ impl EditorView {
             self.add_own_mode(at, mode);
         }
         if was_sticky {
+            self.end_sticky();
             self.begin_sticky(start);
         }
         self.follow_sticky();

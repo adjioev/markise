@@ -3182,7 +3182,8 @@ impl MarkiseApp {
                         self.block_form.request(out.open_block_form.take());
                         self.block_form.request_switch(out.switch_block_view.take());
                         self.block_library.request(out.open_block_library.take());
-                        self.block_library.request_move(out.move_block.take());
+                        let origin = (d.id, d.viewer.ed.session.revision().counter);
+                        self.block_library.request_move(out.move_block.take(), Some(origin));
                         if let Some(n) = d.viewer.take_notice() {
                             self.banner = Some(Banner::Info(n));
                         }
@@ -3311,7 +3312,8 @@ impl MarkiseApp {
         self.block_form.request(out.open_block_form);
         self.block_form.request_switch(out.switch_block_view);
         self.block_library.request(out.open_block_library);
-        self.block_library.request_move(out.move_block);
+        let origin = self.block_edit_origin();
+        self.block_library.request_move(out.move_block, origin);
         if let Some(link) = out.link {
             self.open_link(&ctx, &link);
         }

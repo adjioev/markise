@@ -300,7 +300,12 @@ fn a_list_is_one_block_for_a_drop() {
     let s = surface(doc);
     let line = |n: &str| doc.find(n).unwrap();
     assert_eq!(s.ed.drop_line(0, line("- one")), Some(line("- one")));
-    for inside in ["two", "- two", "- three", "q2", "> q2", "one"] {
+    assert_eq!(
+        s.ed.drop_line(0, line("one")),
+        Some(line("- one")),
+        "the text of its first item is its first line"
+    );
+    for inside in ["two", "- two", "- three", "q2", "> q2"] {
         assert_eq!(s.ed.drop_line(0, line(inside)), None, "{inside}");
     }
 }

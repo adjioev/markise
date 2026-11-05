@@ -126,7 +126,8 @@ and pages split nothing differently (ADR 0018, ADR 0016).
 
 **Bytes.** The block's lines are copied as they stand, odd spacing, trailing blanks, indented opener and ids included. Around
 it, the blank lines it leaves behind go with it, and it gets one blank line each side with the least that does
-that, as an insertion does (one helper). Only blank lines can go. Something it held apart with no blank line
+that, as an insertion does (one helper). Only blank lines can go, and only what the parser calls blank: spaces and tabs. A no-break space is text. A move that
+would take anything else is refused. Something it held apart with no blank line
 stays apart: a blank line is written so that two paragraphs do not run together. Removing a block between two lists
 does let them read as one list afterwards, as it would by hand: their bytes stay. A file ending without a line ending stays so.
 
@@ -148,7 +149,8 @@ innermost block under the pointer has it, and nothing shows otherwise: no button
 Pressing it starts a drag, with the pointer an arrow. A thin accent line shows where it would land, among the
 places on screen at the block's level. Its own place is one of those, where it lands nowhere, so a press and release moves
 nothing. Near the top or bottom edge the view scrolls, faster nearer the edge, and pages come in as they do for any scroll.
-Esc or any change of the document cancels. Release moves it. A read-only view has no handle.
+A list or a quote is one thing here: its items are no places. Esc or any change of the document cancels. Release moves
+it, and a request from a frame ago goes nowhere if the document or its revision is another by then. A read-only view has no handle.
 
 ## Consequences
 

@@ -14,8 +14,8 @@ pub(super) struct BlockLibraryState {
     open: Option<OpenLibrary>,
     /// `/` was typed: opens on the next frame, with what was typed after it.
     requested: Option<String>,
-    /// A block was dropped: its opener and the line it goes to.
-    requested_move: Option<(usize, usize)>,
+    /// A block was dropped: its opener and the line it goes to, in this document at this revision.
+    requested_move: Option<((usize, usize), (u64, u64))>,
 }
 
 impl BlockLibraryState {
@@ -25,9 +25,9 @@ impl BlockLibraryState {
         }
     }
 
-    pub(super) fn request_move(&mut self, drop: Option<(usize, usize)>) {
-        if drop.is_some() {
-            self.requested_move = drop;
+    pub(super) fn request_move(&mut self, drop: Option<(usize, usize)>, origin: Option<(u64, u64)>) {
+        if let (Some(drop), Some(origin)) = (drop, origin) {
+            self.requested_move = Some((drop, origin));
         }
     }
 }
@@ -98,11 +98,21 @@ impl MarkiseApp {
         }
     }
 
+    /// The document as it stands.
+    pub(super) fn block_edit_origin(&self) -> Option<(u64, u64)> {
+        let d = self.doc.as_ref()?;
+        Some((d.id, d.viewer.ed.session.revision().counter))
+    }
+
     /// What the drag of a block came to.
     fn block_drop(&mut self) {
-        let Some((opener, line)) = self.block_library.requested_move.take() else {
+        let Some(((opener, line), origin)) = self.block_library.requested_move.take() else {
             return;
         };
+        // named from the last frame: in another document or revision it means nothing
+        if self.block_edit_origin() != Some(origin) {
+            return;
+        }
         if self.block_draft_changed() {
             self.block_form_message("Save or cancel this draft before moving a block.");
             return;
