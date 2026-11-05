@@ -80,7 +80,7 @@ impl MarkiseApp {
 
     /// Move Block Up or Down.
     pub(super) fn move_block_at_caret(&mut self, up: bool) -> bool {
-        if !self.block_move_allowed() {
+        if !self.block_move_allowed() || self.keyboard_elsewhere() {
             return false;
         }
         let in_source = self.source_focused();
@@ -134,6 +134,18 @@ impl MarkiseApp {
         self.block_move_done(result);
     }
 
+    /// The keyboard is in a field of something else, such as Find: what it types and its commands are not
+    /// the document's.
+    fn keyboard_elsewhere(&self) -> bool {
+        let (Some(ctx), Some(d)) = (&self.ctx, &self.doc) else {
+            return false;
+        };
+        let Some(focused) = ctx.memory(|m| m.focused()) else {
+            return false;
+        };
+        d.viewer.surface_id() != Some(focused) && !self.source_focused()
+    }
+
     /// A block can be deleted now: as for a move, but no package is needed, and a draft is asked about.
     fn block_delete_allowed(&self) -> bool {
         self.doc
@@ -152,7 +164,7 @@ impl MarkiseApp {
 
     /// Delete Block.
     pub(super) fn delete_block_at_caret(&mut self) -> bool {
-        if !self.block_delete_allowed() {
+        if !self.block_delete_allowed() || self.keyboard_elsewhere() {
             return false;
         }
         let in_source = self.source_focused();

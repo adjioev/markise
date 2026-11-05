@@ -332,9 +332,13 @@ const PRESETS: [(&str, &str); 3] = [
 ];
 
 /// The lines with something on them, in no order: what must not be lost or doubled.
+/// Lines by any ending: LF, CRLF or a lone CR.
+fn split_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split(['\r', '\n'])
+}
+
 fn lines(text: &str) -> Vec<String> {
-    let mut out: Vec<_> = text
-        .lines()
+    let mut out: Vec<_> = split_lines(text)
         .filter(|l| !l.trim().is_empty())
         .map(str::to_string)
         .collect();
@@ -344,7 +348,7 @@ fn lines(text: &str) -> Vec<String> {
 
 /// How many of the trailing ids repeat another.
 fn repeats(text: &str) -> usize {
-    let mut ids: Vec<&str> = (text.lines())
+    let mut ids: Vec<&str> = split_lines(text)
         .filter_map(|l| l.trim_end().strip_suffix('}')?.rsplit_once("{#").map(|x| x.1))
         .collect();
     let n = ids.len();
@@ -437,6 +441,33 @@ fn after_a_block_before_it_the_caret_is_on_the_free_line_there() {
 }
 
 #[test]
+fn every_line_ending_keeps_what_stands_around_it_for_delete_move_and_insert() {
+    // a lone CR
+    assert_eq!(
+        deleted("Before.\r\r:::x\rBo‸dy\r:::\r\rAfter.\r").0,
+        "Before.\r\rAfter.\r"
+    );
+    assert_eq!(deleted("a\r:::x\rb‸\r:::\rc\r").0, "a\r\rc\r");
+    assert_eq!(deleted("a\r\r:::x\rb‸\r:::\r").0, "a\r");
+    // mixed
+    assert_eq!(deleted("a\n\r\n:::x\rb‸\n:::\r\n\rc\n").0, "a\n\r\nc\n");
+    assert_eq!(moved("a\r\r:::x\r\rb‸\r\r:::\r", true), ":::x\r\rb\r\r:::\r\ra\r");
+    assert_eq!(moved(":::x\r\rb‸\r\r:::\r\ra\r", false), "a\r\r:::x\r\rb\r\r:::\r");
+    assert_eq!(
+        moved("a\n\r\n:::x\r\nb‸\r\n:::\r\n", true),
+        ":::x\r\nb\r\n:::\r\n\r\na\r\n"
+    );
+    let mut s = surface("Before.\r\r:::x\rBody\r:::\r\rAfter.\r");
+    s.caret(2);
+    let at = s.text().find("After.").unwrap();
+    s.caret(at);
+    s.ed.insert_block("y", ":::y\nn\n:::\n", false).unwrap();
+    assert_eq!(s.text(), "Before.\r\r:::x\rBody\r:::\r\rAfter.\r\r:::y\rn\r:::\r");
+    s.undo();
+    assert_eq!(s.text(), "Before.\r\r:::x\rBody\r:::\r\rAfter.\r");
+}
+
+#[test]
 fn a_no_break_space_is_text_and_stays() {
     let (out, _) = deleted("a\n\n:::x\nb‸\n:::\n\u{a0}\n\nc\n");
     assert_eq!(out, "a\n\n\u{a0}\n\nc\n");
@@ -496,12 +527,29 @@ proptest! {
         pieces in prop::collection::vec(0..PIECES.len(), 1..7),
         gaps in prop::collection::vec(0..4usize, 1..4),
         ops in prop::collection::vec(op(), 1..10),
+        endings in 0..4usize,
     ) {
         let mut doc = String::new();
         for (i, p) in pieces.iter().enumerate() {
             doc.push_str(PIECES[*p]);
             doc.push_str(&"\n".repeat(gaps[i % gaps.len()]));
         }
+        // every line ending a file can have, mixed too
+        let doc = match endings {
+            0 => doc,
+            1 => doc.replace('\n', "\r\n"),
+            2 => doc.replace('\n', "\r"),
+            _ => {
+                let mut mixed = String::new();
+                for (i, part) in doc.split('\n').enumerate() {
+                    if i > 0 {
+                        mixed.push_str(["\n", "\r\n", "\r"][i % 3]);
+                    }
+                    mixed.push_str(part);
+                }
+                mixed
+            }
+        };
         let mut s = surface(&doc);
         let start = s.ed.session.history().undo_len();
         let mut states = vec![doc.clone()];
