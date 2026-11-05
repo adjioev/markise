@@ -84,6 +84,7 @@ fn parse_groups(file: &str, v: Option<&Value>, known: &BTreeSet<String>, issues:
         }
     };
     let mut out: Vec<PaletteGroup> = Vec::new();
+    let mut listed = BTreeSet::new();
     for (i, item) in items.iter().enumerate() {
         let what = format!("group {i}");
         let Some(id) = opt_token(file, &what, item.get("id"), issues) else {
@@ -101,6 +102,10 @@ fn parse_groups(file: &str, v: Option<&Value>, known: &BTreeSet<String>, issues:
                     match name.as_str() {
                         Some(name) => {
                             check_block(file, &format!("group \"{id}\""), name, known, issues);
+                            if !listed.insert(name.to_string()) {
+                                issues.push(file, format!("group \"{id}\": a block is listed more than once"));
+                                continue;
+                            }
                             blocks.push(name.to_string());
                         }
                         None => {

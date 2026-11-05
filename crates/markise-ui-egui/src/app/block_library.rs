@@ -37,6 +37,13 @@ impl MarkiseApp {
         self.block_library.chosen
     }
 
+    /// Closes it, the keyboard going back where it was: Close and Quit go on from there.
+    pub(super) fn block_library_close(&mut self, ctx: &Context) {
+        if let Some(id) = self.block_library.open.take().and_then(|o| o.previous_focus) {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
+    }
+
     fn open_block_library(&mut self, ctx: &Context, opened: Opened, query: String) -> bool {
         let Some(package) = self.block_package().cloned() else {
             return false;
@@ -93,7 +100,10 @@ impl MarkiseApp {
             return;
         };
         // the keyboard goes back in this very frame: what the field took is not the document's
-        ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
+        ctx.input_mut(|i| {
+            i.events
+                .retain(|e| !matches!(e, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Ime(_)));
+        });
         if act != LibraryAct::Dismiss
             && let Some(id) = open.previous_focus
         {
