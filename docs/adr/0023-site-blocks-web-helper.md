@@ -207,6 +207,25 @@ picture. The helper's own screen has no say (ADR 0023, Isolation).
 **Idle.** Nothing runs for a document at rest. `tell_client` speaks only when what is wanted changed; the client's thread sleeps with no timer unless a helper is up, and then wakes once
 to let it go after two minutes; a page's document is gone when it is done; no frame is asked for.
 
+### The switch
+
+`BlockViewMode` goes Native, Site, Markdown (ADR 0021), per block and for the document, with the commands and the button that were there. What each state shows depends on what
+a block can show (`BlockViewMode::shown`):
+
+| State | A block with a view | A block with no view |
+|---|---|---|
+| Native | its view | its picture |
+| Site | its picture | its picture |
+| Markdown | the card | the card |
+
+So a block with no view has two states, and a switch skips what shows the same (`next_for`). With nothing to draw with, Site is skipped everywhere: a block with no view then has
+one state and no button, as before this phase. A state that shows what the document's state shows is no state of its own. Whether the last state should be the card or a block's raw text
+stays an open question for the owner: this leaves what exists.
+
+A picture being asked for from inside a block moves the caret to the place after it, since a block holding a selection's end shows what it holds. A block not filled in yet has no look
+on any site: in the Site state it stays native with its warning. A block with a structural problem is a card in every state. The choice is kept as the other states are: per document, for the
+session, by a live mark on the opener. A block just inserted starts in what its view allows, and shows its picture when the caret leaves it, if it has no view.
+
 ### Distribution
 
 The helper goes in the app bundle, signed before the bundle (see below for the phase's last step). Ad-hoc today, as

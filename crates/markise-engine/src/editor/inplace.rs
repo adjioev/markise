@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use markise_doc::{DocPos, Params, Patch, PatchSet, Selection};
 use markise_layout::caret::Geometry;
-use markise_layout::{BlockViewMode, Images, NativeAt, TextShaper};
+use markise_layout::{BlockViewMode, BlockViews, Images, NativeAt, TextShaper};
 
 use super::command::CommandError;
 use super::{EditorView, MarkId, StateId, TypingDir};
@@ -136,28 +136,70 @@ impl EditorView {
 
     /// The next state for the whole document. Blocks that differed follow it.
     pub fn switch_all_block_views(&mut self) {
-        self.place.mode = self.place.mode.next();
+        self.place.mode = self.place.mode.next_for(true, self.view.can_draw_site());
         self.clear_own_modes();
         self.follow_block_modes();
+        self.leave_block_for_picture();
+    }
+
+    /// Whether a block of this name has a view of its own. With no package to say, nothing is ruled out.
+    fn name_has_view(&self, name: &str) -> bool {
+        self.place.fields.as_ref().is_none_or(|f| f.has_view(name))
+    }
+
+    /// What comes after this block's state. Asked of the switch before it is pressed, to say so.
+    pub fn next_block_view(&self, opener: usize) -> BlockViewMode {
+        let has_view = self.opener_name(opener).is_some_and(|n| self.name_has_view(&n));
+        (self.view.block_mode_of(opener)).next_for(has_view, self.view.can_draw_site())
+    }
+
+    /// A picture shows what no caret can stand in, and a block holding a selection's end shows what it
+    /// holds instead (ADR 0023). So whoever asks for a picture gets one: the caret goes after it.
+    fn leave_block_for_picture(&mut self) {
+        let p = self.session.selection().primary();
+        if !p.is_caret() || !self.view.can_draw_site() {
+            return;
+        }
+        let at = p.focus.offset;
+        let Some(c) = self.session.doc().named_containers_at(at).pop() else {
+            return;
+        };
+        let inside = c.opener.start < at && at < c.closer.end;
+        let site = self
+            .view
+            .block_mode_of(c.opener.start)
+            .shown(self.name_has_view(&c.name), true);
+        if !inside || site != BlockViewMode::Site {
+            return;
+        }
+        let after = match self.session.doc().gap_virt(c.closer.end) {
+            Some(virt) => DocPos::with_virt(c.closer.end, virt),
+            None => DocPos::new(c.closer.end),
+        };
+        self.set_selection(Selection::caret_at(after));
     }
 
     /// The next state for the block with this opener.
     pub fn switch_block_view(&mut self, opener: usize) {
-        let now = self.view.block_mode_of(opener);
-        let next = now.next();
+        let has_view = self.opener_name(opener).is_some_and(|n| self.name_has_view(&n));
+        let site = self.view.can_draw_site();
+        let next = self.next_block_view(opener);
         let own =
             (self.place.own_modes.iter()).position(|o| self.session.mark(o.mark).is_some_and(|p| p.offset == opener));
+        // what shows the same as the document's state needs no state of its own
         match own {
-            Some(i) if next == self.place.mode => {
+            Some(i) if next.shown(has_view, site) == self.place.mode.shown(has_view, site) => {
                 let o = self.place.own_modes.remove(i);
                 self.session.remove_mark(o.mark);
             }
             Some(i) => self.place.own_modes[i].mode = next,
+            None if next.shown(has_view, site) == self.place.mode.shown(has_view, site) => {}
             None => {
                 self.add_own_mode(opener, next);
             }
         }
         self.follow_block_modes();
+        self.leave_block_for_picture();
     }
 
     /// Hands the view where the blocks with a state of their own stand now.

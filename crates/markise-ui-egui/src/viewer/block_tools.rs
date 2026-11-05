@@ -274,6 +274,7 @@ impl DocViewer {
     ) {
         let says = match next {
             BlockViewMode::Native => "Show Native View",
+            BlockViewMode::Site => "Show as on the Site",
             BlockViewMode::Markdown => "Show Markdown",
         };
         let id = ui.scope_id().with(("markise-block-view", opener));
@@ -306,6 +307,13 @@ impl DocViewer {
                     c + vec2(s, s),
                 ];
                 painter.add(egui::Shape::line(pts.to_vec(), stroke));
+            }
+            // a page in a frame: what a site draws
+            BlockViewMode::Site => {
+                painter.circle_stroke(c, s * 1.1, stroke);
+                painter.line_segment([c + vec2(-s * 1.1, 0.0), c + vec2(s * 1.1, 0.0)], stroke);
+                let waist = Rect::from_center_size(c, vec2(s, 2.2 * s));
+                painter.add(egui::Shape::ellipse_stroke(c, waist.size() * 0.5, stroke));
             }
             // a card
             BlockViewMode::Native => {
@@ -416,10 +424,12 @@ impl DocViewer {
             if pointer.is_some_and(|p| row.contains(p)) {
                 self.pointer_on_block_control = true;
             }
-            if has_view && !outside {
-                let next = self.ed.view.block_mode_of(start).next();
+            if (has_view || self.ed.view.can_draw_site()) && !outside {
+                let next = self.ed.next_block_view(start);
                 let m = r.translate(vec2(-(side + 4.0), 0.0));
-                self.block_view_button(ui, m, surface, start, next, &c.name, out);
+                if !v.layout.has_picture() || pointer.is_some_and(|p| row.contains(p)) {
+                    self.block_view_button(ui, m, surface, start, next, &c.name, out);
+                }
             }
             // over a picture the buttons need a ground of their own, and only show when asked for
             let over_picture = v.layout.has_picture();

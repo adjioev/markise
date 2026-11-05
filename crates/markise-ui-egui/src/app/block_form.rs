@@ -111,12 +111,13 @@ impl MarkiseApp {
         self.block_with_view_at_caret().is_some()
     }
 
+    /// The block around the caret, when it has more than one thing to show.
     fn block_with_view_at_caret(&self) -> Option<usize> {
         let (package, d) = (self.block_package()?, self.doc.as_ref()?);
         let s = &d.viewer.ed.session;
         let c = block_at(s.doc(), s.selection().primary().focus.offset, &package.index)?;
-        package.index.block(&c.name)?.view?;
-        Some(c.opener.start)
+        let has_view = package.index.block(&c.name)?.view.is_some();
+        (has_view || d.viewer.ed.view.can_draw_site()).then_some(c.opener.start)
     }
 
     pub(super) fn switch_block_view_at_caret(&mut self) -> bool {

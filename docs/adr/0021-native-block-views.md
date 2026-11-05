@@ -206,13 +206,12 @@ in the view: the form adds it. A picture dropped or pasted into a field asks for
 
 ### The switch
 
-`markise_layout::BlockViewMode` is what a block can show as: `Native`, then `Markdown`, which is the generic
+`markise_layout::BlockViewMode` is what a block can show as: `Native`, then `Site` (ADR 0023), then `Markdown`, which is the generic
 card, where anything a card allows is allowed. A block with a structural problem is a card in any state, with its
-warning. `BlockViewMode::next` is the order a switch goes through; a state that comes later (a site's own
-rendering) goes in the enum and in that order, and nothing else asks for a state by position.
+warning. `BlockViewMode::next` is the order a switch goes through, and nothing else asks for a state by position.
 
 - **A block.** A button beside the block's Edit button says what comes next, or the command Switch This
-  Block's View (⇧⌘M) for the caret's block. A block with no view has neither.
+  Block's View (⇧⌘M) for the caret's block. A block with no view has neither, unless something can draw it (ADR 0023).
 - **The document.** Switch All Blocks' Views (⌥⇧⌘M) moves the document to the next state, and the blocks that
   differed follow it.
 - **Where it is kept.** The session keeps a block's own state at a live mark on its opener, so it survives

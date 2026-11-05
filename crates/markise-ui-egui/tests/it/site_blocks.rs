@@ -399,3 +399,142 @@ fn stopping_the_package_goes_back_to_cards() {
     assert!(picture(&mut h, at(":::plain")).is_none());
     assert!(shown(&mut h).contains("Drawn by its site"));
 }
+
+fn button_says(h: &H, what: &str) -> bool {
+    h.query_by_label(what).is_some()
+}
+
+#[test]
+fn a_block_with_a_view_goes_native_site_markdown_and_back() {
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    let mut h = f.ready_with(Some(p.source()));
+    common::run(&mut h);
+    let tip = at(":::tip");
+    let hello = at("Has a view");
+    let is_native = |h: &mut H| h.state_mut().viewer().unwrap().ed.view.native_block(hello).is_some();
+    assert!(is_native(&mut h));
+    assert!(button_says(&h, "Show as on the Site: tip"));
+    h.get_by_label("Show as on the Site: tip").click();
+    wait_for(&mut h, "its picture", |h| picture(h, tip).is_some());
+    assert!(!is_native(&mut h));
+    assert!(!shown(&mut h).contains("Has a view"));
+    // over a picture the buttons are for the pointer; the command needs none
+    let v = h.state_mut().viewer().unwrap();
+    assert_eq!(v.ed.next_block_view(tip), markise_layout::BlockViewMode::Markdown);
+    v.ed.switch_block_view(tip);
+    common::run(&mut h);
+    assert!(picture(&mut h, tip).is_none());
+    assert!(!is_native(&mut h));
+    assert!(shown(&mut h).contains("Has a view"), "the card");
+    assert!(button_says(&h, "Show Native View: tip"));
+    h.get_by_label("Show Native View: tip").click();
+    common::run(&mut h);
+    assert!(is_native(&mut h));
+    assert_eq!(text(&h), DOC);
+}
+
+#[test]
+fn a_block_with_no_view_skips_native() {
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    let mut h = f.ready_with(Some(p.source()));
+    wait_for(&mut h, "its picture", |h| picture(h, at(":::plain")).is_some());
+    let v = h.state_mut().viewer().unwrap();
+    assert_eq!(
+        v.ed.next_block_view(at(":::plain")),
+        markise_layout::BlockViewMode::Markdown
+    );
+    v.ed.switch_block_view(at(":::plain"));
+    common::run(&mut h);
+    assert!(picture(&mut h, at(":::plain")).is_none());
+    assert!(button_says(&h, "Show as on the Site: plain"));
+    h.get_by_label("Show as on the Site: plain").click();
+    wait_for(&mut h, "its picture again", |h| picture(h, at(":::plain")).is_some());
+    let (mode, own) = h.state_mut().viewer().unwrap().ed.block_view_state();
+    assert_eq!(mode, markise_layout::BlockViewMode::Native);
+    assert!(own.is_empty(), "as the document shows it: no state of its own {own:?}");
+}
+
+#[test]
+fn with_nothing_to_draw_with_the_switch_has_no_site_state() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    assert!(button_says(&h, "Show Markdown: tip"));
+    assert!(!button_says(&h, "Show as on the Site: tip"));
+    assert!(
+        !button_says(&h, "Show as on the Site: plain"),
+        "no view and no helper: no switch"
+    );
+    assert!(!button_says(&h, "Show Markdown: plain"));
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.switch_all_block_views();
+    assert_eq!(v.ed.block_view_state().0, markise_layout::BlockViewMode::Markdown);
+}
+
+#[test]
+fn the_whole_document_goes_through_the_states_and_a_block_on_its_own_follows() {
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    let mut h = f.ready_with(Some(p.source()));
+    wait_for(&mut h, "its picture", |h| picture(h, at(":::plain")).is_some());
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.switch_block_view(at(":::plain")); // Markdown on its own
+    v.ed.switch_all_block_views();
+    assert_eq!(
+        v.ed.block_view_state(),
+        (markise_layout::BlockViewMode::Site, Vec::new())
+    );
+    wait_for(&mut h, "both pictures", |h| {
+        picture(h, at(":::plain")).is_some() && picture(h, at(":::tip")).is_some()
+    });
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.switch_all_block_views();
+    common::run(&mut h);
+    assert!(picture(&mut h, at(":::plain")).is_none() && picture(&mut h, at(":::tip")).is_none());
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.switch_all_block_views();
+    common::run(&mut h);
+    assert!(
+        picture(&mut h, at(":::plain")).is_some(),
+        "its picture is its native state"
+    );
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.ed.view.native_block(at("Has a view")).is_some());
+}
+
+#[test]
+fn asking_for_a_picture_from_inside_a_block_leaves_it() {
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    let mut h = f.ready_with(Some(p.source()));
+    common::run(&mut h);
+    caret(&mut h, at("Has a view") + 3);
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.switch_block_view(at(":::tip"));
+    let focus = v.ed.session.selection().primary().focus;
+    assert!(focus.offset >= at("\n\nAfter"), "{focus:?}");
+    wait_for(&mut h, "its picture", |h| picture(h, at(":::tip")).is_some());
+    assert_eq!(text(&h), DOC, "a caret moved, nothing else");
+}
+
+#[test]
+fn the_choice_is_remembered_for_the_document() {
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    let mut h = f.ready_with(Some(p.source()));
+    common::run(&mut h);
+    h.get_by_label("Show as on the Site: tip").click();
+    wait_for(&mut h, "its picture", |h| picture(h, at(":::tip")).is_some());
+    let other = f.doc.with_file_name("other.md");
+    std::fs::write(&other, "Other.\n").unwrap();
+    h.state_mut().open(other);
+    common::wait_until(&mut h, "the other", |a| !a.is_loading());
+    common::run(&mut h);
+    h.state_mut().open(f.doc.clone());
+    common::wait_until(&mut h, "back", |a| a.document_path() == Some(&f.doc) && !a.is_loading());
+    common::run(&mut h);
+    wait_for(&mut h, "its picture again", |h| picture(h, at(":::tip")).is_some());
+    let mode = h.state_mut().viewer().unwrap().ed.view.block_mode_of(at(":::tip"));
+    assert_eq!(mode, markise_layout::BlockViewMode::Site);
+}
