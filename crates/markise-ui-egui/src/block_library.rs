@@ -135,15 +135,22 @@ impl OpenLibrary {
         });
     }
 
-    /// Keys, before the field and the document see them. Keys belong to a composition while one is
-    /// going on.
-    fn keys(&mut self, ctx: &Context) -> (Option<LibraryAct>, bool) {
+    /// Keys, before the field and the document see them: an action, whether the selection moved and
+    /// whether Return was pressed. Return is acted on after the field has read this frame's text. Keys
+    /// belong to a composition while one is going on, and the Return that ends one is its own.
+    fn keys(&mut self, ctx: &Context) -> (Option<LibraryAct>, bool, bool) {
+        let was_composing = self.composing;
         self.track_composition(ctx);
-        if self.composing {
-            return (None, false);
+        let (commit, typed) = ctx.input(|i| {
+            let commit = (i.events.iter()).any(|e| matches!(e, egui::Event::Ime(egui::ImeEvent::Commit(_))));
+            (commit, i.events.iter().any(|e| matches!(e, egui::Event::Text(_))))
+        });
+        if was_composing || self.composing {
+            ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+            return (None, false, false);
         }
         let (up, down, enter, escape, back) = ctx.input_mut(|i| {
-            let back = self.query.is_empty() && i.consume_key(Modifiers::NONE, Key::Backspace);
+            let back = self.query.is_empty() && !typed && i.consume_key(Modifiers::NONE, Key::Backspace);
             (
                 i.consume_key(Modifiers::NONE, Key::ArrowUp),
                 i.consume_key(Modifiers::NONE, Key::ArrowDown),
@@ -161,17 +168,9 @@ impl OpenLibrary {
             self.selected = (self.selected + 1) % n;
         }
         if escape || (back && self.opened == Opened::Typed) {
-            return (Some(LibraryAct::Close), false);
+            return (Some(LibraryAct::Close), false, false);
         }
-        if enter {
-            if let Some(&i) = self.rows.get(self.selected) {
-                return (Some(LibraryAct::Choose(self.library.entries()[i].preset)), false);
-            }
-            if self.opened == Opened::Typed {
-                return (Some(LibraryAct::Type(format!("/{}", self.query))), false);
-            }
-        }
-        (None, moved)
+        (None, moved, enter && !commit)
     }
 
     /// One frame.
@@ -186,7 +185,7 @@ impl OpenLibrary {
         if self.focus {
             ctx.input_mut(|i| {
                 i.events.retain(|e| match e {
-                    egui::Event::Text(t) => {
+                    egui::Event::Text(t) | egui::Event::Ime(egui::ImeEvent::Commit(t)) => {
                         self.query.push_str(t);
                         false
                     }
@@ -195,7 +194,7 @@ impl OpenLibrary {
             });
             self.set_query_rows();
         }
-        let (act, moved) = self.keys(ctx);
+        let (act, moved, enter) = self.keys(ctx);
         if act.is_some() {
             return act;
         }
@@ -251,7 +250,14 @@ impl OpenLibrary {
         if self.opened == Opened::Typed && self.query == "/" {
             return Some(LibraryAct::Type("/".to_string()));
         }
-        None
+        if !enter {
+            return None;
+        }
+        match self.rows.get(self.selected) {
+            Some(&i) => Some(LibraryAct::Choose(self.library.entries()[i].preset)),
+            None if self.opened == Opened::Typed => Some(LibraryAct::Type(format!("/{}", self.query))),
+            None => None,
+        }
     }
 
     fn contents(

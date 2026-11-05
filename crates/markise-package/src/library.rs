@@ -1,8 +1,9 @@
 //! What the block library offers (ADR 0022): a package's presets in its groups and order, with what
 //! a query looks at. Plain data: this crate draws nothing and keeps no words of its own.
 
+use std::collections::BTreeMap;
+
 use crate::index::PackageIndex;
-use crate::palette::Preset;
 use crate::value::Localized;
 
 /// One row: a preset of the package.
@@ -54,34 +55,35 @@ fn push_all(search: &mut String, text: Option<&Localized>) {
 impl PackageIndex {
     /// The library in the package's order: its groups, the blocks of each, the presets of each. A
     /// block in no group comes last, so that a preset cannot be out of reach. Text shows in `language`
-    /// and a query matches every language the package has.
+    /// and a query matches every language the package has. A block has one place, the first it is
+    /// listed at, so there is at most one row per preset, whatever the groups say.
     pub fn library(&self, language: &str) -> Library {
         let mut library = Library::default();
+        let mut by_block: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (i, preset) in self.presets().iter().enumerate() {
+            by_block.entry(preset.block.as_str()).or_default().push(i);
+        }
+        let mut rest = by_block.clone();
         for (g, group) in self.groups().iter().enumerate() {
             let label = group.label.as_ref().map_or(group.id.as_str(), |l| l.get(language));
             library.groups.push(label.to_string());
             for block in &group.blocks {
-                self.push_block(&mut library, block, Some(g), language);
+                for i in rest.remove(block.as_str()).unwrap_or_default() {
+                    self.push_preset(&mut library, i, Some(g), language);
+                }
             }
         }
-        let grouped = |name: &str| self.groups().iter().any(|g| g.blocks.iter().any(|b| b == name));
-        for (i, preset) in self.presets().iter().enumerate() {
-            if !grouped(&preset.block) {
-                self.push_preset(&mut library, i, preset, None, language);
-            }
+        // the palette's order, not the blocks'
+        let mut ungrouped: Vec<usize> = rest.into_values().flatten().collect();
+        ungrouped.sort_unstable();
+        for i in ungrouped {
+            self.push_preset(&mut library, i, None, language);
         }
         library
     }
 
-    fn push_block(&self, library: &mut Library, block: &str, group: Option<usize>, language: &str) {
-        for (i, preset) in self.presets().iter().enumerate() {
-            if preset.block == block {
-                self.push_preset(library, i, preset, group, language);
-            }
-        }
-    }
-
-    fn push_preset(&self, library: &mut Library, at: usize, preset: &Preset, group: Option<usize>, language: &str) {
+    fn push_preset(&self, library: &mut Library, at: usize, group: Option<usize>, language: &str) {
+        let Some(preset) = self.presets().get(at) else { return };
         let block = preset.block.as_str();
         let Some(entry) = self.block(block) else { return };
         let block_label = entry.schema.label.as_ref();
@@ -140,5 +142,39 @@ impl Library {
             .filter(|(_, e)| words.iter().all(|w| e.search.contains(w)))
             .map(|(i, _)| i)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// What validation refuses cannot make rows either, should an index ever come another way.
+    #[test]
+    fn a_block_listed_many_times_has_one_place() {
+        let manifest = json!({"format": crate::FORMAT, "library": "s", "version": "1", "blocks": ["b"]});
+        let schema = json!({"fields": [{"name": "t", "type": "text"}]});
+        let palette = json!({
+            "groups": [{"id": "g", "blocks": ["b"]}, {"id": "h", "blocks": []}],
+            "presets": [
+                {"id": "p", "block": "b", "markdown": ":::b\n\nx\n\n:::\n"},
+                {"id": "q", "block": "b", "markdown": ":::b\n\ny\n\n:::\n"}
+            ]
+        });
+        let files = [
+            ("manifest.json", manifest),
+            ("components/b/b.json", schema),
+            ("editor/palette.json", palette),
+        ]
+        .map(|(path, v)| (path.to_string(), v.to_string().into_bytes()));
+        let mut index = PackageIndex::from_files(&files.into_iter().collect()).unwrap();
+        for g in index.groups_for_test() {
+            g.blocks = vec!["b".to_string(); 10_000];
+        }
+        let library = index.library("en");
+        assert_eq!(library.entries().len(), 2, "one row per preset");
+        assert!(library.entries().iter().all(|e| e.group == Some(0)));
     }
 }

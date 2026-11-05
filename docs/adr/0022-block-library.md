@@ -16,7 +16,7 @@ icons and the Markdown of a block all come from the package, and the package is 
 `PackageIndex::library(language)` is plain data: one row per preset, by the package's groups, the blocks of
 each group, the presets of each block. A preset of a block in no group comes last, with no heading, so that
 a package's oversight cannot put a preset out of reach. A block with no preset has nothing to insert and has
-no row. Markise makes no preset of its own from a block's fields: what a new block starts with is the
+no row, and a preset has at most one row. Markise makes no preset of its own from a block's fields: what a new block starts with is the
 package's to say.
 
 - **A row** shows the preset's label, else the block's. Below it the block's description; when the block has
@@ -49,7 +49,11 @@ would make a line starting with a slash hard to type, so:
 - Esc, or Backspace with nothing typed, closes it, and the keyboard is back where it was.
 - A press outside closes it and goes on to what is there.
 
-Characters typed right behind the `/`, before the library has shown, are its query rather than the document's.
+Characters typed right behind the `/`, before the library has shown, are its query rather than the document's. Text and
+Return of one frame are read in that order, so fast typing is safe. The Return that ends a composition belongs to the
+composition, and a commit in the frame the library closes is not the document's.
+
+While the library is open, document commands wait, in the menus and by their keys, as they do for a form.
 
 ### On screen
 

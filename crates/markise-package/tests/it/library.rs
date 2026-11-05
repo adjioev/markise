@@ -87,3 +87,17 @@ fn a_query_matches_every_language_and_each_of_its_words() {
     assert_eq!(titles(&index, "poll"), ["Answers"], "the block's name");
     assert_eq!(index.library("ru").entries()[0].title, "Простая Ёлка");
 }
+
+#[test]
+fn a_block_listed_twice_in_the_groups_refuses_the_package() {
+    for groups in [
+        json!([{"id": "g", "blocks": ["tip", "tip"]}]),
+        json!([{"id": "g", "blocks": ["tip"]}, {"id": "h", "blocks": ["poll", "tip"]}]),
+    ] {
+        let mut files = common::files();
+        let palette = json!({"groups": groups, "presets": []}).to_string().into_bytes();
+        files.insert("editor/palette.json".into(), palette);
+        let err = PackageIndex::from_files(&files).unwrap_err().to_string();
+        assert!(err.contains("more than once"), "{err}");
+    }
+}

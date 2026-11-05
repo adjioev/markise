@@ -72,7 +72,8 @@ goes through `InstalledPackage::asset_path` like any other. A block's icon name 
 the package, if it has one; without that file it stays a name and nothing is drawn.
 
 Every reference is checked: a palette group, palette block, preset or view naming a block outside
-`blocks` is an error.
+`blocks` is an error. A block is listed in the groups once: a second listing, in the same group or another,
+is an error, so that groups cannot multiply what a library has to show.
 
 ### Validation
 
