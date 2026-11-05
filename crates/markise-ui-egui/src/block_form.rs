@@ -635,11 +635,7 @@ impl FormHost for FrameHost<'_, '_> {
 /// Where a chosen file goes: relative to the document's folder, the way documents refer to
 /// their pictures. A file elsewhere has no such path.
 pub fn relative_to_folder(file: &Path, folder: &Path) -> Option<String> {
-    let file = std::fs::canonicalize(file).ok()?;
-    let folder = std::fs::canonicalize(folder).ok()?;
-    let rel = file.strip_prefix(folder).ok()?;
-    let parts: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
-    Some(parts?.join("/"))
+    markise_engine::attach::path_below(file, folder)
 }
 
 /// Biggest icon file read. Icons are small; this one is data from a package.

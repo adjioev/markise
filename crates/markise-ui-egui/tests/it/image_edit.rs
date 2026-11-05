@@ -92,10 +92,24 @@ fn click(h: &mut H, p: Pos2) {
 }
 
 fn press_tool(h: &mut H, needle: &str, label: &str) {
+    // (an image failing to load has another height from the frame it shows that)
+    let r = image_rect(h, needle);
+    hover(h, r.center());
+    common::settle(h);
+    common::run(h);
     let r = image_rect(h, needle);
     hover(h, r.center());
     let p = h.get_by_label(label).rect().center();
     click(h, p);
+}
+
+/// Replace…, then Browse… in the picker, where the stub answers.
+fn replace_by_browsing(h: &mut H) {
+    press_tool(h, "![", "Replace Image…");
+    assert!(h.state().image_picker().is_some(), "the picker");
+    h.get_by_label("Browse…").click();
+    common::settle(h);
+    common::run(h);
 }
 
 #[test]
@@ -118,7 +132,7 @@ fn replace_copies_by_the_rules_changes_only_the_path_and_one_undo_brings_it_back
         let away = f.root().join("away/my pic (1).png");
         png(&away);
         *f.pick.lock().unwrap() = Some(away);
-        press_tool(&mut h, "![", "Replace Image…");
+        replace_by_browsing(&mut h);
         assert_eq!(text(&h), want);
         let copied = f.root().join("note/assets/my pic (1).png");
         assert!(copied.is_file(), "copied as a drop is");
@@ -134,10 +148,13 @@ fn a_remote_image_and_a_file_in_the_folder_too_and_no_choice_changes_nothing() {
     let doc = "![a](https://127.0.0.1:9/x.png)\n";
     let (f, mut h) = fixture(doc);
     *f.pick.lock().unwrap() = None;
-    press_tool(&mut h, "![", "Replace Image…");
+    replace_by_browsing(&mut h);
     assert_eq!(text(&h), doc, "the dialog was cancelled");
+    assert!(h.state().image_picker().is_some(), "and the picker is still there");
     *f.pick.lock().unwrap() = Some(f.root().join("note/old.png"));
-    press_tool(&mut h, "![", "Replace Image…");
+    h.get_by_label("Browse…").click();
+    common::settle(&mut h);
+    common::run(&mut h);
     assert_eq!(
         text(&h),
         "![a](old.png)\n",
@@ -256,6 +273,10 @@ fn a_copy_finishing_in_a_review_mode_replaces_nothing() {
     }
     h.step();
     h.step();
+    common::run(&mut h);
+    h.get_by_label("Browse…").click();
+    h.step();
+    h.step();
     assert!(!h.state().background_settled(), "the copy is under way");
     h.state_mut().set_comment_view(CommentView::Final);
     h.step();
@@ -276,4 +297,165 @@ fn esc_closes_the_edit_window_and_changes_nothing() {
     common::run(&mut h);
     assert!(!h.state().image_edit_is_open());
     assert_eq!(text(&h), doc);
+}
+
+mod picker {
+    use super::*;
+    use egui::Key;
+
+    fn stocked(doc: &str, names: &[&str]) -> (Fx, H) {
+        let (f, h) = fixture(doc);
+        for n in names {
+            let p = f.root().join("note").join(n);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            png(&p);
+        }
+        (f, h)
+    }
+
+    fn open(h: &mut H) {
+        press_tool(h, "![", "Replace Image…");
+        common::settle(h);
+        common::run(h);
+        assert!(h.state().image_picker().is_some());
+    }
+
+    fn names(h: &H) -> Vec<String> {
+        let p = h.state().image_picker().unwrap();
+        p.names().into_iter().map(str::to_string).collect()
+    }
+
+    fn key(h: &mut H, k: Key) {
+        h.key_press(k);
+        common::settle(h);
+        common::run(h);
+    }
+
+    #[test]
+    fn nearest_first_the_current_one_selected_and_the_keyboard_chooses_with_one_undo() {
+        let doc = "a\n\n![Alt](old.png \"T\")\n\nb\n";
+        let (f, mut h) = stocked(doc, &["z.png", "sub/a.png", "sub/deep/b.png"]);
+        std::fs::write(f.root().join("note/note.txt"), b"x").unwrap();
+        open(&mut h);
+        assert_eq!(names(&h), ["old.png", "z.png", "sub/a.png", "sub/deep/b.png"]);
+        assert_eq!(h.state().image_picker().unwrap().selected_name(), Some("old.png"));
+        assert!(h.query_by_label("Image: old.png, the current one").is_some());
+        assert!(h.query_by_label("Image: z.png").is_some());
+        // a thumbnail on screen is drawn off the UI thread, and at rest it asks for no frame
+        common::settle(&mut h);
+        h.step();
+        assert!(!h.state().image_picker().unwrap().is_busy());
+        h.step();
+        assert!(!h.ctx.has_requested_repaint(), "no frames at rest");
+        key(&mut h, Key::ArrowRight);
+        assert_eq!(h.state().image_picker().unwrap().selected_name(), Some("z.png"));
+        key(&mut h, Key::Enter);
+        assert!(h.state().image_picker().is_none());
+        assert_eq!(text(&h), "a\n\n![Alt](z.png \"T\")\n\nb\n");
+        h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+        common::run(&mut h);
+        assert_eq!(text(&h), doc, "exact");
+    }
+
+    #[test]
+    fn search_narrows_esc_closes_and_nothing_changes() {
+        let doc = "![Alt](old.png)\n";
+        let (_f, mut h) = stocked(doc, &["Red Car.png", "blue-car.png", "tree.png"]);
+        open(&mut h);
+        h.get_by_label("Search Images").type_text("CAR");
+        common::settle(&mut h);
+        common::run(&mut h);
+        assert!(names(&h).iter().all(|n| n.to_lowercase().contains("car")));
+        assert_eq!(names(&h).len(), 2);
+        key(&mut h, Key::Escape);
+        assert!(h.state().image_picker().is_none());
+        assert_eq!(text(&h), doc);
+    }
+
+    #[test]
+    fn a_broken_file_shows_as_such_and_another_can_be_chosen() {
+        let doc = "![Alt](old.png)\n";
+        let (f, mut h) = stocked(doc, &["good.png"]);
+        std::fs::write(f.root().join("note/bad.png"), b"not an image").unwrap();
+        open(&mut h);
+        assert!(
+            names(&h).contains(&"bad.png".to_string()),
+            "listed, and it says so when shown"
+        );
+        common::settle(&mut h);
+        h.step();
+        h.get_by_label("Image: good.png").click();
+        h.step();
+        h.get_by_label("Use Image").click();
+        common::settle(&mut h);
+        common::run(&mut h);
+        assert_eq!(text(&h), "![Alt](good.png)\n");
+    }
+
+    #[test]
+    fn a_large_folder_shows_a_note_and_stays_bounded() {
+        let doc = "![Alt](old.png)\n";
+        let (f, mut h) = stocked(doc, &[]);
+        // empty files: nothing has to be an image until it is on screen
+        let many = f.root().join("note/many");
+        std::fs::create_dir_all(&many).unwrap();
+        for i in 0..2100 {
+            std::fs::write(many.join(format!("i{i:04}.png")), b"").unwrap();
+        }
+        open(&mut h);
+        assert_eq!(names(&h).len(), markise_engine::image_list::MAX_IMAGES);
+        assert_eq!(names(&h)[0], "old.png", "the nearest first");
+        let note = h.state().image_picker().unwrap().note();
+        assert!(note.contains("Showing the nearest 2000"), "{note}");
+        key(&mut h, Key::Escape);
+    }
+
+    #[test]
+    fn a_file_dropped_on_the_window_is_copied_and_comes_first() {
+        let doc = "![Alt](old.png)\n";
+        let (f, mut h) = stocked(doc, &[]);
+        let away = f.root().join("away/dropped pic.png");
+        png(&away);
+        open(&mut h);
+        h.input_mut()
+            .dropped_files
+            .push(Arc::new(crate::images_paste::Dropped(away)));
+        common::settle(&mut h);
+        common::run(&mut h);
+        assert_eq!(text(&h), doc, "the drop is the window's, not the document's");
+        assert!(f.root().join("note/assets/dropped pic.png").is_file());
+        assert_eq!(names(&h)[0], "assets/dropped pic.png");
+        key(&mut h, Key::Enter);
+        assert_eq!(text(&h), "![Alt](assets/dropped%20pic.png)\n");
+    }
+
+    #[test]
+    fn an_unsaved_document_goes_straight_to_the_dialog() {
+        let dir = tempfile::tempdir().unwrap();
+        let away = dir.path().join("x.png");
+        png(&away);
+        let picked = away.clone();
+        let opts = AppOptions {
+            config: ConfigDir::Dir(dir.path().to_path_buf()),
+            block_image_picker: Some(Arc::new(move |_: &Path| Some(picked.clone()))),
+            ..common::no_watch()
+        };
+        let mut h: H = Harness::builder()
+            .with_size(egui::vec2(1100.0, 900.0))
+            .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), MarkiseApp::new(opts));
+        h.state_mut().new_document();
+        common::settle(&mut h);
+        common::run(&mut h);
+        common::settle(&mut h);
+        common::run(&mut h);
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.edit(|s| s.insert_text("![a](old.png)")).unwrap();
+        common::run(&mut h);
+        h.state_mut().replace_image(0.."![a](old.png)".len());
+        assert!(h.state().image_picker().is_none());
+        common::settle(&mut h);
+        common::run(&mut h);
+        let t = text(&h);
+        assert!(t.starts_with("![a](") && t.contains("x.png"), "{t}");
+    }
 }

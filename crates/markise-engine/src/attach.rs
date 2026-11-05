@@ -305,6 +305,15 @@ pub fn destination(note_dir: Option<&Path>, root: Option<&Path>, file: &Path, re
     if s.starts_with("//") { file_url(&file) } else { enc(&s) }
 }
 
+/// `file` relative to `folder`, with `/`, when it is inside it, links resolved. Asks the file system.
+pub fn path_below(file: &Path, folder: &Path) -> Option<String> {
+    let file = std::fs::canonicalize(file).ok()?;
+    let folder = std::fs::canonicalize(folder).ok()?;
+    let rel = file.strip_prefix(folder).ok()?;
+    let parts: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
+    Some(parts?.join("/"))
+}
+
 /// A Markdown label with its syntax characters escaped.
 fn escape_label(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -425,6 +434,8 @@ pub struct Request {
     pub stamp: String,
     /// The document's resource root as written (`typora-root-url`), if any.
     pub resource_root: Option<String>,
+    /// A folder to say each target's path below, on the worker: it asks the file system.
+    pub below: Option<PathBuf>,
 }
 
 /// The result of a [`Request`].
@@ -439,6 +450,8 @@ pub struct Outcome {
     pub written: Vec<PathBuf>,
     /// One message per item that failed.
     pub errors: Vec<String>,
+    /// Per target, its path below [`Request::below`] with `/`, if it is there.
+    pub below: Vec<Option<String>>,
 }
 
 impl Outcome {
@@ -698,6 +711,9 @@ pub fn run(req: &Request) -> Outcome {
         match r {
             Ok((md, target)) => {
                 out.inserts.push(md);
+                if let Some(folder) = &req.below {
+                    out.below.push(path_below(&target, folder));
+                }
                 out.targets.push(target);
             }
             Err(e) => out.errors.push(e),
@@ -1056,6 +1072,7 @@ mod tests {
             user_images: None,
             stamp: "3".into(),
             resource_root: None,
+            below: None,
         });
         assert_eq!(out.text(), "![](assets/Pasted%20image%203.png)");
         assert_eq!(out.render(Some(&a), None, true), out.text());
@@ -1116,6 +1133,7 @@ mod tests {
             user_images: None,
             stamp: "20261029101500".into(),
             resource_root: None,
+            below: None,
         };
         let out = run(&req);
         assert!(out.errors.is_empty(), "{:?}", out.errors);
@@ -1141,6 +1159,7 @@ mod tests {
             user_images: Some(d.join("user-images")),
             stamp: "20260101000000".into(),
             resource_root: None,
+            below: None,
         };
         let out = run(&req);
         let p = d.join("user-images/Pasted image 20260101000000.png");
@@ -1171,6 +1190,7 @@ mod tests {
             user_images: None,
             stamp: "1".into(),
             resource_root: None,
+            below: None,
         };
         let out = run(&req);
         assert!(out.errors.is_empty(), "{:?}", out.errors);
@@ -1217,6 +1237,7 @@ mod tests {
             user_images: None,
             stamp: "1".into(),
             resource_root: None,
+            below: None,
         };
         let out = run(&req);
         assert!(out.inserts.is_empty());
@@ -1239,6 +1260,7 @@ mod tests {
             user_images: None,
             stamp: "2".into(),
             resource_root: None,
+            below: None,
         };
         let out = run(&req);
         assert_eq!(out.inserts, ["![](../Attachments/Pasted%20image%202.png)"]);

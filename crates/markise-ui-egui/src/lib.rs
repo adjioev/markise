@@ -13,6 +13,7 @@ pub mod export_ui;
 pub mod fonts;
 pub mod highlight;
 pub mod icons;
+pub mod image_picker;
 pub mod images;
 pub mod menu;
 pub mod menu_sync;

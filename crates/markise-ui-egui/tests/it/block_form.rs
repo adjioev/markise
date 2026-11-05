@@ -1046,26 +1046,174 @@ fn a_new_answer_gets_its_id_on_save() {
     assert!(text(&h).contains("- [ ] Three {#a3}"), "{}", text(&h));
 }
 
+/// Browse… in the picker, until the path has come back from its worker and the form has drawn it: its
+/// thumbnail is asked for only then, so settling before that says nothing.
+fn browse_to(h: &mut H, path: &str) {
+    h.get_by_label("Browse…").click();
+    let t = std::time::Instant::now();
+    while draft(h)["pictures"][0]["path"] != json!(path) {
+        assert!(t.elapsed() < common::HANG_GUARD, "{path}");
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    h.step();
+    h.step();
+    common::settle(h);
+    h.run_steps(4);
+    common::settle(h);
+}
+
+/// A slow copy for one form, which is gone when it ends, must not land in another: request numbers
+/// start over in each form.
 #[test]
-fn a_picked_image_goes_in_relative_and_one_outside_is_refused() {
+fn a_copy_for_a_form_that_is_gone_lands_nowhere() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let at = DOC.find(":::gallery").unwrap();
+    let end = at + DOC[at..].find("\n:::\n").unwrap() + 5;
+    let gallery = &DOC[at..end];
+    let doc = format!("{gallery}\nMiddle.\n\n{gallery}");
+    let f = Fixture::new(&doc);
+    let outside = f.config.join("out.png");
+    fs::write(&outside, one_pixel_png()).unwrap();
+    let mut h = f.ready();
+    let hold = Arc::new(AtomicBool::new(true));
+    let held = hold.clone();
+    let job: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        while held.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    });
+    h.state_mut()
+        .set_attach_job_test(std::time::Duration::from_secs(30), Some(job));
+    let steps = |h: &mut H| {
+        for _ in 0..4 {
+            h.step();
+        }
+    };
+    // form A: a slow copy
+    assert!(h.state_mut().open_block_form(0));
+    wait(&mut h);
+    let before = draft(&h)["pictures"][0]["path"].clone();
+    *f.picks.lock().unwrap() = Some(outside);
+    h.get_by_label("Choose file: Pictures 1").click();
+    wait(&mut h);
+    h.get_by_label("Browse…").click();
+    steps(&mut h);
+    assert!(h.state().image_picker().is_none());
+    // form A goes, form B comes and asks for a file of its own
+    h.state_mut().block_form_cancel();
+    steps(&mut h);
+    let b = doc.rfind(":::gallery").unwrap();
+    assert!(h.state_mut().open_block_form(b));
+    steps(&mut h);
+    h.get_by_label("Choose file: Pictures 1").click();
+    steps(&mut h);
+    assert!(h.state().image_picker().is_some());
+    hold.store(false, Ordering::SeqCst);
+    wait(&mut h);
+    assert_eq!(draft(&h)["pictures"][0]["path"], before, "A's file is not B's");
+    h.key_press(egui::Key::Escape);
+    wait(&mut h);
+    assert_eq!(draft(&h)["pictures"][0]["path"], before);
+    assert!(!h.state().block_form().unwrap().is_dirty());
+}
+
+/// Two choices for one row, the older one slower: the row keeps the newer.
+#[test]
+fn an_older_choice_finishing_later_does_not_replace_a_newer_one() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let f = Fixture::new(DOC);
+    let newer = f.folder.join("images/two pics.png");
+    fs::write(&newer, one_pixel_png()).unwrap();
+    let older = f.config.join("out.png");
+    fs::write(&older, one_pixel_png()).unwrap();
+    let mut h = f.ready();
+    let hold = Arc::new(AtomicBool::new(true));
+    let started = Arc::new(AtomicUsize::new(0));
+    let (held, count) = (hold.clone(), started.clone());
+    // only the first job waits
+    let job: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        if count.fetch_add(1, Ordering::SeqCst) == 0 {
+            while held.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    });
+    h.state_mut()
+        .set_attach_job_test(std::time::Duration::from_secs(30), Some(job));
+    let steps = |h: &mut H| {
+        for _ in 0..4 {
+            h.step();
+        }
+    };
+    h.get_by_label("Edit Block: gallery").click();
+    wait(&mut h);
+    *f.picks.lock().unwrap() = Some(older);
+    h.get_by_label("Choose file: Pictures 1").click();
+    wait(&mut h);
+    h.get_by_label("Browse…").click();
+    steps(&mut h);
+    // the older one's worker is the one waiting: the next must not get there first
+    let t = std::time::Instant::now();
+    while started.load(Ordering::SeqCst) == 0 {
+        assert!(t.elapsed() < common::HANG_GUARD, "the older choice");
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    *f.picks.lock().unwrap() = Some(newer);
+    h.get_by_label("Choose file: Pictures 1").click();
+    steps(&mut h);
+    h.get_by_label("Browse…").click();
+    // the newer one is there while the older one still copies
+    let t = std::time::Instant::now();
+    while draft(&h)["pictures"][0]["path"] != json!("images/two pics.png") {
+        assert!(t.elapsed() < common::HANG_GUARD, "the newer choice");
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    hold.store(false, Ordering::SeqCst);
+    common::settle(&mut h);
+    h.run_steps(4);
+    common::settle(&mut h);
+    assert_eq!(draft(&h)["pictures"][0]["path"], json!("images/two pics.png"));
+}
+
+#[test]
+fn a_picked_image_goes_in_relative_and_one_outside_is_copied_in() {
     let f = Fixture::new(DOC);
     let inside = f.folder.join("images/two pics.png");
     fs::write(&inside, one_pixel_png()).unwrap();
     let mut h = f.ready();
     h.get_by_label("Edit Block: gallery").click();
     wait(&mut h);
+    // the picker's Browse…, as the form asks through its host and opens no dialog itself
     *f.picks.lock().unwrap() = Some(inside);
     h.get_by_label("Choose file: Pictures 1").click();
     wait(&mut h);
-    assert_eq!(draft(&h)["pictures"][0]["path"], json!("images/two pics.png"));
+    assert!(h.state().image_picker().is_some(), "the picker");
+    browse_to(&mut h, "images/two pics.png");
+    assert!(h.state().image_picker().is_none());
 
+    // from outside, by the attachment rules, as a drop
     let outside = f.config.join("out.png");
     fs::write(&outside, one_pixel_png()).unwrap();
     *f.picks.lock().unwrap() = Some(outside);
     h.get_by_label("Choose file: Pictures 1").click();
     wait(&mut h);
-    assert_eq!(draft(&h)["pictures"][0]["path"], json!("images/two pics.png"), "kept");
-    assert!(has(&h, "not inside the document's folder"));
+    browse_to(&mut h, "assets/out.png");
+    assert!(f.folder.join("assets/out.png").is_file());
+
+    // back to the first, by its place in the picker: cancelled, nothing changes
+    h.get_by_label("Choose file: Pictures 1").click();
+    wait(&mut h);
+    h.key_press(egui::Key::Escape);
+    wait(&mut h);
+    assert!(h.state().image_picker().is_none());
+    assert_eq!(draft(&h)["pictures"][0]["path"], json!("assets/out.png"), "kept");
+    *f.picks.lock().unwrap() = Some(f.folder.join("images/two pics.png"));
+    h.get_by_label("Choose file: Pictures 1").click();
+    wait(&mut h);
+    browse_to(&mut h, "images/two pics.png");
 
     h.get_by_label("Save").click();
     wait(&mut h);

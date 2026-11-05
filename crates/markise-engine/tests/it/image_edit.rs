@@ -191,3 +191,100 @@ fn what_a_person_types_is_written_so_that_it_reads_as_one_path() {
         assert_eq!(image_dest_for(typed).as_deref(), want, "{typed:?}");
     }
 }
+
+mod listing {
+    use std::sync::atomic::AtomicBool;
+
+    use markise_engine::image_list::{destinations_in, list_images, list_images_within};
+
+    fn touch(root: &std::path::Path, rel: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"x").unwrap();
+    }
+
+    fn rels(root: &std::path::Path) -> Vec<String> {
+        let no = AtomicBool::new(false);
+        list_images(root, &no).images.into_iter().map(|i| i.rel).collect()
+    }
+
+    #[test]
+    fn the_nearest_first_and_only_images_and_nothing_hidden() {
+        let d = tempfile::tempdir().unwrap();
+        for f in [
+            "b.png",
+            "a.JPG",
+            "n.md",
+            "x/z.gif",
+            "x/y/w.webp",
+            ".git/h.png",
+            ".hidden.png",
+        ] {
+            touch(d.path(), f);
+        }
+        assert_eq!(rels(d.path()), ["a.JPG", "b.png", "x/z.gif", "x/y/w.webp"]);
+    }
+
+    #[test]
+    fn it_stops_at_its_bounds_and_says_so_and_when_told() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..20 {
+            touch(d.path(), &format!("{i:02}.png"));
+        }
+        let no = AtomicBool::new(false);
+        let l = list_images_within(d.path(), &no, 5, 1000);
+        assert_eq!(l.images.len(), 5);
+        assert!(l.truncated);
+        let l = list_images_within(d.path(), &no, 1000, 3);
+        assert!(l.truncated && l.images.len() == 3);
+        let yes = AtomicBool::new(true);
+        assert!(list_images(d.path(), &yes).images.is_empty());
+    }
+
+    #[test]
+    fn too_deep_is_said_too() {
+        let d = tempfile::tempdir().unwrap();
+        touch(d.path(), "1/2/3/4/5/6/7/8/far.png");
+        let no = AtomicBool::new(false);
+        let l = list_images(d.path(), &no);
+        assert!(l.images.is_empty() && l.truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_does_not_lead_outside_and_a_folder_link_is_not_followed() {
+        use std::os::unix::fs::symlink;
+        let outside = tempfile::tempdir().unwrap();
+        touch(outside.path(), "secret.png");
+        let d = tempfile::tempdir().unwrap();
+        touch(d.path(), "real.png");
+        std::fs::create_dir(d.path().join("loop")).unwrap();
+        symlink(outside.path().join("secret.png"), d.path().join("out.png")).unwrap();
+        symlink(d.path().join("real.png"), d.path().join("in.png")).unwrap();
+        symlink(outside.path(), d.path().join("outdir")).unwrap();
+        symlink(d.path(), d.path().join("loop/up")).unwrap();
+        assert_eq!(rels(d.path()), ["in.png", "real.png"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_cannot_be_read_is_counted_and_the_rest_listed() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        touch(d.path(), "ok.png");
+        touch(d.path(), "shut/no.png");
+        let shut = d.path().join("shut");
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let no = AtomicBool::new(false);
+        let l = list_images(d.path(), &no);
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(l.images.len(), 1);
+        assert_eq!(l.unreadable, 1);
+    }
+
+    #[test]
+    fn destinations_are_read_in_their_forms() {
+        let d = destinations_in("![a](x.png) ![b](<y z.png> \"t\") [c]( w.md )");
+        assert!(d.contains("x.png") && d.contains("y z.png") && d.contains("w.md"));
+    }
+}

@@ -118,7 +118,7 @@ fn is_png(p: &Path) -> bool {
 
 /// A file dropped on the window (what egui-winit delivers).
 #[derive(Debug)]
-struct Dropped(PathBuf);
+pub(crate) struct Dropped(pub(crate) PathBuf);
 
 impl egui::DroppedFile for Dropped {
     fn path(&self) -> &Path {

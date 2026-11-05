@@ -17,6 +17,7 @@ pub mod edit;
 pub mod editor;
 pub mod export;
 pub mod fsops;
+pub mod image_list;
 pub mod jobs;
 pub mod lease;
 pub mod load;
