@@ -99,6 +99,13 @@ impl MarkiseApp {
         self.block_form.open.as_ref().is_some_and(OpenForm::is_dirty)
     }
 
+    /// Something for the open form to say.
+    pub(super) fn block_form_message(&mut self, text: &str) {
+        if let Some(open) = &mut self.block_form.open {
+            open.set_message(text);
+        }
+    }
+
     /// The block at the caret has a view to switch from or to.
     pub(super) fn block_view_available(&self) -> bool {
         self.block_with_view_at_caret().is_some()

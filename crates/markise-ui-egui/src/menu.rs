@@ -318,6 +318,12 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
         "Insert Block…",
         &[both("Opt+Cmd+B", "Ctrl+Alt+B")],
     ),
+    app("block.moveUp", "Move Block Up", &[both("Opt+Cmd+Up", "Ctrl+Shift+Up")]),
+    app(
+        "block.moveDown",
+        "Move Block Down",
+        &[both("Opt+Cmd+Down", "Ctrl+Shift+Down")],
+    ),
     app(
         "view.switchBlockView",
         "Switch This Block's View",

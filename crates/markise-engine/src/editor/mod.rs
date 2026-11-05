@@ -7,6 +7,7 @@
 //! live-mark transform → hint update → `Step` recorded. Undo/redo replay recorded steps (never
 //! re-plan) and restore the transaction's immutable selections.
 
+mod block_move;
 mod block_place;
 pub mod command;
 pub mod history;
@@ -25,6 +26,7 @@ use markise_doc::{
     Patch, PatchError, PatchSet, Plan, PlanError, PlanRequest, PlanStep, PlannerId, Selection, planners,
 };
 
+pub use block_move::MoveRefused;
 pub use block_place::InsertRefused;
 pub use history::{History, HistoryLimits, StateId, Step, Transaction, TxKind, TypingDir};
 pub use source::{SourceCaret, SourcePane};

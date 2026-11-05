@@ -79,7 +79,7 @@ impl EditorView {
         (self.place.mode, own)
     }
 
-    fn own_modes_now(&self) -> Vec<(usize, BlockViewMode)> {
+    pub(super) fn own_modes_now(&self) -> Vec<(usize, BlockViewMode)> {
         (self.place.own_modes.iter())
             .filter_map(|o| Some((self.session.mark(o.mark)?.offset, o.mode)))
             .collect()
@@ -557,6 +557,11 @@ impl EditorView {
         if self.place.sticky.is_none() {
             self.place.sticky = Some(self.session.add_mark(DocPos::new(opener)));
         }
+    }
+
+    /// Where the block kept native while it is edited stands.
+    pub(super) fn sticky_at(&self) -> Option<usize> {
+        Some(self.session.mark(self.place.sticky?)?.offset)
     }
 
     pub(super) fn end_sticky(&mut self) {
