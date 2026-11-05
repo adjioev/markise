@@ -1,0 +1,4 @@
+{
+  "ingredients": { "kind": "card", "accent": "green" },
+  "tip": { "kind": "callout", "accent": "amber" }
+}

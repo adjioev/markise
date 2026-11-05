@@ -1,0 +1,23 @@
+.tip {
+  padding: 10px 14px;
+  border-left: 6px solid rgb(217, 119, 6);
+  border-radius: 4px;
+  background: rgb(255, 243, 205);
+  color: rgb(66, 45, 8);
+}
+
+.tip[data-variant="warning"] {
+  border-left-color: rgb(185, 28, 28);
+  background: rgb(254, 226, 226);
+  color: rgb(69, 10, 10);
+}
+
+[data-theme="dark"] .tip {
+  background: rgb(66, 45, 8);
+  color: rgb(255, 243, 205);
+}
+
+[data-theme="dark"] .tip[data-variant="warning"] {
+  background: rgb(69, 10, 10);
+  color: rgb(254, 226, 226);
+}

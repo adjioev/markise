@@ -1,0 +1,8 @@
+{
+  "label": { "en": "Tip", "fr": "Astuce" },
+  "variants": { "": "Hint", "warning": { "en": "Warning", "fr": "Attention" } },
+  "fields": [
+    { "name": "title", "type": "heading", "level": 4, "min": 0, "label": "Title" },
+    { "name": "body", "type": "text", "label": "Text", "help": "One or two short sentences." }
+  ]
+}

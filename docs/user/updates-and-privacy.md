@@ -11,6 +11,10 @@ Two things you start yourself can reach the network through other programs:
   and Pandoc may download them for some formats (for example EPUB or Word). See
   [Export](export.md#pandoc-formats).
 
+A [block package](blocks.md) you accept can hold a site's code, which draws blocks on macOS. It runs
+in a separate process that has no network and cannot read your files: it gets only the package's
+own files and the images of the block it is drawing.
+
 ## Automatic update checks are opt-in
 
 On first launch, a small card in the corner asks **"Check for updates automatically?"**:

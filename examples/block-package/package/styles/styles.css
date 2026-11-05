@@ -1,0 +1,22 @@
+/* Loaded before a block's own styles. A page gets the theme through these variables. */
+section[data-component] {
+  box-sizing: border-box;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: var(--markise-font-size, 16px);
+  color: var(--markise-text, rgb(40, 40, 40));
+}
+
+section[data-component] h3,
+section[data-component] h4 {
+  margin: 0 0 8px;
+}
+
+section[data-component] p,
+section[data-component] ul,
+section[data-component] blockquote {
+  margin: 0 0 8px;
+}
+
+section[data-component] > :last-child {
+  margin-bottom: 0;
+}

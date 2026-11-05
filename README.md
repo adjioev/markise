@@ -6,8 +6,8 @@ Markise (pronounced like *marquise*, mar-KEEZ) is a fast, cross-platform live-pr
 editor written in Rust. It is an independent implementation; some editing behaviours were informed by MarkText.
 
 **Status: beta.** Viewer, themes (styles × colour schemes, CSS theme import), code highlighting,
-math (TeX), Mermaid diagrams, export (HTML, PDF, PNG, Pandoc formats), side-by-side source editing
-and editing in the rendered view. Opens 10 MB documents in well under a second.
+math (TeX), Mermaid diagrams, export (HTML, PDF, PNG, Pandoc formats), side-by-side source editing,
+editing in the rendered view, and a site's own blocks through block packages. Opens 10 MB documents in well under a second.
 
 ```sh
 cargo run -p markise --release -- FILE.md|FOLDER          # desktop app (egui)

@@ -1,0 +1,19 @@
+.ingredients {
+  padding: 12px 16px;
+  border: 1px solid rgb(165, 190, 165);
+  border-top: 6px solid rgb(46, 125, 50);
+  border-radius: 4px;
+}
+
+.ingredients[data-argument]::before {
+  content: "Serves " attr(data-argument);
+  float: right;
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+
+.ingredients img {
+  display: block;
+  width: 100%;
+  border-radius: 4px;
+}

@@ -113,7 +113,8 @@ keystroke latency p99 < 16 ms, idle CPU ~0%.
   Multi-MB UI scenarios, exhaustive matrices, adversarial scaling and stress loops belong in
   the heavy suite: `#[ignore = "heavy: …"]`, test name prefixed `heavy_suite_`, run with
   `cargo xtask heavy` (release). Never use bare `--ignored`: known-bug ignores are separate.
-  Heavy coverage runs nightly on main, on `full-ci` PRs and before release artifacts are built.
+  Heavy coverage runs nightly on main, on PRs with the `heavy` label (`docs/ci.md`) and before
+  release artifacts are built.
   Performance budgets belong in `benches/`; preserve event/deadlock hang guards in tests.
   Measure per-test runtime before adding costly coverage (`scripts/test-times.py`), avoid
   duplicate cases, and distinguish warm execution from compilation and local from CI timings.

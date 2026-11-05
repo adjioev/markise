@@ -90,6 +90,34 @@ impl Fixture {
         Fixture { _dir: dir, config, doc }
     }
 
+    /// The example package and its sample document, as `cargo xtask block-package` leaves them.
+    pub(crate) fn example() -> Fixture {
+        let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/block-package");
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let (folder, config) = (root.join("site"), root.join("config"));
+        fs::create_dir_all(folder.join("pictures")).unwrap();
+        fs::create_dir_all(&config).unwrap();
+        let doc = folder.join("weeknight-loaf.md");
+        fs::copy(example.join("document/weeknight-loaf.md"), &doc).unwrap();
+        fs::copy(
+            example.join("document/pictures/loaf.png"),
+            folder.join("pictures/loaf.png"),
+        )
+        .unwrap();
+        let packed = markise_package::pack_folder(&example.join("package")).unwrap();
+        fs::write(folder.join("p.tar.gz"), &packed.bytes).unwrap();
+        fs::write(
+            folder.join(markise_package::BINDING_FILE),
+            format!(
+                r#"{{"library":"{}","version":"{}","source":"p.tar.gz","sha256":"{}"}}"#,
+                packed.id.library, packed.id.version, packed.sha256
+            ),
+        )
+        .unwrap();
+        Fixture { _dir: dir, config, doc }
+    }
+
     pub(crate) fn opened(&self) -> H {
         self.opened_with(None)
     }
@@ -147,6 +175,27 @@ pub(crate) fn caret(h: &mut H, at: usize) {
     v.ed.refresh_focus();
     v.request_refocus();
     common::run(h);
+}
+
+#[test]
+fn the_example_document_shows_its_views_and_needs_nothing_more() {
+    let f = Fixture::example();
+    let mut h = f.ready();
+    let source = text(&h);
+    let s = shown(&mut h);
+    for label in ["Ingredients", "Tip", "Warning", "timing"] {
+        assert!(s.contains(label), "{label} in {s}");
+    }
+    assert!(!s.contains('\u{26a0}'), "every block fits: {s}");
+    let at = |needle: &str| source.find(needle).unwrap();
+    let v = &mut h.state_mut().viewer().unwrap().ed.view;
+    assert!(v.native_block(at("500 g")).is_some());
+    assert!(v.native_block(at("Tap the bottom")).is_some());
+    assert!(
+        v.native_block(at("Knead")).is_none(),
+        "no view, and nothing to draw with here"
+    );
+    assert_eq!(text(&h), source, "opening changes nothing");
 }
 
 #[test]

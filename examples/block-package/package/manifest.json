@@ -1,0 +1,6 @@
+{
+  "format": "markise-block-package/2",
+  "library": "recipe-site",
+  "version": "1.0.0",
+  "blocks": ["tip", "ingredients", "timing"]
+}

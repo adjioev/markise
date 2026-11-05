@@ -1,0 +1,153 @@
+# Blocks
+
+A block is a named part of a document that a website knows how to show: a tip, a question, a
+gallery. In the file it is plain Markdown between two lines:
+
+```text
+:::tip
+
+Tap the bottom of the loaf. It should sound hollow.
+
+:::
+```
+
+Any text editor can read and change that. What a block means comes from the **block package** of
+the site you write for: which fields it has, how it looks, what you can insert. Without a package
+a block is a simple card with its name on the top edge, and you can write one by hand: type
+`:::name` on a new line and press <kbd>Return</kbd>, and Markise adds the closing line.
+
+Block packages are new after 0.1.0-beta.1. If you make a site and want to write a package, see
+[Making block packages](block-packages.md).
+
+## Connect a package
+
+A site gives you a folder with two things in it: the package, a `.tar.gz` file, and a file named
+`blocks.config.json` that says which package this folder uses and pins its exact contents with a
+hash. Markise looks for `blocks.config.json` next to your document and in the folders above it, up
+to your home folder, and the nearest one counts. It reads nothing from the network.
+
+The first time, a card in the corner names the package, its file and its hash, and asks whether to
+use it. You can go on typing meanwhile, and blocks stay cards until you answer.
+
+- **Use Package** unpacks a copy into your settings folder, so it goes on working without the
+  `.tar.gz` file. Other documents bound to the same file do not ask again.
+- **Not Now** holds until you quit. The status bar then shows `Blocks: name version · not in use`,
+  and its menu has **Use This Package…**.
+
+Use a package only if you trust where the folder came from. A hash proves that the files are the
+ones the folder names, not who made them. If the file changes, Markise asks again.
+
+Once it is in use, the status bar shows `Blocks: name version`. Its menu has the details and
+**Stop Using This Package**, which deletes the unpacked copy and your yes; your documents do not
+change, and their blocks are cards again. If something is wrong with the package, the status bar
+says `Block package problem` and its menu says what. The blocks stay cards and the document works
+as usual. A changed `blocks.config.json` counts from the next time you open the document.
+
+## Insert a block
+
+Press <kbd>/</kbd> on an empty line, or choose **Paragraph → Insert Block…**
+(<kbd>Alt+Cmd+B</kbd>; <kbd>Ctrl+Alt+B</kbd> on Windows and Linux). The block library opens with
+what the package offers. Type to narrow the list, use the arrow keys and <kbd>Return</kbd> to
+choose, <kbd>Esc</kbd> to close.
+
+`/` opens the library only on an empty line outside any block, list or quote, and only when the
+package offers something. Anywhere else, and in Source Code Mode, it is a slash. To type a line
+that starts with a slash, press <kbd>/</kbd> twice, or type the text and press <kbd>Return</kbd>
+when nothing matches.
+
+A new block goes on the empty line, or after what the caret is in, and never splits or nests
+anything. Inserting is one undo step.
+
+## How a block shows
+
+A block can show three ways. The button on its top edge says which comes next, and so do the
+commands.
+
+| Button | What you see |
+|---|---|
+| **Show Native View** | Markise's own view of the block, as the package describes it. You edit it where it stands |
+| **Show as on the Site** | a picture drawn by the site's own code (macOS; see [Limits](#limits)) |
+| **Show Markdown** | the simple card: the block's content as ordinary text you edit like the rest of the page |
+
+A block the package gives no native view starts as its picture, and has only the picture and the
+card. **Switch This Block's View** (<kbd>Shift+Cmd+M</kbd>) changes the block at the caret, **Switch
+All Blocks' Views** (<kbd>Shift+Alt+Cmd+M</kbd>) the whole document. The choice is not saved in the
+file. It lasts until you quit, and a document opens in the native view.
+
+Source Code Mode always shows the Markdown as it is.
+
+## Edit in place
+
+In the native view, click and type. Each field is a place of its own: arrow keys cross between
+fields, <kbd>Tab</kbd> and <kbd>Shift+Tab</kbd> jump, and a selection that starts in a field stays
+in it. <kbd>Return</kbd> in a list adds an item, and on an empty last item removes it. Press on an
+answer's mark to mark it. Undo works as in the rest of the document. All the keys are in
+[Keyboard shortcuts](shortcuts.md#inside-a-block).
+
+What you type stays text: `# x` at the start of a line is written so that it does not become a
+heading. Parts a field cannot edit as text, such as a code block inside it, can be read but not
+typed in; use the card or Source Code Mode for those. A picture has nothing to type in.
+
+## The form
+
+**Edit Block…** (<kbd>Shift+Cmd+E</kbd>), or the pencil on a block's top edge, opens a form beside
+the document with every field of the block, also the optional ones that have no place in the view
+yet. **Save** (<kbd>Cmd+Return</kbd> or <kbd>Cmd+S</kbd>) puts your changes into the document as
+one undo step; it does not write the file. **Cancel** (<kbd>Esc</kbd> or <kbd>Cmd+W</kbd>) drops
+them. If you are about to lose changed fields, for example by opening another document, Markise
+asks first. If the block changes underneath the form, the form says so.
+
+## Move and delete
+
+Hover over a block and drag the six dots to the left of its first row. A line shows where it will
+land, <kbd>Esc</kbd> cancels, and the view scrolls near its edges. **Move Block Up** and **Down**
+(<kbd>Alt+Cmd+↑</kbd>, <kbd>Alt+Cmd+↓</kbd>) do the same from the keyboard, and a block inside
+another block stays inside it.
+
+The bin on a block's top edge, or **Delete Block** (<kbd>Alt+Cmd+⌫</kbd>), removes the block with
+no question. Undo brings it back exactly. Each move and each deletion is one undo step.
+
+## Images
+
+A picture in a block's native view belongs to the form: **Choose file** opens the image picker. A
+picture in a card or in ordinary text has **Replace…** and **Edit…** when you hover over it. Both,
+and the picker, are described under [Images](editing.md#images).
+
+In the rendered view an image shows at most 400 points high, in a block or out of one, scaled with
+the window's zoom; a double click shows it whole. The file stays as it is. A site's picture is the
+site's drawing and has no such cap.
+
+## The ⚠ badge
+
+A `⚠` on a block's first row says that it does not match what the package expects. Hover over it to
+read why. It stops nothing: you can edit and save the block, and whoever publishes decides how
+strict to be.
+
+- **Not filled in yet:** a required field is empty or has too little in it. The block stays in its
+  native view; a block with no native view shows as a card. A block fresh from the library often
+  starts like this.
+- **Outside its schema:** content that fits no field, arguments the package does not know, or
+  something else the view cannot read. It shows as a card. While the caret is in it, it stays as it
+  was, so that it does not change under your typing.
+
+A block with a `⚠` has no site's picture, since a site's code can only be expected to draw a block
+that fits.
+
+If a site's code cannot draw a block, the block stays a card with a quiet reason on its first row,
+and no `⚠`.
+
+## Limits
+
+- **Site pictures are macOS only, on macOS 14 or later.** On Windows, on Linux and on older macOS,
+  native views, the form and everything else work, but there is no **Show as on the Site**: a block
+  with no native view shows as a card.
+- **A picture is not interactive.** Clicks in it do not reach the site's code. A click puts the
+  caret before or after the block.
+- **A picture shows the block as it stands in the document.** It is drawn again when the block
+  changes. If you replace an image file on disk and leave the block's text alone, an older picture
+  can go on showing until the block changes.
+- **Exports use neither views nor pictures.** HTML, PDF, PNG and Pandoc exports show a block's
+  content with its name as a label, whichever view is on screen.
+- **A package's code is kept apart.** It runs only for a package you accepted, in a separate
+  process with no network, and gets only the package's files and the block's own images.
+  See [Updates and privacy](updates-and-privacy.md).
