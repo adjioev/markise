@@ -644,6 +644,33 @@ mod moves {
     }
 
     #[test]
+    fn a_drop_for_a_document_that_changed_since_goes_nowhere() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        grab(&mut h, ":::tip");
+        let to = opener_rect(&h, "After.").left_top();
+        let to = pos2(to.x + 20.0, to.y);
+        pointer_to(&mut h, to);
+        // the frame of the release asks; before the next one the text changes
+        h.event(Event::PointerButton {
+            pos: to,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+        let v = h.state_mut().viewer().unwrap();
+        // after the block and the place: both still stand where they did
+        let end = d.len() - 1;
+        v.ed.set_selection(Selection::caret(end));
+        v.ed.edit(|s| s.insert_text("x")).unwrap();
+        let now = text(&h);
+        frames(&mut h);
+        assert_eq!(text(&h), now, "the request named another revision");
+    }
+
+    #[test]
     fn a_nested_block_lands_only_in_its_parent() {
         let d = "Before.\n\n::::plain\n\n:::tip\n\nOne\n\n:::\n\nBetween\n\n:::tip\n\nTwo\n\n:::\n\n::::\n\nAfter.\n";
         let f = Fixture::with_palette(d, PALETTE);

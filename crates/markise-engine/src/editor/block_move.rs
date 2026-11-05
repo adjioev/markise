@@ -16,6 +16,8 @@ const MOVE_LABEL: &str = "Move Block";
 pub enum MoveRefused {
     /// Other blocks would pair differently where it would stand.
     WouldNotStand,
+    /// Something other than blank lines would go with it.
+    WouldLoseText,
     Edit(EditError),
 }
 
@@ -23,6 +25,7 @@ impl fmt::Display for MoveRefused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MoveRefused::WouldNotStand => write!(f, "it would change how the blocks around it pair"),
+            MoveRefused::WouldLoseText => write!(f, "text next to it would be lost"),
             MoveRefused::Edit(e) => write!(f, "{e}"),
         }
     }
@@ -107,7 +110,13 @@ fn after(doc: &dyn FormatDoc, m: &Moving) -> Option<usize> {
 }
 
 /// The edits moving `b` to line `to`, and where its first byte ends up. `None`: it is there already.
-fn plan(text: &str, b: &Range<usize>, to: usize, eol: &str) -> Option<(Vec<Patch>, usize, String)> {
+#[allow(clippy::type_complexity)]
+fn plan(
+    text: &str,
+    b: &Range<usize>,
+    to: usize,
+    eol: &str,
+) -> Option<Result<(Vec<Patch>, usize, String), MoveRefused>> {
     // what follows it, blank lines passed over
     let mut next = after_line(text, b.end);
     while next < text.len() && blank_line_at(text, next) {
@@ -135,6 +144,11 @@ fn plan(text: &str, b: &Range<usize>, to: usize, eol: &str) -> Option<(Vec<Patch
     } else {
         (b.start..next, "")
     };
+    // only blank lines go, and the block's own bytes come back
+    let blank = |t: &str| t.chars().all(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
+    if !blank(&text[remove.start..b.start.max(remove.start)]) || !blank(&text[b.end..remove.end.max(b.end)]) {
+        return Some(Err(MoveRefused::WouldLoseText));
+    }
     let moved = remove.len() - keep.len();
     let start = if to > b.start { to + skip - moved } else { to + skip };
     let mut patches = vec![
@@ -142,7 +156,7 @@ fn plan(text: &str, b: &Range<usize>, to: usize, eol: &str) -> Option<(Vec<Patch
         Patch::verbatim(to..to, insert),
     ];
     patches.sort_by_key(|p| p.range.start);
-    Some((patches, start, body.to_string()))
+    Some(Ok((patches, start, body.to_string())))
 }
 
 impl EditorView {
@@ -268,9 +282,10 @@ impl EditorView {
         self.release();
         let doc = self.session.doc();
         let eol = doc.line_ending().as_str();
-        let Some((patches, start, body)) = plan(doc.text(), &b, to, eol) else {
+        let Some(planned) = plan(doc.text(), &b, to, eol) else {
             return Ok(false);
         };
+        let (patches, start, body) = planned?;
         let patches = PatchSet::new(patches).map_err(|e| MoveRefused::Edit(EditError::Patch(e)))?;
         let want = blocks_of(doc);
         let hints_after = (!doc.hints().is_empty()).then(HintSet::new);

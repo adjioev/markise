@@ -267,7 +267,46 @@ fn it_works_in_a_large_paged_document() {
     assert_eq!(t.ed.session.text(), doc);
 }
 
-const PIECES: [&str; 9] = [
+#[test]
+fn a_line_that_is_no_longer_there_moves_nothing() {
+    let doc = ":::x\n\nb\n\n:::\n\nsome text to go\n";
+    let mut s = surface(doc);
+    let line = s.ed.drop_line_at_end(0).unwrap();
+    s.ed.edit(|e| e.source_edit("Cut", markise_doc::PatchSet::single_verbatim(12..doc.len(), ""), None))
+        .unwrap();
+    let now = s.text();
+    assert_eq!(s.ed.move_block_to(0, line), Ok(false));
+    assert_eq!(s.text(), now);
+    // nor one that is not a boundary at the block's level
+    let doc = ":::x\n\nb\n\n:::\n\none\ntwo\n\nthree\n";
+    let mut s = surface(doc);
+    assert_eq!(s.ed.move_block_to(0, doc.find("two").unwrap()), Ok(false));
+    assert_eq!(s.ed.move_block_to(0, doc.find("wo\n").unwrap()), Ok(false));
+    assert_eq!(s.text(), doc);
+}
+
+#[test]
+fn a_no_break_space_is_text_and_a_move_keeps_it() {
+    let doc = ":::x\nb\n:::\n\n\u{00a0}\n\nq\n";
+    let mut s = surface(doc);
+    let line = s.ed.drop_line_at_end(0).unwrap();
+    assert_eq!(s.ed.move_block_to(0, line), Ok(true));
+    assert_eq!(s.text(), "\u{00a0}\n\nq\n\n:::x\nb\n:::\n");
+}
+
+#[test]
+fn a_list_is_one_block_for_a_drop() {
+    let doc = ":::x\n\nb\n\n:::\n\np\n\n- one\n- two\n- three\n\n> q1\n> q2\n\nz\n";
+    let s = surface(doc);
+    let line = |n: &str| doc.find(n).unwrap();
+    assert_eq!(s.ed.drop_line(0, line("- one")), Some(line("- one")));
+    for inside in ["two", "- two", "- three", "q2", "> q2", "one"] {
+        assert_eq!(s.ed.drop_line(0, line(inside)), None, "{inside}");
+    }
+}
+
+const PIECES: [&str; 10] = [
+    "\u{00a0}\n",
     "a paragraph\nof two lines\n",
     "## A heading {#h1}\n",
     "- one\n- two\n",
