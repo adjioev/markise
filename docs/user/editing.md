@@ -102,6 +102,14 @@ dragging pans, and <kbd>+</kbd>, <kbd>-</kbd> and <kbd>0</kbd> zoom in, zoom out
 <kbd>Esc</kbd> or a click outside the image closes the view. A single click still places the
 caret, and <kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+click on an image inside a link still follows the link.
 
+To change an image, hover it. **Replace…** chooses another file, which is copied by the same rules
+as a drop, and changes only the path: the description and the title stay, and an image from
+anywhere, a web address included, can be replaced. **Edit…** opens a small window with the
+description and the path as written. Each is one undo step, and undo never deletes a copied file.
+A reference image (`![text][label]`) has its path in the definition, so it has neither button; a
+picture in a block's native view belongs to the block's form; and comments shown as No Markup or
+Original leave the document read-only.
+
 Where images go is set in **Preferences → Files & Images**; see
 [Settings](settings.md#files-and-images). In an Obsidian vault, the vault's attachment folder is
 used when it is set.

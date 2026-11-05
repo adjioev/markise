@@ -199,6 +199,8 @@ pub enum Prim {
         rect: Rect,
         src: String,
         placeholder: Color32,
+        /// Its source in the document, relative to the item's start.
+        source: Range<u32>,
     },
     /// A rendered formula's bitmap (padding included); `key` names it in the renderer's cache,
     /// `query` lets the painter ask for it again after an eviction.
@@ -699,6 +701,8 @@ enum Segment {
         src: String,
         alt: String,
         link: Option<String>,
+        /// The image's own source, relative as an inline node's.
+        source: Range<u32>,
     },
 }
 
@@ -1407,6 +1411,7 @@ impl<'a> InlineBuilder<'a> {
                         src,
                         alt,
                         link: Some(target.to_string()),
+                        source: n.children[0].source.clone(),
                     });
                     return;
                 }
@@ -1429,7 +1434,12 @@ impl<'a> InlineBuilder<'a> {
                     let alt = alt.to_string();
                     self.flush();
                     let src = self.resolve(src);
-                    self.segments.push(Segment::Image { src, alt, link: None });
+                    self.segments.push(Segment::Image {
+                        src,
+                        alt,
+                        link: None,
+                        source: n.source.clone(),
+                    });
                 } else {
                     let mut c = st.clone();
                     c.color = color(t.meta_text);
@@ -2264,7 +2274,7 @@ pub fn layout_item(
                             }
                             y += h;
                         }
-                        Segment::Image { src, alt, link } => {
+                        Segment::Image { src, alt, link, source } => {
                             if let Some(target) = link {
                                 // (the image's primitive comes first in `layout_image`)
                                 out.links.push(LinkHit {
@@ -2273,7 +2283,8 @@ pub fn layout_item(
                                     target,
                                 });
                             }
-                            let h = layout_image(&mut out, shaper, images, t, &src, &alt, x, y, width, only_image);
+                            let h =
+                                layout_image(&mut out, shaper, images, t, &src, &alt, x, y, width, only_image, source);
                             if first {
                                 first_line_h = h.min(line_px);
                                 first_is_text = false;
@@ -3639,6 +3650,7 @@ fn layout_image(
     y: f32,
     width: f32,
     center: bool,
+    source: Range<u32>,
 ) -> f32 {
     let ph = color(t.image_placeholder);
     match images.state(src) {
@@ -3651,6 +3663,7 @@ fn layout_image(
                 rect: Rect::from_min_size(pos2(left, y + 4.0), size),
                 src: src.to_string(),
                 placeholder: ph,
+                source: source.clone(),
             });
             size.y + 8.0
         }
@@ -3668,6 +3681,7 @@ fn layout_image(
                 rect,
                 src: src.to_string(),
                 placeholder: ph,
+                source,
             });
             let st = Style::base(t.font_size * 0.85, t.font_size * 1.2, color(t.meta_text));
             let g = shaper.shape(&StyledText::single(label, st.text_style()), wrapped(w - 16.0));

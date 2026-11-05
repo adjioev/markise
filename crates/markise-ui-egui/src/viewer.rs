@@ -78,6 +78,10 @@ pub struct ViewerOutput {
     pub move_block: Option<(usize, usize)>,
     /// A block's delete button was pressed: its opener.
     pub delete_block: Option<usize>,
+    /// An image's Replace… button was pressed: its source in the document.
+    pub replace_image: Option<std::ops::Range<usize>>,
+    /// An image's Edit… button was pressed: its source in the document.
+    pub edit_image: Option<std::ops::Range<usize>>,
 }
 
 /// What the full-window view can show (issue #174).
@@ -2486,7 +2490,9 @@ pub(crate) fn paint_layout(
             }
             // a package's icon and a block's picture: the block tools draw them, as they have them
             Prim::Icon { .. } | Prim::Picture { .. } => {}
-            Prim::Image { rect, src, placeholder } => {
+            Prim::Image {
+                rect, src, placeholder, ..
+            } => {
                 let r = rect.translate(off);
                 match images.texture(src) {
                     Some(tex) => {
