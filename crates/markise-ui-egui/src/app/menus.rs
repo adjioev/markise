@@ -109,6 +109,10 @@ impl MarkiseApp {
         if text_field && TEXT_FIELD_KEYS.iter().any(|(k, ..)| *k == id) {
             return true;
         }
+        // the keyboard is in the block library: document commands wait
+        if self.block_library().is_some() {
+            return false;
+        }
         // the keyboard is in the block form: document commands wait
         if self.ctx.as_ref().is_some_and(|c| self.block_form_focused(c)) {
             return false;
@@ -685,6 +689,15 @@ impl MarkiseApp {
         if id != "help.shortcuts" && !field_edit && self.cheat_sheet.open {
             self.cheat_sheet.close(ctx);
         }
+        // the library holds the keyboard, and what it would insert has no place under another command.
+        // What edits text goes to its field; Close and Quit go on after it.
+        if self.block_library().is_some() {
+            if matches!(id, "file.close" | "app.quit" | "app.exit") {
+                self.block_library_close(ctx);
+            } else if !field_edit {
+                return false;
+            }
+        }
         if self.block_form_focused(ctx) {
             // a composition's text is not final: nothing acts on the draft, as with Esc
             if matches!(id, "file.save" | "file.close") && self.block_form_composing() {
@@ -833,7 +846,7 @@ impl MarkiseApp {
                     });
                     return true;
                 }
-                if self.block_form_focused(ctx) {
+                if self.block_form_focused(ctx) || self.block_library().is_some() {
                     return false;
                 }
                 return self.run_command(ctx, id);

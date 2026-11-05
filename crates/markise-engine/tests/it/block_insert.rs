@@ -304,6 +304,51 @@ fn read_only_refuses() {
     assert_eq!(s.text(), "one\n");
 }
 
+#[test]
+fn an_id_with_blanks_after_it_is_an_id() {
+    let preset = ":::tip\n\n## New {#q}  \n\nBody\n\n:::\n";
+    let out = inserted("## Existing {#q}\n\nz‸\n", preset, "tip");
+    assert!(out.contains("## New {#a1}  \n"), "{out}");
+    // a free one keeps its bytes, blanks included
+    let out = inserted("z‸\n", preset, "tip");
+    assert!(out.contains("## New {#q}  \n"), "{out}");
+}
+
+#[test]
+fn inserting_twice_leaves_the_second_being_edited() {
+    // no answer marked: outside its schema, and native only while it is being edited
+    let preset = ":::poll\n\n## Q\n\n- [ ] A {#a1}\n- [ ] B {#a2}\n\n:::\n";
+    let mut s = surface("one\n");
+    s.caret(0);
+    s.ed.insert_block("poll", preset, false).unwrap();
+    s.frame();
+    assert!(s.ed.view.native_block(s.offset()).is_some(), "the first");
+    s.ed.insert_block("poll", preset, false).unwrap();
+    s.frame();
+    assert!(
+        s.ed.view.native_block(s.offset()).is_some(),
+        "the second, as the first was"
+    );
+    let first = s.text().find("## Q").unwrap();
+    assert!(
+        s.ed.view.native_block(first).is_none(),
+        "the first is left, so ADR 0021's rule applies"
+    );
+}
+
+#[test]
+fn only_what_the_parser_calls_blank_is_blank() {
+    // a no-break space is text: a paragraph, and no separation
+    assert_eq!(
+        inserted("o‸ne\n\u{00a0}\n\ntwo\n", TIP, "tip"),
+        "one\n\u{00a0}\n\n:::tip\n\nHello\n\n:::\n\ntwo\n"
+    );
+    assert_eq!(
+        inserted("‸\n\u{00a0}\n", TIP, "tip"),
+        "\n:::tip\n\nHello\n\n:::\n\n\u{00a0}\n".replacen('\n', "", 1)
+    );
+}
+
 /// The trailing ids of a text, as a reader finds them.
 fn ids(text: &str) -> Vec<&str> {
     (text.lines())

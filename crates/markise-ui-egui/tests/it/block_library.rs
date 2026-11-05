@@ -726,3 +726,117 @@ mod moves {
         assert_eq!(t.len(), d.len());
     }
 }
+
+mod review {
+    use markise_ui_egui::menu::MenuAction;
+
+    use super::*;
+
+    #[test]
+    fn an_ime_enter_with_its_commit_in_one_frame_chooses_nothing_and_writes_nothing() {
+        let f = Fixture::with_palette(DOC, PALETTE);
+        let mut h = f.ready();
+        free_line(&mut h, 7);
+        type_text(&mut h, "/");
+        h.event(Event::Ime(egui::ImeEvent::Preedit {
+            text: "a".to_string(),
+            active_range_chars: Some(0..1),
+        }));
+        frames(&mut h);
+        // one frame: the Return that ends the composition, and what it commits
+        h.input_mut().events.push(Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.input_mut()
+            .events
+            .push(Event::Ime(egui::ImeEvent::Commit("ab".to_string())));
+        frames(&mut h);
+        assert_eq!(text(&h), DOC, "neither a block nor the commit in the document");
+        let open = h.state().block_library().expect("Return was the composition's");
+        assert_eq!(open.query(), "ab");
+    }
+
+    #[test]
+    fn closing_takes_a_commit_of_the_same_frame_with_it() {
+        let f = Fixture::with_palette(DOC, PALETTE);
+        let mut h = f.ready();
+        free_line(&mut h, 7);
+        type_text(&mut h, "/");
+        h.input_mut().events.push(Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.input_mut()
+            .events
+            .push(Event::Ime(egui::ImeEvent::Commit("ab".to_string())));
+        frames(&mut h);
+        assert!(h.state().block_library().is_none());
+        assert_eq!(text(&h), DOC);
+    }
+
+    #[test]
+    fn document_commands_wait_while_it_is_open() {
+        let f = Fixture::with_palette(DOC, PALETTE);
+        let mut h = f.ready();
+        free_line(&mut h, 7);
+        type_text(&mut h, "/");
+        // what is behind the library could take a heading
+        h.state_mut().viewer().unwrap().ed.set_selection(Selection::caret(2));
+        frames(&mut h);
+        assert!(h.state().block_library().is_some());
+        let ctx = h.ctx.clone();
+        assert_eq!(
+            h.state().menu_model().item("block.heading1").map(|i| i.enabled),
+            Some(false)
+        );
+        assert!(!h.state_mut().menu_action(&ctx, &MenuAction::Command("block.heading1")));
+        frames(&mut h);
+        assert_eq!(text(&h), DOC, "the document behind the library is not its target");
+        assert!(h.state().block_library().is_some());
+    }
+
+    #[test]
+    fn text_and_return_of_one_frame_read_in_that_order() {
+        let f = Fixture::with_palette(DOC, PALETTE);
+        let mut h = f.ready();
+        free_line(&mut h, 7);
+        type_text(&mut h, "/");
+        let enter = |h: &mut H| {
+            h.input_mut().events.push(Event::Text("usr/bin".to_string()));
+            h.input_mut().events.push(Event::Key {
+                key: Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+        };
+        enter(&mut h);
+        frames(&mut h);
+        assert_eq!(text(&h), "Before.\n\n/usr/bin\n");
+        assert!(h.state().block_library().is_none());
+        // what was typed narrows what Return takes
+        h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+        frames(&mut h);
+        free_line(&mut h, 7);
+        type_text(&mut h, "/");
+        h.input_mut().events.push(Event::Text("Several".to_string()));
+        h.input_mut().events.push(Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        frames(&mut h);
+        assert!(h.state().block_library().is_none());
+        assert!(text(&h).contains(":::poll many"), "{}", text(&h));
+    }
+}
