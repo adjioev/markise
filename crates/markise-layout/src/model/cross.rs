@@ -18,8 +18,8 @@
 //! Markers are kept in a chunked relative-offset list (like the items): an edit shifts the ones
 //! after it in O(chunks), and groups refer to markers by index, so ordinary typing (no marker
 //! touched) costs no work per disclosure. Scopes are queried ([`FormatDoc::containers_at`])
-//! only when the markers are paired again, i.e. when an edit touched one or lies between a
-//! start and the summary after it (only the adjacency of those two depends on other blocks).
+//! only when the markers are paired again, i.e. when an edit touched one or changed whether a
+//! summary is the block right after its start (the one thing pairing reads from other blocks).
 //!
 //! Format-neutral: markers come from [`FormatDoc::raw_presentation`] through the items.
 
@@ -195,16 +195,10 @@ impl CrossBlockIndex {
         let lo = self.markers.partition_point(|r| r.origin < old.start);
         let hi = self.markers.partition_point(|r| r.origin < old.end).max(lo);
         if lo == hi && fresh.is_empty() {
-            // ordinary typing: only shifts (groups refer to markers by index), unless the edit
-            // lies between a start and the summary after it: their adjacency gives the title
-            let between = |k: usize, f: fn(&RawPresentation) -> bool| {
-                self.markers.range(k..k + 1).next().is_some_and(|r| f(&r.item.kind))
-            };
-            let summary_gap = lo > 0
-                && between(lo - 1, |k| matches!(k, RawPresentation::DisclosureStart { .. }))
-                && between(lo, |k| matches!(k, RawPresentation::DisclosureSummary { .. }));
+            // ordinary typing: only shifts (groups refer to markers by index)
             self.markers.splice(lo..lo, Vec::new(), delta);
-            if !summary_gap {
+            // a block came or went between a start and the summary after it: that gives the title
+            if !self.summary_link_changed(doc, lo) {
                 return false;
             }
             let generation = self.gens.disclosures;
@@ -231,6 +225,30 @@ impl CrossBlockIndex {
         self.reapply_toggles(&toggles);
         self.pair(doc);
         true
+    }
+
+    /// Whether the group of the start just before marker `next` takes marker `next` as its summary
+    /// now but did not when it was paired, or the other way round. Looks at these two markers only,
+    /// so typing in a block between them costs no pairing.
+    fn summary_link_changed(&self, doc: &dyn FormatDoc, next: usize) -> bool {
+        let Some(start) = next.checked_sub(1) else {
+            return false;
+        };
+        let at = self.groups.partition_point(|g| g.start < start);
+        let Some(group) = self.groups.get(at).filter(|g| g.start == start) else {
+            return false; // an unpaired start has no title to change
+        };
+        let (Some(m), Some(n)) = (
+            self.markers.range(start..start + 1).next().map(|r| r.to_abs()),
+            self.markers.range(next..next + 1).next().map(|r| r.to_abs()),
+        ) else {
+            return false;
+        };
+        let takes = matches!(&m.kind, RawPresentation::DisclosureStart { title, .. } if title.is_empty())
+            && matches!(n.kind, RawPresentation::DisclosureSummary { .. })
+            && scope(doc, m.start) == scope(doc, n.start)
+            && next_block(doc, doc.text(), &m, &n);
+        takes != (group.summary == Some(next))
     }
 
     /// Clears the markers (a full rebuild collects them again); returns the reader's choices
@@ -300,10 +318,7 @@ impl CrossBlockIndex {
     pub(super) fn pair(&mut self, doc: &dyn FormatDoc) {
         let text = doc.text();
         let ms = self.markers();
-        let scopes: Vec<Vec<usize>> = ms
-            .iter()
-            .map(|m| doc.containers_at(m.start).iter().map(|c| c.span.start).collect())
-            .collect();
+        let scopes: Vec<Vec<usize>> = ms.iter().map(|m| scope(doc, m.start)).collect();
         let mut groups: Vec<Group> = Vec::new();
         let mut stacks: std::collections::HashMap<&[usize], Vec<usize>> = Default::default();
         for (k, m) in ms.iter().enumerate() {
@@ -356,6 +371,11 @@ impl CrossBlockIndex {
             .iter()
             .any(|g| self.marker_start(g.start) < hi && self.marker_start(g.end) >= lo)
     }
+}
+
+/// The container scope of a marker: markers pair only within one.
+fn scope(doc: &dyn FormatDoc, at: usize) -> Vec<usize> {
+    doc.containers_at(at).iter().map(|c| c.span.start).collect()
 }
 
 /// Whether marker `n` is the block right after marker `m` in their container (a separate

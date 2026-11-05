@@ -223,6 +223,23 @@ fn a_block_between_a_start_and_its_summary_decides_the_title() {
     }
 }
 
+/// Typing in a block between a start and its summary changes no adjacency: no pairing (ADR 0016).
+#[test]
+fn typing_between_a_start_and_its_summary_pairs_nothing() {
+    let src = "<details open>\n\npara\n\n<summary>T</summary>\n\nbody\n\n</details>\n";
+    let mut doc = md(src);
+    let mut m = full(&doc);
+    let pairings = m.cross.pairings;
+    let mut at = src.find("para").unwrap() + 4;
+    for c in ["x", "y", "z"] {
+        let e = doc.apply(&PatchSet::single_verbatim(at..at, c));
+        m.apply(&doc, &e);
+        at += c.len();
+        m.diff(&full(&doc)).unwrap();
+    }
+    assert_eq!(m.cross.pairings, pairings, "no pairing while typing");
+}
+
 // ---- random edits and paging operations == full build -------------------------------------
 
 const SNIPPETS: &[&str] = &[
