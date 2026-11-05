@@ -102,13 +102,22 @@ dragging pans, and <kbd>+</kbd>, <kbd>-</kbd> and <kbd>0</kbd> zoom in, zoom out
 <kbd>Esc</kbd> or a click outside the image closes the view. A single click still places the
 caret, and <kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+click on an image inside a link still follows the link.
 
-To change an image, hover it. **Replace…** chooses another file, which is copied by the same rules
-as a drop, and changes only the path: the description and the title stay, and an image from
-anywhere, a web address included, can be replaced. **Edit…** opens a small window with the
+To change an image, hover it. **Replace…** opens the image picker and changes only the path: the
+description and the title stay, and an image from anywhere, a web address included, can be
+replaced. **Edit…** opens a small window with the
 description and the path as written. Each is one undo step, and undo never deletes a copied file.
 A reference image (`![text][label]`) has its path in the definition, so it has neither button; a
 picture in a block's native view belongs to the block's form; and comments shown as No Markup or
 Original leave the document read-only.
+
+The image picker shows thumbnails of the images in the document's folder and its subfolders, the
+nearest first, up to 2000 images and six levels down; a note says when there are more. Type to
+search by name, use the arrow keys and <kbd>Return</kbd> or double-click to choose, <kbd>Esc</kbd>
+to close. The current image is selected, and a dot marks images the document already uses. An image
+in the folder is linked where it is. **Browse…** opens the system's file dialog, and a file dropped
+on the window is added to the list; both go by the same rules as a drop. A document that has never
+been saved has no folder, so it goes straight to the file dialog. A block's form uses the same
+picker for **Choose file**.
 
 Where images go is set in **Preferences → Files & Images**; see
 [Settings](settings.md#files-and-images). In an Obsidian vault, the vault's attachment folder is

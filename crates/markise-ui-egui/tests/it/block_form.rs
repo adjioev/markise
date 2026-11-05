@@ -1047,25 +1047,46 @@ fn a_new_answer_gets_its_id_on_save() {
 }
 
 #[test]
-fn a_picked_image_goes_in_relative_and_one_outside_is_refused() {
+fn a_picked_image_goes_in_relative_and_one_outside_is_copied_in() {
     let f = Fixture::new(DOC);
     let inside = f.folder.join("images/two pics.png");
     fs::write(&inside, one_pixel_png()).unwrap();
     let mut h = f.ready();
     h.get_by_label("Edit Block: gallery").click();
     wait(&mut h);
+    // the picker's Browse…, as the form asks through its host and opens no dialog itself
     *f.picks.lock().unwrap() = Some(inside);
     h.get_by_label("Choose file: Pictures 1").click();
     wait(&mut h);
+    assert!(h.state().image_picker().is_some(), "the picker");
+    h.get_by_label("Browse…").click();
+    wait(&mut h);
+    assert!(h.state().image_picker().is_none());
     assert_eq!(draft(&h)["pictures"][0]["path"], json!("images/two pics.png"));
 
+    // from outside, by the attachment rules, as a drop
     let outside = f.config.join("out.png");
     fs::write(&outside, one_pixel_png()).unwrap();
     *f.picks.lock().unwrap() = Some(outside);
     h.get_by_label("Choose file: Pictures 1").click();
     wait(&mut h);
-    assert_eq!(draft(&h)["pictures"][0]["path"], json!("images/two pics.png"), "kept");
-    assert!(has(&h, "not inside the document's folder"));
+    h.get_by_label("Browse…").click();
+    wait(&mut h);
+    assert_eq!(draft(&h)["pictures"][0]["path"], json!("assets/out.png"));
+    assert!(f.folder.join("assets/out.png").is_file());
+
+    // back to the first, by its place in the picker: cancelled, nothing changes
+    h.get_by_label("Choose file: Pictures 1").click();
+    wait(&mut h);
+    h.key_press(egui::Key::Escape);
+    wait(&mut h);
+    assert!(h.state().image_picker().is_none());
+    assert_eq!(draft(&h)["pictures"][0]["path"], json!("assets/out.png"), "kept");
+    *f.picks.lock().unwrap() = Some(f.folder.join("images/two pics.png"));
+    h.get_by_label("Choose file: Pictures 1").click();
+    wait(&mut h);
+    h.get_by_label("Browse…").click();
+    wait(&mut h);
 
     h.get_by_label("Save").click();
     wait(&mut h);

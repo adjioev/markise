@@ -201,7 +201,9 @@ impl MarkiseApp {
                 .filter(|p| !p.as_os_str().is_empty())
                 .collect()
         });
-        if !dropped.is_empty() {
+        if !dropped.is_empty()
+            && let Some(dropped) = self.image_picker_takes_drops(dropped)
+        {
             self.drop_files(ctx, dropped);
         }
         if self.doc.is_none() || !self.document_focused(ctx) {

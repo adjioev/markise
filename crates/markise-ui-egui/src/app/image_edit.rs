@@ -1,16 +1,20 @@
-//! Changing an image from its buttons in the rendered view: Replace… chooses another file, which takes
-//! the path the attachment rules give it, the same as a drop; Edit… is a small window with the description
-//! and the path. One undo step each. The image's title and attributes stay.
+//! Changing an image from its buttons in the rendered view: Replace… chooses another file in the image
+//! picker, which takes the path the attachment rules give it, the same as a drop; Edit… is a small window
+//! with the description and the path. One undo step each. The image's title and attributes stay. The picker
+//! also serves a form's Choose file.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use egui::{Context, Key, Modifiers};
+use egui_schema_form::FileRequest;
 use markise_engine::attach::{self, Item, Outcome};
 use markise_engine::editor::image_dest_for;
 
 use super::attach::Stage;
 use super::{Banner, MarkiseApp};
+use crate::block_form::relative_to_folder;
+use crate::image_picker::{ImagePicker, PickerAct, is_droppable};
 
 /// A document and its revision.
 type Origin = (u64, u64);
@@ -38,11 +42,31 @@ struct EditWindow {
     focus: bool,
 }
 
+/// Who a choice in the picker is for.
+#[derive(Clone)]
+enum PickFor {
+    Image(Range<usize>),
+    Form(FileRequest),
+}
+
+/// The open picker.
+struct OpenPicker {
+    picker: ImagePicker,
+    pick_for: PickFor,
+    origin: Origin,
+    folder: PathBuf,
+    /// Dropped files being copied by the attachment rules.
+    adding: Vec<Stage>,
+}
+
 #[derive(Default)]
 pub(super) struct ImageEditState {
     asked: Option<(Asked, Origin)>,
     copying: Option<Copying>,
     window: Option<EditWindow>,
+    picker: Option<OpenPicker>,
+    /// A file from outside on its way into the folder, for a form.
+    form_copying: Option<(FileRequest, PathBuf, Stage)>,
 }
 
 impl ImageEditState {
@@ -60,7 +84,13 @@ impl ImageEditState {
 
     /// Nothing is on its way.
     pub(super) fn is_settled(&self) -> bool {
-        self.asked.is_none() && self.copying.is_none()
+        self.asked.is_none()
+            && self.copying.is_none()
+            && self.form_copying.is_none()
+            && self
+                .picker
+                .as_ref()
+                .is_none_or(|p| !p.picker.is_busy() && p.adding.is_empty())
     }
 }
 
@@ -76,7 +106,163 @@ impl MarkiseApp {
             }
         }
         self.image_copy_poll();
+        self.image_form_copy_poll();
         self.image_edit_window(ctx);
+        self.image_picker_window(ctx);
+    }
+
+    /// The open image picker (tests).
+    pub fn image_picker(&self) -> Option<&ImagePicker> {
+        self.image_edit.picker.as_ref().map(|p| &p.picker)
+    }
+
+    fn open_image_picker(&mut self, pick_for: PickFor, current: Option<String>) -> bool {
+        let Some(origin) = self.block_edit_origin() else {
+            return false;
+        };
+        let wake = self.wake_handle();
+        let Some(d) = &self.doc else { return false };
+        let Some(folder) = d.file().and_then(Path::parent).map(Path::to_path_buf) else {
+            return false;
+        };
+        let text = d.viewer.ed.session.text();
+        let picker = ImagePicker::open(&folder, text, current.as_deref(), wake);
+        self.image_edit.picker = Some(OpenPicker {
+            picker,
+            pick_for,
+            origin,
+            folder,
+            adding: Vec::new(),
+        });
+        true
+    }
+
+    /// A form's Choose file: the picker, or nothing for a document with no folder.
+    pub(super) fn pick_for_form(&mut self, request: FileRequest) {
+        if !self.open_image_picker(PickFor::Form(request), None)
+            && let Some(open) = self.block_form.open.as_mut()
+        {
+            open.deliver_file(request, None);
+        }
+    }
+
+    /// Takes the frame's dropped files while the picker is open: they are added to it, not to the document.
+    pub(super) fn image_picker_takes_drops(&mut self, files: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+        if self.image_edit.picker.is_none() {
+            return Some(files);
+        }
+        let (images, others): (Vec<_>, Vec<_>) = files.into_iter().partition(|p| is_droppable(p));
+        if !others.is_empty()
+            && let Some(p) = &mut self.image_edit.picker
+        {
+            p.picker.set_note("Only image files can be added here.".into());
+        }
+        if !images.is_empty()
+            && let Some(req) = self.attach_request()
+        {
+            let stage = self.job(req, images.into_iter().map(Item::File).collect());
+            if let Some(p) = &mut self.image_edit.picker {
+                p.adding.push(stage);
+            }
+        }
+        None
+    }
+
+    fn image_picker_window(&mut self, ctx: &Context) {
+        let Some(mut open) = self.image_edit.picker.take() else {
+            return;
+        };
+        // what it was opened for is another text by now, unless a form's draft is what it serves
+        if matches!(open.pick_for, PickFor::Image(_)) && self.block_edit_origin() != Some(open.origin) {
+            return;
+        }
+        let mut still = Vec::new();
+        for mut stage in std::mem::take(&mut open.adding) {
+            let Some(out) = self.job_outcome(&mut stage) else {
+                still.push(stage);
+                continue;
+            };
+            if let Some(why) = out.errors.first() {
+                open.picker.set_note(why.clone());
+            }
+            for t in out.targets {
+                let rel = relative_to_folder(&t, &open.folder).unwrap_or_else(|| t.display().to_string());
+                open.picker.add(t, rel);
+            }
+        }
+        open.adding = still;
+        let act = open.picker.show(ctx);
+        let file = match act {
+            None => {
+                self.image_edit.picker = Some(open);
+                return;
+            }
+            Some(PickerAct::Close) => None,
+            Some(PickerAct::Choose(file)) => Some(file),
+            Some(PickerAct::Browse) => {
+                let picker = self.block_form.picker.clone();
+                match picker(&open.folder) {
+                    Some(file) => Some(file),
+                    None => {
+                        self.image_edit.picker = Some(open);
+                        return;
+                    }
+                }
+            }
+        };
+        match (open.pick_for.clone(), file) {
+            (PickFor::Image(at), Some(file)) => self.replace_image_with(at, file),
+            (PickFor::Image(_), None) => {}
+            (PickFor::Form(request), file) => self.image_for_form(request, file, &open.folder),
+        }
+        if let Some(d) = &mut self.doc
+            && matches!(open.pick_for, PickFor::Image(_))
+        {
+            d.viewer.request_refocus();
+        }
+    }
+
+    /// What was chosen for a form: a file from outside its folder is copied by the attachment rules first.
+    fn image_for_form(&mut self, request: FileRequest, file: Option<PathBuf>, folder: &Path) {
+        let Some(file) = file else {
+            if let Some(open) = self.block_form.open.as_mut() {
+                open.deliver_file(request, None);
+            }
+            return;
+        };
+        if let Some(rel) = relative_to_folder(&file, folder) {
+            if let Some(open) = self.block_form.open.as_mut() {
+                open.deliver_file(request, Some(rel));
+            }
+            return;
+        }
+        let Some(req) = self.attach_request() else { return };
+        let stage = self.job(req, vec![Item::File(file)]);
+        self.image_edit.form_copying = Some((request, folder.to_path_buf(), stage));
+    }
+
+    fn image_form_copy_poll(&mut self) {
+        let Some((request, folder, mut stage)) = self.image_edit.form_copying.take() else {
+            return;
+        };
+        let Some(out) = self.job_outcome(&mut stage) else {
+            self.image_edit.form_copying = Some((request, folder, stage));
+            return;
+        };
+        let target = out.targets.first();
+        let rel = target.and_then(|t| relative_to_folder(t, &folder));
+        let Some(open) = self.block_form.open.as_mut() else {
+            return;
+        };
+        if let Some(why) = out.errors.first() {
+            open.set_message(why.clone());
+        } else if let (Some(t), None) = (target, &rel) {
+            open.set_message(format!(
+                "{} is not inside the document's folder, so it was not used.",
+                t.display()
+            ));
+        }
+        open.deliver_file(request, rel);
     }
 
     /// Why no image can change now, as the banner says it.
@@ -99,11 +285,22 @@ impl MarkiseApp {
             self.banner = Some(Banner::Info(why.into()));
             return;
         }
-        let folder = (self.doc.as_ref())
-            .and_then(|d| d.file().and_then(Path::parent).map(Path::to_path_buf))
-            .unwrap_or_else(|| PathBuf::from("."));
+        // what it is now, to show it; a document with no folder yet has only the system's dialog
+        let current = self.doc.as_ref().and_then(|d| {
+            let parts = d.viewer.ed.image_parts(at.clone())?;
+            let dest = &d.viewer.ed.session.text()[parts.dest];
+            Some(
+                dest.strip_prefix('<')
+                    .and_then(|t| t.strip_suffix('>'))
+                    .unwrap_or(dest)
+                    .to_string(),
+            )
+        });
+        if self.open_image_picker(PickFor::Image(at.clone()), current) {
+            return;
+        }
         let picker = self.block_form.picker.clone();
-        let Some(file) = picker(&folder) else { return };
+        let Some(file) = picker(Path::new(".")) else { return };
         self.replace_image_with(at, file);
     }
 

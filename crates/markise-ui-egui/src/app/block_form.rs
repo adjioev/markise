@@ -11,9 +11,7 @@ use markise_layout::BlockViewMode;
 use markise_layout::block::color;
 
 use super::{MarkiseApp, Then};
-use crate::block_form::{
-    FormAssets, OpenForm, PanelAction, PanelHost, block_at, panel_widths, relative_to_folder, style_for,
-};
+use crate::block_form::{FormAssets, OpenForm, PanelAction, PanelHost, block_at, panel_widths, style_for};
 
 /// Chooses a file, starting in the given folder.
 pub type ImagePicker = Arc<dyn Fn(&Path) -> Option<PathBuf> + Send + Sync>;
@@ -29,7 +27,7 @@ pub(super) enum DraftNext {
 
 /// The form of the session.
 pub(super) struct BlockFormState {
-    open: Option<OpenForm>,
+    pub(super) open: Option<OpenForm>,
     /// Asked for by the document's drawing: opens on the next frame.
     requested: Option<usize>,
     /// A block's view button was pressed: switches on the next frame.
@@ -378,7 +376,7 @@ impl MarkiseApp {
         }
     }
 
-    /// The file dialogs the form asked for, between frames as the app's other dialogs.
+    /// The files the form asked for: the image picker, between frames as the app's other windows.
     fn block_form_files(&mut self) {
         let Some(open) = self.block_form.open.as_mut() else {
             return;
@@ -387,23 +385,9 @@ impl MarkiseApp {
         if requests.is_empty() {
             return;
         }
-        let path = self.doc.as_ref().and_then(|d| d.file().map(Path::to_path_buf));
-        let Some(folder) = path.as_deref().and_then(Path::parent) else {
-            return;
-        };
-        let picker = self.block_form.picker.clone();
+        // one window at a time; another click asks again
         for request in requests {
-            let answer = picker(folder).and_then(|file| {
-                let relative = relative_to_folder(&file, folder);
-                if relative.is_none() {
-                    open.set_message(format!(
-                        "{} is not inside the document's folder, so it was not used.",
-                        file.display()
-                    ));
-                }
-                relative
-            });
-            open.deliver_file(request, answer);
+            self.pick_for_form(request);
         }
     }
 }

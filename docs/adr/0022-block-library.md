@@ -183,6 +183,23 @@ afterwards the transaction rolls back and a message says so.
 nothing changed closes, as for any other edit that removes its block. A draft of another block stays. The block's view state and picture identity end with its
 opener, as for any edit going over one: what comes to stand there inherits neither.
 
+### The image picker
+
+An in-app window of thumbnails, for any document, package or not; it knows nothing of blocks. Replace… on an image opens it, and so does a form's Choose
+file, through `FormHost`: the form's crate still opens no dialog. The insert-image command does not: it writes a template and has its own tests and keys, and is left alone.
+
+**What it shows.** `markise_engine::image_list::list_images`: the images of the document's folder and below it, breadth first, at most `MAX_IMAGES` of them,
+`MAX_DEPTH` levels and `MAX_ENTRIES` entries looked at, with a note when a bound was reached and how many folders could not be read. Hidden files and folders are left out. A link counts only
+when it is to a file inside the folder; a link to a folder is not followed, so no link leads out and none loops. That one function is the interface: another source would be another list. There is none now: no network.
+
+**The UI thread.** Listing and decoding run on workers, cancelled when it closes. Thumbnails go through the decoder and limits every image has (`markise_blocks`), with a shared budget. Only what is on screen is asked for, the
+newest first, with at most 64 waiting, and at most 256 are kept. Workers end when nothing waits, and at rest it asks for no frame.
+
+**A choice.** An image inside the folder is linked where it is. Browse… and a dropped file go by the attachment rules (the Files & Images preference); a dropped file joins the list, selected, and is not yet chosen. A
+form takes a path relative to its folder as before: a file from outside is first copied in by those rules, and if they leave it outside, the form says so. A document never saved has no folder and goes to the system's dialog.
+
+**The mark.** `destinations_in` reads the `](…)` of the text once, on opening, for "in this document". It is a cheap look and counts code too; it decides nothing.
+
 ## Consequences
 
 - A package's texts in other languages help find a block before they are shown.
