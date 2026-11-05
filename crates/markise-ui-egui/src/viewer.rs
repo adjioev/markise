@@ -27,6 +27,7 @@ use crate::images::TextureStore;
 use crate::smooth_scroll::{self, SmoothScroll};
 use crate::text_paint::ParleyText;
 
+mod block_move;
 mod block_tools;
 mod card_edit;
 mod code_tools;
@@ -70,6 +71,8 @@ pub struct ViewerOutput {
     pub switch_block_view: Option<usize>,
     /// Open the block library: `/` on a free line, and what was typed right after it.
     pub open_block_library: Option<String>,
+    /// A block was dropped: its opener and the line it goes to.
+    pub move_block: Option<(usize, usize)>,
 }
 
 /// What the full-window view can show (issue #174).
@@ -223,6 +226,8 @@ pub struct DocViewer {
     app_command: Option<&'static str>,
     /// Text the block library gave back, to be typed at the caret on the next frame.
     typed_for_library: Option<String>,
+    /// A block being dragged by its handle.
+    block_drag: Option<block_move::BlockDrag>,
     /// The comment whose text is being edited in its card (issue #87).
     card_edit: Option<card_edit::CardEdit>,
     /// The bubble popover editor's size at its last frame (placement).
@@ -301,6 +306,7 @@ impl DocViewer {
             notice: None,
             app_command: None,
             typed_for_library: None,
+            block_drag: None,
             comment_view: Default::default(),
             card_edit_size: None,
             editable: false,
@@ -1040,6 +1046,7 @@ impl DocViewer {
             self.code_tools_ui(ui, &visible, rect, left, theme, focused, editable, &mut out, &mut sh);
             self.image_tools_ui(ui, &visible, rect, left, theme, imgs, &mut out);
             self.block_tools_ui(ui, &visible, rect, left, theme, &mut out);
+            self.block_move_ui(ui, &visible, rect, left, theme, &mut out);
         }
 
         // ---- review comments: margin cards or bubble popovers (visible items only)

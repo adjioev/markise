@@ -83,7 +83,7 @@ fn line_for_block(doc: &dyn FormatDoc, at: DocPos) -> usize {
 
 /// What is written at `line` so that `body` stands with a blank line on each side, reusing the blank
 /// lines there are, and where in it the body starts. A file that ends without a line ending stays so.
-fn separated(text: &str, line: usize, body: &str, eol: &str) -> (String, usize) {
+pub(super) fn separated(text: &str, line: usize, body: &str, eol: &str) -> (String, usize) {
     let mut out = String::with_capacity(body.len() + 3 * eol.len());
     let complete = line == 0 || text[..line].ends_with('\n');
     if !complete {
@@ -145,7 +145,7 @@ fn with_free_ids(preset: &dyn FormatDoc, in_document: &str) -> String {
 }
 
 /// Every block of a document, as what must stay the same around an edit.
-fn blocks_of(doc: &dyn FormatDoc) -> Vec<(usize, String, String)> {
+pub(super) fn blocks_of(doc: &dyn FormatDoc) -> Vec<(usize, String, String)> {
     let Some(d) = doc.as_any().downcast_ref::<Document>() else {
         return Vec::new();
     };

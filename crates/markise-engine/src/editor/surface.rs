@@ -322,7 +322,7 @@ impl EditorView {
     /// range, and the items around them, stay materialized (not while the view holds a
     /// placeholder document during an edit): caret geometry and selection fixing never see a
     /// placeholder at a selection end.
-    fn pin_caret(&mut self) {
+    pub(super) fn pin_caret(&mut self) {
         if self.view.model().is_paged() && Arc::ptr_eq(self.view.doc(), self.session.doc_arc()) {
             let sel = self.session.selection();
             let mut pins: Vec<usize> = vec![sel.primary().focus.offset, sel.primary().anchor.offset];

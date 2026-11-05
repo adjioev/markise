@@ -108,6 +108,50 @@ in it. Once left in that state it is a card with its warning, as any block.
 **A large file** still opening has a part of its text, where an id could not be seen, so until the rest is in, `/` is
 a character and the command is disabled.
 
+### Moving
+
+`EditorView::move_block(up, in_source)` and `move_block_to(opener, line)`. The commands Move Block Up and Move Block
+Down (⌥⌘↑, ⌥⌘↓; Ctrl+Shift+↑, Ctrl+Shift+↓) are in the Paragraph menu, only with a package, and in Source mode too.
+They are separate from Move Row Up and Down (Alt+↑, Alt+↓), which work on one line or list item and are not applicable on a
+block's marker lines. A test checks that the new chords are on nothing else in the registry or the app.
+
+**What moves.** The block around the caret, the innermost, past what stands next to it at its level: a block whole,
+or one top-level block such as a paragraph, list or table. At the document's level that is the top-level blocks. A
+nested block stays in its parent: the parent's opener and closer are its limits. So the top-level list stays flat
+and pages split nothing differently (ADR 0018, ADR 0016).
+
+- Front matter stays first: nothing goes above it.
+- A reference definition does not show, so a move goes past it to what does; a move that only passed one would look
+  like nothing happened.
+
+**Bytes.** The block's lines are copied as they stand, odd spacing, trailing blanks, indented opener and ids included. Around
+it, the blank lines it leaves behind go with it, and it gets one blank line each side with the least that does
+that, as an insertion does (one helper). Only blank lines can go, and only what the parser calls blank: spaces and tabs. A no-break space is text. A move that
+would take anything else is refused. Something it held apart with no blank line
+stays apart: a blank line is written so that two paragraphs do not run together. Removing a block between two lists
+does let them read as one list afterwards, as it would by hand: their bytes stay. A file ending without a line ending stays so.
+
+**One undo step**, a transaction named Move Block, of one deletion and one insertion rather than a rewrite of the range
+between, so its cost does not grow with what it passes over beyond what any edit costs. In a paged document the
+model re-pages what the two edits span (ADR 0018). The caret moves with the block and stays in the same field.
+
+**Refused.** After the edit the block has to stand at its new place byte for byte and every block has to pair as before,
+or the transaction rolls back and a message says so. Stray markers are the case: in `:::s`, `::::b`, `::::`, `:::`,
+moving `b` above `:::s` would make `s` pair with the last line.
+
+**What goes with it.** A block's own view state (ADR 0021) sits on a mark its bytes moving would end, so it is read before and set
+again after, and so is the state of being edited. A form's changed draft holds its block by marks too and is not to be lost
+silently (ADR 0020): while there is one, the commands are disabled and a drop says why in the panel. An unchanged panel
+closes as for any other edit that removes its block. After undoing a move, a block's own view state is back to the document's.
+
+**The handle.** While the pointer is over a block, a grip of six dots stands to the left of its first row, in the weak text colour. The
+innermost block under the pointer has it, and nothing shows otherwise: no button in the document, no floating control.
+Pressing it starts a drag, with the pointer an arrow. A thin accent line shows where it would land, among the
+places on screen at the block's level. Its own place is one of those, where it lands nowhere, so a press and release moves
+nothing. Near the top or bottom edge the view scrolls, faster nearer the edge, and pages come in as they do for any scroll.
+A list or a quote is one thing here: its items are no places. Esc or any change of the document cancels. Release moves
+it, and a request from a frame ago goes nowhere if the document or its revision is another by then. A read-only view has no handle.
+
 ## Consequences
 
 - A package's texts in other languages help find a block before they are shown.

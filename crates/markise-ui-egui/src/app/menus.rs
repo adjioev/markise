@@ -370,6 +370,12 @@ impl MarkiseApp {
                 self.block_library_available(),
                 Check::None,
             ));
+            paragraph
+                .entries
+                .push(self.app_item("block.moveUp", self.block_move_available(true), Check::None));
+            paragraph
+                .entries
+                .push(self.app_item("block.moveDown", self.block_move_available(false), Check::None));
         }
         menus.push(paragraph);
         let format = self.registry_menu("Format", FORMAT_ORDER, text_field);
@@ -712,6 +718,8 @@ impl MarkiseApp {
         match id {
             "block.editForm" => return self.open_block_form_at_caret(),
             "block.insertFromLibrary" => return self.open_block_library_by_command(ctx),
+            "block.moveUp" => return self.move_block_at_caret(true),
+            "block.moveDown" => return self.move_block_at_caret(false),
             "view.switchBlockView" => return self.switch_block_view_at_caret(),
             "view.switchAllBlockViews" => return self.switch_all_block_views(),
             "file.quickOpen" => self.open_quick(ctx),
