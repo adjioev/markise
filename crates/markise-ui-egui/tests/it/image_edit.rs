@@ -209,6 +209,9 @@ fn the_tools_have_labels_and_an_arrow_and_edit_changes_the_description_and_the_p
 fn a_review_mode_after_the_window_opened_refuses_the_save_and_closes_it() {
     let doc = "![Old](old.png)\n\nb {>>note<<}\n";
     let (_f, mut h) = fixture(doc);
+    h.state_mut().set_view_mode(markise_ui_egui::ViewMode::SideBySide);
+    common::settle(&mut h);
+    common::run(&mut h);
     press_tool(&mut h, "![", "Edit Image…");
     assert!(h.state().image_edit_is_open());
     h.state_mut().set_comment_view(CommentView::Final);
@@ -222,6 +225,10 @@ fn a_copy_finishing_in_a_review_mode_replaces_nothing() {
     use std::sync::atomic::{AtomicBool, Ordering};
     let doc = "![Old](old.png)\n\nb {>>note<<}\n";
     let (f, mut h) = fixture(doc);
+    // in Side by Side a review mode leaves the session writable, by the source pane
+    h.state_mut().set_view_mode(markise_ui_egui::ViewMode::SideBySide);
+    common::settle(&mut h);
+    common::run(&mut h);
     let away = f.root().join("away/x.png");
     png(&away);
     *f.pick.lock().unwrap() = Some(away);
@@ -249,12 +256,14 @@ fn a_copy_finishing_in_a_review_mode_replaces_nothing() {
     }
     h.step();
     h.step();
+    assert!(!h.state().background_settled(), "the copy is under way");
     h.state_mut().set_comment_view(CommentView::Final);
     h.step();
     hold.store(false, Ordering::SeqCst);
     common::settle(&mut h);
     common::run(&mut h);
     assert_eq!(text(&h), doc);
+    assert!(f.root().join("note/assets/x.png").is_file(), "it had got that far");
 }
 
 #[test]
