@@ -20,15 +20,16 @@ pub fn index() -> Arc<PackageIndex> {
         {"name": "why", "type": "quote", "min": 0},
     ]});
     let plain = json!({"label": "Plain", "fields": [{"name": "body", "type": "text"}]});
+    let steps = json!({"label": "Steps", "fields": [{"name": "items", "type": "list", "minItems": 1}]});
     let views = json!({
         "tip": {"kind": "callout", "accent": "green", "icon": "bulb"},
         "poll": {"kind": "choices", "accent": "purple"},
+        "steps": {"kind": "card", "accent": "blue"},
     });
     let mut files = BTreeMap::new();
-    let manifest =
-        r#"{"format":"markise-block-package/2","library":"sample","version":"1","blocks":["tip","poll","plain"]}"#;
+    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1","blocks":["tip","poll","plain","steps"]}"#;
     files.insert("manifest.json".to_string(), manifest.as_bytes().to_vec());
-    for (name, schema) in [("tip", &tip), ("poll", &poll), ("plain", &plain)] {
+    for (name, schema) in [("tip", &tip), ("poll", &poll), ("plain", &plain), ("steps", &steps)] {
         files.insert(
             format!("components/{name}/{name}.json"),
             schema.to_string().into_bytes(),

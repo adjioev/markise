@@ -130,6 +130,21 @@ impl Slot {
             .join("\n")
     }
 
+    /// Where the plain text of the slot starts or ends, what it holds besides aside. A heading or an
+    /// item with no text yet is a place all the same.
+    pub fn text_edge(&self, first: bool) -> Option<usize> {
+        let open = |l: &&SlotLine| !self.is_protected(&l.content);
+        let plain = |l: &&SlotLine| open(l) && !l.value.trim().is_empty();
+        let edge = |l: &SlotLine| if first { l.content.start } else { l.content.end };
+        let found = if first {
+            self.lines.iter().find(plain)
+        } else {
+            self.lines.iter().rev().find(plain)
+        };
+        let empty = || self.lines.iter().find(open).filter(|_| self.is_one_line());
+        found.or_else(empty).map(edge)
+    }
+
     /// One line of text and no more: Enter and a pasted line break cannot go in it.
     pub fn is_one_line(&self) -> bool {
         !matches!(self.kind, FieldKind::Text | FieldKind::Quote)
@@ -225,7 +240,7 @@ impl BlockFields {
         }
         let s = self.source.as_str();
         let typed = if slot.is_one_line() {
-            text.replace("\r\n", " ").replace(['\n', '\r'], " ")
+            one_line(text)
         } else {
             text.replace("\r\n", "\n").replace('\r', "\n")
         };
@@ -266,10 +281,17 @@ impl BlockFields {
         Ok(Some(SlotEdit { applied, caret }))
     }
 
-    /// Gives an absent field `text`, in its declared place.
-    pub fn fill_field(&self, field: usize, text: &str) -> Result<Option<SlotEdit>, Refused> {
+    /// Gives a field with no place in the source `text`, in its declared place: a field with no
+    /// text at all, or what follows `sep` at the end of one that has some.
+    pub fn fill_field(&self, field: usize, sep: &str, text: &str) -> Result<Option<SlotEdit>, Refused> {
         let f = self.fields.get(field).ok_or(Refused::NotText)?;
-        let typed = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut typed = text.replace("\r\n", "\n").replace('\r', "\n");
+        // a new paragraph after the field's text, when it has some
+        if let FieldValue::Text(old) = &f.value
+            && !old.trim().is_empty()
+        {
+            typed = format!("{old}{sep}{typed}");
+        }
         let edit = FieldEdit::SetText {
             field: f.name.clone(),
             text: typed.clone(),
@@ -290,6 +312,166 @@ impl BlockFields {
         let end = next.value().len();
         let caret = SlotCaret::At(next.source_offset(&applied.fields.source, end));
         Ok(Some(SlotEdit { applied, caret }))
+    }
+
+    /// Enter in a list item or an answer: what follows `r` goes to a new one after it, a new answer
+    /// with a new id and no mark.
+    pub fn split_item(&self, at: SlotAt, r: Range<usize>) -> Result<Option<SlotEdit>, Refused> {
+        let (slot, item) = self.item_slot(at)?;
+        if slot.is_protected(&r) {
+            return Err(Refused::NotText);
+        }
+        let s = self.source.as_str();
+        let value = slot.value();
+        let (va, vb) = (slot.value_offset(s, r.start), slot.value_offset(s, r.end));
+        let (left, right) = (value[..va].trim_end().to_string(), value[vb..].trim_start().to_string());
+        let f = &self.fields[at.field];
+        let FieldValue::Items(items) = &f.value else {
+            return Err(Refused::NotText);
+        };
+        let place = items.iter().position(|i| i.id == item).ok_or(Refused::NotText)?;
+        let data = match items[place].data {
+            ItemData::Text(_) => ItemData::Text(right.clone()),
+            _ => ItemData::Choice {
+                anchor: None,
+                text: right.clone(),
+                correct: false,
+            },
+        };
+        let edits = [
+            FieldEdit::SetItemText {
+                field: f.name.clone(),
+                item,
+                text: left.clone(),
+            },
+            FieldEdit::InsertItem {
+                field: f.name.clone(),
+                at: place + 1,
+                item: data,
+            },
+        ];
+        let applied = self.apply(&edits)?;
+        self.check_rest(at, &applied).map_err(Refused::Unsafe)?;
+        let FieldValue::Items(next) = &applied.fields.fields[at.field].value else {
+            return Err(Refused::Unsafe("the field changed kind"));
+        };
+        let mut wanted: Vec<ItemData> = items.iter().map(|i| i.data.clone()).collect();
+        set_text(&mut wanted[place], &left);
+        let same = next.len() == wanted.len() + 1
+            && (next.iter().enumerate()).all(|(k, i)| match k.cmp(&(place + 1)) {
+                std::cmp::Ordering::Less => i.data == wanted[k],
+                std::cmp::Ordering::Equal => item_text(&i.data) == right && has_new_id(&i.data, &wanted),
+                std::cmp::Ordering::Greater => i.data == wanted[k - 1],
+            });
+        if !same {
+            return Err(Refused::Unsafe("the items do not read back"));
+        }
+        let new = SlotAt {
+            field: at.field,
+            item: applied.inserted.first().copied(),
+        };
+        let slot = applied
+            .fields
+            .slot(new)
+            .ok_or(Refused::Unsafe("the new item is not there"))?;
+        let caret = SlotCaret::At(slot.source_offset(&applied.fields.source, 0));
+        Ok(Some(SlotEdit { applied, caret }))
+    }
+
+    /// Removes an empty list item or answer. Its id does not come back while this model lives.
+    /// The caret goes to the end of the one before it, or with `forward` to the start of the one
+    /// after it; to the other when there is none. `Ok(None)`: it has text, or it is the only one.
+    pub fn remove_empty_item(&self, at: SlotAt, forward: bool) -> Result<Option<SlotEdit>, Refused> {
+        let (slot, item) = self.item_slot(at)?;
+        if !plain_value(&slot.value()).is_empty() {
+            return Ok(None);
+        }
+        let f = &self.fields[at.field];
+        let FieldValue::Items(items) = &f.value else {
+            return Err(Refused::NotText);
+        };
+        let place = items.iter().position(|i| i.id == item).ok_or(Refused::NotText)?;
+        if items.len() < 2 {
+            return Ok(None);
+        }
+        let edit = FieldEdit::RemoveItem {
+            field: f.name.clone(),
+            item,
+        };
+        let applied = self.apply(&[edit])?;
+        self.check_rest(at, &applied).map_err(Refused::Unsafe)?;
+        let FieldValue::Items(next) = &applied.fields.fields[at.field].value else {
+            return Err(Refused::Unsafe("the field changed kind"));
+        };
+        let same = next.len() + 1 == items.len()
+            && (next.iter().enumerate()).all(|(k, i)| i.data == items[if k < place { k } else { k + 1 }].data);
+        if !same {
+            return Err(Refused::Unsafe("the items do not read back"));
+        }
+        let (forward, near) = if forward && place + 1 < items.len() || place == 0 {
+            (true, place)
+        } else {
+            (false, place - 1)
+        };
+        let id = next.get(near).ok_or(Refused::NotText)?.id;
+        let other = applied.fields.slot(SlotAt {
+            field: at.field,
+            item: Some(id),
+        });
+        let other = other.ok_or(Refused::Unsafe("the next item is not there"))?;
+        let end = if forward { 0 } else { other.value().len() };
+        let caret = SlotCaret::At(other.source_offset(&applied.fields.source, end));
+        Ok(Some(SlotEdit { applied, caret }))
+    }
+
+    /// Marks or unmarks an answer. With `single` a press marks this one and clears the others, and
+    /// a press on the one marked changes nothing.
+    pub fn press_mark(&self, at: SlotAt, single: bool) -> Result<Option<Applied>, Refused> {
+        let (_, item) = self.item_slot(at)?;
+        let f = &self.fields[at.field];
+        let FieldValue::Items(items) = &f.value else {
+            return Err(Refused::NotText);
+        };
+        let marked = |i: &super::Item| matches!(i.data, ItemData::Choice { correct: true, .. });
+        let mut edits = Vec::new();
+        for i in items {
+            let now = marked(i);
+            let next = match (single, i.id == item) {
+                (true, this) => this,
+                (false, true) => !now,
+                (false, false) => now,
+            };
+            if next != now {
+                edits.push(FieldEdit::SetCorrect {
+                    field: f.name.clone(),
+                    item: i.id,
+                    correct: next,
+                });
+            }
+        }
+        if edits.is_empty() {
+            return Ok(None);
+        }
+        let applied = self.apply(&edits)?;
+        self.check_rest(at, &applied).map_err(Refused::Unsafe)?;
+        let FieldValue::Items(next) = &applied.fields.fields[at.field].value else {
+            return Err(Refused::Unsafe("the field changed kind"));
+        };
+        let same = next.len() == items.len() && next.iter().zip(items).all(|(a, b)| same_but_mark(&a.data, &b.data));
+        if !same {
+            return Err(Refused::Unsafe("an answer's text changed"));
+        }
+        Ok(Some(applied))
+    }
+
+    /// Whether the slot's field marks answers.
+    pub fn is_answer(&self, at: SlotAt) -> bool {
+        self.fields.get(at.field).is_some_and(|f| f.kind == FieldKind::Choices)
+    }
+
+    fn item_slot(&self, at: SlotAt) -> Result<(Slot, ItemId), Refused> {
+        let slot = self.slot(at).ok_or(Refused::NotText)?;
+        Ok((slot, at.item.ok_or(Refused::NotText)?))
     }
 
     /// The end of what stands before field `k` in the block.
@@ -419,6 +601,51 @@ fn stored_offset(wanted: &str, stored: &str, k: usize) -> usize {
         }
     }
     t.peek().map_or(stored.len(), |&(j, _)| j)
+}
+
+/// What goes in a field of one line: a run of line breaks is one blank.
+fn one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut run = false;
+    for c in text.chars() {
+        if matches!(c, '\n' | '\r') {
+            if !run {
+                out.push(' ');
+            }
+            run = true;
+        } else {
+            out.push(c);
+            run = false;
+        }
+    }
+    // a line break at the end of a pasted line is no blank to keep
+    if text.ends_with(['\n', '\r']) {
+        out.pop();
+    }
+    out
+}
+
+fn set_text(d: &mut ItemData, new: &str) {
+    match d {
+        ItemData::Text(t) | ItemData::Choice { text: t, .. } => *t = new.to_string(),
+        ItemData::Image { .. } => {}
+    }
+}
+
+fn has_new_id(d: &ItemData, others: &[ItemData]) -> bool {
+    match d {
+        ItemData::Choice { anchor, .. } => {
+            anchor.is_some() && !(others.iter()).any(|o| matches!(o, ItemData::Choice { anchor: a, .. } if a == anchor))
+        }
+        _ => true,
+    }
+}
+
+fn same_but_mark(a: &ItemData, b: &ItemData) -> bool {
+    match (a, b) {
+        (ItemData::Choice { anchor: x, text: s, .. }, ItemData::Choice { anchor: y, text: t, .. }) => x == y && s == t,
+        _ => false,
+    }
 }
 
 fn item_text(d: &ItemData) -> String {

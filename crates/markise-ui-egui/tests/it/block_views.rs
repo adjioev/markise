@@ -225,6 +225,70 @@ fn typing_in_a_native_block_edits_its_field() {
 }
 
 #[test]
+fn the_keys_of_a_field_through_the_real_keyboard() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    caret(&mut h, DOC.find("One").unwrap() + 3);
+    // a new answer with a new id, its text, and away again
+    h.key_press(egui::Key::Enter);
+    common::run(&mut h);
+    assert!(
+        text(&h).contains("- [ ] One {#a1}\n- [ ] {#a3}\n- [x] Two {#a2}"),
+        "{}",
+        text(&h)
+    );
+    h.event(Event::Text("N".into()));
+    common::run(&mut h);
+    assert!(text(&h).contains("- [ ] N {#a3}\n"), "{}", text(&h));
+    h.key_press(egui::Key::Backspace);
+    common::run(&mut h);
+    assert!(text(&h).contains("- [ ] {#a3}\n"), "{}", text(&h));
+    assert!(shown(&mut h).contains("Poll"), "native while empty: {}", shown(&mut h));
+    h.key_press(egui::Key::Backspace);
+    common::run(&mut h);
+    assert_eq!(text(&h), DOC);
+    // an arrow goes on to the next field, a caret never stands on a mark
+    h.key_press(egui::Key::ArrowRight);
+    common::run(&mut h);
+    let p = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .session
+        .selection()
+        .primary()
+        .focus
+        .offset;
+    assert_eq!(p, DOC.find("Two").unwrap());
+    assert!(!h.state().is_dirty() || text(&h) == DOC);
+}
+
+#[test]
+fn a_click_on_a_mark_moves_it_and_the_caret_stays() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    caret(&mut h, DOC.find("Before").unwrap());
+    let at = DOC.find("One").unwrap();
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(at).expect("on screen");
+    // the row's own mark, whatever is drawn around it: where the layout says it is
+    let (left, top, tasks) = {
+        let v = h.state_mut().viewer().unwrap();
+        let i = v.ed.view.model().item_at_offset(at);
+        let tasks = v.ed.view.cache_peek(i).expect("laid out").tasks.clone();
+        (r.left(), r.top(), tasks)
+    };
+    let box_at = tasks[0].0.center() + egui::vec2(left, top);
+    h.hover_at(box_at);
+    h.drag_at(box_at);
+    h.drop_at(box_at);
+    common::run(&mut h);
+    assert!(text(&h).contains("- [x] One {#a1}\n- [ ] Two {#a2}"), "{}", text(&h));
+    let p = h.state_mut().viewer().unwrap().ed.session.selection().primary();
+    assert_eq!(p.focus.offset, DOC.find("Before").unwrap());
+}
+
+#[test]
 fn a_click_on_a_native_answer_lands_in_its_text() {
     let f = Fixture::new(DOC);
     let mut h = f.ready();

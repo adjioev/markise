@@ -14,8 +14,16 @@ use markise_layout::{Images, NativeAt, TextShaper};
 
 use super::command::CommandError;
 use super::{EditorView, MarkId, StateId, TypingDir};
-use crate::block_fields::{BlockFields, Refused, Slot, SlotCaret, SlotEdit};
+use crate::block_fields::{BlockFields, FieldKind, Refused, Slot, SlotCaret, SlotEdit};
 use crate::block_view::PackageViews;
+
+/// What a place with no source stands for: a field, and what goes before the text typed there if
+/// the field has some already.
+#[derive(Clone, Copy)]
+struct Absent {
+    field: usize,
+    sep: &'static str,
+}
 
 /// What in-place editing holds between keystrokes.
 #[derive(Default)]
@@ -28,7 +36,11 @@ pub(super) struct InPlace {
     /// Carets on a place in a block with no source, and the field each stands for, by the state of
     /// the document they stood in: `DocPos::virt` cannot name a field, and undo brings back the
     /// state and the caret. Only the caret an edit put there has one, newest last.
-    absent: Vec<(StateId, DocPos, usize)>,
+    absent: Vec<(StateId, DocPos, Absent)>,
+}
+
+fn plain_value_is_empty(slot: &Slot) -> bool {
+    slot.value().trim().is_empty()
 }
 
 /// Places remembered for undo to come back to.
@@ -46,18 +58,19 @@ impl EditorView {
     }
 
     /// The field a place with no source stands for, in the document as it stands.
-    fn absent_field(&self, pos: DocPos) -> Option<usize> {
+    fn absent_field(&self, pos: DocPos) -> Option<Absent> {
         let state = self.session.state_id();
         (self.place.absent.iter().rev())
             .find(|(st, p, _)| *st == state && *p == pos)
             .map(|x| x.2)
     }
 
-    fn remember_absent(&mut self, pos: DocPos, field: usize) {
+    fn remember_absent(&mut self, pos: DocPos, field: usize, sep: &'static str) {
         if self.place.absent.len() >= ABSENT_MAX {
             self.place.absent.remove(0);
         }
-        self.place.absent.push((self.session.state_id(), pos, field));
+        let place = Absent { field, sep };
+        self.place.absent.push((self.session.state_id(), pos, place));
     }
 
     /// The model of the block `at` is in, kept up to date with the document.
@@ -152,8 +165,10 @@ impl EditorView {
                 Some(self.field_delete(&at, true, shaper, images, |g, f| g.horizontal(f, true, true)))
             }
             "delete.toLineStart" => Some(self.field_delete(&at, false, shaper, images, |g, f| g.row_edge(f, false))),
-            // the rules of Enter and of a field's edges are the next thing to come
-            "edit.newline" | "edit.softBreak" | "edit.indentOrNextCell" | "edit.outdentOrPrevCell" => Some(Ok(())),
+            "edit.newline" => Some(self.field_enter(&at)),
+            "edit.softBreak" => Some(self.field_break(&at, "\n")),
+            "edit.indentOrNextCell" => Some(self.field_tab(&at, true)),
+            "edit.outdentOrPrevCell" => Some(self.field_tab(&at, false)),
             "format.strong" | "format.emph" | "format.underline" | "format.code" | "format.strike"
             | "format.highlight" | "format.clear" => {
                 // marks inside one field's text are text; what comes of them is checked after
@@ -179,10 +194,10 @@ impl EditorView {
         let focus = self.session.selection().primary().focus;
         if focus.virt > 0 {
             // a place with no source: the field it stands for, or nowhere
-            let (Some(field), Some(model)) = (self.absent_field(focus), self.block_model(at)) else {
+            let (Some(place), Some(model)) = (self.absent_field(focus), self.block_model(at)) else {
                 return Err(NOT_HERE);
             };
-            return self.apply_field_edit(at, model.fill_field(field, text), TypingDir::Insert);
+            return self.apply_field_edit(at, model.fill_field(place.field, place.sep, text), TypingDir::Insert);
         }
         let Some((model, slot, rel)) = self.slot_of_selection(at) else {
             return Err(NOT_HERE);
@@ -209,9 +224,14 @@ impl EditorView {
             return Err(NOT_HERE);
         };
         if p.is_caret() {
+            // off a place with no source: back on the text it follows
+            if p.focus.virt > 0 {
+                self.edit(|s| s.set_selection(Selection::caret(p.focus.offset)));
+                return Ok(());
+            }
             let mut g = self.geometry(shaper, images);
             let to = target(&mut g, p.focus).offset.saturating_sub(at.range.start);
-            // never out of the field: its edges have rules of their own
+            // never out of the field: at its edge, an empty item goes and the rest stays
             let whole = slot.range();
             let to = to.clamp(whole.start, whole.end);
             rel = if forward {
@@ -220,10 +240,142 @@ impl EditorView {
                 to.min(rel.start)..rel.start
             };
             if rel.is_empty() {
-                return Ok(());
+                if slot.at.item.is_none() {
+                    return Ok(());
+                }
+                let done = self.apply_field_edit(at, model.remove_empty_item(slot.at, forward), dir);
+                self.session.close_typing();
+                return done;
             }
         }
         self.apply_field_edit(at, model.edit_slot(slot.at, rel, ""), dir)
+    }
+
+    /// Enter: a new item in a list, a new answer with a new id, a new paragraph in text, and from
+    /// a heading the next field.
+    fn field_enter(&mut self, at: &NativeAt) -> Result<(), CommandError> {
+        if self.session.selection().primary().focus.virt > 0 {
+            return Ok(());
+        }
+        let Some((model, slot, rel)) = self.slot_of_selection(at) else {
+            return Err(NOT_HERE);
+        };
+        self.session.close_typing();
+        match slot.kind {
+            FieldKind::Heading { .. } => self.field_tab(at, true),
+            FieldKind::Text | FieldKind::Quote => self.field_break(at, "\n\n"),
+            _ if plain_value_is_empty(&slot) => {
+                // on an empty item: out of the list, if something comes after it and it has company
+                let next = model.slots().into_iter().skip_while(|s| s.at != slot.at).nth(1);
+                let last = next.as_ref().is_none_or(|n| n.at.field != slot.at.field);
+                if last {
+                    let done = self.apply_field_edit(at, model.remove_empty_item(slot.at, false), TypingDir::Insert);
+                    self.session.close_typing();
+                    return done;
+                }
+                Ok(())
+            }
+            _ => {
+                let done = self.apply_field_edit(at, model.split_item(slot.at, rel), TypingDir::Insert);
+                // an item coming is a step of its own, apart from what is typed into it
+                self.session.close_typing();
+                done
+            }
+        }
+    }
+
+    /// A paragraph break or a line break in text. What it splits is written at once. At the end of
+    /// the text there is nothing to split yet, and Markdown has no such thing as a line with nothing
+    /// on it: the caret goes on a place for what comes next, and the file changes when that comes.
+    fn field_break(&mut self, at: &NativeAt, sep: &'static str) -> Result<(), CommandError> {
+        let Some((model, slot, rel)) = self.slot_of_selection(at) else {
+            return Err(NOT_HERE);
+        };
+        if slot.is_one_line() {
+            return Ok(());
+        }
+        if rel.end != slot.range().end {
+            let s = model.source();
+            // right before another paragraph of the field: there it is
+            let next = s[rel.end..].trim_start_matches(['\r', '\n']);
+            let gap = s[rel.end..].len() - next.len();
+            if rel.is_empty() && sep == "\n\n" && s[rel.end..gap + rel.end].matches('\n').count() >= 2 {
+                let caret = at.range.start + rel.end + gap;
+                self.edit(|s| s.set_selection(Selection::caret(caret)));
+                return Ok(());
+            }
+            let done = self.apply_field_edit(at, model.edit_slot(slot.at, rel, sep), TypingDir::Insert);
+            self.session.close_typing();
+            return done;
+        }
+        if !rel.is_empty() {
+            self.apply_field_edit(at, model.edit_slot(slot.at, rel, ""), TypingDir::DeleteBackward)?;
+            self.session.close_typing();
+            // (emptied altogether, the caret already stands on a place for it)
+            if self.session.selection().primary().focus.virt > 0 {
+                return Ok(());
+            }
+            let Some(now) = self.view.native_block(at.range.start) else {
+                return Ok(());
+            };
+            return self.field_break(&now, sep);
+        }
+        let end = rel.end + at.range.start;
+        let leaf_end = (self.session.doc().leaf(end)).map_or(end, |l| l.span.end.max(end));
+        let pos = DocPos::with_virt(leaf_end, 1);
+        self.remember_absent(pos, slot.at.field, sep);
+        self.begin_sticky(at.range.start);
+        self.edit(|s| s.set_selection(Selection::caret_at(pos)));
+        Ok(())
+    }
+
+    /// Tab goes from field to field in a block, and stays at the ends.
+    fn field_tab(&mut self, at: &NativeAt, forward: bool) -> Result<(), CommandError> {
+        let Some((model, slot, _)) = self.slot_of_selection(at) else {
+            return Err(NOT_HERE);
+        };
+        let slots = model.slots();
+        let k = slots.iter().position(|s| s.at == slot.at).unwrap_or(0);
+        // (a field can hold more than text: the first or the last text of it, going on if it has none)
+        let mut to = if forward { slots.get(k + 1..) } else { slots.get(..k) }
+            .unwrap_or(&[])
+            .to_vec();
+        if !forward {
+            to.reverse();
+        }
+        if let Some(rel) = to.iter().find_map(|t| t.text_edge(forward)) {
+            let caret = at.range.start + rel;
+            self.edit(|s| s.set_selection(Selection::caret(caret)));
+        }
+        Ok(())
+    }
+
+    /// A press on the mark of the answer item at `at`. Returns whether the document changed.
+    pub fn press_answer_mark(&mut self, at: usize) -> bool {
+        let Some(block) = self.view.native_block(at) else {
+            return false;
+        };
+        let Some(model) = self.block_model(&block) else {
+            return false;
+        };
+        let base = block.range.start;
+        let Some(slot) = at.checked_sub(base).and_then(|rel| model.slot_at(rel)) else {
+            return false;
+        };
+        if !model.is_answer(slot.at) {
+            return false;
+        }
+        let Ok(Some(applied)) = model.press_mark(slot.at, block.block.view.single_answer) else {
+            return false;
+        };
+        let shifted: Vec<Patch> = (applied.patches.patches().iter())
+            .map(|p| Patch::verbatim(p.range.start + base..p.range.end + base, p.insert.clone()))
+            .collect();
+        let Ok(patches) = PatchSet::new(shifted) else {
+            return false;
+        };
+        self.place.model = Some(applied.fields);
+        self.edit(|s| s.apply_external(&patches, "Mark Answer", false)).is_ok()
     }
 
     /// Applies a checked edit as a keystroke of the document, with its typing groups and undo.
@@ -254,7 +406,7 @@ impl EditorView {
         let r = self.session.field_keystroke(dir, patches, Selection::caret_at(caret));
         self.place.model = r.is_ok().then_some(edit.applied.fields);
         if let (Some(field), true) = (absent, r.is_ok()) {
-            self.remember_absent(caret, field);
+            self.remember_absent(caret, field, "\n\n");
         }
         self.sync();
         r.map_err(CommandError::from)
