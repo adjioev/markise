@@ -58,6 +58,71 @@ fn a_reference_image_has_no_path_of_its_own() {
 }
 
 #[test]
+fn the_parser_says_where_the_description_ends() {
+    // a code span may hold what looks like the end of an image
+    let doc = "![`x](fake.png)`](old.png)\n";
+    let mut s = surface(doc);
+    assert_eq!(s.ed.replace_image_dest(at(doc), "new.png"), Ok(true));
+    assert_eq!(
+        s.text(),
+        "![`x](fake.png)`](new.png)\n",
+        "not the one in the description"
+    );
+    // and such a one with no path of its own has none
+    let doc = "![`x](fake.png)`][r]\n\n[r]: old.png\n";
+    let mut s = surface(doc);
+    let line = 0..doc.find('\n').unwrap();
+    assert_eq!(s.ed.replace_image_dest(line, "new.png"), Err(ImageRefused::NoImage));
+    assert_eq!(s.text(), doc);
+    // what is no image at all, where a scan would see one
+    let doc = "`![a](old.png)`\n";
+    let mut s = surface(doc);
+    assert_eq!(s.ed.replace_image_dest(1..14, "new.png"), Err(ImageRefused::NoImage));
+    // the forms a description has
+    for doc in [
+        "![](old.png)\n",
+        "![a ](old.png)\n",
+        "![a\\]b](old.png)\n",
+        "![a *b*](old.png)\n",
+        "![[b]](old.png)\n",
+    ] {
+        let mut s = surface(doc);
+        assert_eq!(s.ed.replace_image_dest(at(doc), "new.png"), Ok(true), "{doc:?}");
+        assert_eq!(s.text(), doc.replace("old.png", "new.png"), "{doc:?}");
+    }
+}
+
+#[test]
+fn in_a_quote_and_a_list_the_right_bytes_change() {
+    for doc in [
+        "> a\n> ![x](old.png)\n",
+        "- ![x](old.png)\n",
+        "text ![x](old.png) more\n",
+    ] {
+        let mut s = surface(doc);
+        let start = doc.find("![").unwrap();
+        assert_eq!(
+            s.ed.replace_image_dest(start..start + 14, "new.png"),
+            Ok(true),
+            "{doc:?}"
+        );
+        assert_eq!(s.text(), doc.replace("old.png", "new.png"));
+    }
+}
+
+#[test]
+fn changing_nothing_leaves_the_view_with_its_document() {
+    let doc = "a\n\n![x](old.png)\n";
+    let mut s = surface(doc);
+    assert_eq!(s.ed.edit_image(at(doc), "x", "old.png"), Ok(false));
+    assert_eq!(s.ed.view.doc().text(), doc, "as with any other edit");
+    assert_eq!(s.ed.replace_image_dest(at(doc), "old.png"), Ok(false));
+    assert_eq!(s.ed.view.doc().text(), doc);
+    assert_eq!(s.ed.replace_image_dest(0..1, "new.png"), Err(ImageRefused::NoImage));
+    assert_eq!(s.ed.view.doc().text(), doc);
+}
+
+#[test]
 fn the_description_and_the_path_change_together_in_one_step() {
     let doc = "![old alt](old.png \"t\")\n";
     let mut s = surface(doc);
