@@ -177,14 +177,9 @@ fn the_caret_in_a_native_block_does_not_bring_the_id_back() {
 }
 
 #[test]
-fn a_native_block_is_edited_through_its_form_for_now_and_undo_still_works() {
+fn the_form_works_on_a_native_block_and_undo_is_the_documents() {
     let f = Fixture::new(DOC);
     let mut h = f.ready();
-    caret(&mut h, DOC.find("Hello").unwrap());
-    h.event(Event::Text("x".into()));
-    common::run(&mut h);
-    assert_eq!(text(&h), DOC, "typing does not reach it");
-    // the form is on the block as on any other
     h.get_all_by_label("Edit Block: tip").next().unwrap().click();
     common::run(&mut h);
     assert!(h.state().block_form().is_some());
@@ -196,17 +191,53 @@ fn a_native_block_is_edited_through_its_form_for_now_and_undo_still_works() {
     h.state_mut().block_form_save(&ctx);
     common::run(&mut h);
     assert!(text(&h).contains("Hello!"));
-    // an edit elsewhere, and undo of the form's step, as in the document
-    let before = DOC.find("Before").unwrap();
-    caret(&mut h, before);
-    h.event(Event::Text("y".into()));
-    common::run(&mut h);
-    assert!(text(&h).contains("yBefore"));
     let v = h.state_mut().viewer().unwrap();
-    v.ed.edit(|s| s.undo());
     v.ed.edit(|s| s.undo());
     common::run(&mut h);
     assert_eq!(text(&h), DOC);
+}
+
+#[test]
+fn typing_in_a_native_block_edits_its_field() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    caret(&mut h, DOC.find("Hello").unwrap() + 5);
+    h.event(Event::Text("!".into()));
+    common::run(&mut h);
+    assert!(text(&h).contains("Hello!\n"), "{}", text(&h));
+    // an IME's text is typed text, and a paste is one step
+    h.event(Event::Ime(egui::ImeEvent::Commit("ю".into())));
+    common::run(&mut h);
+    assert!(text(&h).contains("Hello!ю\n"));
+    h.event(Event::Paste("two\nlines".into()));
+    common::run(&mut h);
+    assert!(text(&h).contains("Hello!юtwo\nlines\n"), "{}", text(&h));
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.ed.edit(|s| s.undo()));
+    common::run(&mut h);
+    assert!(text(&h).contains("Hello!ю\n"));
+    // an answer keeps its id, and one line: a line break in a paste is a blank there
+    let one = text(&h).find("One").unwrap();
+    caret(&mut h, one + 3);
+    h.event(Event::Paste("a\nb".into()));
+    common::run(&mut h);
+    assert!(text(&h).contains("- [ ] Onea b {#a1}\n"), "{}", text(&h));
+}
+
+#[test]
+fn a_click_on_a_native_answer_lands_in_its_text() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    let at = DOC.find("Two").unwrap();
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(at).expect("on screen");
+    // well past the text: the end of the answer, before its id
+    h.hover_at(egui::pos2(r.right() - 40.0, r.center().y));
+    h.drag_at(egui::pos2(r.right() - 40.0, r.center().y));
+    h.drop_at(egui::pos2(r.right() - 40.0, r.center().y));
+    common::run(&mut h);
+    h.event(Event::Text("!".into()));
+    common::run(&mut h);
+    assert!(text(&h).contains("- [x] Two! {#a2}\n"), "{}", text(&h));
 }
 
 #[test]

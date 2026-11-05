@@ -98,7 +98,7 @@ impl IconBoard {
 
 /// A package's views with its pictures.
 struct ViewsWithIcons {
-    views: PackageViews,
+    views: Arc<PackageViews>,
     icons: Arc<IconBoard>,
 }
 
@@ -161,13 +161,17 @@ impl DocViewer {
             return;
         }
         self.block_icons.clear();
-        let views = index.clone().map(|i| -> Arc<dyn BlockViews> {
+        let fields = index
+            .clone()
+            .map(|i| Arc::new(PackageViews::new(i, crate::block_form::LANGUAGE)));
+        let views = fields.clone().map(|views| -> Arc<dyn BlockViews> {
             Arc::new(ViewsWithIcons {
-                views: PackageViews::new(i, crate::block_form::LANGUAGE),
+                views,
                 icons: self.block_icons.clone(),
             })
         });
         self.ed.view.set_block_views(views);
+        self.ed.set_block_fields(fields);
         self.block_index = index;
     }
 

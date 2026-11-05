@@ -99,6 +99,8 @@ pub struct EditorView {
     /// Document changes so far (a pressed checkbox is cancelled when the document changed
     /// while it was held).
     changes: u64,
+    /// Editing blocks' fields where they stand ([`super::inplace`]).
+    pub(super) place: super::inplace::InPlace,
 }
 
 /// Recent edits kept for [`EditorView::map_recent`]; beyond them positions kept from the last
@@ -121,6 +123,7 @@ impl EditorView {
             source: None,
             recent: Some(Vec::new()),
             changes: 0,
+            place: Default::default(),
         };
         e.sync();
         e
@@ -193,6 +196,7 @@ impl EditorView {
                 self.source_load_selection();
             }
         }
+        self.follow_sticky();
         self.pin_caret();
     }
 
@@ -260,8 +264,8 @@ impl EditorView {
         })
     }
 
-    /// The selection reaches into a block shown natively without holding it whole. Its text is
-    /// not edited there yet: the form is (ADR 0021).
+    /// The selection reaches into a block shown natively without holding it whole: what edits
+    /// the text there is its fields, and anything else has to ask ([`super::inplace`]).
     pub fn in_native_block(&self) -> bool {
         let r = self.session.selection().primary().range();
         [r.start, r.end].into_iter().any(|at| {
@@ -336,27 +340,59 @@ impl EditorView {
         images: &dyn Images,
         page: f32,
     ) -> Result<(), CommandError> {
-        let r = {
-            let mut g = ViewCaret {
-                geo: Geometry {
-                    view: &mut self.view,
-                    shaper,
-                    images,
-                },
-                page,
-                placeholder: Some(&self.placeholder),
-            };
-            self.registry.execute_with(&mut self.session, &mut g, id, params)
+        if let Some(done) = self.field_command(id, params, shaper, images) {
+            return done;
+        }
+        let before = if id.starts_with("format.") {
+            self.model_for_marks()
+        } else {
+            None
         };
+        let mut r = self.run_command(id, params, shaper, images, page);
         if matches!(
             self.registry.get(id).map(|c| c.desc.effect),
             Some(markise_doc::Effect::View)
         ) {
+            // a motion goes on past what is no place for the caret in a block's fields
+            for _ in 0..4 {
+                if !self.in_stray_gap() {
+                    break;
+                }
+                r = self.run_command(id, params, shaper, images, page);
+            }
+            let sel = self.field_selection(self.session.selection().clone());
             self.release();
+            if &sel != self.session.selection() {
+                self.session.set_selection(sel);
+            }
             self.session.expire_hints_left_behind();
         }
         self.sync();
+        if before.is_some() {
+            let at = self.session.selection().primary().focus.offset;
+            self.check_marks(before, at);
+        }
         r
+    }
+
+    fn run_command(
+        &mut self,
+        id: &str,
+        params: &Params,
+        shaper: &mut dyn TextShaper,
+        images: &dyn Images,
+        page: f32,
+    ) -> Result<(), CommandError> {
+        let mut g = ViewCaret {
+            geo: Geometry {
+                view: &mut self.view,
+                shaper,
+                images,
+            },
+            page,
+            placeholder: Some(&self.placeholder),
+        };
+        self.registry.execute_with(&mut self.session, &mut g, id, params)
     }
 
     /// Updates the view's focus (reveal set, virtual paragraph) for the current selection.
@@ -409,6 +445,8 @@ impl EditorView {
         // placeholder would be "normalized" to another caret stop, changing the selection)
         self.pin_caret();
         let sel = self.session.selection().primary();
+        // (a selection holding a native block whole ends at its edge, which has no caret stop)
+        let (focus_edge, anchor_edge) = (self.is_native_edge(sel.focus), self.is_native_edge(sel.anchor));
         let mut g = self.geometry(shaper, images);
         // whitespace after the text of a paragraph, heading or cell is laid out only while the
         // focus is in it: a selection end there (e.g. the anchor of Shift+← from it) is still a
@@ -432,7 +470,7 @@ impl EditorView {
                     g.caret_rect(p).is_some() && g.normalize(p).offset == p.offset
                 }
         };
-        if ok(&mut g, sel.focus) && (sel.is_caret() || ok(&mut g, sel.anchor)) {
+        if (focus_edge || ok(&mut g, sel.focus)) && (sel.is_caret() || anchor_edge || ok(&mut g, sel.anchor)) {
             return false;
         }
         // inside an object (a rendered formula): the stop after it
@@ -484,6 +522,7 @@ impl EditorView {
     /// Sets the selection (a caret jump: closes the typing group, expires literal hints left
     /// behind).
     pub fn set_selection(&mut self, sel: Selection) {
+        let sel = self.field_selection(sel);
         if &sel == self.session.selection() {
             return;
         }

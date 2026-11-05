@@ -16,6 +16,7 @@ use super::{Applied, BlockFields, Field, FieldEdit, FieldKind, FieldValue, Field
 pub(super) fn apply(old: &BlockFields, edits: &[FieldEdit]) -> Result<Applied, FieldsError> {
     let mut draft = Draft {
         fields: old.fields.clone(),
+        kept: BTreeSet::new(),
         next_item: old.next_item,
         retired: old.retired.clone(),
         inserted: Vec::new(),
@@ -23,7 +24,7 @@ pub(super) fn apply(old: &BlockFields, edits: &[FieldEdit]) -> Result<Applied, F
     for e in edits {
         draft.edit(old, e)?;
     }
-    let source = render(old, &draft.fields);
+    let source = render(old, &draft.fields, &draft.kept);
     let patches = PatchSet::new(line_patches(&old.source, &source)).map_err(FieldsError::Patch)?;
     let mut next = super::decode::decode(&source, old.base, &old.decls, &old.opts)?;
     next.retired = draft.retired;
@@ -108,6 +109,8 @@ fn carry(edited: &[Field], next: &mut BlockFields, old: &BlockFields) {
 
 struct Draft {
     fields: Vec<Field>,
+    /// Headings emptied and kept ([`FieldEdit::ClearHeading`]).
+    kept: BTreeSet<usize>,
     next_item: u32,
     retired: BTreeSet<String>,
     inserted: Vec<ItemId>,
@@ -117,6 +120,7 @@ impl FieldEdit {
     fn field(&self) -> &str {
         match self {
             FieldEdit::SetText { field, .. }
+            | FieldEdit::ClearHeading { field }
             | FieldEdit::SetItemText { field, .. }
             | FieldEdit::SetCorrect { field, .. }
             | FieldEdit::SetImage { field, .. }
@@ -143,12 +147,21 @@ impl Draft {
                 t.clone_from(text);
                 return Ok(());
             }
-            (FieldValue::Items(items), e) if !matches!(e, FieldEdit::SetText { .. }) => items,
+            (FieldValue::Text(t), FieldEdit::ClearHeading { .. }) if matches!(f.kind, FieldKind::Heading { .. }) => {
+                t.clear();
+                self.kept.insert(old.field_index(name)?);
+                return Ok(());
+            }
+            (FieldValue::Items(items), e)
+                if !matches!(e, FieldEdit::SetText { .. } | FieldEdit::ClearHeading { .. }) =>
+            {
+                items
+            }
             _ => return Err(wrong()),
         };
         let find = |items: &[Item], id: &ItemId| items.iter().position(|x| x.id == *id).ok_or_else(unknown);
         match e {
-            FieldEdit::SetText { .. } => {}
+            FieldEdit::SetText { .. } | FieldEdit::ClearHeading { .. } => {}
             FieldEdit::SetItemText { item, text, .. } => {
                 let i = find(items, item)?;
                 match &mut items[i].data {
@@ -251,7 +264,7 @@ fn new_anchor(taken: &BTreeSet<String>, wanted: Option<&str>, retired: &BTreeSet
 
 /// The new block text: the regions in order, with the old gaps where neighbours stay neighbours
 /// and a blank line elsewhere. Keeping every neighbour apart is what keeps blocks from merging.
-fn render(old: &BlockFields, fields: &[Field]) -> String {
+fn render(old: &BlockFields, fields: &[Field], kept: &BTreeSet<usize>) -> String {
     let s = old.source.as_str();
     let is_absent = |f: &Field| {
         !old.chunks
@@ -278,6 +291,13 @@ fn render(old: &BlockFields, fields: &[Field]) -> String {
                 let same = fields[k].value == old.fields[k].value;
                 let text = if same {
                     s[c.range.clone()].to_string()
+                } else if kept.contains(&k) {
+                    // its marks, its tail with no blank before it, and the blank that keeps it a heading
+                    let f = &fields[k].src;
+                    let head = &s[f.head.clone()];
+                    let tail = s[f.tail.clone()].trim_start();
+                    let blank = if head.ends_with([' ', '\t']) { "" } else { " " };
+                    format!("{head}{blank}{tail}")
                 } else {
                     render_field(old, &fields[k])
                 };
@@ -366,22 +386,47 @@ fn esc_heading(_: &BlockFields, line: &str, _last: bool) -> String {
 /// Writes `new` over the old `lines`: a line that stays keeps its bytes.
 fn render_lines(old: &BlockFields, lines: &[Line], new: &[String], st: &Style, out: &mut String) {
     let s = old.source.as_str();
-    let olds: Vec<&str> = lines.iter().map(|l| l.value.as_str()).collect();
+    // a line of blanks reads as an empty one here too, and keeps its bytes while it stays
+    let olds: Vec<&str> = (lines.iter())
+        .map(|l| {
+            if l.value.trim().is_empty() {
+                ""
+            } else {
+                l.value.as_str()
+            }
+        })
+        .collect();
     let news: Vec<&str> = new.iter().map(String::as_str).collect();
     let mut from: Vec<Option<usize>> = vec![None; new.len()];
+    // a line rewritten where it stands keeps what is not its text: its prefix and its terminator
+    let mut shell: Vec<Option<usize>> = vec![None; new.len()];
     for op in capture_diff_slices(Algorithm::Myers, &olds, &news) {
-        if let DiffOp::Equal {
-            old_index,
-            new_index,
-            len,
-        } = op
-        {
-            (0..len).for_each(|i| from[new_index + i] = Some(old_index + i));
+        match op {
+            DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } => (0..len).for_each(|i| from[new_index + i] = Some(old_index + i)),
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => (0..old_len.min(new_len)).for_each(|i| shell[new_index + i] = Some(old_index + i)),
+            _ => {}
         }
     }
     for (k, value) in new.iter().enumerate() {
         let last = k + 1 == new.len();
         let moved_prefix = if k == 0 { st.first } else { st.rest };
+        if let (None, Some(l), false) = (from[k], shell[k].map(|j| &lines[j]), value.is_empty()) {
+            out.push_str(&s[l.prefix.clone()]);
+            out.push_str(&(st.esc)(old, value, last));
+            if !last {
+                out.push_str(if l.term.is_empty() { old.eol } else { &s[l.term.clone()] });
+            }
+            continue;
+        }
         match from[k].map(|j| (j, &lines[j])) {
             Some((j, l)) => {
                 out.push_str(if (k == 0) == (j == 0) {
@@ -513,8 +558,9 @@ fn marker(old: &BlockFields, f: &Field, x: &super::decode::ItemSrc, pos: usize, 
             continue;
         };
         m.push_str(&s[at..r.start]);
-        // `[X]` stays as written while it says the same
-        m.push_str(if s[r.clone()].eq_ignore_ascii_case(&new) {
+        // `[X]` stays as written while it says the same, and so does `02`
+        let same_number = s[r.clone()].parse::<u64>().is_ok_and(|a| new.parse::<u64>() == Ok(a));
+        m.push_str(if same_number || s[r.clone()].eq_ignore_ascii_case(&new) {
             &s[r.clone()]
         } else {
             &new

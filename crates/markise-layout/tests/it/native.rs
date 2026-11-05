@@ -49,7 +49,10 @@ impl BlockViews for Stand {
     }
     fn look(&self, _name: &str, args: &str, source: &str) -> BlockLook {
         if args == "misfit" {
-            return BlockLook::Outside(vec!["First reason".to_string(), "Second reason".to_string()]);
+            return BlockLook::Outside {
+                reasons: vec!["First reason".to_string(), "Second reason".to_string()],
+                native: None,
+            };
         }
         if args == "plain" {
             return BlockLook::Generic;
@@ -303,7 +306,10 @@ fn a_warning_is_cut_to_its_row_and_keeps_the_height() {
             true
         }
         fn look(&self, _: &str, _: &str, _: &str) -> BlockLook {
-            BlockLook::Outside(vec![self.0.clone()])
+            BlockLook::Outside {
+                reasons: vec![self.0.clone()],
+                native: None,
+            }
         }
     }
     let src = ":::any\n\nBody.\n\n:::\n";

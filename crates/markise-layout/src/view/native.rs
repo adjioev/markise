@@ -55,7 +55,7 @@ impl NativeAt {
 #[derive(Clone)]
 enum Looked {
     Generic,
-    Outside(Arc<[String]>),
+    Outside(Arc<[String]>, Option<Arc<NativeBlock>>),
     Native(Arc<NativeBlock>),
 }
 
@@ -75,6 +75,9 @@ pub(super) struct NativeState {
     items: RefCell<HashMap<usize, Option<OfItem>>>,
     /// By name, arguments and source of a block: the same text looks the same anywhere.
     looks: RefCell<HashMap<u64, Looked>>,
+    /// The opener of a block that stays native while it is edited, whatever it looks like now. Two
+    /// blocks with the same text can look alike and only this one is it: not in [`Self::looks`].
+    sticky: Option<usize>,
 }
 
 impl NativeState {
@@ -122,6 +125,15 @@ impl View {
         self.native.mode
     }
 
+    /// The block with this opener stays native while it is being edited, also when it does not fit
+    /// for now (`None`: no such block). Only that block's items get new keys.
+    pub fn set_sticky_block(&mut self, opener: Option<usize>) {
+        if self.native.sticky != opener {
+            self.native.sticky = opener;
+            self.native.items.borrow_mut().clear();
+        }
+    }
+
     /// Part of what a measured page height holds for.
     pub(super) fn native_key(&self) -> u64 {
         self.native.active().map_or(0, |s| s.id() | 1)
@@ -131,8 +143,10 @@ impl View {
     pub fn native_block(&self, at: usize) -> Option<NativeAt> {
         self.native.active()?;
         let c = self.doc.named_containers_at(at).pop()?;
-        let Looked::Native(block) = self.look_of(&c) else {
-            return None;
+        let block = match self.look_of(&c) {
+            Looked::Native(block) => block,
+            Looked::Outside(_, Some(block)) if self.native.sticky == Some(c.opener.start) => block,
+            _ => return None,
         };
         Some(NativeAt {
             block,
@@ -160,7 +174,7 @@ impl View {
         }
         let look = match source.look(&c.name, &c.args, bytes) {
             BlockLook::Generic => Looked::Generic,
-            BlockLook::Outside(why) => Looked::Outside(why.into()),
+            BlockLook::Outside { reasons, native } => Looked::Outside(reasons.into(), native.map(Arc::new)),
             BlockLook::Native(b) => Looked::Native(Arc::new(b)),
         };
         let mut looks = self.native.looks.borrow_mut();
@@ -180,7 +194,7 @@ impl View {
         }
         let c = self.doc.named_containers_at(self.model.item_start(i)).pop()?;
         match self.look_of(&c) {
-            Looked::Outside(why) => Some(why),
+            Looked::Outside(why, _) => Some(why),
             _ => None,
         }
     }

@@ -37,6 +37,8 @@ pub(super) struct ItemSrc {
     pub number: Option<R>,
     /// Alt and destination of an image.
     pub image: Option<(R, R)>,
+    /// What in it is not plain text: anything but paragraphs below the item.
+    pub protected: Vec<R>,
 }
 
 /// How ordered list markers go on.
@@ -57,6 +59,8 @@ pub(super) struct FieldSrc {
     /// The bytes between neighbouring items.
     pub gaps: Vec<R>,
     pub numbering: Option<Numbering>,
+    /// What in a text field or quote is not plain text: a code block or list it took as it stands.
+    pub protected: Vec<R>,
 }
 
 /// A region of the body. Field regions and extras never overlap.
@@ -95,8 +99,8 @@ fn extended(s: &str, b: &Block) -> R {
 }
 
 /// A body block as fields see it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Shape {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Shape {
     Heading(u8),
     Paragraph,
     Images,
@@ -201,7 +205,8 @@ fn numbering(items: &[Block]) -> Option<Numbering> {
 /// Cuts a real ` {#id}` off the end of `s[r]`: the id and the range of the cut part.
 fn cut_anchor(s: &str, r: &R) -> Option<(String, R)> {
     let text = &s[r.clone()];
-    let at = anchor_start(text).filter(|&at| !text[..at].ends_with('\\'))?;
+    // the form a reader of the rendered view has hidden too: at the start or after a blank
+    let at = anchor_start(text).filter(|&at| at == 0 || text[..at].ends_with([' ', '\t']))?;
     let cut = at - usize::from(text[..at].ends_with(' '));
     Some((text[at + 2..text.len() - 1].to_string(), r.start + cut..r.end))
 }
@@ -293,6 +298,10 @@ fn list_item(s: &str, b: &Block, opts: &ParseOptions, choice: bool) -> Option<(I
     });
     src.task_box = task.map(|(_, bx)| bx.start..bx.end);
     src.lines = lines;
+    src.protected = (b.children.iter())
+        .filter(|c| !matches!(c.kind, BlockKind::Paragraph))
+        .map(|c| extended(s, c))
+        .collect();
     Some((src, data))
 }
 
@@ -384,8 +393,18 @@ fn read_field(s: &str, f: &mut Field, group: &[Block], whole: R, next_item: &mut
             f.value = FieldValue::Text(f.src.lines[0].value.clone());
         }
         FieldKind::Text | FieldKind::Quote => {
-            f.src.lines = plain_lines(s, whole, f.kind == FieldKind::Quote, opts);
+            f.src.lines = plain_lines(s, whole.clone(), f.kind == FieldKind::Quote, opts);
             f.value = FieldValue::Text(join_values(&f.src.lines));
+            // a quote holding more than paragraphs, a text field with what it took as it stands
+            let held: Vec<&Block> = if f.kind == FieldKind::Quote {
+                group.iter().flat_map(|b| &b.children).collect()
+            } else {
+                group.iter().collect()
+            };
+            f.src.protected = (held.into_iter())
+                .filter(|b| !matches!(b.kind, BlockKind::Paragraph))
+                .map(|b| extended(s, b))
+                .collect();
         }
         FieldKind::List | FieldKind::Choices | FieldKind::Image => {
             let mut items = Vec::new();
@@ -441,6 +460,7 @@ pub(super) fn decode(
     let kids = &block.children;
     let shapes: Vec<Shape> = kids.iter().map(|b| shape(s, b, opts)).collect();
     let owner = assign(&shapes, decls);
+    let structure = shapes.iter().copied().zip(owner.iter().copied()).collect();
     let new_field = |d: &FieldDecl| {
         let value = match d.kind {
             FieldKind::List | FieldKind::Choices | FieldKind::Image => FieldValue::Items(Vec::new()),
@@ -483,6 +503,7 @@ pub(super) fn decode(
         decls: decls.to_vec(),
         fields,
         chunks,
+        shapes: structure,
         next_item,
         retired: BTreeSet::new(),
     })

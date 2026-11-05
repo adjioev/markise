@@ -145,6 +145,15 @@ fn reasons(spec: &FormSpec, fit: &BlockFit, source: &str) -> Vec<String> {
         .collect()
 }
 
+impl PackageViews {
+    /// The field model of a block with a view, for editing it in place.
+    pub fn fields_of(&self, name: &str, args: &str, source: &str, base: usize) -> Option<BlockFields> {
+        let variant = self.variant_of(name, args).ok()??;
+        variant.view.as_ref()?;
+        BlockFields::decode(source, base, &variant.decls, &ParseOptions::default()).ok()
+    }
+}
+
 impl BlockViews for PackageViews {
     fn id(&self) -> u64 {
         self.id
@@ -163,24 +172,29 @@ impl BlockViews for PackageViews {
             Ok(Some(variant)) => variant,
             // a package saying what a form cannot honour is the panel's to explain
             Ok(None) => return BlockLook::Generic,
-            Err(()) => return BlockLook::Outside(vec![format!("The block has no variant `{args}`.")]),
+            Err(()) => {
+                return BlockLook::Outside {
+                    reasons: vec![format!("The block has no variant `{args}`.")],
+                    native: None,
+                };
+            }
         };
         let Ok(fields) = BlockFields::decode(source, 0, &variant.decls, &ParseOptions::default()) else {
             return BlockLook::Generic;
         };
+        let native = variant.view.as_ref().map(|view| NativeBlock {
+            view: view.clone(),
+            parts: (fields.field_regions().into_iter())
+                .map(|(r, kind)| (r.start as u32..r.end as u32, role_of(kind)))
+                .collect(),
+        });
         let fit = fields.check(&variant.spec);
         if !fit.fits() {
-            return BlockLook::Outside(reasons(&variant.spec, &fit, source));
+            return BlockLook::Outside {
+                reasons: reasons(&variant.spec, &fit, source),
+                native,
+            };
         }
-        let Some(view) = &variant.view else {
-            return BlockLook::Generic;
-        };
-        let parts = (fields.field_regions().into_iter())
-            .map(|(r, kind)| (r.start as u32..r.end as u32, role_of(kind)))
-            .collect();
-        BlockLook::Native(NativeBlock {
-            view: view.clone(),
-            parts,
-        })
+        native.map_or(BlockLook::Generic, BlockLook::Native)
     }
 }

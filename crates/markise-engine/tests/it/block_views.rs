@@ -78,7 +78,7 @@ fn a_variant_says_how_answers_are_marked_and_how_it_is_called() {
 
 fn outside(look: BlockLook) -> Vec<String> {
     match look {
-        BlockLook::Outside(why) => why,
+        BlockLook::Outside { reasons, .. } => reasons,
         other => panic!("{other:?}"),
     }
 }
