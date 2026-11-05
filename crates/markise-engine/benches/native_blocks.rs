@@ -92,8 +92,7 @@ fn run(label: &str, text: String, views: Option<Arc<PackageViews>>) {
     let format: Arc<dyn DocumentFormat> = Arc::new(MarkdownFormat::default());
     let t = Instant::now();
     let mut ed = EditorView::open(format, text, Theme::light(), 700.0);
-    ed.view
-        .set_block_views(views.map(|v| -> Arc<dyn BlockViews> { v.clone() }));
+    ed.view.set_block_views(views.map(|v| v as Arc<dyn BlockViews>));
     ed.set_block_fields(fields);
     let open = t.elapsed();
     let t = Instant::now();
