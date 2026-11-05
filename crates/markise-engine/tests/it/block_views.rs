@@ -48,7 +48,7 @@ const POLL: &str = ":::poll\n\n## Which?\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n
 fn native(look: BlockLook) -> markise_layout::NativeBlock {
     match look {
         BlockLook::Native(b) => b,
-        BlockLook::Generic => panic!("generic"),
+        other => panic!("{other:?}"),
     }
 }
 
@@ -58,6 +58,7 @@ fn a_fitting_block_has_its_view_and_its_parts() {
     assert_eq!(b.view.kind, NativeKind::Choices);
     assert_eq!(b.view.accent.as_deref(), Some("purple"));
     assert_eq!(&*b.view.label, "Poll");
+    assert_eq!(b.view.icon, None);
     assert!(b.view.single_answer, "exactly one");
     let role = |needle: &str| b.role_at(POLL.find(needle).unwrap() as u32);
     assert_eq!(role("Which"), Some(NativeRole::Title));
@@ -75,21 +76,27 @@ fn a_variant_says_how_answers_are_marked_and_how_it_is_called() {
     assert_eq!(&*b.view.label, "Poll · several");
 }
 
+fn outside(look: BlockLook) -> Vec<String> {
+    match look {
+        BlockLook::Outside(why) => why,
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
-fn what_does_not_fit_is_generic() {
+fn what_does_not_fit_says_why() {
     let v = views();
     let two_marks = POLL.replace("[ ] One", "[x] One");
-    assert_eq!(v.look("poll", "", &two_marks), BlockLook::Generic, "more than one mark");
+    assert_eq!(outside(v.look("poll", "", &two_marks)), ["Answers: Mark exactly one"]);
     let no_id = POLL.replace(" {#a1}", "");
-    assert_eq!(v.look("poll", "", &no_id), BlockLook::Generic, "an answer with no id");
-    assert_eq!(v.look("poll", "nope", POLL), BlockLook::Generic, "no such variant");
+    assert_eq!(outside(v.look("poll", "", &no_id)), ["Answers 1: Has no id"]);
+    let unnamed = outside(v.look("poll", "nope", POLL));
+    assert_eq!(unnamed, ["The block has no variant `nope`."]);
     let extra = POLL.replace("> Because.", "> Because.\n\n```\ncode\n```");
-    assert_eq!(v.look("poll", "", &extra), BlockLook::Generic, "content in no field");
-    assert_eq!(
-        v.look("tip", "", ":::tip\n\n:::"),
-        BlockLook::Generic,
-        "a required field is empty"
-    );
+    let why = outside(v.look("poll", "", &extra));
+    assert_eq!(why.len(), 1);
+    assert!(why[0].starts_with("In no field:"), "{why:?}");
+    assert_eq!(outside(v.look("tip", "", ":::tip\n\n:::")), ["Body: Required"]);
 }
 
 #[test]
@@ -97,8 +104,11 @@ fn no_view_means_generic_and_no_name_means_no_view() {
     let v = views();
     assert!(v.has_view("tip") && v.has_view("poll"));
     assert!(!v.has_view("plain") && !v.has_view("unknown"));
+    assert!(v.has_schema("plain") && !v.has_schema("unknown"));
     assert_eq!(v.look("plain", "", ":::plain\n\nBody.\n\n:::"), BlockLook::Generic);
     assert_eq!(v.look("unknown", "", ":::unknown\n\nBody.\n\n:::"), BlockLook::Generic);
+    // a schema is enough to be outside it, with or without a view
+    assert_eq!(outside(v.look("plain", "", ":::plain\n\n:::")), ["Body: Required"]);
 }
 
 #[test]
@@ -113,4 +123,5 @@ fn another_package_is_another_id() {
 fn the_label_follows_the_language() {
     let b = native(PackageViews::new(index(), "de").look("tip", "", ":::tip\n\nBody.\n\n:::"));
     assert_eq!(&*b.view.label, "Tipp");
+    assert_eq!(b.view.icon.as_deref(), Some("assets/bulb.svg"), "a file of the package");
 }

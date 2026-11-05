@@ -11,7 +11,7 @@ use std::sync::Arc;
 use markise_doc::NamedContainer;
 
 use super::View;
-use crate::model::{Container, Item};
+use crate::model::{Container, Item, ItemKind};
 use crate::native::{BlockLook, BlockViews, MAX_NATIVE_BLOCK_BYTES, NativeBlock, NativeParams, NativeRole};
 
 /// More distinct block versions than this are not remembered.
@@ -51,6 +51,14 @@ impl NativeAt {
     }
 }
 
+/// What a block looks like, once read.
+#[derive(Clone)]
+enum Looked {
+    Generic,
+    Outside(Arc<[String]>),
+    Native(Arc<NativeBlock>),
+}
+
 #[derive(Clone)]
 struct OfItem {
     at: NativeAt,
@@ -66,7 +74,7 @@ pub(super) struct NativeState {
     /// By item start, for the document as it stands (see [`NativeState::forget`]).
     items: RefCell<HashMap<usize, Option<OfItem>>>,
     /// By name, arguments and source of a block: the same text looks the same anywhere.
-    looks: RefCell<HashMap<u64, Option<Arc<NativeBlock>>>>,
+    looks: RefCell<HashMap<u64, Looked>>,
 }
 
 impl NativeState {
@@ -77,6 +85,7 @@ impl NativeState {
         }
     }
 
+    /// What shows blocks natively: not in the Markdown state.
     fn active(&self) -> Option<&Arc<dyn BlockViews>> {
         self.source.as_ref().filter(|_| self.mode == BlockViewMode::Native)
     }
@@ -122,23 +131,27 @@ impl View {
     pub fn native_block(&self, at: usize) -> Option<NativeAt> {
         self.native.active()?;
         let c = self.doc.named_containers_at(at).pop()?;
-        let block = self.look_of(&c)?;
+        let Looked::Native(block) = self.look_of(&c) else {
+            return None;
+        };
         Some(NativeAt {
             block,
             range: c.opener.start..c.closer.end,
         })
     }
 
-    fn look_of(&self, c: &NamedContainer) -> Option<Arc<NativeBlock>> {
-        let source = self.native.active()?;
-        if !source.has_view(&c.name) {
-            return None;
+    fn look_of(&self, c: &NamedContainer) -> Looked {
+        let Some(source) = &self.native.source else {
+            return Looked::Generic;
+        };
+        if !source.has_schema(&c.name) {
+            return Looked::Generic;
         }
-        let text = self.doc.text();
-        let bytes = text.get(c.opener.start..c.closer.end)?;
-        if bytes.len() > MAX_NATIVE_BLOCK_BYTES {
-            return None;
-        }
+        let Some(bytes) =
+            (self.doc.text().get(c.opener.start..c.closer.end)).filter(|b| b.len() <= MAX_NATIVE_BLOCK_BYTES)
+        else {
+            return Looked::Generic;
+        };
         let mut h = crate::model::hasher();
         (&c.name, &c.args, bytes).hash(&mut h);
         let key = h.finish();
@@ -146,8 +159,9 @@ impl View {
             return found.clone();
         }
         let look = match source.look(&c.name, &c.args, bytes) {
-            BlockLook::Generic => None,
-            BlockLook::Native(b) => Some(Arc::new(b)),
+            BlockLook::Generic => Looked::Generic,
+            BlockLook::Outside(why) => Looked::Outside(why.into()),
+            BlockLook::Native(b) => Looked::Native(Arc::new(b)),
         };
         let mut looks = self.native.looks.borrow_mut();
         if looks.len() >= LOOKS_MAX {
@@ -155,6 +169,20 @@ impl View {
         }
         looks.insert(key, look.clone());
         look
+    }
+
+    /// Why the block item `i` opens is outside what it declares; `None` for any other item.
+    pub fn block_warnings(&self, i: usize) -> Option<Arc<[String]>> {
+        self.native.source.as_ref()?;
+        let it = self.model.items.get(i)?;
+        if it.kind != (ItemKind::ContainerMarker { close: false }) {
+            return None;
+        }
+        let c = self.doc.named_containers_at(self.model.item_start(i)).pop()?;
+        match self.look_of(&c) {
+            Looked::Outside(why) => Some(why),
+            _ => None,
+        }
     }
 
     fn of_item(&self, start: usize, it: &Item) -> Option<OfItem> {
@@ -187,25 +215,42 @@ impl View {
 
     /// What of the view enters the cache key of `it`.
     pub(super) fn native_item_key(&self, i: usize, it: &Item) -> u64 {
-        self.native.active().map_or(0, |_| {
-            if it.containers.iter().any(|c| matches!(c, Container::Card)) {
-                self.of_item(self.model.item_start(i), it).map_or(0, |o| o.key)
-            } else {
-                0
+        if self.native.source.is_none() || !it.containers.iter().any(|c| matches!(c, Container::Card)) {
+            return 0;
+        }
+        let of = self.of_item(self.model.item_start(i), it);
+        let mut key = of.as_ref().map_or(0, |o| o.key);
+        if it.kind == (ItemKind::ContainerMarker { close: false }) {
+            let opener = (of.as_ref()).is_some_and(|o| self.icon_ready(o));
+            key ^= u64::from(opener).rotate_left(47);
+            if let Some(why) = self.block_warnings(i) {
+                let mut h = crate::model::hasher();
+                why.hash(&mut h);
+                key ^= h.finish().rotate_left(31);
             }
-        })
+        }
+        key
     }
 
-    /// Runs `f` with what item `i`'s layout gets of its view.
-    pub(super) fn with_native_params<R>(&self, i: usize, f: impl FnOnce(Option<NativeParams<'_>>) -> R) -> R {
+    fn icon_ready(&self, of: &OfItem) -> bool {
+        let source = self.native.source.as_ref();
+        (of.at.block.view.icon.as_deref()).is_some_and(|name| source.is_some_and(|s| s.icon_ready(name)))
+    }
+
+    /// Runs `f` with what item `i`'s layout gets of its view: the view and the warnings.
+    pub(super) fn with_native_params<R>(
+        &self,
+        i: usize,
+        f: impl FnOnce(Option<NativeParams<'_>>, Option<&[String]>) -> R,
+    ) -> R {
         let of = (self.model.items.get(i)).and_then(|it| self.of_item(self.model.item_start(i), it));
-        match &of {
-            Some(o) => f(Some(NativeParams {
-                view: &o.at.block.view,
-                role: o.role,
-            })),
-            None => f(None),
-        }
+        let why = self.block_warnings(i);
+        let params = of.as_ref().map(|o| NativeParams {
+            view: &o.at.block.view,
+            role: o.role,
+            icon_ready: self.icon_ready(o),
+        });
+        f(params, why.as_deref())
     }
 
     /// A heading in this item draws at a native title's size, as far as its block's name can tell:

@@ -162,6 +162,12 @@ pub enum Prim {
         b: Pos2,
         stroke: Stroke,
     },
+    /// A package's icon on a native block ([`crate::native`]): drawn by the host, which has it.
+    Icon {
+        rect: Rect,
+        name: Arc<str>,
+        tint: Color32,
+    },
     Circle {
         center: Pos2,
         radius: f32,
@@ -256,6 +262,8 @@ pub struct BlockLayout {
     pub diagram_controls: Option<Rect>,
     /// The top edge of the card this item opens (item-local, left and right ends).
     pub card_top: Option<(Pos2, Pos2)>,
+    /// The warning on the card this item opens (item-local).
+    pub warning: Option<Rect>,
 }
 
 impl BlockLayout {
@@ -328,6 +336,8 @@ pub struct LayoutParams<'a> {
     pub review: ReviewView,
     /// The view of the block around the item, when it shows natively (ADR 0021).
     pub native: Option<crate::native::NativeParams<'a>>,
+    /// Why the block this item opens is outside what it declares (ADR 0021).
+    pub warnings: Option<&'a [String]>,
 }
 
 /// How review marks (CriticMarkup, ADR 0012) are shown in the rendered view (issue #88). Display
@@ -2065,6 +2075,7 @@ pub fn layout_item(
     let mut y = gap;
     let mut toggle = None;
     let mut empty_anchor = None;
+    let mut warning = None;
 
     if let Some((ai, title)) = &alert_title {
         let mut st = Style::base(t.font_size, line_px, color(t.alert[*ai]));
@@ -2513,9 +2524,24 @@ pub fn layout_item(
             });
             let mut st = Style::base(size, size * 1.4, ink);
             st.fam = FontRole::Bold;
+            let mut label_x = x;
+            if let Some(name) = (p.native.filter(|n| n.icon_ready)).and_then(|n| n.view.icon.as_deref()) {
+                let side = size * 1.2;
+                let rect = Rect::from_min_size(pos2(x, y + (size * 1.4 - side) * 0.5), vec2(side, side));
+                out.prims.push(Prim::Icon {
+                    rect,
+                    name: name.into(),
+                    tint: ink,
+                });
+                label_x += side + size * 0.4;
+            }
             let g = shaper.shape(&StyledText::single(label, st.text_style()), wrapped(width));
             let h = g.size().y;
-            out.text(pos2(x, y), g, Vec::new(), FragmentId::label());
+            let label_w = g.size().x;
+            out.text(pos2(label_x, y), g, Vec::new(), FragmentId::label());
+            if let Some(why) = p.warnings.and_then(|w| w.first().map(|first| (first, w.len()))) {
+                warning = warning_badge(&mut out, shaper, t, why, pos2(label_x + label_w + size, y), x + width);
+            }
             y += h;
         }
         ItemKind::Rule => {
@@ -2869,7 +2895,44 @@ pub fn layout_item(
         comments,
         diagram_controls,
         card_top,
+        warning,
     }
+}
+
+/// Room for the card's button at its right end.
+const BADGE_RIGHT_ROOM: f32 = 34.0;
+
+/// `⚠` and the first reason on a card's first row, cut to the room there. It does not wrap: a
+/// card's first row has one height. Returns where it is.
+fn warning_badge(
+    out: &mut Out,
+    shaper: &mut dyn TextShaper,
+    t: &Theme,
+    (first, count): (&String, usize),
+    at: Pos2,
+    right: f32,
+) -> Option<Rect> {
+    let size = t.font_size * 0.85;
+    let room = right - BADGE_RIGHT_ROOM - at.x;
+    if room <= size * 2.0 {
+        return None;
+    }
+    let st = Style::base(size, size * 1.4, color(t.alert[3]));
+    let mut text = format!("⚠ {first}");
+    if count > 1 {
+        text.push_str(&format!(" (+{})", count - 1));
+    }
+    // the shaper has the last word on what fits: cut in proportion until it does
+    let mut g = shaper.shape(&StyledText::single(text.clone(), st.text_style()), None);
+    let mut chars = text.chars().count();
+    while g.size().x > room && chars > 2 {
+        chars = (chars - 1).min((chars as f32 * room / g.size().x) as usize);
+        let cut: String = text.chars().take(chars).chain(['…']).collect();
+        g = shaper.shape(&StyledText::single(cut, st.text_style()), None);
+    }
+    let rect = Rect::from_min_size(at, g.size());
+    out.text(at, g, Vec::new(), FragmentId::label());
+    Some(rect)
 }
 
 /// A native view's own edges around one item of its block (`r`: the item's part of the block).

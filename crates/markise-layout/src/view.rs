@@ -1165,7 +1165,7 @@ impl View {
                     math: Cell::new(false),
                     images: RefCell::new(Vec::new()),
                 };
-                let laid = self.with_native_params(i, |native| {
+                let laid = self.with_native_params(i, |native, warnings| {
                     let params = LayoutParams {
                         theme: &self.theme,
                         width: self.width,
@@ -1179,6 +1179,7 @@ impl View {
                         links: &*self.links,
                         review: self.review,
                         native,
+                        warnings,
                     };
                     layout_item(&*self.doc, &self.model, i, &params, shaper, &rec)
                 });

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::Context;
+use egui_schema_form::Thumbnail;
 use markise_layout::block::color;
 
 use super::{MarkiseApp, Then};
@@ -196,6 +197,7 @@ impl MarkiseApp {
             d.viewer.set_block_index(index.clone());
         }
         self.block_form.assets.poll(ui.ctx());
+        self.block_icons_update(ui.ctx());
         if let Some(at) = self.block_form.requested.take() {
             self.open_block_form(at);
         }
@@ -258,6 +260,30 @@ impl MarkiseApp {
             Some(PanelAction::Cancel) => self.block_form_cancel(),
             Some(PanelAction::Reload) => self.block_form_reload(),
             None => {}
+        }
+    }
+
+    /// The block icons the document's layout has asked for, through the form's worker. Costs a lock
+    /// and a look at an empty set when nothing is on its way.
+    fn block_icons_update(&mut self, ctx: &Context) {
+        let Some(d) = &self.doc else { return };
+        let board = d.viewer.block_icons().clone();
+        if !board.is_waiting() {
+            return;
+        }
+        let Some(package) = self.block_package().cloned() else {
+            return;
+        };
+        let assets = &mut self.block_form.assets;
+        assets.use_package(package);
+        let arrived = board.take_answers(|name| match assets.svg(ctx, name) {
+            Thumbnail::Mask { texture, .. } => Some(Some((texture, true))),
+            Thumbnail::Ready { texture, .. } => Some(Some((texture, false))),
+            Thumbnail::Loading => None,
+            Thumbnail::Failed(_) | Thumbnail::None => Some(None),
+        });
+        if arrived {
+            ctx.request_repaint();
         }
     }
 

@@ -147,7 +147,8 @@ fn open(h: &mut H, doc: &Path) {
 }
 
 fn has(h: &H, text: &str) -> bool {
-    h.query_by_label_contains(text).is_some()
+    // (the panel's reasons and a block's own warning say the same)
+    h.query_all_by_label_contains(text).next().is_some()
 }
 
 fn text(h: &H) -> String {

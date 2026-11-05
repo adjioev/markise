@@ -30,7 +30,8 @@ const GOALS: &str = r#"{"label": "Goals", "fields": [{"name": "items", "type": "
 const PLAIN: &str = r#"{"label": "Plain", "fields": [{"name": "body", "type": "text"}]}"#;
 const VIEWS: &str = r#"{"tip": {"kind": "callout", "accent": "green", "icon": "bulb"},
     "poll": {"kind": "choices", "accent": "purple"},
-    "goals": {"kind": "card", "accent": "blue"}}"#;
+    "goals": {"kind": "card", "accent": "blue", "icon": "no-such-file"}}"#;
+const ICON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M19 12H5"/></svg>"#;
 
 pub(crate) const DOC: &str = "# Doc\n\nBefore.\n\n:::tip\n\n### A title\n\nHello\n\n:::\n\n:::poll\n\n## Which?\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> Because.\n\n:::\n\n:::goals\n\n- First\n- Second\n\n:::\n\n:::plain\n\nNo view.\n\n:::\n\n:::poll\n\n## Outside\n\n- [x] Marked {#b1}\n- [x] Marked too {#b2}\n\n:::\n\n:::unknown\n\nNot in the package.\n\n:::\n";
 
@@ -50,6 +51,7 @@ fn archive() -> Vec<u8> {
         ("components/plain/plain.json", PLAIN),
         ("editor/palette.json", r#"{"format": 1}"#),
         ("editor/views.json", VIEWS),
+        ("assets/bulb.svg", ICON),
     ];
     let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
     for (path, content) in files {
@@ -205,6 +207,50 @@ fn a_native_block_is_edited_through_its_form_for_now_and_undo_still_works() {
     v.ed.edit(|s| s.undo());
     common::run(&mut h);
     assert_eq!(text(&h), DOC);
+}
+
+#[test]
+fn a_block_outside_its_schema_is_a_card_with_a_warning_and_can_be_saved() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    let s = shown(&mut h);
+    assert!(s.contains("⚠ Answers: Mark exactly one"), "{s}");
+    assert!(!s.contains("⚠ Tip"), "only that one: {s}");
+    // for a screen reader, the reasons in full
+    let label = "Outside its schema: Answers: Mark exactly one";
+    assert!(h.query_by_label(label).is_some());
+    assert_eq!(text(&h), DOC);
+    assert!(!h.state().is_dirty());
+    // and it edits as any card: the marks of ADR 0018 still work there
+    caret(&mut h, DOC.find("Marked too").unwrap());
+    h.event(Event::Text("x".into()));
+    common::run(&mut h);
+    assert!(text(&h).contains("xMarked too"));
+}
+
+fn icons_of(h: &mut H, needle: &str) -> Vec<String> {
+    let at = DOC.find(needle).unwrap();
+    let v = &mut h.state_mut().viewer().unwrap();
+    let opener = v.ed.view.native_block(at).unwrap().range.start;
+    let i = v.ed.view.model().item_at_offset(opener);
+    let layout = v.ed.view.cache_peek(i).expect("on screen").clone();
+    (layout.prims.iter())
+        .filter_map(|p| match p {
+            markise_layout::block::Prim::Icon { name, .. } => Some(name.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_icon_comes_from_its_file_through_the_worker_and_no_file_means_no_icon() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    settle(&mut h);
+    common::run(&mut h);
+    assert_eq!(icons_of(&mut h, "Hello"), ["assets/bulb.svg"]);
+    assert!(icons_of(&mut h, "First").is_empty(), "the file is not in the package");
+    assert!(h.state().banner_text().is_none(), "and that is no error");
 }
 
 #[test]
