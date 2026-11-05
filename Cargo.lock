@@ -2825,6 +2825,7 @@ dependencies = [
  "markise-export",
  "markise-layout",
  "markise-md",
+ "markise-package",
  "markise-pdf",
  "markise-testfmt",
  "markise-text",
@@ -2904,6 +2905,7 @@ version = "0.1.0-beta.1"
 dependencies = [
  "flate2",
  "markise-doc",
+ "schema-form-core",
  "serde_json",
  "sha2",
  "tar",

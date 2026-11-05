@@ -348,3 +348,21 @@ fn choices_outside_the_subset_are_refused_by_name() {
     // answers have nothing that lists their options
     assert_eq!(refused(answers, json!({"widget": "buttons"})), "x/options");
 }
+
+#[test]
+fn the_overlay_named_empty_is_for_no_variant_alone() {
+    let s = json!({"type": "object", "properties": {"x": {"type": "string"}}});
+    let h = json!({"version": SPEC_VERSION, "variants": {
+        "": {"fields": {"x": {"label": "Plain"}}},
+        "other": {"fields": {"x": {"help": "Other"}}},
+    }});
+    let label = |variant| {
+        FormSpec::parse(&s, &h, variant).expect("in the subset").fields[0]
+            .label
+            .clone()
+    };
+    assert_eq!(label(None), "Plain");
+    assert_eq!(label(Some("")), "Plain");
+    assert_eq!(label(Some("other")), "x", "not inherited");
+    assert_eq!(label(Some("unknown")), "x");
+}

@@ -4,6 +4,7 @@
 //! links its own executable.
 
 mod block_fields;
+mod block_forms;
 mod block_gaps;
 mod block_ownership;
 mod common;

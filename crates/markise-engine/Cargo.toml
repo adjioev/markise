@@ -44,6 +44,8 @@ libc.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
+# a package's fields and the field model agree (tests/it/block_forms.rs)
+markise-package.workspace = true
 markise-corpus.workspace = true
 markise-testfmt.workspace = true
 proptest.workspace = true

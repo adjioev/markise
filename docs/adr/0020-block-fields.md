@@ -102,7 +102,8 @@ name, so an arbitrary schema cannot silently become a promise:
   choices and images and below a custom widget too; a custom widget may only leave `type` out.
 - UI hints, our own small format and not JSON Forms: `version`, `order`, `fields`, and per field
   `label`, `help`, `widget`, `multiline`, `add_label`, `selection`, `correct`, `options`, `columns`,
-  nested `fields` and `order`, and `custom` for a host's widget. `variants` overlays the hints by a host's name.
+  nested `fields` and `order`, and `custom` for a host's widget. `variants` overlays the hints by a host's name; the overlay named `""` is for
+  no variant, and a named variant does not inherit it.
   Layouts and rules are not offered. `x-` keys are ignored; the engine reads `x-markdown` (heading,
   quote) there, so the rest stays free of Markdown.
 - Correctness (`exactly-one`, `at-least-one`), missing and duplicate answer ids, an option that
@@ -195,6 +196,45 @@ differs by variant, so for them `options` alone says what is allowed.
   state and label. The row count follows the width, down to one button per row, so a narrow
   panel or a large zoom never cuts one off. In a choice with icons, an option without one takes
   a row of its own.
+
+### From a package to a form
+
+A package declares `fields: [{name, type, ...}]` (ADR 0019); the form reads JSON Schema and hints.
+`BlockSchema::form_input` in `markise-package` is the one place that knows both. Its output is plain
+JSON, so that crate needs no form, and the hint `x-markdown` tells `decls_from_spec` where each
+field lives, so the form and the field declarations come from one source.
+
+| Type | Schema | Widget | Required unless |
+|---|---|---|---|
+| `heading` | string; `level` goes to `x-markdown` | text | `min` is 0 |
+| `text` | string | multiline | `min` is 0 |
+| `quote` | string | multiline | `min` is 0 |
+| `list` | array of non-empty strings | list | `minItems` is 0 or absent |
+| `choices` | array of answers with non-empty `text` | choices | `minItems` is 0 or absent |
+| `image` | array of `{alt, path}` with non-empty `path` | images | `min` is 0 or absent |
+
+- **Labels.** A field's `label` (string or per language), else its name made readable, as nothing
+  else knows better. `help` and `add_label` go through too.
+- **Limits.** `minItems` and `maxItems`, or `min` and `max` on an image, become the array's limits.
+- **Variants.** `correct` is one rule, or a rule per variant with `""` for the block without one. It
+  becomes the base hints and `variants` overlays. A block's arguments pick the variant when
+  they name a declared one. Selection follows the rule: `exactly-one` is one mark, others many.
+- **Refused by name.** A known key with a value a form cannot honour stops the block's form with a
+  reason rather than being dropped: a numeric `max` or a `min` above 1 on one piece of text, a
+  `level` outside 1 to 6, `ids` other than `required`. A key not known here is data for
+  later versions and is ignored (ADR 0019). The panel shows the reason; the block stays a card.
+- **Icon choices.** A preset can say how a variant's answers are chosen: `widget: "icon-choices"`,
+  `variant`, `field`, `answers: [{label, icon, exclusive}]`, `columns`, `field_label`. These become
+  choice buttons in that variant's hints; `variant: ""` is the block with no variant and no key at all
+  is every variant. A `field` or `variant` that is not a string is refused. An option's value is its `label`, the text the answer has
+  in the Markdown. `icon` is a file of the package, which the host resolves. Other `widget`
+  values stay data for later.
+- **The block's `argument` is not checked in this phase**: it is not a field, and the subset has no
+  `pattern`.
+
+`tests/it/block_forms.rs` in the engine holds the agreement: for every variant, a full and an empty
+block, the engine's values have the type the spec declares at every depth and no other key,
+and storing them unchanged gives no edits.
 
 ### Images and host widgets
 

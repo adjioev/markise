@@ -11,6 +11,7 @@
 mod archive;
 mod binding;
 mod error;
+mod form;
 mod index;
 pub mod limits;
 mod palette;
@@ -24,6 +25,7 @@ mod views;
 pub use archive::{Files, read_archive};
 pub use binding::{BINDING_FILE, Binding, find_binding, parse_binding, read_binding, read_source};
 pub use error::{Issue, PackageError};
+pub use form::{FormInput, FormRefusal};
 pub use index::{BlockEntry, PackageIndex};
 pub use palette::{Palette, PaletteBlock, PaletteGroup, Preset};
 pub use paths::clean_relative;
