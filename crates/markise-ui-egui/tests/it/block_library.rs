@@ -221,7 +221,16 @@ fn the_mouse_chooses_a_press_outside_closes_and_the_pointer_is_an_arrow() {
     let row = h.get_by_label("One answer").rect();
     h.hover_at(row.center());
     frames(&mut h);
-    assert_eq!(h.ctx.output(|o| o.cursor_icon), egui::CursorIcon::Default);
+    h.step();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Default);
+    // over the text beside it the pointer is what it is there: this reads a real answer
+    let beyond = h.get_by_label("One answer").rect().right_center() + egui::vec2(60.0, 0.0);
+    h.hover_at(beyond);
+    h.step();
+    h.step();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Text);
+    h.hover_at(row.center());
+    frames(&mut h);
     assert_eq!(
         h.state().block_library().unwrap().selected_title(),
         Some("One answer"),
@@ -1050,6 +1059,38 @@ mod deletes {
         undo(&mut h);
         undo(&mut h);
         assert_eq!(text(&h), d);
+    }
+
+    #[test]
+    fn with_the_keyboard_in_find_the_chord_is_not_the_documents() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        caret(&mut h, d.find("Hello").unwrap() + 1);
+        let ctx = h.ctx.clone();
+        assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("find.open")));
+        frames(&mut h);
+        let (m, k) = chord();
+        h.key_press_modifiers(m, k);
+        frames(&mut h);
+        assert_eq!(text(&h), d, "the block stays");
+    }
+
+    #[test]
+    fn the_caret_goes_to_the_free_line_after_a_block_before() {
+        let d = format!("{POLL}\n\n{PLAIN}\n\nAfter.\n");
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        caret(&mut h, d.find("Plain text.").unwrap() + 1);
+        let ctx = h.ctx.clone();
+        assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("block.delete")));
+        let right_after = h.state_mut().viewer().unwrap().ed.session.selection().primary().focus;
+        frames(&mut h);
+        let t = text(&h);
+        let want = DocPos::with_virt(t.find("\n\nAfter.").unwrap(), 1);
+        assert_eq!(right_after, want);
+        let at = h.state_mut().viewer().unwrap().ed.session.selection().primary().focus;
+        assert_eq!(at, want, "and it stays there");
     }
 
     #[test]

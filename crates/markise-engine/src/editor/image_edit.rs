@@ -4,7 +4,7 @@
 use std::fmt;
 use std::ops::Range;
 
-use markise_doc::{HintSet, Patch, PatchSet, PlanStep};
+use markise_doc::{FormatDoc, HintSet, InlineKind, InlineNode, Patch, PatchSet, PlanStep};
 
 use super::block_place::blocks_of;
 use super::{EditError, EditorView, TxKind};
@@ -43,28 +43,45 @@ pub struct ImageParts {
     pub dest: Range<usize>,
 }
 
-/// The parts of the inline image at `at`, which starts at its `!`. `None` for anything else, a
-/// reference image too, whose path stands elsewhere.
-pub fn image_parts_in(text: &str, at: &Range<usize>) -> Option<ImageParts> {
+/// A paragraph longer than this has no image to change here: it is parsed on each look.
+const MAX_LEAF: usize = 1 << 20;
+
+fn image_node(nodes: &[InlineNode], start: u32) -> Option<&InlineNode> {
+    for n in nodes {
+        if n.source.start == start && matches!(n.kind, InlineKind::Image { .. }) {
+            return Some(n);
+        }
+        if n.source.start <= start
+            && start < n.source.end
+            && let Some(found) = image_node(&n.children, start)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// The parts of the inline image at `at`, which starts at its `!`, by the parser: where the description
+/// ends is its to say, as a code span in it may hold anything. `None` for anything else, a reference image
+/// too, whose path stands elsewhere.
+pub fn image_parts_in(doc: &dyn FormatDoc, at: &Range<usize>) -> Option<ImageParts> {
+    let leaf = doc.leaf(at.start)?;
+    let base = leaf.lines.first()?.start;
+    let span = leaf.lines.last()?.end.saturating_sub(base);
+    if span > MAX_LEAF || at.start < base {
+        return None;
+    }
+    let rich = doc.inlines(&leaf);
+    let node = image_node(&rich.nodes, (at.start - base) as u32)?;
+    let end = base + node.source.end as usize;
+    let text = doc.text();
     let bytes = text.as_bytes();
-    let end = at.end.min(bytes.len());
     if bytes.get(at.start..at.start + 2)? != b"![" {
         return None;
     }
     let alt_start = at.start + 2;
-    let mut i = alt_start;
-    let mut depth = 0usize;
-    let alt_end = loop {
-        match *bytes.get(i).filter(|_| i < end)? {
-            b'\\' => i += 1,
-            b'[' => depth += 1,
-            b']' if depth == 0 => break i,
-            b']' => depth -= 1,
-            _ => {}
-        }
-        i += 1;
-    };
-    if bytes.get(alt_end + 1) != Some(&b'(') {
+    let alt_end = node.markers.last().map_or(alt_start, |m| base + m.start as usize);
+    if alt_end < alt_start || bytes.get(alt_end) != Some(&b']') || bytes.get(alt_end + 1) != Some(&b'(') {
         return None;
     }
     let mut d = alt_end + 2;
@@ -138,7 +155,7 @@ pub fn image_dest_for(typed: &str) -> Option<String> {
 impl EditorView {
     /// The parts of the image whose source is `at`.
     pub fn image_parts(&self, at: Range<usize>) -> Option<ImageParts> {
-        image_parts_in(self.session.text(), &at)
+        image_parts_in(self.session.doc(), &at)
     }
 
     /// Puts `dest`, as written, in the place of the image's destination: one undo step.
@@ -165,7 +182,6 @@ impl EditorView {
             return Err(ImageRefused::ReadOnly);
         }
         let parts = self.image_parts(at.clone()).ok_or(ImageRefused::NoImage)?;
-        self.release();
         let doc = self.session.doc();
         let text = doc.text();
         let same_alt = alt.is_none_or(|a| a == &text[parts.alt.clone()]);
@@ -182,18 +198,16 @@ impl EditorView {
         let hints_after = (!doc.hints().is_empty()).then(HintSet::new);
         // the same image, with these bytes
         let new_alt = alt.unwrap_or(&text[parts.alt.clone()]).to_string();
-        let new_end = at.end as isize + dest.len() as isize - parts.dest.len() as isize + new_alt.len() as isize
-            - parts.alt.len() as isize;
-        let new_at = at.start..new_end.max(0) as usize;
-        let start = at.start;
+        let new_at = at.start..at.start + 2;
         let dest_owned = dest.to_string();
+        // last before the edit: it leaves the view with no document until the sync after it
+        self.release();
         let done = self.session.transact(label, TxKind::Structural, |tx| {
             tx.step(PlanStep { patches, hints_after })?;
             let doc = tx.doc();
             let text = doc.text();
-            let stands = image_parts_in(text, &new_at).is_some_and(|p| {
-                text[p.alt.clone()] == new_alt && text[p.dest] == dest_owned && p.alt.start == start + 2
-            });
+            let stands =
+                image_parts_in(doc, &new_at).is_some_and(|p| text[p.alt] == new_alt && text[p.dest] == dest_owned);
             if !stands || blocks_of(doc) != want {
                 return Err(EditError::Aborted(String::new()));
             }

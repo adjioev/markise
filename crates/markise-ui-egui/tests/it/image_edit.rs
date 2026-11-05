@@ -223,6 +223,58 @@ fn the_tools_have_labels_and_an_arrow_and_edit_changes_the_description_and_the_p
 }
 
 #[test]
+fn a_review_mode_after_the_window_opened_refuses_the_save_and_closes_it() {
+    let doc = "![Old](old.png)\n\nb {>>note<<}\n";
+    let (_f, mut h) = fixture(doc);
+    press_tool(&mut h, "![", "Edit Image…");
+    assert!(h.state().image_edit_is_open());
+    h.state_mut().set_comment_view(CommentView::Final);
+    common::run(&mut h);
+    assert!(!h.state().image_edit_is_open());
+    assert_eq!(text(&h), doc);
+}
+
+#[test]
+fn a_copy_finishing_in_a_review_mode_replaces_nothing() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let doc = "![Old](old.png)\n\nb {>>note<<}\n";
+    let (f, mut h) = fixture(doc);
+    let away = f.root().join("away/x.png");
+    png(&away);
+    *f.pick.lock().unwrap() = Some(away);
+    let hold = Arc::new(AtomicBool::new(true));
+    let held = hold.clone();
+    let job: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        while held.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    });
+    h.state_mut()
+        .set_attach_job_test(std::time::Duration::from_secs(30), Some(job));
+    let r = image_rect(&h, "![");
+    hover(&mut h, r.center());
+    let p = h.get_by_label("Replace Image…").rect().center();
+    hover(&mut h, p);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton {
+            pos: p,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.step();
+    h.step();
+    h.state_mut().set_comment_view(CommentView::Final);
+    h.step();
+    hold.store(false, Ordering::SeqCst);
+    common::settle(&mut h);
+    common::run(&mut h);
+    assert_eq!(text(&h), doc);
+}
+
+#[test]
 fn esc_closes_the_edit_window_and_changes_nothing() {
     let doc = "![Old](old.png)\n";
     let (_f, mut h) = fixture(doc);

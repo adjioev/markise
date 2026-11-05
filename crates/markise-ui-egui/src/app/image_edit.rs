@@ -327,6 +327,11 @@ impl MarkiseApp {
             ));
             return;
         }
+        // it may have become read-only meanwhile, a review mode in Side by Side as anywhere
+        if let Some(why) = self.image_edit_refused() {
+            self.banner = Some(Banner::Info(why.into()));
+            return;
+        }
         self.image_take_outcome(copying.at, out);
     }
 
@@ -387,6 +392,11 @@ impl MarkiseApp {
         };
         // what it holds a place in is another text by now
         if self.block_edit_origin() != Some(w.origin) {
+            return;
+        }
+        // nor is it to be saved once the document has become read-only
+        if let Some(why) = self.image_edit_refused() {
+            self.banner = Some(Banner::Info(why.into()));
             return;
         }
         let mut save = false;
