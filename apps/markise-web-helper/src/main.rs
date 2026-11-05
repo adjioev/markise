@@ -2,7 +2,16 @@
 //! window nobody sees, and answers with an image. It reads its requests from stdin and answers on
 //! stdout. It opens no file: everything a page loads comes through the client, which validates it.
 
-/// No web engine is wired up here: the client hears so, and blocks stay cards.
+#[cfg(target_os = "macos")]
+mod mac;
+
+#[cfg(target_os = "macos")]
+fn main() {
+    mac::main();
+}
+
+/// No web engine is wired up here yet: the client hears so, and blocks stay cards.
+#[cfg(not(target_os = "macos"))]
 fn main() {
     use markise_web_render::proto::{FromHelper, PROTOCOL, write_frame};
     let hello = FromHelper::Hello {

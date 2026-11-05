@@ -9,3 +9,23 @@ publish.workspace = true
 
 [dependencies]
 markise-web-render.workspace = true
+serde_json.workspace = true
+
+# The system's web engine, on macOS only (ADR 0023). objc2 family: Zlib OR Apache-2.0 OR MIT; block2: MIT.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+libc.workspace = true
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGImage", "CGColorSpace", "CGContext", "CGBitmapContext"] }
+objc2-foundation = { version = "0.3.2", features = ["NSString", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSValue", "NSObject", "NSURL", "NSURLRequest", "NSURLResponse", "NSArray", "NSKeyValueCoding", "block2"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSWindow", "NSView", "NSResponder", "NSImage", "NSGraphics", "NSRunningApplication", "objc2-core-graphics"] }
+objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKWebViewConfiguration", "WKSnapshotConfiguration", "WKContentWorld", "WKFrameInfo", "WKNavigation", "WKNavigationAction", "WKNavigationDelegate", "WKNavigationResponse", "WKPreferences", "WKURLSchemeHandler", "WKURLSchemeTask", "WKUIDelegate", "WKWebsiteDataStore", "WKContentRuleList", "WKContentRuleListStore", "WKUserContentController", "WKWindowFeatures", "WKWebpagePreferences", "WKSecurityOrigin", "WKOpenPanelParameters", "objc2-app-kit", "block2"] }
+
+[dev-dependencies]
+png.workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
