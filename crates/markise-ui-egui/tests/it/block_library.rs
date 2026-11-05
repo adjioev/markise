@@ -167,8 +167,10 @@ fn arrows_move_return_chooses_and_esc_gives_the_keyboard_back() {
     assert_eq!(selected(&h), "Several answers", "round");
     press(&mut h, Key::Enter);
     assert!(h.state().block_library().is_none());
-    assert_eq!(h.state().block_library_chosen(), Some(2));
-    assert_eq!(text(&h), DOC, "this phase chooses and writes nothing");
+    assert!(text(&h).contains(":::poll many"), "{}", text(&h));
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    frames(&mut h);
+    assert_eq!(text(&h), DOC);
 
     free_line(&mut h, 7);
     type_text(&mut h, "/");
@@ -228,7 +230,9 @@ fn the_mouse_chooses_a_press_outside_closes_and_the_pointer_is_an_arrow() {
     h.get_by_label("One answer").click();
     frames(&mut h);
     assert!(h.state().block_library().is_none());
-    assert_eq!(h.state().block_library_chosen(), Some(1));
+    assert!(text(&h).contains(":::poll\n"), "{}", text(&h));
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    frames(&mut h);
 
     free_line(&mut h, 7);
     type_text(&mut h, "/");
@@ -272,6 +276,131 @@ fn icons_come_by_name_through_the_worker() {
     assert!(h.state().background_settled());
     // the name with a file gets its picture
     assert_eq!(h.state().block_library().unwrap().pictures(), 1);
+}
+
+mod insert {
+    use markise_ui_egui::ViewMode;
+    use markise_ui_egui::menu::MenuAction;
+
+    use super::*;
+
+    const WITH_A_BAD_ONE: &str = r#"{"format": 1, "presets": [
+        {"id": "bad", "block": "tip", "label": "Broken", "markdown": ":::tip\n\nnever closed\n"},
+        {"id": "two", "block": "tip", "label": "Two blocks", "markdown": ":::tip\n\nx\n\n:::\n\nmore\n"}
+    ]}"#;
+
+    #[test]
+    fn return_inserts_at_the_free_line_one_undo_step_with_the_caret_in_the_field() {
+        let f = Fixture::with_palette(DOC, PALETTE);
+        let mut h = f.ready();
+        free_line(&mut h, 7);
+        type_text(&mut h, "/");
+        press(&mut h, Key::Enter);
+        assert_eq!(text(&h), "Before.\n\n:::tip\n\n### A title {#t1}\n\nHello\n\n:::\n");
+        // the keyboard is back in the document, in the first field
+        type_text(&mut h, "!");
+        assert!(text(&h).contains("### A title! {#t1}"), "{}", text(&h));
+        let v = h.state_mut().viewer().unwrap();
+        let at = v.ed.session.text().find("Hello").unwrap();
+        assert!(v.ed.view.native_block(at).is_some(), "a native view, not a card");
+        v.ed.edit(|s| s.undo());
+        v.ed.edit(|s| s.undo());
+        frames(&mut h);
+        assert_eq!(text(&h), DOC);
+    }
+
+    #[test]
+    fn the_command_inserts_after_the_block_holding_the_caret_and_new_ids_come_with_it() {
+        let doc = "Before.\n\n:::poll\n\n## Q\n\n- [x] Yes {#a1}\n- [ ] No {#a2}\n\n:::\n\nAfter.\n";
+        let f = Fixture::with_palette(doc, PALETTE);
+        let mut h = f.ready();
+        caret(&mut h, doc.find("Yes").unwrap());
+        let ctx = h.ctx.clone();
+        assert!(
+            h.state_mut()
+                .menu_action(&ctx, &MenuAction::Command("block.insertFromLibrary"))
+        );
+        frames(&mut h);
+        assert!(h.state().block_library().is_some(), "the same library");
+        type_text(&mut h, "one");
+        press(&mut h, Key::Enter);
+        assert_eq!(
+            text(&h),
+            "Before.\n\n:::poll\n\n## Q\n\n- [x] Yes {#a1}\n- [ ] No {#a2}\n\n:::\n\n\
+             :::poll\n\n## A question\n\n- [x] Yes {#a3}\n- [ ] No {#a4}\n\n:::\n\nAfter.\n"
+        );
+    }
+
+    #[test]
+    fn the_command_works_in_source_and_side_by_side() {
+        for mode in [ViewMode::Source, ViewMode::SideBySide] {
+            let f = Fixture::with_palette(DOC, PALETTE);
+            let mut h = f.ready();
+            h.state_mut().set_view_mode(mode);
+            frames(&mut h);
+            let ctx = h.ctx.clone();
+            if mode == ViewMode::Source {
+                assert!(h.state().source_caret().is_some());
+            }
+            assert!(
+                h.state_mut()
+                    .menu_action(&ctx, &MenuAction::Command("block.insertFromLibrary"))
+            );
+            frames(&mut h);
+            press(&mut h, Key::Enter);
+            assert_eq!(
+                text(&h),
+                "Before.\n\n:::tip\n\n### A title {#t1}\n\nHello\n\n:::\n",
+                "{mode:?}"
+            );
+            if mode == ViewMode::Source {
+                let want = text(&h).find(" {#t1}").unwrap();
+                assert_eq!(h.state().source_caret(), Some(want), "the pane's caret in the field");
+            }
+        }
+    }
+
+    #[test]
+    fn a_preset_that_is_not_its_block_is_refused_with_a_message() {
+        let f = Fixture::with_palette(DOC, WITH_A_BAD_ONE);
+        let mut h = f.ready();
+        for query in ["Broken", "Two"] {
+            free_line(&mut h, 7);
+            type_text(&mut h, "/");
+            type_text(&mut h, query);
+            press(&mut h, Key::Enter);
+            assert_eq!(text(&h), DOC);
+            assert!(!h.state().is_dirty());
+            let banner = h.state().banner_text().unwrap_or_default();
+            assert!(banner.contains("was not inserted"), "{banner}");
+        }
+    }
+
+    #[test]
+    fn insert_block_is_in_the_menu_only_with_a_package_and_its_chord_works() {
+        let f = Fixture::with_palette(DOC, PALETTE);
+        let h = f.opened();
+        assert!(h.state().menu_model().item("block.insertFromLibrary").is_none());
+        let f = Fixture::with_palette(DOC, PALETTE);
+        let mut h = f.ready();
+        assert!(
+            h.state()
+                .menu_model()
+                .item("block.insertFromLibrary")
+                .is_some_and(|i| i.enabled)
+        );
+        caret(&mut h, 2);
+        let chord = if cfg!(target_os = "macos") {
+            egui::Modifiers::ALT | egui::Modifiers::MAC_CMD
+        } else {
+            egui::Modifiers::CTRL | egui::Modifiers::ALT
+        };
+        h.key_press_modifiers(chord, Key::B);
+        frames(&mut h);
+        assert!(h.state().block_library().is_some());
+        press(&mut h, Key::Escape);
+        assert_eq!(text(&h), DOC);
+    }
 }
 
 mod review {
@@ -384,6 +513,6 @@ mod review {
         });
         frames(&mut h);
         assert!(h.state().block_library().is_none());
-        assert_eq!(h.state().block_library_chosen(), Some(2));
+        assert!(text(&h).contains(":::poll many"), "{}", text(&h));
     }
 }

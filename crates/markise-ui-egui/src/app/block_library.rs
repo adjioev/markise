@@ -14,8 +14,6 @@ pub(super) struct BlockLibraryState {
     open: Option<OpenLibrary>,
     /// `/` was typed: opens on the next frame, with what was typed after it.
     requested: Option<String>,
-    /// The preset last chosen.
-    chosen: Option<usize>,
 }
 
 impl BlockLibraryState {
@@ -32,9 +30,48 @@ impl MarkiseApp {
         self.block_library.open.as_ref()
     }
 
-    /// The preset last chosen in the library, by its place in the package.
-    pub fn block_library_chosen(&self) -> Option<usize> {
-        self.block_library.chosen
+    /// There is something to offer and the document can take it: the Insert Block command.
+    pub(super) fn block_library_available(&self) -> bool {
+        self.block_package().is_some_and(|p| !p.index.presets().is_empty())
+            && self.progressive.is_none()
+            && self
+                .doc
+                .as_ref()
+                .is_some_and(|d| d.viewer.ed.session.read_only().is_none() && d.viewer.card_edit().is_none())
+    }
+
+    /// Insert Block…: the same library, for the caret wherever it is.
+    pub(super) fn open_block_library_by_command(&mut self, ctx: &Context) -> bool {
+        self.block_library_available() && self.open_block_library(ctx, Opened::Command, String::new())
+    }
+
+    /// Inserts the preset at this place in the package: one undo step, shown natively, the caret in its
+    /// first field. Package data is not trusted: a preset that is not what it says is refused here.
+    pub fn insert_block_preset(&mut self, preset: usize) -> bool {
+        let Some(package) = self.block_package().cloned() else {
+            return false;
+        };
+        let Some(preset) = package.index.presets().get(preset) else {
+            return false;
+        };
+        let in_source = self.source_focused();
+        let Some(d) = &mut self.doc else { return false };
+        match d.viewer.ed.insert_block(&preset.block, &preset.markdown, in_source) {
+            Ok(_) => {
+                if in_source {
+                    d.source_ui.find_reveal = true;
+                } else {
+                    d.viewer.find_reveal = true;
+                }
+                self.remember_block_views();
+                true
+            }
+            Err(why) => {
+                let label = preset.label.as_ref().map_or(preset.id.as_str(), |l| l.get(LANGUAGE));
+                self.banner = Some(super::Banner::Error(format!("“{label}” was not inserted: {why}.")));
+                false
+            }
+        }
     }
 
     /// Closes it, the keyboard going back where it was: Close and Quit go on from there.
@@ -74,7 +111,13 @@ impl MarkiseApp {
     /// Per frame, before the document is drawn, so that the keys it takes do not reach it.
     pub(super) fn block_library_window(&mut self, ctx: &Context) {
         if let Some(query) = self.block_library.requested.take() {
-            self.open_block_library(ctx, Opened::Typed, query);
+            // the rest of a large file is on its way: an id in it could not be seen, so it is typing
+            if self.progressive.is_none() {
+                self.open_block_library(ctx, Opened::Typed, query);
+            } else if let Some(d) = &mut self.doc {
+                d.viewer.type_after_library(format!("/{query}"));
+                ctx.request_repaint();
+            }
         }
         let Some(open) = &mut self.block_library.open else {
             return;
@@ -110,7 +153,10 @@ impl MarkiseApp {
             ctx.memory_mut(|m| m.request_focus(id));
         }
         match act {
-            LibraryAct::Choose(preset) => self.block_library.chosen = Some(preset),
+            LibraryAct::Choose(preset) => {
+                self.insert_block_preset(preset);
+                ctx.request_repaint();
+            }
             LibraryAct::Type(text) => {
                 if let Some(d) = &mut self.doc {
                     d.viewer.type_after_library(text);

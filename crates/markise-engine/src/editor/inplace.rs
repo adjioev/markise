@@ -46,7 +46,7 @@ pub(super) struct InPlace {
     /// state and the caret. Only the caret an edit put there has one, newest last.
     absent: Vec<(StateId, DocPos, Absent)>,
     /// How the document shows its blocks …
-    mode: BlockViewMode,
+    pub(super) mode: BlockViewMode,
     /// … and the blocks that differ from it, at their openers.
     own_modes: Vec<OwnMode>,
     /// States brought back for openers not in the document yet (the first part of a large file).
@@ -91,7 +91,7 @@ impl EditorView {
         (c.opener.start == at).then_some(c.name)
     }
 
-    fn add_own_mode(&mut self, opener: usize, mode: BlockViewMode) -> bool {
+    pub(super) fn add_own_mode(&mut self, opener: usize, mode: BlockViewMode) -> bool {
         let Some(name) = self.opener_name(opener) else {
             return false;
         };
@@ -553,7 +553,7 @@ impl EditorView {
         r.map_err(CommandError::from)
     }
 
-    fn begin_sticky(&mut self, opener: usize) {
+    pub(super) fn begin_sticky(&mut self, opener: usize) {
         if self.place.sticky.is_none() {
             self.place.sticky = Some(self.session.add_mark(DocPos::new(opener)));
         }

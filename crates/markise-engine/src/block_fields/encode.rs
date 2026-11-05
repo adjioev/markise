@@ -227,15 +227,22 @@ impl Draft {
     }
 }
 
-/// Every id in the block: in the source, headings and what no field took included, and on the
-/// answers as edited so far.
-fn block_ids(old: &BlockFields, fields: &[Field]) -> BTreeSet<String> {
+/// Every `{#id}` written anywhere in `text`, whether or not a reader would call it an id there: what
+/// must not be given out again.
+pub(crate) fn ids_in(text: &str) -> BTreeSet<String> {
     let mut ids = BTreeSet::new();
-    for part in old.source.split("{#").skip(1) {
+    for part in text.split("{#").skip(1) {
         if let Some(id) = part.split('}').next().filter(|id| valid_anchor(id)) {
             ids.insert(id.to_string());
         }
     }
+    ids
+}
+
+/// Every id in the block: in the source, headings and what no field took included, and on the
+/// answers as edited so far.
+fn block_ids(old: &BlockFields, fields: &[Field]) -> BTreeSet<String> {
+    let mut ids = ids_in(&old.source);
     for f in fields {
         if let FieldValue::Items(items) = &f.value {
             ids.extend(items.iter().filter_map(|i| match &i.data {
@@ -249,7 +256,7 @@ fn block_ids(old: &BlockFields, fields: &[Field]) -> BTreeSet<String> {
 
 /// The wanted id if valid and free, or `a<N>` above every number in use or retired, so a
 /// removed answer's id does not come back.
-fn new_anchor(taken: &BTreeSet<String>, wanted: Option<&str>, retired: &BTreeSet<String>) -> String {
+pub(crate) fn new_anchor(taken: &BTreeSet<String>, wanted: Option<&str>, retired: &BTreeSet<String>) -> String {
     if let Some(w) = wanted.filter(|w| valid_anchor(w) && !taken.contains(*w) && !retired.contains(*w)) {
         return w.to_string();
     }

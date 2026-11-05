@@ -362,6 +362,15 @@ impl MarkiseApp {
             "Table",
             self.command_entries(crate::menu::TABLE_COMMANDS, text_field),
         )));
+        // only where a package can offer blocks (ADR 0022)
+        if self.block_package().is_some() {
+            paragraph.entries.push(Entry::Separator);
+            paragraph.entries.push(self.app_item(
+                "block.insertFromLibrary",
+                self.block_library_available(),
+                Check::None,
+            ));
+        }
         menus.push(paragraph);
         let format = self.registry_menu("Format", FORMAT_ORDER, text_field);
         if !format.entries.is_empty() {
@@ -702,6 +711,7 @@ impl MarkiseApp {
         }
         match id {
             "block.editForm" => return self.open_block_form_at_caret(),
+            "block.insertFromLibrary" => return self.open_block_library_by_command(ctx),
             "view.switchBlockView" => return self.switch_block_view_at_caret(),
             "view.switchAllBlockViews" => return self.switch_all_block_views(),
             "file.quickOpen" => self.open_quick(ctx),

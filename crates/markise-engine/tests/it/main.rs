@@ -7,6 +7,7 @@ mod block_fields;
 mod block_forms;
 mod block_gaps;
 mod block_inplace;
+mod block_insert;
 mod block_ownership;
 mod block_place;
 mod block_views;

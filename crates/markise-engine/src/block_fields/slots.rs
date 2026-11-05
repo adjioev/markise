@@ -151,6 +151,11 @@ impl Slot {
     }
 
     /// Whether `r` touches something in the slot that is not plain text.
+    /// All of it is plain text: nothing in it is out of the keyboard's reach.
+    pub fn is_plain(&self) -> bool {
+        self.protected.is_empty()
+    }
+
     pub fn is_protected(&self, r: &Range<usize>) -> bool {
         (self.protected.iter()).any(|p| r.start <= p.end && p.start <= r.end)
     }
