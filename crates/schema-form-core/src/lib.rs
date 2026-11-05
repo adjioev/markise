@@ -5,13 +5,16 @@
 //! The subset is versioned ([`SPEC_VERSION`]). A schema or hints using anything outside it is an
 //! error ([`FormSpec::parse`]), not silently ignored: what parses is what is promised.
 
+mod choice;
 mod parse;
 mod validate;
 
+pub use choice::{ChoiceOption, ChoiceShape, selected_options, toggle_option, unknown_rows, write_selected};
 pub use validate::{ErrorKind, FieldError};
 
-/// The version of the subset and of the hints format.
-pub const SPEC_VERSION: u64 = 1;
+/// The newest version of the subset and of the hints format this crate reads. Version 1 hints
+/// still mean what they meant: `enum` and choice buttons need version 2.
+pub const SPEC_VERSION: u64 = 2;
 
 /// How many answers can be marked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +50,14 @@ pub enum Control {
     Images,
     /// An object drawn as a group.
     Group { fields: Vec<FieldSpec> },
+    /// A choice among known options, drawn as one button each, with icons and labels from data.
+    ChoiceButtons {
+        options: Vec<ChoiceOption>,
+        selection: Selection,
+        shape: ChoiceShape,
+        /// Buttons per row; `None` lets the form decide.
+        columns: Option<u32>,
+    },
     /// Drawn by what the host registered under this name. Its schema still holds; without a
     /// `type` any value goes.
     Custom { name: String },
@@ -74,6 +85,19 @@ pub struct ValueRule {
     pub closed: bool,
     /// An array of answers: what must hold for their marks. Their ids are checked as well.
     pub choices: Option<CorrectRule>,
+    /// `enum`: the only strings allowed.
+    pub one_of: Option<Vec<String>>,
+    /// The options of choice buttons over an array.
+    pub options: Option<OptionsRule>,
+}
+
+/// What must hold for an array drawn as choice buttons.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptionsRule {
+    /// The values of the options.
+    pub values: Vec<String>,
+    /// The values that cannot be selected together with anything else.
+    pub exclusive: Vec<String>,
 }
 
 /// One property of an object.

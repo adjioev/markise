@@ -147,10 +147,7 @@ fn a_new_answer_has_no_id_of_its_own_and_marks_stay_exclusive() {
     h.run();
     h.get_by_label("Add answer").click();
     h.run();
-    assert_eq!(
-        value_of(&h, "answers")[3],
-        json!({"id": "", "text": "", "correct": false})
-    );
+    assert_eq!(value_of(&h, "answers")[3], json!({"text": "", "correct": false}));
     h.get_by_label("Marked: Answers 1").click();
     h.run();
     let marks: Vec<bool> = (value_of(&h, "answers").as_array().expect("array").iter())

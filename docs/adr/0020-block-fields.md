@@ -92,21 +92,23 @@ reason per field, stays editable and can be saved, because strict checks belong 
 publishes. `BlockFields::check` gives the reasons plus the extras.
 
 The rules live in `schema-form-core`: no GUI, no Markdown, used by the engine here and by a form
-crate above. It reads a **declared, versioned subset** (`SPEC_VERSION` 1) and refuses the rest by
+crate above. It reads a **declared, versioned subset** (`SPEC_VERSION` 2) and refuses the rest by
 name, so an arbitrary schema cannot silently become a promise:
 
 - JSON Schema: `type` (one of string, boolean, array, object), `properties`, `required`, `items`,
-  `minLength`, `maxLength`, `minItems`, `maxItems`, `additionalProperties` as true or false.
-  Annotations are ignored. `enum`, `pattern`, `format`, `$ref` and combinators are refused, and so
-  is a keyword that would mean nothing on its type. This holds at any depth, in the entries of
+  `minLength`, `maxLength`, `minItems`, `maxItems`, `additionalProperties` as true or false, and
+  `enum` of distinct strings on a string. Annotations are ignored. `pattern`, `format`, `$ref` and
+  combinators are refused, and so is a keyword that would mean nothing on its type. This holds at any depth, in the entries of
   choices and images and below a custom widget too; a custom widget may only leave `type` out.
 - UI hints, our own small format and not JSON Forms: `version`, `order`, `fields`, and per field
-  `label`, `help`, `widget`, `multiline`, `add_label`, `selection`, `correct`, nested `fields` and
-  `order`, and `custom` for a host's widget. `variants` overlays the hints by a host's name.
+  `label`, `help`, `widget`, `multiline`, `add_label`, `selection`, `correct`, `options`, `columns`,
+  nested `fields` and `order`, and `custom` for a host's widget. `variants` overlays the hints by a host's name.
   Layouts and rules are not offered. `x-` keys are ignored; the engine reads `x-markdown` (heading,
   quote) there, so the rest stays free of Markdown.
-- Correctness (`exactly-one`, `at-least-one`), missing and duplicate answer ids: these are not
-  JSON Schema, so a validator would not have given them anyway.
+- Correctness (`exactly-one`, `at-least-one`), missing and duplicate answer ids, an option that
+  excludes the others: these are not JSON Schema, so a validator would not have given them anyway.
+- Version 1 hints keep their meaning: `enum` and choice buttons need version 2, which an older
+  build refuses by version rather than by a keyword it has not heard of.
 
 Empty is how missing content looks in a document, so an empty string or array as a field's value
 fails `required` and passes the other limits. An entry of an array exists, so its strings answer
@@ -125,7 +127,8 @@ behind `FormSpec::validate`.
 `crates/egui-schema-form` draws a `FormSpec` over JSON values: schema, hints and values in, changed
 values and reasons out. It depends on `schema-form-core`, egui and `serde_json`, and knows nothing of
 Markdown, Markise or any block. It draws generic primitives only: text, multiline text, string
-list, array with add, remove and reorder, radio and checkbox choices, checkbox, group. No widget of
+list, array with add, remove and reorder, radio and checkbox choices, choice buttons, checkbox,
+group. No widget of
 any site's vocabulary lives here.
 
 - **Identity.** Values stay plain JSON. Beside them every array row has a key that moves with it,
@@ -144,6 +147,54 @@ any site's vocabulary lives here.
   description, a move is announced.
 - **Theme and zoom.** Colours and sizes come from the `Ui`; icons are painted, so no font is needed.
 - A value of an unexpected type is shown as not editable and kept. The form never coerces it.
+
+### Choice buttons
+
+A choice among known options can be drawn as one button per option (`"widget": "buttons"`, the
+default for an `enum`). This is a generic primitive, the owner's decision: a choice can be made
+"by icon buttons", and an option can be `exclusive`. No widget for any particular choice exists.
+
+```json
+{ "widget": "buttons", "selection": "multiple", "columns": 4, "options": [
+    { "value": "Left", "label": "To the left", "icon": "left" },
+    { "value": "None", "exclusive": true } ] }
+```
+
+The value may be held three ways, and the schema says which:
+
+| Schema | Value | An option is selected when |
+|---|---|---|
+| string with `enum` | one string, empty for none | the string is its value |
+| array of strings with `enum` | the strings selected | the array holds its value |
+| array of `{id, text, correct}` | answers | the first row with its value as `text` is `correct` |
+
+`enum` says what is allowed, `options` how it looks; an `enum` value with no option shows under its
+own name, and an option outside the `enum` is refused. Answers have no place for an `enum` that
+differs by variant, so for them `options` alone says what is allowed.
+
+- **What a press means** lives in `schema-form-core` (`toggle_option`, `write_selected`), not in
+  the drawing: one selection stays on what was pressed; otherwise a press toggles, an exclusive option
+  clears the others and any other clears the exclusive ones.
+- **Answers keep their rows.** A press writes only the marks that changed. A selected option with
+  no row gets one in the options' order. A row that fits no option, or a second answer with an
+  option's text, is not a button's to change: the form shows its text and a remove button, and the
+  validator gives a reason (`NotAnOption`). Marks that break an exclusive option give a reason too,
+  and any press mends them.
+- **Repeated strings are one selected option.** In an array of strings, `["a", "a"]` selects `a` once.
+  The second row still has a reason (`NotAnOption`), but no remove button of its own: pressing the
+  option removes every row of that value, so a press always deselects and an exclusive press leaves
+  no copy behind.
+- **New answers have no `id` key.** In a form draft, a row with no `id` key is new and its host
+  gives it an id when the values are stored. An empty `id` is a row read from somewhere that has
+  none, and that is a reason (`MissingId`). So adding an answer no longer shows a false reason.
+- **Icons come through the host.** `FormHost::icon(name)` answers like a thumbnail and must not block;
+  the name is data the form does not read. `Thumbnail::Mask` is a one-colour picture the form tints
+  with the text colour, so it follows the theme. No answer means the label alone.
+- **Keyboard and screen readers** as for other choices: each button is a tab stop, Space and Enter
+  press it, its id comes from the option, and it reads as a radio button or checkbox with its
+  state and label. The row count follows the width, down to one button per row, so a narrow
+  panel or a large zoom never cuts one off. In a choice with icons, an option without one takes
+  a row of its own.
 
 ### Images and host widgets
 

@@ -358,3 +358,224 @@ fn an_empty_value_of_the_wrong_type_is_still_the_wrong_type() {
     // the right type, empty: still exempt from the limits
     assert_eq!(reasons(&spec, json!({"title": "", "tags": []})), []);
 }
+
+mod choice_options {
+    use schema_form_core::{
+        ChoiceOption, ChoiceShape, Control, ErrorKind, FormSpec, SPEC_VERSION, Selection, selected_options,
+        toggle_option, unknown_rows, write_selected,
+    };
+    use serde_json::{Value, json};
+
+    fn spec() -> FormSpec {
+        let schema = json!({"type": "object", "properties": {
+            "one": {"type": "string", "enum": ["a", "b"]},
+            "many": {"type": "array", "items": {"type": "string", "enum": ["a", "b", "z"]}},
+            "marks": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
+                "id": {"type": "string"}, "text": {"type": "string"}, "correct": {"type": "boolean"},
+            }}},
+        }});
+        let hints = json!({"version": SPEC_VERSION, "fields": {
+            "many": {"options": [{"value": "z", "exclusive": true}]},
+            "marks": {"widget": "buttons", "correct": "at-least-one", "options": [
+                {"value": "L"}, {"value": "R"}, {"value": "No", "exclusive": true},
+            ]},
+        }});
+        FormSpec::parse(&schema, &hints, None).expect("in the subset")
+    }
+
+    fn options(key: &str) -> Vec<ChoiceOption> {
+        let spec = spec();
+        let f = spec.fields.iter().find(|f| f.key == key).expect("field");
+        match &f.control {
+            Control::ChoiceButtons { options, .. } => options.clone(),
+            c => panic!("{c:?}"),
+        }
+    }
+
+    fn kinds(v: Value) -> Vec<(String, ErrorKind)> {
+        (spec().validate(&v).into_iter()).map(|e| (e.path, e.kind)).collect()
+    }
+
+    fn mark(id: &str, text: &str, correct: bool) -> Value {
+        json!({"id": id, "text": text, "correct": correct})
+    }
+
+    #[test]
+    fn a_value_outside_the_options_has_a_reason() {
+        assert_eq!(
+            kinds(json!({"one": "c", "many": ["a", "c"], "marks": [mark("x", "Odd", true)]})),
+            [
+                ("many/1".to_string(), ErrorKind::NotAnOption),
+                ("marks/0".to_string(), ErrorKind::NotAnOption),
+                ("one".to_string(), ErrorKind::NotAnOption),
+            ]
+        );
+        assert_eq!(kinds(json!({"one": ""})), [], "empty is how no choice looks");
+    }
+
+    #[test]
+    fn an_exclusive_option_with_others_has_a_reason() {
+        let exclusive = |value: &str| ErrorKind::ExclusiveWithOthers { value: value.into() };
+        assert_eq!(
+            kinds(json!({"many": ["a", "z"], "marks": [mark("x", "L", true), mark("y", "No", true)]})),
+            [
+                ("many".to_string(), exclusive("z")),
+                ("marks".to_string(), exclusive("No")),
+            ]
+        );
+        assert_eq!(
+            kinds(json!({"many": ["z"], "marks": [mark("x", "L", false), mark("y", "No", true)]})),
+            []
+        );
+    }
+
+    #[test]
+    fn repeated_strings_are_one_selected_option() {
+        let o = options("many");
+        let mut v = json!(["a", "a", "b"]);
+        assert_eq!(
+            unknown_rows(ChoiceShape::Strings, &o, &v),
+            [] as [usize; 0],
+            "no rows kept aside"
+        );
+        assert_eq!(selected_options(ChoiceShape::Strings, &o, &v), [false, true, true]);
+        // pressing it deselects it, whatever else the rows hold
+        write_selected(ChoiceShape::Strings, &o, &[false, false, true], &mut v);
+        assert_eq!(v, json!(["b"]));
+    }
+
+    #[test]
+    fn an_exclusive_press_leaves_no_copy_behind() {
+        let o = options("many");
+        let mut selected = vec![false, true, false];
+        toggle_option(&o, Selection::Multiple, &mut selected, 0);
+        let mut v = json!(["a", "a"]);
+        write_selected(ChoiceShape::Strings, &o, &selected, &mut v);
+        assert_eq!(v, json!(["z"]));
+        assert_eq!(kinds(json!({"many": v})), []);
+    }
+
+    #[test]
+    fn a_second_row_of_an_option_has_a_reason() {
+        assert_eq!(
+            kinds(json!({"marks": [mark("x", "L", true), mark("y", "L", false)]})),
+            [("marks/1".to_string(), ErrorKind::NotAnOption)]
+        );
+        assert_eq!(
+            kinds(json!({"many": ["a", "a"]})),
+            [("many/1".to_string(), ErrorKind::NotAnOption)]
+        );
+    }
+
+    #[test]
+    fn an_empty_entry_is_not_an_option() {
+        assert_eq!(
+            kinds(json!({"many": [""]})),
+            [("many/0".to_string(), ErrorKind::NotAnOption)]
+        );
+    }
+
+    #[test]
+    fn a_new_answer_without_an_id_key_is_not_missing_one() {
+        let new = json!({"text": "L", "correct": true});
+        assert_eq!(kinds(json!({"marks": [new]})), []);
+        assert_eq!(
+            kinds(json!({"marks": [mark("", "L", true)]})),
+            [("marks/0".to_string(), ErrorKind::MissingId)]
+        );
+    }
+
+    #[test]
+    fn the_correct_rule_holds_for_marks() {
+        assert_eq!(
+            kinds(json!({"marks": [mark("x", "L", false)]})),
+            [("marks".to_string(), ErrorKind::AtLeastOneCorrect)]
+        );
+    }
+
+    #[test]
+    fn exclusive_and_the_others_clear_each_other() {
+        let o = options("marks");
+        let press = |sel: &[bool], i: usize| {
+            let mut s = sel.to_vec();
+            toggle_option(&o, Selection::Multiple, &mut s, i);
+            s
+        };
+        assert_eq!(press(&[false, false, false], 0), [true, false, false]);
+        assert_eq!(press(&[true, false, false], 1), [true, true, false], "others stay");
+        assert_eq!(press(&[true, true, false], 2), [false, false, true], "exclusive clears");
+        assert_eq!(
+            press(&[false, false, true], 0),
+            [true, false, false],
+            "another clears it"
+        );
+        assert_eq!(press(&[true, true, false], 0), [false, true, false], "pressed again");
+        assert_eq!(press(&[false, false, true], 2), [false, false, false]);
+    }
+
+    #[test]
+    fn one_selection_stays_on_what_was_pressed() {
+        let o = options("one");
+        let mut s = vec![true, false];
+        toggle_option(&o, Selection::Single, &mut s, 1);
+        assert_eq!(s, [false, true]);
+        toggle_option(&o, Selection::Single, &mut s, 1);
+        assert_eq!(s, [false, true]);
+    }
+
+    #[test]
+    fn writing_a_string_and_strings() {
+        let o = options("one");
+        let mut v = json!("a");
+        assert_eq!(selected_options(ChoiceShape::String, &o, &v), [true, false]);
+        write_selected(ChoiceShape::String, &o, &[false, true], &mut v);
+        assert_eq!(v, json!("b"));
+
+        let o = options("many");
+        // z, then the rest of the enum in its order
+        assert_eq!(o.iter().map(|x| x.value.as_str()).collect::<Vec<_>>(), ["z", "a", "b"]);
+        let mut v = json!(["other", "b"]);
+        assert_eq!(selected_options(ChoiceShape::Strings, &o, &v), [false, false, true]);
+        write_selected(ChoiceShape::Strings, &o, &[false, true, true], &mut v);
+        assert_eq!(
+            v,
+            json!(["other", "a", "b"]),
+            "keeps what it cannot show, in the options' order"
+        );
+        write_selected(ChoiceShape::Strings, &o, &[false, false, false], &mut v);
+        assert_eq!(v, json!(["other"]));
+    }
+
+    #[test]
+    fn writing_marks_touches_only_what_changed() {
+        let o = options("marks");
+        let mut v = json!([mark("a2", "R", true), mark("a9", "Odd", true), mark("a3", "No", false)]);
+        assert_eq!(selected_options(ChoiceShape::Marks, &o, &v), [false, true, false]);
+        assert_eq!(unknown_rows(ChoiceShape::Marks, &o, &v), [1]);
+        write_selected(ChoiceShape::Marks, &o, &[false, false, true], &mut v);
+        assert_eq!(
+            v,
+            json!([mark("a2", "R", false), mark("a9", "Odd", true), mark("a3", "No", true)])
+        );
+    }
+
+    #[test]
+    fn a_selected_option_without_a_row_gets_one_in_order() {
+        let o = options("marks");
+        let mut v = json!([mark("a2", "R", true)]);
+        write_selected(ChoiceShape::Marks, &o, &[true, true, false], &mut v);
+        assert_eq!(v, json!([{"text": "L", "correct": true}, mark("a2", "R", true)]));
+        write_selected(ChoiceShape::Marks, &o, &[true, true, true], &mut v);
+        assert_eq!(v[2], json!({"text": "No", "correct": true}));
+    }
+
+    #[test]
+    fn a_second_row_of_an_option_is_unknown_and_a_mark_it_cannot_read_is_kept() {
+        let o = options("marks");
+        let v = json!([mark("a", "L", false), mark("b", "L", false)]);
+        assert_eq!(unknown_rows(ChoiceShape::Marks, &o, &v), [1]);
+        let mut v = json!([{"id": "a", "text": "L", "correct": "yes"}]);
+        write_selected(ChoiceShape::Marks, &o, &[true, false, false], &mut v);
+        assert_eq!(v[0]["correct"], json!("yes"));
+    }
+}

@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use egui::{Id, Key, KeyboardShortcut, Modifiers, Response, Role, ScrollArea, TextEdit, Ui, UiBuilder, WidgetInfo};
-use schema_form_core::{Control, FieldError, FieldSpec, Limits, Selection};
+use schema_form_core::{ChoiceShape, Control, FieldError, FieldSpec, Limits, Selection};
 use serde_json::{Map, Value, json};
 
 use crate::SchemaForm;
@@ -38,7 +38,7 @@ pub(crate) struct Cx<'a> {
     focus_row_drawn: bool,
     /// Where that focus goes if the row has no real control: its first enabled button.
     focus_fallback: Option<Id>,
-    status: &'a mut std::collections::HashMap<Id, String>,
+    pub status: &'a mut std::collections::HashMap<Id, String>,
     buttons: &'a mut std::collections::HashMap<Id, [Id; 3]>,
     moving: MoveRequest,
     /// The rows around the widget being drawn, innermost last.
@@ -49,7 +49,7 @@ pub(crate) struct Cx<'a> {
 impl Cx<'_> {
     /// Like [`Cx::track`], for a control that is something to edit: a new row around it gives it
     /// the focus.
-    fn track_control(&mut self, r: &Response) {
+    pub(crate) fn track_control(&mut self, r: &Response) {
         self.track(r);
         if r.enabled() && self.focus_row.is_some_and(|row| self.row_stack.contains(&row)) {
             r.request_focus();
@@ -64,7 +64,15 @@ impl Cx<'_> {
         }
     }
 
-    fn messages(&self, path: &str) -> Vec<String> {
+    /// The reasons of everything inside `path`, with the place left out.
+    pub fn messages_inside(&self, path: &str) -> Vec<(String, String)> {
+        let prefix = format!("{path}/");
+        (self.errors.iter())
+            .filter_map(|e| Some((e.path.strip_prefix(&prefix)?.to_string(), (self.texts.message)(&e.kind))))
+            .collect()
+    }
+
+    pub(crate) fn messages(&self, path: &str) -> Vec<String> {
         (self.errors.iter())
             .filter(|e| e.path == path)
             .map(|e| (self.texts.message)(&e.kind))
@@ -212,6 +220,21 @@ fn draw_field(ui: &mut Ui, f: &FieldSpec, obj: &mut Map<String, Value>, id: Id, 
             }
             None => not_editable(ui, cx),
         },
+        Control::ChoiceButtons {
+            options,
+            selection,
+            shape,
+            columns,
+        } => {
+            let choice = crate::choice::Choice {
+                field: f,
+                options,
+                selection: *selection,
+                shape: *shape,
+                columns: *columns,
+            };
+            crate::choice::draw(ui, &choice, &mut value, id, path, cx);
+        }
         Control::Custom { name } => {
             let errors = cx.messages(path);
             let context = WidgetContext {
@@ -235,6 +258,10 @@ fn draw_field(ui: &mut Ui, f: &FieldSpec, obj: &mut Map<String, Value>, id: Id, 
 fn empty_value(c: &Control) -> Value {
     match c {
         Control::Text { .. } => json!(""),
+        Control::ChoiceButtons {
+            shape: ChoiceShape::String,
+            ..
+        } => json!(""),
         Control::Checkbox => json!(false),
         Control::Group { .. } => json!({}),
         Control::Custom { .. } => Value::Null,
@@ -284,7 +311,8 @@ pub(crate) fn text_editor(ui: &mut Ui, s: &mut String, id: Id, multiline: bool, 
 
 fn new_row(c: &Control) -> Value {
     match c {
-        Control::Choices { .. } => json!({"id": "", "text": "", "correct": false}),
+        // no `id` key: its host gives it one when the values are stored
+        Control::Choices { .. } => json!({"text": "", "correct": false}),
         Control::Images => json!({"alt": "", "path": ""}),
         Control::Array { fields } => {
             let m: Map<String, Value> = fields
@@ -307,7 +335,7 @@ fn may_add(l: &Limits, len: usize) -> bool {
     l.max_items.is_none_or(|m| (len as u64) < m)
 }
 
-fn may_remove(l: &Limits, len: usize) -> bool {
+pub(crate) fn may_remove(l: &Limits, len: usize) -> bool {
     l.min_items.is_none_or(|m| (len as u64) > m)
 }
 

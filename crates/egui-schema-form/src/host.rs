@@ -19,6 +19,12 @@ pub enum Thumbnail {
         texture: TextureId,
         size: Vec2,
     },
+    /// A picture of one colour, white in the texture: the form draws it in the colour of the text
+    /// around it, so it follows the theme.
+    Mask {
+        texture: TextureId,
+        size: Vec2,
+    },
     /// Why there is no picture.
     Failed(String),
 }
@@ -35,6 +41,12 @@ pub trait FormHost {
     /// The thumbnail of `path`, called every frame for every image with a path, so it must be
     /// cheap: start the loading once, answer [`Thumbnail::Loading`] meanwhile.
     fn thumbnail(&mut self, path: &str) -> Thumbnail;
+    /// The picture of an option's icon, called every frame for every option with one, under the
+    /// same rules as [`FormHost::thumbnail`]. The name comes from the hints and means nothing to
+    /// the form. Without one, the option shows its label alone.
+    fn icon(&mut self, _name: &str) -> Thumbnail {
+        Thumbnail::None
+    }
 }
 
 /// A host with no files: no picker, no thumbnails.
