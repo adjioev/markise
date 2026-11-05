@@ -592,6 +592,15 @@ pub fn focus_for(view: &View, pos: DocPos, reveal: bool) -> Option<(usize, ItemF
             if !lines.is_empty() {
                 let rich = doc.inline(InlineSource::Lines(&lines), start);
                 f.reveal = reveal_set(&rich, p.rel);
+                // a native view never shows a block's hidden note: it is no text of any field
+                if view.native_item(i).is_some() {
+                    let note = rich
+                        .nodes
+                        .iter()
+                        .rev()
+                        .find(|n| n.kind == markise_doc::InlineKind::Comment);
+                    f.reveal.retain(|r| note.is_none_or(|n| n.source != *r));
+                }
                 // the whitespace ending the text, from the ownership query (ADR 0011); a
                 // segmented paragraph: only its last segment ends the text
                 if it.segment.as_ref().is_none_or(|s| s.last())

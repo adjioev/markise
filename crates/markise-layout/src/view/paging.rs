@@ -97,6 +97,16 @@ impl View {
         // a closer has no gap before it, unlike every item counted above
         h += s.card_openers as f32 * crate::block::card_opener_height(t)
             + s.card_closers as f32 * (crate::block::card_padding(t) - t.block_spacing);
+        // a native title has a size of its own, whatever its level
+        for (_, heads) in s.card_heads.iter().filter(|(name, _)| self.native_name(name)) {
+            for (li, &n) in heads.iter().enumerate() {
+                let hs = &t.headings[li];
+                let pad = 2.0 * t.heading_decor[li].padding[1];
+                let extra = (hs.margin_top - t.block_spacing).max(0.0);
+                let plain = extra + hs.size * 1.3 + hs.margin_bottom + pad;
+                h += n as f32 * (crate::native::title_line(t) - plain);
+            }
+        }
         // a TOC lists the whole outline, one line per entry
         h += s.tocs as f32 * self.model.outline.len().max(1) as f32 * line;
         h += s.para_lines_at(per_line) * line;
@@ -110,6 +120,7 @@ impl View {
             ^ self.font_gen.wrapping_mul(0x9e37_79b9_7f4a_7c15)
             ^ ((self.ppp * 100.0) as u64) << 48
             ^ (self.review as u64).wrapping_mul(0x2545_f491_4f6c_dd1d)
+            ^ self.native_key().rotate_left(11)
     }
 
     /// Sets the source offset of the caret (`None`: no caret): its page and the items right

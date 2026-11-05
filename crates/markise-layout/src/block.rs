@@ -254,6 +254,8 @@ pub struct BlockLayout {
     /// The row reserved under a rendered diagram (item-local) for its hover controls, so they
     /// never cover the picture (issue #174).
     pub diagram_controls: Option<Rect>,
+    /// The top edge of the card this item opens (item-local, left and right ends).
+    pub card_top: Option<(Pos2, Pos2)>,
 }
 
 impl BlockLayout {
@@ -324,6 +326,8 @@ pub struct LayoutParams<'a> {
     pub links: &'a dyn crate::links::LinkTargets,
     /// How review marks are shown (issue #88).
     pub review: ReviewView,
+    /// The view of the block around the item, when it shows natively (ADR 0021).
+    pub native: Option<crate::native::NativeParams<'a>>,
 }
 
 /// How review marks (CriticMarkup, ADR 0012) are shown in the rendered view (issue #88). Display
@@ -1965,6 +1969,8 @@ pub fn layout_item(
     let gap = match item.gap {
         // a card's closer: only the card's padding between the last block and the edge
         _ if item.kind == (ItemKind::ContainerMarker { close: true }) => 0.0,
+        // a native title's size is its own, whatever its level (ADR 0021)
+        Gap::Normal if p.native.is_some() => t.block_spacing,
         Gap::None => 0.0,
         Gap::Tight => 3.0,
         Gap::Normal => match item.kind {
@@ -2215,6 +2221,18 @@ pub fn layout_item(
                                 first_is_text = false;
                             }
                             y += h;
+                            // a picture's caption, in a view made for pictures
+                            if p.native
+                                .is_some_and(|n| n.view.kind == crate::native::NativeKind::Media)
+                                && !alt.trim().is_empty()
+                            {
+                                let size = t.font_size * 0.85;
+                                let st = Style::base(size, size * 1.4, color(t.meta_text));
+                                let g = shaper.shape(&StyledText::single(alt.clone(), st.text_style()), wrapped(width));
+                                let cap = g.size().y;
+                                out.text(pos2(x, y + 2.0), g, Vec::new(), FragmentId::label());
+                                y += cap + 2.0;
+                            }
                         }
                     }
                     first = false;
@@ -2223,8 +2241,9 @@ pub fn layout_item(
         }
         ItemKind::Heading { level } => {
             let li = (*level as usize - 1).min(5);
-            let hs = &t.headings[li];
-            let d = &t.heading_decor[li];
+            let title = p.native.map(|n| crate::native::title_style(n.view, t));
+            let hs = title.as_ref().map_or(&t.headings[li], |(hs, _)| hs);
+            let d = title.as_ref().map_or(&t.heading_decor[li], |(_, d)| d);
             let rich = doc.inline(InlineSource::Lines(&lines), origin);
             let mut st = Style::base(hs.size, hs.size * 1.3, color(hs.color));
             st.fam = if hs.bold {
@@ -2480,13 +2499,19 @@ pub fn layout_item(
         ItemKind::ContainerMarker { close: false } => {
             // the name and arguments as written: uninterpreted, cut for display at a size that
             // lays out at once (a marker is one item, not segmented like a long paragraph)
-            let label = doc
-                .named_containers_at(origin)
-                .last()
-                .map_or_else(String::new, |c| card_label(&c.name, &c.args));
+            let label = match p.native {
+                Some(n) => n.view.label.to_string(),
+                None => doc
+                    .named_containers_at(origin)
+                    .last()
+                    .map_or_else(String::new, |c| card_label(&c.name, &c.args)),
+            };
             y += card_inset;
             let size = t.font_size * 0.85;
-            let mut st = Style::base(size, size * 1.4, color(t.meta_block.text));
+            let ink = p.native.map_or(color(t.meta_block.text), |n| {
+                crate::native::accent_color(n.view.accent.as_deref(), t)
+            });
+            let mut st = Style::base(size, size * 1.4, ink);
             st.fam = FontRole::Bold;
             let g = shaper.shape(&StyledText::single(label, st.text_style()), wrapped(width));
             let h = g.size().y;
@@ -2665,6 +2690,18 @@ pub fn layout_item(
                     vec2(s, s),
                 );
                 tasks.push((rect, li));
+                if let Some(n) = p.native.filter(|n| n.role == Some(crate::native::NativeRole::Answer)) {
+                    answer_mark(
+                        &mut deco,
+                        n.view,
+                        t,
+                        rect,
+                        checked,
+                        (x - mw, content_bottom, gap),
+                        p.width - card_right,
+                    );
+                    continue;
+                }
                 deco.push(Prim::Checkbox {
                     rect,
                     checked,
@@ -2760,6 +2797,7 @@ pub fn layout_item(
     // ---- cards: side edges over the item's whole height, the virtual paragraph included, so
     // they are continuous from item to item; top and bottom edges at the markers
     let stroke = Stroke::new(1.0, color(t.rule));
+    let mut card_top = None;
     for (i, &(left, right)) in cards.iter().enumerate() {
         let (l, r) = (left, p.width - right);
         // a marker is its own card's top or bottom edge, the innermost around it
@@ -2769,6 +2807,20 @@ pub fn layout_item(
         let top = if opens { gap } else { 0.0 };
         // a virtual paragraph after a closer is outside that card
         let bottom = if closes { content_bottom } else { height };
+        if opens {
+            card_top = Some((pos2(l, top), pos2(r, top)));
+        }
+        if own && let Some(n) = p.native {
+            native_chrome(
+                &mut deco,
+                n.view,
+                t,
+                Rect::from_min_max(pos2(l, top), pos2(r, bottom)),
+                opens,
+                closes,
+            );
+            continue;
+        }
         for ex in [l, r] {
             deco.push(Prim::Line {
                 a: pos2(ex, top),
@@ -2816,6 +2868,115 @@ pub fn layout_item(
         virtual_caret,
         comments,
         diagram_controls,
+        card_top,
+    }
+}
+
+/// A native view's own edges around one item of its block (`r`: the item's part of the block).
+/// Its background goes below everything else in the item.
+fn native_chrome(deco: &mut Vec<Prim>, v: &crate::native::NativeView, t: &Theme, r: Rect, opens: bool, closes: bool) {
+    use crate::native::{NativeKind, accent_color, tint};
+    let accent = accent_color(v.accent.as_deref(), t);
+    let rule = color(t.rule);
+    let (fill, edge) = match v.kind {
+        NativeKind::Callout => (tint(accent, t), None),
+        NativeKind::Card => (Color32::TRANSPARENT, Some(rule)),
+        NativeKind::Choices => (Color32::TRANSPARENT, Some(accent)),
+        NativeKind::Media => (Color32::TRANSPARENT, None),
+    };
+    if fill != Color32::TRANSPARENT {
+        deco.insert(
+            0,
+            Prim::Rect {
+                rect: r,
+                fill,
+                stroke: Stroke::NONE,
+                radius: 0.0,
+            },
+        );
+    }
+    if v.kind == NativeKind::Callout {
+        deco.push(Prim::Rect {
+            rect: Rect::from_min_max(r.min, pos2(r.min.x + 3.0, r.max.y)),
+            fill: accent,
+            stroke: Stroke::NONE,
+            radius: 0.0,
+        });
+    }
+    let Some(edge) = edge else { return };
+    let stroke = Stroke::new(1.0, edge);
+    for x in [r.min.x, r.max.x] {
+        deco.push(Prim::Line {
+            a: pos2(x, r.min.y),
+            b: pos2(x, r.max.y),
+            stroke,
+        });
+    }
+    if opens {
+        // a card's accent is its top edge
+        let top = Stroke::new(if v.kind == NativeKind::Card { 2.0 } else { 1.0 }, accent);
+        deco.push(Prim::Line {
+            a: r.left_top(),
+            b: r.right_top(),
+            stroke: top,
+        });
+    }
+    if closes {
+        deco.push(Prim::Line {
+            a: r.left_bottom(),
+            b: r.right_bottom(),
+            stroke,
+        });
+    }
+}
+
+/// An answer's mark, a radio button or a check box in the view's accent, and a tint on the row of
+/// one that is marked. `row`: the row's left edge, its bottom and its top; `right`: its right edge.
+fn answer_mark(
+    deco: &mut Vec<Prim>,
+    v: &crate::native::NativeView,
+    t: &Theme,
+    rect: Rect,
+    checked: bool,
+    row: (f32, f32, f32),
+    right: f32,
+) {
+    use crate::native::{accent_color, tint};
+    let accent = accent_color(v.accent.as_deref(), t);
+    if checked {
+        let (left, bottom, top) = row;
+        deco.insert(
+            0,
+            Prim::Rect {
+                rect: Rect::from_min_max(pos2(left.max(0.0), top), pos2(right, bottom)),
+                fill: tint(accent, t),
+                stroke: Stroke::NONE,
+                radius: 3.0,
+            },
+        );
+    }
+    if v.single_answer {
+        deco.push(Prim::Circle {
+            center: rect.center(),
+            radius: rect.width() * 0.5,
+            fill: Color32::TRANSPARENT,
+            stroke: Stroke::new(1.5, accent),
+        });
+        if checked {
+            deco.push(Prim::Circle {
+                center: rect.center(),
+                radius: rect.width() * 0.25,
+                fill: accent,
+                stroke: Stroke::NONE,
+            });
+        }
+    } else {
+        deco.push(Prim::Checkbox {
+            rect,
+            checked,
+            border: accent,
+            fill: accent,
+        });
     }
 }
 

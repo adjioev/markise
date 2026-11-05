@@ -1,0 +1,221 @@
+//! Native views of blocks on the real app (ADR 0021), on a small neutral package: what shows, what
+//! stays a card, and that the form and the file are as they were.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use egui::Event;
+use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
+use markise_doc::Selection;
+use markise_package::Sha256Hex;
+use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp};
+
+use crate::common::{self, settle, wait_until};
+
+type H = Harness<'static, MarkiseApp>;
+
+const TIP: &str = r#"{"label": "Tip", "fields": [
+    {"name": "title", "type": "heading", "level": 3, "min": 0},
+    {"name": "body", "type": "text", "min": 1}
+]}"#;
+const POLL: &str = r#"{"label": "Poll", "variants": {"": "one answer", "many": "several"},
+    "fields": [
+        {"name": "question", "type": "heading", "level": 2},
+        {"name": "answers", "type": "choices", "ids": "required", "minItems": 2,
+         "correct": {"": "exactly-one", "many": "at-least-one"}},
+        {"name": "why", "type": "quote", "min": 0}
+    ]}"#;
+const GOALS: &str = r#"{"label": "Goals", "fields": [{"name": "items", "type": "list", "minItems": 1}]}"#;
+const PLAIN: &str = r#"{"label": "Plain", "fields": [{"name": "body", "type": "text"}]}"#;
+const VIEWS: &str = r#"{"tip": {"kind": "callout", "accent": "green", "icon": "bulb"},
+    "poll": {"kind": "choices", "accent": "purple"},
+    "goals": {"kind": "card", "accent": "blue"}}"#;
+
+pub(crate) const DOC: &str = "# Doc\n\nBefore.\n\n:::tip\n\n### A title\n\nHello\n\n:::\n\n:::poll\n\n## Which?\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> Because.\n\n:::\n\n:::goals\n\n- First\n- Second\n\n:::\n\n:::plain\n\nNo view.\n\n:::\n\n:::poll\n\n## Outside\n\n- [x] Marked {#b1}\n- [x] Marked too {#b2}\n\n:::\n\n:::unknown\n\nNot in the package.\n\n:::\n";
+
+pub(crate) struct Fixture {
+    _dir: tempfile::TempDir,
+    pub config: PathBuf,
+    pub doc: PathBuf,
+}
+
+fn archive() -> Vec<u8> {
+    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip","poll","goals","plain"]}"#;
+    let files = [
+        ("manifest.json", manifest),
+        ("components/tip/tip.json", TIP),
+        ("components/poll/poll.json", POLL),
+        ("components/goals/goals.json", GOALS),
+        ("components/plain/plain.json", PLAIN),
+        ("editor/palette.json", r#"{"format": 1}"#),
+        ("editor/views.json", VIEWS),
+    ];
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+    for (path, content) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, path, content.as_bytes()).unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap()
+}
+
+impl Fixture {
+    pub(crate) fn new(text: &str) -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        let folder = root.join("site");
+        let config = root.join("config");
+        fs::create_dir_all(&folder).unwrap();
+        fs::create_dir_all(&config).unwrap();
+        let doc = folder.join("doc.md");
+        fs::write(&doc, text).unwrap();
+        let bytes = archive();
+        let sha = Sha256Hex::of(&bytes);
+        fs::write(folder.join("p.tar.gz"), &bytes).unwrap();
+        fs::write(
+            folder.join(markise_package::BINDING_FILE),
+            format!(r#"{{"library":"sample","version":"1.0.0","source":"p.tar.gz","sha256":"{sha}"}}"#),
+        )
+        .unwrap();
+        Fixture { _dir: dir, config, doc }
+    }
+
+    pub(crate) fn opened(&self) -> H {
+        let opts = AppOptions {
+            config: ConfigDir::Dir(self.config.clone()),
+            ..common::no_watch()
+        };
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1100.0, 1400.0))
+            .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), MarkiseApp::new(opts));
+        open(&mut h, &self.doc);
+        h
+    }
+
+    /// Opened, and the package accepted.
+    pub(crate) fn ready(&self) -> H {
+        let mut h = self.opened();
+        h.get_by_label("Use Package").click();
+        h.step();
+        wait_until(&mut h, "the install", |a| a.block_package().is_some());
+        settle(&mut h);
+        common::run(&mut h);
+        h
+    }
+}
+
+fn open(h: &mut H, doc: &Path) {
+    h.state_mut().open(doc.to_path_buf());
+    wait_until(h, "document load", |a| {
+        a.document_path() == Some(doc) && !a.is_loading()
+    });
+    settle(h);
+    common::run(h);
+}
+
+pub(crate) fn shown(h: &mut H) -> String {
+    h.state_mut().viewer().unwrap().visible_text()
+}
+
+pub(crate) fn text(h: &H) -> String {
+    h.state().document_text().unwrap()
+}
+
+pub(crate) fn caret(h: &mut H, at: usize) {
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.set_selection(Selection::caret(at));
+    v.ed.refresh_focus();
+    v.request_refocus();
+    common::run(h);
+}
+
+#[test]
+fn a_package_not_yet_accepted_leaves_cards() {
+    let f = Fixture::new(DOC);
+    let mut h = f.opened();
+    let s = shown(&mut h);
+    assert!(s.contains("tip") && s.contains("poll"), "{s}");
+    assert!(!s.contains("Tip"), "{s}");
+}
+
+#[test]
+fn blocks_with_a_view_show_it_and_the_rest_stay_cards() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    let s = shown(&mut h);
+    for label in ["Tip", "Poll", "Goals"] {
+        assert!(s.contains(label), "{label} in {s}");
+    }
+    assert!(s.contains("plain"), "a schema and no view: a card: {s}");
+    assert!(s.contains("unknown"), "not in the package: a card: {s}");
+    let at = |needle: &str| DOC.find(needle).unwrap();
+    let v = &mut h.state_mut().viewer().unwrap().ed.view;
+    assert!(v.native_block(at("Hello")).is_some());
+    assert!(v.native_block(at("One")).is_some());
+    assert!(v.native_block(at("First")).is_some());
+    assert!(v.native_block(at("No view")).is_none());
+    assert!(v.native_block(at("Outside")).is_none(), "outside its schema: a card");
+    assert!(v.native_block(at("Not in the package")).is_none());
+    assert_eq!(text(&h), DOC);
+    assert!(!h.state().is_dirty());
+}
+
+#[test]
+fn the_caret_in_a_native_block_does_not_bring_the_id_back() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    caret(&mut h, DOC.find("One").unwrap() + 3);
+    assert!(!shown(&mut h).contains("{#a1}"));
+    // in the generic card next to it, as ever
+    caret(&mut h, DOC.find("Marked").unwrap() + 6);
+    assert!(shown(&mut h).contains("{#b1}"));
+}
+
+#[test]
+fn a_native_block_is_edited_through_its_form_for_now_and_undo_still_works() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    caret(&mut h, DOC.find("Hello").unwrap());
+    h.event(Event::Text("x".into()));
+    common::run(&mut h);
+    assert_eq!(text(&h), DOC, "typing does not reach it");
+    // the form is on the block as on any other
+    h.get_all_by_label("Edit Block: tip").next().unwrap().click();
+    common::run(&mut h);
+    assert!(h.state().block_form().is_some());
+    h.get_by_label("Body").click();
+    common::run(&mut h);
+    h.get_by_label("Body").type_text("!");
+    common::run(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().block_form_save(&ctx);
+    common::run(&mut h);
+    assert!(text(&h).contains("Hello!"));
+    // an edit elsewhere, and undo of the form's step, as in the document
+    let before = DOC.find("Before").unwrap();
+    caret(&mut h, before);
+    h.event(Event::Text("y".into()));
+    common::run(&mut h);
+    assert!(text(&h).contains("yBefore"));
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| s.undo());
+    v.ed.edit(|s| s.undo());
+    common::run(&mut h);
+    assert_eq!(text(&h), DOC);
+}
+
+#[test]
+fn a_withdrawn_package_brings_the_cards_back() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    assert!(shown(&mut h).contains("Tip"));
+    h.state_mut()
+        .block_package_action(markise_ui_egui::package_ui::PackageAction::Forget);
+    settle(&mut h);
+    common::run(&mut h);
+    let s = shown(&mut h);
+    assert!(!s.contains("Tip") && s.contains("tip"), "{s}");
+}

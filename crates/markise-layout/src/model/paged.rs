@@ -94,6 +94,9 @@ pub struct PageStats {
     /// Opening and closing lines of cards (ADR 0018).
     pub card_openers: u32,
     pub card_closers: u32,
+    /// Headings per level, per name of the block they are directly in (ADR 0021: the estimate of
+    /// a page depends on which names show natively).
+    pub card_heads: Vec<(Box<str>, [u32; 6])>,
     /// `[toc]` blocks (each lists the whole outline).
     pub tocs: u32,
     /// Headings whose text may use a reference definition (their outline entries are
@@ -145,6 +148,20 @@ impl PageStats {
         let mut s = PageStats::default();
         for it in items {
             s.add(it);
+            if let ItemKind::Heading { level } = it.kind
+                && it.containers.iter().any(|c| matches!(c, super::Container::Card))
+                && let Some(c) = doc.named_containers_at(it.origin).pop()
+            {
+                let li = (level as usize).clamp(1, 6) - 1;
+                match s.card_heads.iter_mut().find(|(n, _)| *n == c.name) {
+                    Some((_, heads)) => heads[li] += 1,
+                    None => {
+                        let mut heads = [0; 6];
+                        heads[li] = 1;
+                        s.card_heads.push((c.name, heads));
+                    }
+                }
+            }
             s.images += it.has_image as u32;
             let prose = matches!(
                 it.kind,

@@ -14,6 +14,7 @@ Existing entry points cover the work moved out of default tests (#98):
 | TOC export expansion | `cargo bench -p markise-export` |
 | Large-document edit latency | `cargo bench -p markise-engine --bench typing` |
 | `:::` blocks on large documents | `cargo bench -p markise-engine --bench directives` |
+| Native block views on large documents | `cargo bench -p markise-engine --bench native_blocks` |
 | Large-document open/layout | `cargo bench -p markise-layout --bench layout` |
 | 100 MiB scaling | `cargo bench -p markise-ui-egui --bench huge` (see its environment options) |
 

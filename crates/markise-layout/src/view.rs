@@ -21,7 +21,9 @@ use crate::links::{AllResolved, LinkTargets};
 use crate::model::{DocModel, Item, ItemKind, ModelChange, Segment};
 use crate::text::TextShaper;
 
+mod native;
 mod paging;
+pub use native::{BlockViewMode, NativeAt};
 pub use paging::PagingStats;
 
 /// An item to paint this frame.
@@ -85,6 +87,8 @@ pub struct View {
     /// The scroll position by source when the model was handed out for an in-place update
     /// ([`View::model_mut`]): a full replacement keeps it.
     pre_edit_anchor: Option<(usize, usize, f32)>,
+    /// Which blocks show natively ([`native`], ADR 0021).
+    native: native::NativeState,
 }
 
 impl View {
@@ -121,6 +125,7 @@ impl View {
             caret_item: None,
             paging: Default::default(),
             pre_edit_anchor: None,
+            native: Default::default(),
         };
         v.reset_heights();
         v
@@ -225,6 +230,7 @@ impl View {
     /// [`View::set_model`] with the scroll position at `anchor` (by source:
     /// [`View::source_anchor`]).
     fn set_model_at(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>, anchor: (usize, usize, f32)) {
+        self.native.forget();
         self.focus = None;
         self.caret_item = None;
         self.doc = doc;
@@ -304,6 +310,7 @@ impl View {
     /// the returned document in place and then call [`View::apply_change`]). Nothing may be
     /// laid out in between.
     pub fn replace_doc(&mut self, doc: Arc<dyn FormatDoc>) -> Arc<dyn FormatDoc> {
+        self.native.forget();
         std::mem::replace(&mut self.doc, doc)
     }
 
@@ -311,6 +318,7 @@ impl View {
     /// [`DocModel::apply`] returned `change`): heights are spliced as in [`View::apply`].
     pub fn apply_change(&mut self, doc: Arc<dyn FormatDoc>, change: &ModelChange) {
         self.doc = doc;
+        self.native.forget();
         let old_focus = self.focus.take().map(|f| f.0);
         self.caret_item = None;
         let pre = self.pre_edit_anchor.take();
@@ -920,6 +928,9 @@ impl View {
         let h = match &it.kind {
             ItemKind::Hidden => return pa + pb,
             ItemKind::Page(st) => return self.page_estimate(st) + pa + pb,
+            ItemKind::Heading { .. } if self.native_title_estimate(i, it) => {
+                t.block_spacing + crate::native::title_line(t)
+            }
             ItemKind::Heading { level } => {
                 let li = (*level as usize - 1).min(5);
                 let hs = &t.headings[li];
@@ -1023,6 +1034,7 @@ impl View {
             std::hash::Hash::hash(&(self.diagrams.generation(), tag, block, 0xd1a6_u32), &mut h);
             std::hash::Hasher::finish(&h)
         });
+        extra ^= self.native_item_key(i, it);
         CacheKey {
             item_hash: it.hash,
             ctx_hash: images ^ code_ident ^ diagram ^ self.references_fingerprint(i, it),
@@ -1148,25 +1160,29 @@ impl View {
                 // evicted between `ready` and `runs`: lay out plain, but not under the
                 // "highlighted" key
                 let cacheable = ready != Some(true) || runs.is_some();
-                let params = LayoutParams {
-                    theme: &self.theme,
-                    width: self.width,
-                    disclosure: self.disclosures.groups.get(&i).map(|g| (g.title.as_str(), g.open)),
-                    disclosure_depth: self.disclosures.depth(i),
-                    expanded: self.expanded.contains(&i),
-                    code_runs: runs.as_deref(),
-                    focus: self.focus.as_ref().filter(|f| f.0 == i).map(|f| &f.1),
-                    diagram: dstate.as_ref(),
-                    ppp: self.ppp,
-                    links: &*self.links,
-                    review: self.review,
-                };
                 let rec = Recording {
                     inner: images,
                     math: Cell::new(false),
                     images: RefCell::new(Vec::new()),
                 };
-                let l = Arc::new(layout_item(&*self.doc, &self.model, i, &params, shaper, &rec));
+                let laid = self.with_native_params(i, |native| {
+                    let params = LayoutParams {
+                        theme: &self.theme,
+                        width: self.width,
+                        disclosure: self.disclosures.groups.get(&i).map(|g| (g.title.as_str(), g.open)),
+                        disclosure_depth: self.disclosures.depth(i),
+                        expanded: self.expanded.contains(&i),
+                        code_runs: runs.as_deref(),
+                        focus: self.focus.as_ref().filter(|f| f.0 == i).map(|f| &f.1),
+                        diagram: dstate.as_ref(),
+                        ppp: self.ppp,
+                        links: &*self.links,
+                        review: self.review,
+                        native,
+                    };
+                    layout_item(&*self.doc, &self.model, i, &params, shaper, &rec)
+                });
+                let l = Arc::new(laid);
                 if !self.missing_glyphs {
                     self.missing_glyphs = lacks_glyphs(&l, shaper);
                 }
