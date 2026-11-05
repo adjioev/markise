@@ -1129,7 +1129,8 @@ fn an_older_choice_finishing_later_does_not_replace_a_newer_one() {
     fs::write(&older, one_pixel_png()).unwrap();
     let mut h = f.ready();
     let hold = Arc::new(AtomicBool::new(true));
-    let (held, count) = (hold.clone(), Arc::new(AtomicUsize::new(0)));
+    let started = Arc::new(AtomicUsize::new(0));
+    let (held, count) = (hold.clone(), started.clone());
     // only the first job waits
     let job: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         if count.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -1152,6 +1153,13 @@ fn an_older_choice_finishing_later_does_not_replace_a_newer_one() {
     wait(&mut h);
     h.get_by_label("Browse…").click();
     steps(&mut h);
+    // the older one's worker is the one waiting: the next must not get there first
+    let t = std::time::Instant::now();
+    while started.load(Ordering::SeqCst) == 0 {
+        assert!(t.elapsed() < common::HANG_GUARD, "the older choice");
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
     *f.picks.lock().unwrap() = Some(newer);
     h.get_by_label("Choose file: Pictures 1").click();
     steps(&mut h);
