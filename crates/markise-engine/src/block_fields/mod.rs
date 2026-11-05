@@ -258,6 +258,13 @@ impl BlockFields {
             .collect()
     }
 
+    /// The regions the fields took, in source order, with the kind of field each is.
+    pub fn field_regions(&self) -> Vec<(Range<usize>, FieldKind)> {
+        (self.chunks.iter())
+            .filter_map(|c| Some((c.range.clone(), self.fields[c.field?].kind)))
+            .collect()
+    }
+
     /// Applies `edits` as one change. No edit changes nothing, and neither do edits that give
     /// the same values: the patches are empty.
     pub fn apply(&self, edits: &[FieldEdit]) -> Result<Applied, FieldsError> {

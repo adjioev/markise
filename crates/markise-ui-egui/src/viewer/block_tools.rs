@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use egui::accesskit::Role;
 use egui::{Pos2, Rect, Sense, Stroke, Ui, WidgetInfo, pos2, vec2};
-use markise_layout::block::Prim;
 use markise_layout::{ItemKind, Visible};
 use markise_package::PackageIndex;
 use markise_theme::Theme;
@@ -15,6 +14,21 @@ use super::{DocViewer, ViewerOutput};
 impl DocViewer {
     /// The package whose blocks have a form; `None` when there is none in use.
     pub fn set_block_index(&mut self, index: Option<Arc<PackageIndex>>) {
+        let same = match (&index, &self.block_index) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        let views = index.clone().map(|i| -> Arc<dyn markise_layout::BlockViews> {
+            Arc::new(markise_engine::block_view::PackageViews::new(
+                i,
+                crate::block_form::LANGUAGE,
+            ))
+        });
+        self.ed.view.set_block_views(views);
         self.block_index = index;
     }
 
@@ -46,11 +60,7 @@ impl DocViewer {
                 continue;
             };
             // the card's top edge, the line a marker draws from side to side
-            let edge = v.layout.prims.iter().find_map(|p| match p {
-                Prim::Line { a, b, .. } if (a.y - b.y).abs() < 0.01 => Some((*a, *b)),
-                _ => None,
-            });
-            let Some((_, b)) = edge else { continue };
+            let Some((_, b)) = v.layout.card_top else { continue };
             let origin = vec2(left, surface.top() + v.y);
             let top_right: Pos2 = b + origin;
             let r = Rect::from_min_size(pos2(top_right.x - side - 4.0, top_right.y + 4.0), vec2(side, side));

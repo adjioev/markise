@@ -12,6 +12,7 @@ regex = "1.12"
 markise-doc.workspace = true
 markise-md.workspace = true
 schema-form-core.workspace = true
+markise-package.workspace = true
 markise-layout.workspace = true
 notify.workspace = true
 trash.workspace = true
@@ -44,8 +45,6 @@ libc.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
-# a package's fields and the field model agree (tests/it/block_forms.rs)
-markise-package.workspace = true
 markise-corpus.workspace = true
 markise-testfmt.workspace = true
 proptest.workspace = true
@@ -61,6 +60,10 @@ harness = false
 
 [[bench]]
 name = "directives"
+harness = false
+
+[[bench]]
+name = "native_blocks"
 harness = false
 
 [[bench]]

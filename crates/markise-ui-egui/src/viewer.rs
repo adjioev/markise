@@ -528,6 +528,12 @@ impl DocViewer {
     }
 
     /// Command `id` changes the document.
+    /// A command that would edit a block shown natively, by a selection that does not hold it
+    /// whole. Undo and redo are the document's.
+    fn native_refuses(&self, id: &str) -> bool {
+        !matches!(id, "edit.undo" | "edit.redo") && self.mutates(id) && self.ed.in_native_block()
+    }
+
     fn mutates(&self, id: &str) -> bool {
         self.ed
             .registry
@@ -551,6 +557,11 @@ impl DocViewer {
         if self.review_preview() && self.mutates(id) {
             return Err(markise_engine::editor::command::CommandError::Disabled(
                 "read-only while comments show as No Markup or Original",
+            ));
+        }
+        if self.native_refuses(id) {
+            return Err(markise_engine::editor::command::CommandError::Disabled(
+                "this block is edited through its form",
             ));
         }
         // an open card edit is saved before another command acts on the document; refused,
@@ -1616,6 +1627,9 @@ impl DocViewer {
     /// outermost) of visible item `idx` as one undo step ("Toggle Task Status"); the selection
     /// is kept as it was (the box is not a caret stop, spec 02 §9).
     fn toggle_task(&mut self, idx: usize, li: u16) -> bool {
+        if self.ed.view.native_item(idx).is_some() {
+            return false;
+        }
         let leaf = self.ed.view.model().item_span(idx).start;
         // that list item's own start: inside it but before any nested list, so the planner's
         // "deepest task item" is exactly this one
@@ -1968,6 +1982,9 @@ impl DocViewer {
         images: &dyn markise_layout::Images,
         vh: f32,
     ) -> bool {
+        if self.native_refuses(id) {
+            return false;
+        }
         let r = self.ed.execute(id, params, sh, images, vh);
         // each command sees the reveal state of the previous one's caret
         self.ed.refresh_focus();

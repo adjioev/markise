@@ -22,6 +22,7 @@ pub mod highlight;
 pub mod links;
 pub mod math;
 pub mod model;
+pub mod native;
 pub mod source;
 pub mod text;
 pub mod view;
@@ -38,12 +39,13 @@ pub use model::{
     CodeRef, Container, DocModel, Gap, Item, ItemKind, Items, Marker, ModelChange, Moved, OutlineEntry, PAGE_TOPS,
     PageStats, Paging, PagingCounters, paging_counters,
 };
+pub use native::{BlockLook, BlockViews, NativeBlock, NativeKind, NativeRole, NativeView};
 pub use source::{SourceCtx, SourceLayout, SourceLine, SourceParams, SourceView, SourceVisible};
 pub use text::{
     EpaintShaper, FontRole, FragmentId, FragmentKind, MapPiece, ParleyShaper, PieceKind, SourceMap, StyledText,
     TextBlock, TextShaper, TextStyle,
 };
-pub use view::{View, Visible};
+pub use view::{BlockViewMode, NativeAt, View, Visible};
 
 /// Font family names the layout uses; the UI must register all of them
 /// (see [`block::register_families`]).

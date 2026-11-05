@@ -8,6 +8,7 @@
 
 pub mod attach;
 pub mod block_fields;
+pub mod block_view;
 pub mod comment_scan;
 pub mod count;
 pub mod count_worker;

@@ -9,6 +9,7 @@ mod font_fallback;
 mod highlight;
 mod incremental;
 mod math;
+mod native;
 mod paging;
 mod seam;
 mod segments;
