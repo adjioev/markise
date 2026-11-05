@@ -433,6 +433,17 @@ fn read_field(s: &str, f: &mut Field, group: &[Block], whole: R, next_item: &mut
     }
 }
 
+/// The kinds of what stands below a block, in order. A paragraph and a list item come and go as
+/// text is edited; anything else there means the text became structure.
+fn nested_kinds(b: &Block, out: &mut Vec<std::mem::Discriminant<BlockKind>>) {
+    for c in &b.children {
+        if !matches!(c.kind, BlockKind::Paragraph | BlockKind::ListItem { .. }) {
+            out.push(std::mem::discriminant(&c.kind));
+        }
+        nested_kinds(c, out);
+    }
+}
+
 pub(super) fn decode(
     s: &str,
     base: usize,
@@ -504,6 +515,10 @@ pub(super) fn decode(
         fields,
         chunks,
         shapes: structure,
+        nested: kids.iter().fold(Vec::new(), |mut out, b| {
+            nested_kinds(b, &mut out);
+            out
+        }),
         next_item,
         retired: BTreeSet::new(),
     })
