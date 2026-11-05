@@ -1929,22 +1929,52 @@ pub(crate) fn card_opener_height(t: &Theme) -> f32 {
     card_padding(t) + size * 1.4
 }
 
-/// The shown label of a named container: name and arguments, at most [`CARD_LABEL_CHARS`]
-/// characters. The source keeps them whole.
+/// The shown label of a named container: name and arguments on one line, at most
+/// [`CARD_LABEL_CHARS`] characters. The source keeps them whole.
 fn card_label(name: &str, args: &str) -> String {
     let mut out = String::with_capacity(name.len().min(CARD_LABEL_CHARS) + args.len().min(CARD_LABEL_CHARS) + 4);
     let joined = name
         .chars()
         .chain(" ".chars().filter(|_| !args.is_empty()))
         .chain(args.chars());
-    for (i, c) in joined.enumerate() {
-        if i + 1 == CARD_LABEL_CHARS {
+    let mut count = 0;
+    let mut blank = false;
+    for c in joined {
+        if c.is_whitespace() || c.is_control() {
+            blank = !out.is_empty();
+            continue;
+        }
+        count += 1 + usize::from(blank);
+        if count >= CARD_LABEL_CHARS {
             out.push('…');
             break;
+        }
+        if blank {
+            out.push(' ');
+            blank = false;
         }
         out.push(c);
     }
     out
+}
+
+/// Room at the right end of a card's first row for its buttons.
+const CARD_BUTTONS_ROOM: f32 = 60.0;
+
+/// `text` shaped on one row of at most `room` points, cut with `…` to fit. The shaper has the last
+/// word on what fits: it is cut in proportion until it does.
+fn one_row(shaper: &mut dyn TextShaper, text: &str, st: &Style, room: f32) -> Arc<dyn TextBlock> {
+    let mut g = shaper.shape(&StyledText::single(text.to_string(), st.text_style()), None);
+    let mut chars = text.chars().count();
+    while g.size().x > room && chars > 1 {
+        chars = (chars - 1).min((chars as f32 * room / g.size().x) as usize).max(1);
+        let cut: String = text.chars().take(chars).chain(['…']).collect();
+        g = shaper.shape(&StyledText::single(cut, st.text_style()), None);
+        if chars == 1 {
+            break;
+        }
+    }
+    g
 }
 
 /// Lays out item `idx` of `model` (a view model of `doc`). The result is item-relative: it
@@ -2511,7 +2541,8 @@ pub fn layout_item(
             // the name and arguments as written: uninterpreted, cut for display at a size that
             // lays out at once (a marker is one item, not segmented like a long paragraph)
             let label = match p.native {
-                Some(n) => n.view.label.to_string(),
+                // data from a package: one row of it, whatever it holds
+                Some(n) => card_label(&n.view.label, ""),
                 None => doc
                     .named_containers_at(origin)
                     .last()
@@ -2535,8 +2566,12 @@ pub fn layout_item(
                 });
                 label_x += side + size * 0.4;
             }
-            let g = shaper.shape(&StyledText::single(label, st.text_style()), wrapped(width));
-            let h = g.size().y;
+            let g = if p.native.is_some() {
+                one_row(shaper, &label, &st, (width - CARD_BUTTONS_ROOM).max(size))
+            } else {
+                shaper.shape(&StyledText::single(label, st.text_style()), wrapped(width))
+            };
+            let h = g.size().y.max(size * 1.4);
             let label_w = g.size().x;
             out.text(pos2(label_x, y), g, Vec::new(), FragmentId::label());
             if let Some(why) = p.warnings.and_then(|w| w.first().map(|first| (first, w.len()))) {
