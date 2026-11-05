@@ -890,6 +890,43 @@ fn marks_that_would_change_what_a_quote_holds_are_taken_back() {
     assert!(s.text().contains("\n> Plain\n"), "{}", s.text());
 }
 
+#[test]
+fn tab_stops_at_a_field_with_no_text_yet() {
+    // an empty item
+    let mut s = surface(":::steps\n\n- First\n- Third\n\n:::\n");
+    s.caret_at("First", 5);
+    s.key("edit.newline");
+    let empty = s.offset();
+    s.key("edit.indentOrNextCell");
+    assert_eq!(&s.text()[s.offset()..s.offset() + 5], "Third");
+    s.key("edit.outdentOrPrevCell");
+    assert_eq!(s.offset(), empty, "not past the empty one");
+    s.key("edit.outdentOrPrevCell");
+    assert_eq!(&s.text()[s.offset() - 5..s.offset()], "First");
+    s.key("edit.indentOrNextCell");
+    assert_eq!(s.offset(), empty);
+    // an empty answer
+    let mut s = surface(DOC);
+    s.caret_at("One", 3);
+    s.key("edit.newline");
+    let empty = s.offset();
+    s.key("edit.indentOrNextCell");
+    s.key("edit.outdentOrPrevCell");
+    assert_eq!(s.offset(), empty);
+    // a cleared heading
+    let doc = ":::poll\n\n## Hi {#q}\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n:::\n";
+    let mut s = surface(doc);
+    s.caret_at("Hi", 2);
+    s.key("edit.deleteBackward");
+    s.key("edit.deleteBackward");
+    let empty = s.offset();
+    assert!(s.text().contains("## {#q}"), "{}", s.text());
+    s.key("edit.indentOrNextCell");
+    assert_eq!(&s.text()[s.offset()..s.offset() + 3], "One");
+    s.key("edit.outdentOrPrevCell");
+    assert_eq!(s.offset(), empty);
+}
+
 // ---- random edits
 
 const TYPED: &[&str] = &[
