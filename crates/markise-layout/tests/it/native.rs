@@ -359,3 +359,34 @@ fn an_icon_takes_its_place_when_the_host_has_it_and_only_then() {
         "the same height"
     );
 }
+
+#[test]
+fn a_block_can_differ_from_the_document_and_every_state_comes_round() {
+    let src = format!("{BLOCK}\n{BLOCK}");
+    let second = src.rfind(":::shown").unwrap();
+    let mut v = view_of(&src);
+    v.set_block_views(Some(stand(NativeKind::Callout)));
+    assert!(v.native_block(second + 12).is_some());
+    v.set_block_modes(BlockViewMode::Native, vec![(second, BlockViewMode::Markdown)]);
+    assert!(v.native_block(5).is_some(), "the other one");
+    assert!(v.native_block(second + 12).is_none());
+    assert_eq!(v.block_mode_of(second), BlockViewMode::Markdown);
+    let shown = texts(&mut v);
+    assert!(
+        shown.contains(&"shown".to_string()) && shown.contains(&"Shown label".to_string()),
+        "{shown:?}"
+    );
+    v.set_block_modes(BlockViewMode::Markdown, vec![(second, BlockViewMode::Native)]);
+    assert!(v.native_block(5).is_none());
+    assert!(v.native_block(second + 12).is_some());
+    // however many states there are, going on from one comes back to it
+    for start in [BlockViewMode::Native, BlockViewMode::Markdown] {
+        let mut m = start.next();
+        let mut steps = 1;
+        while m != start {
+            m = m.next();
+            steps += 1;
+            assert!(steps < 8, "a cycle");
+        }
+    }
+}

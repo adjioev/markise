@@ -196,7 +196,10 @@ impl EditorView {
                 self.source_load_selection();
             }
         }
-        self.follow_sticky();
+        if !self.place_is_idle() {
+            self.follow_sticky();
+            self.follow_block_modes();
+        }
         self.pin_caret();
     }
 

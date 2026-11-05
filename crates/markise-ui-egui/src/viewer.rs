@@ -66,6 +66,8 @@ pub struct ViewerOutput {
     pub open_view: Option<ViewTarget>,
     /// Open the form of the block at this offset (the button on its card).
     pub open_block_form: Option<usize>,
+    /// Switch the view of the block with this opener (the button on its card).
+    pub switch_block_view: Option<usize>,
 }
 
 /// What the full-window view can show (issue #174).
@@ -232,6 +234,8 @@ pub struct DocViewer {
     /// The document's block package, when it has one in use: its blocks get a button.
     block_index: Option<std::sync::Arc<markise_package::PackageIndex>>,
     block_icons: std::sync::Arc<block_tools::IconBoard>,
+    /// The pointer is on a block's control or its first row, this frame: not text.
+    pointer_on_block_control: bool,
     /// A press on the scrollbar (issue #123).
     thumb_drag: scrollbar::ThumbDrag,
     /// Wheel / trackpad smoothing (issue #86).
@@ -280,6 +284,7 @@ impl DocViewer {
             refocus: false,
             block_index: None,
             block_icons: Default::default(),
+            pointer_on_block_control: false,
             view_press: None,
             caret_screen: None,
             hover: None,
@@ -1113,18 +1118,26 @@ impl DocViewer {
         // the I-beam only while the pointer is over the surface itself (not over the sidebar,
         // the toolbar or a window on top of it: `hovered` honours layers; issue #36)
         if resp.hovered() {
-            ctx.set_cursor_icon(CursorIcon::Text);
+            ctx.set_cursor_icon(if self.pointer_on_block_control {
+                CursorIcon::Default
+            } else {
+                CursorIcon::Text
+            });
         }
 
         // ---- pointer: link / toggle hover
         if let Some(p) = resp.hover_pos()
-            && let Some((_, local, layout)) = hit(&visible, p, left, rect.top())
+            && let Some((hit_item, local, layout)) = hit(&visible, p, left, rect.top())
         {
             let link = layout.link_at(local).is_some() && (modifiers.command || !focused);
             let on_toggle = layout.toggle.is_some_and(|t| t.contains(local));
             let on_task = editable && task_box_hit(layout, local).is_some();
             if link || on_toggle || on_task {
                 ctx.set_cursor_icon(CursorIcon::PointingHand);
+            }
+            // a mark in a native view is a control like the block's buttons, not text
+            if on_task && self.ed.view.native_item(hit_item).is_some() {
+                ctx.set_cursor_icon(CursorIcon::Default);
             }
         }
         if resp.clicked()

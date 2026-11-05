@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use markise_doc::{DocPos, Params, Patch, PatchSet, Selection};
 use markise_layout::caret::Geometry;
-use markise_layout::{Images, NativeAt, TextShaper};
+use markise_layout::{BlockViewMode, Images, NativeAt, TextShaper};
 
 use super::command::CommandError;
 use super::{EditorView, MarkId, TypingDir};
@@ -28,6 +28,10 @@ pub(super) struct InPlace {
     /// A caret on a place in a block with no source yet, and the field that place stands for. Only
     /// the caret an edit put there has one.
     absent: Option<(DocPos, usize)>,
+    /// How the document shows its blocks …
+    mode: BlockViewMode,
+    /// … and the blocks that differ from it, at their openers.
+    own_modes: Vec<(MarkId, BlockViewMode)>,
 }
 
 fn plain_value_is_empty(slot: &Slot) -> bool {
@@ -43,6 +47,68 @@ impl EditorView {
         self.place.fields = fields;
         self.place.model = None;
         self.end_sticky();
+    }
+
+    /// How the document shows its blocks, and the blocks that differ, by opener.
+    pub fn block_view_state(&self) -> (BlockViewMode, Vec<(usize, BlockViewMode)>) {
+        let own = (self.place.own_modes.iter())
+            .filter_map(|(m, mode)| Some((self.session.mark(*m)?.offset, *mode)))
+            .collect();
+        (self.place.mode, own)
+    }
+
+    /// Brings back what [`Self::block_view_state`] said, as far as blocks stand at those openers.
+    pub fn restore_block_view_state(&mut self, mode: BlockViewMode, own: &[(usize, BlockViewMode)]) {
+        self.place.mode = mode;
+        self.clear_own_modes();
+        for &(opener, m) in own {
+            let is_opener =
+                (self.session.doc().named_containers_at(opener).pop()).is_some_and(|c| c.opener.start == opener);
+            if is_opener {
+                let mark = self.session.add_mark(DocPos::new(opener));
+                self.place.own_modes.push((mark, m));
+            }
+        }
+        self.follow_block_modes();
+    }
+
+    fn clear_own_modes(&mut self) {
+        for (m, _) in std::mem::take(&mut self.place.own_modes) {
+            self.session.remove_mark(m);
+        }
+    }
+
+    /// The next state for the whole document. Blocks that differed follow it.
+    pub fn switch_all_block_views(&mut self) {
+        self.place.mode = self.place.mode.next();
+        self.clear_own_modes();
+        self.follow_block_modes();
+    }
+
+    /// The next state for the block with this opener.
+    pub fn switch_block_view(&mut self, opener: usize) {
+        let now = self.view.block_mode_of(opener);
+        let next = now.next();
+        let own =
+            (self.place.own_modes.iter()).position(|(m, _)| self.session.mark(*m).is_some_and(|p| p.offset == opener));
+        match own {
+            Some(i) if next == self.place.mode => {
+                let (m, _) = self.place.own_modes.remove(i);
+                self.session.remove_mark(m);
+            }
+            Some(i) => self.place.own_modes[i].1 = next,
+            None => {
+                let mark = self.session.add_mark(DocPos::new(opener));
+                self.place.own_modes.push((mark, next));
+            }
+        }
+        self.follow_block_modes();
+    }
+
+    /// Hands the view where the blocks with a state of their own stand now.
+    pub(super) fn follow_block_modes(&mut self) {
+        let (mode, own) = self.block_view_state();
+        self.view.set_block_modes(mode, own);
     }
 
     /// The model of the block `at` is in, kept up to date with the document.
@@ -328,6 +394,11 @@ impl EditorView {
             self.session.remove_mark(m);
         }
         self.view.set_sticky_block(None);
+    }
+
+    /// Nothing to keep up with: the cost of a document without any of this.
+    pub(super) fn place_is_idle(&self) -> bool {
+        self.place.sticky.is_none() && self.place.own_modes.is_empty()
     }
 
     /// Keeps the block being edited native while the selection is in it. Called on every change

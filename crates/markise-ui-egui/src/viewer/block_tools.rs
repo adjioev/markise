@@ -8,7 +8,7 @@ use egui::accesskit::Role;
 use egui::{Pos2, Rect, Sense, Stroke, TextureId, Ui, WidgetInfo, pos2, vec2};
 use markise_engine::block_view::PackageViews;
 use markise_layout::block::Prim;
-use markise_layout::{BlockLook, BlockViews, ItemKind, Visible};
+use markise_layout::{BlockLook, BlockViewMode, BlockViews, ItemKind, Visible};
 use markise_package::PackageIndex;
 use markise_theme::Theme;
 
@@ -150,6 +150,68 @@ impl DocViewer {
         resp.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("Outside its schema: {all}")));
     }
 
+    /// The button that switches a block's view: it says what comes next.
+    #[allow(clippy::too_many_arguments)]
+    fn block_view_button(
+        &self,
+        ui: &mut Ui,
+        r: Rect,
+        surface: Rect,
+        opener: usize,
+        next: BlockViewMode,
+        name: &str,
+        out: &mut ViewerOutput,
+    ) {
+        let says = match next {
+            BlockViewMode::Native => "Show Native View",
+            BlockViewMode::Markdown => "Show Markdown",
+        };
+        let id = ui.scope_id().with(("markise-block-view", opener));
+        let resp = ui.interact(r, id, Sense::click()).on_hover_text(says);
+        let label = format!("{says}: {name}");
+        resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+        if resp.clicked() {
+            out.switch_block_view = Some(opener);
+            ui.ctx().request_repaint();
+        }
+        let tone = if resp.hovered() {
+            ui.visuals().text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        let painter = ui.painter_at(surface);
+        if resp.hovered() {
+            painter.rect_filled(r, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+        }
+        let (c, s) = (r.center(), r.width() * 0.26);
+        let stroke = Stroke::new((r.width() * 0.08).max(1.0), tone);
+        match next {
+            // the source: an M
+            BlockViewMode::Markdown => {
+                let pts = [
+                    c + vec2(-s, s),
+                    c + vec2(-s, -s),
+                    c + vec2(0.0, s * 0.3),
+                    c + vec2(s, -s),
+                    c + vec2(s, s),
+                ];
+                painter.add(egui::Shape::line(pts.to_vec(), stroke));
+            }
+            // a card
+            BlockViewMode::Native => {
+                let rect = Rect::from_center_size(c, vec2(2.0 * s, 1.6 * s));
+                painter.rect_stroke(rect, 1.0, stroke, egui::StrokeKind::Middle);
+                painter.line_segment(
+                    [
+                        rect.left_top() + vec2(0.0, s * 0.5),
+                        rect.right_top() + vec2(0.0, s * 0.5),
+                    ],
+                    stroke,
+                );
+            }
+        }
+    }
+
     /// The package whose blocks have a form; `None` when there is none in use.
     pub fn set_block_index(&mut self, index: Option<Arc<PackageIndex>>) {
         let same = match (&index, &self.block_index) {
@@ -195,6 +257,8 @@ impl DocViewer {
         if self.block_icons.take_fresh() {
             ui.ctx().request_repaint();
         }
+        self.pointer_on_block_control = false;
+        let pointer = ui.input(|i| i.pointer.hover_pos());
         let model = self.ed.view.model().clone();
         let side = theme.line_px().min(22.0);
         for v in visible {
@@ -219,6 +283,21 @@ impl DocViewer {
             let r = Rect::from_min_size(pos2(top_right.x - side - 4.0, top_right.y + 4.0), vec2(side, side));
             if !surface.contains_rect(r) {
                 continue;
+            }
+            // a block's first row is no text, and its buttons are controls
+            let row = Rect::from_min_max(
+                pos2(left, surface.top() + v.y),
+                pos2(top_right.x, surface.top() + v.y + v.layout.height),
+            );
+            let has_view = index.block(&c.name).is_some_and(|e| e.view.is_some());
+            let outside = self.ed.view.block_warnings(v.idx).is_some();
+            if pointer.is_some_and(|p| row.contains(p)) {
+                self.pointer_on_block_control = true;
+            }
+            if has_view && !outside {
+                let next = self.ed.view.block_mode_of(start).next();
+                let m = r.translate(vec2(-(side + 4.0), 0.0));
+                self.block_view_button(ui, m, surface, start, next, &c.name, out);
             }
             let label = format!("Edit Block: {}", c.name);
             let resp = ui

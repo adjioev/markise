@@ -190,3 +190,21 @@ block.
 so that retired ids live on while it does. Blocks over 64 KiB are generic, which also bounds the cost per
 keystroke: a decode, a diff and a decode of one block. An optional field with no text in the file has no place
 in the view: the form adds it. A picture dropped or pasted into a field asks for the form instead.
+
+### The switch
+
+`markise_layout::BlockViewMode` is what a block can show as: `Native`, then `Markdown`, which is the generic
+card, where anything a card allows is allowed. A block outside its schema is a card in any state, with its
+warning. `BlockViewMode::next` is the order a switch goes through; a state that comes later (a site's own
+rendering) goes in the enum and in that order, and nothing else asks for a state by position.
+
+- **A block.** A button beside the block's Edit button says what comes next, or the command Switch This
+  Block's View (⇧⌘M) for the caret's block. A block with no view has neither.
+- **The document.** Switch All Blocks' Views (⌥⇧⌘M) moves the document to the next state, and the blocks that
+  differed follow it.
+- **Where it is kept.** The session keeps a block's own state at a live mark on its opener, so it survives
+  edits above it, and hands the view the positions after every change: moving them costs what any edit does
+  and lays out nothing else. The state is not in the file, and not in settings. The app keeps it per document
+  path for the session and brings it back when that document opens again, for openers that still stand where
+  they did. A document opens native by default.
+- **The pointer.** Text gets the text caret. A block's first row, its buttons and an answer's mark get the arrow.
