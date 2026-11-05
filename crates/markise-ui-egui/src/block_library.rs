@@ -60,6 +60,8 @@ pub struct OpenLibrary {
     anchor: Option<Rect>,
     /// Where it was drawn last.
     rect: Option<Rect>,
+    /// Rows that got their picture in the last frame.
+    pictures: std::cell::Cell<usize>,
     pub(crate) previous_focus: Option<Id>,
 }
 
@@ -84,6 +86,7 @@ impl OpenLibrary {
             composing: false,
             anchor,
             rect: None,
+            pictures: std::cell::Cell::new(0),
             previous_focus,
         }
     }
@@ -103,6 +106,11 @@ impl OpenLibrary {
     pub fn selected_title(&self) -> Option<&str> {
         let i = *self.rows.get(self.selected)?;
         Some(self.library.entries()[i].title.as_str())
+    }
+
+    /// Rows drawn with a picture in the last frame.
+    pub fn pictures(&self) -> usize {
+        self.pictures.get()
     }
 
     /// Where it stands on screen, as last drawn.
@@ -274,6 +282,7 @@ impl OpenLibrary {
         ui.painter()
             .hline(line, field.rect.bottom(), Stroke::new(1.0, style.line));
         ui.add_space(4.0);
+        self.pictures.set(0);
         let ctx = ui.ctx().clone();
         let with_icons = (self.rows.iter()).any(|&i| {
             (self.library.entries()[i].icon.as_deref())
@@ -351,9 +360,11 @@ impl OpenLibrary {
             match picture {
                 Some(Thumbnail::Mask { texture, .. }) => {
                     painter.image(texture, icon, uv, style.fg);
+                    self.pictures.set(self.pictures.get() + 1);
                 }
                 Some(Thumbnail::Ready { texture, .. }) => {
                     painter.image(texture, icon, uv, egui::Color32::WHITE);
+                    self.pictures.set(self.pictures.get() + 1);
                 }
                 _ => {}
             }
