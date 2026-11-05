@@ -424,18 +424,19 @@ impl DocViewer {
             if pointer.is_some_and(|p| row.contains(p)) {
                 self.pointer_on_block_control = true;
             }
+            // over a picture the buttons need a ground of their own, and only show when asked for
+            let over_picture = v.layout.has_picture();
+            if over_picture && pointer.is_some_and(|p| row.contains(p)) {
+                let ground = ui.visuals().window_fill().gamma_multiply(0.85);
+                let all = r.union(r.translate(vec2(-(side + 4.0), 0.0)));
+                ui.painter_at(surface).rect_filled(all, 4.0, ground);
+            }
             if (has_view || self.ed.view.can_draw_site()) && !outside {
                 let next = self.ed.next_block_view(start);
                 let m = r.translate(vec2(-(side + 4.0), 0.0));
                 if !v.layout.has_picture() || pointer.is_some_and(|p| row.contains(p)) {
                     self.block_view_button(ui, m, surface, start, next, &c.name, out);
                 }
-            }
-            // over a picture the buttons need a ground of their own, and only show when asked for
-            let over_picture = v.layout.has_picture();
-            if over_picture && pointer.is_some_and(|p| row.contains(p)) {
-                let ground = ui.visuals().window_fill().gamma_multiply(0.85);
-                ui.painter_at(surface).rect_filled(r, 4.0, ground);
             }
             let label = format!("Edit Block: {}", c.name);
             let resp = ui
