@@ -270,4 +270,6 @@ fn icons_come_by_name_through_the_worker() {
     assert!(h.get_by_label("One answer").rect().height() > 0.0);
     frames(&mut h);
     assert!(h.state().background_settled());
+    // the name with a file gets its picture
+    assert_eq!(h.state().block_library().unwrap().pictures(), 1);
 }

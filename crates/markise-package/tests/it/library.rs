@@ -36,7 +36,7 @@ fn rows_follow_the_packages_groups_and_order() {
         [("Plain tip", "tip", Some(0)), ("Two answers", "poll", Some(1))],
         "a block with no preset has nothing to insert, so no row"
     );
-    assert_eq!(library.entries()[0].icon.as_deref(), Some("bulb"));
+    assert_eq!(library.entries()[0].icon.as_deref(), Some("assets/bulb.svg"));
     assert_eq!(library.entries()[0].detail.as_deref(), Some("A short hint"));
 }
 
