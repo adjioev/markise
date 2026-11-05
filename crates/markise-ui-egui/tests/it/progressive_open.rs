@@ -146,3 +146,113 @@ fn the_first_part_is_shown_and_the_whole_document_replaces_it_in_place() {
     assert!(v.ed.edit(|s| s.undo()));
     assert_eq!(h.state().document_text().unwrap(), text);
 }
+
+#[test]
+fn a_blocks_state_beyond_the_first_part_comes_back_with_the_rest() {
+    let d = std::env::temp_dir().join(format!("markise-progressive-states-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let dir = std::fs::canonicalize(&d).unwrap();
+    let (p, other) = (dir.join("big.md"), dir.join("small.md"));
+    let mut text = markise_corpus::generate(48 << 10, 22);
+    text.push_str("\n\n:::far\n\nBody\n\n:::\n");
+    std::fs::write(&p, &text).unwrap();
+    std::fs::write(&other, "Small.\n").unwrap();
+    let opener = text.rfind(":::far").unwrap();
+    let gate: Gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let mut h: H = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| app.ui(ui),
+            MarkiseApp::new(AppOptions {
+                open: vec![p.clone()],
+                progressive: Some(ProgressiveOpts {
+                    min_bytes: 16 << 10,
+                    prefix_bytes: 4 << 10,
+                }),
+                load_hook: Some(hook(&gate)),
+                ..common::no_watch()
+            }),
+        );
+    common::wait_until(&mut h, "the whole file", |a| {
+        !a.is_partial() && a.document_text().is_some_and(|t| t.len() == text.len())
+    });
+    h.state_mut().viewer().unwrap().ed.switch_block_view(opener);
+    let markdown = markise_layout::BlockViewMode::Markdown;
+    assert_eq!(h.state_mut().viewer().unwrap().ed.view.block_mode_of(opener), markdown);
+
+    h.state_mut().open(other.clone());
+    common::wait_until(&mut h, "the other file", |a| {
+        a.document_path() == Some(other.as_path()) && !a.is_loading()
+    });
+    *gate.0.lock().unwrap() = true;
+    h.state_mut().open(p.clone());
+    common::wait_until(&mut h, "the first part", |a| {
+        a.document_path() == Some(p.as_path()) && a.is_partial()
+    });
+    // an edit in the first part moves it, and leaving now would not lose it either
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| s.insert_text("xy")).unwrap();
+    assert_eq!(v.ed.block_view_state().1.len(), 1, "it is still known while it waits");
+    *gate.0.lock().unwrap() = false;
+    gate.1.notify_all();
+    common::wait_until(&mut h, "the rest", |a| !a.is_partial());
+    let v = h.state_mut().viewer().unwrap();
+    assert_eq!(v.ed.view.block_mode_of(opener + 2), markdown);
+    assert_eq!(v.ed.block_view_state().1, vec![(opener + 2, markdown)]);
+}
+
+#[test]
+fn a_switch_of_the_whole_document_while_it_loads_holds_for_what_is_still_to_come() {
+    let d = std::env::temp_dir().join(format!("markise-progressive-switch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let dir = std::fs::canonicalize(&d).unwrap();
+    let (p, other) = (dir.join("big.md"), dir.join("small.md"));
+    let mut text = markise_corpus::generate(48 << 10, 23);
+    text.push_str("\n\n:::far\n\nBody\n\n:::\n");
+    std::fs::write(&p, &text).unwrap();
+    std::fs::write(&other, "Small.\n").unwrap();
+    let opener = text.rfind(":::far").unwrap();
+    let gate: Gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let mut h: H = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .allow_missing_glyphs()
+        .build_ui_state(
+            |ui, app: &mut MarkiseApp| app.ui(ui),
+            MarkiseApp::new(AppOptions {
+                open: vec![p.clone()],
+                progressive: Some(ProgressiveOpts {
+                    min_bytes: 16 << 10,
+                    prefix_bytes: 4 << 10,
+                }),
+                load_hook: Some(hook(&gate)),
+                ..common::no_watch()
+            }),
+        );
+    common::wait_until(&mut h, "the whole file", |a| {
+        !a.is_partial() && a.document_text().is_some_and(|t| t.len() == text.len())
+    });
+    h.state_mut().viewer().unwrap().ed.switch_block_view(opener);
+    h.state_mut().open(other.clone());
+    common::wait_until(&mut h, "the other file", |a| {
+        a.document_path() == Some(other.as_path()) && !a.is_loading()
+    });
+    *gate.0.lock().unwrap() = true;
+    h.state_mut().open(p.clone());
+    common::wait_until(&mut h, "the first part", |a| {
+        a.document_path() == Some(p.as_path()) && a.is_partial()
+    });
+    // round the whole document, back to what it started as: no block differs from it any more
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.switch_all_block_views();
+    v.ed.switch_all_block_views();
+    assert!(v.ed.block_view_state().1.is_empty());
+    *gate.0.lock().unwrap() = false;
+    gate.1.notify_all();
+    common::wait_until(&mut h, "the rest", |a| !a.is_partial());
+    let v = h.state_mut().viewer().unwrap();
+    assert_eq!(v.ed.view.block_mode_of(opener), markise_layout::BlockViewMode::Native);
+    assert!(v.ed.block_view_state().1.is_empty());
+}

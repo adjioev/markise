@@ -9,6 +9,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use markise_doc::Selection;
 use markise_package::Sha256Hex;
+use markise_ui_egui::menu::MenuAction;
 use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp};
 
 use crate::common::{self, settle, wait_until};
@@ -346,6 +347,143 @@ fn an_icon_comes_from_its_file_through_the_worker_and_no_file_means_no_icon() {
     assert_eq!(icons_of(&mut h, "Hello"), ["assets/bulb.svg"]);
     assert!(icons_of(&mut h, "First").is_empty(), "the file is not in the package");
     assert!(h.state().banner_text().is_none(), "and that is no error");
+}
+
+fn click(h: &mut H, label: &str) {
+    h.get_all_by_label(label)
+        .next()
+        .unwrap_or_else(|| panic!("{label}"))
+        .click();
+    common::run(h);
+}
+
+fn cursor(h: &mut H, at: egui::Pos2) -> egui::CursorIcon {
+    h.hover_at(at);
+    h.step();
+    h.step();
+    h.output().platform_output.cursor_icon
+}
+
+#[test]
+fn a_block_switches_its_view_on_its_button_and_back() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    let hello = DOC.find("Hello").unwrap();
+    assert!(h.state_mut().viewer().unwrap().ed.view.native_block(hello).is_some());
+    // a block with no view has no such button
+    assert!(h.query_by_label("Show Markdown: plain").is_none());
+    click(&mut h, "Show Markdown: tip");
+    assert!(h.state_mut().viewer().unwrap().ed.view.native_block(hello).is_none());
+    let s = shown(&mut h);
+    assert!(s.contains("tip"), "{s}");
+    assert!(s.contains("Poll"), "the others as they were: {s}");
+    // in Markdown it is the card, which can do what a card can
+    caret(&mut h, hello);
+    h.event(Event::Text("x".into()));
+    common::run(&mut h);
+    assert!(text(&h).contains("xHello"));
+    click(&mut h, "Show Native View: tip");
+    assert!(h.state_mut().viewer().unwrap().ed.view.native_block(hello).is_some());
+}
+
+#[test]
+fn the_document_switches_all_its_blocks_and_a_block_follows() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    let ctx = h.ctx.clone();
+    click(&mut h, "Show Markdown: tip");
+    assert!(
+        h.state()
+            .menu_model()
+            .item("view.switchAllBlockViews")
+            .is_some_and(|i| i.enabled)
+    );
+    let hello = DOC.find("Hello").unwrap();
+    let one = DOC.find("One").unwrap();
+    let all = MenuAction::Command("view.switchAllBlockViews");
+    assert!(h.state_mut().menu_action(&ctx, &all));
+    common::run(&mut h);
+    {
+        let v = &h.state_mut().viewer().unwrap().ed.view;
+        assert!(v.native_block(hello).is_none() && v.native_block(one).is_none());
+    }
+    assert_eq!(text(&h), DOC, "no byte moves");
+    assert!(h.state_mut().menu_action(&ctx, &all));
+    common::run(&mut h);
+    {
+        let v = &h.state_mut().viewer().unwrap().ed.view;
+        assert!(
+            v.native_block(hello).is_some() && v.native_block(one).is_some(),
+            "all of them"
+        );
+    }
+    // the caret's block, by command
+    caret(&mut h, one);
+    let this = MenuAction::Command("view.switchBlockView");
+    assert!(h.state_mut().menu_action(&ctx, &this));
+    common::run(&mut h);
+    let v = &h.state_mut().viewer().unwrap().ed.view;
+    assert!(v.native_block(one).is_none() && v.native_block(hello).is_some());
+}
+
+#[test]
+fn a_blocks_state_follows_it_through_edits_above() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    click(&mut h, "Show Markdown: tip");
+    caret(&mut h, DOC.find("Before").unwrap());
+    h.event(Event::Text("abc".into()));
+    common::run(&mut h);
+    let t = text(&h);
+    let v = &h.state_mut().viewer().unwrap().ed.view;
+    assert!(v.native_block(t.find("Hello").unwrap()).is_none());
+    assert!(v.native_block(t.find("Which").unwrap()).is_some());
+}
+
+#[test]
+fn how_a_document_shows_its_blocks_is_kept_for_the_session() {
+    let f = Fixture::new(DOC);
+    let other = f.doc.with_file_name("other.md");
+    fs::write(&other, DOC).unwrap();
+    let mut h = f.ready();
+    let (hello, one) = (DOC.find("Hello").unwrap(), DOC.find("One").unwrap());
+    click(&mut h, "Show Markdown: tip");
+    open(&mut h, &other);
+    settle(&mut h);
+    common::run(&mut h);
+    {
+        let v = &h.state_mut().viewer().unwrap().ed.view;
+        assert!(v.native_block(hello).is_some(), "another document opens native");
+    }
+    open(&mut h, &f.doc);
+    settle(&mut h);
+    common::run(&mut h);
+    let v = &h.state_mut().viewer().unwrap().ed.view;
+    assert!(v.native_block(hello).is_none(), "and this one as it was");
+    assert!(v.native_block(one).is_some());
+}
+
+#[test]
+fn the_pointer_is_an_arrow_on_a_blocks_controls_and_a_caret_on_its_text() {
+    let f = Fixture::new(DOC);
+    let mut h = f.ready();
+    let at = DOC.find("One").unwrap();
+    let r = h.state_mut().viewer().unwrap().item_screen_rect(at).expect("on screen");
+    let text_pos = egui::pos2(r.left() + 60.0, r.center().y);
+    assert_eq!(cursor(&mut h, text_pos), egui::CursorIcon::Text);
+    let button = h.get_all_by_label("Show Markdown: poll").next().unwrap().rect();
+    assert_eq!(cursor(&mut h, button.center()), egui::CursorIcon::Default);
+    let edit = h.get_all_by_label("Edit Block: poll").next().unwrap().rect();
+    assert_eq!(cursor(&mut h, edit.center()), egui::CursorIcon::Default);
+    // an answer's mark too
+    let (left, top, tasks) = {
+        let v = h.state_mut().viewer().unwrap();
+        let i = v.ed.view.model().item_at_offset(at);
+        let tasks = v.ed.view.cache_peek(i).expect("laid out").tasks.clone();
+        (r.left(), r.top(), tasks)
+    };
+    let mark = tasks[0].0.center() + egui::vec2(left, top);
+    assert_eq!(cursor(&mut h, mark), egui::CursorIcon::Default);
 }
 
 #[test]

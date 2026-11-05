@@ -1493,6 +1493,7 @@ impl MarkiseApp {
             }
         }
         self.nav_leave();
+        self.remember_block_views();
         let format: Arc<dyn markise_doc::DocumentFormat> = Arc::new(MarkdownFormat {
             opts: self.parse.clone(),
         });
@@ -1529,6 +1530,7 @@ impl MarkiseApp {
             d.saved_fp = None;
             d.viewer.ed.session.clear_saved_state();
         }
+        self.bring_back_block_views();
         self.nav_installed(untitled);
     }
 
@@ -3174,6 +3176,7 @@ impl MarkiseApp {
                         let mut out = d.viewer.show(ui, &mut self.images, &t, self.parley.as_mut(), true);
                         self.full_view_request = out.open_view.take();
                         self.block_form.request(out.open_block_form.take());
+                        self.block_form.request_switch(out.switch_block_view.take());
                         if let Some(n) = d.viewer.take_notice() {
                             self.banner = Some(Banner::Info(n));
                         }
@@ -3300,6 +3303,7 @@ impl MarkiseApp {
         }
         self.full_view_request = out.open_view;
         self.block_form.request(out.open_block_form);
+        self.block_form.request_switch(out.switch_block_view);
         if let Some(link) = out.link {
             self.open_link(&ctx, &link);
         }

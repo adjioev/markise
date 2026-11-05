@@ -1,11 +1,13 @@
 //! The block form's glue (ADR 0020): when a form opens and closes, which keys reach it, and the
 //! file dialog it asks for. See [`crate::block_form`].
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::Context;
 use egui_schema_form::Thumbnail;
+use markise_layout::BlockViewMode;
 use markise_layout::block::color;
 
 use super::{MarkiseApp, Then};
@@ -28,16 +30,24 @@ pub(super) struct BlockFormState {
     open: Option<OpenForm>,
     /// Asked for by the document's drawing: opens on the next frame.
     requested: Option<usize>,
+    /// A block's view button was pressed: switches on the next frame.
+    switch_requested: Option<usize>,
     picker: ImagePicker,
     assets: FormAssets,
+    /// How each document showed its blocks, for the session.
+    view_states: HashMap<PathBuf, ViewState>,
 }
+
+type ViewState = (BlockViewMode, Vec<(usize, BlockViewMode)>);
 
 impl BlockFormState {
     pub(super) fn new(picker: Option<ImagePicker>) -> BlockFormState {
         BlockFormState {
             open: None,
             requested: None,
+            switch_requested: None,
             assets: FormAssets::default(),
+            view_states: HashMap::new(),
             picker: picker.unwrap_or_else(|| {
                 Arc::new(|folder: &Path| {
                     rfd::FileDialog::new()
@@ -61,6 +71,12 @@ impl BlockFormState {
             self.requested = at;
         }
     }
+
+    pub(super) fn request_switch(&mut self, opener: Option<usize>) {
+        if opener.is_some() {
+            self.switch_requested = opener;
+        }
+    }
 }
 
 impl MarkiseApp {
@@ -81,6 +97,54 @@ impl MarkiseApp {
     /// A form holds changes the document does not.
     pub(super) fn block_draft_changed(&self) -> bool {
         self.block_form.open.as_ref().is_some_and(OpenForm::is_dirty)
+    }
+
+    /// The block at the caret has a view to switch from or to.
+    pub(super) fn block_view_available(&self) -> bool {
+        self.block_with_view_at_caret().is_some()
+    }
+
+    fn block_with_view_at_caret(&self) -> Option<usize> {
+        let (package, d) = (self.block_package()?, self.doc.as_ref()?);
+        let s = &d.viewer.ed.session;
+        let c = block_at(s.doc(), s.selection().primary().focus.offset, &package.index)?;
+        package.index.block(&c.name)?.view?;
+        Some(c.opener.start)
+    }
+
+    pub(super) fn switch_block_view_at_caret(&mut self) -> bool {
+        let Some(opener) = self.block_with_view_at_caret() else {
+            return false;
+        };
+        let Some(d) = &mut self.doc else { return false };
+        d.viewer.ed.switch_block_view(opener);
+        self.remember_block_views();
+        true
+    }
+
+    pub(super) fn switch_all_block_views(&mut self) -> bool {
+        let Some(d) = &mut self.doc else { return false };
+        d.viewer.ed.switch_all_block_views();
+        self.remember_block_views();
+        true
+    }
+
+    /// Keeps how this document shows its blocks, for the session (ADR 0021).
+    pub(super) fn remember_block_views(&mut self) {
+        if let Some(d) = &self.doc
+            && !d.untitled
+        {
+            let state = d.viewer.ed.block_view_state();
+            self.block_form.view_states.insert(d.path.clone(), state);
+        }
+    }
+
+    /// What was kept for this document, in its new viewer.
+    pub(super) fn bring_back_block_views(&mut self) {
+        let Some(d) = &mut self.doc else { return };
+        if let Some((mode, own)) = self.block_form.view_states.get(&d.path) {
+            d.viewer.ed.restore_block_view_state(*mode, own);
+        }
     }
 
     /// The keyboard is in the form.
@@ -208,6 +272,12 @@ impl MarkiseApp {
         self.block_icons_update(ui.ctx());
         if let Some(at) = self.block_form.requested.take() {
             self.open_block_form(at);
+        }
+        if let Some(opener) = self.block_form.switch_requested.take()
+            && let Some(d) = &mut self.doc
+        {
+            d.viewer.ed.switch_block_view(opener);
+            self.remember_block_views();
         }
         if self.block_form.open.is_none() {
             return;

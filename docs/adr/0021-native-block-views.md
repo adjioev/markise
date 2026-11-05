@@ -152,8 +152,9 @@ whole block: the block is then deleted or replaced as a whole, by the rule of AD
 
 **Undo.** A keystroke goes through the session's own keystroke path, so typing groups (their pause, the
 break at a blank, direction), undo steps and the selection restored are the document's. It is typing.
-Inline marks run their usual planners with a selection inside one slot, and are taken back if the block
-then reads differently. Every other mutating command is refused in a block.
+Inline marks run their usual planners with a selection inside one slot, and are taken back, with no redo, if
+the same block no longer stands from the same opener to its own closer and reads the same. Whatever else
+inserts text in a field (link completion) goes through `EditorView::field_replace` and the same checks. Every other mutating command is refused in a block.
 
 **Keys.** `editor::inplace` decides them; the field model does the work, with the same checks.
 
@@ -177,8 +178,11 @@ then reads differently. Every other mutating command is refused in a block.
 **A place with no text.** An emptied heading stays in the source as `## ` with its id (`FieldEdit::
 ClearHeading`). An emptied item stays an empty item. An emptied text or quote has nothing to stand on in the
 source, so the caret goes on a virtual paragraph where it was, and the session's in-place state remembers
-which field that position stands for: `DocPos::virt` cannot say (two absent fields can share a gap). Only the
-caret an edit put there has that meaning. Typing on it fills that field in its declared place.
+which field that position stands for, by the state of the document: `DocPos::virt` cannot say (two absent
+fields can share a gap), and undo brings back a state and its caret, so it brings back the meaning too. Only
+a caret an edit put there has that meaning; one with none writes nowhere. Typing on it fills that field in its
+declared place. Enter and Shift+Enter at the end of text put the caret on such a place as well, with what goes
+between the text and what comes next.
 
 **A block being edited stays native.** Emptying a required field makes `.check` fail, and such a block is a
 card. So the block the caret is editing stays native until the selection leaves it, marked by a live mark at
@@ -190,3 +194,22 @@ block.
 so that retired ids live on while it does. Blocks over 64 KiB are generic, which also bounds the cost per
 keystroke: a decode, a diff and a decode of one block. An optional field with no text in the file has no place
 in the view: the form adds it. A picture dropped or pasted into a field asks for the form instead.
+
+### The switch
+
+`markise_layout::BlockViewMode` is what a block can show as: `Native`, then `Markdown`, which is the generic
+card, where anything a card allows is allowed. A block outside its schema is a card in any state, with its
+warning. `BlockViewMode::next` is the order a switch goes through; a state that comes later (a site's own
+rendering) goes in the enum and in that order, and nothing else asks for a state by position.
+
+- **A block.** A button beside the block's Edit button says what comes next, or the command Switch This
+  Block's View (⇧⌘M) for the caret's block. A block with no view has neither.
+- **The document.** Switch All Blocks' Views (⌥⇧⌘M) moves the document to the next state, and the blocks that
+  differed follow it.
+- **Where it is kept.** The session keeps a block's own state at a live mark on its opener, so it survives
+  edits above it, and hands the view the positions after every change: moving them costs what any edit does
+  and lays out nothing else. A state goes with its block: when the opener's first byte is deleted or the name
+  changes, it is dropped rather than collapsing onto what follows. The state is not in the file, and not in settings. The app keeps it per document
+  path for the session and brings it back when that document opens again, for openers that still stand where
+  they did. A large file opens in parts, so a state for an opener not there yet waits for the rest. A document opens native by default.
+- **The pointer.** Text gets the text caret. A block's first row, its buttons and an answer's mark get the arrow.

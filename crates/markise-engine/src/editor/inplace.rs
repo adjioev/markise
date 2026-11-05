@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use markise_doc::{DocPos, Params, Patch, PatchSet, Selection};
 use markise_layout::caret::Geometry;
-use markise_layout::{Images, NativeAt, TextShaper};
+use markise_layout::{BlockViewMode, Images, NativeAt, TextShaper};
 
 use super::command::CommandError;
 use super::{EditorView, MarkId, StateId, TypingDir};
@@ -25,6 +25,14 @@ struct Absent {
     sep: &'static str,
 }
 
+/// A block with a state of its own: the mark on its opener, where that was last, and its name.
+struct OwnMode {
+    mark: MarkId,
+    mode: BlockViewMode,
+    at: usize,
+    name: Box<str>,
+}
+
 /// What in-place editing holds between keystrokes.
 #[derive(Default)]
 pub(super) struct InPlace {
@@ -37,6 +45,12 @@ pub(super) struct InPlace {
     /// the document they stood in: `DocPos::virt` cannot name a field, and undo brings back the
     /// state and the caret. Only the caret an edit put there has one, newest last.
     absent: Vec<(StateId, DocPos, Absent)>,
+    /// How the document shows its blocks …
+    mode: BlockViewMode,
+    /// … and the blocks that differ from it, at their openers.
+    own_modes: Vec<OwnMode>,
+    /// States brought back for openers not in the document yet (the first part of a large file).
+    pending_modes: Vec<(usize, BlockViewMode)>,
 }
 
 fn plain_value_is_empty(slot: &Slot) -> bool {
@@ -55,6 +69,133 @@ impl EditorView {
         self.place.fields = fields;
         self.place.model = None;
         self.end_sticky();
+    }
+
+    /// How the document shows its blocks, and the blocks that differ, by opener; for what keeps it
+    /// (openers not in the document yet included).
+    pub fn block_view_state(&self) -> (BlockViewMode, Vec<(usize, BlockViewMode)>) {
+        let mut own = self.own_modes_now();
+        own.extend(self.place.pending_modes.iter().copied());
+        (self.place.mode, own)
+    }
+
+    fn own_modes_now(&self) -> Vec<(usize, BlockViewMode)> {
+        (self.place.own_modes.iter())
+            .filter_map(|o| Some((self.session.mark(o.mark)?.offset, o.mode)))
+            .collect()
+    }
+
+    /// The name of the block whose opener stands at `at`.
+    fn opener_name(&self, at: usize) -> Option<Box<str>> {
+        let c = self.session.doc().named_containers_at(at).pop()?;
+        (c.opener.start == at).then_some(c.name)
+    }
+
+    fn add_own_mode(&mut self, opener: usize, mode: BlockViewMode) -> bool {
+        let Some(name) = self.opener_name(opener) else {
+            return false;
+        };
+        let mark = self.session.add_mark(DocPos::new(opener));
+        self.place.own_modes.push(OwnMode {
+            mark,
+            mode,
+            at: opener,
+            name,
+        });
+        true
+    }
+
+    /// Brings back what [`Self::block_view_state`] said, as far as blocks stand at those openers.
+    /// The others wait for [`Self::retry_block_views`]: the file may not have come whole yet.
+    pub fn restore_block_view_state(&mut self, mode: BlockViewMode, own: &[(usize, BlockViewMode)]) {
+        self.place.mode = mode;
+        self.clear_own_modes();
+        for &(opener, m) in own {
+            if !self.add_own_mode(opener, m) {
+                self.place.pending_modes.push((opener, m));
+            }
+        }
+        self.follow_block_modes();
+    }
+
+    /// The rest of a file came: what waited for its openers takes effect, `moved` by the edits made
+    /// in the first part meanwhile. What finds no opener now is gone.
+    pub(super) fn retry_block_views(&mut self, moved: isize) {
+        for (opener, m) in std::mem::take(&mut self.place.pending_modes) {
+            self.add_own_mode(opener.saturating_add_signed(moved), m);
+        }
+        self.follow_block_modes();
+    }
+
+    fn clear_own_modes(&mut self) {
+        for o in std::mem::take(&mut self.place.own_modes) {
+            self.session.remove_mark(o.mark);
+        }
+        self.place.pending_modes.clear();
+    }
+
+    /// The next state for the whole document. Blocks that differed follow it.
+    pub fn switch_all_block_views(&mut self) {
+        self.place.mode = self.place.mode.next();
+        self.clear_own_modes();
+        self.follow_block_modes();
+    }
+
+    /// The next state for the block with this opener.
+    pub fn switch_block_view(&mut self, opener: usize) {
+        let now = self.view.block_mode_of(opener);
+        let next = now.next();
+        let own =
+            (self.place.own_modes.iter()).position(|o| self.session.mark(o.mark).is_some_and(|p| p.offset == opener));
+        match own {
+            Some(i) if next == self.place.mode => {
+                let o = self.place.own_modes.remove(i);
+                self.session.remove_mark(o.mark);
+            }
+            Some(i) => self.place.own_modes[i].mode = next,
+            None => {
+                self.add_own_mode(opener, next);
+            }
+        }
+        self.follow_block_modes();
+    }
+
+    /// Hands the view where the blocks with a state of their own stand now.
+    pub(super) fn follow_block_modes(&mut self) {
+        let own = self.own_modes_now();
+        self.view.set_block_modes(self.place.mode, own);
+    }
+
+    /// After the document changed: a state belongs to its block, so it goes with it. A mark on a
+    /// deleted opener collapses onto whatever follows, which must not inherit it. `edits`: `(start,
+    /// end, delta)` of each step, each in the coordinates after the ones before.
+    pub(super) fn prune_block_modes(&mut self, edits: &[(usize, usize, isize)]) {
+        let mut kept: Vec<OwnMode> = Vec::with_capacity(self.place.own_modes.len());
+        for mut o in std::mem::take(&mut self.place.own_modes) {
+            let mut at = Some(o.at);
+            for &(start, end, delta) in edits {
+                at = at.and_then(|p| match p {
+                    p if p < start => Some(p),
+                    p if p >= end => Some(p.saturating_add_signed(delta)),
+                    _ => None,
+                });
+            }
+            let now = self.session.mark(o.mark).map(|p| p.offset);
+            let holds = at.is_some()
+                && now.is_some_and(|p| {
+                    self.opener_name(p).is_some_and(|n| n == o.name)
+                        && !kept
+                            .iter()
+                            .any(|k| self.session.mark(k.mark).map(|q| q.offset) == Some(p))
+                });
+            if holds {
+                o.at = now.unwrap_or(o.at);
+                kept.push(o);
+            } else {
+                self.session.remove_mark(o.mark);
+            }
+        }
+        self.place.own_modes = kept;
     }
 
     /// The field a place with no source stands for, in the document as it stands.
@@ -423,6 +564,11 @@ impl EditorView {
             self.session.remove_mark(m);
         }
         self.view.set_sticky_block(None);
+    }
+
+    /// Nothing to keep up with: the cost of a document without any of this.
+    pub(super) fn place_is_idle(&self) -> bool {
+        self.place.sticky.is_none() && self.place.own_modes.is_empty()
     }
 
     /// Keeps the block being edited native while the selection is in it. Called on every change

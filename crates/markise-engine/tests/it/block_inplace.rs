@@ -862,6 +862,49 @@ fn tab_and_enter_reach_the_text_of_a_field_that_holds_more() {
 }
 
 #[test]
+fn a_blocks_state_goes_with_it_when_it_is_deleted() {
+    use markise_doc::PatchSet;
+    use markise_layout::BlockViewMode as Mode;
+    let doc = ":::tip\n\nFirst\n\n:::\n\n:::tip\n\nSecond\n\n:::\n";
+    let second = doc.rfind(":::tip").unwrap();
+    let mut s = surface(doc);
+    s.ed.switch_block_view(0);
+    assert_eq!(s.ed.view.block_mode_of(0), Mode::Markdown);
+    assert_eq!(s.ed.view.block_mode_of(second), Mode::Native);
+    // the first block goes, as an edit in Source mode can make it go
+    let cut = PatchSet::single_verbatim(0..second, "");
+    s.ed.edit(|e| e.apply_external(&cut, "Edit", false)).unwrap();
+    s.frame();
+    assert_eq!(
+        s.ed.view.block_mode_of(0),
+        Mode::Native,
+        "what follows does not inherit it"
+    );
+    assert!(s.ed.view.native_block(2).is_some());
+    assert!(s.ed.block_view_state().1.is_empty());
+
+    // two states, the first one's block goes: the other's stays where it is now
+    let mut s = surface(doc);
+    s.ed.switch_block_view(0);
+    s.ed.switch_block_view(second);
+    let cut = PatchSet::single_verbatim(0..second, "");
+    s.ed.edit(|e| e.apply_external(&cut, "Edit", false)).unwrap();
+    s.frame();
+    assert_eq!(s.ed.block_view_state().1, vec![(0, Mode::Markdown)]);
+
+    // an edit above only moves it, and a rename makes another block of it
+    let mut s = surface(doc);
+    s.ed.switch_block_view(second);
+    let above = PatchSet::single_verbatim(0..0, "Top\n\n");
+    s.ed.edit(|e| e.apply_external(&above, "Edit", false)).unwrap();
+    assert_eq!(s.ed.block_view_state().1, vec![(second + 5, Mode::Markdown)]);
+    let name = second + 5 + 3;
+    let rename = PatchSet::single_verbatim(name..name + 3, "poll");
+    s.ed.edit(|e| e.apply_external(&rename, "Edit", false)).unwrap();
+    assert!(s.ed.block_view_state().1.is_empty());
+}
+
+#[test]
 fn marks_that_would_change_what_a_quote_holds_are_taken_back() {
     let doc = ":::poll\n\n## Which?\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> `# Heading`\n\n:::\n";
     let mut s = surface(doc);

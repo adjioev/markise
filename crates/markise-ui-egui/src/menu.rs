@@ -313,6 +313,16 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
     app("edit.smartPunctuation", "Smart Punctuation: Convert on Input", &[]),
     app("edit.smartDashesEm", "Smart Dashes: -- as Em Dash", &[]),
     app("block.editForm", "Edit Block…", &[both("Shift+Cmd+E", "Ctrl+Shift+E")]),
+    app(
+        "view.switchBlockView",
+        "Switch This Block's View",
+        &[both("Shift+Cmd+M", "Ctrl+Shift+M")],
+    ),
+    app(
+        "view.switchAllBlockViews",
+        "Switch All Blocks' Views",
+        &[both("Shift+Opt+Cmd+M", "Ctrl+Shift+Alt+M")],
+    ),
     app("view.rendered", "Rendered", &[]),
     // spec 04 §3.3: ⌃⌘/ on macOS, Ctrl+Alt+/ elsewhere (Ctrl+/ is Source Code Mode)
     app("view.sideBySide", "Side by Side", &[both("Ctrl+Cmd+/", "Ctrl+Alt+/")]),

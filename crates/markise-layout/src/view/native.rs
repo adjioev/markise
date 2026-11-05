@@ -70,7 +70,10 @@ struct OfItem {
 #[derive(Default)]
 pub(super) struct NativeState {
     source: Option<Arc<dyn BlockViews>>,
+    /// How the document shows its blocks …
     mode: BlockViewMode,
+    /// … and the blocks that differ from it, by opener, ascending.
+    own_modes: Vec<(usize, BlockViewMode)>,
     /// By item start, for the document as it stands (see [`NativeState::forget`]).
     items: RefCell<HashMap<usize, Option<OfItem>>>,
     /// By name, arguments and source of a block: the same text looks the same anywhere.
@@ -88,9 +91,18 @@ impl NativeState {
         }
     }
 
-    /// What shows blocks natively: not in the Markdown state.
+    /// What shows blocks natively, as far as the document's state can tell: for what is estimated
+    /// by name, with no block read.
     fn active(&self) -> Option<&Arc<dyn BlockViews>> {
         self.source.as_ref().filter(|_| self.mode == BlockViewMode::Native)
+    }
+
+    /// The state of the block with this opener.
+    fn mode_of(&self, opener: usize) -> BlockViewMode {
+        match self.own_modes.binary_search_by_key(&opener, |m| m.0) {
+            Ok(i) => self.own_modes[i].1,
+            Err(_) => self.mode,
+        }
     }
 }
 
@@ -112,13 +124,33 @@ impl View {
         self.reset_heights();
     }
 
-    /// Whether blocks with a view show it. Height estimates and layouts follow.
+    /// How blocks with a view show, for the whole document. Height estimates and layouts follow.
     pub fn set_block_view_mode(&mut self, mode: BlockViewMode) {
-        if mode != self.native.mode {
-            self.native.mode = mode;
-            self.native.items.borrow_mut().clear();
+        self.set_block_modes(mode, Vec::new());
+    }
+
+    /// How blocks with a view show: `mode` for the whole document, and the blocks that differ from
+    /// it by opener. A block's own state lasts through edits above it by the caller moving it
+    /// here: that alone costs what any edit does.
+    pub fn set_block_modes(&mut self, mode: BlockViewMode, mut own: Vec<(usize, BlockViewMode)>) {
+        own.sort_unstable_by_key(|m| m.0);
+        if mode == self.native.mode && own == self.native.own_modes {
+            return;
+        }
+        let same_states = mode == self.native.mode
+            && own.len() == self.native.own_modes.len()
+            && (own.iter().zip(&self.native.own_modes)).all(|(a, b)| a.1 == b.1);
+        self.native.mode = mode;
+        self.native.own_modes = own;
+        self.native.items.borrow_mut().clear();
+        if !same_states {
             self.reset_heights();
         }
+    }
+
+    /// The state the block with this opener is in.
+    pub fn block_mode_of(&self, opener: usize) -> BlockViewMode {
+        self.native.mode_of(opener)
     }
 
     pub fn block_view_mode(&self) -> BlockViewMode {
@@ -136,13 +168,16 @@ impl View {
 
     /// Part of what a measured page height holds for.
     pub(super) fn native_key(&self) -> u64 {
-        self.native.active().map_or(0, |s| s.id() | 1)
+        self.native.active().map_or(0, |s| s.id() | 1) ^ (self.native.own_modes.len() as u64).rotate_left(53)
     }
 
     /// The block shown natively around `at`, the innermost one if any.
     pub fn native_block(&self, at: usize) -> Option<NativeAt> {
-        self.native.active()?;
+        self.native.source.as_ref()?;
         let c = self.doc.named_containers_at(at).pop()?;
+        if self.native.mode_of(c.opener.start) != BlockViewMode::Native {
+            return None;
+        }
         let block = match self.look_of(&c) {
             Looked::Native(block) => block,
             Looked::Outside(_, Some(block)) if self.native.sticky == Some(c.opener.start) => block,
@@ -200,7 +235,7 @@ impl View {
     }
 
     fn of_item(&self, start: usize, it: &Item) -> Option<OfItem> {
-        self.native.active()?;
+        self.native.source.as_ref()?;
         if !it.containers.iter().any(|c| matches!(c, Container::Card)) {
             return None;
         }

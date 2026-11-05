@@ -265,6 +265,7 @@ pub struct SbsOutput {
     pub open_view: Option<crate::viewer::ViewTarget>,
     /// The rendered pane asks for the form of the block at this offset.
     pub open_block_form: Option<usize>,
+    pub switch_block_view: Option<usize>,
 }
 
 /// Per-document Side by Side state (the divider position lives in the settings).
@@ -439,6 +440,7 @@ impl SideBySide {
             out.link = vo.link;
             out.open_view = vo.open_view;
             out.open_block_form = vo.open_block_form;
+            out.switch_block_view = vo.switch_block_view;
             out.right = Some(pane);
             user_scrolls_rendered |= vo.wheel_scrolled;
         }

@@ -152,6 +152,7 @@ impl EditorView {
     /// Brings the view up to the session's document (after any session change).
     pub fn sync(&mut self) {
         let steps = self.session.take_steps();
+        let mut mode_edits = None;
         match self.session.take_change() {
             DocChange::None => {
                 // the view may still hold the placeholder after a no-op edit
@@ -161,6 +162,11 @@ impl EditorView {
             }
             DocChange::Edited(e) => {
                 self.changes += 1;
+                mode_edits = Some(
+                    steps
+                        .clone()
+                        .unwrap_or_else(|| vec![(e.changed.start, e.changed.end, e.delta)]),
+                );
                 if let Some(r) = &mut self.recent {
                     r.push(e.clone());
                 }
@@ -185,6 +191,7 @@ impl EditorView {
             }
             DocChange::Replaced => {
                 self.changes += 1;
+                mode_edits = Some(Vec::new());
                 self.recent = None;
                 // the same kind of model as before (paged or full)
                 let paging = self.view.model().paging();
@@ -196,7 +203,13 @@ impl EditorView {
                 self.source_load_selection();
             }
         }
-        self.follow_sticky();
+        if !self.place_is_idle() {
+            if let Some(edits) = mode_edits {
+                self.prune_block_modes(&edits);
+            }
+            self.follow_sticky();
+            self.follow_block_modes();
+        }
         self.pin_caret();
     }
 
@@ -256,6 +269,7 @@ impl EditorView {
         // (positions in the text shown so far stay valid: `recent` and `changes` are kept, so
         // hit tests from the last frame and a pressed checkbox survive)
         self.source_load_selection();
+        self.retry_block_views(shown as isize - cut as isize);
         self.pin_caret();
         Ok(Continued {
             edited,

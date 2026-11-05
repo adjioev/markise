@@ -488,6 +488,14 @@ impl MarkiseApp {
             ),
             self.app_item("view.sideBySide", has_doc, Check::Radio(mode == ViewMode::SideBySide)),
             Entry::Separator,
+        ];
+        // only where a package can give a block a view (ADR 0021)
+        if self.block_package().is_some() {
+            entries.push(self.app_item("view.switchBlockView", self.block_view_available(), Check::None));
+            entries.push(self.app_item("view.switchAllBlockViews", has_doc, Check::None));
+            entries.push(Entry::Separator);
+        }
+        entries.extend([
             self.item(
                 MenuAction::Command("view.toggleSidebar"),
                 "Toggle Sidebar",
@@ -504,7 +512,7 @@ impl MarkiseApp {
             self.app_item("view.zoomIn", self.zoom() < ZOOM_RANGE.1, Check::None),
             self.app_item("view.zoomOut", self.zoom() > ZOOM_RANGE.0, Check::None),
             self.app_item("view.actualSize", true, Check::None),
-        ];
+        ]);
         // macOS adds its own "Enter/Exit Full Screen" item to every menu titled "View" (for
         // full-screen capable windows) and flips its title itself; a second item of ours
         // would show twice. ⌃⌘F stays bound: the system item answers it, and when it does not,
@@ -681,6 +689,8 @@ impl MarkiseApp {
         }
         match id {
             "block.editForm" => return self.open_block_form_at_caret(),
+            "view.switchBlockView" => return self.switch_block_view_at_caret(),
+            "view.switchAllBlockViews" => return self.switch_all_block_views(),
             "file.quickOpen" => self.open_quick(ctx),
             "file.clearRecent" => self.clear_recent_paths(),
             "file.recover" => self.workflow.show_recovery = true,
