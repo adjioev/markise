@@ -178,8 +178,9 @@ position, mark and edit goes on as it did. What changes is their heights.
 - **A picture coming is a change of heights.** Above the viewport it moves nothing on screen, as any height does (ADR 0016). When the viewport starts inside the
   block, it keeps its relative place in the block. Only heights around the viewport are read at once; the others are corrected when they are laid out. A
   placeholder's measured height keeps what it held, for the views it was measured under; one never measured is estimated as cards.
-- **Pending** shows the card, the first time. After that the newest picture of the block at that opener stands in until its new one comes, so nothing
-  flickers while typing above it, resizing, or after Save.
+- **Pending** shows the card, the first time. After that the newest picture of the same block stands in until its new one comes, so nothing
+  flickers while typing above it, resizing, or after Save. "The same" is an identity the view keeps by opener and moves with every edit: an edit that goes over the opener, or another name
+  or arguments there, ends it, so another block coming to stand at that offset shows its card, not this picture. The content is not compared: a block being edited differs from its picture by definition.
 - **Failure** keeps the card, with a quiet reason on its first row (no `⚠`), in full on hover and for a screen reader. It is not tried again until the block changes.
 - **What is shown which way.** A block that does not fit its schema has no picture: it shows what ADR 0021 says, native with its warning when it is only not filled
   in, a card when its structure is wrong. Only a block that fits can be expected to draw.
@@ -190,7 +191,8 @@ position, mark and edit goes on as it did. What changes is their heights.
 - **Known limit, as for cards at the top (ADR 0018):** with no gap offered before the document's first block, a click on a picture there goes to the next stop.
 
 **The cache.** A picture is named by the package's hash and the document's folder (the session), the document's language, the block's name, arguments and source, its width, the
-scale, and the theme's fingerprint. Pictures are textures, 256 MiB together, least recently used first, and none on disk. At most two become textures per frame. One gone is drawn
+scale, and the theme's fingerprint. Pictures are textures, 256 MiB together, least recently used first, and none on disk. At most two become textures per frame. One over the graphics card's `max_texture_side` is refused and the block stays a card with that reason: scaling
+would be work on the UI thread for a rare card, and tiles a lot of code for it. One gone is drawn
 again when it is next on screen. Typing elsewhere changes no key, so it draws nothing.
 
 **What the page sees of the theme,** all of it data on `<html>`:

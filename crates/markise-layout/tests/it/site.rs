@@ -20,7 +20,7 @@ struct Host {
     failed: Mutex<Vec<String>>,
     seen: Mutex<Vec<u64>>,
     asked: Mutex<Vec<String>>,
-    older: Mutex<HashMap<usize, SitePicture>>,
+    older: Mutex<HashMap<u64, SitePicture>>,
     off: AtomicBool,
 }
 
@@ -50,12 +50,12 @@ impl BlockViews for Host {
                     width: q.width,
                     height,
                 };
-                self.older.lock().unwrap().insert(q.opener, picture);
+                self.older.lock().unwrap().insert(q.identity, picture);
                 (key, SiteShot::Ready(picture))
             }
             None => (
                 key,
-                SiteShot::Pending(self.older.lock().unwrap().get(&q.opener).copied()),
+                SiteShot::Pending(self.older.lock().unwrap().get(&q.identity).copied()),
             ),
         }
     }
@@ -217,8 +217,9 @@ fn an_older_picture_stands_in_until_the_new_one_comes() {
 #[test]
 fn an_older_picture_at_another_width_scales_with_its_height() {
     let (mut v, host) = set_up(DOC, 700.0);
+    // the first block asked about is the first identity
     host.older.lock().unwrap().insert(
-        DOC.find(":::scene").unwrap(),
+        1,
         SitePicture {
             id: 1,
             width: 350.0,

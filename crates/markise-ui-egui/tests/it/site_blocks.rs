@@ -399,3 +399,71 @@ fn stopping_the_package_goes_back_to_cards() {
     assert!(picture(&mut h, at(":::plain")).is_none());
     assert!(shown(&mut h).contains("Drawn by its site"));
 }
+
+#[test]
+fn another_block_at_the_same_place_does_not_show_the_first_ones_picture() {
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    let mut h = f.ready_with(Some(p.source()));
+    wait_for(&mut h, "its picture", |h| picture(h, at(":::plain")).is_some());
+    p.hold.store(true, Ordering::SeqCst);
+    let before = p.count();
+    // the whole of it goes and another comes, at the same offset
+    let (start, end) = (at(":::plain"), at("\n\nBetween"));
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.set_selection(Selection::range(start, end));
+    v.ed.edit(|s| s.insert_text(":::plain\n\nSomething else entirely.\n\n:::"))
+        .unwrap();
+    v.ed.set_selection(Selection::caret(0));
+    v.ed.refresh_focus();
+    wait_for(&mut h, "its render", |_| p.count() > before);
+    assert!(
+        picture(&mut h, start).is_none(),
+        "the card, not the other block's picture"
+    );
+    assert!(shown(&mut h).contains("Something else entirely"));
+    p.hold.store(false, Ordering::SeqCst);
+    wait_for(&mut h, "its own picture", |h| picture(h, start).is_some());
+}
+
+#[test]
+fn text_above_a_block_being_redrawn_does_not_lose_its_picture() {
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    let mut h = f.ready_with(Some(p.source()));
+    wait_for(&mut h, "its picture", |h| picture(h, at(":::plain")).is_some());
+    p.hold.store(true, Ordering::SeqCst);
+    let before = p.count();
+    // an edit in the block and one above it, with no frame between: the block moved and changed
+    let inner = at("Drawn");
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.set_selection(Selection::caret(inner));
+    v.ed.edit(|s| s.insert_text("z")).unwrap();
+    v.ed.set_selection(Selection::caret(0));
+    v.ed.edit(|s| s.insert_text("ab")).unwrap();
+    v.ed.refresh_focus();
+    wait_for(&mut h, "its render", |_| p.count() > before);
+    assert!(
+        picture(&mut h, at(":::plain") + 2).is_some(),
+        "the older picture, with no flicker"
+    );
+    p.hold.store(false, Ordering::SeqCst);
+    common::run(&mut h);
+}
+
+#[test]
+fn a_picture_over_the_graphics_limit_is_a_card_with_its_reason() {
+    let f = Fixture::new(DOC);
+    let p = played(3000);
+    let mut h = f.opened_with(Some(p.source()));
+    h.input_mut().max_texture_side = Some(2048);
+    h.get_by_label("Use Package").click();
+    h.step();
+    common::wait_until(&mut h, "the install", |a| a.block_package().is_some());
+    wait_for(&mut h, "its reason", |h| {
+        h.input_mut().max_texture_side = Some(2048);
+        h.query_by_label_contains("larger than").is_some()
+    });
+    assert!(picture(&mut h, at(":::plain")).is_none());
+    assert!(shown(&mut h).contains("Drawn by its site"));
+}
