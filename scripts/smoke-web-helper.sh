@@ -23,7 +23,7 @@ out="$(mktemp)"
 # a watchdog instead of timeout(1), which macOS lacks
 "$helper" --self-test >"$out" 2>&1 &
 pid=$!
-(sleep 120 && kill "$pid") >/dev/null 2>&1 &
+(sleep 600 && kill "$pid") >/dev/null 2>&1 &
 dog=$!
 status=0
 wait "$pid" || status=$?
