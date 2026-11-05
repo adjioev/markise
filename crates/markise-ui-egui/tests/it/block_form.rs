@@ -1046,6 +1046,61 @@ fn a_new_answer_gets_its_id_on_save() {
     assert!(text(&h).contains("- [ ] Three {#a3}"), "{}", text(&h));
 }
 
+/// A slow copy for one form, which is gone when it ends, must not land in another: request numbers
+/// start over in each form.
+#[test]
+fn a_copy_for_a_form_that_is_gone_lands_nowhere() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let at = DOC.find(":::gallery").unwrap();
+    let end = at + DOC[at..].find("\n:::\n").unwrap() + 5;
+    let gallery = &DOC[at..end];
+    let doc = format!("{gallery}\nMiddle.\n\n{gallery}");
+    let f = Fixture::new(&doc);
+    let outside = f.config.join("out.png");
+    fs::write(&outside, one_pixel_png()).unwrap();
+    let mut h = f.ready();
+    let hold = Arc::new(AtomicBool::new(true));
+    let held = hold.clone();
+    let job: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        while held.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    });
+    h.state_mut()
+        .set_attach_job_test(std::time::Duration::from_secs(30), Some(job));
+    let steps = |h: &mut H| {
+        for _ in 0..4 {
+            h.step();
+        }
+    };
+    // form A: a slow copy
+    assert!(h.state_mut().open_block_form(0));
+    wait(&mut h);
+    let before = draft(&h)["pictures"][0]["path"].clone();
+    *f.picks.lock().unwrap() = Some(outside);
+    h.get_by_label("Choose file: Pictures 1").click();
+    wait(&mut h);
+    h.get_by_label("Browse…").click();
+    steps(&mut h);
+    assert!(h.state().image_picker().is_none());
+    // form A goes, form B comes and asks for a file of its own
+    h.state_mut().block_form_cancel();
+    steps(&mut h);
+    let b = doc.rfind(":::gallery").unwrap();
+    assert!(h.state_mut().open_block_form(b));
+    steps(&mut h);
+    h.get_by_label("Choose file: Pictures 1").click();
+    steps(&mut h);
+    assert!(h.state().image_picker().is_some());
+    hold.store(false, Ordering::SeqCst);
+    wait(&mut h);
+    assert_eq!(draft(&h)["pictures"][0]["path"], before, "A's file is not B's");
+    h.key_press(egui::Key::Escape);
+    wait(&mut h);
+    assert_eq!(draft(&h)["pictures"][0]["path"], before);
+    assert!(!h.state().block_form().unwrap().is_dirty());
+}
+
 #[test]
 fn a_picked_image_goes_in_relative_and_one_outside_is_copied_in() {
     let f = Fixture::new(DOC);

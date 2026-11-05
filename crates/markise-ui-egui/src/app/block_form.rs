@@ -28,6 +28,8 @@ pub(super) enum DraftNext {
 /// The form of the session.
 pub(super) struct BlockFormState {
     pub(super) open: Option<OpenForm>,
+    /// How many forms were opened: names the one open, as its file requests are numbered by itself.
+    pub(super) opened: u64,
     /// Asked for by the document's drawing: opens on the next frame.
     requested: Option<usize>,
     /// A block's view button was pressed: switches on the next frame.
@@ -44,6 +46,7 @@ impl BlockFormState {
     pub(super) fn new(picker: Option<ImagePicker>) -> BlockFormState {
         BlockFormState {
             open: None,
+            opened: 0,
             requested: None,
             switch_requested: None,
             assets: FormAssets::default(),
@@ -199,6 +202,7 @@ impl MarkiseApp {
         self.block_form.assets.use_package(package);
         self.block_form.assets.forget_paths();
         self.block_form.open = OpenForm::open(d.id, &c, &mut d.viewer.ed.session, &index);
+        self.block_form.opened += 1;
         self.block_form.open.is_some()
     }
 

@@ -373,6 +373,7 @@ impl MarkiseApp {
             user_images: self.user_images_folder(),
             stamp: self.attach.stamp.clone().unwrap_or_else(attach::stamp_now),
             resource_root: d.viewer.ed.session.doc().resource_root(),
+            below: None,
         })
     }
 

@@ -13,7 +13,6 @@ use markise_engine::editor::image_dest_for;
 
 use super::attach::Stage;
 use super::{Banner, MarkiseApp};
-use crate::block_form::relative_to_folder;
 use crate::image_picker::{ImagePicker, PickerAct, is_droppable};
 
 /// A document and its revision.
@@ -46,7 +45,22 @@ struct EditWindow {
 #[derive(Clone)]
 enum PickFor {
     Image(Range<usize>),
-    Form(FileRequest),
+    /// A form's request, numbered by that form, and which form it is.
+    Form(FileRequest, FormMark),
+}
+
+/// Which form of which document.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FormMark {
+    doc: u64,
+    opened: u64,
+}
+
+/// A file on its way into a form's folder.
+struct FormCopy {
+    request: FileRequest,
+    form: FormMark,
+    stage: Stage,
 }
 
 /// The open picker.
@@ -65,8 +79,8 @@ pub(super) struct ImageEditState {
     copying: Option<Copying>,
     window: Option<EditWindow>,
     picker: Option<OpenPicker>,
-    /// A file from outside on its way into the folder, for a form.
-    form_copying: Option<(FileRequest, PathBuf, Stage)>,
+    /// Chosen files on their way to a form.
+    form_copying: Vec<FormCopy>,
 }
 
 impl ImageEditState {
@@ -86,7 +100,7 @@ impl ImageEditState {
     pub(super) fn is_settled(&self) -> bool {
         self.asked.is_none()
             && self.copying.is_none()
-            && self.form_copying.is_none()
+            && self.form_copying.is_empty()
             && self
                 .picker
                 .as_ref()
@@ -139,10 +153,29 @@ impl MarkiseApp {
 
     /// A form's Choose file: the picker, or nothing for a document with no folder.
     pub(super) fn pick_for_form(&mut self, request: FileRequest) {
-        if !self.open_image_picker(PickFor::Form(request), None)
+        let Some(form) = self.open_form_mark() else { return };
+        if !self.open_image_picker(PickFor::Form(request, form), None)
             && let Some(open) = self.block_form.open.as_mut()
         {
             open.deliver_file(request, None);
+        }
+    }
+
+    fn open_form_mark(&self) -> Option<FormMark> {
+        let open = self.block_form.open.as_ref()?;
+        Some(FormMark {
+            doc: open.doc(),
+            opened: self.block_form.opened,
+        })
+    }
+
+    /// The form this was for, if it is still the one open, in the document open.
+    fn form_if_still(&mut self, form: FormMark) -> Option<&mut crate::block_form::OpenForm> {
+        let doc = self.doc.as_ref().map(|d| d.id);
+        if self.open_form_mark() == Some(form) && doc == Some(form.doc) {
+            self.block_form.open.as_mut()
+        } else {
+            None
         }
     }
 
@@ -158,8 +191,9 @@ impl MarkiseApp {
             p.picker.set_note("Only image files can be added here.".into());
         }
         if !images.is_empty()
-            && let Some(req) = self.attach_request()
+            && let Some(mut req) = self.attach_request()
         {
+            req.below = self.image_edit.picker.as_ref().map(|p| p.folder.clone());
             let stage = self.job(req, images.into_iter().map(Item::File).collect());
             if let Some(p) = &mut self.image_edit.picker {
                 p.adding.push(stage);
@@ -185,8 +219,8 @@ impl MarkiseApp {
             if let Some(why) = out.errors.first() {
                 open.picker.set_note(why.clone());
             }
-            for t in out.targets {
-                let rel = relative_to_folder(&t, &open.folder).unwrap_or_else(|| t.display().to_string());
+            for (t, below) in out.targets.into_iter().zip(out.below) {
+                let rel = below.unwrap_or_else(|| t.display().to_string());
                 open.picker.add(t, rel);
             }
         }
@@ -213,7 +247,7 @@ impl MarkiseApp {
         match (open.pick_for.clone(), file) {
             (PickFor::Image(at), Some(file)) => self.replace_image_with(at, file),
             (PickFor::Image(_), None) => {}
-            (PickFor::Form(request), file) => self.image_for_form(request, file, &open.folder),
+            (PickFor::Form(request, form), file) => self.image_for_form(request, form, file, &open.folder),
         }
         if let Some(d) = &mut self.doc
             && matches!(open.pick_for, PickFor::Image(_))
@@ -222,47 +256,45 @@ impl MarkiseApp {
         }
     }
 
-    /// What was chosen for a form: a file from outside its folder is copied by the attachment rules first.
-    fn image_for_form(&mut self, request: FileRequest, file: Option<PathBuf>, folder: &Path) {
+    /// What was chosen for a form, if it is still there. By the attachment rules on a worker, which also
+    /// says the path below its folder: a file from outside is copied in first.
+    fn image_for_form(&mut self, request: FileRequest, form: FormMark, file: Option<PathBuf>, folder: &Path) {
         let Some(file) = file else {
-            if let Some(open) = self.block_form.open.as_mut() {
+            if let Some(open) = self.form_if_still(form) {
                 open.deliver_file(request, None);
             }
             return;
         };
-        if let Some(rel) = relative_to_folder(&file, folder) {
-            if let Some(open) = self.block_form.open.as_mut() {
-                open.deliver_file(request, Some(rel));
-            }
+        if self.form_if_still(form).is_none() {
             return;
         }
-        let Some(req) = self.attach_request() else { return };
+        let Some(mut req) = self.attach_request() else { return };
+        req.below = Some(folder.to_path_buf());
         let stage = self.job(req, vec![Item::File(file)]);
-        self.image_edit.form_copying = Some((request, folder.to_path_buf(), stage));
+        self.image_edit.form_copying.push(FormCopy { request, form, stage });
     }
 
     fn image_form_copy_poll(&mut self) {
-        let Some((request, folder, mut stage)) = self.image_edit.form_copying.take() else {
-            return;
-        };
-        let Some(out) = self.job_outcome(&mut stage) else {
-            self.image_edit.form_copying = Some((request, folder, stage));
-            return;
-        };
-        let target = out.targets.first();
-        let rel = target.and_then(|t| relative_to_folder(t, &folder));
-        let Some(open) = self.block_form.open.as_mut() else {
-            return;
-        };
-        if let Some(why) = out.errors.first() {
-            open.set_message(why.clone());
-        } else if let (Some(t), None) = (target, &rel) {
-            open.set_message(format!(
-                "{} is not inside the document's folder, so it was not used.",
-                t.display()
-            ));
+        for mut copy in std::mem::take(&mut self.image_edit.form_copying) {
+            let Some(out) = self.job_outcome(&mut copy.stage) else {
+                self.image_edit.form_copying.push(copy);
+                continue;
+            };
+            // the form or the document it was for is gone: its numbers mean nothing to another
+            let Some(open) = self.form_if_still(copy.form) else {
+                continue;
+            };
+            let rel = out.below.first().cloned().flatten();
+            if let Some(why) = out.errors.first() {
+                open.set_message(why.clone());
+            } else if let (Some(t), None) = (out.targets.first(), &rel) {
+                open.set_message(format!(
+                    "{} is not inside the document's folder, so it was not used.",
+                    t.display()
+                ));
+            }
+            open.deliver_file(copy.request, rel);
         }
-        open.deliver_file(request, rel);
     }
 
     /// Why no image can change now, as the banner says it.

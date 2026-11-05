@@ -198,6 +198,8 @@ newest first, with at most 64 waiting, and at most 256 are kept. Workers end whe
 **A choice.** An image inside the folder is linked where it is. Browse… and a dropped file go by the attachment rules (the Files & Images preference); a dropped file joins the list, selected, and is not yet chosen. A
 form takes a path relative to its folder as before: a file from outside is first copied in by those rules, and if they leave it outside, the form says so. A document never saved has no folder and goes to the system's dialog.
 
+A form's request is numbered by that form, so a result carries which form it was for and is dropped if another is open by then. Paths below the folder are worked out on the worker.
+
 **The mark.** `destinations_in` reads the `](…)` of the text once, on opening, for "in this document". It is a cheap look and counts code too; it decides nothing.
 
 ## Consequences

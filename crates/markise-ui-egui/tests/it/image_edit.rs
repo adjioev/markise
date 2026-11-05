@@ -273,6 +273,10 @@ fn a_copy_finishing_in_a_review_mode_replaces_nothing() {
     }
     h.step();
     h.step();
+    common::run(&mut h);
+    h.get_by_label("Browse…").click();
+    h.step();
+    h.step();
     assert!(!h.state().background_settled(), "the copy is under way");
     h.state_mut().set_comment_view(CommentView::Final);
     h.step();

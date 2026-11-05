@@ -32,6 +32,34 @@ pub struct ImageListing {
     pub unreadable: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stop {
+    End,
+    Cancelled,
+    Bound,
+}
+
+/// What `entries` gives, until it ends, `cancel` is set or `seen` passes `max`: looked at one by one.
+fn take_bounded<T>(
+    entries: impl Iterator<Item = T>,
+    cancel: &AtomicBool,
+    seen: &mut usize,
+    max: usize,
+) -> (Vec<T>, Stop) {
+    let mut out = Vec::new();
+    for e in entries {
+        if cancel.load(Ordering::Relaxed) {
+            return (out, Stop::Cancelled);
+        }
+        *seen += 1;
+        if *seen > max {
+            return (out, Stop::Bound);
+        }
+        out.push(e);
+    }
+    (out, Stop::End)
+}
+
 /// The images in `root` and below it, breadth first and by name within a folder. Hidden files and folders
 /// are left out. A link counts only when it is to a file inside `root`; a link to a folder is not followed.
 pub fn list_images(root: &Path, cancel: &AtomicBool) -> ImageListing {
@@ -55,15 +83,16 @@ pub fn list_images_within(root: &Path, cancel: &AtomicBool, max_images: usize, m
                 out.unreadable += 1;
                 continue;
             };
-            let mut entries: Vec<_> = read.flatten().collect();
+            // a folder may hold millions: both bounds count while it is read, not after
+            let (mut entries, stop) = take_bounded(read.flatten(), cancel, &mut seen, max_entries);
+            match stop {
+                Stop::Cancelled => return out,
+                Stop::Bound => out.truncated = true,
+                Stop::End => {}
+            }
             entries.sort_by_key(|e| e.file_name());
             for e in entries {
                 if cancel.load(Ordering::Relaxed) {
-                    return out;
-                }
-                seen += 1;
-                if seen > max_entries {
-                    out.truncated = true;
                     return out;
                 }
                 let Some(name) = e.file_name().to_str().map(str::to_string) else {
@@ -95,6 +124,9 @@ pub fn list_images_within(root: &Path, cancel: &AtomicBool, max_images: usize, m
                     out.images.push(ListedImage { path, rel });
                 }
             }
+            if stop == Stop::Bound {
+                return out;
+            }
         }
         next.sort();
         level = next;
@@ -121,4 +153,38 @@ pub fn destinations_in(text: &str) -> HashSet<&str> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// With no end, as a folder of millions nearly has: a bound or a cancel has to come from within.
+    #[test]
+    fn a_folder_is_read_only_as_far_as_the_bounds_allow() {
+        let no = AtomicBool::new(false);
+        let mut asked = 0usize;
+        let endless = std::iter::repeat_with(|| {
+            asked += 1;
+            0u8
+        });
+        let mut seen = 0;
+        let (got, stop) = take_bounded(endless, &no, &mut seen, 5);
+        assert_eq!((got.len(), stop), (5, Stop::Bound));
+        assert_eq!(asked, 6);
+
+        // cancelled during the reading
+        let cancel = AtomicBool::new(false);
+        let mut n = 0;
+        let endless = std::iter::repeat_with(|| {
+            n += 1;
+            if n == 3 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            0u8
+        });
+        let mut seen = 0;
+        let (got, stop) = take_bounded(endless, &cancel, &mut seen, usize::MAX);
+        assert_eq!((got.len(), stop), (2, Stop::Cancelled));
+    }
 }
