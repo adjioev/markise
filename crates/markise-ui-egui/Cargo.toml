@@ -18,6 +18,7 @@ markise-layout.workspace = true
 markise-text.workspace = true
 markise-blocks.workspace = true
 markise-package.workspace = true
+markise-web-render.workspace = true
 schema-form-core.workspace = true
 egui-schema-form.workspace = true
 markise-engine.workspace = true

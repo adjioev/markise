@@ -34,7 +34,9 @@ mod code_tools;
 mod comment_place;
 mod comment_presence;
 mod scrollbar;
+mod site_board;
 pub use code_tools::{LangEdit, LangItem, ShownTools, lang_matches};
+pub use site_board::{HelperSource, SiteBoard, system_web_helpers};
 
 const SCROLLBAR_W: f32 = 10.0;
 /// Caret blink half-period (seconds).
@@ -243,6 +245,11 @@ pub struct DocViewer {
     /// The document's block package, when it has one in use: its blocks get a button.
     block_index: Option<std::sync::Arc<markise_package::PackageIndex>>,
     block_icons: std::sync::Arc<block_tools::IconBoard>,
+    /// What draws blocks with no view, for a package in use (ADR 0023).
+    block_site: block_tools::SiteSlot,
+    block_fields: Option<std::sync::Arc<markise_engine::block_view::PackageViews>>,
+    /// The document's change count its language was last read at.
+    site_read_at: u64,
     /// The pointer is on a block's control or its first row, this frame: not text.
     pointer_on_block_control: bool,
     /// A press on the scrollbar (issue #123).
@@ -293,6 +300,9 @@ impl DocViewer {
             refocus: false,
             block_index: None,
             block_icons: Default::default(),
+            block_site: Default::default(),
+            block_fields: None,
+            site_read_at: u64::MAX,
             pointer_on_block_control: false,
             view_press: None,
             caret_screen: None,
@@ -959,6 +969,7 @@ impl DocViewer {
 
         // keyboard scrolling, the scrollbar or a caret / find reveal in this frame took over
         self.smooth.follow(self.ed.view.source_anchor(), false);
+        self.site_before_frame(&ctx);
         // ---- layout of the viewport (+ half a screen of margin)
         let visible = {
             let view = &mut self.ed.view;
@@ -2457,8 +2468,8 @@ pub(crate) fn paint_layout(
                     );
                 }
             }
-            // a package's icon: the block tools draw it, with the package's pictures
-            Prim::Icon { .. } => {}
+            // a package's icon and a block's picture: the block tools draw them, as they have them
+            Prim::Icon { .. } | Prim::Picture { .. } => {}
             Prim::Image { rect, src, placeholder } => {
                 let r = rect.translate(off);
                 match images.texture(src) {

@@ -272,8 +272,11 @@ impl MarkiseApp {
     /// Per frame, before the document is drawn. Closes what lost its document, package or block.
     pub(super) fn block_form_panel(&mut self, ui: &mut egui::Ui) {
         let index = self.block_package().map(|p| p.index.clone());
+        let package = self.block_package().cloned();
         if let Some(d) = self.doc.as_mut() {
             d.viewer.set_block_index(index.clone());
+            d.viewer
+                .set_block_site(package.as_ref(), self.web_helpers.as_ref(), ui.ctx());
         }
         self.block_form.assets.poll(ui.ctx());
         self.block_icons_update(ui.ctx());

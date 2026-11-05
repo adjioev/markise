@@ -36,6 +36,7 @@ mod safety;
 mod select_all;
 mod side_by_side;
 mod sidebar;
+mod site_blocks;
 mod smoke;
 mod source_editor;
 mod tables;

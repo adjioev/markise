@@ -162,6 +162,11 @@ pub enum Prim {
         b: Pos2,
         stroke: Stroke,
     },
+    /// A block as its site draws it ([`crate::native::SitePicture`]): drawn by the host, which has it.
+    Picture {
+        rect: Rect,
+        id: u64,
+    },
     /// A package's icon on a native block ([`crate::native`]): drawn by the host, which has it.
     Icon {
         rect: Rect,
@@ -264,6 +269,8 @@ pub struct BlockLayout {
     pub card_top: Option<(Pos2, Pos2)>,
     /// The warning on the card this item opens (item-local).
     pub warning: Option<Rect>,
+    /// The quiet reason this card shows no picture (item-local).
+    pub note: Option<Rect>,
 }
 
 impl BlockLayout {
@@ -284,6 +291,11 @@ impl BlockLayout {
             b += std::mem::size_of::<CommentHit>() + c.text.len();
         }
         b
+    }
+
+    /// It shows a block as a picture (ADR 0023).
+    pub fn has_picture(&self) -> bool {
+        self.prims.iter().any(|p| matches!(p, Prim::Picture { .. }))
     }
 
     /// Target of the link at item-local position `pos`, if any.
@@ -338,6 +350,10 @@ pub struct LayoutParams<'a> {
     pub native: Option<crate::native::NativeParams<'a>>,
     /// Why the block this item opens is outside what it declares (ADR 0021).
     pub warnings: Option<&'a [String]>,
+    /// The block's picture, instead of what it holds (ADR 0023).
+    pub site: Option<crate::view::SiteLook>,
+    /// Why the card this item opens shows no picture.
+    pub note: Option<&'a str>,
 }
 
 /// How review marks (CriticMarkup, ADR 0012) are shown in the rendered view (issue #88). Display
@@ -2106,6 +2122,7 @@ pub fn layout_item(
     let mut toggle = None;
     let mut empty_anchor = None;
     let mut warning = None;
+    let mut note = None;
 
     if let Some((ai, title)) = &alert_title {
         let mut st = Style::base(t.font_size, line_px, color(t.alert[*ai]));
@@ -2536,7 +2553,20 @@ pub fn layout_item(
                 p.review,
             );
         }
+        // no height of its own: the picture above it is the block
+        ItemKind::ContainerMarker { close: true } if p.site.is_some() => {}
         ItemKind::ContainerMarker { close: true } => y += card_inset,
+        ItemKind::ContainerMarker { close: false } if p.site.is_some() => {
+            if let (Some(crate::view::SiteLook::Picture(picture)), Some(&(left, right))) = (p.site, cards.last()) {
+                let w = (p.width - left - right).max(40.0);
+                let h = picture.height * w / picture.width.max(1.0);
+                out.prims.push(Prim::Picture {
+                    rect: Rect::from_min_size(pos2(left, y), vec2(w, h)),
+                    id: picture.id,
+                });
+                y += h;
+            }
+        }
         ItemKind::ContainerMarker { close: false } => {
             // the name and arguments as written: uninterpreted, cut for display at a size that
             // lays out at once (a marker is one item, not segmented like a long paragraph)
@@ -2592,6 +2622,12 @@ pub fn layout_item(
             out.text(pos2(label_x, y), g, Vec::new(), FragmentId::label());
             if let Some(why) = why {
                 warning = warning_badge(&mut out, shaper, t, why, pos2(label_x + label_w + size, y), row_right);
+            } else if let Some(text) = p.note {
+                let at = pos2(label_x + label_w + size, y);
+                let st = Style::base(size, size * 1.4, color(t.meta_block.text));
+                let g = one_row(shaper, &card_label(text, ""), &st, (row_right - at.x).max(size * 2.0));
+                note = Some(Rect::from_min_size(at, g.size()));
+                out.text(at, g, Vec::new(), FragmentId::label());
             }
             y += h;
         }
@@ -2887,6 +2923,10 @@ pub fn layout_item(
         if opens {
             card_top = Some((pos2(l, top), pos2(r, top)));
         }
+        // a picture draws its own edges, whatever it wants them to be
+        if own && p.site.is_some() {
+            continue;
+        }
         if own && let Some(n) = p.native {
             native_chrome(
                 &mut deco,
@@ -2947,6 +2987,7 @@ pub fn layout_item(
         diagram_controls,
         card_top,
         warning,
+        note,
     }
 }
 

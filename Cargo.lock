@@ -3019,6 +3019,7 @@ dependencies = [
  "markise-package",
  "markise-text",
  "markise-theme",
+ "markise-web-render",
  "memmap2",
  "memory-stats",
  "resvg",

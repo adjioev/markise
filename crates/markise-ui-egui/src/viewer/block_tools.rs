@@ -8,10 +8,11 @@ use egui::accesskit::Role;
 use egui::{Pos2, Rect, Sense, Stroke, TextureId, Ui, WidgetInfo, pos2, vec2};
 use markise_engine::block_view::PackageViews;
 use markise_layout::block::Prim;
-use markise_layout::{BlockLook, BlockViewMode, BlockViews, ItemKind, Visible};
-use markise_package::PackageIndex;
+use markise_layout::{BlockLook, BlockViewMode, BlockViews, ItemKind, SiteQuery, SiteShot, Visible};
+use markise_package::{InstalledPackage, PackageIndex};
 use markise_theme::Theme;
 
+use super::site_board::{HelperSource, SiteBoard};
 use super::{DocViewer, ViewerOutput};
 
 /// What the app knows about the pictures of block icons. The layout asks without blocking; the app
@@ -96,10 +97,20 @@ impl IconBoard {
     }
 }
 
+/// Where the board for the package in use is, if any: the view holds it through its views.
+pub(super) type SiteSlot = Arc<Mutex<Option<Arc<SiteBoard>>>>;
+
 /// A package's views with its pictures.
 struct ViewsWithIcons {
     views: Arc<PackageViews>,
     icons: Arc<IconBoard>,
+    site: SiteSlot,
+}
+
+impl ViewsWithIcons {
+    fn board(&self) -> Option<Arc<SiteBoard>> {
+        self.site.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
 }
 
 impl BlockViews for ViewsWithIcons {
@@ -115,12 +126,106 @@ impl BlockViews for ViewsWithIcons {
     fn icon_ready(&self, icon: &str) -> bool {
         self.icons.ready(icon)
     }
+    fn has_site(&self) -> bool {
+        self.board().is_some_and(|b| b.usable())
+    }
+    fn site_shot(&self, query: &SiteQuery<'_>) -> (u64, SiteShot) {
+        self.board().map_or((0, SiteShot::Pending(None)), |b| b.shot(query))
+    }
+    fn site_seen(&self, key: u64) {
+        if let Some(b) = self.board() {
+            b.seen(key);
+        }
+    }
     fn look(&self, name: &str, args: &str, source: &str) -> BlockLook {
         self.views.look(name, args, source)
     }
 }
 
 impl DocViewer {
+    /// The package whose blocks can be drawn by its code; `None` when none is in use. No helper starts
+    /// here: only when a block on screen needs one. Called per frame: a comparison when nothing changed.
+    pub fn set_block_site(
+        &mut self,
+        package: Option<&InstalledPackage>,
+        helpers: Option<&HelperSource>,
+        ctx: &egui::Context,
+    ) {
+        let folder = self.ed.path().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+        let current = self.block_site.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let fine = match (package, &current) {
+            (None, None) => true,
+            (Some(p), Some(b)) => b.is_for(p, folder.as_ref()),
+            _ => false,
+        };
+        if fine {
+            return;
+        }
+        let board = package
+            .zip(self.block_fields.clone())
+            .map(|(package, views)| Arc::new(SiteBoard::new(views, package.clone(), folder, helpers, ctx)));
+        *self.block_site.lock().unwrap_or_else(|e| e.into_inner()) = board;
+        self.site_read_at = u64::MAX;
+        self.ed.view.site_changed();
+    }
+
+    /// A block on screen is being drawn: its picture is still to come (tests).
+    pub fn site_busy(&self) -> bool {
+        let board = self.block_site.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        board.is_some_and(|b| b.is_busy())
+    }
+
+    /// Before the frame is laid out: what came from the helper, and the document's language.
+    pub(super) fn site_before_frame(&mut self, ctx: &egui::Context) {
+        let Some(board) = self.block_site.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+            return;
+        };
+        let changes = self.ed.changes();
+        let mut again = false;
+        if self.site_read_at != changes {
+            self.site_read_at = changes;
+            let language = markise_engine::block_page::document_language(self.ed.session.text());
+            again |= board.set_language(language);
+        }
+        again |= board.take_arrivals(ctx);
+        if again {
+            self.ed.view.site_changed();
+        }
+    }
+
+    fn paint_pictures(&self, ui: &Ui, v: &Visible, surface: Rect, left: f32, board: &SiteBoard) {
+        let origin = vec2(left, surface.top() + v.y);
+        for p in &v.layout.prims {
+            let Prim::Picture { rect, id } = p else { continue };
+            let r = rect.translate(origin);
+            let painter = ui.painter_at(surface);
+            match board.texture(*id) {
+                Some(texture) => {
+                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                    painter.image(texture, r, uv, egui::Color32::WHITE);
+                }
+                None => {
+                    painter.rect_filled(r, 4.0, ui.visuals().faint_bg_color);
+                }
+            }
+        }
+    }
+
+    /// The quiet reason a card shows no picture, on hover, and for a screen reader.
+    fn note_tip(&self, ui: &mut Ui, v: &Visible, surface: Rect, left: f32) {
+        let Some(rect) = v.layout.note else { return };
+        let Some(why) = self.ed.view.block_note(v.idx) else {
+            return;
+        };
+        let r = rect.translate(vec2(left, surface.top() + v.y));
+        if !surface.contains_rect(r) {
+            return;
+        }
+        let id = ui.scope_id().with(("markise-block-note", v.idx));
+        let resp = ui.interact(r, id, Sense::hover()).on_hover_text(&*why);
+        resp.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("Not drawn by its site's code: {why}")));
+    }
+
     fn paint_icons(&self, ui: &Ui, v: &Visible, surface: Rect, left: f32) {
         let origin = vec2(left, surface.top() + v.y);
         for p in &v.layout.prims {
@@ -228,6 +333,8 @@ impl DocViewer {
             return;
         }
         self.block_icons.clear();
+        // what it drew is another package's
+        *self.block_site.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let fields = index
             .clone()
             .map(|i| Arc::new(PackageViews::new(i, crate::block_form::LANGUAGE)));
@@ -235,8 +342,10 @@ impl DocViewer {
             Arc::new(ViewsWithIcons {
                 views,
                 icons: self.block_icons.clone(),
+                site: self.block_site.clone(),
             })
         });
+        self.block_fields = fields.clone();
         self.ed.view.set_block_views(views);
         self.ed.set_block_fields(fields);
         self.block_index = index;
@@ -266,7 +375,15 @@ impl DocViewer {
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let model = self.ed.view.model().clone();
         let side = theme.line_px().min(22.0);
+        let board = self.block_site.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(b) = &board {
+            b.tell_client();
+        }
         for v in visible {
+            if let Some(b) = &board {
+                self.paint_pictures(ui, v, surface, left, b);
+                self.note_tip(ui, v, surface, left);
+            }
             self.paint_icons(ui, v, surface, left);
             self.warning_tip(ui, v, surface, left);
             let opener = model
@@ -304,6 +421,12 @@ impl DocViewer {
                 let m = r.translate(vec2(-(side + 4.0), 0.0));
                 self.block_view_button(ui, m, surface, start, next, &c.name, out);
             }
+            // over a picture the buttons need a ground of their own, and only show when asked for
+            let over_picture = v.layout.has_picture();
+            if over_picture && pointer.is_some_and(|p| row.contains(p)) {
+                let ground = ui.visuals().window_fill().gamma_multiply(0.85);
+                ui.painter_at(surface).rect_filled(r, 4.0, ground);
+            }
             let label = format!("Edit Block: {}", c.name);
             let resp = ui
                 .interact(r, ui.scope_id().with(("markise-block-edit", start)), Sense::click())
@@ -321,6 +444,9 @@ impl DocViewer {
             let painter = ui.painter_at(surface);
             if resp.hovered() {
                 painter.rect_filled(r, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+            }
+            if over_picture && !pointer.is_some_and(|p| row.contains(p)) {
+                continue;
             }
             // a pencil: a slanted stroke and its tip
             let s = side * 0.28;

@@ -171,6 +171,8 @@ fn main() -> eframe::Result {
         welcome: true,
         // the update check's HTTP client (issue #70; off in debug builds unless enabled)
         updates: update_client::source(),
+        // blocks with no view, drawn by their site's code in a helper (ADR 0023)
+        web_helpers: markise_ui_egui::viewer::system_web_helpers(),
         ..Default::default()
     };
     let mut viewport = eframe::egui::ViewportBuilder::default()
