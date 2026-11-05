@@ -514,7 +514,17 @@ impl FormatDoc for Document {
                     let src = lines[i].start + (k - starts[i]).min(lines[i].len());
                     (src - base) as u32
                 };
-                neutral_tree(&content, &nodes, &map)
+                let mut rich = neutral_tree(&content, &nodes, &map);
+                if content.ends_with('}')
+                    && self.hides_block_id_at(lines[0].start)
+                    && let Some(cut) = self.block_id_cut(&content)
+                    && let Some(last) = lines.last()
+                {
+                    let in_line = cut - starts[starts.len() - 1];
+                    let (a, b) = ((last.start + in_line - base) as u32, (last.end - base) as u32);
+                    hide_tail(&mut rich, a, b, content[cut..].to_string());
+                }
+                rich
             }
             InlineSource::Cell { span, cap } => {
                 let raw = span.slice(text);
@@ -660,6 +670,12 @@ impl FormatDoc for Document {
             }
             content.push_str(&text[l.start + origin..l.end + origin]);
         }
+        // what shows: an id is no part of the heading's name, in the outline or in its anchor
+        if self.hides_block_id_at(b.lines.first().map_or(at, |l| l.start + origin))
+            && let Some(cut) = self.block_id_cut(&content)
+        {
+            content.truncate(cut);
+        }
         let nodes = parse_inlines(&content, self.options(), &self.ref_context().inline);
         let plain = plain_text(&content, &nodes);
         let key = crate::slug::slug(&plain);
@@ -770,6 +786,48 @@ fn cap_str(s: &str, cap: usize) -> (&str, bool) {
 
 /// Neutral inline tree of `nodes` parsed from `content`; `map` turns content offsets into
 /// base-relative source offsets.
+/// Makes the end of a leaf from `a` to `b`, plain text, a hidden note: shown only with the caret
+/// on it, like other marks (ADR 0018). Anything else there (an id inside emphasis or code, an
+/// escape) stays what it is.
+fn hide_tail(rich: &mut RichInline, a: u32, b: u32, raw: String) {
+    // a tail of plain text nodes, the first of them perhaps only in part
+    let mut from = rich.nodes.len();
+    for n in rich.nodes.iter().rev() {
+        if n.source.end <= a {
+            break;
+        }
+        let plain =
+            n.kind == markise_doc::InlineKind::Text && (n.text.end - n.text.start) == (n.source.end - n.source.start);
+        if !plain {
+            return;
+        }
+        from -= 1;
+    }
+    if from == rich.nodes.len() || rich.nodes.last().is_none_or(|n| n.source.end != b) {
+        return;
+    }
+    rich.nodes.truncate(from + 1);
+    let n = rich.nodes.last_mut().expect("the first of the tail");
+    if n.source.start < a {
+        let keep = a - n.source.start;
+        n.source.end = a;
+        n.content.end = a;
+        n.text.end = n.text.start + keep;
+    } else {
+        rich.nodes.pop();
+    }
+    let start = rich.text.len() as u32;
+    rich.text.push_str(&raw);
+    rich.nodes.push(markise_doc::InlineNode {
+        kind: markise_doc::InlineKind::Comment,
+        source: a..b,
+        content: a..b,
+        markers: std::iter::once(a..b).collect(),
+        children: Vec::new(),
+        text: start..rich.text.len() as u32,
+    });
+}
+
 fn neutral_tree(content: &str, nodes: &[Inline], map: &dyn Fn(usize) -> u32) -> RichInline {
     let mut text = String::new();
     let nodes = neutral_nodes(content, nodes, map, &mut text);

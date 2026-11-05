@@ -293,6 +293,7 @@ impl RichInline {
         fn go(r: &RichInline, nodes: &[InlineNode], out: &mut String) {
             for n in nodes {
                 match &n.kind {
+                    InlineKind::Comment => {}
                     InlineKind::Break { .. } => out.push(' '),
                     InlineKind::Image { .. } => out.push_str(r.value(n)),
                     _ if n.children.is_empty() => out.push_str(r.value(n)),

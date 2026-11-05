@@ -915,6 +915,82 @@ impl Document {
         path
     }
 
+    /// [`Document::tree`] as exports read it: a hidden id is left out of what shows ([`hidden_block_id`],
+    /// ADR 0018). The document itself stays as it is. `None`: the document has no directive and no
+    /// such id, so its top-level blocks are the same thing.
+    pub fn export_tree(&self) -> Option<Vec<Block>> {
+        (self.has_directives() || self.text().contains("{#")).then(|| self.tree_for_export())
+    }
+
+    /// See [`Document::export_tree`], whatever the document holds.
+    pub fn tree_for_export(&self) -> Vec<Block> {
+        fn visit(doc: &Document, b: &mut Block, in_block: bool) {
+            match &b.kind {
+                BlockKind::Heading { .. } if heading_can_hide_id(b) => doc.drop_block_id(b),
+                BlockKind::ListItem { .. } if in_block => {
+                    if let Some(first) = b.children.first_mut()
+                        && matches!(first.kind, BlockKind::Paragraph)
+                    {
+                        doc.drop_block_id(first);
+                    }
+                }
+                _ => {}
+            }
+            let in_block = in_block || matches!(b.kind, BlockKind::Directive { .. });
+            for c in &mut b.children {
+                visit(doc, c, in_block);
+            }
+        }
+        let mut tree = self.tree();
+        for b in &mut tree {
+            visit(self, b, false);
+        }
+        tree
+    }
+
+    fn drop_block_id(&self, b: &mut Block) {
+        let content = b.content(self.text());
+        if let Some(cut) = self.block_id_cut(&content)
+            && let Some(last) = b.lines.last_mut()
+        {
+            let line_start = content.rfind('\n').map_or(0, |i| i + 1);
+            last.end = last.start + (cut - line_start);
+        }
+    }
+
+    /// Where the hidden id of a leaf with this content starts, for every reader alike: the exact form
+    /// on its last line ([`hidden_block_id`]), and plain text when parsed, so that a code span or
+    /// emphasis ending there stays whole.
+    pub(crate) fn block_id_cut(&self, content: &str) -> Option<usize> {
+        let line_start = content.rfind('\n').map_or(0, |i| i + 1);
+        let cut = line_start + hidden_block_id(&content[line_start..])?;
+        let nodes = inline::parse_inlines(content, self.options(), &self.ref_context().inline);
+        let plain = (nodes.iter().rev())
+            .take_while(|n| n.span.end > cut)
+            .all(|n| matches!(n.kind, inline::InlineKind::Text));
+        plain.then_some(cut)
+    }
+
+    /// Whether a trailing id of the leaf starting at `base` is hidden: of an ATX heading anywhere, and
+    /// of the first paragraph of a list item inside a `:::` block (ADR 0018).
+    pub(crate) fn hides_block_id_at(&self, base: usize) -> bool {
+        let path = self.block_path_at(base);
+        let Some(leaf) = self.block_at_path_rel(&path).map(|(b, _)| b) else {
+            return false;
+        };
+        match leaf.kind {
+            BlockKind::Heading { .. } => heading_can_hide_id(leaf),
+            BlockKind::Paragraph => {
+                let first = path.last() == Some(&0);
+                let parent = path.split_last().and_then(|(_, p)| self.block_at_path_rel(p));
+                first
+                    && parent.is_some_and(|(b, _)| matches!(b.kind, BlockKind::ListItem { .. }))
+                    && !self.directives_at(base).is_empty()
+            }
+            _ => false,
+        }
+    }
+
     /// Resolves a block path produced by [`Document::block_path_at`]: an owned copy of that
     /// block (and its descendants) with absolute spans.
     pub fn block_at_path(&self, path: &[usize]) -> Option<Block> {
@@ -1085,4 +1161,33 @@ pub fn debug_tree(doc: &Document) -> String {
         });
     }
     out
+}
+
+/// Where a trailing `{#id}` starts in `s`: an id with no space and no brace. Whether it is
+/// escaped is the caller's question.
+pub fn block_id_start(s: &str) -> Option<usize> {
+    let body = s.strip_suffix('}')?;
+    let at = body.rfind("{#")?;
+    let id = &body[at + 2..];
+    (!id.is_empty() && !id.contains(char::is_whitespace) && !id.contains('{')).then_some(at)
+}
+
+/// What of the line `s` to hide as an id, `Some(where it starts)`: a `{#id}` at its very end, at its
+/// start or after a blank, and nothing else. The id has no blank and no brace. An escaped one is text.
+pub fn hidden_block_id(s: &str) -> Option<usize> {
+    let at = block_id_start(s)?;
+    if s[at + 2..s.len() - 1].contains('}') {
+        return None;
+    }
+    let before = &s[..at];
+    if !before.is_empty() && !before.ends_with([' ', '\t']) {
+        return None;
+    }
+    Some(before.trim_end_matches([' ', '\t']).len())
+}
+
+/// An ATX heading with nothing after its text: no closing hashes behind the id. A setext heading
+/// keeps its text as written.
+fn heading_can_hide_id(b: &Block) -> bool {
+    matches!(b.kind, BlockKind::Heading { setext: false, .. }) && b.lines.last().is_some_and(|l| l.end == b.span.end)
 }

@@ -174,6 +174,44 @@ long paragraph; the source keeps it whole.
 Unpaired markers export as the text they are. Exporters read `Document::tree`.
 HTML's size limit and cancellation checkpoints also run between the blocks inside a block.
 
+### A trailing id
+
+A heading, or the first paragraph of a list item inside a `:::` block, can end with ` {#id}`, a stable
+name for that part (ADR 0020). Readers of the rendered view are not meant to read it.
+
+**The exact form.** `{#` at the very end of the line, at its start or after a blank, with an id of no
+blank and no brace, then `}` and nothing else. So `Title{#q}`, `\\{#q}`, `{# q}`, `{#}`, `{#q} more` and `{#q} ##`
+stay text, as does an id inside code or emphasis.
+
+One check decides for every reader (screen, outline, counts, exports): the form above, on text that
+parses as plain text there, so `` ## `literal {#id`} `` keeps its code span whole.
+
+**Where.** On an ATX heading in any document, inside a block or not: real documents keep their
+section ids on headings outside any block. On a list item only inside a paired `:::` block, since `{#x}` at
+the end of an item in ordinary prose may well be text. A setext heading, a plain paragraph and a table
+cell keep it as text everywhere. This changes how such a heading looks in documents that have nothing to do with
+packages, and nothing else about them.
+
+- **On screen.** The format's inline tree holds it as a hidden note (`InlineKind::Comment`, as other
+  non-rendered annotations), from the blanks before it to the end of the line. With the caret on it, or
+  touching it at the end of the text, it shows as muted source like the marks of emphasis do; a caret
+  elsewhere hides it. Typing at the end of the text goes before it.
+- **Nothing else there.** A leaf of only an id keeps a caret place like an empty one, so an arrow or a
+  click still lands on `- {#a}`, and the caret there shows the id.
+- **The file.** No bytes change, and Source mode shows it as written. A selection copies source, here
+  as everywhere. The field model reads the plain tree, so `## {#q}`, a heading of only an id, shows
+  nothing and keeps its id for the model.
+- **Counts and search.** It is no word or character. Search runs on the source, as it does for all
+  hidden marks: a query can find it, and it gets no highlight while it is hidden.
+- **Outline and anchors.** A heading's entry and its anchor come from what shows, so `## Intro {#x}` is
+  anchored `intro`, as `## Intro` is.
+- **Exports.** `Document::export_tree` leaves it out, so HTML, PDF, PNG and Pandoc do not show it.
+
+**Not its anchor.** The id does not become the heading's anchor, in exports or in internal links: anchors
+here are lowercase and unique per document through the slug tracker, ids are case-sensitive and may repeat,
+and a document's existing links to its slugs would change. So today's slug stays, computed from what
+shows, and a later change can add the id as a second anchor.
+
 ## Consequences
 
 - Round trip is byte-exact by construction: the text remains the source of truth, and markers

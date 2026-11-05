@@ -443,6 +443,13 @@ pub fn reveal_set(rich: &RichInline, caret: u32) -> Vec<Range<u32>> {
     out
 }
 
+/// Nothing of `rich` shows: all its nodes are hidden notes and the caret reveals none of them.
+fn only_hidden(rich: &RichInline, focus: Option<&ItemFocus>) -> bool {
+    !rich.nodes.is_empty()
+        && rich.nodes.iter().all(|n| n.kind == InlineKind::Comment)
+        && focus.is_none_or(|f| f.reveal.is_empty())
+}
+
 /// The glyph a collapsed comment shows in the text (ADR 0012).
 pub const COMMENT_GLYPH: &str = "\u{1F4AC}";
 
@@ -2126,13 +2133,18 @@ pub fn layout_item(
                 content_lines = content_lines.get(1..).unwrap_or(&[]);
             }
             // (lines joined with `\n` are empty only for no lines or one empty line)
-            let empty = content_lines.is_empty() || (content_lines.len() == 1 && content_lines[0].is_empty());
+            let mut empty = content_lines.is_empty() || (content_lines.len() == 1 && content_lines[0].is_empty());
+            let rich = (!empty).then(|| doc.inline(InlineSource::Lines(content_lines), origin));
+            // a leaf of nothing but a hidden note is a place for the caret like an empty one, until
+            // the caret there shows the note
+            if rich.as_ref().is_some_and(|r| only_hidden(r, p.focus)) {
+                empty = true;
+            }
             if empty && item.segment.is_none() {
                 let rel = content_lines.first().map_or(0, |l| l.start.saturating_sub(origin)) as u32;
                 empty_anchor = Some((Rect::from_min_size(pos2(x, y), vec2(0.0, line_px)), rel));
             }
-            if !empty {
-                let rich = doc.inline(InlineSource::Lines(content_lines), origin);
+            if let Some(rich) = rich.filter(|_| !empty) {
                 let mut st = Style::base(t.font_size, line_px, text_color);
                 st.italic = in_quote && t.quote_italic;
                 let mut b = InlineBuilder::new(t, model, true)

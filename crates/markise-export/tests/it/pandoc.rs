@@ -149,6 +149,18 @@ fn pandoc_errors_carry_stderr() {
     }
 }
 
+/// An id shows in no heading and in no list item of a block (ADR 0018).
+#[test]
+fn a_hidden_id_is_left_out() {
+    let doc = model(":::q\n\n## Asked {#q}\n\n- [x] One {#a1}\n\n:::\n\n## Out {#o}\n");
+    let ast = markise_export::pandoc::to_pandoc_json(&doc, &[1, 23]).to_string();
+    assert!(!ast.contains("{#q}") && !ast.contains("{#a1}"), "{ast}");
+    assert!(
+        ast.contains("Asked") && ast.contains("One") && ast.contains("Out") && !ast.contains("{#o}"),
+        "{ast}"
+    );
+}
+
 /// `:::` blocks (ADR 0018): a `Div` with the name and arguments as attributes and a title.
 #[test]
 fn a_directive_is_a_div() {

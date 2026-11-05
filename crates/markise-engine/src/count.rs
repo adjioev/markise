@@ -241,6 +241,7 @@ fn rendered(r: &RichInline, nodes: &[InlineNode], base: usize, clip: Option<&Ran
             | InlineKind::Image { .. }
             | InlineKind::FootnoteRef { .. }
             | InlineKind::RawInline
+            | InlineKind::Comment
             | InlineKind::Critic(CriticKind::Delete | CriticKind::Old | CriticKind::Comment) => {}
             InlineKind::Break { hard: false } => out.push(' '),
             InlineKind::Break { hard: true } => out.push('\n'),
@@ -1079,6 +1080,21 @@ mod tests {
         c.reset(&doc);
         assert!(c.fill(&doc, usize::MAX));
         (doc, c)
+    }
+
+    /// An id on a heading, or on a list item in a block, is not visible text.
+    #[test]
+    fn a_hidden_id_counts_nothing() {
+        let shown = count(":::q\n\n## One {#word}\n\n- [ ] two {#another}\n\n:::\n");
+        assert_eq!(shown.words, 2);
+        let plain = count(":::q\n\n## One\n\n- [ ] two\n\n:::\n");
+        assert_eq!(shown, plain);
+        assert_eq!(count("## One {#word}\n").words, 1);
+        assert_eq!(
+            count("- One {#word}\n").words,
+            2,
+            "in a list outside a block it is text"
+        );
     }
 
     /// Marker lines of a `:::` block are structure, not words; unpaired they are text.
