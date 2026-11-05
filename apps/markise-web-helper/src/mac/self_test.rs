@@ -19,7 +19,7 @@ use super::render;
 const ATTEMPTS: &str = include_str!("self_test.names");
 const PAGE: &str = include_str!("self_test.js");
 const CELL: u32 = 8;
-/// What one forbidden page may take in all: 42 attempts at their budget of 5 s each, and some.
+/// What one forbidden page may take in all: 43 attempts at their budget of 5 s each, and some.
 const PAGE_LIMIT_MS: u32 = 240_000;
 
 const FIXTURE_HTML: &str =

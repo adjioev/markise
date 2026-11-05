@@ -112,7 +112,8 @@ next document. Every render is a fresh document in that web view: what the last 
 | A navigation policy: the main frame to the exact URL the helper asked for, once | navigation, redirects, meta refresh, frames, downloads, other apps' URL schemes |
 | `createWebView` answers nil, dialogs complete at once, capture and motion are denied, the open panel is empty | new windows, anything that waits for a person |
 | The engine's features off, by name (`_setEnabled:forFeature:`): peer connections, a link's preconnect, DNS prefetch, prefetch, speculation rules, WebTransport | what no rule is asked about. Peer connections' UDP goes around everything else, and clicking a link preconnects before any policy, in any frame. Both were heard on a listener |
-| A check, before any package code runs, that a page has no peer connections | the engine ignoring that switch |
+| Also off: capture, screen capture, speech recognition, geolocation, notifications, sharing, the async clipboard | what asks a person or the system, with nobody there. A capture request waited for ever on a CI runner, and could put a prompt on a user's screen |
+| A check, before any package code runs, that a page has no peer connections and no capture | the engine ignoring those switches |
 | A dead SOCKS proxy on the data store (`proxyConfigurations`, macOS 14), no failover | what is left at the level of the engine's networking: it resolves no name itself this way. It exempts loopback, and it did not catch a preconnect every time, so it is a second line and not the answer to one |
 | A click and a submit stop at the window, before a page's listeners, in a world of its own | activating anything: nothing here is interactive |
 | Safe browsing off | the engine's own questions about what loads |
