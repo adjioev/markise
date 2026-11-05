@@ -68,6 +68,8 @@ pub struct ViewerOutput {
     pub open_block_form: Option<usize>,
     /// Switch the view of the block with this opener (the button on its card).
     pub switch_block_view: Option<usize>,
+    /// Open the block library: `/` on a free line, and what was typed right after it.
+    pub open_block_library: Option<String>,
 }
 
 /// What the full-window view can show (issue #174).
@@ -219,6 +221,8 @@ pub struct DocViewer {
     /// A command the app runs like its menu item (taken once): one that asks first, e.g.
     /// Insert Table… opens its size dialog (issue #164).
     app_command: Option<&'static str>,
+    /// Text the block library gave back, to be typed at the caret on the next frame.
+    typed_for_library: Option<String>,
     /// The comment whose text is being edited in its card (issue #87).
     card_edit: Option<card_edit::CardEdit>,
     /// The bubble popover editor's size at its last frame (placement).
@@ -296,6 +300,7 @@ impl DocViewer {
             card_edit: None,
             notice: None,
             app_command: None,
+            typed_for_library: None,
             comment_view: Default::default(),
             card_edit_size: None,
             editable: false,
@@ -757,12 +762,31 @@ impl DocViewer {
             let events = ui.input(|i| i.events.clone());
             let mut ran = false;
             with_shaper(&ctx, parley.as_deref_mut(), |sh| {
+                if let Some(t) = self.typed_for_library.take()
+                    && editable
+                {
+                    ran |= self.exec("edit.insertText", &Params::text("text", t), sh, &*images, vh);
+                }
                 for e in events {
+                    // the library opens next frame: what was typed after `/` is its query
+                    if let Some(query) = &mut out.open_block_library {
+                        if let Event::Text(t) = &e {
+                            query.push_str(t);
+                        }
+                        continue;
+                    }
+                    if editable && self.opens_block_library(&e) {
+                        out.open_block_library = Some(String::new());
+                        continue;
+                    }
                     ran |= self.handle_event(e, sh, &*images, editable, vh);
                 }
             });
             if let Some(t) = self.pending_copy.take() {
                 ctx.copy_text(t);
+            }
+            if out.open_block_library.is_some() {
+                ctx.request_repaint();
             }
             if ran {
                 follow = true;
@@ -1893,6 +1917,18 @@ impl DocViewer {
     }
 
     /// One input event; returns `true` when it ran a command.
+    /// `/` on a free line with a package that has something to offer (ADR 0022).
+    fn opens_block_library(&self, e: &Event) -> bool {
+        matches!(e, Event::Text(t) if t == "/")
+            && self.block_index.as_ref().is_some_and(|i| !i.presets().is_empty())
+            && self.ed.on_free_line()
+    }
+
+    /// Text for the document after the library closed with it (ADR 0022): it was typed for here.
+    pub fn type_after_library(&mut self, text: String) {
+        self.typed_for_library = Some(text);
+    }
+
     fn handle_event(
         &mut self,
         e: Event,

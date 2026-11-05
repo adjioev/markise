@@ -7,6 +7,7 @@
 //! live-mark transform → hint update → `Step` recorded. Undo/redo replay recorded steps (never
 //! re-plan) and restore the transaction's immutable selections.
 
+mod block_place;
 pub mod command;
 pub mod history;
 mod inplace;

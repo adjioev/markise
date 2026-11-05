@@ -8,6 +8,7 @@ mod block_forms;
 mod block_gaps;
 mod block_inplace;
 mod block_ownership;
+mod block_place;
 mod block_views;
 mod common;
 mod directive_edit;

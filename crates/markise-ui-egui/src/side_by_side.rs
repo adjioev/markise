@@ -266,6 +266,7 @@ pub struct SbsOutput {
     /// The rendered pane asks for the form of the block at this offset.
     pub open_block_form: Option<usize>,
     pub switch_block_view: Option<usize>,
+    pub open_block_library: Option<String>,
 }
 
 /// Per-document Side by Side state (the divider position lives in the settings).
@@ -441,6 +442,7 @@ impl SideBySide {
             out.open_view = vo.open_view;
             out.open_block_form = vo.open_block_form;
             out.switch_block_view = vo.switch_block_view;
+            out.open_block_library = vo.open_block_library;
             out.right = Some(pane);
             user_scrolls_rendered |= vo.wheel_scrolled;
         }

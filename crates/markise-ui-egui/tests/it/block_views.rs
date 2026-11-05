@@ -42,7 +42,7 @@ pub(crate) struct Fixture {
     pub doc: PathBuf,
 }
 
-fn archive() -> Vec<u8> {
+fn archive(palette: &str) -> Vec<u8> {
     let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip","poll","steps","plain"]}"#;
     let files = [
         ("manifest.json", manifest),
@@ -50,7 +50,7 @@ fn archive() -> Vec<u8> {
         ("components/poll/poll.json", POLL),
         ("components/steps/steps.json", STEPS),
         ("components/plain/plain.json", PLAIN),
-        ("editor/palette.json", r#"{"format": 1}"#),
+        ("editor/palette.json", palette),
         ("editor/views.json", VIEWS),
         ("assets/bulb.svg", ICON),
     ];
@@ -67,6 +67,10 @@ fn archive() -> Vec<u8> {
 
 impl Fixture {
     pub(crate) fn new(text: &str) -> Fixture {
+        Self::with_palette(text, r#"{"format": 1}"#)
+    }
+
+    pub(crate) fn with_palette(text: &str, palette: &str) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(dir.path()).unwrap();
         let folder = root.join("site");
@@ -75,7 +79,7 @@ impl Fixture {
         fs::create_dir_all(&config).unwrap();
         let doc = folder.join("doc.md");
         fs::write(&doc, text).unwrap();
-        let bytes = archive();
+        let bytes = archive(palette);
         let sha = Sha256Hex::of(&bytes);
         fs::write(folder.join("p.tar.gz"), &bytes).unwrap();
         fs::write(
