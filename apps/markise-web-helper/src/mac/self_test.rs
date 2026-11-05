@@ -175,11 +175,8 @@ fn run(frames: Receiver<(FromHelper, Vec<u8>)>) -> Result<(), String> {
     println!("fixture: drawn in {:.0} ms", m.ms);
 
     // at this machine's address, and at loopback, which a proxy might treat otherwise
-    let mut id = 2;
-    for address in [local_address(), IpAddr::V4(Ipv4Addr::LOCALHOST)] {
-        forbidden(&frames, &mut files, id, address)?;
-        id += 1;
-    }
+    forbidden(&frames, &mut files, 2, local_address())?;
+    forbidden(&frames, &mut files, 3, IpAddr::V4(Ipv4Addr::LOCALHOST))?;
     if std::fs::read_dir(std::env::var("HOME").unwrap_or_default()).is_ok() {
         return Err("this process can read the home folder".to_string());
     }
