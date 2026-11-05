@@ -333,12 +333,12 @@ mod review {
         let f = Fixture::with_palette(DOC, PALETTE);
         let mut h = f.ready();
         free_line(&mut h, 7);
-        let at = |h: &mut H| h.state_mut().viewer().unwrap().ed.set_selection(Selection::caret(2));
-        at(&mut h);
-        let ctx = h.ctx.clone();
-        let opened = MenuAction::Command("block.insertFromLibrary");
-        assert!(h.state_mut().menu_action(&ctx, &opened));
+        type_text(&mut h, "/");
+        // what is behind the library could take a heading
+        h.state_mut().viewer().unwrap().ed.set_selection(Selection::caret(2));
         frames(&mut h);
+        assert!(h.state().block_library().is_some());
+        let ctx = h.ctx.clone();
         assert_eq!(
             h.state().menu_model().item("block.heading1").map(|i| i.enabled),
             Some(false)
