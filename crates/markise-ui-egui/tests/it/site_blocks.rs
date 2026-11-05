@@ -404,6 +404,130 @@ fn button_says(h: &H, what: &str) -> bool {
     h.query_by_label(what).is_some()
 }
 
+/// Presses the handle at `grip` and goes to `to` in steps.
+fn drag_handle(h: &mut H, grip: egui::Pos2, to: egui::Pos2) {
+    h.hover_at(grip);
+    h.step();
+    h.step();
+    h.event(egui::Event::PointerButton {
+        pos: grip,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    h.step();
+    for i in 1..=6 {
+        h.hover_at(grip + (to - grip) * (i as f32 / 6.0));
+        h.step();
+    }
+}
+
+/// A tall picture with its top above the view, and the block after it on screen.
+fn scrolled_past_the_top_of_a_picture(h: &mut H, doc: &str) -> egui::Rect {
+    wait_for(h, "the picture", |h| {
+        picture(h, doc.find(":::plain").unwrap()).is_some_and(|r| r.height() > 1000.0)
+    });
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.view.scroll_by(1200.0);
+    common::run(h);
+    h.state().viewer_item_rect(doc.find(":::tip").unwrap()).unwrap()
+}
+
+#[test]
+fn a_drop_never_lands_at_a_place_off_screen() {
+    let doc = "# Doc\n\n:::plain\n\nDrawn by its site.\n\n:::\n\n:::tip\n\nHas a view.\n\n:::\n\nAfter.\n";
+    let f = Fixture::new(doc);
+    let p = played(1800);
+    let mut h = f.ready_with(Some(p.source()));
+    let tip = scrolled_past_the_top_of_a_picture(&mut h, doc);
+    h.hover_at(tip.center());
+    h.step();
+    h.step();
+    let grip = h.get_by_label("Move Block").rect().center();
+    let to = grip + egui::vec2(0.0, -80.0);
+    drag_handle(&mut h, grip, to);
+    let shown = h.state_mut().viewer().unwrap().block_drag_shown().cloned().unwrap();
+    assert!(!shown.moves, "the top of the picture is off screen: {shown:?}");
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    h.step();
+    common::run(&mut h);
+    assert_eq!(text(&h), doc, "nothing moves to where nothing showed");
+}
+
+#[test]
+fn the_line_of_a_picture_cut_off_at_the_top_stays_in_the_view() {
+    let doc = "# Doc\n\n:::plain\n\nDrawn by its site.\n\n:::\n\n:::tip\n\nHas a view.\n\n:::\n\nAfter.\n";
+    let f = Fixture::new(doc);
+    let p = played(1800);
+    let mut h = f.ready_with(Some(p.source()));
+    let tip = scrolled_past_the_top_of_a_picture(&mut h, doc);
+    // on the picture, above the next block
+    let on = egui::pos2(tip.center().x, (tip.top() - 300.0).max(120.0));
+    h.hover_at(on);
+    h.step();
+    h.step();
+    let grip = h.get_by_label("Move Block").rect().center();
+    drag_handle(&mut h, grip, grip);
+    let s = h.state_mut().viewer().unwrap().block_drag_shown().cloned().unwrap();
+    let outline = s.outline.unwrap();
+    assert!(!s.moves);
+    // the outline stops 2 points inside the view's top
+    assert!(s.line_y >= outline.top() - 2.0, "{s:?}");
+}
+
+#[test]
+fn a_picture_shows_as_picked_up_on_a_press_and_moves() {
+    use egui::{Modifiers, PointerButton, pos2};
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    let mut h = f.ready_with(Some(p.source()));
+    wait_for(&mut h, "the picture", |h| picture(h, at(":::plain")).is_some());
+    let item = h.state().viewer_item_rect(at(":::plain")).unwrap();
+    let from = pos2(item.left() + 40.0, item.center().y);
+    h.hover_at(from);
+    h.step();
+    h.step();
+    let grip = h.get_by_label("Move Block").rect().center();
+    for i in 1..=10 {
+        h.hover_at(from + (grip - from) * (i as f32 / 10.0));
+        h.step();
+    }
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    h.event(button(grip, true));
+    h.step();
+    h.step();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Grabbing);
+    let s = h.state_mut().viewer().unwrap().block_drag_shown().cloned().unwrap();
+    let outline = s.outline.unwrap();
+    assert!(outline.height() >= 120.0 && outline.top() <= grip.y, "{outline:?}");
+    assert!(!s.moves);
+    let to = h.state().viewer_item_rect(at("After.")).unwrap().left_top();
+    let to = pos2(grip.x, to.y);
+    for i in 1..=8 {
+        h.hover_at(grip + (to - grip) * (i as f32 / 8.0));
+        h.step();
+    }
+    assert!(h.state_mut().viewer().unwrap().block_drag_shown().unwrap().moves);
+    h.event(button(to, false));
+    h.step();
+    h.step();
+    common::run(&mut h);
+    let t = text(&h);
+    assert!(t.find(":::tip").unwrap() < t.find(":::plain").unwrap(), "{t}");
+}
+
 #[test]
 fn a_block_with_a_view_goes_native_site_markdown_and_back() {
     let f = Fixture::new(DOC);

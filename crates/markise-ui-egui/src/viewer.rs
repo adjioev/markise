@@ -35,6 +35,7 @@ mod comment_place;
 mod comment_presence;
 mod scrollbar;
 mod site_board;
+pub use block_move::BlockDragShown;
 pub use code_tools::{LangEdit, LangItem, ShownTools, lang_matches};
 pub use site_board::{HelperSource, SiteBoard, system_web_helpers};
 
@@ -230,6 +231,10 @@ pub struct DocViewer {
     typed_for_library: Option<String>,
     /// A block being dragged by its handle.
     block_drag: Option<block_move::BlockDrag>,
+    /// The handle shown in the last frame, and what of it takes a press.
+    block_handle: Option<(usize, Rect)>,
+    /// The pointer is on that handle: it says so with its own cursor.
+    pointer_on_block_handle: bool,
     /// The comment whose text is being edited in its card (issue #87).
     card_edit: Option<card_edit::CardEdit>,
     /// The bubble popover editor's size at its last frame (placement).
@@ -317,6 +322,8 @@ impl DocViewer {
             app_command: None,
             typed_for_library: None,
             block_drag: None,
+            block_handle: None,
+            pointer_on_block_handle: false,
             comment_view: Default::default(),
             card_edit_size: None,
             editable: false,
@@ -1159,7 +1166,7 @@ impl DocViewer {
         }
         // the I-beam only while the pointer is over the surface itself (not over the sidebar,
         // the toolbar or a window on top of it: `hovered` honours layers; issue #36)
-        if resp.hovered() {
+        if resp.hovered() && !self.pointer_on_block_handle {
             ctx.set_cursor_icon(if self.pointer_on_block_control {
                 CursorIcon::Default
             } else {
