@@ -661,6 +661,7 @@ impl JobSource for Slow {
         })
     }
     fn file(&self, _area: Area, _path: &str) -> Option<Vec<u8>> {
+        std::thread::sleep(self.0);
         None
     }
 }
@@ -689,29 +690,30 @@ fn stale(peer: &mut Peer, n: usize) {
 
 #[test]
 fn a_helper_streaming_while_the_client_is_busy_is_ended_not_buffered() {
-    let flooding = Arc::new(AtomicBool::new(false));
-    let done = flooding.clone();
     let script = move |peer: &mut Peer, m: ToHelper, _: Vec<u8>| {
         if let ToHelper::Render(q) = m {
-            // about 100 MiB in all, far over the budget below
+            // the file holds the client's thread while these come in: about 100 MiB in all
+            let need = FromHelper::NeedFile {
+                token: 1,
+                id: q.id,
+                area: Area::Package,
+                path: "slow".to_string(),
+            };
+            peer.say(need, &[]);
             stale(peer, 100);
             peer.draw(q.id, 20, 20);
-            done.store(true, Ordering::SeqCst);
         }
     };
     let mut l = limits();
     l.render = Duration::from_secs(10);
     l.queued_bytes = 8 << 20;
     let r = rig_with(Arc::new(script), hello(), l, false);
-    let mut first = job(1);
-    first.source = Arc::new(Files(HashMap::new()));
-    // the second job holds the client's thread while the first one's frames come in
-    let mut busy = job(2);
-    busy.source = Arc::new(Slow(Duration::from_millis(600)));
-    r.client.want(vec![first]);
-    until(|| r.spawned.load(Ordering::SeqCst) == 1);
-    r.client.want(vec![job(1), busy]);
+    let mut j = job(1);
+    j.source = Arc::new(Slow(Duration::from_millis(1500)));
+    r.client.want(vec![j]);
     until(|| r.killed.load(Ordering::SeqCst) >= 1);
+    let got = results(&r, 1);
+    assert!(matches!(got[0].1, Outcome::Failed(_)), "{got:?}");
 }
 
 #[test]
