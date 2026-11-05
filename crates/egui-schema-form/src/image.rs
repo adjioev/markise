@@ -104,6 +104,8 @@ fn picker(ui: &mut Ui, label: &str, row: Id, row_name: &str, cx: &mut Cx) {
     if r.clicked() {
         *cx.next_request += 1;
         let token = *cx.next_request;
+        // the latest asked for this row is the one that counts: an older answer coming later goes nowhere
+        cx.file_requests.retain(|_, r| *r != row);
         cx.file_requests.insert(token, row);
         cx.host.request_file(FileRequest(token), row_name);
     }
