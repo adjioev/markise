@@ -22,6 +22,7 @@ markise-theme = { path = "crates/markise-theme" }
 markise-layout = { path = "crates/markise-layout" }
 markise-blocks = { path = "crates/markise-blocks" }
 markise-package = { path = "crates/markise-package" }
+markise-web-render = { path = "crates/markise-web-render" }
 markise-engine = { path = "crates/markise-engine" }
 markise-ui-egui = { path = "crates/markise-ui-egui" }
 memchr = "2.7"
