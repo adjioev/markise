@@ -155,6 +155,25 @@ break at a blank, direction), undo steps and the selection restored are the docu
 Inline marks run their usual planners with a selection inside one slot, and are taken back if the block
 then reads differently. Every other mutating command is refused in a block.
 
+**Keys.** `editor::inplace` decides them; the field model does the work, with the same checks.
+
+| Key | Where | What |
+|---|---|---|
+| Enter | a list item | what follows the caret goes to a new item after it |
+| Enter | an answer | the same, a new answer with a new `{#id}` and no mark |
+| Enter | an empty last item | it goes, and the caret stays at the end of the one before |
+| Enter | an empty item in the middle | nothing |
+| Enter | a heading | to the next field; the text stays |
+| Enter | text, a quote | a new paragraph; at the end of the text a place for one, nothing in the file until it has text |
+| Shift+Enter | text, a quote | a line break in the paragraph |
+| Backspace, Delete | an empty item, at its only edge | it goes, unless it is the only one; its id does not come back while the model lives |
+| Backspace, Delete | an item or field with text, at the edge | nothing: items are not joined, fields do not run together |
+| Backspace | between two paragraphs of one text field | they join: they are one value |
+| Tab, Shift+Tab | any field | the next or the previous field, staying at the ends |
+| A paste | text, a quote | its lines; markup at their start stays text |
+| A paste | a heading, an item, an answer | one line: a run of line breaks is one blank |
+| A press on an answer's mark | | marks it by the same `selection` as the form: one mark moves to it and a press on the marked one does nothing; several toggle. Its own undo step, and the caret stays |
+
 **A place with no text.** An emptied heading stays in the source as `## ` with its id (`FieldEdit::
 ClearHeading`). An emptied item stays an empty item. An emptied text or quote has nothing to stand on in the
 source, so the caret goes on a virtual paragraph where it was, and the session's in-place state remembers

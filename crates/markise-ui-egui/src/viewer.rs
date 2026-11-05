@@ -1619,7 +1619,8 @@ impl DocViewer {
     /// is kept as it was (the box is not a caret stop, spec 02 §9).
     fn toggle_task(&mut self, idx: usize, li: u16) -> bool {
         if self.ed.view.native_item(idx).is_some() {
-            return false;
+            let at = self.ed.view.model().item_start(idx);
+            return self.ed.press_answer_mark(at);
         }
         let leaf = self.ed.view.model().item_span(idx).start;
         // that list item's own start: inside it but before any nested list, so the planner's

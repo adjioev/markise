@@ -446,6 +446,241 @@ fn an_emptied_text_field_keeps_a_place_for_the_caret() {
     assert_eq!(s.text(), ":::tip\n\n### Title\n\nYo\n\n:::\n");
 }
 
+#[test]
+fn enter_in_a_list_makes_an_item() {
+    let doc = ":::goals\n\n- First\n- Second\n\n:::\n";
+    let mut s = surface(doc);
+    s.caret_at("First", 5);
+    s.key("edit.newline");
+    assert_eq!(s.text(), ":::goals\n\n- First\n- \n- Second\n\n:::\n");
+    s.typed("New");
+    assert_eq!(s.text(), ":::goals\n\n- First\n- New\n- Second\n\n:::\n");
+    // in the middle it splits, and markup stays text
+    s.caret_at("New", 1);
+    s.key("edit.newline");
+    assert_eq!(s.text(), ":::goals\n\n- First\n- N\n- ew\n- Second\n\n:::\n");
+    s.typed("# ");
+    assert!(s.text().contains("- \\# ew\n"), "{}", s.text());
+}
+
+#[test]
+fn enter_on_an_answer_makes_an_answer_with_a_new_id() {
+    let mut s = surface(DOC);
+    s.caret_at("One", 3);
+    s.key("edit.newline");
+    let t = s.text();
+    assert!(t.contains("- [ ] One {#a1}\n- [ ] {#a3}\n- [x] Two {#a2}\n"), "{t}");
+    s.typed("Three");
+    assert!(s.text().contains("- [ ] Three {#a3}\n"), "{}", s.text());
+    // one undo for the words, one for the answer
+    s.undo();
+    s.undo();
+    assert_eq!(s.text(), DOC);
+    // in the middle the rest goes along, without the mark
+    s.caret_at("Two", 1);
+    s.key("edit.newline");
+    assert!(s.text().contains("- [x] T {#a2}\n- [ ] wo {#a3}\n"), "{}", s.text());
+}
+
+#[test]
+fn a_removed_answer_does_not_give_its_id_back() {
+    let mut s = surface(DOC);
+    s.caret_at("Two", 3);
+    s.key("edit.newline");
+    assert!(s.text().contains("{#a3}"));
+    s.key("edit.deleteBackward");
+    assert!(!s.text().contains("{#a3}"), "{}", s.text());
+    s.key("edit.newline");
+    assert!(
+        s.text().contains("{#a4}"),
+        "the third one is taken while this goes on: {}",
+        s.text()
+    );
+}
+
+#[test]
+fn enter_on_an_empty_last_item_leaves_the_list() {
+    let mut s = surface(DOC);
+    s.caret_at("Two", 3);
+    s.key("edit.newline");
+    s.key("edit.newline");
+    assert_eq!(s.text(), DOC, "gone again");
+    assert_eq!(s.offset(), DOC.find("Two").unwrap() + 3);
+    // an empty one in the middle just stays
+    s.caret_at("One", 3);
+    s.key("edit.newline");
+    let t = s.text();
+    s.key("edit.newline");
+    assert_eq!(s.text(), t);
+}
+
+/// A list with an empty second item made in place: a block like this only stays native while
+/// it is being edited.
+fn with_an_empty_item() -> Surface {
+    let mut s = surface(":::goals\n\n- First\n- Third\n\n:::\n");
+    s.caret_at("First", 5);
+    s.key("edit.newline");
+    assert_eq!(s.text(), EMPTY_ITEM);
+    s
+}
+
+const EMPTY_ITEM: &str = ":::goals\n\n- First\n- \n- Third\n\n:::\n";
+
+#[test]
+fn backspace_and_delete_remove_an_empty_item_and_nothing_else() {
+    let mut s = with_an_empty_item();
+    s.key("edit.deleteBackward");
+    assert_eq!(s.text(), ":::goals\n\n- First\n- Third\n\n:::\n");
+    assert_eq!(
+        s.offset(),
+        EMPTY_ITEM.find("First").unwrap() + 5,
+        "the end of the one before"
+    );
+    s.undo();
+    assert_eq!(s.text(), EMPTY_ITEM);
+
+    let mut s = with_an_empty_item();
+    s.key("edit.deleteForward");
+    assert_eq!(s.text(), ":::goals\n\n- First\n- Third\n\n:::\n");
+    assert_eq!(
+        &s.text()[s.offset()..s.offset() + 5],
+        "Third",
+        "the start of the one after"
+    );
+
+    // an item with text is not joined to its neighbour: nothing happens at its edge
+    let doc = ":::goals\n\n- First\n- Third\n\n:::\n";
+    let mut s = surface(doc);
+    s.caret_at("Third", 0);
+    s.key("edit.deleteBackward");
+    assert_eq!(s.text(), doc);
+    s.caret_at("First", 5);
+    s.key("edit.deleteForward");
+    assert_eq!(s.text(), doc);
+
+    // the only item stays
+    let doc = ":::goals\n\n- a\n\n:::\n";
+    let mut s = surface(doc);
+    s.caret_at("- a", 3);
+    s.key("edit.deleteBackward");
+    assert_eq!(s.text(), ":::goals\n\n- \n\n:::\n");
+    s.key("edit.deleteBackward");
+    assert_eq!(s.text(), ":::goals\n\n- \n\n:::\n");
+}
+
+#[test]
+fn enter_in_a_heading_goes_on_and_enter_in_text_makes_a_paragraph() {
+    let mut s = surface(DOC);
+    s.caret_at("Which", 2);
+    s.key("edit.newline");
+    assert_eq!(s.text(), DOC);
+    assert_eq!(s.offset(), DOC.find("One").unwrap());
+
+    let mut s = surface(DOC);
+    s.caret_at("Hello", 5);
+    s.key("edit.newline");
+    assert!(s.text().contains("Hello\n\nthere\n\nSecond part"), "{}", s.text());
+    assert_eq!(&s.text()[s.offset()..s.offset() + 5], "there");
+    // Backspace at its start joins them again
+    s.key("edit.deleteBackward");
+    assert!(
+        s.text().contains("Hello there\n") || s.text().contains("Hellothere\n"),
+        "{}",
+        s.text()
+    );
+
+    // at the end of the text: a place for a new paragraph, nothing in the file until it has text
+    let mut s = surface(DOC);
+    s.caret_at("Second part", 11);
+    s.key("edit.newline");
+    assert_eq!(s.text(), DOC);
+    assert!(s.ed.session.selection().primary().focus.virt > 0);
+    s.typed("# Third");
+    assert!(s.text().contains("Second part\n\n\\# Third\n"), "{}", s.text());
+    // leaving it without text changes nothing
+    let mut s = surface(DOC);
+    s.caret_at("Second part", 11);
+    s.key("edit.newline");
+    s.key("edit.deleteBackward");
+    assert_eq!(s.text(), DOC);
+    assert_eq!(s.ed.session.selection().primary().focus.virt, 0);
+}
+
+#[test]
+fn enter_in_a_quote_makes_a_paragraph_of_the_quote() {
+    let mut s = surface(DOC);
+    s.caret_at("Because.", 8);
+    s.key("edit.newline");
+    s.typed("More");
+    assert!(s.text().contains("> Because.\n>\n> More\n"), "{}", s.text());
+}
+
+#[test]
+fn a_press_on_a_mark_marks_by_the_blocks_rule() {
+    // one answer: the press moves the mark, as one undo step, and the caret stays
+    let mut s = surface(DOC);
+    s.caret_at("Between", 0);
+    let caret = s.offset();
+    assert!(s.ed.press_answer_mark(DOC.find("One").unwrap()));
+    assert!(s.text().contains("- [x] One {#a1}\n- [ ] Two {#a2}"), "{}", s.text());
+    assert_eq!(s.offset(), caret);
+    assert!(
+        !s.ed.press_answer_mark(DOC.find("One").unwrap()),
+        "a press on the marked one"
+    );
+    s.undo();
+    assert_eq!(s.text(), DOC);
+
+    // several: each its own, and nothing else in the file moves
+    let doc = DOC.replace(":::poll\n", ":::poll many\n");
+    let mut s = surface(&doc);
+    assert!(s.ed.press_answer_mark(doc.find("One").unwrap()));
+    assert!(s.text().contains("- [x] One {#a1}\n- [x] Two {#a2}"), "{}", s.text());
+    assert!(s.ed.press_answer_mark(doc.find("Two").unwrap()));
+    assert!(s.text().contains("- [x] One {#a1}\n- [ ] Two {#a2}"), "{}", s.text());
+    assert_eq!(s.text().len(), doc.len());
+    // not a mark's business anywhere else
+    assert!(!s.ed.press_answer_mark(doc.find("Because").unwrap()));
+}
+
+#[test]
+fn a_paste_keeps_markup_as_text_and_a_one_line_field_one_line() {
+    let mut s = surface(DOC);
+    s.caret_at("Hello", 0);
+    let _ = s.run("edit.insertText", &Params::text("text", "# a\n- b\n\n:::c\n"));
+    let t = s.text();
+    assert!(t.contains("\\# a\n\\- b\n\n\\:::c\nHello there"), "{t}");
+    assert_eq!(s.ed.view.native_block(s.offset()).map(|_| ()), Some(()));
+
+    let mut s = surface(DOC);
+    s.caret_at("Which", 0);
+    let _ = s.run("edit.insertText", &Params::text("text", "# a\r\n\r\nb\n"));
+    assert!(s.text().contains("## # a bWhich? {#q}"), "{}", s.text());
+
+    let mut s = surface(DOC);
+    s.caret_at("One", 3);
+    let _ = s.run("edit.insertText", &Params::text("text", "\n- [x] x {#a2}\n"));
+    let t = s.text();
+    assert!(
+        t.contains("- [ ] One - [x] x \\{#a2} {#a1}\n") || t.contains("- [ ] One - [x] x {#a2} {#a1}\n"),
+        "{t}"
+    );
+    assert_eq!(t.matches("\n- [").count(), 2, "{t}");
+}
+
+#[test]
+fn tab_goes_from_field_to_field() {
+    let mut s = surface(DOC);
+    s.caret_at("Which", 2);
+    s.key("edit.indentOrNextCell");
+    assert_eq!(s.offset(), DOC.find("One").unwrap());
+    s.key("edit.indentOrNextCell");
+    assert_eq!(s.offset(), DOC.find("Two").unwrap());
+    s.key("edit.outdentOrPrevCell");
+    assert_eq!(s.offset(), DOC.find("One").unwrap() + 3);
+    assert_eq!(s.text(), DOC);
+}
+
 // ---- random edits
 
 const TYPED: &[&str] = &[
@@ -545,32 +780,33 @@ proptest! {
             }
             let p = *at.get(&inside);
             s.caret(p);
-            let p = s.offset();
-            // the lines of the field the caret is in: nothing else may change
-            let span = field_lines(&t, p);
-            match op {
-                0 | 1 => { let _ = s.run("edit.insertText", &Params::text("text", *what.get(TYPED))); }
-                2 => { for _ in 0..n { s.key("edit.deleteBackward"); } }
-                3 => { for _ in 0..n { s.key("edit.deleteForward"); } }
-                _ => {
-                    s.key("select.right");
-                    let _ = s.run("edit.insertText", &Params::text("text", *what.get(TYPED)));
+            for _ in 0..if matches!(op, 2 | 3) { n } else { 1 } {
+                let t = s.text();
+                // the lines of the field the caret is in: nothing else may change
+                let span = field_lines(&t, s.offset());
+                match op {
+                    0 => { let _ = s.run("edit.insertText", &Params::text("text", *what.get(TYPED))); }
+                    1 => s.key("edit.newline"),
+                    2 => s.key("edit.deleteBackward"),
+                    3 => s.key("edit.deleteForward"),
+                    _ => {
+                        s.key("select.right");
+                        let _ = s.run("edit.insertText", &Params::text("text", *what.get(TYPED)));
+                    }
                 }
-            }
-            let now = s.text();
-            match span {
-                None => prop_assert_eq!(&now, &t, "the caret is in no field"),
-                Some((head, tail)) => {
-                    let (h, t2) = (head.trim_end_matches('\n'), tail.trim_start_matches('\n'));
-                    prop_assert!(now.starts_with(h), "before the field: {} -> {}", t, now);
-                    prop_assert!(now.ends_with(t2), "after the field: {} -> {}", t, now);
+                let now = s.text();
+                match span {
+                    None => prop_assert_eq!(&now, &t, "the caret is in no field"),
+                    Some((head, tail)) => {
+                        let (h, t2) = (head.trim_end_matches('\n'), tail.trim_start_matches('\n'));
+                        prop_assert!(now.starts_with(h), "before the field: {} -> {}", t, now);
+                        // (a new item renumbers the ones after it in an ordered list)
+                        prop_assert!(op == 1 || now.ends_with(t2), "after the field: {} -> {}", t, now);
+                    }
                 }
+                prop_assert_eq!(outside_blocks(&now), around.clone(), "around the blocks: {}", now);
+                prop_assert_eq!(shape_of(&now), names.clone(), "the same blocks: {}", now);
             }
-            prop_assert_eq!(outside_blocks(&now), around.clone(), "around the blocks: {}", now);
-            prop_assert_eq!(shape_of(&now), names.clone(), "the same blocks: {}", now);
-            // answers keep their ids, whatever was typed
-            let ids = now.matches("{#a1}").count() + now.matches("{#a2}").count();
-            prop_assert!(ids >= 2, "{}", now);
         }
         for _ in 0..200 {
             if s.text() == doc { break; }

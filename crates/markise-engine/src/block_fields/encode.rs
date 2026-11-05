@@ -621,10 +621,15 @@ fn render_list_item(
         esc,
     };
     render_lines(old, lines, &new, &st, out);
-    if !written.is_empty() && !written.starts_with(' ') && !text.trim().is_empty() {
-        out.push(' ');
+    if text.trim().is_empty() {
+        // the marker's blank is the one before the id
+        out.push_str(written.trim_start());
+    } else {
+        if !written.is_empty() && !written.starts_with(' ') {
+            out.push(' ');
+        }
+        out.push_str(&written);
     }
-    out.push_str(&written);
 }
 
 fn alt_source(alt: &str) -> String {
