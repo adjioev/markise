@@ -18,6 +18,9 @@ use super::native::{BlockViewMode, Looked};
 use crate::model::{Container, Item, ItemKind};
 use crate::native::{MAX_NATIVE_BLOCK_BYTES, SitePicture, SiteQuery, SiteShot};
 
+/// Who stands at an opener: an identity, for this name and these arguments.
+type Identity = (u64, Box<str>, Box<str>);
+
 /// Blocks whose identity is kept at most.
 const IDENTITIES_MAX: usize = 4096;
 
@@ -50,7 +53,7 @@ pub(super) struct SiteState {
     /// The openers of the blocks around the selection's ends: those show what they hold.
     held: Vec<usize>,
     /// Which block stands at which opener, with its name and arguments, moved by every edit.
-    identities: RefCell<HashMap<usize, (u64, Box<str>, Box<str>)>>,
+    identities: RefCell<HashMap<usize, Identity>>,
     next_identity: Cell<u64>,
 }
 
