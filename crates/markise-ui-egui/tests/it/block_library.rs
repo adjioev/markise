@@ -562,6 +562,12 @@ mod moves {
         let f = Fixture::with_palette(&d, PALETTE);
         let mut h = f.ready();
         assert!(h.query_by_label("Move Block").is_none(), "nothing floats by itself");
+        // no package in use, no handle
+        let g = Fixture::with_palette(&d, PALETTE);
+        let mut plain = g.opened();
+        let hello = opener_rect(&plain, "Hello").center();
+        pointer_to(&mut plain, hello);
+        assert!(plain.query_by_label("Move Block").is_none());
         let over_text = opener_rect(&h, "Before.").center();
         pointer_to(&mut h, over_text);
         assert!(h.query_by_label("Move Block").is_none(), "nothing beside plain text");

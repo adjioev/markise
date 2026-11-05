@@ -42,13 +42,16 @@ impl DocViewer {
         theme: &Theme,
         out: &mut ViewerOutput,
     ) {
-        if self.ed.session.read_only().is_some() {
+        if self.block_index.is_none() || self.ed.session.read_only().is_some() {
             self.block_drag = None;
             return;
         }
         let side = theme.line_px().clamp(14.0, 20.0);
-        let hovered = self.hovered_block(ui, visible, surface, left - side - 6.0);
         let drag_opener = self.block_drag.as_ref().map(|d| d.opener);
+        // while one is dragged, the pointer passing over others offers nothing
+        let hovered = (drag_opener.is_none())
+            .then(|| self.hovered_block(ui, visible, surface, left - side - 6.0))
+            .flatten();
         let model = self.ed.view.model().clone();
         for v in visible {
             let start = model.item_start(v.idx);
