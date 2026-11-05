@@ -352,6 +352,33 @@ fn a_link_out_of_the_folder_is_outside_it_too() {
 }
 
 #[test]
+fn a_path_is_decoded_once() {
+    let r = rig();
+    fs::create_dir_all(r.folder.join("%2e%2e")).unwrap();
+    fs::write(r.folder.join("%2e%2e/x.png"), "x").unwrap();
+    let p = r.page("shot", "x", ":::shot x\n\n![a](%252e%252e/x.png)\n\n:::");
+    p.prepare().unwrap();
+    assert_eq!(p.file(Area::Document, "%2e%2e/x.png").as_deref(), Some(&b"x"[..]));
+    assert_eq!(unreachable_image("%252e%252e/x.png"), None);
+    assert!(
+        unreachable_image("%2e%2e/x.png").is_some(),
+        "this one is dots to a page's address"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_there_that_may_not_be_read_is_not_outside_the_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = rig();
+    fs::write(r.folder.join("x.png"), "x").unwrap();
+    fs::set_permissions(r.folder.join("x.png"), fs::Permissions::from_mode(0o000)).unwrap();
+    let p = r.page("shot", "x", ":::shot x\n\n![a](x.png)\n\n:::");
+    p.prepare().unwrap();
+    assert_eq!(p.images_note().as_deref(), Some("Cannot read: x.png"));
+}
+
+#[test]
 fn what_a_picture_can_never_have_is_known_without_the_disk() {
     for fine in ["a.png", "./a/b.png", "data:image/png;base64,AA", "BLOB:x", "a%20b.png"] {
         assert_eq!(unreachable_image(fine), None, "{fine}");

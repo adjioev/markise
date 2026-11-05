@@ -82,7 +82,8 @@ impl JobSource for BlockPage {
         let html = markup(&fields, &spec, variant, argument);
         let images = images_in(&html);
         // a page's address would lose the dots and could name another file: such a path never gets there
-        let refused: Vec<String> = sorted(&images).iter().filter_map(|p| unreachable_image(p)).collect();
+        // (these are decoded already)
+        let refused: Vec<String> = sorted(&images).iter().filter_map(|p| unreachable_path(p)).collect();
         if !refused.is_empty() {
             return Err(joined(refused));
         }
@@ -139,7 +140,10 @@ impl BlockPage {
         let file = match dir.open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(format!("File not found: {shown}")),
-            // a link leading out is refused by the handle, whatever is at the end of it
+            // the system saying no has a number; the handle refusing a link that leads out has none
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && e.raw_os_error().is_some() => {
+                return Some(format!("Cannot read: {shown}"));
+            }
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Some(outside(&shown)),
             Err(_) => return Some(format!("This file cannot be opened: {shown}")),
         };
@@ -185,18 +189,25 @@ fn joined(notes: Vec<String>) -> String {
 /// editor's own display of an image goes by its own rule and shows all of these it can read. Cheap,
 /// and touches no disk.
 pub fn unreachable_image(src: &str) -> Option<String> {
-    let path = src.split(['?', '#']).next().unwrap_or("");
-    let shown = clipped(src);
     if has_scheme(src) {
+        return unreachable_path(src);
+    }
+    let path = src.split(['?', '#']).next().unwrap_or("");
+    unreachable_path(&percent_decoded(path))
+}
+
+/// [`unreachable_image`] of a path decoded already, as a page's address comes to one.
+fn unreachable_path(path: &str) -> Option<String> {
+    let shown = clipped(path);
+    if has_scheme(path) {
         let own = ["data:", "blob:"]
             .iter()
-            .any(|s| src.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)));
+            .any(|s| path.get(..s.len()).is_some_and(|p| p.eq_ignore_ascii_case(s)));
         return (!own).then(|| format!("Not a file in the document's folder: {shown}"));
     }
     if is_absolute_like(path) {
         return Some(outside(&shown));
     }
-    let path = percent_decoded(path);
     let mut depth = 0i32;
     let mut dots = false;
     for part in path.split(['/', '\\']) {

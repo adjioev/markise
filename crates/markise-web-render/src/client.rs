@@ -111,6 +111,9 @@ pub enum Outcome {
     Drawn(Shot),
     /// In words, not for alarm: the block stays a card. It is not tried again.
     Failed(String),
+    /// The same, because a file it asked for was not there or could not be read: that can change
+    /// with no change to the block.
+    MissingImage(String),
 }
 
 /// How the helper is doing.
@@ -584,8 +587,12 @@ impl Worker {
                 self.idle_since = Instant::now();
                 if !cancelled && kind != FailKind::Cancelled {
                     // the page's word is that one did not come; what it was, this side knows
-                    let note = (kind == FailKind::Images).then(|| source.images_note()).flatten();
-                    self.deliver(key, Outcome::Failed(note.unwrap_or(reason)));
+                    let outcome = if kind == FailKind::Images {
+                        Outcome::MissingImage(source.images_note().unwrap_or(reason))
+                    } else {
+                        Outcome::Failed(reason)
+                    };
+                    self.deliver(key, outcome);
                 }
             }
         }

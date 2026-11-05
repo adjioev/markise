@@ -391,7 +391,7 @@ fn a_picture_that_did_not_come_is_named_by_the_job_and_nothing_else_is() {
     script.source = Arc::new(NoteSource);
     r.client.want(vec![images, script]);
     let got = results(&r, 2);
-    assert_eq!(got[0], (1, Outcome::Failed("File not found: x.png".to_string())));
+    assert_eq!(got[0], (1, Outcome::MissingImage("File not found: x.png".to_string())));
     assert_eq!(got[1], (2, Outcome::Failed("the helper's words".to_string())));
 }
 

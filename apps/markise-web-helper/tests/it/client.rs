@@ -75,7 +75,7 @@ fn a_picture_that_did_not_come_reaches_the_block_as_its_reason() {
     client.want(vec![j]);
     assert_eq!(
         results(&client, 1),
-        vec![(1, Outcome::Failed("File not found: images/x.png".to_string()))]
+        vec![(1, Outcome::MissingImage("File not found: images/x.png".to_string()))]
     );
 }
 
