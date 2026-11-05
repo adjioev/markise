@@ -21,8 +21,11 @@ const LOOKS_MAX: usize = 4096;
 /// state goes in the list below and into the two `match`es on it, and nowhere else.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum BlockViewMode {
+    /// A block's own view, or its site's picture if it has none.
     #[default]
     Native,
+    /// As its site draws it (ADR 0023).
+    Site,
     Markdown,
 }
 
@@ -30,9 +33,31 @@ impl BlockViewMode {
     /// The state after this one, in the order a switch goes through them.
     pub fn next(self) -> BlockViewMode {
         match self {
-            BlockViewMode::Native => BlockViewMode::Markdown,
+            BlockViewMode::Native => BlockViewMode::Site,
+            BlockViewMode::Site => BlockViewMode::Markdown,
             BlockViewMode::Markdown => BlockViewMode::Native,
         }
+    }
+
+    /// What a block shows in this state, as far as what it can show goes.
+    pub fn shown(self, has_view: bool, site: bool) -> BlockViewMode {
+        match self {
+            BlockViewMode::Native if has_view => BlockViewMode::Native,
+            BlockViewMode::Site if site => BlockViewMode::Site,
+            BlockViewMode::Native if site => BlockViewMode::Site,
+            _ => BlockViewMode::Markdown,
+        }
+    }
+
+    /// The next state that shows something else, for a block that has a view or not, with something
+    /// to draw it or not. A block with neither has only one state, and this is it.
+    pub fn next_for(self, has_view: bool, site: bool) -> BlockViewMode {
+        let now = self.shown(has_view, site);
+        let mut next = now.next();
+        while next != now && next.shown(has_view, site) != next {
+            next = next.next();
+        }
+        next
     }
 }
 
@@ -159,6 +184,11 @@ impl View {
         }
     }
 
+    /// Whether something can draw a block here at all.
+    pub fn can_draw_site(&self) -> bool {
+        self.native.source.as_ref().is_some_and(|s| s.has_site())
+    }
+
     /// The state the block with this opener is in.
     pub fn block_mode_of(&self, opener: usize) -> BlockViewMode {
         self.native.mode_of(opener)
@@ -186,12 +216,18 @@ impl View {
     pub fn native_block(&self, at: usize) -> Option<NativeAt> {
         self.native.source.as_ref()?;
         let c = self.doc.named_containers_at(at).pop()?;
-        if self.native.mode_of(c.opener.start) != BlockViewMode::Native {
-            return None;
-        }
-        let block = match self.look_of(&c) {
-            Looked::Native(block) | Looked::Unfilled(_, block) => block,
-            Looked::Outside(_, Some(block)) if self.native.sticky == Some(c.opener.start) => block,
+        let mode = self.native.mode_of(c.opener.start);
+        let block = match (mode, self.look_of(&c)) {
+            (BlockViewMode::Markdown, _) => return None,
+            // not filled in yet has no look on any site (ADR 0021)
+            (_, Looked::Unfilled(_, block)) => block,
+            // being edited natively in the Site state, and it has come to fit: it stays what it was
+            // until the caret leaves, as any block being edited does
+            (BlockViewMode::Site, Looked::Native(block)) if self.native.sticky == Some(c.opener.start) => block,
+            (BlockViewMode::Native, Looked::Native(block)) => block,
+            (BlockViewMode::Native, Looked::Outside(_, Some(block))) if self.native.sticky == Some(c.opener.start) => {
+                block
+            }
             _ => return None,
         };
         Some(NativeAt {

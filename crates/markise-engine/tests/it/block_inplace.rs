@@ -398,6 +398,33 @@ fn an_emptied_heading_keeps_its_place_and_its_id() {
 }
 
 #[test]
+fn a_block_edited_natively_in_the_site_state_stays_so_until_the_caret_leaves() {
+    use markise_layout::BlockViewMode::{Native, Site};
+    let mut s = surface(DOC);
+    s.caret_at("Which?", 6);
+    for _ in 0..6 {
+        s.key("edit.deleteBackward");
+    }
+    let opener = s.text().find(":::poll").unwrap();
+    assert_eq!(s.ed.block_view_state().0, Native);
+    s.ed.restore_block_view_state(Site, &[]);
+    s.frame();
+    assert!(
+        s.ed.view.native_block(opener).is_some(),
+        "not filled in: native in the Site state"
+    );
+    // it comes to fit with the caret in it: it must not turn into something else under the caret
+    s.caret_at("## {#q}", 3);
+    s.typed("Back");
+    assert!(s.ed.view.native_block(opener).is_some(), "{}", s.text());
+    s.typed("!");
+    assert!(s.text().contains("Back!"), "still typing in the field: {}", s.text());
+    // the caret leaves: the Site state's rule applies
+    s.caret_at("Between", 0);
+    assert!(s.ed.view.native_block(opener).is_none());
+}
+
+#[test]
 fn a_block_not_filled_in_stays_native_when_the_caret_leaves() {
     let mut s = surface(DOC);
     s.caret_at("Which?", 6);

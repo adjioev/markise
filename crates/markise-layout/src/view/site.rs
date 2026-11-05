@@ -111,6 +111,7 @@ impl View {
         }
         let wanted = match self.native.mode_of(c.opener.start) {
             BlockViewMode::Native => !source.has_view(&c.name),
+            BlockViewMode::Site => true,
             BlockViewMode::Markdown => false,
         };
         // a card with its warning is what a block that does not fit its schema shows, and only

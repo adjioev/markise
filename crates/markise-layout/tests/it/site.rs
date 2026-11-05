@@ -421,3 +421,46 @@ fn a_nested_block_in_a_picture_is_inside_it() {
     assert_eq!(v.height(item_of(&v, "Deep.")), 0.0);
     assert!(picture_of(&mut v, "::::scene").is_some());
 }
+
+#[test]
+fn the_switch_goes_through_what_a_block_can_show() {
+    use BlockViewMode::{Markdown, Native, Site};
+    // a view and something to draw with: all three, in order
+    assert_eq!(Native.next_for(true, true), Site);
+    assert_eq!(Site.next_for(true, true), Markdown);
+    assert_eq!(Markdown.next_for(true, true), Native);
+    // no view: Native is the site's picture, and is skipped
+    assert_eq!(Native.next_for(false, true), Markdown);
+    assert_eq!(Site.next_for(false, true), Markdown);
+    assert_eq!(Markdown.next_for(false, true), Site);
+    // nothing to draw with: as before this phase
+    assert_eq!(Native.next_for(true, false), Markdown);
+    assert_eq!(
+        Site.next_for(true, false),
+        Native,
+        "shown as Markdown: the helper went away"
+    );
+    assert_eq!(Markdown.next_for(true, false), Native);
+    // neither: one state
+    assert_eq!(Markdown.next_for(false, false), Markdown);
+    assert_eq!(Native.next_for(false, false), Markdown);
+}
+
+#[test]
+fn the_site_state_gives_a_block_with_a_view_its_picture_too() {
+    let (mut v, host) = set_up(DOC, 700.0);
+    host.pictures.lock().unwrap().insert("viewed".into(), 200.0);
+    host.pictures.lock().unwrap().insert("scene".into(), 100.0);
+    v.site_changed();
+    frame(&mut v);
+    assert!(picture_of(&mut v, ":::viewed").is_none(), "its own view by default");
+    v.set_block_view_mode(BlockViewMode::Site);
+    frame(&mut v);
+    assert_eq!(picture_of(&mut v, ":::viewed"), Some((700.0, 200.0)));
+    assert_eq!(picture_of(&mut v, ":::scene"), Some((700.0, 100.0)));
+    // one block alone
+    let opener = DOC.find(":::viewed").unwrap();
+    v.set_block_modes(BlockViewMode::Native, vec![(opener, BlockViewMode::Site)]);
+    frame(&mut v);
+    assert_eq!(picture_of(&mut v, ":::viewed"), Some((700.0, 200.0)));
+}
