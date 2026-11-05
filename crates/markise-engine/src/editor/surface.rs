@@ -371,10 +371,7 @@ impl EditorView {
             self.session.expire_hints_left_behind();
         }
         self.sync();
-        if before.is_some() {
-            let at = self.session.selection().primary().focus.offset;
-            self.check_marks(before, at);
-        }
+        self.check_marks(before);
         r
     }
 

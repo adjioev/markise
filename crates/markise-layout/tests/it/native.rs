@@ -422,7 +422,10 @@ fn a_long_name_leaves_room_for_the_warning_and_an_icon_for_the_label() {
         }
         fn look(&self, name: &str, _: &str, source: &str) -> BlockLook {
             if name != "shown" {
-                return BlockLook::Outside(vec!["The reason".to_string()]);
+                return BlockLook::Outside {
+                    reasons: vec!["The reason".to_string()],
+                    native: None,
+                };
             }
             BlockLook::Native(NativeBlock {
                 view: Arc::new(NativeView {
