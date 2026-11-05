@@ -305,6 +305,17 @@ fn plan_submission(wanted: &[u64], has_job: impl Fn(u64) -> bool, told: &[u64]) 
     ((submit != told).then_some(submit), lost)
 }
 
+impl Drop for SiteBoard {
+    /// Ending a helper can take a moment: not on the UI thread.
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            let _ = std::thread::Builder::new()
+                .name("markise-web-end".into())
+                .spawn(move || drop(client));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::plan_submission;
@@ -321,16 +332,5 @@ mod tests {
         assert!(!lost);
         // nothing changed: nothing to say
         assert_eq!(plan_submission(&[1, 2], |_| true, &[1, 2]), (None, false));
-    }
-}
-
-impl Drop for SiteBoard {
-    /// Ending a helper can take a moment: not on the UI thread.
-    fn drop(&mut self) {
-        if let Some(client) = self.client.take() {
-            let _ = std::thread::Builder::new()
-                .name("markise-web-end".into())
-                .spawn(move || drop(client));
-        }
     }
 }
