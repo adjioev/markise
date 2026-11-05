@@ -3,8 +3,10 @@
 //!
 //! - A dead proxy on the data store: the engine sends everything HTTP-like there, resolving no name
 //!   itself, also what no rule is asked about (a link's click preconnects before any policy).
-//! - Peer connections off: their UDP goes around both rules and proxy. No public switch exists, so a
-//!   page is also checked for not having them before any of a package's code runs ([`page::PREPARE`]).
+//! - The engine's own features off, by name: peer connections, whose UDP goes around both rules and
+//!   proxy, and a link's preconnect, which happens before any policy, in any frame, and no rule is
+//!   asked. No public switch exists, so a page is also checked for having no peer connections before
+//!   any of a package's code runs ([`page::PREPARE`]).
 //! - This process itself: it has no business with the network or with the user's files.
 //!
 //! Without any of these, there is no helper: [`usable`] says so before anything loads.
@@ -12,8 +14,9 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 
 use objc2::msg_send;
+use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
-use objc2_foundation::NSArray;
+use objc2_foundation::{NSArray, NSObject, NSString};
 use objc2_web_kit::{WKPreferences, WKWebsiteDataStore};
 
 #[link(name = "Network", kind = "framework")]
@@ -28,10 +31,40 @@ unsafe extern "C" {
     fn sandbox_free_error(errorbuf: *mut c_char);
 }
 
+/// What must be off for a page to run at all.
+const MUST_BE_OFF: &[&str] = &["PeerConnectionEnabled", "LinkPreconnect", "LinkDNSPrefetchEnabled"];
+/// What is off where this engine knows it: others that reach out with nobody asked.
+const ALSO_OFF: &[&str] = &[
+    "LinkPreconnectEarlyHintsEnabled",
+    "LinkPrefetchEnabled",
+    "SpeculationRulesPrefetchEnabled",
+    "WebTransportEnabled",
+];
+
+/// The engine's features with their names.
+fn features() -> Vec<(String, Retained<NSObject>)> {
+    let class = objc2::class!(WKPreferences);
+    // SAFETY: every class answers this
+    let there: bool = unsafe { msg_send![class, respondsToSelector: objc2::sel!(_features)] };
+    if !there {
+        return Vec::new();
+    }
+    // SAFETY: it responds; it answers an array of feature objects, each with a key
+    let list: Option<Retained<NSArray<NSObject>>> = unsafe { msg_send![class, _features] };
+    let list = list.map_or(Vec::new(), |l| l.to_vec());
+    let named = list.into_iter().filter_map(|f| {
+        let key: Option<Retained<NSString>> = unsafe { msg_send![&*f, key] };
+        Some((key?.to_string(), f))
+    });
+    named.collect()
+}
+
 /// Whether this system has what it takes (macOS 14 for the proxy).
 pub fn usable(store: &WKWebsiteDataStore, prefs: &WKPreferences) -> bool {
+    let known = features();
     store.respondsToSelector(objc2::sel!(setProxyConfigurations:))
-        && prefs.respondsToSelector(objc2::sel!(_setPeerConnectionEnabled:))
+        && prefs.respondsToSelector(objc2::sel!(_setEnabled:forFeature:))
+        && MUST_BE_OFF.iter().all(|name| known.iter().any(|(k, _)| k == name))
 }
 
 /// Everything HTTP-like of this store goes to a port nothing listens on, with no failover.
@@ -49,9 +82,13 @@ pub fn dead_proxy(store: &WKWebsiteDataStore) {
     }
 }
 
-pub fn no_peer_connections(prefs: &WKPreferences) {
-    // SAFETY: [`usable`] checked it responds
-    let _: () = unsafe { msg_send![prefs, _setPeerConnectionEnabled: false] };
+pub fn engine_features_off(prefs: &WKPreferences) {
+    for (name, feature) in features() {
+        if MUST_BE_OFF.contains(&name.as_str()) || ALSO_OFF.contains(&name.as_str()) {
+            // SAFETY: [`usable`] checked it responds
+            let _: () = unsafe { msg_send![prefs, _setEnabled: false, forFeature: &*feature] };
+        }
+    }
 }
 
 /// From here on this process reaches no network and no file of the user. `network`: the self-test
