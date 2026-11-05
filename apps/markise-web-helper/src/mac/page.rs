@@ -52,7 +52,18 @@ const sheets = r.styles.map((href) => new Promise((done) => {
   document.head.append(link);
 }));
 await Promise.race([Promise.all(sheets), sleep(1500)]);
-document.getElementById('markise-root').innerHTML = r.html;
+const root = document.getElementById('markise-root');
+// Left to itself the engine does not hold a paint back for a large picture: it asks for it to be
+// decoded and goes on, and a snapshot shows the frame with nothing in it. Set before the picture
+// loads, or it does not help (measured): now for what is in the markup, and as soon as they appear for
+// what the block's code adds.
+const whole = (i) => { i.loading = 'eager'; i.decoding = 'sync'; };
+const pictures = (node) => node.querySelectorAll ? [...(node.matches('img') ? [node] : []), ...node.querySelectorAll('img')] : [];
+new MutationObserver((changes) => {
+  for (const c of changes) for (const n of c.addedNodes) pictures(n).forEach(whole);
+}).observe(root, { childList: true, subtree: true });
+root.innerHTML = r.html;
+pictures(root).forEach(whole);
 return document.querySelectorAll('#markise-root > *').length;
 "#;
 
@@ -66,11 +77,14 @@ return true;
 "#;
 
 /// In the world of its own again: waits for pictures and fonts, within bounds, and measures. A page
-/// resizing itself gets one measure: there is no second look.
+/// resizing itself gets one measure: there is no second look. The answer is three numbers: the
+/// height, the pictures there are, and the pictures that did not come. A picture with nothing to
+/// fetch (`data:`, `blob:`, no address) is the page's own business: only what was asked for counts.
 pub const SETTLE: &str = r#"
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 const root = document.getElementById('markise-root');
-const open = [...root.querySelectorAll('img')].filter((i) => !i.complete);
+const images = [...root.querySelectorAll('img')];
+const open = images.filter((i) => !i.complete);
 await Promise.race([
   Promise.all(open.map((i) => new Promise((done) => {
     i.addEventListener('load', done, { once: true });
@@ -78,11 +92,28 @@ await Promise.race([
   }))),
   sleep(1500),
 ]);
-// loaded is not yet drawn: a picture is decoded when it is painted, which a snapshot does not wait for
 await Promise.race([
-  Promise.all([...root.querySelectorAll('img')].map((i) => i.decode().catch(() => {}))),
+  Promise.all(images.map((i) => i.decode().catch(() => {}))),
+  sleep(1500),
+]);
+// a CSS background: decoded as a picture of the same file is, within the same bound
+const backgrounds = new Set();
+for (const e of [...root.querySelectorAll('*')].slice(0, 2000)) {
+  for (const pseudo of [null, '::before', '::after']) {
+    for (const m of getComputedStyle(e, pseudo).backgroundImage.matchAll(/url\("([^"]+)"\)/g)) backgrounds.add(m[1]);
+  }
+}
+await Promise.race([
+  Promise.all([...backgrounds].map((u) => {
+    const i = new Image();
+    i.decoding = 'sync';
+    i.src = u;
+    return i.decode().catch(() => {});
+  })),
   sleep(1500),
 ]);
 await Promise.race([document.fonts.ready, sleep(1000)]);
-return root.getBoundingClientRect().height;
+const asked = (i) => i.getAttribute('src') && !/^(data|blob):/i.test(i.currentSrc || i.src);
+const broken = images.filter((i) => asked(i) && !(i.complete && i.naturalWidth > 0)).length;
+return `${root.getBoundingClientRect().height} ${images.length} ${broken}`;
 "#;

@@ -47,7 +47,7 @@ bytes. **Each side treats what it reads as untrusted**, since a page's code runs
 | `hello` | the first frame: the protocol's number, and whether this helper can draw at all |
 | `need` | a page asks for a file: token, render, area and path, as written, decoded and **untrusted** |
 | `rendered` | the block's height, the image's measures, the time taken; the image as bytes |
-| `failed` | script, hung, size, snapshot, crashed or cancelled, with a reason in words |
+| `failed` | script, hung, size, snapshot, images, crashed or cancelled, with a reason in words |
 
 ### How a package draws a block
 
@@ -156,13 +156,27 @@ number, checked.
 | The helper itself | the client's timer, a little longer, then `SIGKILL`, and it starts another when next needed, with a growing pause; after repeated failures with nothing drawn it counts as unavailable |
 | A page done, nothing to do next | its document goes, so its code stops; if it does not within 1.5 s it is spinning, and the helper exits. A document at rest costs nothing |
 | An image | 8192 px a side, 24 Mpx. A larger one is `size`, and the block stays a card. The block's height gets one measure, so a page resizing itself gets nowhere |
-| Waiting for styles, pictures, fonts | 1.5 s, 1.5 s, 1 s, then the picture is taken as it stands |
+| Waiting for styles, pictures, fonts | 1.5 s, 1.5 s, 1 s, then the picture is taken as it stands, unless a picture is what did not come (below) |
+| Looking for a paint | 1.5 s, then the page is taken as it stands: one still changing by then is animating itself |
 | A block that fails | not asked again until its source, width, theme or scale changes |
 
 **Accepted.** Memory a page allocates in its own process is bounded by time and by WebKit's own limit on such a process,
 not by Markise: no public API sets one. The helper's stdin carries a client's messages and it trusts their order. A hash
 is not a publisher (ADR 0019): code the user accepted can draw anything in its own picture, misleading included. It is
 shown only as that block, in that block's place.
+
+### A picture of a block and the pictures in it
+
+A window never ordered in has no frames. `requestAnimationFrame` does not run there: two of them hit a 1 s bound on all of 600 cold opens. So
+nothing in a page can say that a paint was done, and a snapshot is the only paint there is. And left to itself the engine does not hold a paint back
+for a large picture: it asks for it to be decoded and goes on. The snapshot then shows the frame with the picture's place empty, with no error, even
+after `load` and a resolved `decode()`. Measured on cold opens of a fresh helper with a 1448×1086 PNG: about 2% empty, 5 to 10% on a busy machine, all of them
+the block's first large picture or nearly so, and a small picture never. A look 50 ms to 300 ms later shows it.
+
+- **`decoding="sync"` on every `<img>`,** in the helper's own world, before it loads: the markup's at once, and what the block's code adds as soon as it is added, by an observer. Setting it after the picture has loaded helps only by about ten times (0.6%, against 0 in 2100).
+- **A CSS background** cannot be asked that. A picture of its file is decoded in its place, before the look: 10 empty of 300 without that, none with it, on a busy machine, against 60 of 200 before any of this.
+- **Two looks.** For a page with pictures (an `<img>` or a picture file asked for, so a CSS background too), the snapshot is taken again after 40 ms until two agree, within the bound above. A page with no picture has one look, and pays nothing. It costs a picture's block about 60 ms and a second snapshot.
+- **A picture that did not come is not a picture of the block.** A `src` that failed or was still not answered at the bound is `images`: no image is sent, nothing is cached, and the block stays a card with a quiet reason. `data:` and `blob:` are the page's own business. A canvas of the block's code's making, or a background that did not come, cannot be seen from here.
 
 ### Showing a picture
 
