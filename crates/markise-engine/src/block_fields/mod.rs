@@ -207,6 +207,8 @@ pub struct BlockFields {
     chunks: Vec<decode::Chunk>,
     /// What each body block parses as, in order, and which field took it.
     shapes: Vec<(decode::Shape, Option<usize>)>,
+    /// What stands below the body blocks, in order, apart from paragraphs and list items.
+    nested: Vec<std::mem::Discriminant<markise_md::BlockKind>>,
     next_item: u32,
     /// Anchors removed through this model and its predecessors: never given out again.
     retired: BTreeSet<String>,
@@ -304,7 +306,10 @@ impl BlockFields {
 
     /// Whether the two read as the same block, apart from the text in its fields.
     pub fn same_structure(&self, other: &BlockFields) -> bool {
-        self.name() == other.name() && self.args() == other.args() && self.structure() == other.structure()
+        self.name() == other.name()
+            && self.args() == other.args()
+            && self.structure() == other.structure()
+            && self.nested == other.nested
     }
 
     /// What the body parses as, apart from how many paragraphs a text field has.

@@ -130,14 +130,19 @@ impl Slot {
             .join("\n")
     }
 
-    /// Where the plain text of the slot starts or ends, what it holds besides aside.
+    /// Where the plain text of the slot starts or ends, what it holds besides aside. A heading or an
+    /// item with no text yet is a place all the same.
     pub fn text_edge(&self, first: bool) -> Option<usize> {
-        let plain = |l: &&SlotLine| !l.value.trim().is_empty() && !self.is_protected(&l.content);
-        if first {
-            self.lines.iter().find(plain).map(|l| l.content.start)
+        let open = |l: &&SlotLine| !self.is_protected(&l.content);
+        let plain = |l: &&SlotLine| open(l) && !l.value.trim().is_empty();
+        let edge = |l: &SlotLine| if first { l.content.start } else { l.content.end };
+        let found = if first {
+            self.lines.iter().find(plain)
         } else {
-            self.lines.iter().rev().find(plain).map(|l| l.content.end)
-        }
+            self.lines.iter().rev().find(plain)
+        };
+        let empty = || self.lines.iter().find(open).filter(|_| self.is_one_line());
+        found.or_else(empty).map(edge)
     }
 
     /// One line of text and no more: Enter and a pasted line break cannot go in it.
@@ -552,7 +557,7 @@ impl BlockFields {
             }
             v
         };
-        if without(self) != without(next) {
+        if without(self) != without(next) || self.nested != next.nested {
             return Err("the block would parse differently");
         }
         Ok(())
