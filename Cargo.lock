@@ -3032,6 +3032,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "markise-web-helper"
+version = "0.1.0-beta.1"
+dependencies = [
+ "markise-web-render",
+]
+
+[[package]]
+name = "markise-web-render"
+version = "0.1.0-beta.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "maybe-owned"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

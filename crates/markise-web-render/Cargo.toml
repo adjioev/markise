@@ -1,0 +1,15 @@
+[package]
+name = "markise-web-render"
+description = "HTML, CSS and JS to an image in a helper process: the protocol and the client; no web engine here"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

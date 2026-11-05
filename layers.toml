@@ -27,6 +27,7 @@ exclude_paths = ["spikes/"]
 [layers]
 markise-geom = 0
 schema-form-core = 0
+markise-web-render = 0
 markise-md = 1
 markise-doc = 1
 markise-layout = 2
@@ -51,6 +52,7 @@ markise-ui-egui = 6
 [roles]
 markise = "app"
 markise-cli = "app"
+markise-web-helper = "app"
 markise-corpus = "testkit"
 markise-testfmt = "testkit"
 xtask = "tool"

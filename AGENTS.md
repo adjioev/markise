@@ -38,6 +38,7 @@ Layered workspace (`crates/*`, `apps/*`), lower layers never depend on higher on
 |---|---|---|
 | L0 | `markise-geom` | units, measurements |
 | L0 | `schema-form-core` | forms from JSON: a declared subset of JSON Schema plus UI hints to a field tree and validation; no GUI, knows nothing of Markdown (ADR 0020) |
+| L0 | `markise-web-render` | HTML, CSS and JS to an image in a helper process: protocol and client, no web engine, no Markdown (ADR 0023) |
 | L1 | `markise-doc` | format-neutral document seam (ADR 0006): spans, patches, positions, selections, hints, views, command descriptors, format traits |
 | L1 | `markise-md` | Markdown parse/serialize, lossless round-trip (spec 01); implements the `markise-doc` traits |
 | L2 | `markise-layout` | shaping, line breaking, block layout, tables, hit testing |
@@ -50,7 +51,7 @@ Layered workspace (`crates/*`, `apps/*`), lower layers never depend on higher on
 | L5 | `markise-mcp` | MCP server |
 | L6 | `egui-schema-form` | a native egui form from JSON (schema, UI hints, values); knows nothing of Markise or Markdown (ADR 0020) |
 | L6 | `markise-ui-egui` | egui front end |
-| apps | `markise`, `markise-cli` | desktop app, command line |
+| apps | `markise`, `markise-cli`, `markise-web-helper` | desktop app, command line, the helper that draws blocks with the system's web engine (ADR 0023) |
 | tests | `markise-corpus` | deterministic corpus for tests and benchmarks (dev-dependency only) |
 | tests | `markise-testfmt` | tiny line-based toy format proving the format seam (dev-dependency only) |
 
