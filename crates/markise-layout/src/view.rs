@@ -23,8 +23,10 @@ use crate::text::TextShaper;
 
 mod native;
 mod paging;
+mod site;
 pub use native::{BlockViewMode, NativeAt};
 pub use paging::PagingStats;
+pub use site::SiteLook;
 
 /// An item to paint this frame.
 #[derive(Clone, Debug)]
@@ -89,6 +91,8 @@ pub struct View {
     pre_edit_anchor: Option<(usize, usize, f32)>,
     /// Which blocks show natively ([`native`], ADR 0021).
     native: native::NativeState,
+    /// Which blocks show as pictures ([`site`], ADR 0023).
+    site: site::SiteState,
 }
 
 impl View {
@@ -126,6 +130,7 @@ impl View {
             paging: Default::default(),
             pre_edit_anchor: None,
             native: Default::default(),
+            site: Default::default(),
         };
         v.reset_heights();
         v
@@ -231,6 +236,7 @@ impl View {
     /// [`View::source_anchor`]).
     fn set_model_at(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>, anchor: (usize, usize, f32)) {
         self.native.forget();
+        self.site.forget();
         self.focus = None;
         self.caret_item = None;
         self.doc = doc;
@@ -311,6 +317,7 @@ impl View {
     /// laid out in between.
     pub fn replace_doc(&mut self, doc: Arc<dyn FormatDoc>) -> Arc<dyn FormatDoc> {
         self.native.forget();
+        self.site.forget();
         std::mem::replace(&mut self.doc, doc)
     }
 
@@ -319,6 +326,7 @@ impl View {
     pub fn apply_change(&mut self, doc: Arc<dyn FormatDoc>, change: &ModelChange) {
         self.doc = doc;
         self.native.forget();
+        self.site.forget();
         let old_focus = self.focus.take().map(|f| f.0);
         self.caret_item = None;
         let pre = self.pre_edit_anchor.take();
@@ -544,6 +552,7 @@ impl View {
                 .items
                 .get(i)
                 .is_some_and(|it| it.raw.as_deref() == Some(&markise_doc::RawPresentation::Comment))
+            || self.site_hidden(i)
     }
 
     /// Height before this frame: cached layout or estimate.
@@ -577,6 +586,7 @@ impl View {
         self.theme = theme.clone();
         self.theme_fp = fp;
         self.ppp = ppp;
+        self.site.forget();
         self.reset_heights();
         self.anchor_off = frac * self.height(self.anchor);
     }
@@ -921,6 +931,9 @@ impl View {
         }
         let t = &self.theme;
         let (pa, pb) = self.item_pad(i);
+        if let Some(h) = self.site_estimate(i, it) {
+            return h + pa + pb;
+        }
         let line = t.line_px();
         let avg_char = t.font_size * 0.5;
         let per_line = (self.width / avg_char).max(10.0);
@@ -1115,6 +1128,7 @@ impl View {
             self.exact[i] = true;
             return Arc::new(BlockLayout::default());
         }
+        self.site_seen(i);
         let ready = self.code_query(i).map(|q| {
             let r = self.highlights.ready(&q);
             if !r {
@@ -1165,7 +1179,7 @@ impl View {
                     math: Cell::new(false),
                     images: RefCell::new(Vec::new()),
                 };
-                let laid = self.with_native_params(i, |native, warnings| {
+                let laid = self.with_native_params(i, |look| {
                     let params = LayoutParams {
                         theme: &self.theme,
                         width: self.width,
@@ -1178,8 +1192,10 @@ impl View {
                         ppp: self.ppp,
                         links: &*self.links,
                         review: self.review,
-                        native,
-                        warnings,
+                        native: look.native,
+                        warnings: look.warnings,
+                        site: look.site,
+                        note: look.note,
                     };
                     layout_item(&*self.doc, &self.model, i, &params, shaper, &rec)
                 });
@@ -1236,6 +1252,8 @@ impl View {
             if self.reveal_item(i) {
                 self.reset_heights();
             }
+            // what a picture stands for: the picture
+            let i = self.site_opener_of(i).unwrap_or(i);
             self.anchor = i;
             self.anchor_off = 0.0;
         }
@@ -1320,7 +1338,7 @@ impl View {
                 }
                 let l = self.layout(i, shaper, images);
                 let h = self.height(i);
-                if y + h > 0.0 && y < viewport_h {
+                if y + h > 0.0 && y < viewport_h && !self.site_hidden(i) {
                     let (pad, _) = self.item_pad(i);
                     out.push(Visible {
                         idx: i,

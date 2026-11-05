@@ -147,6 +147,9 @@ pub struct AppOptions {
     /// Chooses a file for an image field of a block's form, starting in the given folder.
     /// Default: the system's file dialog; tests pass their own.
     pub block_image_picker: Option<block_form::ImagePicker>,
+    /// What draws blocks by their site's code (ADR 0023). `None`: nothing does, and they stay cards.
+    /// The app passes [`crate::viewer::system_web_helpers`]; tests pass a helper of their own or none.
+    pub web_helpers: Option<crate::viewer::HelperSource>,
 }
 
 impl Default for AppOptions {
@@ -172,6 +175,7 @@ impl Default for AppOptions {
             updates: Default::default(),
             watch: true,
             block_image_picker: None,
+            web_helpers: None,
         }
     }
 }
@@ -467,6 +471,7 @@ pub struct MarkiseApp {
     ctx: Option<Context>,
     wake: Option<Wake>,
     hooks: Hooks,
+    web_helpers: Option<crate::viewer::HelperSource>,
     load_hook: Option<StageHook>,
     doc: Option<DocState>,
     next_doc_id: u64,
@@ -614,6 +619,7 @@ impl MarkiseApp {
     pub fn new(mut opts: AppOptions) -> Self {
         let package = package::PackageState::new(&opts.config);
         let opts_picker = opts.block_image_picker.clone();
+        let web_helpers = opts.web_helpers.clone();
         let mut themes = ThemeManager::new(opts.config, opts.system_fonts);
         themes.set_watch(opts.watch);
         let diagrams = themes.diagrams();
@@ -631,6 +637,7 @@ impl MarkiseApp {
             ctx: None,
             wake: None,
             hooks: opts.hooks,
+            web_helpers,
             watch: opts.watch,
             load_hook: opts.load_hook,
             doc: None,
@@ -975,6 +982,7 @@ impl MarkiseApp {
             && self.review_settled()
             && self.attach_settled()
             && self.images.is_idle()
+            && self.doc.as_ref().is_none_or(|d| !d.viewer.site_busy())
             && self.full_view_settled()
             && self.tree.as_ref().is_none_or(FileTree::is_idle)
             && !self.highlighter.as_ref().is_some_and(|h| h.busy())

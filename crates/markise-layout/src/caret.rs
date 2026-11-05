@@ -496,6 +496,12 @@ pub fn row_edge(l: &BlockLayout, p: ItemPos, end: bool) -> Option<ItemPos> {
 /// in layout `l`; `to_end` / `from_start`: the selection continues past the item.
 pub fn selection_rects(l: &BlockLayout, r: Range<u32>) -> Vec<Rect> {
     let mut out = Vec::new();
+    // a selection reaches a picture only by holding its block whole
+    for p in &l.prims {
+        if let crate::block::Prim::Picture { rect, .. } = p {
+            out.push(*rect);
+        }
+    }
     for f in frags(l) {
         let a = r.start.max(f.lo);
         let b = r.end.min(f.hi);
@@ -678,6 +684,18 @@ impl Geometry<'_> {
     /// The document position at item-local point `pt` of item `i`.
     pub fn hit(&mut self, i: usize, pt: Pos2) -> Option<DocPos> {
         let l = self.layout(i);
+        // a picture has no stops: its upper half is the place before it, its lower half after it
+        if l.has_picture() {
+            let below = pt.y > l.height * 0.5;
+            let gap = if below {
+                self.view
+                    .adjacent_visible(i, true)
+                    .and_then(|closer| self.gap_after(closer))
+            } else {
+                self.gap_before(i)
+            };
+            return gap.or_else(|| self.nearest_stop(i, pt.x, below));
+        }
         // the gap above the item's content: the virtual paragraph between it and the block
         // before it, where the format offers one (issue #166)
         if pt.y < l.gap

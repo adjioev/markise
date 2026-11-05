@@ -164,6 +164,55 @@ not by Markise: no public API sets one. The helper's stdin carries a client's me
 is not a publisher (ADR 0019): code the user accepted can draw anything in its own picture, misleading included. It is
 shown only as that block, in that block's place.
 
+### Showing a picture
+
+A picture changes nothing about a block's items (ADR 0021): they stay flat, pages split them as ever (ADR 0016), and every source
+position, mark and edit goes on as it did. What changes is their heights.
+
+- **The opener holds the picture** (`Prim::Picture`, drawn by the host, as an icon is). Its height is the picture's, scaled to the
+  column if an older one stands in at another width. The items inside are hidden the way a closed disclosure's are, zero height
+  and skipped by the caret. The closer stays with no height, so the gap after it is where a caret lands (issue #166). Nested blocks
+  are inside the outermost picture. A picture draws its own edges, so its own card draws none; the block's outer margins are not in it,
+  and the document's block spacing stands instead.
+- **Which item is what** is read through `BlockViews`: `has_site`, then `site_shot`, once per version of a block, and `site_seen` for what is on
+  screen, every frame. It answers from a map and never blocks. A document whose blocks nothing can draw pays one comparison per item.
+- **A picture coming is a change of heights.** Above the viewport it moves nothing on screen, as any height does (ADR 0016). When the viewport starts inside the
+  block, it keeps its relative place in the block. Only heights around the viewport are read at once; the others are corrected when they are laid out. A
+  placeholder's measured height keeps what it held, for the views it was measured under; one never measured is estimated as cards.
+- **Pending** shows the card, the first time. After that the newest picture of the same block stands in until its new one comes, so nothing
+  flickers while typing above it, resizing, or after Save. "The same" is an identity the view keeps by opener and moves with every edit: an edit that goes over the opener, or another name
+  or arguments there, ends it, so another block coming to stand at that offset shows its card, not this picture. The content is not compared: a block being edited differs from its picture by definition.
+- **Failure** keeps the card, with a quiet reason on its first row (no `⚠`), in full on hover and for a screen reader. It is not tried again until the block changes.
+- **What is shown which way.** A block that does not fit its schema has no picture: it shows what ADR 0021 says, native with its warning when it is only not filled
+  in, a card when its structure is wrong. Only a block that fits can be expected to draw.
+- **The caret.** A picture has no stops, so keys go past it. A click in its upper half lands on the place before it, in its lower half on the place after it, the
+  virtual paragraphs of issue #166 where there is no text. A selection holding the block whole paints over the picture, and copies, deletes and moves it as any
+  block. When a selection's end is inside (search, undo, Go to Heading through a caret), the block shows what it holds until it leaves. There is nothing to edit in a picture.
+- **The pencil** stays: the form edits the block (ADR 0020), and Save is a new version, so a new picture. Over a picture the buttons show when the pointer is on it, on a ground of their own.
+- **Known limit, as for cards at the top (ADR 0018):** with no gap offered before the document's first block, a click on a picture there goes to the next stop.
+
+**The cache.** A picture is named by the package's hash and the document's folder (the session), the document's language, the block's name, arguments and source, its width, the
+scale, and the theme's fingerprint. Pictures are textures, 256 MiB together, least recently used first, and none on disk. At most two become textures per frame. One over the graphics card's `max_texture_side` is refused and the block stays a card with that reason: scaling
+would be work on the UI thread for a rare card, and tiles a lot of code for it. One gone is drawn
+again when it is next on screen. Typing elsewhere changes no key, so it draws nothing.
+
+**What the page sees of the theme,** all of it data on `<html>`:
+
+| | |
+|---|---|
+| `data-theme` | `light` or `dark`; also `color-scheme` |
+| `lang` | the `lang` key of the document's front matter, if it has one |
+| `--markise-background`, `--markise-text`, `--markise-link`, `--markise-accent`, `--markise-selection` | the theme's colours |
+| `--markise-font-size` | the theme's body size, in `px` |
+
+The picture's background is transparent, so what a block does not paint is the document. A package with no dark look of its own draws what it draws, on the document's dark page.
+
+**Scale.** The width is the column's in points, and the scale is the window's pixels per point, whole-window zoom included: at any zoom a picture is sharp, and it is another
+picture. The helper's own screen has no say (ADR 0023, Isolation).
+
+**Idle.** Nothing runs for a document at rest. `tell_client` speaks only when what is wanted changed; the client's thread sleeps with no timer unless a helper is up, and then wakes once
+to let it go after two minutes; a page's document is gone when it is done; no frame is asked for.
+
 ### Distribution
 
 The helper goes in the app bundle, signed before the bundle (see below for the phase's last step). Ad-hoc today, as

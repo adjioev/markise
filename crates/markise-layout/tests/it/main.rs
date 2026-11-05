@@ -13,6 +13,7 @@ mod native;
 mod paging;
 mod seam;
 mod segments;
+mod site;
 mod source_view;
 mod theme;
 mod view;

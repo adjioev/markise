@@ -88,6 +88,41 @@ pub enum BlockLook {
     Native(NativeBlock),
 }
 
+/// A picture of a block, drawn by its site's code and held by a host (ADR 0023).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SitePicture {
+    /// What the host draws it by.
+    pub id: u64,
+    /// In points, as it was drawn.
+    pub width: f32,
+    pub height: f32,
+}
+
+/// What is asked about a block that could show as a picture. `hash` stands for all of it but the host's own
+/// inputs: the block's name, arguments and source, width, scale and theme.
+pub struct SiteQuery<'a> {
+    pub hash: u64,
+    pub name: &'a str,
+    pub args: &'a str,
+    pub source: &'a str,
+    /// Which block this is, through edits: its opener can move and its content change, and it stays
+    /// this. An older picture of the same block can stand in for a new one; another block's cannot.
+    pub identity: u64,
+    pub width: f32,
+    pub scale: f32,
+    pub theme: &'a Theme,
+}
+
+/// What a host has for a block.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SiteShot {
+    Ready(SitePicture),
+    /// Not yet; an older picture of it, if there is one, stands in.
+    Pending(Option<SitePicture>),
+    /// Not ever, for this version: why, in words. The block stays a card.
+    Failed(Arc<str>),
+}
+
 /// What knows about blocks. Answers must be cheap: [`BlockViews::look`] is asked once per version
 /// of a block on screen, with at most [`MAX_NATIVE_BLOCK_BYTES`] of source.
 pub trait BlockViews: Send + Sync {
@@ -105,6 +140,19 @@ pub trait BlockViews: Send + Sync {
     fn icon_ready(&self, _icon: &str) -> bool {
         false
     }
+    /// Whether something can draw blocks here at all. `false` costs a comparison per item.
+    fn has_site(&self) -> bool {
+        false
+    }
+    /// What there is for this block, under a key the host names it by. Must not block: a host starts what
+    /// it has to, and asks for a frame when it comes. Asked once per version of a block on screen.
+    fn site_shot(&self, query: &SiteQuery<'_>) -> (u64, SiteShot) {
+        let _ = query;
+        (0, SiteShot::Pending(None))
+    }
+    /// The block with this key is on screen, or about to be. Called every frame for each, in the order
+    /// they matter.
+    fn site_seen(&self, _key: u64) {}
     /// How the block `name args` with this source looks. `source` runs from the first colon of
     /// its opener to the end of its closer.
     fn look(&self, name: &str, args: &str, source: &str) -> BlockLook;

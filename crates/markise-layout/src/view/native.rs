@@ -36,6 +36,14 @@ impl BlockViewMode {
     }
 }
 
+/// What an item's layout gets of its block.
+pub(super) struct ItemLook<'a> {
+    pub native: Option<NativeParams<'a>>,
+    pub warnings: Option<&'a [String]>,
+    pub site: Option<super::site::SiteLook>,
+    pub note: Option<&'a str>,
+}
+
 /// A block shown natively, around a position.
 #[derive(Clone, Debug)]
 pub struct NativeAt {
@@ -53,7 +61,7 @@ impl NativeAt {
 
 /// What a block looks like, once read.
 #[derive(Clone)]
-enum Looked {
+pub(super) enum Looked {
     Generic,
     Unfilled(Arc<[String]>, Arc<NativeBlock>),
     Outside(Arc<[String]>, Option<Arc<NativeBlock>>),
@@ -70,7 +78,7 @@ struct OfItem {
 
 #[derive(Default)]
 pub(super) struct NativeState {
-    source: Option<Arc<dyn BlockViews>>,
+    pub(super) source: Option<Arc<dyn BlockViews>>,
     /// How the document shows its blocks …
     mode: BlockViewMode,
     /// … and the blocks that differ from it, by opener, ascending.
@@ -99,7 +107,7 @@ impl NativeState {
     }
 
     /// The state of the block with this opener.
-    fn mode_of(&self, opener: usize) -> BlockViewMode {
+    pub(super) fn mode_of(&self, opener: usize) -> BlockViewMode {
         match self.own_modes.binary_search_by_key(&opener, |m| m.0) {
             Ok(i) => self.own_modes[i].1,
             Err(_) => self.mode,
@@ -122,6 +130,7 @@ impl View {
         self.native.source = views;
         self.native.items.borrow_mut().clear();
         self.native.looks.borrow_mut().clear();
+        self.site.forget();
         self.reset_heights();
     }
 
@@ -144,6 +153,7 @@ impl View {
         self.native.mode = mode;
         self.native.own_modes = own;
         self.native.items.borrow_mut().clear();
+        self.site.forget();
         if !same_states {
             self.reset_heights();
         }
@@ -190,7 +200,7 @@ impl View {
         })
     }
 
-    fn look_of(&self, c: &NamedContainer) -> Looked {
+    pub(super) fn look_of(&self, c: &NamedContainer) -> Looked {
         let Some(source) = &self.native.source else {
             return Looked::Generic;
         };
@@ -268,7 +278,7 @@ impl View {
         found
     }
 
-    /// The block of item `i` when it shows natively.
+    /// The block of item `i` when it shows natively. Not one a picture stands for.
     pub fn native_item(&self, i: usize) -> Option<NativeAt> {
         let it = self.model.items.get(i)?;
         self.of_item(self.model.item_start(i), it).map(|o| o.at)
@@ -280,7 +290,7 @@ impl View {
             return 0;
         }
         let of = self.of_item(self.model.item_start(i), it);
-        let mut key = of.as_ref().map_or(0, |o| o.key);
+        let mut key = of.as_ref().map_or(0, |o| o.key) ^ self.site_item_key(i, it);
         if it.kind == (ItemKind::ContainerMarker { close: false }) {
             let opener = (of.as_ref()).is_some_and(|o| self.icon_ready(o));
             key ^= u64::from(opener).rotate_left(47);
@@ -299,19 +309,22 @@ impl View {
     }
 
     /// Runs `f` with what item `i`'s layout gets of its view: the view and the warnings.
-    pub(super) fn with_native_params<R>(
-        &self,
-        i: usize,
-        f: impl FnOnce(Option<NativeParams<'_>>, Option<&[String]>) -> R,
-    ) -> R {
-        let of = (self.model.items.get(i)).and_then(|it| self.of_item(self.model.item_start(i), it));
+    pub(super) fn with_native_params<R>(&self, i: usize, f: impl FnOnce(ItemLook<'_>) -> R) -> R {
+        let it = self.model.items.get(i);
+        let of = it.and_then(|it| self.of_item(self.model.item_start(i), it));
         let why = self.block_warnings(i);
         let params = of.as_ref().map(|o| NativeParams {
             view: &o.at.block.view,
             role: o.role,
             icon_ready: self.icon_ready(o),
         });
-        f(params, why.as_deref())
+        let (site, note) = it.map_or((None, None), |it| self.site_params(i, it));
+        f(ItemLook {
+            native: params,
+            warnings: why.as_deref(),
+            site,
+            note: note.as_deref(),
+        })
     }
 
     /// A heading in this item draws at a native title's size, as far as its block's name can tell:

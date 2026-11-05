@@ -91,8 +91,13 @@ impl Fixture {
     }
 
     pub(crate) fn opened(&self) -> H {
+        self.opened_with(None)
+    }
+
+    pub(crate) fn opened_with(&self, web_helpers: Option<markise_ui_egui::viewer::HelperSource>) -> H {
         let opts = AppOptions {
             config: ConfigDir::Dir(self.config.clone()),
+            web_helpers,
             ..common::no_watch()
         };
         let mut h = Harness::builder()
@@ -104,7 +109,12 @@ impl Fixture {
 
     /// Opened, and the package accepted.
     pub(crate) fn ready(&self) -> H {
-        let mut h = self.opened();
+        self.ready_with(None)
+    }
+
+    /// Opened with this to draw with, and the package accepted.
+    pub(crate) fn ready_with(&self, web_helpers: Option<markise_ui_egui::viewer::HelperSource>) -> H {
+        let mut h = self.opened_with(web_helpers);
         h.get_by_label("Use Package").click();
         h.step();
         wait_until(&mut h, "the install", |a| a.block_package().is_some());

@@ -203,6 +203,9 @@ impl EditorView {
                 self.source_load_selection();
             }
         }
+        if let Some(edits) = &mode_edits {
+            self.view.site_follow_edits(edits);
+        }
         if !self.place_is_idle() {
             if let Some(edits) = mode_edits {
                 self.prune_block_modes(&edits);
@@ -323,6 +326,14 @@ impl EditorView {
     /// placeholder document during an edit): caret geometry and selection fixing never see a
     /// placeholder at a selection end.
     pub(super) fn pin_caret(&mut self) {
+        // a picture stands for a block the selection is not in (ADR 0023)
+        if Arc::ptr_eq(self.view.doc(), self.session.doc_arc()) {
+            let sel = self.session.selection();
+            let ends: Vec<usize> = (sel.ranges().iter())
+                .flat_map(|r| [r.anchor.offset, r.focus.offset])
+                .collect();
+            self.view.set_selection_for_site(&ends);
+        }
         if self.view.model().is_paged() && Arc::ptr_eq(self.view.doc(), self.session.doc_arc()) {
             let sel = self.session.selection();
             let mut pins: Vec<usize> = vec![sel.primary().focus.offset, sel.primary().anchor.offset];
