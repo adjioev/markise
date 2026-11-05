@@ -6,18 +6,18 @@ use std::time::{Duration, Instant};
 use markise_web_render::proto::Area;
 use markise_web_render::{Client, Job, JobSource, Limits, Outcome, Prepared, ProcessSpawner};
 
-struct Block(&'static str);
+struct Block(&'static str, String);
 
 impl JobSource for Block {
     fn prepare(&self) -> Result<Prepared, String> {
         Ok(Prepared {
             html: "<section style=\"height:30px;background:rgb(0,0,255)\"></section>".to_string(),
             styles: Vec::new(),
-            module: Some("m.js".to_string()),
+            module: Some(self.1.clone()),
         })
     }
     fn file(&self, _area: Area, path: &str) -> Option<Vec<u8>> {
-        (path == "m.js").then(|| self.0.as_bytes().to_vec())
+        (path == self.1).then(|| self.0.as_bytes().to_vec())
     }
 }
 
@@ -30,7 +30,8 @@ fn job(key: u64, js: &'static str) -> Job {
         dark: false,
         lang: "en".to_string(),
         vars: Vec::new(),
-        source: Arc::new(Block(js)),
+        // the engine keeps a loaded module by its URL: within a package, a file does not change
+        source: Arc::new(Block(js, format!("m{key}.js"))),
     }
 }
 
