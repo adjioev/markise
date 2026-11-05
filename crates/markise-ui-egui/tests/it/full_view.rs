@@ -222,6 +222,26 @@ fn a_double_click_opens_the_view_and_a_plain_click_does_not() {
     );
 }
 
+/// Portrait and larger than a window: capped in the document, whole in the view, the file untouched.
+#[test]
+fn a_tall_image_is_capped_in_the_document_and_still_opens_whole() {
+    use markise_layout::block::IMAGE_MAX_HEIGHT;
+    let md = "before\n\n![a](pic.png)\n\nafter\n";
+    let mut h = image_harness(md, [1086, 1448], "tall");
+    let r = item_rect(&h, "![a]");
+    assert!(r.height() < IMAGE_MAX_HEIGHT + 40.0, "{r:?}");
+    let after = item_rect(&h, "after").top();
+    assert!(after < 700.0, "what follows is on screen at a glance");
+    click(&mut h, r.center());
+    assert!(h.state().full_view().is_none(), "a plain click stays in the document");
+    h.run_steps(30);
+    double_click(&mut h, r.center());
+    let view = h.state().full_view().expect("the view opens");
+    let _ = view;
+    assert_eq!(text(&h), md);
+    assert!(!h.state().is_dirty());
+}
+
 /// The hover controls sit in a row under the picture, the screenshot's language label no longer
 /// covers the diagram.
 #[test]

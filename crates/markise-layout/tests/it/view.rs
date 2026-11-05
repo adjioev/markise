@@ -134,6 +134,79 @@ impl Images for Sized {
     }
 }
 
+/// The image's rectangle in the first item of `src` showing one.
+fn shown_image(src: &str, size: [u32; 2], width: f32) -> (epaint::Rect, f32) {
+    struct One([u32; 2]);
+    impl Images for One {
+        fn state(&self, _src: &str) -> ImageState {
+            ImageState::Ready { size: self.0 }
+        }
+    }
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut v = view(src, width);
+    let vis = v.frame(1500.0, 0.0, &mut f, &One(size));
+    vis.iter()
+        .find_map(|x| {
+            x.layout.prims.iter().find_map(|p| match p {
+                Prim::Image { rect, .. } => Some((*rect, x.layout.height)),
+                _ => None,
+            })
+        })
+        .expect("an image")
+}
+
+#[test]
+fn a_tall_image_is_capped_a_small_one_stays_and_proportions_hold() {
+    use markise_layout::block::IMAGE_MAX_HEIGHT as MAX;
+    let md = "para\n\n![a](t.png)\n\nend\n";
+    for ([w, h], want) in [
+        // portrait, taller than a window at column width
+        ([1086, 1448], (MAX * 1086.0 / 1448.0, MAX)),
+        // small: never scaled up
+        ([40, 30], (40.0, 30.0)),
+        // tall and narrow, under the column
+        ([100, 900], (MAX / 9.0, MAX)),
+        // wide: the column decides, as ever
+        ([2000, 500], (700.0, 175.0)),
+        // just about square: the column would leave it taller than the cap
+        ([1000, 900], (MAX / 0.9, MAX)),
+    ] {
+        let (r, item) = shown_image(md, [w, h], 700.0);
+        assert!((r.width() - want.0).abs() < 0.01, "{w}x{h}: {r:?}");
+        assert!((r.height() - want.1).abs() < 0.01, "{w}x{h}: {r:?}");
+        assert!(item >= r.height(), "the item holds it");
+    }
+}
+
+#[test]
+fn an_image_in_a_card_or_a_quote_is_capped_too() {
+    use markise_layout::block::IMAGE_MAX_HEIGHT as MAX;
+    for md in [":::x\n\n![a](t.png)\n\n:::\n", "> ![a](t.png)\n", "- ![a](t.png)\n"] {
+        let (r, _) = shown_image(md, [1086, 1448], 700.0);
+        assert!((r.height() - MAX).abs() < 0.01, "{md:?}: {r:?}");
+    }
+}
+
+#[test]
+fn the_height_of_an_image_does_not_depend_on_the_viewport() {
+    let md = "![a](t.png)\n\nend\n";
+    struct Tall;
+    impl Images for Tall {
+        fn state(&self, _src: &str) -> ImageState {
+            ImageState::Ready { size: [1086, 1448] }
+        }
+    }
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut v = view(md, 700.0);
+    let at = |vis: &[markise_layout::Visible]| vis[0].layout.height;
+    let small = at(&v.frame(200.0, 0.0, &mut f, &Tall));
+    let large = at(&v.frame(1600.0, 0.0, &mut f, &Tall));
+    assert_eq!(small, large);
+    assert!(v.total_height() < 600.0, "{}", v.total_height());
+}
+
 #[test]
 fn arriving_images_relayout_only_the_items_that_showed_them() {
     // issue #29: a decoded image used to re-key every item that mentions an image; only the
