@@ -19,6 +19,8 @@ use super::render;
 const ATTEMPTS: &str = include_str!("self_test.names");
 const PAGE: &str = include_str!("self_test.js");
 const CELL: u32 = 8;
+/// What one forbidden page may take in all: 42 attempts at their budget of 5 s each, and some.
+const PAGE_LIMIT_MS: u32 = 240_000;
 
 const FIXTURE_HTML: &str =
     r#"<section data-component="fixture"><h2 data-field="title">A title</h2><p>Text</p></section>"#;
@@ -126,7 +128,9 @@ fn forbidden(
     // a URL of its own: the engine keeps a module by its URL
     let module = format!("forbidden-{id}.js");
     files.insert((Area::Package, module.clone()), page.into());
-    let request = request(id, "<section></section>", &module, &[], 25_000);
+    // every attempt has a budget of its own in the page, so the page always ends and says which; this is
+    // for all of them at once on a slow machine, and only for this test
+    let request = request(id, "<section></section>", &module, &[], PAGE_LIMIT_MS);
     to_main(ToHelper::Render(request), Vec::new());
     let (m, b) = answer(frames, files, id).map_err(|e| format!("the forbidden page: {e}"))?;
     // time for anything delayed to arrive
@@ -139,11 +143,18 @@ fn forbidden(
     for (k, name) in ATTEMPTS.lines().enumerate() {
         let k = k as u32;
         let (x, y) = ((k % per_row) * CELL + CELL / 2, (k / per_row) * CELL + CELL / 2);
-        if pixel(&m, &b, x, y) == [0, 255, 0, 255] {
-            println!("stopped: {name}");
-        } else {
-            println!("MANAGED: {name}");
-            wrong.push(name);
+        let [r, g, tenths, a] = pixel(&m, &b, x, y);
+        let took = tenths as u32 * 100;
+        match (r, g, a) {
+            (0, 255, 255) => println!("stopped: {name} ({took} ms)"),
+            (255, 255, 255) => {
+                println!("UNFINISHED: {name} ({took} ms)");
+                wrong.push(name);
+            }
+            _ => {
+                println!("MANAGED: {name} ({took} ms)");
+                wrong.push(name);
+            }
         }
     }
     for h in &heard {
@@ -151,7 +162,7 @@ fn forbidden(
     }
     println!("the listener on {target} heard {} connections", heard.len());
     if !wrong.is_empty() || !heard.is_empty() {
-        return Err(format!("managed {wrong:?}, heard {heard:?}"));
+        return Err(format!("not stopped {wrong:?}, heard {heard:?}"));
     }
     Ok(())
 }

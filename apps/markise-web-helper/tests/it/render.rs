@@ -82,6 +82,25 @@ fn a_document_image_is_asked_for_by_its_relative_path() {
     assert_eq!(h.asked, [(Area::Document, "images/a b.png".to_string())]);
 }
 
+/// A hidden page's timers would otherwise wait a second or more: a block with a short wait in its
+/// code would use up its render, and on a slow machine more than that.
+#[test]
+fn a_page_nobody_sees_runs_its_timers_on_time() {
+    let mut h = Helper::start();
+    h.file(
+        Area::Package,
+        "m.js",
+        "export default async function(root){ const t=performance.now(); for(let i=0;i<8;i++){ await new Promise((r)=>setTimeout(r,25)); } root.style.height=Math.ceil(performance.now()-t)+'px'; }",
+    );
+    // the page has been hidden for a while by the second render
+    for _ in 0..2 {
+        let r = h.request("<section></section>", Some("m.js"), &[]);
+        let (m, _) = image(h.render(r));
+        assert!(m.css_height >= 190.0, "they did wait: {}", m.css_height);
+        assert!(m.css_height < 900.0, "8 waits of 25 ms took {} ms", m.css_height);
+    }
+}
+
 /// A PNG of one opaque blue pixel.
 fn one_pixel_png() -> Vec<u8> {
     let mut out = Vec::new();

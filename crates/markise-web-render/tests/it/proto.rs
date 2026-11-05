@@ -184,3 +184,61 @@ fn urls_name_files_and_nothing_else() {
     assert_eq!(url, "markise-block://document/a%20b/%C3%A9.png");
     assert_eq!(parse_file_url(&url), Some((Area::Document, "a b/é.png".to_string())));
 }
+
+/// Panics if anything reads past what it was given: a read that should have been refused before it.
+struct NoMore(Cursor<Vec<u8>>);
+
+impl std::io::Read for NoMore {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.0.read(buf)?;
+        assert!(
+            n > 0 || buf.is_empty(),
+            "read past the header of an attachment that must be refused"
+        );
+        Ok(n)
+    }
+}
+
+fn header_only(json: &str, len: u32) -> NoMore {
+    let mut out = (json.len() as u32).to_le_bytes().to_vec();
+    out.extend_from_slice(json.as_bytes());
+    out.extend_from_slice(&len.to_le_bytes());
+    NoMore(Cursor::new(out))
+}
+
+#[test]
+fn an_attachment_is_refused_by_its_message_before_a_byte_of_it_is_read() {
+    let rendered = |w: u64, h: u64| {
+        json!({"t": "rendered", "id": 1, "css_height": 2.0, "px_width": w, "px_height": h, "ms": 1.0}).to_string()
+    };
+    // measures out of bounds, with the largest attachment there is
+    assert!(read_from_helper(&mut header_only(&rendered(0, 2), 96_000_000)).is_err());
+    // fine measures, and a length that is not theirs
+    assert!(read_from_helper(&mut header_only(&rendered(2, 2), 96_000_000)).is_err());
+    assert!(read_from_helper(&mut header_only(&rendered(2, 2), 15)).is_err());
+    // an unknown message
+    assert!(read_from_helper(&mut header_only(r#"{"t":"nope"}"#, 1)).is_err());
+    // to the helper: a file with none found has no bytes
+    let none = json!({"t": "file", "token": 1, "found": false}).to_string();
+    assert!(read_to_helper(&mut header_only(&none, 5)).is_err());
+    let over = json!({"t": "file", "token": 1, "found": true}).to_string();
+    assert!(read_to_helper(&mut header_only(&over, MAX_FILE as u32 + 1)).is_err());
+}
+
+#[test]
+fn lists_are_counted_before_anything_of_them_is_copied() {
+    // a list far over its bound comes back as an error with no entry looked at beyond the bound
+    let mut r = ToHelper::Render(request()).encode();
+    r["styles"] = serde_json::Value::Array(vec![json!("a"); MAX_STYLES + 1]);
+    assert!(ToHelper::decode(&r).is_err());
+    let mut r = ToHelper::Render(request()).encode();
+    r["vars"] = serde_json::Value::Array(vec![json!(["--a", "b"]); MAX_VARS + 1]);
+    assert!(ToHelper::decode(&r).is_err());
+    // a long entry too
+    let mut r = ToHelper::Render(request()).encode();
+    r["styles"] = json!(["x".repeat(MAX_PATH + 1)]);
+    assert!(ToHelper::decode(&r).is_err());
+    let mut r = ToHelper::Render(request()).encode();
+    r["vars"] = json!([["--a", "x".repeat(4096)]]);
+    assert!(ToHelper::decode(&r).is_err());
+}
