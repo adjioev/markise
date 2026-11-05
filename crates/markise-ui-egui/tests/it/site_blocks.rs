@@ -617,8 +617,23 @@ fn switching_one_block_leaves_a_caret_in_another_where_it_is() {
     caret(&mut h, inside);
     let v = h.state_mut().viewer().unwrap();
     v.ed.switch_block_view(at(":::tip"));
-    assert_eq!(v.ed.session.selection().primary().focus.offset, inside, "that block is not this one");
+    assert_eq!(
+        v.ed.session.selection().primary().focus.offset,
+        inside,
+        "that block is not this one"
+    );
     common::run(&mut h);
     assert!(picture(&mut h, at(":::tip")).is_some());
-    assert_eq!(h.state_mut().viewer().unwrap().ed.session.selection().primary().focus.offset, inside);
+    assert_eq!(
+        h.state_mut()
+            .viewer()
+            .unwrap()
+            .ed
+            .session
+            .selection()
+            .primary()
+            .focus
+            .offset,
+        inside
+    );
 }

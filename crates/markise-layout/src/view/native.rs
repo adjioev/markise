@@ -221,6 +221,9 @@ impl View {
             (BlockViewMode::Markdown, _) => return None,
             // not filled in yet has no look on any site (ADR 0021)
             (_, Looked::Unfilled(_, block)) => block,
+            // being edited natively in the Site state, and it has come to fit: it stays what it was
+            // until the caret leaves, as any block being edited does
+            (BlockViewMode::Site, Looked::Native(block)) if self.native.sticky == Some(c.opener.start) => block,
             (BlockViewMode::Native, Looked::Native(block)) => block,
             (BlockViewMode::Native, Looked::Outside(_, Some(block))) if self.native.sticky == Some(c.opener.start) => {
                 block
