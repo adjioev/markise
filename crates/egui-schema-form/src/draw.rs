@@ -3,17 +3,23 @@
 
 use std::collections::HashSet;
 
-use egui::{Id, Key, KeyboardShortcut, Modifiers, Response, Role, ScrollArea, TextEdit, Ui, UiBuilder, WidgetInfo};
+use egui::{Frame, Id, Key, KeyboardShortcut, Modifiers, Response, RichText, ScrollArea, TextEdit, Ui, UiBuilder};
 use schema_form_core::{ChoiceShape, Control, FieldError, FieldSpec, Limits, Selection};
 use serde_json::{Map, Value, json};
 
 use crate::SchemaForm;
 use crate::host::{FormHost, HostWidget, WidgetContext};
 use crate::rows::Rows;
-use crate::widgets::{Icon, error_label, field_label, icon_button, status_label};
+use crate::style::{
+    FIELD_MARGIN, FieldLook, NOTE_SIZE, Style, add_button, labelled_checkbox, mark_control, paint_field_box, sub_card,
+};
+use crate::widgets::{ICON_WIDTH, Icon, error_label, field_label, icon_button, status_label};
 
 const MOVE_UP: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::ArrowUp);
 const MOVE_DOWN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::ArrowDown);
+
+/// Between one field and the next, on top of the spacing of the rows.
+const FIELD_GAP: f32 = 8.0;
 
 /// How many lines a multiline field shows at most before it scrolls.
 const MAX_ROWS: f32 = 12.0;
@@ -30,6 +36,9 @@ pub(crate) struct Cx<'a> {
     pub delivered: &'a mut std::collections::HashMap<Id, String>,
     errors: &'a [FieldError],
     pub texts: &'a crate::Texts,
+    pub style: Style,
+    /// An IME composition is going on in the form.
+    composing: bool,
     focus_rows: std::collections::HashMap<Id, Id>,
     /// Every text editor of this frame: what a composition can belong to.
     editors: HashSet<Id>,
@@ -86,7 +95,7 @@ impl Cx<'_> {
 
     pub fn draw_errors(&self, ui: &mut Ui, path: &str) {
         for m in self.messages(path) {
-            error_label(ui, &m);
+            error_label(ui, &m, self.style);
         }
     }
 
@@ -135,6 +144,8 @@ impl SchemaForm {
             delivered: &mut self.delivered,
             errors: &self.errors,
             texts: &self.texts,
+            style: self.style.unwrap_or_else(|| Style::for_visuals(ui.visuals())),
+            composing: self.composing.is_some(),
             focus_rows: std::collections::HashMap::new(),
             editors: HashSet::new(),
             focus_row: &mut self.focus_row,
@@ -153,7 +164,11 @@ impl SchemaForm {
             return false;
         }
         let root = self.values.as_object_mut().expect("checked");
-        ui.vertical(|ui| draw_fields(ui, &self.spec.fields, root, self.id, "", &mut cx));
+        ui.vertical(|ui| {
+            // tight between a label and its field; `draw_fields` adds the gap between fields
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            draw_fields(ui, &self.spec.fields, root, self.id, "", &mut cx);
+        });
         let changed = cx.changed;
         if cx.focus_row_drawn && cx.focus_row.is_some() {
             *cx.focus_row = None;
@@ -174,7 +189,7 @@ fn draw_fields(ui: &mut Ui, fields: &[FieldSpec], obj: &mut Map<String, Value>, 
         let id = scope.with(&f.key);
         let p = join(path, &f.key);
         draw_field(ui, f, obj, id, &p, cx);
-        ui.add_space(ui.spacing().item_spacing.y);
+        ui.add_space(FIELD_GAP);
     }
 }
 
@@ -188,18 +203,19 @@ fn draw_field(ui: &mut Ui, f: &FieldSpec, obj: &mut Map<String, Value>, id: Id, 
             return;
         }
         let mut on = obj.get(&f.key).and_then(Value::as_bool).unwrap_or(false);
-        let r = ui.checkbox(&mut on, &f.label);
+        let r = labelled_checkbox(ui, on, &f.label, cx.style);
         cx.track_control(&r);
-        if r.changed() {
+        if r.clicked() {
+            on = !on;
             obj.insert(f.key.clone(), Value::Bool(on));
             cx.changed = true;
         }
         cx.draw_errors(ui, path);
         return;
     }
-    let label = field_label(ui, &f.label, f.required);
+    let label = field_label(ui, &f.label, f.required, cx.style);
     if let Some(h) = &f.help {
-        ui.small(h);
+        ui.label(RichText::new(h).size(NOTE_SIZE).color(cx.style.muted));
     }
     // a missing value is empty for the widget; it enters the values only when edited
     let mut value = obj.get(&f.key).cloned().unwrap_or_else(|| empty_value(&f.control));
@@ -207,7 +223,11 @@ fn draw_field(ui: &mut Ui, f: &FieldSpec, obj: &mut Map<String, Value>, id: Id, 
     match &f.control {
         Control::Text { multiline } => match &mut value {
             Value::String(s) => {
-                let r = text_editor(ui, s, id, *multiline, ui.available_width(), cx);
+                let look = FieldLook {
+                    invalid: !cx.messages(path).is_empty(),
+                    marked: false,
+                };
+                let r = text_editor(ui, s, id, *multiline, ui.available_width(), look, cx);
                 let r = r.labelled_by(label);
                 cx.describe(ui, &r, path);
             }
@@ -222,7 +242,7 @@ fn draw_field(ui: &mut Ui, f: &FieldSpec, obj: &mut Map<String, Value>, id: Id, 
         }
         Control::Group { fields } => match value.as_object_mut() {
             Some(o) => {
-                ui.group(|ui| draw_fields(ui, fields, o, id, path, cx));
+                sub_card(ui, cx.style, |ui| draw_fields(ui, fields, o, id, path, cx));
             }
             None => not_editable(ui, cx),
         },
@@ -276,20 +296,32 @@ fn empty_value(c: &Control) -> Value {
 }
 
 pub(crate) fn not_editable(ui: &mut Ui, cx: &Cx) {
-    ui.colored_label(ui.visuals().warn_fg_color, &cx.texts.cannot_edit);
+    ui.colored_label(cx.style.danger, &cx.texts.cannot_edit);
 }
 
 fn not_available(ui: &mut Ui, cx: &Cx) {
-    ui.colored_label(ui.visuals().warn_fg_color, &cx.texts.no_widget);
+    ui.colored_label(cx.style.danger, &cx.texts.no_widget);
 }
 
 /// The text editor of a field or a row. Its id is the widget's identity, so its caret,
 /// selection and composition follow it.
-pub(crate) fn text_editor(ui: &mut Ui, s: &mut String, id: Id, multiline: bool, width: f32, cx: &mut Cx) -> Response {
+pub(crate) fn text_editor(
+    ui: &mut Ui,
+    s: &mut String,
+    id: Id,
+    multiline: bool,
+    width: f32,
+    look: FieldLook,
+    cx: &mut Cx,
+) -> Response {
     let editor_id = id.with("text");
-    let r = if multiline {
+    let st = cx.style;
+    // the box goes under the text, and its size is known only after the text
+    let slot = ui.painter().add(egui::Shape::Noop);
+    let frame = Frame::NONE.inner_margin(FIELD_MARGIN);
+    let (r, outer) = if multiline {
         let line = ui.text_style_height(&egui::TextStyle::Body);
-        ScrollArea::vertical()
+        let out = ScrollArea::vertical()
             .id_salt(id.with("scroll"))
             .max_height(line * MAX_ROWS)
             .auto_shrink([false, true])
@@ -298,14 +330,39 @@ pub(crate) fn text_editor(ui: &mut Ui, s: &mut String, id: Id, multiline: bool, 
                 ui.add(
                     TextEdit::multiline(s)
                         .id(editor_id)
+                        .frame(frame)
+                        .text_color(st.fg)
                         .desired_width(width)
                         .desired_rows(3),
                 )
-            })
-            .inner
+            });
+        // the viewport can be as tall as the limit; the box is as tall as what it shows
+        let h = out.content_size.y.min(out.inner_rect.height());
+        let outer = egui::Rect::from_min_size(out.inner_rect.min, egui::vec2(out.inner_rect.width(), h));
+        (out.inner, outer)
     } else {
-        ui.add(TextEdit::singleline(s).id(editor_id).desired_width(width))
+        // one value, shown on as many lines as it takes: a long heading or answer stays readable
+        let had_breaks = s.contains(['\r', '\n']);
+        let r = ui.add(
+            TextEdit::multiline(s)
+                .id(editor_id)
+                .frame(frame)
+                .text_color(st.fg)
+                .desired_width(width)
+                .desired_rows(1)
+                .return_key(None),
+        );
+        // what a one-line field does: Enter ends the input, and a pasted line break is a space
+        if r.changed() && !had_breaks && s.contains(['\r', '\n']) {
+            *s = s.replace(['\r', '\n'], " ");
+        }
+        if r.has_focus() && !cx.composing && ui.input(enter_pressed) {
+            ui.memory_mut(|m| m.surrender_focus(r.id));
+        }
+        let outer = r.rect;
+        (r, outer)
     };
+    paint_field_box(ui, slot, outer, look, r.has_focus(), st);
     if r.changed() {
         cx.changed = true;
         cx.status.clear();
@@ -313,6 +370,13 @@ pub(crate) fn text_editor(ui: &mut Ui, s: &mut String, id: Id, multiline: bool, 
     cx.editors.insert(r.id);
     cx.track_control(&r);
     r
+}
+
+fn enter_pressed(i: &egui::InputState) -> bool {
+    i.events.iter().any(|e| {
+        matches!(e, egui::Event::Key { key: Key::Enter, pressed: true, modifiers, .. }
+            if modifiers.matches_logically(Modifiers::NONE))
+    })
 }
 
 fn new_row(c: &Control) -> Value {
@@ -390,14 +454,9 @@ fn draw_array(ui: &mut Ui, f: &FieldSpec, arr: &mut Vec<Value>, id: Id, path: &s
         cx.changed = true;
     }
     let add_label = f.add_label.as_deref().unwrap_or(&cx.texts.add);
-    // an explicit scope: its id stays the same as rows come and go, so it can take the focus
-    let add = ui
-        .scope_builder(UiBuilder::new().scope_id(id.with("add")), |ui| {
-            ui.add_enabled(may_add(&f.rule.limits, n), egui::Button::new(add_label))
-        })
-        .inner;
+    let add = add_button(ui, id.with("add"), add_label, may_add(&f.rule.limits, n), cx.style);
     let add = add.labelled_by(label);
-    add.widget_info(|| WidgetInfo::labeled(Role::Button, may_add(&f.rule.limits, n), add_label));
+    add.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, may_add(&f.rule.limits, n), add_label));
     cx.track_control(&add);
     if add.clicked() {
         action = Some(RowAction::Add);
@@ -443,7 +502,7 @@ fn draw_array(ui: &mut Ui, f: &FieldSpec, arr: &mut Vec<Value>, id: Id, path: &s
     }
     cx.rows.store(id, keys);
     if let Some(s) = cx.status.get(&id).cloned() {
-        status_label(ui, &s);
+        status_label(ui, &s, cx.style);
     }
 }
 
@@ -470,13 +529,14 @@ pub(crate) fn row_buttons(ui: &mut Ui, f: &FieldSpec, row: Id, i: usize, n: usiz
     let up = format!("{}: {name}", t.move_up);
     let down = format!("{}: {name}", t.move_down);
     let remove = format!("{}: {name}", t.remove);
-    let r = icon_button(ui, row.with("up"), Icon::Up, &up, i > 0);
+    let st = cx.style;
+    let r = icon_button(ui, row.with("up"), Icon::Up, &up, i > 0, st);
     let up_id = r.id;
     cx.track(&r);
     if r.clicked() {
         action = Some(RowAction::Move(i, -1));
     }
-    let r = icon_button(ui, row.with("down"), Icon::Down, &down, i + 1 < n);
+    let r = icon_button(ui, row.with("down"), Icon::Down, &down, i + 1 < n, st);
     let down_id = r.id;
     cx.track(&r);
     if r.clicked() {
@@ -488,6 +548,7 @@ pub(crate) fn row_buttons(ui: &mut Ui, f: &FieldSpec, row: Id, i: usize, n: usiz
         Icon::Cross,
         &remove,
         may_remove(&f.rule.limits, n),
+        st,
     );
     cx.track(&r);
     if r.clicked() {
@@ -506,7 +567,7 @@ pub(crate) fn row_buttons(ui: &mut Ui, f: &FieldSpec, row: Id, i: usize, n: usiz
 }
 
 pub(crate) fn buttons_width(ui: &Ui) -> f32 {
-    3.0 * (ui.spacing().interact_size.y + ui.spacing().item_spacing.x)
+    3.0 * (ICON_WIDTH + ui.spacing().item_spacing.x)
 }
 
 #[expect(clippy::too_many_arguments, reason = "the drawing state of one row")]
@@ -528,7 +589,11 @@ fn draw_row(
                 let w = ui.available_width() - buttons_width(ui);
                 match v.as_str().map(str::to_string) {
                     Some(mut s) => {
-                        let r = text_editor(ui, &mut s, row, *multiline, w, cx);
+                        let look = FieldLook {
+                            invalid: !cx.messages(path).is_empty(),
+                            marked: false,
+                        };
+                        let r = text_editor(ui, &mut s, row, *multiline, w, look, cx);
                         ui.ctx().accesskit_node_builder(r.id, |b| b.set_label(row_name.clone()));
                         cx.describe(ui, &r, path);
                         if r.changed() {
@@ -554,9 +619,14 @@ fn draw_row(
                 }
                 let w = ui.available_width() - buttons_width(ui);
                 let mut s = o.get("text").and_then(Value::as_str).unwrap_or("").to_string();
-                let r = text_editor(ui, &mut s, row, false, w, cx);
+                let at = join(path, "text");
+                let look = FieldLook {
+                    invalid: !cx.messages(path).is_empty() || !cx.messages(&at).is_empty(),
+                    marked: o.get("correct") == Some(&Value::Bool(true)),
+                };
+                let r = text_editor(ui, &mut s, row, false, w, look, cx);
                 ui.ctx().accesskit_node_builder(r.id, |b| b.set_label(row_name.clone()));
-                cx.describe(ui, &r, &join(path, "text"));
+                cx.describe(ui, &r, &at);
                 if r.changed() {
                     o.insert("text".into(), Value::String(s));
                 }
@@ -582,7 +652,7 @@ fn draw_group_row(
     n: usize,
     cx: &mut Cx,
 ) -> Option<RowAction> {
-    ui.group(|ui| {
+    sub_card(ui, cx.style, |ui| {
         let action = ui
             .horizontal(|ui| {
                 ui.add_space((ui.available_width() - buttons_width(ui)).max(0.0));
@@ -595,7 +665,6 @@ fn draw_group_row(
         }
         action
     })
-    .inner
 }
 
 #[expect(clippy::too_many_arguments, reason = "the drawing state of one row")]
@@ -615,22 +684,20 @@ fn draw_mark(
     }
     let on = o.get("correct").and_then(Value::as_bool).unwrap_or(false);
     let label = format!("{}: {row_name}", cx.texts.correct);
+    let st = cx.style;
     ui.push_id(row.with("mark"), |ui| match selection {
         Selection::Single => {
-            let r = ui.radio(on, "");
-            r.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, on, &label));
+            let r = mark_control(ui, true, on, true, &label, st);
             cx.track(&r);
             if r.clicked() && !on {
                 *exclusive = Some(i);
             }
         }
         Selection::Multiple => {
-            let mut now = on;
-            let r = ui.checkbox(&mut now, "");
-            r.widget_info(|| WidgetInfo::selected(Role::CheckBox, true, now, &label));
+            let r = mark_control(ui, false, on, true, &label, st);
             cx.track(&r);
-            if r.changed() {
-                o.insert("correct".into(), Value::Bool(now));
+            if r.clicked() {
+                o.insert("correct".into(), Value::Bool(!on));
                 cx.changed = true;
             }
         }

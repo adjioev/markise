@@ -68,7 +68,8 @@ stays what it is today, a simple card. An unknown kind is an error.
 **Icons and accents are names**, ASCII tokens like `library`. Only the package gives them meaning;
 the token form means later code can use one as a key or a file stem without another check. The one
 exception is an answer's `icon` in a preset for icon choices: a path of a file in the package, which
-goes through `InstalledPackage::asset_path` like any other.
+goes through `InstalledPackage::asset_path` like any other. A block's icon name means the file `assets/<name>.svg` of
+the package, if it has one; without that file it stays a name and nothing is drawn.
 
 Every reference is checked: a palette group, palette block, preset or view naming a block outside
 `blocks` is an error.

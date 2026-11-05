@@ -3,9 +3,7 @@
 
 use std::sync::Arc;
 
-use egui::{
-    Color32, Galley, Id, Rect, Response, Role, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2, WidgetInfo, pos2,
-};
+use egui::{Color32, FontId, Galley, Id, Rect, Response, Role, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, pos2};
 use schema_form_core::{
     ChoiceOption, ChoiceShape, FieldSpec, Selection, selected_options, toggle_option, unknown_rows, write_selected,
 };
@@ -13,6 +11,7 @@ use serde_json::Value;
 
 use crate::draw::{Cx, may_remove, not_editable};
 use crate::host::Thumbnail;
+use crate::style::{CARD_RADIUS, Style, paint_mark};
 use crate::widgets::{Icon, error_label, icon_button};
 
 /// The narrowest a button with an icon gets before a row holds fewer of them.
@@ -106,8 +105,8 @@ pub(crate) fn draw(ui: &mut Ui, c: &Choice, value: &mut Value, id: Id, path: &st
         let row = at.split('/').next().and_then(|r| r.parse::<usize>().ok());
         let name = row.and_then(|r| row_text(value, r));
         match name {
-            Some(n) if !n.is_empty() => error_label(ui, &format!("{n}: {message}")),
-            _ => error_label(ui, &message),
+            Some(n) if !n.is_empty() => error_label(ui, &format!("{n}: {message}"), cx.style),
+            _ => error_label(ui, &message, cx.style),
         }
     }
 }
@@ -117,29 +116,30 @@ fn row_text(value: &Value, row: usize) -> Option<&str> {
     e.as_str().or_else(|| e.get("text")?.as_str())
 }
 
-fn pad(ui: &Ui) -> f32 {
-    ui.spacing().button_padding.y.max(4.0)
-}
-
-fn icon_side(ui: &Ui) -> f32 {
-    ui.text_style_height(&TextStyle::Body) * 1.8
-}
+const PAD: f32 = 8.0;
+const ICON_SIDE: f32 = 26.0;
+const LABEL_FONT: f32 = 12.5;
 
 fn label_galley(ui: &Ui, o: &ChoiceOption, width: f32, color: Color32) -> Arc<Galley> {
-    let font = TextStyle::Body.resolve(ui.style());
-    ui.painter().layout(o.label.clone(), font, color, width - pad(ui) * 2.0)
+    ui.painter().layout(
+        o.label.clone(),
+        FontId::proportional(LABEL_FONT),
+        color,
+        width - PAD * 2.0,
+    )
 }
 
 fn button_height(ui: &Ui, o: &ChoiceOption, width: f32) -> f32 {
     let text = label_galley(ui, o, width, Color32::PLACEHOLDER).size().y;
     match o.icon {
-        Some(_) => icon_side(ui) + text + pad(ui) * 3.0,
-        None => text + pad(ui) * 2.0,
+        Some(_) => ICON_SIDE + text + PAD * 3.0,
+        None => (text + PAD * 2.0).max(36.0),
     }
 }
 
 fn option_button(ui: &mut Ui, c: &Choice, i: usize, on: bool, id: Id, size: Vec2, cx: &mut Cx) -> Response {
     let o = &c.options[i];
+    let s: Style = cx.style;
     // the id comes from the option, not its place, so that the focus stays put
     let r = ui
         .push_id(id.with(("option", &o.value)), |ui| {
@@ -152,38 +152,36 @@ fn option_button(ui: &mut Ui, c: &Choice, i: usize, on: bool, id: Id, size: Vec2
     };
     r.widget_info(|| WidgetInfo::selected(role, true, on, &o.label));
     cx.track_control(&r);
-    let visuals = ui.style().interact_selectable(&r, on);
-    let selection = ui.visuals().selection;
-    let fill = if on { selection.bg_fill } else { visuals.weak_bg_fill };
-    let stroke = match () {
-        () if r.has_focus() => Stroke::new(2.0, selection.stroke.color),
-        () if on => selection.stroke,
-        () => visuals.bg_stroke,
+    let (fill, stroke) = match () {
+        () if on => (s.accent_soft, Stroke::new(1.5, s.accent)),
+        () if r.hovered() => (s.hover, Stroke::new(1.0, s.line)),
+        () => (s.field, Stroke::new(1.0, s.line)),
     };
-    let text = if on {
-        selection.stroke.color
+    let stroke = if r.has_focus() {
+        Stroke::new(2.0, s.accent)
     } else {
-        visuals.text_color()
+        stroke
     };
+    let text = if on { s.fg } else { s.muted };
+    let tone = if on { s.accent } else { s.muted };
     ui.painter()
-        .rect(r.rect, visuals.corner_radius, fill, stroke, StrokeKind::Inside);
+        .rect(r.rect, f32::from(CARD_RADIUS), fill, stroke, StrokeKind::Inside);
     let state = o.icon.as_ref().map_or(Thumbnail::None, |n| cx.host.icon(n));
     let picture = match state {
         Thumbnail::Ready { texture, size } => Some((texture, size, Color32::WHITE)),
-        Thumbnail::Mask { texture, size } => Some((texture, size, text)),
+        Thumbnail::Mask { texture, size } => Some((texture, size, tone)),
         _ => None,
     };
-    let top = r.rect.top() + pad(ui);
+    let top = r.rect.top() + PAD;
     if let Some((texture, size, tint)) = picture {
-        let side = icon_side(ui);
-        let scale = (side / size.x.max(1.0)).min(side / size.y.max(1.0));
-        let at = Rect::from_center_size(pos2(r.rect.center().x, top + side / 2.0), size * scale);
+        let scale = (ICON_SIDE / size.x.max(1.0)).min(ICON_SIDE / size.y.max(1.0));
+        let at = Rect::from_center_size(pos2(r.rect.center().x, top + ICON_SIDE / 2.0), size * scale);
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         ui.painter().image(texture, at, uv, tint);
     }
     let galley = label_galley(ui, o, size.x, text);
     let y = match o.icon {
-        Some(_) => r.rect.bottom() - pad(ui) - galley.size().y,
+        Some(_) => r.rect.bottom() - PAD - galley.size().y,
         None => r.rect.center().y - galley.size().y / 2.0,
     };
     let at = pos2(r.rect.center().x - galley.size().x / 2.0, y);
@@ -209,15 +207,16 @@ fn draw_unknown_rows(ui: &mut Ui, c: &Choice, value: &mut Value, id: Id, fallbac
         let marked = e.get("correct") == Some(&Value::Bool(true));
         ui.horizontal(|ui| {
             if c.shape == ChoiceShape::Marks {
-                let mut mark = marked;
-                let r = ui.add_enabled(false, egui::Checkbox::new(&mut mark, ""));
+                let (r, _) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::hover());
                 let name = format!("{}: {text}", cx.texts.correct);
-                r.widget_info(|| WidgetInfo::selected(Role::CheckBox, false, marked, &name));
+                let node = ui.interact(r, id.with(("mark", shown)), Sense::hover());
+                node.widget_info(|| WidgetInfo::selected(Role::CheckBox, false, marked, &name));
+                paint_mark(ui, r.center(), false, marked, false, cx.style);
             }
-            ui.label(text);
+            ui.label(egui::RichText::new(text).color(cx.style.fg));
             let label = format!("{}: {text}", cx.texts.remove);
             let enabled = may_remove(&c.field.rule.limits, n);
-            let r = icon_button(ui, id.with(("unknown", shown)), Icon::Cross, &label, enabled);
+            let r = icon_button(ui, id.with(("unknown", shown)), Icon::Cross, &label, enabled, cx.style);
             cx.track(&r);
             if r.clicked() {
                 remove = Some(row);

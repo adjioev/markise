@@ -146,7 +146,19 @@ any site's vocabulary lives here.
   row gives it to its first real control, whatever kind that is.
 - **Screen readers.** Fields are labelled, a reason is an `Alert` live region and the field's
   description, a move is announced.
-- **Theme and zoom.** Colours and sizes come from the `Ui`; icons are painted, so no font is needed.
+- **Look.** The form paints its own controls so that a field is plainly a field and a selected answer
+  plainly selected: framed fields with an accent ring on focus and a danger ring on a reason, painted
+  radio buttons and checkboxes, accent-soft fill on marked rows, framed sub-cards, quiet glyph buttons,
+  and small muted labels close to their field with a clear gap between fields. All in points, so the
+  host's zoom scales them.
+- **Long text.** A field of one value (a heading, an answer, a list item) wraps on as many lines as its
+  text takes, and its height follows. It stays one value: Enter ends the input as in a one-line field, and a
+  pasted line break becomes a space.
+- **Colours.** `Style` holds `fg`, `muted`, `field`, `line`, `hover`, `accent`, `accent_soft`, `danger`
+  and `on_accent`. A host gives its own (`with_style`, `set_style`); otherwise the form takes the light
+  or dark default for the `Ui`'s visuals each frame. Markise's panel takes the default for the theme
+  with the theme's accent (`Style::with_accent`); a package's accent can feed this later. Nothing here
+  belongs to a site.
 - A value of an unexpected type is shown as not editable and kept. The form never coerces it.
 
 ### Choice buttons
@@ -320,8 +332,10 @@ own: it decides which block, and what becomes of a draft when the document chang
   opening a form again adds nothing to what runs. Other formats go through the image store. New dependency: `resvg` 0.45 with default
   features off (Apache-2.0 OR MIT; its tree adds `usvg`, `tiny-skia`, `roxmltree` and a few small
   crates, all MIT, Apache-2.0 or BSD).
-- **Theme and zoom.** Colours come from the egui visuals the app derives from the theme, sizes from the
-  whole-window zoom. The width is the user's for the session, from 280 points up to 60 % of the window.
+- **Header and footer.** The block's label at 15 points, with its icon if the package has one, and the
+  variant or the arguments as a muted note. Save, filled with the accent, and Cancel stay pinned at the
+  bottom; Tab reaches Cancel, then Save.
+- **Theme and zoom.** Colours come from `Style` as above, sizes from the whole-window zoom. The width is the user's for the session, from 280 points up to 60 % of the window.
 - **Cost.** A document with no package pays one comparison per frame. With a package, one index
   lookup per block opener on screen. An open panel adds a search of the text only when the document
   changed and the block is not where it was.

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use egui::{ColorImage, Context, Key, KeyboardShortcut, Modifiers, RichText, TextureHandle, Ui, UiBuilder, vec2};
-use egui_schema_form::{FileRequest, FormHost, SchemaForm, Thumbnail};
+use egui_schema_form::{FileRequest, FormHost, SchemaForm, Style, Thumbnail};
 use markise_doc::{Affinity, DocPos};
 use markise_doc::{FormatDoc, NamedContainer};
 use markise_engine::block_fields::{BlockFields, FieldsError, decls_from_spec};
@@ -30,6 +30,10 @@ const UNDO_LABEL: &str = "Edit Block";
 const SAVE_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
 /// How long the shown part of something outside the fields gets.
 const MAX_EXTRA_CHARS: usize = 80;
+const FOOTER_HEIGHT: f32 = 44.0;
+const BUTTON_ROW: f32 = 32.0;
+/// Below this much free room in the footer, its note about the keys goes.
+const KEYS_NOTE_ROOM: f32 = 180.0;
 const PANEL_MIN: f32 = 280.0;
 const PANEL_DEFAULT: f32 = 420.0;
 
@@ -81,6 +85,10 @@ pub struct OpenForm {
     name: String,
     args: String,
     title: String,
+    /// The variant in words, or the arguments as they stand.
+    note: String,
+    /// A file of the package for the block's icon, if it declares one.
+    icon: Option<String>,
     content: Content,
     /// The text revision the panel last looked at (a reload moves it too).
     changes: u64,
@@ -126,11 +134,12 @@ impl OpenForm {
         let label = schema.label.as_ref().map_or(c.name.as_ref(), |l| l.get(LANGUAGE));
         let variant = Some(args.as_str()).filter(|a| !a.is_empty() && schema.variants().any(|v| v == *a));
         let variant_label = schema.variant_label(variant.unwrap_or(""), LANGUAGE);
-        let mut title = label.to_string();
-        if let Some(v) = variant_label {
-            title.push_str(" · ");
-            title.push_str(v);
-        }
+        let title = label.to_string();
+        let note = variant_label.map_or_else(|| args.clone(), str::to_string);
+        // a name; a package gives it meaning with a file of that name, or leaves it a name
+        let icon_name =
+            (entry.view.and_then(|v| v.icon.as_deref())).or_else(|| entry.palette.and_then(|p| p.icon.as_deref()));
+        let icon = icon_name.map(|n| format!("assets/{n}.svg"));
         let mut block_reasons = Vec::new();
         // arguments of a block with variants name one; anywhere else they are not ours to judge
         if variant.is_none() && !args.is_empty() && schema.variants().next().is_some() {
@@ -182,6 +191,8 @@ impl OpenForm {
             name: c.name.to_string(),
             args,
             title,
+            note,
+            icon,
             content,
             changes,
             message: None,
@@ -385,52 +396,63 @@ impl OpenForm {
     pub fn ui(&mut self, ui: &mut Ui, host: &mut PanelHost<'_>) -> Option<PanelAction> {
         let ctx = ui.ctx().clone();
         let mut action = self.keys(&ctx);
+        let st = host.style;
         let spacing = ui.spacing().item_spacing.y;
         let full = ui.available_rect_before_wrap();
         self.rect = Some(full);
-        let footer_h = ui.spacing().interact_size.y + spacing * 2.0;
+        let footer_h = FOOTER_HEIGHT;
         let body = egui::Rect::from_min_max(full.min, egui::pos2(full.right(), full.bottom() - footer_h));
         let foot = egui::Rect::from_min_max(egui::pos2(full.left(), body.bottom()), full.max);
 
         let mut body_ui = ui.new_child(UiBuilder::new().id_salt("markise-block-form-body").max_rect(body));
-        body_ui.label(RichText::new(&self.title).strong());
-        if !self.args.is_empty() {
-            body_ui.small(&self.args);
+        let picture = (self.icon.as_deref()).map(|name| host.assets.svg(&ctx, name));
+        body_ui.horizontal(|ui| {
+            match picture {
+                Some(Thumbnail::Mask { texture, .. }) => paint_title_icon(ui, texture, st.muted),
+                Some(Thumbnail::Ready { texture, .. }) => paint_title_icon(ui, texture, egui::Color32::WHITE),
+                _ => {}
+            }
+            ui.add(egui::Label::new(RichText::new(&self.title).size(15.0).strong().color(st.fg)).wrap());
+        });
+        if !self.note.is_empty() {
+            body_ui.label(RichText::new(&self.note).size(11.5).color(st.muted));
         }
         body_ui.add_space(spacing);
         if let Some(m) = &self.message {
-            warn(&mut body_ui, m);
+            warn(&mut body_ui, m, st);
         }
         let mut can_save = true;
         match &mut self.content {
             Content::Refused(why) => {
                 can_save = false;
-                warn(&mut body_ui, &format!("This block has no form: {why}"));
+                warn(&mut body_ui, &format!("This block has no form: {why}"), st);
             }
             Content::Form(r) => {
                 match r.track {
                     Track::Live => {}
                     Track::Stale => {
-                        warn(&mut body_ui, STALE);
-                        if body_ui.button("Read the Block Again").clicked() {
+                        warn(&mut body_ui, STALE, st);
+                        if egui_schema_form::button(&mut body_ui, "Read the Block Again", false, true, st).clicked() {
                             action = Some(PanelAction::Reload);
                         }
                     }
                     Track::Gone => {
                         can_save = false;
-                        warn(&mut body_ui, GONE);
+                        warn(&mut body_ui, GONE, st);
                     }
                 }
                 if !r.form.errors().is_empty() || !r.block_reasons.is_empty() {
                     body_ui.label(
                         RichText::new("This block does not fit its schema. You can still save it.")
-                            .color(body_ui.visuals().warn_fg_color),
+                            .size(12.0)
+                            .color(st.danger),
                     );
                     for reason in &r.block_reasons {
-                        body_ui.small(reason);
+                        body_ui.label(RichText::new(reason).size(11.5).color(st.muted));
                     }
                 }
-                body_ui.separator();
+                body_ui.add_space(spacing);
+                r.form.set_style(st);
                 let mut host = FrameHost {
                     host,
                     picking: &mut self.picking,
@@ -445,15 +467,38 @@ impl OpenForm {
                     });
             }
         }
+        // the footer: right-aligned, Cancel then Save in the order Tab reaches them
         let mut foot_ui = ui.new_child(UiBuilder::new().id_salt("markise-block-form-foot").max_rect(foot));
-        foot_ui.add_space(spacing);
+        foot_ui.add_space(FOOTER_HEIGHT - BUTTON_ROW);
         foot_ui.horizontal(|ui| {
-            if ui.add_enabled(can_save, egui::Button::new("Save")).clicked() {
-                action = Some(PanelAction::Save);
+            let widths = |label: &str| {
+                let font = egui::FontId::proportional(13.5);
+                ui.painter().layout_no_wrap(label.to_string(), font, st.fg).size().x + 24.0
+            };
+            let total = widths("Cancel") + widths("Save") + ui.spacing().item_spacing.x;
+            let room = ui.available_width() - total;
+            if room > KEYS_NOTE_ROOM {
+                let keys = if cfg!(target_os = "macos") {
+                    "Esc cancels, ⌘↩ saves"
+                } else {
+                    "Esc cancels, Ctrl+Enter saves"
+                };
+                let note = ui.add(egui::Label::new(RichText::new(keys).size(11.5).color(st.muted)).selectable(false));
+                ui.add_space((room - note.rect.width() - ui.spacing().item_spacing.x).max(0.0));
+            } else {
+                ui.add_space(room.max(0.0));
             }
-            if ui.button("Cancel").clicked() {
-                action = Some(PanelAction::Cancel);
-            }
+            // ids of their own: the note before them comes and goes with the width, and the
+            // focus must stay on the button it is on
+            let mut footer = |ui: &mut Ui, label: &str, primary: bool, enabled: bool, then: PanelAction| {
+                let scope = UiBuilder::new().scope_id(egui::Id::unique(("markise-block-form-button", label)));
+                let r = ui.scope_builder(scope, |ui| egui_schema_form::button(ui, label, primary, enabled, st));
+                if r.inner.clicked() {
+                    action = Some(then);
+                }
+            };
+            footer(ui, "Cancel", false, true, PanelAction::Cancel);
+            footer(ui, "Save", true, can_save, PanelAction::Save);
         });
         ui.advance_cursor_after_rect(full);
         self.had_focus = self.is_focused(&ctx);
@@ -466,9 +511,14 @@ const STALE: &str = "The block changed in the document, so the draft was not sav
                      to lose the draft, or Cancel.";
 const GONE: &str = "The block is no longer in the document, so there is nothing to save to.";
 
-fn warn(ui: &mut Ui, text: &str) {
-    let color = ui.visuals().warn_fg_color;
-    let r = ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
+fn paint_title_icon(ui: &mut Ui, texture: egui::TextureId, tint: egui::Color32) {
+    let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    ui.painter().image(texture, r, uv, tint);
+}
+
+fn warn(ui: &mut Ui, text: &str, st: Style) {
+    let r = ui.add(egui::Label::new(RichText::new(text).size(12.5).color(st.danger)).wrap());
     ui.ctx().accesskit_node_builder(r.id, |n| {
         n.clear_value();
         n.set_label(text);
@@ -488,6 +538,12 @@ fn block_range_at_container(c: &NamedContainer) -> std::ops::Range<usize> {
     c.opener.start..c.closer.end
 }
 
+/// The form's colours from the theme: its light or dark base, with the theme's accent.
+pub fn style_for(theme: &markise_theme::Theme) -> Style {
+    let base = if theme.dark { Style::DARK } else { Style::LIGHT };
+    base.with_accent(markise_layout::block::color(theme.chrome.accent))
+}
+
 /// The width a panel of this window may have.
 pub fn panel_widths(window: f32) -> (f32, f32, f32) {
     let max = (window * 0.6).max(PANEL_MIN);
@@ -496,6 +552,7 @@ pub fn panel_widths(window: f32) -> (f32, f32, f32) {
 
 /// What the app gives a form to draw with, for one frame.
 pub struct PanelHost<'a> {
+    pub style: Style,
     pub ctx: &'a Context,
     pub images: &'a mut TextureStore,
     pub assets: &'a mut FormAssets,
@@ -728,7 +785,7 @@ impl FormAssets {
         None
     }
 
-    fn svg(&mut self, ctx: &Context, name: &str) -> Thumbnail {
+    pub(crate) fn svg(&mut self, ctx: &Context, name: &str) -> Thumbnail {
         let size = vec2(ICON_PIXELS as f32, ICON_PIXELS as f32);
         match self.icons.get(name) {
             Some(IconEntry::Loading) => Thumbnail::Loading,
