@@ -349,6 +349,57 @@ fn an_icon_comes_from_its_file_through_the_worker_and_no_file_means_no_icon() {
 }
 
 #[test]
+fn typing_on_the_place_after_a_native_block_is_outside_it() {
+    let doc = ":::tip\n\nBody.\n\n:::\n";
+    let f = Fixture::new(doc);
+    let mut h = f.ready();
+    let v = h.state_mut().viewer().unwrap();
+    let end = doc.rfind(":::").unwrap() + 3;
+    assert!(v.ed.view.native_block(2).is_some());
+    v.ed.set_selection(Selection::caret_at(markise_doc::DocPos::with_virt(end, 1)));
+    v.ed.refresh_focus();
+    v.request_refocus();
+    common::run(&mut h);
+    h.event(Event::Text("After".into()));
+    common::run(&mut h);
+    assert!(text(&h).starts_with(":::tip\n\nBody.\n\n:::\n"), "{}", text(&h));
+    assert!(text(&h).contains("After"), "{}", text(&h));
+}
+
+#[test]
+fn a_link_completed_in_a_field_is_an_edit_of_that_field() {
+    let f = Fixture::new(DOC);
+    let folder = f.doc.parent().unwrap().to_path_buf();
+    fs::create_dir_all(folder.join(".obsidian")).unwrap();
+    fs::write(folder.join(".obsidian/app.json"), "{}").unwrap();
+    fs::write(folder.join("Other.md"), "# Other\n").unwrap();
+    let mut h = f.opened();
+    h.state_mut().open(folder.clone());
+    h.get_by_label("Use Package").click();
+    h.step();
+    wait_until(&mut h, "the install", |a| a.block_package().is_some());
+    settle(&mut h);
+    common::run(&mut h);
+    let end = DOC.find("Hello").unwrap() + 5;
+    caret(&mut h, end);
+    for t in [" ", "[", "[", "O", "t", "h"] {
+        h.event(Event::Text(t.into()));
+        h.step();
+    }
+    assert!(h.state().completion().is_some(), "{}", text(&h));
+    h.state_mut().accept_completion(0);
+    common::run(&mut h);
+    let t = text(&h);
+    assert!(t.contains("Hello [[Other]]\n"), "{t}");
+    let v = h.state_mut().viewer().unwrap();
+    assert_eq!(&t[v.ed.session.selection().primary().focus.offset..][..2], "]]");
+    assert!(v.ed.view.native_block(end).is_some());
+    v.ed.edit(|s| s.undo());
+    common::run(&mut h);
+    assert!(text(&h).contains("Hello [[Oth\n"), "one step: {}", text(&h));
+}
+
+#[test]
 fn a_withdrawn_package_brings_the_cards_back() {
     let f = Fixture::new(DOC);
     let mut h = f.ready();

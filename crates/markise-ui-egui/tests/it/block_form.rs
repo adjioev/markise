@@ -9,6 +9,7 @@ use egui::{Key, Modifiers};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use markise_doc::{Patch, PatchSet};
+use markise_engine::jobs::JobHooks;
 use markise_package::Sha256Hex;
 use markise_ui_egui::confirm::{Choice, Kind};
 use markise_ui_egui::menu::MenuAction;
@@ -113,10 +114,15 @@ impl Fixture {
     }
 
     fn harness(&self) -> H {
+        self.harness_with(Default::default())
+    }
+
+    fn harness_with(&self, hooks: JobHooks) -> H {
         let picks = self.picks.clone();
         let opts = AppOptions {
             config: ConfigDir::Dir(self.config.clone()),
             block_image_picker: Some(Arc::new(move |_: &Path| picks.lock().unwrap().clone())),
+            hooks: std::sync::Arc::new(hooks),
             ..common::no_watch()
         };
         Harness::builder()
@@ -819,6 +825,72 @@ fn a_document_switch_asks_about_a_changed_draft() {
     common::run(&mut h);
     assert_eq!(h.state().document_path(), Some(f.doc.as_path()));
     assert!(h.state().is_dirty());
+}
+
+#[test]
+fn a_draft_with_nowhere_to_go_is_not_overwritten_by_another_form() {
+    let f = Fixture::new(DOC);
+    let other = f.folder.join("other.md");
+    fs::write(&other, DOC).unwrap();
+    let mut h = f.ready();
+    changed_draft(&mut h);
+    // another document takes its place with no question, and it has blocks too
+    h.state_mut().open_answered_for_test(other.clone());
+    wait_until(&mut h, "the other document", |a| {
+        a.document_path() == Some(other.as_path()) && !a.is_loading() && a.block_package().is_some()
+    });
+    common::run(&mut h);
+    assert_eq!(draft(&h)["body"], json!("Hello!"));
+    let tip = text(&h).find("Hello").unwrap();
+    assert!(!h.state_mut().open_block_form(tip), "refused");
+    assert_eq!(draft(&h)["body"], json!("Hello!"), "still there");
+    common::run(&mut h);
+    assert!(has(&h, "Cancel this draft"), "and it says why");
+}
+
+#[test]
+fn a_draft_changed_during_the_save_that_closes_the_window_is_asked_about() {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let rx = Mutex::new(rx);
+    let f = Fixture::new(DOC);
+    let mut h = f.harness_with(JobHooks {
+        before_save: Some(Box::new(move |_| {
+            let _ = rx.lock().unwrap().recv();
+        })),
+        ..Default::default()
+    });
+    open(&mut h, &f.doc);
+    h.get_by_label("Use Package").click();
+    h.step();
+    wait_until(&mut h, "the install", |a| a.block_package().is_some());
+    settle(&mut h);
+    common::run(&mut h);
+    open_form(&mut h, "tip");
+    // the document has an edit of its own; the draft has none yet
+    let patches = PatchSet::new(vec![Patch::verbatim(0..0, "x".to_string())]).unwrap();
+    h.state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .edit(|s| s.apply_external(&patches, "Edit", false))
+        .unwrap();
+    h.step();
+    assert!(!h.state_mut().request_close());
+    assert_eq!(asked(&h), Kind::UnsavedChanges);
+    h.state_mut().answer_question(Choice::Save);
+    // while it saves, the draft changes
+    h.get_by_label("Body").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    h.get_by_label("Body").type_text("!");
+    for _ in 0..4 {
+        h.step();
+    }
+    assert_eq!(draft(&h)["body"], json!("Hello!"));
+    tx.send(()).unwrap();
+    wait_until(&mut h, "the question", |a| a.is_asking());
+    assert_eq!(asked(&h), Kind::BlockDraft, "not closed");
 }
 
 #[test]

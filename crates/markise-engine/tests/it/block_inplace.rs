@@ -474,6 +474,7 @@ fn enter_on_an_answer_makes_an_answer_with_a_new_id() {
     assert!(s.text().contains("- [ ] Three {#a3}\n"), "{}", s.text());
     // one undo for the words, one for the answer
     s.undo();
+    assert_eq!(s.text(), t, "the words go, the answer stays");
     s.undo();
     assert_eq!(s.text(), DOC);
     // in the middle the rest goes along, without the mark
@@ -679,6 +680,185 @@ fn tab_goes_from_field_to_field() {
     s.key("edit.outdentOrPrevCell");
     assert_eq!(s.offset(), DOC.find("One").unwrap() + 3);
     assert_eq!(s.text(), DOC);
+}
+
+#[test]
+fn marks_that_would_lose_the_block_are_taken_back() {
+    // clearing the bold makes a closing delimiter of the text
+    let doc = ":::tip\n\n**:::**\n\n:::\n";
+    let mut s = surface(doc);
+    let at = doc.find("**").unwrap();
+    s.ed.set_selection(Selection::range(at, at + 7));
+    s.frame();
+    s.key("format.clear");
+    assert_eq!(s.text(), doc);
+    assert!(s.ed.view.native_block(at).is_some());
+    s.key("edit.redo");
+    assert_eq!(s.text(), doc, "and it is not there to redo");
+
+    // with text after it the rest of the block reads the same, and it is still not the block
+    let doc = ":::tip\n\nA\n\n**:::**\n\nB\n\n:::\n";
+    let mut s = surface(doc);
+    let at = doc.find("**").unwrap();
+    s.ed.set_selection(Selection::range(at, at + 7));
+    s.frame();
+    s.key("format.clear");
+    assert_eq!(s.text(), doc);
+
+    // marks that keep it are marks
+    let doc = ":::tip\n\n**Hello**\n\n:::\n";
+    let mut s = surface(doc);
+    let at = doc.find("**").unwrap();
+    s.ed.set_selection(Selection::range(at, at + 9));
+    s.frame();
+    s.key("format.clear");
+    assert_eq!(s.text(), ":::tip\n\nHello\n\n:::\n");
+}
+
+#[test]
+fn undo_back_to_a_place_with_no_text_keeps_which_field_it_is() {
+    let doc = ":::tip\n\n### Title\n\nBody\n\n:::\n";
+    let mut s = surface(doc);
+    s.caret_at("Body", 4);
+    for _ in 0..4 {
+        s.key("edit.deleteBackward");
+    }
+    assert_eq!(s.text(), ":::tip\n\n### Title\n\n:::\n");
+    s.typed("X");
+    assert_eq!(s.text(), ":::tip\n\n### Title\n\nX\n\n:::\n");
+    s.undo();
+    assert_eq!(s.text(), ":::tip\n\n### Title\n\n:::\n");
+    s.typed("Y");
+    assert_eq!(s.text(), ":::tip\n\n### Title\n\nY\n\n:::\n", "the body, not the title");
+    // redo over it too
+    s.undo();
+    s.key("edit.redo");
+    assert_eq!(s.text(), ":::tip\n\n### Title\n\nY\n\n:::\n");
+}
+
+#[test]
+fn a_place_nobody_can_name_writes_nowhere() {
+    let doc = ":::tip\n\n### Title\n\nBody\n\n:::\n";
+    let mut s = surface(doc);
+    let end = doc.find("Title").unwrap() + 5;
+    // what a stale selection could be: no edit put the caret there
+    s.ed.session
+        .set_selection(Selection::caret_at(DocPos::with_virt(end, 1)));
+    s.frame();
+    s.typed("Y");
+    assert_eq!(s.text(), doc);
+}
+
+#[test]
+fn the_caret_after_a_paste_is_on_a_character() {
+    for (doc, needle, want) in [
+        (":::tip\n\nю  word\n\n:::\n", "ю", "юé\nword"),
+        (":::tip\n\n### ю  word\n\nBody\n\n:::\n", "ю", "юé   word"),
+    ] {
+        let mut s = surface(doc);
+        s.caret_at(needle, "ю".len());
+        s.run("edit.insertText", &Params::text("text", "é\n")).unwrap();
+        let t = s.text();
+        assert!(t.contains(want), "{t:?}");
+        let at = s.offset();
+        assert!(t.is_char_boundary(at));
+        assert!(
+            t[..at].trim_end().ends_with('é'),
+            "right after what was pasted: {t:?} at {at}"
+        );
+    }
+}
+
+#[test]
+fn a_replacement_from_outside_a_field_goes_through_its_checks() {
+    let mut s = surface(DOC);
+    let at = DOC.find("Hello").unwrap();
+    assert!(s.ed.field_replace(at..at + 5, "[[Other]]").is_some_and(|r| r.is_ok()));
+    assert!(s.text().contains("[[Other]] there"), "{}", s.text());
+    s.undo();
+    assert_eq!(s.text(), DOC);
+    // over two fields: no
+    let (a, b) = (DOC.find("One").unwrap(), DOC.find("Two").unwrap() + 1);
+    assert!(s.ed.field_replace(a..b, "x").is_some_and(|r| r.is_err()));
+    assert_eq!(s.text(), DOC);
+    // outside a block it is not for this
+    assert!(s.ed.field_replace(0..1, "x").is_none());
+}
+
+#[test]
+fn typing_on_the_place_after_a_block_is_not_in_a_field() {
+    let doc = ":::tip\n\nBody\n\n:::\n";
+    let mut s = surface(doc);
+    let end = doc.rfind(":::").unwrap() + 3;
+    s.ed.set_selection(Selection::caret_at(DocPos::with_virt(end, 1)));
+    s.frame();
+    s.typed("After");
+    assert!(s.text().starts_with(doc), "{}", s.text());
+    assert!(s.text().contains("After"), "{}", s.text());
+}
+
+#[test]
+fn a_line_break_at_the_end_of_text_is_a_place_for_the_next_line() {
+    let mut s = surface(DOC);
+    s.caret_at("Second part", 11);
+    s.key("edit.softBreak");
+    assert_eq!(s.text(), DOC, "nothing in the file yet");
+    assert!(s.ed.session.selection().primary().focus.virt > 0);
+    s.typed("line");
+    assert!(s.text().contains("Second part\nline\n"), "{}", s.text());
+    s.undo();
+    assert_eq!(s.text(), DOC);
+    s.typed("y");
+    assert!(
+        s.text().contains("Second part\ny\n"),
+        "undo keeps which place it is: {}",
+        s.text()
+    );
+
+    let mut s = surface(DOC);
+    s.caret_at("Because.", 8);
+    s.key("edit.softBreak");
+    s.typed("More");
+    assert!(s.text().contains("> Because.\n> More\n"), "{}", s.text());
+
+    // over a selection to the end, the selection goes and the place is there
+    let mut s = surface(DOC);
+    let at = DOC.find("Second part").unwrap();
+    s.ed.set_selection(Selection::range(at + 6, at + 11));
+    s.frame();
+    s.key("edit.softBreak");
+    s.typed("z");
+    assert!(s.text().contains("Second\nz\n"), "{}", s.text());
+
+    // nothing of the kind in a field of one line
+    let mut s = surface(DOC);
+    s.caret_at("One", 3);
+    s.key("edit.softBreak");
+    assert_eq!(s.text(), DOC);
+    assert_eq!(s.ed.session.selection().primary().focus.virt, 0);
+}
+
+#[test]
+fn enter_at_the_end_of_a_paragraph_before_another_goes_on_to_it() {
+    let mut s = surface(DOC);
+    s.caret_at("Hello there", 11);
+    s.key("edit.newline");
+    assert_eq!(s.text(), DOC, "no blank lines pile up");
+    assert_eq!(s.offset(), DOC.find("Second").unwrap());
+}
+
+#[test]
+fn tab_and_enter_reach_the_text_of_a_field_that_holds_more() {
+    let doc = ":::tip\n\n### Title\n\n```\ncode\n```\n\nAfter\n\n:::\n";
+    let mut s = surface(doc);
+    s.caret_at("Title", 2);
+    s.key("edit.indentOrNextCell");
+    assert_eq!(s.offset(), doc.find("After").unwrap());
+    s.key("edit.outdentOrPrevCell");
+    assert_eq!(s.offset(), doc.find("Title").unwrap() + 5);
+    s.key("edit.newline");
+    assert_eq!(s.offset(), doc.find("After").unwrap());
+    assert_eq!(s.text(), doc);
 }
 
 // ---- random edits

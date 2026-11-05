@@ -13,7 +13,7 @@ use markise_layout::caret::Geometry;
 use markise_layout::{Images, NativeAt, TextShaper};
 
 use super::command::CommandError;
-use super::{EditorView, MarkId, TypingDir};
+use super::{EditorView, MarkId, StateId, TypingDir};
 use crate::block_fields::{BlockFields, FieldKind, Refused, Slot, SlotCaret, SlotEdit};
 use crate::block_view::PackageViews;
 
@@ -25,14 +25,18 @@ pub(super) struct InPlace {
     model: Option<BlockFields>,
     /// The block being edited stays native until the selection leaves it (ADR 0021).
     sticky: Option<MarkId>,
-    /// A caret on a place in a block with no source yet, and the field that place stands for. Only
-    /// the caret an edit put there has one.
-    absent: Option<(DocPos, usize)>,
+    /// Carets on a place in a block with no source, and the field each stands for, by the state of
+    /// the document they stood in: `DocPos::virt` cannot name a field, and undo brings back the
+    /// state and the caret. Only the caret an edit put there has one, newest last.
+    absent: Vec<(StateId, DocPos, usize)>,
 }
 
 fn plain_value_is_empty(slot: &Slot) -> bool {
     slot.value().trim().is_empty()
 }
+
+/// Places remembered for undo to come back to.
+const ABSENT_MAX: usize = 64;
 
 const NOT_HERE: CommandError = CommandError::Disabled("not in a field of a block");
 
@@ -43,6 +47,21 @@ impl EditorView {
         self.place.fields = fields;
         self.place.model = None;
         self.end_sticky();
+    }
+
+    /// The field a place with no source stands for, in the document as it stands.
+    fn absent_field(&self, pos: DocPos) -> Option<usize> {
+        let state = self.session.state_id();
+        (self.place.absent.iter().rev())
+            .find(|(st, p, _)| *st == state && *p == pos)
+            .map(|x| x.2)
+    }
+
+    fn remember_absent(&mut self, pos: DocPos, field: usize) {
+        if self.place.absent.len() >= ABSENT_MAX {
+            self.place.absent.remove(0);
+        }
+        self.place.absent.push((self.session.state_id(), pos, field));
     }
 
     /// The model of the block `at` is in, kept up to date with the document.
@@ -64,6 +83,28 @@ impl EditorView {
         }?;
         self.place.model = Some(model.clone());
         Some(model)
+    }
+
+    /// Replaces source range `r` as one step, through the checks of a field, when it is in a block
+    /// shown natively: what inserts text by a route of its own (link completion) comes here. `None`:
+    /// not in such a block, or it holds the block whole.
+    pub fn field_replace(&mut self, r: Range<usize>, text: &str) -> Option<Result<(), CommandError>> {
+        self.place.fields.as_ref()?;
+        let at = self.view.native_block(r.start)?;
+        if r.start <= at.range.start && r.end >= at.range.end {
+            return None;
+        }
+        let edit = (|| {
+            let model = self.block_model(&at)?;
+            let rel = r.start - at.range.start..r.end.checked_sub(at.range.start)?;
+            let slot = model.slot_at(rel.start).filter(|s| rel.end <= s.range().end)?;
+            Some(model.edit_slot(slot.at, rel, text))
+        })();
+        let Some(edit) = edit else { return Some(Err(NOT_HERE)) };
+        self.session.close_typing();
+        let done = self.apply_field_edit(&at, edit, TypingDir::Insert);
+        self.session.close_typing();
+        Some(done)
     }
 
     /// The slot holding the selection, both its ends; the model and offsets relative to it.
@@ -91,6 +132,10 @@ impl EditorView {
         let at = (self.view.native_block(r.start)).or_else(|| self.view.native_block(r.end))?;
         if r.start <= at.range.start && r.end >= at.range.end {
             return None; // holds the block whole: as anything else
+        }
+        // the virtual paragraph after a closer shares its end, and is outside the block
+        if p.is_caret() && p.focus.virt > 0 && p.focus.offset >= at.range.end {
+            return None;
         }
         match id {
             "edit.undo" | "edit.redo" => None,
@@ -138,10 +183,9 @@ impl EditorView {
 
     fn field_insert(&mut self, at: &NativeAt, text: &str) -> Result<(), CommandError> {
         let focus = self.session.selection().primary().focus;
-        if let Some((pos, field)) = self.place.absent
-            && pos == focus
-        {
-            let Some(model) = self.block_model(at) else {
+        if focus.virt > 0 {
+            // a place with no source: the field it stands for, or nowhere
+            let (Some(field), Some(model)) = (self.absent_field(focus), self.block_model(at)) else {
                 return Err(NOT_HERE);
             };
             return self.apply_field_edit(at, model.fill_field(field, text), TypingDir::Insert);
@@ -173,7 +217,6 @@ impl EditorView {
         if p.is_caret() {
             // off a place with no source: back on the text it follows
             if p.focus.virt > 0 {
-                self.place.absent = None;
                 self.edit(|s| s.set_selection(Selection::caret(p.focus.offset)));
                 return Ok(());
             }
@@ -215,7 +258,7 @@ impl EditorView {
                     let end = rel.end + at.range.start;
                     let leaf_end = (self.session.doc().leaf(end)).map_or(end, |l| l.span.end.max(end));
                     let pos = DocPos::with_virt(leaf_end, 1);
-                    self.place.absent = Some((pos, slot.at.field));
+                    self.remember_absent(pos, slot.at.field);
                     self.begin_sticky(at.range.start);
                     self.edit(|s| s.set_selection(Selection::caret_at(pos)));
                     return Ok(());
@@ -303,16 +346,15 @@ impl EditorView {
         };
         let (caret, absent) = match edit.caret {
             SlotCaret::At(rel) => (DocPos::new(rel + base), None),
-            SlotCaret::Absent { after, field } => {
-                let pos = DocPos::with_virt(after + base, 1);
-                (pos, Some((pos, field)))
-            }
+            SlotCaret::Absent { after, field } => (DocPos::with_virt(after + base, 1), Some(field)),
         };
         self.begin_sticky(base);
         self.release();
         let r = self.session.field_keystroke(dir, patches, Selection::caret_at(caret));
         self.place.model = r.is_ok().then_some(edit.applied.fields);
-        self.place.absent = absent.filter(|_| r.is_ok());
+        if let (Some(field), true) = (absent, r.is_ok()) {
+            self.remember_absent(caret, field);
+        }
         self.sync();
         r.map_err(CommandError::from)
     }
@@ -362,7 +404,7 @@ impl EditorView {
                     .view
                     .native_block(p.focus.offset)
                     .is_some_and(|b| p.focus.offset < b.range.end)
-                && self.place.absent.is_none_or(|(pos, _)| pos != p.focus);
+                && self.absent_field(p.focus).is_none();
             return if virt_inside {
                 Selection::caret(p.focus.offset)
             } else {
@@ -410,7 +452,7 @@ impl EditorView {
                 .view
                 .native_block(p.focus.offset)
                 .is_some_and(|b| p.focus.offset < b.range.end)
-            && self.place.absent.is_none_or(|(pos, _)| pos != p.focus)
+            && self.absent_field(p.focus).is_none()
     }
 
     /// Whether `at` is the end or the start of a block shown natively: a selection may stop there,
@@ -422,25 +464,46 @@ impl EditorView {
             && !self.session.selection().is_caret()
     }
 
-    /// After inline marks ran on a field: if the block's fields do not read as before, they did
-    /// something else, and they are taken back.
-    pub(super) fn check_marks(&mut self, before: Option<BlockFields>, at: usize) {
-        let (Some(before), Some(block)) = (before, self.view.native_block(at)) else {
+    /// After inline marks ran on a field: the same block has to stand from the same opener to its
+    /// own closer and read as before, apart from the text. If not, they did something else, also if
+    /// no block is left to ask, and they are taken back and are not there to redo.
+    pub(super) fn check_marks(&mut self, before: Option<(BlockFields, usize, StateId)>) {
+        let Some((before, len, state)) = before else { return };
+        if self.session.state_id() == state {
             return;
-        };
-        let Some(next) = self.block_model(&block) else { return };
-        if !before.same_structure(&next) {
+        }
+        if !self.reads_as(&before, len) {
             self.release();
             self.session.undo();
+            self.session.clear_redo();
+            self.place.model = None;
             self.sync();
         }
     }
 
+    fn reads_as(&self, before: &BlockFields, len: usize) -> bool {
+        let base = before.base();
+        let Some(c) = self.session.doc().named_containers_at(base).pop() else {
+            return false;
+        };
+        let moved = self.session.text().len() as isize - len as isize;
+        if c.opener.start != base || c.closer.end as isize != (base + before.source().len()) as isize + moved {
+            return false;
+        }
+        let Some(source) = self.session.text().get(c.opener.start..c.closer.end) else {
+            return false;
+        };
+        (self.place.fields.as_ref())
+            .and_then(|f| f.fields_of(&c.name, &c.args, source, base))
+            .is_some_and(|next| before.same_structure(&next))
+    }
+
     /// The model around the selection, for [`Self::check_marks`].
-    pub(super) fn model_for_marks(&mut self) -> Option<BlockFields> {
+    pub(super) fn model_for_marks(&mut self) -> Option<(BlockFields, usize, StateId)> {
         self.place.fields.as_ref()?;
         let at = self.session.selection().primary().focus.offset;
         let block = self.view.native_block(at)?;
-        self.block_model(&block)
+        let model = self.block_model(&block)?;
+        Some((model, self.session.text().len(), self.session.state_id()))
     }
 }

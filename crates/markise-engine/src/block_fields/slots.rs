@@ -149,7 +149,9 @@ impl Slot {
     pub fn value_offset(&self, s: &str, source: usize) -> usize {
         let Some(l) = self.line_of(source) else { return 0 };
         let k = source.saturating_sub(l.content.start).min(l.content.len());
-        l.at + to_value(&s[l.content.clone()], &l.value, k)
+        l.at + l
+            .value
+            .floor_char_boundary(to_value(&s[l.content.clone()], &l.value, k))
     }
 
     /// The source offset of a value offset.
@@ -159,7 +161,8 @@ impl Slot {
             return 0;
         };
         let k = value.saturating_sub(l.at).min(l.value.len());
-        l.content.start + to_content(&s[l.content.clone()], &l.value, k)
+        let content = &s[l.content.clone()];
+        l.content.start + content.floor_char_boundary(to_content(content, &l.value, k))
     }
 }
 
@@ -556,26 +559,33 @@ impl BlockFields {
 }
 
 /// Offset `k` of `wanted` in `stored`, which reads the same but for blanks the codec took away.
+/// Character by character: both sides may hold any text, and `k` is on a character of `wanted`.
 fn stored_offset(wanted: &str, stored: &str, k: usize) -> usize {
     if wanted == stored {
         return k;
     }
-    let (w, t) = (wanted.as_bytes(), stored.as_bytes());
-    let (mut i, mut j) = (0, 0);
-    while i < k.min(w.len()) {
-        if j < t.len() && w[i] == t[j] {
-            j += 1;
-        } else if j < t.len() && t[j].is_ascii_whitespace() && !w[i].is_ascii_whitespace() {
-            j += 1;
-            continue;
+    let mut w = wanted.char_indices().peekable();
+    let mut t = stored.char_indices().peekable();
+    while let Some(&(i, a)) = w.peek() {
+        if i >= k {
+            break;
         }
-        i += 1;
+        match t.peek() {
+            Some(&(_, b)) if a == b => {
+                w.next();
+                t.next();
+            }
+            // a blank the codec has and this side does not
+            Some(&(_, b)) if b.is_whitespace() && !a.is_whitespace() => {
+                t.next();
+            }
+            // what the codec took away
+            _ => {
+                w.next();
+            }
+        }
     }
-    // past the blanks that now stand at the place, as far as they are not in what was asked
-    while j < t.len() && !stored.is_char_boundary(j) {
-        j += 1;
-    }
-    j.min(t.len())
+    t.peek().map_or(stored.len(), |&(j, _)| j)
 }
 
 /// What goes in a field of one line: a run of line breaks is one blank.
