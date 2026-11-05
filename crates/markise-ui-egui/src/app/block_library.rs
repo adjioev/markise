@@ -143,7 +143,8 @@ impl MarkiseApp {
         let Some(focused) = ctx.memory(|m| m.focused()) else {
             return false;
         };
-        d.viewer.surface_id() != Some(focused) && !self.source_focused()
+        // the widget itself: full Source mode counts as the source's whoever has the keyboard
+        d.viewer.surface_id() != Some(focused) && !d.source_ui.has_focus(ctx)
     }
 
     /// A block can be deleted now: as for a move, but no package is needed, and a draft is asked about.

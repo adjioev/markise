@@ -1076,6 +1076,28 @@ mod deletes {
         assert_eq!(text(&h), d, "the block stays");
     }
 
+    /// Full Source mode counts as the source's for what a command acts on, but Find has the keyboard.
+    #[test]
+    fn with_the_keyboard_in_find_in_source_mode_block_commands_wait() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        caret(&mut h, d.find("Hello").unwrap() + 1);
+        h.state_mut().set_view_mode(markise_ui_egui::ViewMode::Source);
+        common::run(&mut h);
+        let ctx = h.ctx.clone();
+        assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("find.open")));
+        frames(&mut h);
+        let (m, k) = chord();
+        h.key_press_modifiers(m, k);
+        frames(&mut h);
+        assert_eq!(text(&h), d, "the block stays");
+        assert!(!h.state_mut().menu_action(&ctx, &MenuAction::Command("block.delete")));
+        assert!(!h.state_mut().menu_action(&ctx, &MenuAction::Command("block.moveDown")));
+        frames(&mut h);
+        assert_eq!(text(&h), d);
+    }
+
     #[test]
     fn the_caret_goes_to_the_free_line_after_a_block_before() {
         let d = format!("{POLL}\n\n{PLAIN}\n\nAfter.\n");
