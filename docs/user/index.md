@@ -19,6 +19,8 @@ in a scratch document that never touches your own files.
 | Change the look, import a CSS theme | [Themes](themes.md) |
 | Write formulas and diagrams | [Math and diagrams](math-and-diagrams.md) |
 | Review a text with comments and suggested changes | [Comments and suggestions](comments-and-suggestions.md) |
+| Write in a site's blocks with a block package | [Blocks](blocks.md) |
+| Make a block package for a site | [Making block packages](block-packages.md) |
 | Save as HTML, PDF, PNG, Word and more | [Export](export.md) |
 | Work with very large files | [Large files](large-files.md) |
 | Understand autosave, draft backups and recovery | [Saving and recovery](saving-and-recovery.md) |

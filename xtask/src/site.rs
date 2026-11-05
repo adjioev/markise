@@ -41,6 +41,8 @@ const PAGES: &[(&str, &str)] = &[
     ("themes", "Themes"),
     ("math-and-diagrams", "Math and diagrams"),
     ("comments-and-suggestions", "Comments and suggestions"),
+    ("blocks", "Blocks"),
+    ("block-packages", "Making block packages"),
     ("export", "Export"),
     ("large-files", "Large files"),
     ("saving-and-recovery", "Saving and recovery"),

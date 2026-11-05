@@ -80,7 +80,7 @@ default key.
 
 ## Blocks
 
-These need a block package in use.
+Delete Block works on any block. The others need a block package in use; see [Blocks](blocks.md).
 
 | Command | macOS | Windows and Linux |
 |---|---|---|
@@ -90,6 +90,49 @@ These need a block package in use.
 | Delete Block | Alt+Cmd+⌫ | Ctrl+Shift+Delete |
 | Switch This Block's View | Shift+Cmd+M | Ctrl+Shift+M |
 | Switch All Blocks' Views | Shift+Alt+Cmd+M | Ctrl+Shift+Alt+M |
+
+### Inside a block
+
+In a block's native view.
+
+| Key | Where | What it does |
+|---|---|---|
+| Tab / Shift+Tab | any field | next / previous field |
+| Return | a list item or answer | what follows the caret goes to a new item after it |
+| Return | an empty last item | removes it, and the caret stays at the end of the one before |
+| Return | a heading | next field |
+| Return | text, a quote | new paragraph |
+| Shift+Return | text, a quote | line break in the paragraph |
+| Backspace, Delete | an empty item | removes it, unless it is the only one |
+| Backspace | between two paragraphs of one text field | joins them |
+| Esc | while dragging a block | cancels the drag |
+
+### The block library
+
+| Key | What it does |
+|---|---|
+| ↑ / ↓ | previous / next row |
+| Return | inserts the row; with no row matching, closes and types what you typed |
+| / | right after the first `/`: closes and types one `/` |
+| Esc, or Backspace with nothing typed | closes |
+
+### The block form
+
+While the keyboard is in the form. Other document commands wait until it closes.
+
+| Command | macOS | Windows and Linux |
+|---|---|---|
+| Save the form | Cmd+Return or Cmd+S | Ctrl+Enter or Ctrl+S |
+| Cancel | Esc or Cmd+W | Esc or Ctrl+W |
+| Move a row up / down | Alt+↑ / Alt+↓ | Alt+↑ / Alt+↓ |
+
+### The image picker
+
+| Key | What it does |
+|---|---|
+| Arrow keys | move through the images |
+| Return | uses the selected image |
+| Esc | closes |
 
 ## Format
 
