@@ -53,6 +53,7 @@ use crate::viewer::DocViewer;
 
 mod attach;
 mod block_form;
+mod block_library;
 mod files;
 mod find;
 mod full_view;
@@ -606,6 +607,7 @@ pub struct MarkiseApp {
     package: package::PackageState,
     /// The form of a block in the side panel (ADR 0020).
     block_form: block_form::BlockFormState,
+    block_library: block_library::BlockLibraryState,
 }
 
 impl MarkiseApp {
@@ -718,6 +720,7 @@ impl MarkiseApp {
             updates: crate::updates::UpdateState::new(opts.updates),
             package,
             block_form: block_form::BlockFormState::new(opts_picker),
+            block_library: Default::default(),
         }
     }
 
@@ -2497,6 +2500,7 @@ impl MarkiseApp {
         self.complete_pre_input(ctx);
         self.attach_pre_input(ctx);
         self.quick_window(ctx);
+        self.block_library_window(ctx);
         self.shortcuts_window(ctx);
         self.central(ui);
         self.complete_update();
@@ -3177,6 +3181,7 @@ impl MarkiseApp {
                         self.full_view_request = out.open_view.take();
                         self.block_form.request(out.open_block_form.take());
                         self.block_form.request_switch(out.switch_block_view.take());
+                        self.block_library.request(out.open_block_library.take());
                         if let Some(n) = d.viewer.take_notice() {
                             self.banner = Some(Banner::Info(n));
                         }
@@ -3304,6 +3309,7 @@ impl MarkiseApp {
         self.full_view_request = out.open_view;
         self.block_form.request(out.open_block_form);
         self.block_form.request_switch(out.switch_block_view);
+        self.block_library.request(out.open_block_library);
         if let Some(link) = out.link {
             self.open_link(&ctx, &link);
         }

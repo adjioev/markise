@@ -4,6 +4,7 @@
 pub mod about;
 pub mod app;
 pub mod block_form;
+pub mod block_library;
 pub mod clipboard;
 pub mod confirm;
 pub mod diagram;

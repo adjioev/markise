@@ -150,6 +150,11 @@ impl PackageIndex {
         &self.palette.groups
     }
 
+    #[cfg(test)]
+    pub(crate) fn groups_for_test(&mut self) -> &mut [PaletteGroup] {
+        &mut self.palette.groups
+    }
+
     /// The presets, in the palette's order.
     pub fn presets(&self) -> &[Preset] {
         &self.palette.presets

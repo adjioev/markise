@@ -13,6 +13,7 @@ mod binding;
 mod error;
 mod form;
 mod index;
+mod library;
 pub mod limits;
 mod palette;
 mod paths;
@@ -27,6 +28,7 @@ pub use binding::{BINDING_FILE, Binding, find_binding, parse_binding, read_bindi
 pub use error::{Issue, PackageError};
 pub use form::{FormInput, FormRefusal};
 pub use index::{BlockEntry, PackageIndex};
+pub use library::{Library, LibraryEntry};
 pub use palette::{Palette, PaletteBlock, PaletteGroup, Preset};
 pub use paths::clean_relative;
 pub use resolve::{InstalledPackage, Pending, Problem, Resolution, accept, resolve};

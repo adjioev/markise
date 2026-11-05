@@ -33,7 +33,7 @@ pub(super) struct BlockFormState {
     /// A block's view button was pressed: switches on the next frame.
     switch_requested: Option<usize>,
     picker: ImagePicker,
-    assets: FormAssets,
+    pub(super) assets: FormAssets,
     /// How each document showed its blocks, for the session.
     view_states: HashMap<PathBuf, ViewState>,
 }
