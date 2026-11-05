@@ -226,7 +226,7 @@ fn the_caret_lands_in_the_first_field_and_it_shows_natively() {
 
 #[test]
 fn an_empty_marked_answer_stays_native_while_it_is_edited() {
-    // no answer marked yet: outside its schema, but being written
+    // no answer marked yet: only not filled in
     let preset = ":::poll\n\n## Q\n\n- [ ] A {#a1}\n- [ ] B {#a2}\n\n:::\n";
     let mut s = surface("one\n\nlast\n");
     s.caret(0);
@@ -240,9 +240,26 @@ fn an_empty_marked_answer_stays_native_while_it_is_edited() {
     s.caret(s.text().find("last").unwrap());
     s.frame();
     assert!(
-        s.ed.view.native_block(inside).is_none(),
-        "and a card once it is left, as ADR 0021 says"
+        s.ed.view.native_block(inside).is_some(),
+        "and once it is left, as ADR 0021 says"
     );
+    let i = s.ed.view.model().item_at_offset(s.text().find(":::poll").unwrap());
+    assert!(s.ed.view.block_warnings(i).is_some(), "with its reason");
+}
+
+#[test]
+fn a_preset_of_a_broken_structure_is_native_only_while_it_is_edited() {
+    // an answer with no id is more than something yet to be filled in
+    let preset = ":::poll\n\n## Q\n\n- [x] A\n- [ ] B {#a2}\n\n:::\n";
+    let mut s = surface("one\n\nlast\n");
+    s.caret(0);
+    s.ed.insert_block("poll", preset, false).unwrap();
+    s.frame();
+    assert!(s.ed.view.native_block(s.offset()).is_some());
+    let inside = s.offset();
+    s.caret(s.text().find("last").unwrap());
+    s.frame();
+    assert!(s.ed.view.native_block(inside).is_none(), "a card once it is left");
 }
 
 #[test]
@@ -331,8 +348,8 @@ fn inserting_twice_leaves_the_second_being_edited() {
     );
     let first = s.text().find("## Q").unwrap();
     assert!(
-        s.ed.view.native_block(first).is_none(),
-        "the first is left, so ADR 0021's rule applies"
+        s.ed.view.native_block(first).is_some(),
+        "the first is left and only not filled in: ADR 0021"
     );
 }
 

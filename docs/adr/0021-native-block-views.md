@@ -33,8 +33,8 @@ the same items lay out with a little more input, namely the block's view and wha
 - `NativeKind`, `NativeView { kind, accent, icon, label, single_answer }`, `NativeRole` (title, text, quote,
   list item, answer, image).
 - `BlockViews`, a trait the view holds as `Option<Arc<dyn BlockViews>>`: `has_view(name)` and
-  `has_schema(name)` from the name alone, `look(name, args, source)`, which is `Generic`, `Outside` with
-  its reasons, or `Native` with each part's role by source range, and `icon_ready(icon)`.
+  `has_schema(name)` from the name alone, `look(name, args, source)`, which is `Generic`, `Outside` or
+  `Unfilled` with its reasons, or `Native` with each part's role by source range, and `icon_ready(icon)`.
 
 `markise_engine::block_view::PackageViews` implements it from a `PackageIndex` and the field model
 (ADR 0020): the form spec of the block's variant, `BlockFields::decode`, and `.check`. A package's view
@@ -45,11 +45,19 @@ Nothing about a document's bytes depends on any of this.
 
 ### A block outside its schema
 
-A block with a schema in the package, with or without a view, that does not fit it (`.check`), whose
-arguments name no variant, or that has content in no field, is `Outside`: the generic card, with `⚠` and
-the first reason on its first row, and all the reasons on hover and for a screen reader. The row keeps its
-height, so a long reason is cut there. It edits and saves as any card: strict checks belong to whoever
-publishes (ADR 0020). A block with no schema, or one the package says something a form cannot honour
+A block with a schema in the package, with or without a view, can fail to fit it (`.check`) in two ways (owner's
+decision, phase 6):
+
+- **Not filled in yet.** All that is wrong is an empty required field, too few characters or items, or no marked
+  answer (`BlockFit::only_unfilled`). A block with a view stays native (`Unfilled`), also after the caret leaves,
+  with `⚠` and the first reason on its first row, all the reasons on hover and for a screen reader. It edits in
+  place and switches as any native block. A block just inserted from a preset is usually this.
+- **A structural problem.** Content in no field, arguments naming no variant, or any other reason (an answer with no
+  id or a repeated one, two marks where one can be, too many items) is a shape the view cannot read: `Outside`, the
+  generic card with the same `⚠`. A block with no view that is only unfilled is this too, as it has nothing else to show.
+
+The row keeps its height, so a long reason is cut there. A card edits and saves as any card: strict checks belong
+to whoever publishes (ADR 0020). A block with no schema, or one the package says something a form cannot honour
 about, is plain `Generic`, and the panel explains the second.
 
 ### Icons
@@ -184,11 +192,12 @@ a caret an edit put there has that meaning; one with none writes nowhere. Typing
 declared place. Enter and Shift+Enter at the end of text put the caret on such a place as well, with what goes
 between the text and what comes next.
 
-**A block being edited stays native.** Emptying a required field makes `.check` fail, and such a block is a
-card. So the block the caret is editing stays native until the selection leaves it, marked by a live mark at
-its opener. Then the rule applies: a block left outside its schema is a card with a warning. This lives in
-the view by opener, not in the look cache, which is by content: another block with the same text is another
-block.
+**A block being edited stays native.** Emptying a required field only makes a block unfilled, which is native
+anyway. What the caret leaves behind can still be worse: a preset with a broken structure, or a change from outside
+while the caret is in the block. So the block the caret is editing stays native until the selection leaves it,
+marked by a live mark at its opener. Then the rule applies: a block left with a structural problem is a card with a
+warning. This lives in the view by opener, not in the look cache, which is by content: another block with the same
+text is another block.
 
 **The sticky state, the cached model and limits.** One model is kept between keystrokes, through `refreshed`,
 so that retired ids live on while it does. Blocks over 64 KiB are generic, which also bounds the cost per
@@ -198,7 +207,7 @@ in the view: the form adds it. A picture dropped or pasted into a field asks for
 ### The switch
 
 `markise_layout::BlockViewMode` is what a block can show as: `Native`, then `Markdown`, which is the generic
-card, where anything a card allows is allowed. A block outside its schema is a card in any state, with its
+card, where anything a card allows is allowed. A block with a structural problem is a card in any state, with its
 warning. `BlockViewMode::next` is the order a switch goes through; a state that comes later (a site's own
 rendering) goes in the enum and in that order, and nothing else asks for a state by position.
 

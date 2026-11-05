@@ -55,6 +55,7 @@ impl NativeAt {
 #[derive(Clone)]
 enum Looked {
     Generic,
+    Unfilled(Arc<[String]>, Arc<NativeBlock>),
     Outside(Arc<[String]>, Option<Arc<NativeBlock>>),
     Native(Arc<NativeBlock>),
 }
@@ -179,7 +180,7 @@ impl View {
             return None;
         }
         let block = match self.look_of(&c) {
-            Looked::Native(block) => block,
+            Looked::Native(block) | Looked::Unfilled(_, block) => block,
             Looked::Outside(_, Some(block)) if self.native.sticky == Some(c.opener.start) => block,
             _ => return None,
         };
@@ -209,6 +210,7 @@ impl View {
         }
         let look = match source.look(&c.name, &c.args, bytes) {
             BlockLook::Generic => Looked::Generic,
+            BlockLook::Unfilled { reasons, block } => Looked::Unfilled(reasons.into(), Arc::new(block)),
             BlockLook::Outside { reasons, native } => Looked::Outside(reasons.into(), native.map(Arc::new)),
             BlockLook::Native(b) => Looked::Native(Arc::new(b)),
         };
@@ -220,7 +222,8 @@ impl View {
         look
     }
 
-    /// Why the block item `i` opens is outside what it declares; `None` for any other item.
+    /// What is wrong with the block item `i` opens, whether it is yet to be filled in or outside
+    /// what it declares; `None` for any other item.
     pub fn block_warnings(&self, i: usize) -> Option<Arc<[String]>> {
         self.native.source.as_ref()?;
         let it = self.model.items.get(i)?;
@@ -229,9 +232,18 @@ impl View {
         }
         let c = self.doc.named_containers_at(self.model.item_start(i)).pop()?;
         match self.look_of(&c) {
-            Looked::Outside(why, _) => Some(why),
+            Looked::Outside(why, _) | Looked::Unfilled(why, _) => Some(why),
             _ => None,
         }
+    }
+
+    /// The block item `i` opens is a card whatever its state: its structure is outside what it
+    /// declares. A block that is only yet to be filled in is not.
+    pub fn block_outside(&self, i: usize) -> bool {
+        (self.native.source.is_some() && self.model.items.get(i).is_some())
+            && self.model.items[i].kind == (ItemKind::ContainerMarker { close: false })
+            && (self.doc.named_containers_at(self.model.item_start(i)).pop())
+                .is_some_and(|c| matches!(self.look_of(&c), Looked::Outside(..)))
     }
 
     fn of_item(&self, start: usize, it: &Item) -> Option<OfItem> {

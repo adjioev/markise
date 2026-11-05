@@ -147,7 +147,12 @@ impl DocViewer {
         let all = why.join("\n");
         let id = ui.scope_id().with(("markise-block-warning", v.idx));
         let resp = ui.interact(r, id, Sense::hover()).on_hover_text(&all);
-        resp.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("Outside its schema: {all}")));
+        let what = if self.ed.view.block_outside(v.idx) {
+            "Outside its schema"
+        } else {
+            "Not filled in yet"
+        };
+        resp.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("{what}: {all}")));
     }
 
     /// The button that switches a block's view: it says what comes next.
@@ -290,7 +295,7 @@ impl DocViewer {
                 pos2(top_right.x, surface.top() + v.y + v.layout.height),
             );
             let has_view = index.block(&c.name).is_some_and(|e| e.view.is_some());
-            let outside = self.ed.view.block_warnings(v.idx).is_some();
+            let outside = self.ed.view.block_outside(v.idx);
             if pointer.is_some_and(|p| row.contains(p)) {
                 self.pointer_on_block_control = true;
             }

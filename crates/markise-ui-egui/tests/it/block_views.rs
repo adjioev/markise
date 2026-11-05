@@ -171,6 +171,24 @@ fn blocks_with_a_view_show_it_and_the_rest_stay_cards() {
 }
 
 #[test]
+fn a_block_not_filled_in_is_native_with_its_warning_and_can_switch() {
+    let doc = ":::poll\n\n## Which?\n\n- [ ] One {#a1}\n- [ ] Two {#a2}\n\n> Because.\n\n:::\n\nAfter.\n";
+    let f = Fixture::new(doc);
+    let mut h = f.ready();
+    let s = shown(&mut h);
+    assert!(s.contains("⚠ Answers: Mark exactly one"), "{s}");
+    assert!(s.contains("Poll"), "its view's label: {s}");
+    assert!(!s.contains("{#a1}"), "a native view hides ids: {s}");
+    assert!(
+        h.query_by_label("Not filled in yet: Answers: Mark exactly one")
+            .is_some()
+    );
+    assert!(h.query_by_label("Show Markdown: poll").is_some());
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.ed.view.native_block(doc.find("One").unwrap()).is_some());
+}
+
+#[test]
 fn the_caret_in_a_native_block_does_not_bring_the_id_back() {
     let f = Fixture::new(DOC);
     let mut h = f.ready();

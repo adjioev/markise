@@ -97,7 +97,21 @@ fn what_does_not_fit_says_why() {
     let why = outside(v.look("poll", "", &extra));
     assert_eq!(why.len(), 1);
     assert!(why[0].starts_with("In no field:"), "{why:?}");
-    assert_eq!(outside(v.look("tip", "", ":::tip\n\n:::")), ["Body: Required"]);
+}
+
+#[test]
+fn what_is_only_not_filled_in_stays_native_with_its_reason() {
+    let v = views();
+    let unfilled = |look: BlockLook| match look {
+        BlockLook::Unfilled { reasons, .. } => reasons,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(unfilled(v.look("tip", "", ":::tip\n\n:::")), ["Body: Required"]);
+    let no_mark = POLL.replace("[x]", "[ ]");
+    assert_eq!(unfilled(v.look("poll", "", &no_mark)), ["Answers: Mark exactly one"]);
+    // both kinds at once are about the structure
+    let both = no_mark.replace(" {#a1}", "");
+    assert_eq!(outside(v.look("poll", "", &both)).len(), 2);
 }
 
 #[test]

@@ -398,7 +398,7 @@ fn an_emptied_heading_keeps_its_place_and_its_id() {
 }
 
 #[test]
-fn a_block_being_edited_stays_native_until_the_caret_leaves() {
+fn a_block_not_filled_in_stays_native_when_the_caret_leaves() {
     let mut s = surface(DOC);
     s.caret_at("Which?", 6);
     for _ in 0..6 {
@@ -406,15 +406,14 @@ fn a_block_being_edited_stays_native_until_the_caret_leaves() {
     }
     let opener = s.text().find(":::poll").unwrap();
     assert!(s.ed.view.native_block(opener).is_some());
-    // the block just below it with the same text is not it
     s.caret_at("Between", 0);
-    assert!(s.ed.view.native_block(opener).is_none(), "outside its schema: a card");
+    assert!(s.ed.view.native_block(opener).is_some(), "only not filled in yet");
     let i = s.ed.view.model().item_at_offset(opener);
-    assert!(s.ed.view.block_warnings(i).is_some());
-    // it edits as a card now, and the next fit brings the view back
+    assert!(s.ed.view.block_warnings(i).is_some(), "with its reason");
+    assert!(!s.ed.view.block_outside(i));
     s.caret_at("## {#q}", 3);
     s.typed("Back");
-    assert!(s.ed.view.native_block(opener).is_some(), "{}", s.text());
+    assert!(s.ed.view.block_warnings(i).is_none(), "{}", s.text());
 }
 
 #[test]

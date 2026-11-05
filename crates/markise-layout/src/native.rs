@@ -72,9 +72,15 @@ impl NativeBlock {
 pub enum BlockLook {
     /// The generic card.
     Generic,
-    /// The generic card with a warning: the block is outside what it declares. The reasons are
-    /// in words, the most useful first. `native` is how it would show if it were not, for a block
-    /// that stays native while it is being edited.
+    /// Native with a warning: all that is wrong is that the author has yet to fill it in (an empty
+    /// required field, no marked answer). The reasons are in words, the most useful first.
+    Unfilled {
+        reasons: Vec<String>,
+        block: NativeBlock,
+    },
+    /// The generic card with a warning: the block's structure is outside what it declares (content
+    /// in no field, an unknown variant, a shape its view cannot read). `native` is how it would show
+    /// if it were not, for a block that stays native while it is being edited.
     Outside {
         reasons: Vec<String>,
         native: Option<NativeBlock>,
