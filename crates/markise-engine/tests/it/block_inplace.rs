@@ -742,6 +742,16 @@ fn shape_of(doc: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The text with the numbers of ordered list items taken out.
+fn unnumbered(text: &str) -> String {
+    (text.split_inclusive('\n'))
+        .map(|l| {
+            let d = l.bytes().take_while(u8::is_ascii_digit).count();
+            if d > 0 && l[d..].starts_with('.') { &l[d..] } else { l }
+        })
+        .collect()
+}
+
 /// What stands before and after the lines of the field at `at`.
 fn field_lines(doc: &str, at: usize) -> Option<(String, String)> {
     let d = markise_md::parse(doc);
@@ -800,8 +810,9 @@ proptest! {
                     Some((head, tail)) => {
                         let (h, t2) = (head.trim_end_matches('\n'), tail.trim_start_matches('\n'));
                         prop_assert!(now.starts_with(h), "before the field: {} -> {}", t, now);
-                        // (a new item renumbers the ones after it in an ordered list)
-                        prop_assert!(op == 1 || now.ends_with(t2), "after the field: {} -> {}", t, now);
+                        // (an item coming or going renumbers the ones after it in an ordered list)
+                        let (a, b) = (unnumbered(&now), unnumbered(t2));
+                        prop_assert!(a.ends_with(&b), "after the field: {} -> {}", t, now);
                     }
                 }
                 prop_assert_eq!(outside_blocks(&now), around.clone(), "around the blocks: {}", now);
