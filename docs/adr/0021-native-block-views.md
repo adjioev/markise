@@ -30,18 +30,37 @@ the same items lay out with a little more input, namely the block's view and wha
 
 `markise_layout::native` holds what layout knows, and depends on no package:
 
-- `NativeKind`, `NativeView { kind, accent, label, single_answer }`, `NativeRole` (title, text, quote,
+- `NativeKind`, `NativeView { kind, accent, icon, label, single_answer }`, `NativeRole` (title, text, quote,
   list item, answer, image).
-- `BlockViews`, a trait the view holds as `Option<Arc<dyn BlockViews>>`: `has_view(name)` from the name
-  alone, and `look(name, args, source)`, `Generic` or `Native`, with each part's role by source range.
+- `BlockViews`, a trait the view holds as `Option<Arc<dyn BlockViews>>`: `has_view(name)` and
+  `has_schema(name)` from the name alone, `look(name, args, source)`, which is `Generic`, `Outside` with
+  its reasons, or `Native` with each part's role by source range, and `icon_ready(icon)`.
 
 `markise_engine::block_view::PackageViews` implements it from a `PackageIndex` and the field model
 (ADR 0020): the form spec of the block's variant, `BlockFields::decode`, and `.check`. A package's view
 and the form therefore agree on which fields a block has and whether it fits. `markise-layout` does not
 depend on `markise-package`, and `cargo xtask layers` holds.
 
-A block that does not fit, whose arguments name no variant, or that has content in no field, is
-`Generic`: the card it always was. Nothing about a document's bytes depends on any of this.
+Nothing about a document's bytes depends on any of this.
+
+### A block outside its schema
+
+A block with a schema in the package, with or without a view, that does not fit it (`.check`), whose
+arguments name no variant, or that has content in no field, is `Outside`: the generic card, with `⚠` and
+the first reason on its first row, and all the reasons on hover and for a screen reader. The row keeps its
+height, so a long reason is cut there. It edits and saves as any card: strict checks belong to whoever
+publishes (ADR 0020). A block with no schema, or one the package says something a form cannot honour
+about, is plain `Generic`, and the panel explains the second.
+
+### Icons
+
+An icon is the file `assets/<name>.svg` of the package (ADR 0019), through the same worker and the same
+refusal rules as the form's icons (`FormAssets`, ADR 0020). Nothing is read in layout: `BlockViews::
+icon_ready` answers without blocking, a host that does not have the picture yet remembers it was asked,
+loads it off the UI thread and asks for a frame when it comes. Only the opener's key depends on the
+answer, so only that item is laid out again, at the same height. A name with no such file, or a file the
+rules refuse, is no icon and no error. The layout emits `Prim::Icon` and the viewer draws it, as it has
+the textures.
 
 ### Cost
 

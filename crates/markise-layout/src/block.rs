@@ -162,6 +162,12 @@ pub enum Prim {
         b: Pos2,
         stroke: Stroke,
     },
+    /// A package's icon on a native block ([`crate::native`]): drawn by the host, which has it.
+    Icon {
+        rect: Rect,
+        name: Arc<str>,
+        tint: Color32,
+    },
     Circle {
         center: Pos2,
         radius: f32,
@@ -256,6 +262,8 @@ pub struct BlockLayout {
     pub diagram_controls: Option<Rect>,
     /// The top edge of the card this item opens (item-local, left and right ends).
     pub card_top: Option<(Pos2, Pos2)>,
+    /// The warning on the card this item opens (item-local).
+    pub warning: Option<Rect>,
 }
 
 impl BlockLayout {
@@ -328,6 +336,8 @@ pub struct LayoutParams<'a> {
     pub review: ReviewView,
     /// The view of the block around the item, when it shows natively (ADR 0021).
     pub native: Option<crate::native::NativeParams<'a>>,
+    /// Why the block this item opens is outside what it declares (ADR 0021).
+    pub warnings: Option<&'a [String]>,
 }
 
 /// How review marks (CriticMarkup, ADR 0012) are shown in the rendered view (issue #88). Display
@@ -2095,6 +2105,7 @@ pub fn layout_item(
     let mut y = gap;
     let mut toggle = None;
     let mut empty_anchor = None;
+    let mut warning = None;
 
     if let Some((ai, title)) = &alert_title {
         let mut st = Style::base(t.font_size, line_px, color(t.alert[*ai]));
@@ -2544,13 +2555,44 @@ pub fn layout_item(
             });
             let mut st = Style::base(size, size * 1.4, ink);
             st.fam = FontRole::Bold;
-            let g = if p.native.is_some() {
-                one_row(shaper, &label, &st, (width - CARD_BUTTONS_ROOM).max(size))
+            // what the row holds, from the left: the icon, the label, the warning. The row is one line
+            // in a native view or with a warning, and then each part keeps to its room.
+            let row_right = x + width
+                - if p.native.is_some() {
+                    CARD_BUTTONS_ROOM
+                } else {
+                    BADGE_RIGHT_ROOM
+                };
+            let mut label_x = x;
+            if let Some(name) = (p.native.filter(|n| n.icon_ready)).and_then(|n| n.view.icon.as_deref()) {
+                let side = size * 1.2;
+                let rect = Rect::from_min_size(pos2(x, y + (size * 1.4 - side) * 0.5), vec2(side, side));
+                out.prims.push(Prim::Icon {
+                    rect,
+                    name: name.into(),
+                    tint: ink,
+                });
+                label_x += side + size * 0.4;
+            }
+            let room = (row_right - label_x).max(size);
+            let why = p.warnings.and_then(|w| w.first().map(|first| (first, w.len())));
+            // with a warning the label leaves room for it: at least the symbol and a few words
+            let label_room = if why.is_some() {
+                (room - size * 12.0).max(room * 0.4)
+            } else {
+                room
+            };
+            let g = if p.native.is_some() || why.is_some() {
+                one_row(shaper, &label, &st, label_room)
             } else {
                 shaper.shape(&StyledText::single(label, st.text_style()), wrapped(width))
             };
             let h = g.size().y.max(size * 1.4);
-            out.text(pos2(x, y), g, Vec::new(), FragmentId::label());
+            let label_w = g.size().x;
+            out.text(pos2(label_x, y), g, Vec::new(), FragmentId::label());
+            if let Some(why) = why {
+                warning = warning_badge(&mut out, shaper, t, why, pos2(label_x + label_w + size, y), row_right);
+            }
             y += h;
         }
         ItemKind::Rule => {
@@ -2904,7 +2946,34 @@ pub fn layout_item(
         comments,
         diagram_controls,
         card_top,
+        warning,
     }
+}
+
+/// Room for the card's button at its right end.
+const BADGE_RIGHT_ROOM: f32 = 34.0;
+
+/// `⚠` and the first reason on a card's first row, cut to the room there: the symbol always shows.
+/// It does not wrap: a card's first row has one height. Returns where it is.
+fn warning_badge(
+    out: &mut Out,
+    shaper: &mut dyn TextShaper,
+    t: &Theme,
+    (first, count): (&String, usize),
+    at: Pos2,
+    right: f32,
+) -> Option<Rect> {
+    let size = t.font_size * 0.85;
+    let room = (right - at.x).max(size * 2.0);
+    let st = Style::base(size, size * 1.4, color(t.alert[3]));
+    let mut text = format!("⚠ {}", card_label(first, ""));
+    if count > 1 {
+        text.push_str(&format!(" (+{})", count - 1));
+    }
+    let g = one_row(shaper, &text, &st, room);
+    let rect = Rect::from_min_size(at, g.size());
+    out.text(at, g, Vec::new(), FragmentId::label());
+    Some(rect)
 }
 
 /// A native view's own edges around one item of its block (`r`: the item's part of the block).

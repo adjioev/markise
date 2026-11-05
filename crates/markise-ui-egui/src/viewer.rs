@@ -231,6 +231,7 @@ pub struct DocViewer {
     code: code_tools::CodeTools,
     /// The document's block package, when it has one in use: its blocks get a button.
     block_index: Option<std::sync::Arc<markise_package::PackageIndex>>,
+    block_icons: std::sync::Arc<block_tools::IconBoard>,
     /// A press on the scrollbar (issue #123).
     thumb_drag: scrollbar::ThumbDrag,
     /// Wheel / trackpad smoothing (issue #86).
@@ -278,6 +279,7 @@ impl DocViewer {
             last_surface: None,
             refocus: false,
             block_index: None,
+            block_icons: Default::default(),
             view_press: None,
             caret_screen: None,
             hover: None,
@@ -2412,6 +2414,8 @@ pub(crate) fn paint_layout(
                     );
                 }
             }
+            // a package's icon: the block tools draw it, with the package's pictures
+            Prim::Icon { .. } => {}
             Prim::Image { rect, src, placeholder } => {
                 let r = rect.translate(off);
                 match images.texture(src) {

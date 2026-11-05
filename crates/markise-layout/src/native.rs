@@ -33,6 +33,8 @@ pub struct NativeView {
     pub kind: NativeKind,
     /// A colour name (see [`accent_color`]).
     pub accent: Option<Box<str>>,
+    /// An icon's name; whether there is such a picture is [`BlockViews::icon_ready`]'s to say.
+    pub icon: Option<Box<str>>,
     /// The label on the block's first row.
     pub label: Box<str>,
     /// One answer can be marked: answers draw as radio buttons, not check boxes.
@@ -70,6 +72,9 @@ impl NativeBlock {
 pub enum BlockLook {
     /// The generic card.
     Generic,
+    /// The generic card with a warning: the block is outside what it declares. The reasons are
+    /// in words, the most useful first.
+    Outside(Vec<String>),
     Native(NativeBlock),
 }
 
@@ -80,6 +85,16 @@ pub trait BlockViews: Send + Sync {
     fn id(&self) -> u64;
     /// Whether blocks of this name have a view at all (height estimates: no source is read).
     fn has_view(&self, name: &str) -> bool;
+    /// Whether blocks of this name can be judged at all; the others are not read.
+    fn has_schema(&self, name: &str) -> bool {
+        self.has_view(name)
+    }
+    /// Whether the picture of this icon can be drawn. Must not block: a host that loads it off
+    /// the UI thread answers `false` until then, and asks for a frame when it comes. Called for
+    /// every opener on screen every frame. No such picture stays `false`, with no error.
+    fn icon_ready(&self, _icon: &str) -> bool {
+        false
+    }
     /// How the block `name args` with this source looks. `source` runs from the first colon of
     /// its opener to the end of its closer.
     fn look(&self, name: &str, args: &str, source: &str) -> BlockLook;
@@ -90,6 +105,8 @@ pub trait BlockViews: Send + Sync {
 pub struct NativeParams<'a> {
     pub view: &'a NativeView,
     pub role: Option<NativeRole>,
+    /// The view's icon can be drawn (the block's opener only).
+    pub icon_ready: bool,
 }
 
 /// The generic colour names a package can use, light then dark: a name means the same hue in every
