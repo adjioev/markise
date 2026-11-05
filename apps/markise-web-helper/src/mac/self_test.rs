@@ -113,34 +113,22 @@ fn listen() -> std::io::Result<(u16, Arc<AtomicBool>, std::thread::JoinHandle<Ve
     Ok((port, stop, heard))
 }
 
-fn run(frames: Receiver<(FromHelper, Vec<u8>)>) -> Result<(), String> {
-    let mut files: HashMap<(Area, String), Vec<u8>> = HashMap::new();
-    files.insert((Area::Package, "fixture.css".to_string()), FIXTURE_CSS.into());
-    files.insert((Area::Package, "fixture.js".to_string()), FIXTURE_JS.into());
-
-    to_main(
-        ToHelper::Render(request(1, FIXTURE_HTML, "fixture.js", &["fixture.css"], 10_000)),
-        Vec::new(),
-    );
-    let (m, b) = answer(&frames, &files, 1).map_err(|e| format!("the fixture: {e}"))?;
-    if m.css_height != 100.0
-        || pixel(&m, &b, 200, 30) != [10, 200, 30, 255]
-        || pixel(&m, &b, 200, 80) != [200, 10, 30, 255]
-    {
-        return Err(format!("the fixture drew wrong: {m:?}"));
-    }
-    println!("fixture: drawn in {:.0} ms", m.ms);
-
+/// The forbidden page, aimed at a listener on this address.
+fn forbidden(
+    frames: &Receiver<(FromHelper, Vec<u8>)>,
+    files: &mut HashMap<(Area, String), Vec<u8>>,
+    id: u64,
+    address: IpAddr,
+) -> Result<(), String> {
     let (port, stop, heard) = listen().map_err(|e| e.to_string())?;
-    let address = local_address();
     let target = format!("{address}:{port}");
     let page = PAGE.replace("TARGET", &target).replace("CELLpx", &format!("{CELL}px"));
-    files.insert((Area::Package, "forbidden.js".to_string()), page.into());
-    to_main(
-        ToHelper::Render(request(2, "<section></section>", "forbidden.js", &[], 25_000)),
-        Vec::new(),
-    );
-    let (m, b) = answer(&frames, &files, 2).map_err(|e| format!("the forbidden page: {e}"))?;
+    // a URL of its own: the engine keeps a module by its URL
+    let module = format!("forbidden-{id}.js");
+    files.insert((Area::Package, module.clone()), page.into());
+    let request = request(id, "<section></section>", &module, &[], 25_000);
+    to_main(ToHelper::Render(request), Vec::new());
+    let (m, b) = answer(frames, files, id).map_err(|e| format!("the forbidden page: {e}"))?;
     // time for anything delayed to arrive
     std::thread::sleep(Duration::from_millis(500));
     stop.store(true, Ordering::SeqCst);
@@ -162,11 +150,35 @@ fn run(frames: Receiver<(FromHelper, Vec<u8>)>) -> Result<(), String> {
         println!("HEARD: {h}");
     }
     println!("the listener on {target} heard {} connections", heard.len());
-    // on a machine with no other interface: the known limit of ADR 0023, one bare connection
-    let allowed = if address.is_loopback() { 1 } else { 0 };
-    let heard_data = heard.iter().any(|h| h.starts_with("udp"));
-    if !wrong.is_empty() || heard.len() > allowed || heard_data {
+    if !wrong.is_empty() || !heard.is_empty() {
         return Err(format!("managed {wrong:?}, heard {heard:?}"));
+    }
+    Ok(())
+}
+
+fn run(frames: Receiver<(FromHelper, Vec<u8>)>) -> Result<(), String> {
+    let mut files: HashMap<(Area, String), Vec<u8>> = HashMap::new();
+    files.insert((Area::Package, "fixture.css".to_string()), FIXTURE_CSS.into());
+    files.insert((Area::Package, "fixture.js".to_string()), FIXTURE_JS.into());
+
+    to_main(
+        ToHelper::Render(request(1, FIXTURE_HTML, "fixture.js", &["fixture.css"], 10_000)),
+        Vec::new(),
+    );
+    let (m, b) = answer(&frames, &files, 1).map_err(|e| format!("the fixture: {e}"))?;
+    if m.css_height != 100.0
+        || pixel(&m, &b, 200, 30) != [10, 200, 30, 255]
+        || pixel(&m, &b, 200, 80) != [200, 10, 30, 255]
+    {
+        return Err(format!("the fixture drew wrong: {m:?}"));
+    }
+    println!("fixture: drawn in {:.0} ms", m.ms);
+
+    // at this machine's address, and at loopback, which a proxy might treat otherwise
+    let mut id = 2;
+    for address in [local_address(), IpAddr::V4(Ipv4Addr::LOCALHOST)] {
+        forbidden(&frames, &mut files, id, address)?;
+        id += 1;
     }
     if std::fs::read_dir(std::env::var("HOME").unwrap_or_default()).is_ok() {
         return Err("this process can read the home folder".to_string());

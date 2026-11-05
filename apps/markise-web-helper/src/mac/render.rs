@@ -178,7 +178,7 @@ fn new_page(session: &str, rules: &WKContentRuleList) -> Page {
         config.setMediaTypesRequiringUserActionForPlayback(objc2_web_kit::WKAudiovisualMediaTypes::All);
         let prefs = config.preferences();
         prefs.setJavaScriptCanOpenWindowsAutomatically(false);
-        network::no_peer_connections(&prefs);
+        network::engine_features_off(&prefs);
         // safe browsing would ask the network about what loads
         prefs.setFraudulentWebsiteWarningEnabled(false);
         // not suspended for not being on screen

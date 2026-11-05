@@ -110,22 +110,19 @@ next document. Every render is a fresh document in that web view: what the last 
 | A CSP in the page's response and in its markup | the same, once more; inline scripts and handlers in a document's markup; `eval`; workers; forms; `file:` |
 | A navigation policy: the main frame to the exact URL the helper asked for, once | navigation, redirects, meta refresh, frames, downloads, other apps' URL schemes |
 | `createWebView` answers nil, dialogs complete at once, capture and motion are denied, the open panel is empty | new windows, anything that waits for a person |
-| A dead SOCKS proxy on the data store (`proxyConfigurations`, macOS 14), no failover | what no rule is asked about: clicking a link preconnects before any policy, and that was heard on a listener. The engine resolves no name itself this way |
-| Peer connections off (`_setPeerConnectionEnabled:`), and a check before any package code runs that a page has none, in all frames | WebRTC's UDP, which goes around all of the above, and was heard too |
+| The engine's features off, by name (`_setEnabled:forFeature:`): peer connections, a link's preconnect, DNS prefetch, prefetch, speculation rules, WebTransport | what no rule is asked about. Peer connections' UDP goes around everything else, and clicking a link preconnects before any policy, in any frame. Both were heard on a listener |
+| A check, before any package code runs, that a page has no peer connections | the engine ignoring that switch |
+| A dead SOCKS proxy on the data store (`proxyConfigurations`, macOS 14), no failover | what is left at the level of the engine's networking: it resolves no name itself this way. It exempts loopback, and it did not catch a preconnect every time, so it is a second line and not the answer to one |
 | A click and a submit stop at the window, before a page's listeners, in a world of its own | activating anything: nothing here is interactive |
 | Safe browsing off | the engine's own questions about what loads |
 
-The peer connection switch is private API, there being no public one; the proxy needs macOS 14. **Without them there is no
+The feature switches are private API, there being no public ones; the proxy needs macOS 14. **Without them there is no
 helper**: it says `available: false`, and blocks stay cards. The check in the page also fails closed, so an OS that ignores the
 switch draws nothing. This goes through Developer ID distribution, not the App Store, where private API would be refused.
 
-`markise-web-helper --self-test` is that test page: about forty attempts at a listener on all interfaces, TCP and UDP. The
-page cannot tell it anything, there being no way to, so it paints a cell per attempt and the test reads the image.
-
-**Known limit.** Aimed at a *loopback* address, one attempt is still heard: a connection, with no byte sent. The proxy
-exempts loopback, and that link is in a frame's initial document, where the click stop is not. A page learns nothing back. The
-self-test therefore aims at the machine's address on another interface, where nothing is heard, and on a machine with none, at
-loopback with that one connection allowed.
+`markise-web-helper --self-test` is that test page: about forty attempts, aimed at this machine's address and then at loopback, at a
+listener on all interfaces, TCP and UDP. The page cannot tell it anything, there being no way to, so it paints a cell per attempt and
+the test reads the image.
 
 **Files through the client, and nothing else.** The helper opens no file of a package or document. Its scheme handler
 turns every load into a `need`, and the client decides:
