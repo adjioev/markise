@@ -46,7 +46,8 @@ pub(super) fn line_start(text: &str, at: usize) -> usize {
 /// The line starting at `start` holds nothing but blanks.
 pub(super) fn blank_line_at(text: &str, start: usize) -> bool {
     let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
-    text[start..end].trim().is_empty()
+    // what the parser calls blank: a no-break space is text
+    text[start..end].trim_matches([' ', '\t', '\r']).is_empty()
 }
 
 /// The line before the one starting at `start` is blank, or there is none.
@@ -111,7 +112,8 @@ fn trailing_ids(doc: &dyn FormatDoc) -> Vec<(usize, usize)> {
     let mut start = 0;
     while start < text.len() {
         let next = after_line(text, start);
-        let end = start + text[start..next].trim_end_matches(['\n', '\r']).len();
+        // blanks after an id are no text of the line
+        let end = start + text[start..next].trim_end_matches([' ', '\t', '\r', '\n']).len();
         if let Some(note) = doc.hidden_note(end)
             && note.end == end
             && note.start >= start
@@ -251,6 +253,8 @@ impl EditorView {
                 self.add_own_mode(opener, BlockViewMode::Native);
             }
             // it may not fit its schema until its fields are filled: it stays native while it is edited
+            // the mark goes over from a block edited before this one, which is left now
+            self.end_sticky();
             if self.view_of_block_at(opener) {
                 self.begin_sticky(opener);
             }
