@@ -753,7 +753,7 @@ fn a_place_nobody_can_name_writes_nowhere() {
 fn the_caret_after_a_paste_is_on_a_character() {
     for (doc, needle, want) in [
         (":::tip\n\nю  word\n\n:::\n", "ю", "юé\nword"),
-        (":::tip\n\n### ю  word\n\nBody\n\n:::\n", "ю", "юé   word"),
+        (":::tip\n\n### ю  word\n\nBody\n\n:::\n", "ю", "юé  word"),
     ] {
         let mut s = surface(doc);
         s.caret_at(needle, "ю".len());

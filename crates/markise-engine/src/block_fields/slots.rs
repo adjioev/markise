@@ -130,6 +130,16 @@ impl Slot {
             .join("\n")
     }
 
+    /// Where the plain text of the slot starts or ends, what it holds besides aside.
+    pub fn text_edge(&self, first: bool) -> Option<usize> {
+        let plain = |l: &&SlotLine| !l.value.trim().is_empty() && !self.is_protected(&l.content);
+        if first {
+            self.lines.iter().find(plain).map(|l| l.content.start)
+        } else {
+            self.lines.iter().rev().find(plain).map(|l| l.content.end)
+        }
+    }
+
     /// One line of text and no more: Enter and a pasted line break cannot go in it.
     pub fn is_one_line(&self) -> bool {
         !matches!(self.kind, FieldKind::Text | FieldKind::Quote)
@@ -267,15 +277,15 @@ impl BlockFields {
     }
 
     /// Gives a field with no place in the source `text`, in its declared place: a field with no
-    /// text at all, or a new paragraph at the end of one that has some.
-    pub fn fill_field(&self, field: usize, text: &str) -> Result<Option<SlotEdit>, Refused> {
+    /// text at all, or what follows `sep` at the end of one that has some.
+    pub fn fill_field(&self, field: usize, sep: &str, text: &str) -> Result<Option<SlotEdit>, Refused> {
         let f = self.fields.get(field).ok_or(Refused::NotText)?;
         let mut typed = text.replace("\r\n", "\n").replace('\r', "\n");
         // a new paragraph after the field's text, when it has some
         if let FieldValue::Text(old) = &f.value
             && !old.trim().is_empty()
         {
-            typed = format!("{old}\n\n{typed}");
+            typed = format!("{old}{sep}{typed}");
         }
         let edit = FieldEdit::SetText {
             field: f.name.clone(),
