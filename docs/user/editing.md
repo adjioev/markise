@@ -82,6 +82,8 @@ click can place the caret inside the link text. Links between notes in a folder 
 
 ## Images
 
+In the rendered view an image shows at its own size at most, within the column and 400 points high, scaled with the window's zoom. The file, the Markdown and exports stay as they are, and a double click or the expand button shows the image whole.
+
 Paste an image (for example a screenshot) or drag image files into a document. Markise copies
 the image into a folder next to the note — `assets` by default — and inserts a Markdown image
 with a relative path. Pasted image data is saved as `Pasted image <date and time>.png`.

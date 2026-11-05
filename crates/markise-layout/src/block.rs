@@ -3614,6 +3614,19 @@ fn code_box_hl(
     rect.max.y
 }
 
+/// The tallest an image shows in the rendered view, in points, so that the window's zoom scales it.
+/// A fixed value, not a share of the window: a layout's height does not depend on the viewport, so
+/// neither do the cache, the pages' measured heights or the scroll position. What stays as it is: the
+/// file, the full-window view and exports.
+pub const IMAGE_MAX_HEIGHT: f32 = 400.0;
+
+/// The size an image of this many pixels shows at: its own at most, within the column and
+/// [`IMAGE_MAX_HEIGHT`], its proportions kept.
+pub fn image_show_size(w: f32, h: f32, width: f32) -> (f32, f32) {
+    let scale = (width / w).min(IMAGE_MAX_HEIGHT / h).min(1.0);
+    (w * scale, h * scale)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn layout_image(
     out: &mut Out,
@@ -3631,8 +3644,8 @@ fn layout_image(
     match images.state(src) {
         ImageState::Ready { size: [w, h] } => {
             let (w, h) = (w.max(1) as f32, h.max(1) as f32);
-            let scale = (width / w).min(1.0);
-            let size = vec2(w * scale, h * scale);
+            let (sw, sh) = image_show_size(w, h, width);
+            let size = vec2(sw, sh);
             let left = if center { x + (width - size.x) * 0.5 } else { x };
             out.prims.push(Prim::Image {
                 rect: Rect::from_min_size(pos2(left, y + 4.0), size),
