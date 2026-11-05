@@ -2555,6 +2555,14 @@ pub fn layout_item(
             });
             let mut st = Style::base(size, size * 1.4, ink);
             st.fam = FontRole::Bold;
+            // what the row holds, from the left: the icon, the label, the warning. The row is one line
+            // in a native view or with a warning, and then each part keeps to its room.
+            let row_right = x + width
+                - if p.native.is_some() {
+                    CARD_BUTTONS_ROOM
+                } else {
+                    BADGE_RIGHT_ROOM
+                };
             let mut label_x = x;
             if let Some(name) = (p.native.filter(|n| n.icon_ready)).and_then(|n| n.view.icon.as_deref()) {
                 let side = size * 1.2;
@@ -2566,16 +2574,24 @@ pub fn layout_item(
                 });
                 label_x += side + size * 0.4;
             }
-            let g = if p.native.is_some() {
-                one_row(shaper, &label, &st, (width - CARD_BUTTONS_ROOM).max(size))
+            let room = (row_right - label_x).max(size);
+            let why = p.warnings.and_then(|w| w.first().map(|first| (first, w.len())));
+            // with a warning the label leaves room for it: at least the symbol and a few words
+            let label_room = if why.is_some() {
+                (room - size * 12.0).max(room * 0.4)
+            } else {
+                room
+            };
+            let g = if p.native.is_some() || why.is_some() {
+                one_row(shaper, &label, &st, label_room)
             } else {
                 shaper.shape(&StyledText::single(label, st.text_style()), wrapped(width))
             };
             let h = g.size().y.max(size * 1.4);
             let label_w = g.size().x;
             out.text(pos2(label_x, y), g, Vec::new(), FragmentId::label());
-            if let Some(why) = p.warnings.and_then(|w| w.first().map(|first| (first, w.len()))) {
-                warning = warning_badge(&mut out, shaper, t, why, pos2(label_x + label_w + size, y), x + width);
+            if let Some(why) = why {
+                warning = warning_badge(&mut out, shaper, t, why, pos2(label_x + label_w + size, y), row_right);
             }
             y += h;
         }
@@ -2937,8 +2953,8 @@ pub fn layout_item(
 /// Room for the card's button at its right end.
 const BADGE_RIGHT_ROOM: f32 = 34.0;
 
-/// `⚠` and the first reason on a card's first row, cut to the room there. It does not wrap: a
-/// card's first row has one height. Returns where it is.
+/// `⚠` and the first reason on a card's first row, cut to the room there: the symbol always shows.
+/// It does not wrap: a card's first row has one height. Returns where it is.
 fn warning_badge(
     out: &mut Out,
     shaper: &mut dyn TextShaper,
@@ -2948,23 +2964,13 @@ fn warning_badge(
     right: f32,
 ) -> Option<Rect> {
     let size = t.font_size * 0.85;
-    let room = right - BADGE_RIGHT_ROOM - at.x;
-    if room <= size * 2.0 {
-        return None;
-    }
+    let room = (right - at.x).max(size * 2.0);
     let st = Style::base(size, size * 1.4, color(t.alert[3]));
-    let mut text = format!("⚠ {first}");
+    let mut text = format!("⚠ {}", card_label(first, ""));
     if count > 1 {
         text.push_str(&format!(" (+{})", count - 1));
     }
-    // the shaper has the last word on what fits: cut in proportion until it does
-    let mut g = shaper.shape(&StyledText::single(text.clone(), st.text_style()), None);
-    let mut chars = text.chars().count();
-    while g.size().x > room && chars > 2 {
-        chars = (chars - 1).min((chars as f32 * room / g.size().x) as usize);
-        let cut: String = text.chars().take(chars).chain(['…']).collect();
-        g = shaper.shape(&StyledText::single(cut, st.text_style()), None);
-    }
+    let g = one_row(shaper, &text, &st, room);
     let rect = Rect::from_min_size(at, g.size());
     out.text(at, g, Vec::new(), FragmentId::label());
     Some(rect)
