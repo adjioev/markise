@@ -77,6 +77,11 @@ await Promise.race([
   }))),
   sleep(1500),
 ]);
+// loaded is not yet drawn: a picture is decoded when it is painted, which a snapshot does not wait for
+await Promise.race([
+  Promise.all([...root.querySelectorAll('img')].map((i) => i.decode().catch(() => {}))),
+  sleep(1500),
+]);
 await Promise.race([document.fonts.ready, sleep(1000)]);
 return root.getBoundingClientRect().height;
 "#;
