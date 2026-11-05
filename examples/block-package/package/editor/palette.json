@@ -1,0 +1,42 @@
+{
+  "format": 1,
+  "groups": [
+    { "id": "cooking", "label": "Cooking", "blocks": ["ingredients", "timing"] },
+    { "id": "notes", "label": { "en": "Notes", "fr": "Notes" }, "blocks": ["tip"] }
+  ],
+  "blocks": {
+    "ingredients": { "description": "What goes in, with an optional photo", "icon": "basket" },
+    "timing": { "description": "The steps of a recipe as one bar", "icon": "clock" },
+    "tip": { "description": { "en": "A short hint for the cook", "fr": "Un conseil" }, "icon": "bulb" }
+  },
+  "presets": [
+    {
+      "id": "ingredients-short",
+      "block": "ingredients",
+      "label": "Ingredients",
+      "keywords": "shopping list pantry",
+      "markdown": ":::ingredients 4\n\n### Ingredients\n\n- An ingredient\n\n:::\n"
+    },
+    {
+      "id": "timing-two-steps",
+      "block": "timing",
+      "label": "Timing",
+      "keywords": "minutes duration schedule",
+      "markdown": ":::timing\n\n### Timing\n\n- Prepare, 10 min\n- Cook, 20 min\n\n:::\n"
+    },
+    {
+      "id": "tip-hint",
+      "block": "tip",
+      "label": "Hint",
+      "keywords": "advice note",
+      "markdown": ":::tip\n\nWrite the hint here.\n\n:::\n"
+    },
+    {
+      "id": "tip-warning",
+      "block": "tip",
+      "label": "Warning",
+      "keywords": "careful danger",
+      "markdown": ":::tip warning\n\nWrite the warning here.\n\n:::\n"
+    }
+  ]
+}

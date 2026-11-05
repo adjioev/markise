@@ -25,6 +25,13 @@ objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKWebViewConfigur
 
 [dev-dependencies]
 png.workspace = true
+# tests/it/example_package.rs: the example package as a document gets it
+markise-doc.workspace = true
+markise-engine.workspace = true
+markise-layout.workspace = true
+markise-md.workspace = true
+markise-package.workspace = true
+tempfile.workspace = true
 
 [[test]]
 name = "it"

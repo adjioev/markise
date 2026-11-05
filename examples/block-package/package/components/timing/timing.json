@@ -1,0 +1,14 @@
+{
+  "label": "Timing",
+  "fields": [
+    { "name": "title", "type": "heading", "level": 3, "label": "Title" },
+    {
+      "name": "steps",
+      "type": "list",
+      "minItems": 2,
+      "label": "Steps",
+      "help": "Write the minutes in each step, as in: Prove, 60 min",
+      "add_label": "Add a step"
+    }
+  ]
+}

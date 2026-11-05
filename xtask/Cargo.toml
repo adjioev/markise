@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Markise workspace tooling: `cargo xtask layers|assets|ci|dist|site|version`"
+description = "Markise workspace tooling: `cargo xtask layers|assets|ci|dist|site|block-package|version`"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,5 +10,6 @@ publish.workspace = true
 [dependencies]
 markise-export.workspace = true
 markise-md.workspace = true
+markise-package.workspace = true
 serde_json.workspace = true
 toml.workspace = true

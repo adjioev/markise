@@ -3040,6 +3040,11 @@ dependencies = [
  "block2 0.6.2",
  "dispatch2",
  "libc",
+ "markise-doc",
+ "markise-engine",
+ "markise-layout",
+ "markise-md",
+ "markise-package",
  "markise-web-render",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -3049,6 +3054,7 @@ dependencies = [
  "objc2-web-kit",
  "png 0.18.1",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -6680,6 +6686,7 @@ version = "0.1.0-beta.1"
 dependencies = [
  "markise-export",
  "markise-md",
+ "markise-package",
  "serde_json",
  "toml",
 ]

@@ -4,6 +4,7 @@
 //! `std::process::Command`. The command structure follows WordCraft's xtask (see NOTICE).
 
 mod assets;
+mod block_package;
 mod dist;
 mod layers;
 mod site;
@@ -21,6 +22,7 @@ commands:
   heavy    heavy tests (release) and 3000-case incremental properties; excludes known bugs
   dist     build and package release artifacts: `cargo xtask dist --help`
   site     build the website and user guide into target/site/ and check its links
+  block-package  build the example block package and its document: `cargo xtask block-package --help`
   version  print the workspace version (the release tag is `v` + this)
 ";
 
@@ -33,6 +35,7 @@ fn main() -> ExitCode {
         Some("heavy") => cmd_heavy(),
         Some("dist") => dist::run(&root(), &args[1..]),
         Some("site") => site::run(&root(), &args[1..]),
+        Some("block-package") => block_package::run(&root(), &args[1..]),
         Some("version") => dist::workspace_version(&root()).map(|v| println!("{v}")),
         Some("-h" | "--help" | "help") | None => {
             print!("{USAGE}");

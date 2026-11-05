@@ -1,0 +1,10 @@
+{
+  "label": "Ingredients",
+  "argument": { "name": "serves" },
+  "fields": [
+    { "name": "title", "type": "heading", "level": 3, "label": "Title" },
+    { "name": "items", "type": "list", "minItems": 1, "label": "Ingredients", "add_label": "Add an ingredient" },
+    { "name": "photo", "type": "image", "min": 0, "max": 1, "label": "Photo" },
+    { "name": "note", "type": "quote", "min": 0, "label": "Note" }
+  ]
+}

@@ -1038,6 +1038,16 @@ mod tests {
     }
 
     #[test]
+    fn the_example_package_s_icons_are_masks() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/block-package/package/assets");
+        for name in ["basket", "bulb", "clock"] {
+            let path = root.join(format!("{name}.svg"));
+            let (_, mask) = rasterize_svg(&path).unwrap();
+            assert!(mask, "{name} follows the theme");
+        }
+    }
+
+    #[test]
     fn what_is_not_an_icon_is_a_reason() {
         let (_d, path) = svg("not svg");
         assert!(rasterize_svg(&path).is_err());
