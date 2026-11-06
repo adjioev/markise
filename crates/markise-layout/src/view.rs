@@ -86,6 +86,8 @@ pub struct View {
     /// Editing state of the item holding the caret (ADR 0006 §2.4): part of that item's key.
     focus: Option<(usize, ItemFocus, u64)>,
     caret_item: Option<usize>,
+    /// Where the caret is ([`View::set_caret_source`]).
+    caret_source: Option<usize>,
     /// What a paged model keeps materialized ([`paging`]).
     paging: paging::PagingState,
     /// The scroll position by source when the model was handed out for an in-place update
@@ -129,6 +131,7 @@ impl View {
             refs: Default::default(),
             focus: None,
             caret_item: None,
+            caret_source: None,
             paging: Default::default(),
             pre_edit_anchor: None,
             native: Default::default(),
@@ -531,6 +534,7 @@ impl View {
             .iter()
             .filter(|g| !g.open && g.start < o && o <= g.end)
             .map(|g| g.start)
+            .chain(self.model.cross.closed_folds_around(o))
             .collect();
         if starts.is_empty() {
             return false;
@@ -541,6 +545,66 @@ impl View {
         }
         self.disclosures.update(&self.model);
         true
+    }
+
+    /// Item `idx` heads a closed callout holding source offset `at`: where a caret there goes, the
+    /// next thing shown (else the previous one, else the end of the text).
+    pub fn caret_out_of_closed_fold(&self, idx: usize, at: usize) -> Option<usize> {
+        if !self.disclosures.groups.get(&idx).is_some_and(|g| g.fold && !g.open) {
+            return None;
+        }
+        let fold = self.model.cross.fold_at(self.model.item_start(idx))?;
+        if !fold.holds(at) {
+            return None;
+        }
+        Some(if let Some(next) = self.adjacent_visible(idx, true) {
+            self.model.item_start(next)
+        } else if let Some(previous) = self.adjacent_visible(idx, false) {
+            self.model.item_span(previous).end
+        } else {
+            self.doc.text().len()
+        })
+    }
+
+    /// The source offset of the caret for the next [`View::set_focus`].
+    pub fn set_caret_source(&mut self, offset: usize) {
+        self.caret_source = Some(offset);
+    }
+
+    /// The caret resting at the start of a closed callout's header, coming from no item: it has
+    /// not gone in. A document opens with the caret at offset 0, and the selection fix takes it to
+    /// the title's start. An edit there opens it through [`View::reveal_offset`].
+    fn caret_rests_on_closed_head(&self, i: usize) -> bool {
+        if self.caret_item.is_some() || !self.disclosures.groups.get(&i).is_some_and(|g| g.fold && !g.open) {
+            return false;
+        }
+        let start = self.model.item_start(i);
+        let title = self.model.items.get(i).and_then(|it| {
+            it.containers.iter().find_map(|c| match c {
+                crate::model::Container::Quote { head: Some(h), .. } => h.title.as_ref().map(|t| t.start as usize),
+                _ => None,
+            })
+        });
+        self.caret_source
+            .is_some_and(|at| at == start || title.is_some_and(|t| at == start + t))
+    }
+
+    /// Opens what hides source offset `at`: an edit or a search hit landed there, whichever item
+    /// the caret was on before. O(log items) when nothing hides it.
+    pub fn reveal_offset(&mut self, at: usize) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        let i = self.model.item_at_offset(at);
+        let closed_head = self.disclosures.groups.get(&i).is_some_and(|g| g.fold && !g.open);
+        if !closed_head && self.disclosures.closed_end(i).is_none() {
+            return false;
+        }
+        let opened = self.reveal_item(i);
+        if opened {
+            self.reset_heights();
+        }
+        opened
     }
 
     fn disclosure_hidden(&self, i: usize) -> bool {
@@ -868,7 +932,8 @@ impl View {
     /// clears it. Only that item's cache key changes; returns `true` when the focus changed.
     pub fn set_focus(&mut self, focus: Option<(usize, ItemFocus)>) -> bool {
         let caret_item = focus.as_ref().map(|(i, _)| *i);
-        let opened = caret_item != self.caret_item && caret_item.is_some_and(|i| self.reveal_item(i));
+        let opened = caret_item != self.caret_item
+            && caret_item.is_some_and(|i| !self.caret_rests_on_closed_head(i) && self.reveal_item(i));
         self.caret_item = caret_item;
         let focus = focus.filter(|(i, f)| *i < self.len() && !f.is_empty());
         let same = match (&self.focus, &focus) {
@@ -946,7 +1011,10 @@ impl View {
         let wrapped = |chars: u32, lines: u32| -> f32 { (lines as f32).max(chars as f32 / per_line).ceil() };
         let h = match &it.kind {
             ItemKind::Hidden => return pa + pb,
-            ItemKind::Page(st) => return self.page_estimate(st) + pa + pb,
+            ItemKind::Page(st) => {
+                let start = self.model.item_start(i);
+                return self.page_estimate(st, start..start + it.len) + pa + pb;
+            }
             ItemKind::Heading { .. } if self.native_title_estimate(i, it) => {
                 t.block_spacing + crate::native::title_line(t)
             }
@@ -975,6 +1043,10 @@ impl View {
             ItemKind::Rule | ItemKind::Empty => t.block_spacing + line,
             ItemKind::ContainerMarker { close: false } => t.block_spacing + crate::block::card_opener_height(t),
             ItemKind::ContainerMarker { close: true } => crate::block::card_padding(t),
+            // a closed callout shows its header alone (ADR 0025)
+            ItemKind::Paragraph if self.disclosures.groups.get(&i).is_some_and(|g| g.fold && !g.open) => {
+                t.block_spacing + line + 2.0
+            }
             ItemKind::Paragraph => t.block_spacing + wrapped(it.est_chars, it.est_lines) * line,
         };
         h + pa + pb
@@ -1189,7 +1261,13 @@ impl View {
                     let params = LayoutParams {
                         theme: &self.theme,
                         width: self.width,
-                        disclosure: self.disclosures.groups.get(&i).map(|g| (g.title.as_str(), g.open)),
+                        disclosure: self
+                            .disclosures
+                            .groups
+                            .get(&i)
+                            .filter(|g| !g.fold)
+                            .map(|g| (g.title.as_str(), g.open)),
+                        callout_open: self.disclosures.groups.get(&i).filter(|g| g.fold).map(|g| g.open),
                         disclosure_depth: self.disclosures.depth(i),
                         expanded: self.expanded.contains(&i),
                         code_runs: runs.as_deref(),

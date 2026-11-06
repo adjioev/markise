@@ -232,7 +232,16 @@ impl PageStats {
             && (!self.in_disclosure || m.disclosures == now.disclosures)
     }
 
-    fn add(&mut self, it: &Item) {
+    /// A callout's body counted with its first leaf: that leaf stays, one line, as the header.
+    pub(super) fn keep_header(&mut self) {
+        self.items = self.items.saturating_sub(1);
+        self.paras = self.paras.saturating_sub(1);
+        for w in &mut self.para_wrapped {
+            *w = w.saturating_sub(1);
+        }
+    }
+
+    pub(super) fn add(&mut self, it: &Item) {
         self.items += 1;
         match &it.kind {
             ItemKind::Hidden => self.hidden += 1,
@@ -376,7 +385,7 @@ impl DocModel {
             if items.is_empty() {
                 continue;
             }
-            cross.add_from(&items);
+            cross.add_from(doc, &items);
             for it in &items {
                 if let ItemKind::Heading { level } = it.kind {
                     let info = doc.heading(it.origin).unwrap_or_default();
@@ -516,6 +525,7 @@ impl DocModel {
         let lo = items[0].origin;
         let hi = items.iter().map(|it| it.origin + it.len).max().unwrap_or(lo);
         stats.in_disclosure = self.cross.disclosure_meets(lo, hi);
+        self.cross.refresh_fold_bodies(doc, &items);
         let page = page_item(&items, stats);
         let removed = r.len() - 1;
         let ka = self.outline.partition_point(|o| o.item < r.start);
@@ -675,6 +685,7 @@ impl DocModel {
         let mut pages: Vec<Item> = Vec::new();
         let mut heads: Vec<(usize, u8, usize)> = Vec::new(); // (page, level, heading start)
         let mut markers = Vec::new();
+        let mut folds = Vec::new();
         let mut k = t0;
         while k < t1 {
             let end = (k + tops).min(t1);
@@ -689,6 +700,7 @@ impl DocModel {
                 }
             }
             markers.extend(super::cross::markers_of(&items));
+            folds.extend(super::cross::folds_of(doc, &items));
             pages.push(page_item(&items, PageStats::of(&items, doc)));
         }
         if lo == 0 && pages.is_empty() && hi < n_before && !self.is_page(hi) {
@@ -733,7 +745,8 @@ impl DocModel {
             }
         }
         // disclosure markers of the region
-        self.cross.replace_range(doc, a..b, markers, e.changed.clone(), e.delta);
+        self.cross
+            .replace_range(doc, a..b, markers, folds, e.changed.clone(), e.delta);
         // document-level inputs
         let mut full = false;
         if e.deps.resources {
