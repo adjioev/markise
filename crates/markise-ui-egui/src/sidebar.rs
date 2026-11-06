@@ -1466,6 +1466,63 @@ pub fn outline(
     clicked
 }
 
+/// The outline with sections as a level above headings. Rows are asked for by what is on screen,
+/// so a large document costs what a small one does. `name`: what to call a section. Returns the
+/// clicked row's meaning.
+pub fn section_outline(
+    ui: &mut Ui,
+    view: &markise_layout::View,
+    current: usize,
+    look: &SideLook,
+    partial: bool,
+) -> Option<markise_layout::OutlineRow> {
+    use markise_layout::OutlineRow;
+    let model = view.model();
+    let min_level = model.outline.iter().map(|e| e.level).min().unwrap_or(1);
+    let sections = view.doc().section_count();
+    let mut clicked = None;
+    let rows = view.outline_row_count() + usize::from(partial);
+    virtual_rows(ui, "markise-section-outline", look.row_h, rows, None, |ui, range| {
+        for i in range {
+            if i >= view.outline_row_count() {
+                ui.label(
+                    RichText::new("More when the file has loaded…")
+                        .font(look.font.clone())
+                        .color(look.icon),
+                );
+                continue;
+            }
+            let row = view.outline_row(i);
+            let r = match row {
+                OutlineRow::Section(k) => {
+                    let mut name = view.section_name(k);
+                    // the last section of a part goes on in what has yet to load
+                    if partial && k + 1 == sections {
+                        name.push('…');
+                    }
+                    look.row(ui, 0, RowKind::Heading { level: 1 }, &name, current == i)
+                }
+                OutlineRow::Heading(h) => {
+                    let Some(e) = model.outline.get(h) else { continue };
+                    let level = e.level - min_level + 1;
+                    let text = if e.text.is_empty() { "(empty heading)" } else { &e.text };
+                    look.row(
+                        ui,
+                        level as usize,
+                        RowKind::Heading { level: level + 1 },
+                        text,
+                        current == i,
+                    )
+                }
+            };
+            if r.clicked() {
+                clicked = Some(row);
+            }
+        }
+    });
+    clicked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

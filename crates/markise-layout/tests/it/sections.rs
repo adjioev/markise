@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use markise_doc::{FormatDoc, PatchSet};
 use markise_layout::block::{NoImages, Prim};
-use markise_layout::{BlockViewMode, DocModel, ItemKind, Paging, View, testing};
+use markise_layout::{BlockViewMode, DocModel, ItemKind, OutlineRow, Paging, View, testing};
 use markise_theme::Theme;
 use proptest::prelude::*;
 
@@ -96,6 +96,45 @@ proptest! {
             let i = paged.item_at_offset(b);
             prop_assert!(paged.is_page(i) || paged.items[i].kind == ItemKind::Rule, "{}", b);
         }
+    }
+}
+
+proptest! {
+    /// The outline's rows are the same whatever a model holds as real items, and they run in
+    /// the document's order, each section before its headings.
+    #[test]
+    fn outline_rows_agree_on_paged_and_full_models(s in doc_text()) {
+        let d: Arc<dyn FormatDoc> = Arc::new(markise_md::parse(&s));
+        let mut views = [Paging::Paged { tops: 3 }, Paging::Full].map(|paging| {
+            let model = Arc::new(DocModel::build_with(&*d, None, paging));
+            let mut v = View::new(d.clone(), model, Theme::light(), 700.0, 1.0);
+            v.set_sections(true);
+            v
+        });
+        let rows = |v: &View| (0..v.outline_row_count()).map(|r| v.outline_row(r)).collect::<Vec<_>>();
+        let (a, b) = (rows(&views[0]), rows(&views[1]));
+        prop_assert_eq!(&a, &b);
+        // each kind once, in order
+        let sections: Vec<usize> = a.iter().filter_map(|r| match r { OutlineRow::Section(k) => Some(*k), _ => None }).collect();
+        let heads: Vec<usize> = a.iter().filter_map(|r| match r { OutlineRow::Heading(k) => Some(*k), _ => None }).collect();
+        prop_assert_eq!(sections, (0..d.section_count()).collect::<Vec<_>>());
+        prop_assert_eq!(heads, (0..views[1].model().outline.len()).collect::<Vec<_>>());
+        // a heading comes after its section's row, by the full model's positions
+        let m = views[1].model().clone();
+        let mut current = 0;
+        for r in &b {
+            match r {
+                OutlineRow::Section(k) => current = *k,
+                OutlineRow::Heading(h) => {
+                    let at = m.item_start(m.outline[*h].item);
+                    prop_assert_eq!(d.section_at(at).index, current);
+                }
+            }
+        }
+        // a jump materializes the page it goes to, and only then
+        let last = d.section_count() - 1;
+        let i = views[0].ensure_section(last).unwrap();
+        prop_assert!(!views[0].model().is_page(i));
     }
 }
 

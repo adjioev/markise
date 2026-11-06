@@ -230,3 +230,90 @@ fn the_example_document_opens_as_written() {
     assert_eq!(text(&h), bytes);
     assert_eq!(std::fs::read_to_string(&p.doc).unwrap(), bytes);
 }
+
+#[test]
+fn the_outline_has_sections_above_headings_and_a_click_goes_there() {
+    let mut doc = String::from("---\nauthoring: blocks-v3\n---\n\n# Top\n\n");
+    for i in 0..40 {
+        doc.push_str(&format!(
+            "---\n\n:::section-metadata\n\nid: s{i}\n\n:::\n\n## Part {i}\n\nText.\n\nMore text.\n\n"
+        ));
+    }
+    let p = plain(&doc);
+    let mut h = opened(&p);
+    h.get_by_label("s10").click();
+    common::run(&mut h);
+    let s = shown(&mut h);
+    assert!(s.contains("Part 10"), "{s}");
+    assert_eq!(text(&h), doc);
+    // the status bar follows, by what is on screen
+    let v = h.state_mut().viewer().unwrap();
+    let (name, about) = v.section_status(false).unwrap();
+    assert!(name.starts_with("§ s"), "{name}");
+    assert!(about.contains("front matter"), "{about}");
+}
+
+#[test]
+fn a_first_part_says_more_is_to_come_and_the_whole_document_completes_it() {
+    use std::sync::{Arc, Condvar, Mutex};
+
+    use markise_engine::load::{ProgressiveOpts, Stage};
+
+    let mut doc = String::from("---\nauthoring: blocks-v3\n---\n\n# Top\n\n");
+    for i in 0..600 {
+        doc.push_str(&format!(
+            "---\n\n:::section-metadata\n\nid: s{i}\n\n:::\n\n## Part {i}\n\nSome text.\n\n"
+        ));
+    }
+    let p = plain(&doc);
+    let gate = Arc::new((Mutex::new(true), Condvar::new()));
+    let held = gate.clone();
+    let mut h: H = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
+        |ui, app: &mut MarkiseApp| app.ui(ui),
+        MarkiseApp::new(AppOptions {
+            open: vec![p.doc.clone()],
+            config: ConfigDir::Dir(p.config.clone()),
+            progressive: Some(ProgressiveOpts {
+                min_bytes: 16 << 10,
+                prefix_bytes: 4 << 10,
+            }),
+            load_hook: Some(Arc::new(move |st, _| {
+                if st == Stage::Parse && std::thread::current().name() == Some("markise-load-rest") {
+                    let (m, cv) = &*held;
+                    let mut on = m.lock().unwrap();
+                    while *on {
+                        on = cv.wait(on).unwrap();
+                    }
+                }
+            })),
+            ..common::no_watch()
+        }),
+    );
+    wait_until(&mut h, "the first part", |a| a.is_partial());
+    h.step();
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.ed.view.sections_on(), "the front matter is in the part");
+    let part = v.ed.session.doc().section_count();
+    assert!(part < 601);
+    // on to the end of what there is: the count is not known yet
+    let item = v.ed.view.ensure_section(part - 1).unwrap();
+    v.ed.view.scroll_to_item(item);
+    let at = v.ed.session.doc().text().len();
+    v.ed.set_caret(markise_doc::DocPos::new(at), false);
+    h.step();
+    h.step();
+    let (_, about) = h.state_mut().viewer().unwrap().section_status(true).unwrap();
+    assert!(about.contains(&format!("of {part}+")), "{about}");
+    {
+        let (m, cv) = &*gate;
+        *m.lock().unwrap() = false;
+        cv.notify_all();
+    }
+    wait_until(&mut h, "the whole document", |a| !a.is_partial());
+    common::run(&mut h);
+    let v = h.state_mut().viewer().unwrap();
+    assert_eq!(v.ed.session.doc().section_count(), 601);
+    let (name, _) = v.section_status(false).unwrap();
+    assert!(!name.ends_with('…'), "{name}");
+    assert_eq!(text(&h), doc);
+}

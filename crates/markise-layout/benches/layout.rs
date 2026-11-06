@@ -7,6 +7,69 @@ use markise_layout::block::{Images, NoImages};
 use markise_layout::{DocModel, MathBox, MathQuery, MathState, testing};
 use markise_theme::Theme;
 
+/// Sections (ADR 0026): 10 MiB, a section every couple of KiB. What an edit, a frame and the
+/// outline cost with them on and with no boundary at all.
+fn sections(c: &mut Criterion) {
+    let mut g = c.benchmark_group("sections");
+    g.sample_size(30);
+    let block = "---\n\n:::section-metadata\n\nid: part\nkind: reading\n\n:::\n\n## A part\n\nSome text of a paragraph that goes on for a while, as text does.\n\n";
+    let n = (10 << 20) / (block.len() + 2048);
+    let filler = "Some text of a paragraph that goes on for a while, as text does.\n\n".repeat(30);
+    let with: String = (0..n).map(|_| format!("{block}{filler}")).collect();
+    let without = with.replace("---\n\n:::section-metadata", "text\n\n:::section-metadata");
+    g.bench_function("parse-10mb", |b| b.iter(|| markise_md::parse(&with).section_count()));
+    g.bench_function("parse-10mb-no-boundary", |b| {
+        b.iter(|| markise_md::parse(&without).section_count())
+    });
+    let text_at = with.len() / 2;
+    let at = text_at + with[text_at..].find("paragraph").unwrap();
+    for (name, src) in [("sections", &with), ("no-boundary", &without)] {
+        let at = at + src[at..].find(" goes").unwrap();
+        let doc = markise_md::parse(src);
+        g.bench_function(format!("keystroke-{name}"), |b| {
+            let mut d = doc.clone();
+            let mut typed = false;
+            b.iter(|| {
+                if typed {
+                    d.edit(at..at + 1, "");
+                } else {
+                    d.edit(at..at, "x");
+                }
+                typed = !typed;
+            })
+        });
+    }
+    let doc = std::sync::Arc::new(markise_md::parse(&with));
+    g.bench_function("section-at", |b| b.iter(|| doc.section_at(at).index));
+    let shown = testing::Shown::new(doc.clone());
+    let mut fonts = testing::fonts();
+    for on in [false, true] {
+        let mut v = shown.view(Theme::light(), 700.0, 2.0);
+        v.set_sections(on);
+        v.scroll_to_item(shown.model.items.len() / 2);
+        g.bench_function(format!("frame-warm-on-{on}"), |b| {
+            b.iter(|| {
+                fonts.begin_pass(testing::text_options(), Default::default());
+                let mut f = fonts.with_pixels_per_point(2.0);
+                v.frame(800.0, 400.0, &mut f, &NoImages).len()
+            })
+        });
+    }
+    let mut v = shown.view(Theme::light(), 700.0, 2.0);
+    v.set_sections(true);
+    let rows = v.outline_row_count();
+    g.bench_function("outline-40-rows-cold", |b| {
+        b.iter(|| {
+            let doc = shown.model.clone();
+            v.set_model(v.doc().clone(), doc);
+            (rows / 2..rows / 2 + 40)
+                .filter(|&r| v.outline_row(r) == markise_layout::OutlineRow::Section(0))
+                .count()
+        })
+    });
+    g.finish();
+}
+
 fn bench(c: &mut Criterion) {
     let mut g = c.benchmark_group("layout");
     g.sample_size(20);
@@ -198,5 +261,5 @@ fn math_first_screen(g: &mut criterion::BenchmarkGroup<'_, criterion::measuremen
     });
 }
 
-criterion_group!(benches, bench);
+criterion_group!(benches, sections, bench);
 criterion_main!(benches);

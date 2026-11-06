@@ -27,7 +27,7 @@ mod sections;
 mod site;
 pub use native::{BlockViewMode, NativeAt};
 pub use paging::PagingStats;
-pub use sections::{Plaque, SectionLook};
+pub use sections::{OutlineRow, Plaque, SectionLook};
 pub use site::SiteLook;
 
 /// An item to paint this frame.

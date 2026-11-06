@@ -11,6 +11,9 @@ use markise_theme::Theme;
 
 use super::{DocViewer, ViewerOutput};
 
+/// The status bar's words, and the state they are for: the document, the section, whether it is whole.
+pub(super) type SectionStatus = ((u64, usize, bool), (String, String));
+
 impl DocViewer {
     /// Reads the document's dialect: a comparison per frame unless the document or its package changed.
     pub fn follow_section_dialect(&mut self) {
@@ -30,6 +33,48 @@ impl DocViewer {
     /// The document's dialect, when anything names one.
     pub fn section_dialect(&self) -> Option<&Dialect> {
         self.section_dialect.as_ref()
+    }
+
+    /// What the status bar says of the current section, and more on hover. The caret's section while
+    /// the caret is on screen, else the one at the top of the screen. Per frame: a comparison unless the
+    /// document or the section changed.
+    pub fn section_status(&mut self, partial: bool) -> Option<(String, String)> {
+        if !self.ed.view.sections_on() {
+            return None;
+        }
+        let view = &self.ed.view;
+        let caret = self.ed.session.selection().primary().focus.offset;
+        let model = view.model();
+        let on_screen = view.last_visible.contains(&model.item_at_offset(caret));
+        let at = if on_screen {
+            caret
+        } else {
+            model.item_start(view.anchor().0.min(view.len().saturating_sub(1)))
+        };
+        let index = self.ed.session.doc().section_at(at).index;
+        let key = (self.ed.changes(), index, partial);
+        if let Some((k, said)) = &self.section_status
+            && *k == key
+        {
+            return Some(said.clone());
+        }
+        let count = self.ed.session.doc().section_count();
+        let mut name = format!("§ {}", view.section_name(index));
+        // the last section of a part goes on in what has yet to load
+        let last = index + 1 == count;
+        if partial && last {
+            name.push('…');
+        }
+        let total = if partial {
+            format!("{count}+")
+        } else {
+            count.to_string()
+        };
+        let origin = self.section_dialect.as_ref().map_or_else(String::new, Dialect::origin);
+        let about = format!("Section {} of {total}. Sections are on by {origin}.", index + 1);
+        let said = (name, about);
+        self.section_status = Some((key, said.clone()));
+        Some(said)
     }
 
     pub(super) fn sections_ui(

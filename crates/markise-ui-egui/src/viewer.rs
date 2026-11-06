@@ -270,6 +270,8 @@ pub struct DocViewer {
     section_dialect: Option<markise_engine::sections::Dialect>,
     /// When that was read: the document's change counter and the package.
     section_dialect_read_at: Option<(u64, usize)>,
+    /// The status bar's words, for this state of the document and this section.
+    section_status: Option<sections::SectionStatus>,
     /// What package text is shown in, and the change of the document it was read at.
     block_language: String,
     block_language_read_at: u64,
@@ -328,6 +330,7 @@ impl DocViewer {
             site_read_at: u64::MAX,
             section_dialect: None,
             section_dialect_read_at: None,
+            section_status: None,
             block_language: String::new(),
             block_language_read_at: u64::MAX,
             pointer_on_block_control: false,

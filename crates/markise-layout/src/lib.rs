@@ -47,7 +47,7 @@ pub use text::{
     EpaintShaper, FontRole, FragmentId, FragmentKind, MapPiece, ParleyShaper, PieceKind, SourceMap, StyledText,
     TextBlock, TextShaper, TextStyle,
 };
-pub use view::{BlockViewMode, NativeAt, Plaque, SectionLook, SiteLook, View, Visible};
+pub use view::{BlockViewMode, NativeAt, OutlineRow, Plaque, SectionLook, SiteLook, View, Visible};
 
 /// Font family names the layout uses; the UI must register all of them
 /// (see [`block::register_families`]).
