@@ -27,7 +27,7 @@ mod views;
 pub use archive::{Files, read_archive};
 pub use binding::{BINDING_FILE, Binding, find_binding, parse_binding, read_binding, read_source};
 pub use error::{Issue, PackageError};
-pub use form::{FormInput, FormRefusal};
+pub use form::{ARGUMENT_KEY, FormInput, FormRefusal};
 pub use index::{BlockEntry, PackageIndex};
 pub use library::{Library, LibraryEntry};
 pub use pack::{Packed, pack_folder};

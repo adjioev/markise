@@ -37,6 +37,10 @@ pub enum ErrorKind {
     ExclusiveWithOthers {
         value: String,
     },
+    /// The string does not have the form `pattern` asks for.
+    NoMatch {
+        pattern: String,
+    },
 }
 
 impl std::fmt::Display for ErrorKind {
@@ -56,6 +60,7 @@ impl std::fmt::Display for ErrorKind {
             ErrorKind::UnknownKey => write!(f, "Not a field of this form"),
             ErrorKind::NotAnOption => write!(f, "Not one of the options"),
             ErrorKind::ExclusiveWithOthers { value } => write!(f, "`{value}` cannot go with the others"),
+            ErrorKind::NoMatch { pattern } => write!(f, "Does not have the form `{pattern}`"),
         }
     }
 }
@@ -183,6 +188,14 @@ fn check_value(rule: &ValueRule, v: &Value, path: &str, in_item: bool, out: &mut
                 out.push(FieldError {
                     path: path.to_string(),
                     kind: ErrorKind::NotAnOption,
+                });
+            }
+            if let Some(p) = rule.pattern.as_ref().filter(|p| !p.is_match(s)) {
+                out.push(FieldError {
+                    path: path.to_string(),
+                    kind: ErrorKind::NoMatch {
+                        pattern: p.source().to_string(),
+                    },
                 });
             }
         }

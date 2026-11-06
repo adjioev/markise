@@ -42,6 +42,9 @@ pub enum FieldKind {
     Choices,
     /// Paragraphs holding only images, one image per line.
     Image,
+    /// The arguments of the opener, not anything in the body: no place to type, no region of the
+    /// block. The form is the only way to it, apart from the Markdown.
+    Argument,
 }
 
 /// One declared field; the order of the declarations is the order in the block.
@@ -163,7 +166,7 @@ pub enum FieldsError {
     UnknownItem {
         field: String,
     },
-    /// The edit or value does not fit the field's kind.
+    /// The edit or value does not fit the field's kind, or an argument would not read back.
     WrongKind {
         field: String,
     },

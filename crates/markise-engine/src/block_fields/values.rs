@@ -4,6 +4,7 @@
 
 use serde_json::{Map, Value, json};
 
+use super::encode::trim_argument;
 use super::identity::matched;
 use super::{BlockFields, FieldEdit, FieldKind, FieldValue, FieldsError, Item, ItemData};
 
@@ -57,7 +58,12 @@ impl BlockFields {
             let wrong = || FieldsError::WrongKind { field: f.name.clone() };
             match &f.value {
                 FieldValue::Text(old) => {
-                    let text = v.as_str().ok_or_else(wrong)?.to_string();
+                    let text = v.as_str().ok_or_else(wrong)?;
+                    let text = match f.kind {
+                        FieldKind::Argument => trim_argument(text),
+                        _ => text,
+                    }
+                    .to_string();
                     if text != *old {
                         out.push(FieldEdit::SetText {
                             field: f.name.clone(),

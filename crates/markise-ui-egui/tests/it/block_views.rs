@@ -29,8 +29,16 @@ const POLL: &str = r#"{"label": "Poll", "variants": {"": "one answer", "many": "
     ]}"#;
 const STEPS: &str = r#"{"label": "Steps", "fields": [{"name": "items", "type": "list", "minItems": 1}]}"#;
 const PLAIN: &str = r#"{"label": "Plain", "fields": [{"name": "body", "type": "text"}]}"#;
+const PLATE: &str = r#"{"label": "Plate", "argument": {"name": "image_set"}, "fields": [
+    {"name": "body", "type": "text", "min": 0}
+]}"#;
+const SIGN: &str = r#"{"label": "Sign", "variants": {"": "plain", "loud": "loud"},
+    "argument": {"name": "how", "label": "How it reads"},
+    "fields": [{"name": "body", "type": "text", "min": 0}]}"#;
 const VIEWS: &str = r#"{"tip": {"kind": "callout", "accent": "green", "icon": "bulb"},
     "poll": {"kind": "choices", "accent": "purple"},
+    "plate": {"kind": "card", "accent": "teal"},
+    "sign": {"kind": "callout", "accent": "red"},
     "steps": {"kind": "card", "accent": "blue", "icon": "no-such-file"}}"#;
 const ICON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M19 12H5"/></svg>"#;
 
@@ -43,13 +51,15 @@ pub(crate) struct Fixture {
 }
 
 fn archive(palette: &str) -> Vec<u8> {
-    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip","poll","steps","plain"]}"#;
+    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip","poll","steps","plain","plate","sign"]}"#;
     let files = [
         ("manifest.json", manifest),
         ("components/tip/tip.json", TIP),
         ("components/poll/poll.json", POLL),
         ("components/steps/steps.json", STEPS),
         ("components/plain/plain.json", PLAIN),
+        ("components/plate/plate.json", PLATE),
+        ("components/sign/sign.json", SIGN),
         ("editor/palette.json", palette),
         ("editor/views.json", VIEWS),
         ("assets/bulb.svg", ICON),
@@ -629,4 +639,97 @@ fn a_withdrawn_package_brings_the_cards_back() {
     common::run(&mut h);
     let s = shown(&mut h);
     assert!(!s.contains("Tip") && s.contains("tip"), "{s}");
+}
+
+fn edit_argument(h: &mut H, block: &str, label: &str, typed: &str) {
+    h.get_all_by_label(&format!("Edit Block: {block}"))
+        .next()
+        .unwrap()
+        .click();
+    common::run(h);
+    h.get_by_label(label).click();
+    common::run(h);
+    h.get_by_label(label).type_text(typed);
+    common::run(h);
+}
+
+const PLATES: &str = "Before.\n\n::::plate some/path\n\nBody\n\n::::\n\nAfter.\n";
+
+#[test]
+fn the_form_changes_only_the_arguments_bytes_as_one_undo_step() {
+    let f = Fixture::new(PLATES);
+    let mut h = f.ready();
+    let undo = h.state_mut().viewer().unwrap().ed.session.history().undo_len();
+    edit_argument(&mut h, "plate", "Image set", "/more");
+    assert_eq!(text(&h), PLATES, "a draft stays out of the document");
+    assert!(!has_note(&h, "some/path"), "the field has it: no note as well");
+    h.get_by_label("Save").click();
+    common::run(&mut h);
+    assert!(h.state().block_form().is_none());
+    assert_eq!(text(&h), PLATES.replace("some/path", "some/path/more"));
+    let v = h.state_mut().viewer().unwrap();
+    assert_eq!(v.ed.session.history().undo_len(), undo + 1);
+    assert!(v.ed.edit(|s| s.undo()));
+    common::run(&mut h);
+    assert_eq!(text(&h), PLATES);
+}
+
+fn has_note(h: &H, text: &str) -> bool {
+    h.query_all_by_label(text).next().is_some()
+}
+
+#[test]
+fn a_draft_of_the_argument_is_refused_when_the_block_changed() {
+    let f = Fixture::new(PLATES);
+    let mut h = f.ready();
+    edit_argument(&mut h, "plate", "Image set", "/more");
+    let at = PLATES.find("some/path").unwrap();
+    let patches =
+        markise_doc::PatchSet::new(vec![markise_doc::Patch::verbatim(at..at + 4, "any".to_string())]).unwrap();
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.edit(|s| s.apply_external(&patches, "Edit", false)).unwrap();
+    common::run(&mut h);
+    h.get_by_label("Save").click();
+    common::run(&mut h);
+    assert!(h.state().block_form().is_some(), "the draft stays");
+    assert_eq!(
+        text(&h),
+        PLATES.replace("some/path", "any/path"),
+        "and nothing is written"
+    );
+}
+
+#[test]
+fn the_view_follows_an_argument_that_names_a_variant() {
+    let doc = ":::sign\n\nBody\n\n:::\n";
+    let f = Fixture::new(doc);
+    let mut h = f.ready();
+    assert!(!shown(&mut h).contains("Sign · "), "{}", shown(&mut h));
+    edit_argument(&mut h, "sign", "How it reads", "loud");
+    h.get_by_label("Save").click();
+    common::run(&mut h);
+    assert_eq!(text(&h), ":::sign loud\n\nBody\n\n:::\n");
+    assert!(shown(&mut h).contains("Sign · loud"), "{}", shown(&mut h));
+    // a form opened now is that variant's, and a name that is none is still the reason it was
+    edit_argument(&mut h, "sign", "How it reads", "er");
+    h.get_by_label("Save").click();
+    common::run(&mut h);
+    assert_eq!(text(&h), ":::sign louder\n\nBody\n\n:::\n");
+    assert!(
+        shown(&mut h).contains("⚠ The block has no variant `louder`"),
+        "{}",
+        shown(&mut h)
+    );
+}
+
+#[test]
+fn the_keyboard_does_not_reach_the_opener_of_a_native_block() {
+    let f = Fixture::new(PLATES);
+    let mut h = f.ready();
+    let at = PLATES.find("some/path").unwrap() + 2;
+    caret(&mut h, at);
+    h.event(Event::Text("x".into()));
+    common::run(&mut h);
+    // markers have no stops: the caret stands in the first field, and that is where it goes
+    assert_eq!(text(&h), PLATES.replace("Body", "xBody"));
 }
