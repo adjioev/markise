@@ -98,6 +98,6 @@ mod tests {
             panic!("expected a question, got {found:?}");
         };
         assert_eq!(pending.id.library, "recipe-site");
-        assert_eq!(pending.block_count, 3);
+        assert_eq!(pending.block_count, 4);
     }
 }

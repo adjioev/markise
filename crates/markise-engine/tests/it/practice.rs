@@ -162,3 +162,27 @@ fn a_hidden_field_at_the_top_of_the_viewport_leaves_the_viewport_on_what_comes_n
     let (anchor, off) = ed.view.anchor();
     assert!(ed.view.height(anchor) >= off, "{off} into {}", ed.view.height(anchor));
 }
+
+#[test]
+fn reset_all_reaches_pages_long_gone() {
+    let text = questions(1500);
+    let mut ed = editor(text.clone());
+    ed.toggle_practice_all();
+    frame(&mut ed);
+    let plain = measured_total(&mut ed);
+    ed.view.scroll_to_y(0.0);
+    frame(&mut ed);
+    let opener = text.find(":::question").unwrap();
+    assert!(ed.practice_press(text.find("Another answer").unwrap()));
+    assert!(ed.practice_check(opener));
+    assert_eq!(ed.practice_score(), (1, 1));
+    frame(&mut ed);
+    ed.view.scroll_to_y(ed.view.total_height() * 0.9);
+    frame(&mut ed);
+    ed.practice_reset_all();
+    assert_eq!(ed.practice_score(), (0, 0));
+    assert!(ed.view.practice_conceals(text.find("The explanation").unwrap()));
+    let again = measured_total(&mut ed);
+    assert!((again - plain).abs() < 1.0, "{plain} and {again}");
+    assert_eq!(ed.session.text(), text);
+}

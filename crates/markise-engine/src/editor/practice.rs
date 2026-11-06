@@ -17,6 +17,8 @@ pub(super) struct Practised {
     at: usize,
     len: usize,
     show: PracticeShow,
+    /// Once checked, with answers to check: whether they were the right ones.
+    right: Option<bool>,
 }
 
 impl EditorView {
@@ -130,6 +132,7 @@ impl EditorView {
                     at: opener,
                     len: block.range.len(),
                     show: PracticeShow::default(),
+                    right: None,
                 });
                 self.place.practice.len() - 1
             }
@@ -185,7 +188,16 @@ impl EditorView {
         if parts.has_choices && !answered {
             return false;
         }
-        self.practice_entry(&block).show.checked = true;
+        let right = parts.has_choices.then(|| {
+            let correct = (parts.answers.iter().enumerate())
+                .filter(|(_, a)| a.correct)
+                .map(|(n, _)| n as u32);
+            let selected = self.practice_show(opener).map_or(&[][..], |s| &s.selected);
+            correct.eq(selected.iter().copied())
+        });
+        let entry = self.practice_entry(&block);
+        entry.show.checked = true;
+        entry.right = right;
         self.follow_practice();
         true
     }
@@ -197,8 +209,32 @@ impl EditorView {
         self.practice_place_caret();
     }
 
+    /// How the blocks checked so far went: how many were right, of how many. A block with no answers
+    /// to give counts for nothing.
+    pub fn practice_score(&self) -> (usize, usize) {
+        self.place.practice_score
+    }
+
+    /// Whether anything has been done that Reset All would take back.
+    pub fn practice_started(&self) -> bool {
+        !self.place.practice.is_empty()
+    }
+
+    /// As if nothing had been practised in the document. Blocks may stand anywhere, on pages long gone.
+    pub fn practice_reset_all(&mut self) {
+        let revealed = self.place.practice.iter().any(|p| p.show.checked);
+        self.place.practice.clear();
+        self.follow_practice();
+        if revealed {
+            self.view.practice_forgotten();
+        }
+        self.practice_place_caret();
+    }
+
     /// Hands the view what was done, where the blocks stand now.
     pub(super) fn follow_practice(&mut self) {
+        let checked = self.place.practice.iter().filter_map(|p| p.right);
+        self.place.practice_score = checked.fold((0, 0), |(right, all), r| (right + usize::from(r), all + 1));
         let shows = (self.place.practice.iter()).map(|p| (p.at, p.show.clone())).collect();
         self.view.set_block_practice(shows);
     }

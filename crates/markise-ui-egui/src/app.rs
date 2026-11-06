@@ -2949,6 +2949,7 @@ impl MarkiseApp {
                 self.word_count_label(ui);
                 self.comment_view_switch(ui);
                 self.package_status_item(ui);
+                self.practice_status_item(ui);
             });
         });
     }
