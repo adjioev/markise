@@ -102,6 +102,39 @@ A document without sections pays one comparison per item.
 - Everything is in points from the theme, so theme and zoom apply and the layout cache keys on them, the
   name and the plaque's contents included.
 
+### Finding one's way
+
+The outline panel has every section as a level above headings. Its rows are not built: the row of section
+`k` is `k` plus the headings before it, so the rows on screen are found by bisection over sections, and a
+list of any size costs what is shown. The model's outline names a heading in a placeholder by the
+placeholder, so a boundary in one reads that page's items, without materializing it, and remembers the count
+until the document changes. A click materializes the target's page and goes there as a heading's does.
+
+The status bar names the current section: the caret's while the caret is on screen, else the one at the top
+of the screen. On hover it says which of how many, and where the dialect came from, with the package's
+version. While a document is partial the last section's name ends in `…`, the count in `+`, and the outline
+says that more is to come. A front matter `authoring` that is empty or no string shows as `§ off`, its reason on
+hover.
+
+Measured with `cargo bench -p markise-layout --bench layout -- sections/`: 10 MiB, about 4,700 sections, each
+with metadata, a paged view, macOS, release, 2026-11-06, with other builds running on the machine, so these
+are upper bounds and the small differences are noise:
+
+| | sections | no boundary |
+|---|---|---|
+| Parse | 54 ms | 42 ms |
+| A keystroke in a paragraph (`Document::edit`) | 0.31 ms | 0.26 ms |
+| `section_at` | 66 ns | |
+| A warm frame, sections off / on | 8 µs / 15 µs | |
+| 40 outline rows with nothing remembered, a new model included | 1.1 ms | |
+
+### Read mode
+
+In Read (ADR 0024) dividers and plaques read as they do in Edit, with their warnings. No control shows, and a
+block opened as a card in Edit is a plaque there and a card again after. In Edit a plaque's switch follows the
+rule for a block's controls: it shows under the pointer or the caret. While a block is in Practice the outline keeps
+every section and leaves out the headings that ADR 0024 does, and a name never comes from a heading in a block.
+
 ### Exports
 
 With sections on, HTML, PDF, PNG and Pandoc leave a root-level `:::section-metadata` out: they all read

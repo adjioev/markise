@@ -7,7 +7,7 @@ use std::sync::Arc;
 use markise_doc::{FormatDoc, PatchSet};
 use markise_layout::block::{NoImages, Prim};
 use markise_layout::caret::Geometry;
-use markise_layout::{BlockViewMode, DocModel, ItemKind, Paging, View, testing};
+use markise_layout::{BlockViewMode, DocModel, ItemKind, OutlineRow, Paging, View, testing};
 use markise_theme::Theme;
 use proptest::prelude::*;
 
@@ -98,6 +98,73 @@ proptest! {
             prop_assert!(paged.is_page(i) || paged.items[i].kind == ItemKind::Rule, "{}", b);
         }
     }
+}
+
+proptest! {
+    /// The outline's rows are the same whatever a model holds as real items, and they run in
+    /// the document's order, each section before its headings.
+    #[test]
+    fn outline_rows_agree_on_paged_and_full_models(s in doc_text()) {
+        let d: Arc<dyn FormatDoc> = Arc::new(markise_md::parse(&s));
+        let mut views = [Paging::Paged { tops: 3 }, Paging::Full].map(|paging| {
+            let model = Arc::new(DocModel::build_with(&*d, None, paging));
+            let mut v = View::new(d.clone(), model, Theme::light(), 700.0, 1.0);
+            v.set_sections(true);
+            v
+        });
+        let rows = |v: &View| (0..v.outline_row_count(None)).map(|r| v.outline_row(r, None)).collect::<Vec<_>>();
+        let (a, b) = (rows(&views[0]), rows(&views[1]));
+        prop_assert_eq!(&a, &b);
+        // each kind once, in order
+        let sections: Vec<usize> = a.iter().filter_map(|r| match r { OutlineRow::Section(k) => Some(*k), _ => None }).collect();
+        let heads: Vec<usize> = a.iter().filter_map(|r| match r { OutlineRow::Heading(k) => Some(*k), _ => None }).collect();
+        prop_assert_eq!(sections, (0..d.section_count()).collect::<Vec<_>>());
+        prop_assert_eq!(heads, (0..views[1].model().outline.len()).collect::<Vec<_>>());
+        // a heading comes after its section's row, by the full model's positions
+        let m = views[1].model().clone();
+        let mut current = 0;
+        for r in &b {
+            match r {
+                OutlineRow::Section(k) => current = *k,
+                OutlineRow::Heading(h) => {
+                    let at = m.item_start(m.outline[*h].item);
+                    prop_assert_eq!(d.section_at(at).index, current);
+                }
+            }
+        }
+        // a jump materializes the page it goes to, and only then
+        let last = d.section_count() - 1;
+        let i = views[0].ensure_section(last).unwrap();
+        prop_assert!(!views[0].model().is_page(i));
+    }
+}
+
+#[test]
+fn outline_rows_list_what_they_are_told_and_a_current_heading_not_listed_goes_to_its_section() {
+    let s = "# A\n\n:::q\n\n## In a block\n\n:::\n\n---\n\n## B\n\n:::q\n\n## In another\n\n:::\n\n## C\n";
+    let d: Arc<dyn FormatDoc> = Arc::new(markise_md::parse(s));
+    let model = Arc::new(DocModel::build_with(&*d, None, Paging::Full));
+    let mut v = View::new(d, model, Theme::light(), 700.0, 1.0);
+    v.set_sections(true);
+    assert_eq!(v.model().outline.len(), 5);
+    let only = [0usize, 2, 4];
+    use OutlineRow::*;
+    let rows: Vec<_> = (0..v.outline_row_count(Some(&only)))
+        .map(|r| v.outline_row(r, Some(&only)))
+        .collect();
+    assert_eq!(rows, [Section(0), Heading(0), Section(1), Heading(2), Heading(4)]);
+    // the heading in a block is not listed: the one before it stands for it
+    assert_eq!(v.outline_row_of(0, Some(1), Some(&only)), 1);
+    assert_eq!(v.outline_row_of(1, Some(3), Some(&only)), 3);
+    assert_eq!(
+        v.outline_row_of(1, Some(1), Some(&only)),
+        2,
+        "before the section: the section"
+    );
+    assert_eq!(v.outline_row_of(1, Some(4), Some(&only)), 4);
+    assert_eq!(v.outline_row_of(1, Some(4), None), 6);
+    // no heading in a block names a section
+    assert_eq!(v.section_name(1), "B");
 }
 
 #[test]
@@ -191,6 +258,41 @@ fn a_metadata_block_is_a_plaque_and_its_items_hide() {
     assert_eq!(v.height(closer), 0.0);
     assert!(!markise_layout::caret::has_stops(&l));
     assert_eq!(v.section_warnings(opener).unwrap().len(), 1);
+}
+
+#[test]
+fn a_closed_fold_and_sections_agree_on_heights() {
+    let s = "---\nauthoring: blocks-v3\n---\n\n:::section-metadata\n\nid: top\n\n:::\n\n> [!note]- Folded\n>\n> Body.\n>\n> ---\n>\n> More.\n\n---\n\nAfter.\n";
+    let mut v = view_of(s, true);
+    frame(&mut v);
+    assert_eq!(v.doc().section_count(), 2, "a rule in a callout is no boundary");
+    let body = v.model().item_at_offset(s.find("Body.").unwrap());
+    assert_eq!(v.height(body), 0.0, "folded");
+    let inner = v.model().item_at_offset(s.find("> ---").unwrap() + 2);
+    assert_eq!(v.height(inner), 0.0, "and the rule with it");
+    assert_eq!(
+        v.height(v.model().item_at_offset(s.find("id: top").unwrap())),
+        0.0,
+        "under the plaque"
+    );
+    let rule = rule_item(&v, 1);
+    assert!(v.height(rule) > 0.0);
+    // what estimates say comes to what layout says, with both kept out of the count
+    let mut full = view_of(s, true);
+    let d = full.doc().clone();
+    let paged = Arc::new(DocModel::build_with(&*d, None, Paging::Paged { tops: 2 }));
+    let mut p = View::new(d, paged, Theme::light(), 700.0, 1.0);
+    p.set_sections(true);
+    frame(&mut full);
+    frame(&mut p);
+    frame(&mut p);
+    frame(&mut full);
+    assert!(
+        (full.total_height() - p.total_height()).abs() < 1.0,
+        "{} {}",
+        full.total_height(),
+        p.total_height()
+    );
 }
 
 #[test]

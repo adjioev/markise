@@ -76,17 +76,110 @@ pub(super) struct SectionsState {
     roles: RefCell<HashMap<usize, Role>>,
     /// The openers of the metadata blocks around the selection's ends: those show what they hold.
     held: Vec<usize>,
+    /// Outline entries before each section asked about, for the document as it stands.
+    heads: RefCell<HashMap<usize, usize>>,
 }
 
 impl SectionsState {
     pub(super) fn forget(&self) {
         if self.on {
             self.roles.borrow_mut().clear();
+            self.heads.borrow_mut().clear();
         }
     }
 }
 
+/// A row of the outline with sections above its headings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutlineRow {
+    /// Section `index`.
+    Section(usize),
+    /// Entry `k` of the model's outline.
+    Heading(usize),
+}
+
 impl View {
+    /// How many outline entries lie before section `k`. The model's outline holds items, so that
+    /// a heading in a placeholder counts as the placeholder: a boundary in one reads that one
+    /// page, materializing nothing. Kept until the document changes.
+    fn heads_before(&self, k: usize) -> usize {
+        if let Some(&n) = self.sections.heads.borrow().get(&k) {
+            return n;
+        }
+        let n = match self.doc.section(k).and_then(|s| s.boundary) {
+            None => 0,
+            Some(b) => {
+                let i = self.model.item_at_offset(b.start);
+                let whole = self.model.outline.partition_point(|o| o.item < i);
+                let heading = |it: &Item| matches!(it.kind, ItemKind::Heading { .. });
+                let part = if self.model.is_page(i) {
+                    let items = self.model.page_items(&*self.doc, i);
+                    items.iter().filter(|(at, it)| *at < b.start && heading(it)).count()
+                } else {
+                    0
+                };
+                whole + part
+            }
+        };
+        self.sections.heads.borrow_mut().insert(k, n);
+        n
+    }
+
+    /// Outline entries before section `k` that are listed: `only` names them, when not all are (ADR 0024).
+    fn listed_before(&self, k: usize, only: Option<&[usize]>) -> usize {
+        let n = self.heads_before(k);
+        only.map_or(n, |o| o.partition_point(|&e| e < n))
+    }
+
+    /// Rows of the outline with sections: every section, each followed by its listed headings.
+    pub fn outline_row_count(&self, only: Option<&[usize]>) -> usize {
+        self.doc.section_count() + only.map_or(self.model.outline.len(), <[usize]>::len)
+    }
+
+    /// Row `row` of that outline. O(log sections) lookups: the rows are not built, so a list of
+    /// any size costs what is on screen.
+    pub fn outline_row(&self, row: usize, only: Option<&[usize]>) -> OutlineRow {
+        let (mut lo, mut hi) = (0, self.doc.section_count());
+        // the last section whose row is at or before this one
+        while lo + 1 < hi {
+            let mid = (lo + hi) / 2;
+            if mid + self.listed_before(mid, only) <= row {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo + self.listed_before(lo, only) == row {
+            OutlineRow::Section(lo)
+        } else {
+            let i = row - lo - 1;
+            OutlineRow::Heading(only.map_or(i, |o| o.get(i).copied().unwrap_or(i)))
+        }
+    }
+
+    /// The row of outline entry `heading`, or of `section` if the entry is not listed or lies before it.
+    /// For what is on screen.
+    pub fn outline_row_of(&self, section: usize, heading: Option<usize>, only: Option<&[usize]>) -> usize {
+        let before = self.listed_before(section, only);
+        let place = heading.and_then(|k| match only {
+            Some(o) => o.partition_point(|&e| e <= k).checked_sub(1),
+            None => Some(k),
+        });
+        match place {
+            Some(p) if p >= before => p + section + 1,
+            _ => section + before,
+        }
+    }
+
+    /// Where a jump to section `k` goes: its boundary, or for the first section its start. Materializes
+    /// that page.
+    pub fn ensure_section(&mut self, k: usize) -> Option<usize> {
+        let s = self.doc.section(k)?;
+        let at = s.boundary.map_or(s.start, |b| b.start);
+        self.ensure_offset(at);
+        Some(self.model.item_at_offset(at))
+    }
+
     /// Whether the document is in a dialect with sections. It reads as a document without them when not.
     pub fn set_sections(&mut self, on: bool) {
         if on != self.sections.on {

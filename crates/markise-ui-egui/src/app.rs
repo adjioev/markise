@@ -46,7 +46,7 @@ use markise_theme::catalog::{StyleId, ThemeId};
 
 use crate::images::TextureStore;
 use crate::side_by_side::{DEFAULT_SPLIT, SideBySide};
-use crate::sidebar::{EditEnd, FileTree, Tab, TreeAction, outline};
+use crate::sidebar::{EditEnd, FileTree, Tab, TreeAction, outline, section_outline};
 use crate::source::SourceEditor;
 use crate::themes::{ConfigDir, InstallDone, ThemeEvent, ThemeManager};
 use crate::viewer::DocViewer;
@@ -2969,8 +2969,18 @@ impl MarkiseApp {
                 self.package_status_item(ui);
                 self.practice_status_item(ui);
                 self.read_mode_status_item(ui);
+                self.section_status_item(ui);
             });
         });
+    }
+
+    /// The status bar's current section, with where the dialect came from on hover (ADR 0026).
+    fn section_status_item(&mut self, ui: &mut egui::Ui) {
+        let Some(d) = self.doc.as_mut() else { return };
+        let partial = d.partial;
+        if let Some((name, about)) = d.viewer.section_status(partial) {
+            ui.weak(name).on_hover_text(about);
+        }
     }
 
     /// The status bar's review-view switch (issue #88): the current view, a click picks
@@ -3114,14 +3124,32 @@ impl MarkiseApp {
                             self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
                         }
                         if let Some(d) = &mut self.doc {
-                            let clicked = {
-                                let model = d.viewer.model().clone();
-                                let cur = model.current_heading(d.viewer.ed.view.anchor().0);
+                            let jump = if d.viewer.ed.view.sections_on() {
                                 let rows = d.viewer.outline_rows();
-                                outline(ui, &model.outline, rows.as_deref(), cur, &look, d.partial)
+                                let view = &d.viewer.ed.view;
+                                let anchor = view.anchor().0;
+                                let at = view.model().item_start(anchor.min(view.len().saturating_sub(1)));
+                                let cur = view.outline_row_of(
+                                    view.doc().section_at(at).index,
+                                    view.model().current_heading(anchor),
+                                    rows.as_deref(),
+                                );
+                                match section_outline(ui, view, rows.as_deref(), cur, &look, d.partial) {
+                                    Some(markise_layout::OutlineRow::Section(k)) => d.viewer.ed.view.ensure_section(k),
+                                    Some(markise_layout::OutlineRow::Heading(k)) => d.viewer.ed.view.ensure_heading(k),
+                                    None => None,
+                                }
+                            } else {
+                                let clicked = {
+                                    let model = d.viewer.model().clone();
+                                    let cur = model.current_heading(d.viewer.ed.view.anchor().0);
+                                    let rows = d.viewer.outline_rows();
+                                    outline(ui, &model.outline, rows.as_deref(), cur, &look, d.partial)
+                                };
+                                // a paged model materializes the heading's page first
+                                clicked.and_then(|k| d.viewer.ed.view.ensure_heading(k))
                             };
-                            // a paged model materializes the heading's page first
-                            if let Some(item) = clicked.and_then(|k| d.viewer.ed.view.ensure_heading(k)) {
+                            if let Some(item) = jump {
                                 let model = d.viewer.model().clone();
                                 d.viewer.ed.view.scroll_to_item(item);
                                 // Side by Side: the source pane follows the rendered pane

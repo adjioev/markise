@@ -29,7 +29,7 @@ mod site;
 pub use native::{BlockCan, BlockViewMode, NativeAt};
 pub use paging::PagingStats;
 pub use practice::PracticeShow;
-pub use sections::{Plaque, SectionLook};
+pub use sections::{OutlineRow, Plaque, SectionLook};
 pub use site::SiteLook;
 
 /// An item to paint this frame.
