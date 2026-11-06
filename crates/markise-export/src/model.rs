@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 
+use markise_md::callout::{CalloutType, Fold, export_head};
 use markise_md::inline::{Inline, InlineContext, InlineKind, decode_entity, decode_refs, parse_inlines, plain_text};
 use markise_md::slug::{SlugTracker, slug};
 use markise_md::{AlertKind, Align, Block, BlockKind, Document, frontmatter};
@@ -96,6 +97,16 @@ pub enum ExBlock {
     },
     Alert {
         kind: AlertKind,
+        blocks: Vec<ExBlock>,
+    },
+    /// An extended callout (ADR 0025), its title resolved. Folding is for the page formats that
+    /// have it; every other target shows it open.
+    Callout {
+        ty: CalloutType,
+        fold: Fold,
+        /// The name as written.
+        name: String,
+        title: Vec<ExInline>,
         blocks: Vec<ExBlock>,
     },
     List {
@@ -416,9 +427,15 @@ impl Builder<'_> {
             }
             BlockKind::BlockQuote { callout } => {
                 let alert = callout.and_then(|c| c.alert);
+                let head = b
+                    .children
+                    .first()
+                    .and_then(|c| c.lines.first())
+                    .and_then(|l| export_head(*callout, l.slice(text)));
+                let tagged = alert.is_some() || head.is_some();
                 let mut inner = Vec::new();
                 for (i, c) in b.children.iter().enumerate() {
-                    if alert.is_some() && i == 0 && matches!(c.kind, BlockKind::Paragraph) {
+                    if tagged && i == 0 && matches!(c.kind, BlockKind::Paragraph) {
                         // drop the `[!KIND]` marker line
                         if c.lines.len() > 1 {
                             let rest: Vec<&str> = c.lines[1..].iter().map(|l| l.slice(text)).collect();
@@ -431,9 +448,19 @@ impl Builder<'_> {
                     }
                     self.block(c, &mut inner);
                 }
-                out.push(match alert {
-                    Some(kind) => ExBlock::Alert { kind, blocks: inner },
-                    None => ExBlock::Quote(inner),
+                out.push(match (alert, head) {
+                    (Some(kind), _) => ExBlock::Alert { kind, blocks: inner },
+                    (None, Some(h)) => ExBlock::Callout {
+                        ty: h.ty,
+                        fold: h.fold,
+                        name: h.name.to_string(),
+                        title: match h.title {
+                            Some(t) => self.inline_content(t),
+                            None => vec![ExInline::Text(h.label)],
+                        },
+                        blocks: inner,
+                    },
+                    (None, None) => ExBlock::Quote(inner),
                 });
             }
             BlockKind::List {
@@ -701,6 +728,32 @@ mod tests {
         assert_eq!(p[5], ExInline::Underline(vec![ExInline::Text("u".into())]));
         assert_eq!(p[6], ExInline::Text(" & ".into()));
         assert_eq!(p[7], ExInline::Highlight(vec![ExInline::Text("m".into())]));
+    }
+
+    #[test]
+    fn callouts_carry_their_title_and_fold() {
+        let d = model("> [!warning]- **T** x\n> body\n\n> [!mine]\n> y\n");
+        let ExBlock::Callout {
+            ty,
+            fold,
+            name,
+            title,
+            blocks,
+        } = &d.blocks[0]
+        else {
+            panic!("{:?}", d.blocks[0]);
+        };
+        assert_eq!(
+            (*ty, *fold, name.as_str()),
+            (CalloutType::Warning, Fold::Closed, "warning")
+        );
+        assert_eq!(inline_text(title), "T x");
+        assert_eq!(blocks.len(), 1);
+        let ExBlock::Callout { ty, title, .. } = &d.blocks[1] else {
+            panic!();
+        };
+        assert_eq!(*ty, CalloutType::Unknown);
+        assert_eq!(title, &vec![ExInline::Text("Mine".into())]);
     }
 
     #[test]
