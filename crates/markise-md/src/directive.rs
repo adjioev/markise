@@ -501,13 +501,15 @@ impl Document {
         &mut self,
         old: Range<usize>,
         new: Vec<RawMarker>,
+        rules: Vec<usize>,
         delta: isize,
         r: &mut EditResult,
     ) {
-        let (label, region) = self.directives.splice(old, new, delta);
+        let (label, region) = self.directives.splice(old.clone(), new, delta);
         for i in label {
             self.label_marker(i);
         }
+        self.splice_sections(old, rules, delta, region.clone());
         let Some(region) = region else { return };
         let first = self.top.partition_point(|t| t.end() < region.start);
         let last = self.top.partition_point(|t| t.start() <= region.end);

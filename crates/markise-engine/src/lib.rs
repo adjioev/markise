@@ -23,6 +23,7 @@ pub mod lease;
 pub mod load;
 pub mod save;
 pub mod search;
+pub mod sections;
 pub mod settings;
 pub mod tree;
 pub mod update;

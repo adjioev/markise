@@ -12,6 +12,7 @@ mod math;
 mod native;
 mod paging;
 mod seam;
+mod sections;
 mod segments;
 mod site;
 mod source_view;

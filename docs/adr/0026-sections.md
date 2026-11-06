@@ -1,0 +1,79 @@
+# ADR 0026: sections
+
+Status: prototype for issue #178, phase 9, of a draft syntax that may still move. Display only.
+
+## Context
+
+Between ordinary content and blocks some sites have a third level: a page is a list of sections,
+each a run of content and blocks with a little metadata of its own. An editor should show where
+sections start and what they say, with no knowledge of what any site makes of them. The syntax is a
+draft, implemented nowhere yet, so this has to be small and easy to change. The file never changes
+on opening or viewing.
+
+## Decision
+
+### The syntax
+
+- **A dialect switches it on** (below). Without it `---` is a line and nothing changes.
+- **A boundary** is a root-level thematic break whose line is exactly `---`, as the parser reads the
+  tree, never by a line search. `***`, `___`, `----`, `- - -`, ` ---` and `--- ` stay lines. `---`
+  directly under text is a setext heading, as Markdown says. Inside a list, a quote or a paired
+  `:::` block it is no boundary, and front matter delimiters are none.
+- **Metadata** is a paired `:::section-metadata` block that is the first block of its section. Any
+  other one is an ordinary block. Its body has a grammar of its own, not Markdown and not the block
+  field grammar: `key: value` lines split at the first colon, both trimmed, values literal. Keys are
+  `[a-z][a-z0-9-]*`, values one line up to 200 characters, at most 20 keys. Blank lines say nothing.
+
+### The dialect
+
+Sections are on when the document's dialect is `blocks-v3`. The document's front matter `authoring`
+says, and if it does not, the manifest of its accepted package, a flat `"authoring": "blocks-v3"`.
+Front matter wins, so another value there turns them off whatever the package says, and an empty one
+says nothing. A document needs no package: its own front matter is enough. A package without the key
+reads as before, and this key is read, not validated (ADR 0019: a known format ignores what it does
+not need). `sections::section_dialect` is the whole rule, and it says where the answer came from,
+with the package's version when it came from a package.
+
+### Tolerating what does not fit
+
+The reader is a small line parser into ordered pairs, by the lines of the source between the markers,
+so that a line Markdown would read otherwise (`---` under a line, `# x`) is seen for what the author
+wrote. A line that does not fit is flagged with a reason and takes nothing else with it. A long
+value is kept and flagged; of a repeated key the first counts. Refusing is for whoever publishes.
+A block over 64 KiB is not read, since this is asked on the UI thread, and counts as no metadata.
+
+### The index
+
+`section.rs` in `markise-md` is built like the directive index (ADR 0018) and kept in the same places:
+two chunked relative-offset lists of rules, those at the root and those inside a directive. It
+comes from the edit's re-parsed top-level blocks, so it depends on no item or page of any view model
+(ADR 0016), and it always stands, whatever the dialect: the cost in a document without sections is an
+empty list and a few comparisons per re-parse.
+
+- **An edit that touches no rule** shifts the later ones, O(chunks). The fast path and a re-parse
+  inside one container do only that.
+- **A re-parsed region** takes the rules of its new blocks.
+- **A change of pairs** can bring a far-away rule in or out of a block. Only rules between the markers
+  whose pair changed and the region can do that, and only those are read again.
+- **A section's number** is the position of its boundary in its list, so `section_at(pos)` is
+  O(log rules), with no count over the document.
+- **Nothing is cached about metadata**: it is read from the text when asked, O(log) plus its size. The
+  view asks for what is on screen.
+
+`FormatDoc` has `section_count`, `section`, `section_at`, `section_metadata` and `authoring`, so layout
+stays on the seam. A format with no boundaries has one section.
+
+### Progressive open
+
+A first part (ADR 0017) is a real prefix, so every section but the last ends where it will in the whole
+document, and the last one is cut short: its extent is provisional, which a reader of a partial
+document knows from `partial`. One thing can be wrong before the whole is in: a rule inside a
+block whose closer lies after the cut stands at the root in the part, since that opener pairs with
+nothing yet. It is corrected with everything else, since the whole document has its own index.
+
+## Consequences
+
+- The bytes of a file do not depend on any of this: the index only reads.
+- A first line `---` with a later `---` is front matter, as ever, so a document that starts with a
+  boundary and has no front matter loses its first two boundaries to it. The draft refuses a leading
+  boundary anyway.

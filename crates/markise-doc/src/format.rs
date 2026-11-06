@@ -16,7 +16,8 @@ use crate::pos::{Affinity, DocPos, VirtualSlot};
 use crate::source::SourceToken;
 use crate::text::{LineEnding, Span};
 use crate::view::{
-    CodeFenceView, FlatEvent, HeadingInfo, InlineSource, LeafView, NamedContainer, RichInline, TableView,
+    CodeFenceView, FlatEvent, HeadingInfo, InlineSource, LeafView, NamedContainer, RichInline, SectionAt,
+    SectionMetadata, TableView,
 };
 
 /// Format-neutral options for opening a document. Format-specific settings (e.g. Markdown's
@@ -445,6 +446,41 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
     }
     /// The language the document says it is in (Markdown: front matter `lang`), as written.
     fn language(&self) -> Option<String> {
+        None
+    }
+    /// The authoring dialect the document names itself (Markdown: front matter `authoring`), as
+    /// written. Which dialects have sections is not the format's to say (ADR 0026).
+    fn authoring(&self) -> Option<String> {
+        None
+    }
+    /// Number of sections ([`SectionAt`]), at least 1, whatever the dialect. Formats without
+    /// boundaries keep the defaults: one section, the whole document. Must be cheap: no
+    /// walk over the document.
+    fn section_count(&self) -> usize {
+        1
+    }
+    /// Section `index` from 0.
+    fn section(&self, index: usize) -> Option<SectionAt> {
+        (index == 0).then(|| SectionAt {
+            index: 0,
+            boundary: None,
+            start: 0,
+            end: self.text().len(),
+        })
+    }
+    /// The section around `at`; a boundary belongs to the section it opens.
+    fn section_at(&self, at: usize) -> SectionAt {
+        let _ = at;
+        SectionAt {
+            index: 0,
+            boundary: None,
+            start: 0,
+            end: self.text().len(),
+        }
+    }
+    /// What section `index` says about itself, if it does.
+    fn section_metadata(&self, index: usize) -> Option<SectionMetadata> {
+        let _ = index;
         None
     }
     /// Resolves an image source against the document folder and [`FormatDoc::resource_root`].

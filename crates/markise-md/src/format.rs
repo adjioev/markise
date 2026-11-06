@@ -720,6 +720,21 @@ impl FormatDoc for Document {
     fn language(&self) -> Option<String> {
         Document::language(self).map(str::to_string)
     }
+    fn authoring(&self) -> Option<String> {
+        Document::authoring(self).map(str::to_string)
+    }
+    fn section_count(&self) -> usize {
+        Document::section_count(self)
+    }
+    fn section(&self, index: usize) -> Option<markise_doc::SectionAt> {
+        Document::section(self, index)
+    }
+    fn section_at(&self, at: usize) -> markise_doc::SectionAt {
+        Document::section_at(self, at)
+    }
+    fn section_metadata(&self, index: usize) -> Option<markise_doc::SectionMetadata> {
+        Document::section_metadata(self, index)
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }

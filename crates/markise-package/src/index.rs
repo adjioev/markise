@@ -20,6 +20,8 @@ const VIEWS: &str = "editor/views.json";
 #[derive(Clone, Debug, PartialEq)]
 pub struct PackageIndex {
     id: PackageId,
+    /// The manifest's `authoring`, as written (ADR 0026).
+    authoring: Option<String>,
     blocks: BTreeMap<String, BlockSchema>,
     palette: Palette,
     views: BTreeMap<String, ViewConfig>,
@@ -66,6 +68,10 @@ impl PackageIndex {
         let library = manifest_token(&manifest, "library", &mut issues);
         let version = manifest_token(&manifest, "version", &mut issues);
         let names = manifest_blocks(&manifest, &mut issues);
+        // read, not checked: a key this format does not need, whose values are not Markise's to know
+        let authoring = (manifest.get("authoring").and_then(Value::as_str))
+            .filter(|v| !v.is_empty() && v.len() <= MAX_NAME_BYTES)
+            .map(str::to_string);
         let known: BTreeSet<String> = names.iter().cloned().collect();
 
         let mut blocks = BTreeMap::new();
@@ -104,6 +110,7 @@ impl PackageIndex {
 
         issues.into_result(|| PackageIndex {
             id: PackageId { library, version },
+            authoring,
             blocks,
             palette,
             views: view_map,
@@ -117,6 +124,7 @@ impl PackageIndex {
                 library: String::new(),
                 version: String::new(),
             },
+            authoring: None,
             blocks: BTreeMap::new(),
             palette: Palette::default(),
             views: BTreeMap::new(),
@@ -125,6 +133,11 @@ impl PackageIndex {
 
     pub fn id(&self) -> &PackageId {
         &self.id
+    }
+
+    /// The authoring dialect the package's site writes in, as its manifest says.
+    pub fn authoring(&self) -> Option<&str> {
+        self.authoring.as_deref()
     }
 
     /// The block's entry; `None` for a name the package does not define.
