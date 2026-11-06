@@ -56,6 +56,8 @@ pub(super) struct InPlace {
     /// The document is in Read, and whether that was someone's choice: a package has no say then.
     pub(super) read: bool,
     pub(super) read_chosen: bool,
+    /// How many of those were right, of how many checked: read per frame, so not worked out per frame.
+    pub(super) practice_score: (usize, usize),
 }
 
 fn plain_value_is_empty(slot: &Slot) -> bool {

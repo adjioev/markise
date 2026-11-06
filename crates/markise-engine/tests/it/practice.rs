@@ -186,3 +186,18 @@ fn reset_all_reaches_pages_long_gone() {
     assert!((again - plain).abs() < 1.0, "{plain} and {again}");
     assert_eq!(ed.session.text(), text);
 }
+
+#[test]
+fn while_a_package_is_not_known_all_a_block_holds_is_concealed() {
+    let text = questions(3);
+    let mut ed = editor(text.clone());
+    let inside = text.find("The explanation").unwrap();
+    let outside = text.find("A paragraph").unwrap();
+    assert!(!ed.view.practice_conceals(inside), "nothing is in Practice");
+    ed.view.set_blocks_veiled(true);
+    assert!(ed.view.practice_conceals(inside));
+    assert!(ed.view.practice_conceals(text.find("One answer").unwrap()));
+    assert!(!ed.view.practice_conceals(outside));
+    ed.view.set_blocks_veiled(false);
+    assert!(!ed.view.practice_conceals(inside));
+}

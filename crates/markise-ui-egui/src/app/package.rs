@@ -92,14 +92,14 @@ impl MarkiseApp {
                 if let Some(earlier) = earlier {
                     let _ = earlier.join();
                 }
-                // `None`: nothing to report, so no frame is spent on the common unbound case
+                // `None`: nothing to report, but a frame has to see that: a document stays veiled until then
                 match job(&store) {
                     Some(done) => {
                         let _ = tx.send(done);
-                        wake();
                     }
                     None => drop(tx),
                 }
+                wake();
             });
         match spawned {
             Ok(handle) => {
