@@ -102,6 +102,10 @@ fn reasons(s: &str) -> Vec<&'static str> {
         .collect()
 }
 
+fn flag_reasons(m: &markise_doc::SectionMetadata) -> Vec<&'static str> {
+    m.flagged.iter().map(|f| f.reason).collect()
+}
+
 fn own(k: &str, v: &str) -> (String, String) {
     (k.to_string(), v.to_string())
 }
@@ -122,12 +126,9 @@ fn metadata_first_in_a_section_reads_as_ordered_pairs() {
     assert_eq!(m.get("id"), Some("top"));
     assert_eq!(m.opener.slice(s), ":::section-metadata");
     assert_eq!(m.closer.slice(s), ":::");
-    assert!(m.flagged.is_empty());
-    assert_eq!(
-        pairs(&d, 1),
-        [own("kind", "other")],
-        "no blank lines are needed around markers here"
-    );
+    assert_eq!(flag_reasons(&m), [MALFORMED_BODY], "two paragraphs, read all the same");
+    assert_eq!(pairs(&d, 1), [own("kind", "other")]);
+    assert_eq!(flag_reasons(&d.section_metadata(1).unwrap()), [MALFORMED_TIGHT]);
     assert_eq!(d.section_metadata(2), None);
     assert_eq!(d.section_metadata(3), None);
 }
@@ -151,21 +152,17 @@ fn metadata_anywhere_else_is_no_metadata() {
 
 #[test]
 fn lines_that_do_not_fit_are_flagged_and_take_nothing_else_with_them() {
-    let s = ":::section-metadata\n\nfine: yes\nno colon here\nBad-Key: x\n1key: x\nempty:\nfine: again\n---\n# heading\n\nalso: fine\n\n:::\n";
+    let s = ":::section-metadata\n\nfine: yes\nno colon here\nBad-Key: x\n1key: x\nempty:\nfine: again\nalso: fine\nnote\n\n:::\n";
     let d = parse(s);
     let m = d.section_metadata(0).unwrap();
     assert_eq!(
         m.pairs.iter().map(|p| p.key.as_str()).collect::<Vec<_>>(),
         ["fine", "also"]
     );
-    assert_eq!(m.flagged.len(), 7);
+    assert_eq!(m.flagged.len(), 6);
     assert_eq!(m.flagged[0].text, "no colon here");
     assert_eq!(m.flagged[0].at, s.find("no colon").unwrap());
     assert_eq!(m.flagged[4].text, "fine: again", "the first of a repeated key counts");
-    assert_eq!(
-        m.flagged[5].text, "---",
-        "a line under text is what it is in Markdown, here it fits nothing"
-    );
     assert_eq!(d.serialize(), s);
     // a long value is kept and flagged, and arguments are flagged on the opener
     let long = "x".repeat(201);
@@ -178,11 +175,106 @@ fn lines_that_do_not_fit_are_flagged_and_take_nothing_else_with_them() {
     // keys over the limit
     let many: String = (0..22).map(|i| format!("k{i}: v\n")).collect();
     let d = parse(&format!(":::section-metadata\n\n{many}\n:::\n"));
+    assert_eq!(flag_reasons(&d.section_metadata(0).unwrap()).len(), 2);
     let m = d.section_metadata(0).unwrap();
     assert_eq!((m.pairs.len(), m.flagged.len()), (20, 2));
     // CRLF reads the same
     let d = parse(":::section-metadata\r\n\r\na: b\r\nc: d\r\n\r\n:::\r\n");
     assert_eq!(pairs(&d, 0), [own("a", "b"), own("c", "d")]);
+}
+
+#[test]
+fn between_the_markers_is_one_paragraph_and_nothing_else() {
+    let flags = |s: &str| flag_reasons(&parse(s).section_metadata(0).expect("metadata"));
+    assert_eq!(flags(":::section-metadata\n\na: b\nc: d\n\n:::\n"), [] as [&str; 0]);
+    for tight in [
+        ":::section-metadata\na: b\n:::\n",
+        ":::section-metadata\na: b\n\n:::\n",
+        ":::section-metadata\n\na: b\n:::\n",
+    ] {
+        assert_eq!(flags(tight), [MALFORMED_TIGHT], "{tight:?}");
+    }
+    for other in [
+        ":::section-metadata\n\n:::\n",
+        ":::section-metadata\n\na: b\n\nc: d\n\n:::\n",
+        ":::section-metadata\n\n- a: b\n\n:::\n",
+        ":::section-metadata\n\n# a: b\n\n:::\n",
+        ":::section-metadata\n\n[a]: b\n\n:::\n",
+        ":::section-metadata\n\na: b\n---\n\n:::\n",
+        ":::section-metadata\n\n---\n\n:::\n",
+    ] {
+        assert_eq!(flags(other)[0], MALFORMED_BODY, "{other:?}");
+    }
+    // a fence takes the closer: there is no block, and that is said
+    let d = parse(":::section-metadata\n\n```\n\n:::\n\ntext\n");
+    assert_eq!(d.section_metadata(0), None);
+    assert_eq!(d.section_metadata_unclosed(0).map(|s| s.start), Some(0));
+    assert_eq!(parse(":::note\n\ntext\n").section_metadata_unclosed(0), None);
+    assert_eq!(
+        parse("text\n\n:::section-metadata\n").section_metadata_unclosed(0),
+        None
+    );
+}
+
+#[test]
+fn a_block_not_first_is_misplaced() {
+    let s = "text\n\n:::section-metadata\n\na: b\n\n:::\n\n---\n\n:::section-metadata\n\nc: d\n\n:::\n\n:::section-metadata\n\ne: f\n\n:::\n\n:::note\n\nx\n\n:::\n";
+    let d = parse(s);
+    let openers: Vec<usize> = s.match_indices(":::section-metadata").map(|(i, _)| i).collect();
+    assert!(d.section_metadata_misplaced(openers[0]));
+    assert!(!d.section_metadata_misplaced(openers[1]));
+    assert!(d.section_metadata_misplaced(openers[2]), "a second one");
+    assert!(!d.section_metadata_misplaced(s.find(":::note").unwrap()));
+}
+
+#[test]
+fn a_first_heading_is_found_past_blocks_and_not_in_them() {
+    let s = "---\na: b\n---\n\ntext\n\n:::card\n\n## In a block\n\n:::\n\n## First\n\n## Second\n\n---\n\nno heading\n\n---\n\n> # quoted\n";
+    let d = parse(s);
+    assert_eq!(d.section_first_heading(0), s.find("## First"));
+    assert_eq!(d.section_first_heading(1), None);
+    assert_eq!(d.section_first_heading(2), None);
+    assert_eq!(d.section_first_heading(9), None);
+}
+
+#[test]
+fn rules_written_nearly_as_a_boundary_are_told_apart() {
+    for (line, near) in [
+        ("----", true),
+        ("- - -", true),
+        ("--- ", true),
+        ("***", false),
+        ("___", false),
+    ] {
+        let s = format!("a\n\n{line}\n\nb\n");
+        assert_eq!(parse(&s).section_near_boundary(3), near, "{line:?}");
+    }
+    let s = "a\n\n ---\n\nb\n";
+    assert!(parse(s).section_near_boundary(s.find("---").unwrap()));
+    assert!(!parse("a\n\n---\n\nb\n").section_near_boundary(3), "a boundary");
+    let s = ":::card\n\n----\n\n:::\n";
+    assert!(!parse(s).section_near_boundary(s.find("----").unwrap()), "in a block");
+    let s = "> ----\n";
+    assert!(!parse(s).section_near_boundary(2), "in a quote");
+}
+
+#[test]
+fn a_very_long_marker_line_is_refused_from_the_index() {
+    let s = format!(
+        ":::section-metadata{}\n\na: b\n\n:::\n\ntext\n",
+        " ".repeat(MAX_METADATA_BYTES)
+    );
+    assert_eq!(parse(&s).section_metadata(0), None);
+    let s = format!(
+        ":::section-metadata\n\na: b\n\n:::{}\n\ntext\n",
+        " ".repeat(MAX_METADATA_BYTES)
+    );
+    assert_eq!(parse(&s).section_metadata(0), None);
+    let s = format!(
+        ":::section-metadata{}\n\na: b\n\ntext\n",
+        " ".repeat(MAX_METADATA_BYTES)
+    );
+    assert_eq!(parse(&s).section_metadata_unclosed(0), None);
 }
 
 #[test]
@@ -202,7 +294,11 @@ fn the_front_matter_names_the_dialect_until_an_edit_reaches_it() {
     d.edit(at..at + 9, "blocks-v2");
     assert_eq!(Document::authoring(&d), Some("blocks-v2"));
     assert_eq!(Document::authoring(&parse("Text\n")), None);
-    assert_eq!(Document::authoring(&parse("---\nauthoring:\n---\n\nText\n")), None);
+    assert_eq!(
+        Document::authoring(&parse("---\nauthoring:\n---\n\nText\n")),
+        Some(""),
+        "said, and empty"
+    );
     assert_eq!(
         Document::authoring(&parse("---\nauthoring: \"blocks-v3\"\n---\n")),
         Some("blocks-v3")

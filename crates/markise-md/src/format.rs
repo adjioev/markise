@@ -735,6 +735,18 @@ impl FormatDoc for Document {
     fn section_metadata(&self, index: usize) -> Option<markise_doc::SectionMetadata> {
         Document::section_metadata(self, index)
     }
+    fn section_metadata_misplaced(&self, opener: usize) -> bool {
+        Document::section_metadata_misplaced(self, opener)
+    }
+    fn section_metadata_unclosed(&self, index: usize) -> Option<Span> {
+        Document::section_metadata_unclosed(self, index)
+    }
+    fn section_first_heading(&self, index: usize) -> Option<usize> {
+        Document::section_first_heading(self, index)
+    }
+    fn section_near_boundary(&self, at: usize) -> bool {
+        Document::section_near_boundary(self, at)
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
