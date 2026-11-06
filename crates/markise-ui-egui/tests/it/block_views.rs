@@ -29,7 +29,7 @@ const POLL: &str = r#"{"label": "Poll", "variants": {"": "one answer", "many": "
     ]}"#;
 const STEPS: &str = r#"{"label": "Steps", "fields": [{"name": "items", "type": "list", "minItems": 1}]}"#;
 const PLAIN: &str = r#"{"label": "Plain", "fields": [{"name": "body", "type": "text"}]}"#;
-const PLATE: &str = r#"{"label": "Plate", "argument": {"name": "image_set"}, "fields": [
+const PLATE: &str = r#"{"label": "Plate", "argument": {"name": "image_set", "pattern": "^[a-z/]+$"}, "fields": [
     {"name": "body", "type": "text", "min": 0}
 ]}"#;
 const SIGN: &str = r#"{"label": "Sign", "variants": {"": "plain", "loud": "loud"},
@@ -732,4 +732,53 @@ fn the_keyboard_does_not_reach_the_opener_of_a_native_block() {
     common::run(&mut h);
     // markers have no stops: the caret stands in the first field, and that is where it goes
     assert_eq!(text(&h), PLATES.replace("Body", "xBody"));
+}
+
+#[test]
+fn a_wrong_argument_warns_stays_native_shows_in_the_form_and_can_be_saved() {
+    let f = Fixture::new(PLATES);
+    let mut h = f.ready();
+    let opener = PLATES.find("::::plate").unwrap();
+    assert!(!shown(&mut h).contains('⚠'), "{}", shown(&mut h));
+    edit_argument(&mut h, "plate", "Image set", " bad!");
+    assert!(
+        h.query_all_by_label_contains("Does not have the form").next().is_some(),
+        "the form says why while it is typed"
+    );
+    h.get_by_label("Save").click();
+    common::run(&mut h);
+    assert!(h.state().block_form().is_none(), "saving stays allowed");
+    assert_eq!(text(&h), PLATES.replace("some/path", "some/path bad!"));
+    let s = shown(&mut h);
+    assert!(s.contains("⚠ Image set: Does not have the form"), "{s}");
+    assert!(
+        h.state_mut().viewer().unwrap().ed.view.native_block(opener).is_some(),
+        "native"
+    );
+
+    // and the form opens with the reason on it, for a missing one too
+    let bare = "::::plate\n\nBody\n\n::::\n";
+    let f = Fixture::new(bare);
+    let mut h = f.ready();
+    let s = shown(&mut h);
+    assert!(s.contains("⚠ Image set: Required"), "{s}");
+    assert!(
+        h.state_mut().viewer().unwrap().ed.view.native_block(0).is_some(),
+        "native"
+    );
+    h.get_all_by_label("Edit Block: plate").next().unwrap().click();
+    common::run(&mut h);
+    assert!(
+        h.query_all_by_label_contains("does not fit its schema")
+            .next()
+            .is_some()
+    );
+    h.get_by_label("Image set").click();
+    common::run(&mut h);
+    h.get_by_label("Image set").type_text("a/b");
+    common::run(&mut h);
+    h.get_by_label("Save").click();
+    common::run(&mut h);
+    assert_eq!(text(&h), bare.replace("::::plate", "::::plate a/b"));
+    assert!(!shown(&mut h).contains('⚠'), "{}", shown(&mut h));
 }

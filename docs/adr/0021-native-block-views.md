@@ -48,8 +48,8 @@ Nothing about a document's bytes depends on any of this.
 A block with a schema in the package, with or without a view, can fail to fit it (`.check`) in two ways (owner's
 decision, phase 6):
 
-- **Not filled in yet.** All that is wrong is an empty required field, too few characters or items, or no marked
-  answer (`BlockFit::only_unfilled`). A block with a view stays native (`Unfilled`), also after the caret leaves,
+- **Not filled in yet.** All that is wrong is an empty required field, too few characters or items, no marked
+  answer, or an argument missing or not of its form (`BlockFit::only_unfilled`, ADR 0020). A block with a view stays native (`Unfilled`), also after the caret leaves,
   with `⚠` and the first reason on its first row, all the reasons on hover and for a screen reader. It edits in
   place and switches as any native block. A block just inserted from a preset is usually this.
 - **A structural problem.** Content in no field, arguments naming no variant, or any other reason (an answer with no

@@ -21,15 +21,34 @@ pub fn index() -> Arc<PackageIndex> {
     ]});
     let plain = json!({"label": "Plain", "fields": [{"name": "body", "type": "text"}]});
     let steps = json!({"label": "Steps", "fields": [{"name": "items", "type": "list", "minItems": 1}]});
+    let plate = json!({"label": "Plate", "argument": {"name": "image_set", "pattern": "^[a-z]+/[a-z]+$"},
+        "fields": [{"name": "body", "type": "text", "min": 0}]});
+    let bare = json!({"label": "Bare", "argument": {"label": "Which"},
+        "fields": [{"name": "body", "type": "text", "min": 0}]});
+    let sign = json!({"label": "Sign", "variants": {"": "plain", "loud": "loud"},
+        "argument": {"name": "how", "pattern": "^x$"}, "fields": [{"name": "body", "type": "text", "min": 0}]});
+    let unseen = json!({"label": "Unseen", "argument": {"name": "set", "pattern": "^x$"}, "fields": []});
     let views = json!({
+        "plate": {"kind": "card", "accent": "teal"},
+        "bare": {"kind": "card"},
+        "sign": {"kind": "callout"},
         "tip": {"kind": "callout", "accent": "green", "icon": "bulb"},
         "poll": {"kind": "choices", "accent": "purple"},
         "steps": {"kind": "card", "accent": "blue"},
     });
     let mut files = BTreeMap::new();
-    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1","blocks":["tip","poll","plain","steps"]}"#;
+    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1","blocks":["tip","poll","plain","steps","plate","bare","sign","unseen"]}"#;
     files.insert("manifest.json".to_string(), manifest.as_bytes().to_vec());
-    for (name, schema) in [("tip", &tip), ("poll", &poll), ("plain", &plain), ("steps", &steps)] {
+    for (name, schema) in [
+        ("tip", &tip),
+        ("poll", &poll),
+        ("plain", &plain),
+        ("steps", &steps),
+        ("plate", &plate),
+        ("bare", &bare),
+        ("sign", &sign),
+        ("unseen", &unseen),
+    ] {
         files.insert(
             format!("components/{name}/{name}.json"),
             schema.to_string().into_bytes(),
@@ -139,4 +158,57 @@ fn the_label_follows_the_language() {
     let b = native(PackageViews::new(index(), "de").look("tip", "", ":::tip\n\nBody.\n\n:::"));
     assert_eq!(&*b.view.label, "Tipp");
     assert_eq!(b.view.icon.as_deref(), Some("assets/bulb.svg"), "a file of the package");
+}
+
+#[test]
+fn a_missing_or_wrong_argument_is_not_filled_in_and_stays_native() {
+    let v = views();
+    let look = |args: &str| {
+        let opener = if args.is_empty() {
+            ":::plate".to_string()
+        } else {
+            format!(":::plate {args}")
+        };
+        v.look("plate", args, &format!("{opener}\n\nBody\n\n:::"))
+    };
+    assert!(matches!(look("some/path"), BlockLook::Native(_)));
+    for (args, reason) in [
+        ("", "Image set: Required"),
+        ("bad arg!", "Image set: Does not have the form `^[a-z]+/[a-z]+$`"),
+        ("NoSlash", "Image set: Does not have the form `^[a-z]+/[a-z]+$`"),
+    ] {
+        match look(args) {
+            BlockLook::Unfilled { reasons, block } => {
+                assert_eq!(reasons, [reason], "{args:?}");
+                assert_eq!(&*block.view.label, "Plate");
+            }
+            other => panic!("{args:?}: {other:?}"),
+        }
+    }
+    // with no pattern only a missing one is a reason, and its label is the package's
+    assert!(matches!(
+        v.look("bare", "any thing!", ":::bare any thing!\n:::"),
+        BlockLook::Native(_)
+    ));
+    match v.look("bare", "", ":::bare\n:::") {
+        BlockLook::Unfilled { reasons, .. } => assert_eq!(reasons, ["Which: Required"]),
+        other => panic!("{other:?}"),
+    }
+    // a block with no view has nothing else to show, as for any field not filled in
+    assert_eq!(outside(v.look("unseen", "y", ":::unseen y\n:::")).len(), 1);
+    assert_eq!(v.look("unseen", "x", ":::unseen x\n:::"), BlockLook::Generic);
+}
+
+#[test]
+fn beside_variants_the_reason_stays_the_variant_s() {
+    let v = views();
+    assert!(matches!(v.look("sign", "", ":::sign\n:::"), BlockLook::Native(_)));
+    assert!(matches!(
+        v.look("sign", "loud", ":::sign loud\n:::"),
+        BlockLook::Native(_)
+    ));
+    assert_eq!(
+        outside(v.look("sign", "other", ":::sign other\n:::")),
+        ["The block has no variant `other`."]
+    );
 }

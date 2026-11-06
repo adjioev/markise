@@ -99,7 +99,8 @@ asks first. If the block changes underneath the form, the form says so.
 
 When the package says a block takes an argument in its opener, as in `:::figure lesson/three`, it is the
 first field of the form. It is the way to change it outside Source mode: the opener line itself takes no
-typing. Saving changes only the argument; the block's picture, its variant and its view follow.
+typing. Saving changes only the argument; the block's picture, its variant and its view follow. If the
+argument is missing or not of the form the package asks for, the field says so, and you can still save.
 
 ## Move and delete
 
@@ -127,8 +128,8 @@ A `⚠` on a block's first row says that it does not match what the package expe
 read why. It stops nothing: you can edit and save the block, and whoever publishes decides how
 strict to be.
 
-- **Not filled in yet:** a required field is empty or has too little in it. The block stays in its
-  native view; a block with no native view shows as a card. A block fresh from the library often
+- **Not filled in yet:** a required field is empty or has too little in it, or the block's argument
+  is missing or not of the form the package asks for. The block stays in its native view; a block with no native view shows as a card. A block fresh from the library often
   starts like this.
 - **Outside its schema:** content that fits no field, arguments the package does not know, or
   something else the view cannot read. It shows as a card. While the caret is in it, it stays as it

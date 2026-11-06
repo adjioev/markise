@@ -237,7 +237,7 @@ field lives, so the form and the field declarations come from one source.
 | `list` | array of non-empty strings | list | `minItems` is 0 or absent |
 | `choices` | array of answers with non-empty `text` | choices | `minItems` is 0 or absent |
 | `image` | array of `{alt, path}` with non-empty `path` | images | `min` is 0 or absent |
-| the schema's `argument` | string, under a key no field can have (`:argument`), first | text | never |
+| the schema's `argument` | string with its `pattern`, under a key no field can have (`:argument`), first | text | the schema has `variants` |
 
 - **Labels.** A field's `label` (string or per language), else its name made readable, as nothing
   else knows better. `help` and `add_label` go through too.
@@ -261,7 +261,16 @@ field lives, so the form and the field declarations come from one source.
   `x-markdown` kind is `argument`, and `FieldKind::Argument` takes no block of the body. A variant is
   still picked as before, by the arguments naming it, with no control of its own. In a schema with both,
   the field is one line for what is one string in the file, and what it says goes on deciding the variant.
-  The check of what it holds is not in this step.
+- **The argument's check.** Declared, it has to be there and, with a `pattern`, to match it. A missing one is
+  `Required`, a wrong one `NoMatch`; both are a report like any other (below "Validation"), so saving stays
+  allowed, and both count as not filled in (`BlockFit::only_unfilled`, ADR 0021): a preset's placeholder
+  forgotten is the usual case, and a view reads nothing from it. There is no way to declare an argument
+  optional. Beside `variants` the arguments have their check already, naming one, so neither `required` nor
+  `pattern` applies there and the reason stays the variant's. A preset's placeholder gets no rule of its own:
+  one that matches the pattern reads as a real argument.
+- **A pattern that cannot be run** refuses the package when it is validated (`schema.rs`, with the bounds of
+  `schema_form_core::Pattern`), with the file and the reason, so `markise-package` depends on
+  `schema-form-core` for that one check. One a backtracking engine would hang on is harmless here and stays.
 
 `tests/it/block_forms.rs` in the engine holds the agreement: for every variant, a full and an empty
 block, the engine's values have the type the spec declares at every depth and no other key,

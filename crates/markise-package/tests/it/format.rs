@@ -327,3 +327,27 @@ fn a_version_is_limited_as_a_whole() {
     let fits = format!("{}+{}", "a".repeat(64), "b".repeat(63));
     assert!(PackageIndex::from_files(&with("manifest.json", &manifest(&fits))).is_ok());
 }
+
+#[test]
+fn an_argument_s_pattern_that_cannot_be_run_refuses_the_package_at_once() {
+    let started = std::time::Instant::now();
+    let long = "a".repeat(schema_form_core::MAX_PATTERN_BYTES + 1);
+    for (pattern, word) in [
+        (serde_json::json!("(unclosed"), "cannot be used"),
+        (serde_json::json!("(?=x)y"), "look-around"),
+        (serde_json::json!(r"(a)\1"), "backreference"),
+        (serde_json::json!("(a{1000}){1000}"), "too large"),
+        (serde_json::json!(long), "limit"),
+        (serde_json::json!(3), "must be a string"),
+    ] {
+        let schema = serde_json::json!({"label": "G", "argument": {"pattern": pattern}, "fields": []});
+        let why = refusal(&with("components/gallery/gallery.json", &schema.to_string()));
+        assert!(why.contains("components/gallery/gallery.json"), "{why}");
+        assert!(why.contains("the argument's pattern"), "{why}");
+        assert!(why.contains(word), "{pattern}: {why}");
+    }
+    assert!(started.elapsed().as_secs() < 30);
+    // one that a backtracking engine would hang on is harmless here, so it stays
+    let schema = serde_json::json!({"label": "G", "argument": {"pattern": "^(a+)+$"}, "fields": []});
+    assert!(PackageIndex::from_files(&with("components/gallery/gallery.json", &schema.to_string())).is_ok());
+}

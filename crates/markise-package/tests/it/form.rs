@@ -320,3 +320,38 @@ fn a_block_with_no_argument_has_no_such_field() {
         "a variant stays what it was"
     );
 }
+
+#[test]
+fn an_argument_is_required_and_answers_to_its_pattern() {
+    let block = json!({"label": "Plate", "argument": {"name": "set", "pattern": "^[a-z]+/[a-z]+$"}, "fields": []});
+    let spec = spec_of(&block, &[], None);
+    assert!(spec.fields[0].required);
+    let kinds = |v: Value| spec.validate(&v).into_iter().map(|e| e.kind).collect::<Vec<_>>();
+    assert!(kinds(json!({ARGUMENT_KEY: "a/b"})).is_empty());
+    assert_eq!(kinds(json!({ARGUMENT_KEY: ""})), [ErrorKind::Required]);
+    assert_eq!(
+        kinds(json!({ARGUMENT_KEY: "bad arg!"})),
+        [ErrorKind::NoMatch {
+            pattern: "^[a-z]+/[a-z]+$".to_string()
+        }]
+    );
+    // no pattern: anything goes, as long as something is there
+    let block = json!({"label": "Plate", "argument": {"name": "set"}, "fields": []});
+    let spec = spec_of(&block, &[], None);
+    assert!(spec.validate(&json!({ARGUMENT_KEY: "any thing!"})).is_empty());
+    assert_eq!(spec.validate(&json!({ARGUMENT_KEY: ""}))[0].kind, ErrorKind::Required);
+}
+
+#[test]
+fn beside_variants_an_argument_is_checked_by_naming_one() {
+    let block = json!({"label": "Sign", "variants": {"": "plain", "loud": "loud"},
+        "argument": {"name": "how", "pattern": "^x$"}, "fields": []});
+    let spec = spec_of(&block, &[], Some("loud"));
+    assert!(!spec.fields[0].required);
+    assert!(spec.validate(&json!({ARGUMENT_KEY: "loud"})).is_empty());
+    assert!(
+        spec_of(&block, &[], None)
+            .validate(&json!({ARGUMENT_KEY: ""}))
+            .is_empty()
+    );
+}
