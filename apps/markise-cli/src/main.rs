@@ -95,13 +95,16 @@ fn html(
     max_size: Option<u64>,
 ) -> Result<ExitCode, String> {
     let text = read_markdown(path)?;
-    let doc = Document::parse(
+    let mut doc = Document::parse(
         text,
         ParseOptions {
             diagrams,
             ..ParseOptions::default()
         },
     );
+    // ADR 0026; a package's dialect is not known here
+    let sections = doc.authoring() == Some(markise_md::SECTIONS_DIALECT);
+    doc.set_export_leaves_out_section_metadata(sections);
     let opts = HtmlOptions {
         fallback_title: Path::new(path).file_stem().and_then(|s| s.to_str()).map(str::to_string),
         trusted,

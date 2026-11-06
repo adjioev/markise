@@ -2,9 +2,7 @@
 
 use markise_package::{PackageId, PackageIndex};
 
-/// The one authoring dialect in which `---` divides a document. Front matter or a package name it;
-/// what it means to their site is not known here.
-pub const SECTIONS_DIALECT: &str = "blocks-v3";
+pub use markise_md::SECTIONS_DIALECT;
 
 /// Who named a document's dialect.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -2465,7 +2465,8 @@ impl MarkiseApp {
         }
         self.apply_key_bindings();
         if let Some(d) = self.doc.as_mut() {
-            let p = self.themes.editing().to_prefs();
+            let mut p = self.themes.editing().to_prefs();
+            p.rule_stars = d.viewer.ed.view.sections_on();
             if *d.viewer.ed.session.prefs() != p {
                 d.viewer.ed.session.set_prefs(p);
             }

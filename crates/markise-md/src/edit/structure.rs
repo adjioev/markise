@@ -452,7 +452,8 @@ impl Document {
         let prefix = cont_prefix(text, ls, last.start.max(ls));
         let blank = prefix.trim_end();
         let end = leaf.span.end;
-        let ins = format!("{eol}{blank}{eol}{prefix}---");
+        let rule = if req.prefs.rule_stars { "***" } else { "---" };
+        let ins = format!("{eol}{blank}{eol}{prefix}{rule}");
         let caret = end + ins.len();
         Ok(Plan::single(
             PlanStep::patches(PatchSet::single_verbatim(end..end, ins)),

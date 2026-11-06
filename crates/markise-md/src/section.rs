@@ -22,6 +22,10 @@ use crate::block::{Block, BlockKind};
 use crate::text::{Span, line_end};
 use crate::{Document, line_start};
 
+/// The one authoring dialect in which `---` divides a document. Front matter or a package name it;
+/// what it means to their site is not known here.
+pub const SECTIONS_DIALECT: &str = "blocks-v3";
+
 /// The name of the block that holds a section's metadata.
 pub const SECTION_METADATA: &str = "section-metadata";
 
@@ -320,6 +324,12 @@ impl Document {
             && self.text().as_bytes().get(at) == Some(&b'-')
             && self.directive_depth_at(at) == 0
             && self.section_at(at).boundary.is_none_or(|b| b.start != at)
+    }
+
+    /// Exports leave a metadata block out (ADR 0026). Whether the document has sections is not its to
+    /// know, as a package can say so too.
+    pub fn set_export_leaves_out_section_metadata(&mut self, leave_out: bool) {
+        self.export_leaves_out_metadata = leave_out;
     }
 
     /// The `authoring` of the front matter, as written: empty when the key has no value, which is

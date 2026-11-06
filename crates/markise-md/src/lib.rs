@@ -50,7 +50,7 @@ pub use markise_doc::{DepChange, HintOrigin, HintSet, LiteralHint, Patch, PatchS
 pub use options::{HeadingStyle, IndentSize, OrderedStyle, ParseOptions, WriteOptions};
 pub use parser::{MAX_NESTING, MAX_QUOTE_DEPTH, bom_len};
 pub use prefix::progressive_prefix;
-pub use section::{MALFORMED_BODY, MALFORMED_TIGHT, MAX_METADATA_BYTES, SECTION_METADATA};
+pub use section::{MALFORMED_BODY, MALFORMED_TIGHT, MAX_METADATA_BYTES, SECTION_METADATA, SECTIONS_DIALECT};
 pub use text::{LineEnding, Span};
 pub use tops::Top;
 
@@ -84,6 +84,8 @@ pub struct Document {
     directives: directive::DirectiveIndex,
     /// The rules that may divide the document into sections (ADR 0026).
     sections: section::SectionIndex,
+    /// See [`Document::set_export_leaves_out_section_metadata`].
+    export_leaves_out_metadata: bool,
 }
 
 /// What an [`Document::edit`] changed in the top-level block list.
@@ -258,6 +260,7 @@ impl Document {
             hints,
             directives: directive::DirectiveIndex::from_raw(out.markers),
             sections: Default::default(),
+            export_leaves_out_metadata: false,
         };
         doc.label_all_markers();
         doc.build_sections(rules);
@@ -978,6 +981,10 @@ impl Document {
             }
         }
         let mut tree = self.tree();
+        if self.export_leaves_out_metadata {
+            let text = self.text();
+            tree.retain(|b| !matches!(&b.kind, BlockKind::Directive { name, .. } if name.slice(text) == section::SECTION_METADATA));
+        }
         for b in &mut tree {
             visit(self, b, false);
         }

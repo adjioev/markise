@@ -78,9 +78,50 @@ document knows from `partial`. One thing can be wrong before the whole is in: a 
 block whose closer lies after the cut stands at the root in the part, since that opener pairs with
 nothing yet. It is corrected with everything else, since the whole document has its own index.
 
+### On screen
+
+Nothing here is new layout state in the model: as with a picture (ADR 0023), the same items show otherwise.
+A document without sections pays one comparison per item.
+
+- **A boundary** is a quiet divider on the line's own row, so it has the line's height and estimates
+  stand: the section's name, then the line to the right edge. The name is its `id`, else its first heading
+  among the section's own top-level blocks (a bounded look, as this is asked on the UI thread), else
+  `Section N`. Only `id` and `style` are engine keys, and no other key is ranked. No caret stands in it, as in
+  any rule.
+- **A rule nearly a boundary** (`----`, `- - -`, ` ---`, `--- `) at the root says so on its own row, quietly.
+- **A metadata block** is a compact plaque: `key: value` as written, and `⚠` with the first reason for what
+  does not fit, all of them on hover. Its opener item holds it, the content items are hidden as a closed
+  disclosure's are, the closer has no height and the gap after it stays. Pages, marks and source positions
+  go on as they do.
+- **Its text stays editable.** The block's state (`BlockViewMode`, ADR 0021) is the toggle: `Markdown` is
+  the generic card, anything else the plaque, with one button on it, kept per block for the session
+  as any block's state is. A selection's end inside it shows the card too, so that what is found or undone
+  can be seen; asking for the plaque with the caret inside puts the caret after it.
+- **The caret** goes past a plaque as past a picture: keys skip it and a click lands before or after it.
+- **Source mode** shows the text; Side by Side's rendered pane is the rendered view.
+- Everything is in points from the theme, so theme and zoom apply and the layout cache keys on them, the
+  name and the plaque's contents included.
+
+### Exports
+
+With sections on, HTML, PDF, PNG and Pandoc leave a root-level `:::section-metadata` out: they all read
+`Document::export_tree`. The dialect comes to an export as a request's flag, for what a package says, and from
+the document's own front matter, which wins; the command line knows only the front matter. `---` in exports stays
+as it is for now: `<hr />`, a line in PDF and PNG, `HorizontalRule` for Pandoc.
+
+### Writing
+
+On a page with sections Horizontal Line writes `***`, as it would start a section otherwise (`EditPrefs::
+rule_stars`, set while sections are on). A typed `---` and Enter does make a boundary, which is correct, and
+Backspace at the start of what follows takes it, as for any rule, with an undo step.
+
 ## Consequences
 
 - The bytes of a file do not depend on any of this: the index only reads.
+- What moves blocks does not know sections: a block dropped above a plaque is allowed, and the metadata
+  block then shows as a card with the warning above. No move is refused.
+- A metadata block not first, or a second one, is a generic card with a warning.
+- A metadata opener with no closer stays text, with a warning under it.
 - A first line `---` with a later `---` is front matter, as ever, so a document that starts with a
   boundary and has no front matter loses its first two boundaries to it. The draft refuses a leading
   boundary anyway.

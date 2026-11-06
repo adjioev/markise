@@ -276,6 +276,8 @@ pub struct BlockLayout {
     pub warning: Option<Rect>,
     /// The quiet reason this card shows no picture (item-local).
     pub note: Option<Rect>,
+    /// The plaque this item shows (item-local).
+    pub plaque: Option<Rect>,
     /// Where the buttons of a practised block go (item-local, on its closer).
     pub practice_row: Option<Rect>,
     /// The line or lines of a practised answer, its control and text (item-local).
@@ -365,6 +367,8 @@ pub struct LayoutParams<'a> {
     pub site: Option<crate::view::SiteLook>,
     /// Why the card this item opens shows no picture.
     pub note: Option<&'a str>,
+    /// What a section makes of this item: a boundary's divider, a metadata block's plaque (ADR 0026).
+    pub section: Option<crate::view::SectionLook<'a>>,
     /// The outline's entries a table of contents leaves out, by their place in it (ADR 0024).
     pub toc_hidden: Option<&'a [bool]>,
 }
@@ -2176,6 +2180,7 @@ pub fn layout_item(
     let mut toggle = None;
     let mut empty_anchor = None;
     let mut warning = None;
+    let mut plaque_rect = None;
     let mut note = None;
     let mut practice_row = None;
     let mut practice_answer = None;
@@ -2680,7 +2685,8 @@ pub fn layout_item(
             );
         }
         // no height of its own: the picture above it is the block
-        ItemKind::ContainerMarker { close: true } if p.site.is_some() => {}
+        ItemKind::ContainerMarker { close: true }
+            if p.site.is_some() || matches!(p.section, Some(crate::view::SectionLook::End)) => {}
         ItemKind::ContainerMarker { close: true } => {
             if p.native
                 .is_some_and(|n| n.practice == Some(crate::native::PracticeItem::Row))
@@ -2692,6 +2698,16 @@ pub fn layout_item(
                 y += h;
             }
             y += card_inset;
+        }
+        ItemKind::ContainerMarker { close: false }
+            if matches!(p.section, Some(crate::view::SectionLook::Plaque(_))) =>
+        {
+            if let (Some(crate::view::SectionLook::Plaque(plaque)), Some(&(left, right))) = (p.section, cards.last()) {
+                let (rect, why) = layout_plaque(&mut out, shaper, t, plaque, left, p.width - right, y);
+                plaque_rect = Some(rect);
+                warning = why;
+                y = rect.bottom();
+            }
         }
         ItemKind::ContainerMarker { close: false } if p.site.is_some() => {
             if let (Some(crate::view::SiteLook::Picture(picture)), Some(&(left, right))) = (p.site, cards.last()) {
@@ -2778,6 +2794,17 @@ pub fn layout_item(
                 out.text(at, g, Vec::new(), FragmentId::label());
             }
             y += h;
+        }
+        ItemKind::Rule
+            if matches!(
+                p.section,
+                Some(crate::view::SectionLook::Divider(_) | crate::view::SectionLook::Hint(_))
+            ) =>
+        {
+            if let Some(crate::view::SectionLook::Divider(label) | crate::view::SectionLook::Hint(label)) = p.section {
+                layout_divider(&mut out, shaper, t, label, x, width, y + line_px * 0.5);
+            }
+            y += line_px;
         }
         ItemKind::Rule => {
             let mid = y + line_px * 0.5;
@@ -2912,6 +2939,16 @@ pub fn layout_item(
             y += line_px;
         }
         ItemKind::Hidden | ItemKind::Page(_) => {}
+    }
+    // a quiet word under a paragraph; a rule's stands on its own row
+    if let (crate::view::SectionLook::Hint(text), ItemKind::Paragraph) =
+        (p.section.unwrap_or(crate::view::SectionLook::End), &item.kind)
+    {
+        let size = t.font_size * 0.8;
+        let st = Style::base(size, size * 1.4, color(t.alert[3]));
+        let g = one_row(shaper, &format!("⚠ {text}"), &st, width);
+        out.text(pos2(x, y), g, Vec::new(), FragmentId::label());
+        y += size * 1.4;
     }
     let content_bottom = y;
 
@@ -3108,11 +3145,16 @@ pub fn layout_item(
         let top = if opens { gap } else { 0.0 };
         // a virtual paragraph after a closer is outside that card
         let bottom = if closes { content_bottom } else { height };
-        if opens {
+        let plaque = matches!(
+            p.section,
+            Some(crate::view::SectionLook::Plaque(_) | crate::view::SectionLook::End)
+        );
+        // a plaque is no card to act on: it has no buttons but its own
+        if opens && !plaque {
             card_top = Some((pos2(l, top), pos2(r, top)));
         }
-        // a picture draws its own edges, whatever it wants them to be
-        if own && p.site.is_some() {
+        // a picture or a plaque draws its own edges
+        if own && (p.site.is_some() || plaque) {
             continue;
         }
         if own && let Some(n) = p.native {
@@ -3178,6 +3220,7 @@ pub fn layout_item(
         bands,
         warning,
         note,
+        plaque: plaque_rect,
         practice_row,
         practice_answer,
     }
@@ -3207,6 +3250,79 @@ fn warning_badge(
     let rect = Rect::from_min_size(at, g.size());
     out.text(at, g, Vec::new(), FragmentId::label());
     Some(rect)
+}
+
+/// The height of a plaque's one row, for estimates.
+pub(crate) fn plaque_row_height(t: &Theme) -> f32 {
+    t.font_size * 0.85 * 1.4 + 2.0 * PLAQUE_PAD
+}
+
+const PLAQUE_PAD: f32 = 4.0;
+
+/// A section's metadata as a compact plaque from `left` to `right`, `key: value` as written. Returns
+/// where it is, and where its warning is if it has one. Everything is in points from the theme.
+fn layout_plaque(
+    out: &mut Out,
+    shaper: &mut dyn TextShaper,
+    t: &Theme,
+    plaque: &crate::view::Plaque,
+    left: f32,
+    right: f32,
+    y: f32,
+) -> (Rect, Option<Rect>) {
+    let size = t.font_size * 0.85;
+    let st = Style::base(size, size * 1.4, color(t.meta_block.text));
+    let x = left + 2.0 * PLAQUE_PAD;
+    let room = (right - x - CARD_BUTTONS_ROOM).max(size * 4.0);
+    let said: Vec<String> = plaque
+        .pairs
+        .iter()
+        .map(|p| format!("{}: {}", p.key, card_label(&p.value, "")))
+        .collect();
+    let text = if said.is_empty() {
+        "No section metadata".to_string()
+    } else {
+        said.join("   ")
+    };
+    let g = shaper.shape(&StyledText::single(text, st.text_style()), wrapped(room));
+    let row = g.size().y.max(size * 1.4);
+    let at = pos2(x, y + PLAQUE_PAD);
+    let mut bottom = at.y + row;
+    let fill = Prim::Rect {
+        // its size is known below
+        rect: Rect::NOTHING,
+        fill: color(t.meta_block.background),
+        stroke: Stroke::new(1.0, color(t.rule)),
+        radius: t.meta_block.radius,
+    };
+    let fill_at = out.prims.len();
+    out.prims.push(fill);
+    out.text(at, g, Vec::new(), FragmentId::label());
+    let why = plaque.warnings.first().map(|first| (first, plaque.warnings.len()));
+    let warning = why.and_then(|why| {
+        let w = warning_badge(out, shaper, t, why, pos2(x, bottom), right - PLAQUE_PAD);
+        bottom += size * 1.4;
+        w
+    });
+    let rect = Rect::from_min_max(pos2(left, y), pos2(right, bottom + PLAQUE_PAD));
+    if let Prim::Rect { rect: r, .. } = &mut out.prims[fill_at] {
+        *r = rect;
+    }
+    (rect, warning)
+}
+
+/// A section's boundary: its name, quiet, then the line to the right edge, on the line's own row.
+fn layout_divider(out: &mut Out, shaper: &mut dyn TextShaper, t: &Theme, label: &str, x: f32, width: f32, mid: f32) {
+    let size = t.font_size * 0.8;
+    let st = Style::base(size, size * 1.4, color(t.meta_block.text));
+    let g = one_row(shaper, &card_label(label, ""), &st, width * 0.7);
+    let (w, h) = (g.size().x, g.size().y);
+    out.text(pos2(x, mid - h * 0.5), g, Vec::new(), FragmentId::label());
+    out.prims.push(Prim::Line {
+        a: pos2(x + w + size * 0.6, mid),
+        b: pos2(x + width, mid),
+        stroke: Stroke::new(1.0, color(t.rule)),
+    });
 }
 
 /// A native view's own edges around one item of its block (`r`: the item's part of the block).

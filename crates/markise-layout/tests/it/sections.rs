@@ -2,8 +2,13 @@
 //! same document, through random edits, agree on every boundary, and a boundary is a rule item
 //! wherever items are real.
 
+use std::sync::Arc;
+
 use markise_doc::{FormatDoc, PatchSet};
-use markise_layout::{DocModel, ItemKind, Paging};
+use markise_layout::block::{NoImages, Prim};
+use markise_layout::caret::Geometry;
+use markise_layout::{BlockViewMode, DocModel, ItemKind, Paging, View, testing};
+use markise_theme::Theme;
 use proptest::prelude::*;
 
 fn line() -> impl Strategy<Value = &'static str> {
@@ -108,4 +113,248 @@ fn asking_about_sections_materializes_nothing() {
     assert_eq!(d.section_count(), 501);
     assert_eq!(d.section_at(s.len() - 1).index, 500);
     assert_eq!(m.items.len(), items);
+}
+
+// ---- on screen
+
+const DOC: &str = "---\nauthoring: blocks-v3\n---\n\n:::section-metadata\n\nid: top\nkind: opening\nnot a pair\n\n:::\n\nFirst.\n\n---\n\nSecond.\n\n***\n\nStill second.\n\n---\n\n:::section-metadata\n\nstyle: wide\n\n:::\n\nThird.\n";
+
+fn view_of(text: &str, on: bool) -> View {
+    let d: Arc<dyn FormatDoc> = Arc::new(markise_md::parse(text));
+    let model = Arc::new(DocModel::build_with(&*d, None, Paging::Full));
+    let mut v = View::new(d, model, Theme::light(), 700.0, 1.0);
+    v.set_sections(on);
+    v
+}
+
+fn lay_out(v: &mut View, i: usize) -> Arc<markise_layout::BlockLayout> {
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    v.layout(i, &mut f, &NoImages)
+}
+
+fn frame(v: &mut View) {
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    v.frame(2000.0, 0.0, &mut f, &NoImages);
+}
+
+fn texts(l: &markise_layout::BlockLayout) -> Vec<String> {
+    (l.prims.iter())
+        .filter_map(|p| match p {
+            Prim::Text { text, .. } => Some(text.text().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn item_of(v: &View, needle: &str) -> usize {
+    v.model().item_at_offset(v.doc().text().find(needle).unwrap())
+}
+
+/// The nth `---` of the text that is a line of its own, after the front matter.
+fn rule_item(v: &View, section: usize) -> usize {
+    let at = v.doc().section(section).unwrap().boundary.unwrap().start;
+    v.model().item_at_offset(at)
+}
+
+#[test]
+fn a_boundary_is_a_labelled_divider_and_other_rules_stay_lines() {
+    let mut v = view_of(DOC, true);
+    frame(&mut v);
+    let (a, b) = (rule_item(&v, 1), rule_item(&v, 2));
+    assert_eq!(texts(&lay_out(&mut v, a)), ["Section 2"], "no metadata: its number");
+    assert_eq!(texts(&lay_out(&mut v, b)), ["Section 3"], "style is no name");
+    let line = item_of(&v, "***");
+    assert!(texts(&lay_out(&mut v, line)).is_empty());
+    assert!(
+        !markise_layout::caret::has_stops(&lay_out(&mut v, a)),
+        "no caret stands in it"
+    );
+    // the same height as the line it stands for, so nothing else moves
+    assert_eq!(v.height(a), v.height(line));
+}
+
+#[test]
+fn a_metadata_block_is_a_plaque_and_its_items_hide() {
+    let mut v = view_of(DOC, true);
+    frame(&mut v);
+    let (opener, body) = (item_of(&v, ":::section-metadata"), item_of(&v, "id: top"));
+    let closer = body + 1;
+    let l = lay_out(&mut v, opener);
+    assert!(texts(&l)[0].contains("id: top"));
+    assert!(texts(&l)[0].contains("kind: opening"));
+    assert!(texts(&l)[1].starts_with('⚠'), "{:?}", texts(&l));
+    assert!(l.plaque.is_some() && l.warning.is_some());
+    assert!(l.card_top.is_none(), "no block buttons on it");
+    assert_eq!(v.height(body), 0.0);
+    assert_eq!(v.height(closer), 0.0);
+    assert!(!markise_layout::caret::has_stops(&l));
+    assert_eq!(v.section_warnings(opener).unwrap().len(), 1);
+}
+
+#[test]
+fn a_name_is_the_id_else_the_first_heading_else_the_number() {
+    let s = "One.\n\n---\n\n:::section-metadata\n\nid: named\nkind: a\n\n:::\n\n## Heading\n\n---\n\n:::section-metadata\n\nkind: a\n\n:::\n\n:::card\n\n## In a block\n\n:::\n\n## Mine {#hidden}\n\n---\n\nNothing.\n";
+    let v = view_of(s, true);
+    let names: Vec<String> = (0..4).map(|i| v.section_name(i)).collect();
+    assert_eq!(names, ["Section 1", "named", "Mine", "Section 4"]);
+}
+
+#[test]
+fn a_rule_nearly_a_boundary_and_a_block_where_none_can_be_say_so() {
+    let s = "One.\n\n----\n\n- - -\n\n***\n\n:::section-metadata\n\na: b\n\n:::\n\nTwo.\n";
+    let mut v = view_of(s, true);
+    frame(&mut v);
+    let i = item_of(&v, "----");
+    assert!(texts(&lay_out(&mut v, i))[0].starts_with("No section starts here"));
+    let i = item_of(&v, "- - -");
+    assert!(texts(&lay_out(&mut v, i))[0].starts_with("No section starts here"));
+    let i = item_of(&v, "***");
+    assert!(texts(&lay_out(&mut v, i)).is_empty());
+    let i = item_of(&v, ":::section-metadata");
+    let l = lay_out(&mut v, i);
+    assert!(l.plaque.is_none() && l.card_top.is_some(), "a card");
+    assert!(l.warning.is_some(), "that says why");
+    assert!(texts(&l).iter().any(|t| t.contains("goes first")), "{:?}", texts(&l));
+    assert_eq!(v.section_warnings(i).unwrap().len(), 1);
+    // with sections off none of it
+    let mut off = view_of(s, false);
+    frame(&mut off);
+    let i = item_of(&off, "----");
+    assert!(texts(&lay_out(&mut off, i)).is_empty());
+}
+
+#[test]
+fn an_unclosed_metadata_block_says_so_under_its_opener() {
+    let s = "One.\n\n---\n\n:::section-metadata\n\n```\na: b\n```\n\nText.\n";
+    let mut v = view_of(s, true);
+    frame(&mut v);
+    let i = item_of(&v, ":::section-metadata");
+    let t = texts(&lay_out(&mut v, i));
+    assert!(t.iter().any(|t| t.contains("no closing marker")), "{t:?}");
+    let i = item_of(&v, "One.");
+    assert!(!texts(&lay_out(&mut v, i)).iter().any(|t| t.contains('⚠')));
+}
+
+#[test]
+fn a_rule_in_a_metadata_block_hides_with_the_rest_and_a_click_stays_out() {
+    let s = "One.\n\n---\n\n:::section-metadata\n\na: b\n\n---\n\nc: d\n\n:::\n\nTwo.\n";
+    let mut v = view_of(s, true);
+    frame(&mut v);
+    let inner = s.match_indices("---").nth(1).unwrap().0;
+    let rule = v.model().item_at_offset(inner);
+    assert_eq!(v.model().item_start(rule), inner);
+    assert_eq!(v.height(rule), 0.0, "under the plaque");
+    assert!(lay_out(&mut v, rule).prims.is_empty());
+    let opener = item_of(&v, ":::section-metadata");
+    let (open, close) = (s.find(":::section").unwrap(), s.rfind(":::").unwrap() + 3);
+    let l = lay_out(&mut v, opener);
+    let plaque = l.plaque.unwrap();
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut g = Geometry {
+        view: &mut v,
+        shaper: &mut f,
+        images: &NoImages,
+    };
+    let (mut high, mut low) = (plaque.center_top(), plaque.center_bottom());
+    high.y += 1.0;
+    low.y -= 1.0;
+    for pt in [high, low] {
+        let at = g.hit(opener, pt).expect("a place");
+        assert!(at.offset <= open || at.offset >= close, "{pt:?}: {at:?}");
+    }
+}
+
+#[test]
+fn off_nothing_changes() {
+    let mut v = view_of(DOC, false);
+    frame(&mut v);
+    let (a, body) = (rule_item(&v, 1), item_of(&v, "id: top"));
+    assert!(texts(&lay_out(&mut v, a)).is_empty());
+    assert!(v.height(body) > 0.0);
+    let opener = item_of(&v, ":::section-metadata");
+    let l = lay_out(&mut v, opener);
+    assert!(l.plaque.is_none() && l.card_top.is_some());
+}
+
+#[test]
+fn the_markdown_state_and_a_selection_inside_show_the_card() {
+    let mut v = view_of(DOC, true);
+    frame(&mut v);
+    let (opener, body) = (item_of(&v, ":::section-metadata"), item_of(&v, "id: top"));
+    let at = v.model().item_start(opener);
+    assert!(v.is_section_metadata(at));
+    v.set_block_modes(BlockViewMode::Native, vec![(at, BlockViewMode::Markdown)]);
+    frame(&mut v);
+    assert!(lay_out(&mut v, opener).plaque.is_none());
+    assert!(v.height(body) > 0.0);
+    v.set_block_modes(BlockViewMode::Native, Vec::new());
+    frame(&mut v);
+    assert_eq!(v.height(body), 0.0);
+    // a selection in it: what is selected can be seen
+    let inside = v.doc().text().find("kind:").unwrap();
+    v.set_selection_for_sections(&[inside]);
+    frame(&mut v);
+    assert!(v.height(body) > 0.0);
+    v.set_selection_for_sections(&[v.doc().text().find("First").unwrap()]);
+    frame(&mut v);
+    assert_eq!(v.height(body), 0.0);
+}
+
+#[test]
+fn a_rule_in_a_block_and_a_metadata_block_not_first_stay_what_they_are() {
+    let s = "Text.\n\n:::section-metadata\n\na: b\n\n:::\n\n:::card\n\n---\n\n:::\n";
+    let mut v = view_of(s, true);
+    frame(&mut v);
+    let opener = item_of(&v, ":::section-metadata");
+    assert!(lay_out(&mut v, opener).plaque.is_none());
+    assert!(v.height(item_of(&v, "a: b")) > 0.0);
+    let rule = item_of(&v, "---");
+    assert!(texts(&lay_out(&mut v, rule)).is_empty());
+}
+
+#[test]
+fn it_follows_the_theme_and_its_size() {
+    let mut small = view_of(DOC, true);
+    let mut large = view_of(DOC, true);
+    let mut big = Theme::light();
+    big.font_size *= 2.0;
+    large.set_params(700.0, &big, 1.0);
+    frame(&mut small);
+    frame(&mut large);
+    let (a, b) = (
+        item_of(&small, ":::section-metadata"),
+        item_of(&large, ":::section-metadata"),
+    );
+    let h = |v: &mut View, i| lay_out(v, i).plaque.unwrap().height();
+    assert!(h(&mut large, b) > 1.5 * h(&mut small, a));
+    // another theme is another layout, also of the words on a divider
+    let dark = Theme {
+        dark: true,
+        rule: markise_theme::Rgba::hex(0x123456),
+        ..Theme::light()
+    };
+    let i = rule_item(&small, 1);
+    let before = lay_out(&mut small, i);
+    small.set_params(700.0, &dark, 1.0);
+    frame(&mut small);
+    assert!(!Arc::ptr_eq(&before, &lay_out(&mut small, i)));
+}
+
+#[test]
+fn editing_metadata_renames_the_divider_above_it_without_a_rebuild() {
+    let s = "One.\n\n---\n\n:::section-metadata\n\nid: old\n\n:::\n\nTwo.\n";
+    let mut d = markise_md::parse(s);
+    let mut m = DocModel::build_with(&d, None, Paging::Full);
+    let at = s.find("old").unwrap();
+    let e = FormatDoc::apply(&mut d, &PatchSet::single_verbatim(at..at + 3, "new"));
+    m.apply(&d, &e);
+    let d: Arc<dyn FormatDoc> = Arc::new(d);
+    let mut v = View::new(d, Arc::new(m), Theme::light(), 700.0, 1.0);
+    v.set_sections(true);
+    frame(&mut v);
+    let i = rule_item(&v, 1);
+    assert_eq!(texts(&lay_out(&mut v, i)), ["new"]);
 }

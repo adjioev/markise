@@ -83,6 +83,7 @@ pub(super) struct ItemLook<'a> {
     pub warnings: Option<&'a [String]>,
     pub site: Option<super::site::SiteLook>,
     pub note: Option<&'a str>,
+    pub section: Option<super::SectionLook<'a>>,
 }
 
 /// A block shown natively, around a position.
@@ -188,6 +189,7 @@ impl View {
         self.native.looks.borrow_mut().clear();
         self.native.practice_source_changed();
         self.site.forget();
+        self.sections.forget();
         self.reset_heights();
     }
 
@@ -211,6 +213,7 @@ impl View {
         self.native.own_modes = own;
         self.native.items.borrow_mut().clear();
         self.site.forget();
+        self.sections.forget();
         if !same_states {
             self.reset_heights();
         }
@@ -418,11 +421,16 @@ impl View {
             practice: o.practice,
         });
         let (site, note) = it.map_or((None, None), |it| self.site_params(i, it));
+        let section = it.map(|it| self.section_role(i, it));
         f(ItemLook {
             native: params,
-            warnings: why.as_deref(),
+            warnings: why.as_deref().or(match &section {
+                Some(super::sections::Role::Warned(w)) => Some(w),
+                _ => None,
+            }),
             site,
             note: note.as_deref(),
+            section: section.as_ref().and_then(|r| r.look()),
         })
     }
 

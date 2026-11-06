@@ -35,6 +35,7 @@ mod comment_place;
 mod comment_presence;
 mod practice_tools;
 mod scrollbar;
+mod sections;
 mod site_board;
 pub use block_move::BlockDragShown;
 pub use code_tools::{LangEdit, LangItem, ShownTools, lang_matches};
@@ -242,6 +243,8 @@ pub struct DocViewer {
     block_handle: Option<(usize, Rect)>,
     /// The delete button shown in the last frame: a press there places no caret.
     block_delete_button: Option<Rect>,
+    /// Where metadata blocks' switches are: a press on one is no press on the text.
+    section_buttons: Vec<Rect>,
     /// The pointer is on that handle: it says so with its own cursor.
     pointer_on_block_handle: bool,
     /// The comment whose text is being edited in its card (issue #87).
@@ -264,6 +267,10 @@ pub struct DocViewer {
     block_fields: Option<std::sync::Arc<markise_engine::block_view::PackageViews>>,
     /// The document's change count its language was last read at.
     site_read_at: u64,
+    /// The document's dialect and whether it has sections (ADR 0026).
+    section_dialect: Option<markise_engine::sections::Dialect>,
+    /// When that was read: the document's change counter and the package.
+    section_dialect_read_at: Option<(u64, usize)>,
     /// What package text is shown in, and the change of the document it was read at.
     block_language: String,
     block_language_read_at: u64,
@@ -324,6 +331,8 @@ impl DocViewer {
             block_site: Default::default(),
             block_fields: None,
             site_read_at: u64::MAX,
+            section_dialect: None,
+            section_dialect_read_at: None,
             block_language: String::new(),
             block_language_read_at: u64::MAX,
             pointer_on_block_control: false,
@@ -344,6 +353,7 @@ impl DocViewer {
             block_drag: None,
             block_handle: None,
             block_delete_button: None,
+            section_buttons: Vec::new(),
             pointer_on_block_handle: false,
             comment_view: Default::default(),
             card_edit_size: None,
@@ -841,9 +851,10 @@ impl DocViewer {
 
         // ---- input: pointer (hit tests against the last frame's layout)
         let modifiers = ui.input(|i| i.modifiers);
-        let on_delete = ui
-            .input(|i| i.pointer.interact_pos())
-            .is_some_and(|p| self.block_delete_button.is_some_and(|r| r.contains(p)));
+        let on_delete = ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| {
+            self.block_delete_button.is_some_and(|r| r.contains(p))
+                || self.section_buttons.iter().any(|r| r.contains(p))
+        });
         let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.hovered() && !on_delete;
         // a click on a task checkbox toggles it (spec 02 §9): the press neither places the caret
         // nor starts a selection; the toggle happens on release over the same box (a press
@@ -1002,6 +1013,7 @@ impl DocViewer {
         // keyboard scrolling, the scrollbar or a caret / find reveal in this frame took over
         self.smooth.follow(self.ed.view.source_anchor(), false);
         self.site_before_frame(&ctx);
+        self.follow_section_dialect();
         // ---- layout of the viewport (+ half a screen of margin)
         let visible = {
             let view = &mut self.ed.view;
@@ -1096,6 +1108,7 @@ impl DocViewer {
             self.code_tools_ui(ui, &visible, rect, left, theme, focused, editable, &mut out, &mut sh);
             self.image_tools_ui(ui, &visible, rect, left, theme, imgs, &mut out);
             self.block_tools_ui(ui, &visible, rect, left, theme, &mut out);
+            self.sections_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_delete_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_move_ui(ui, &visible, rect, left, theme, &mut out);
             self.practice_ui(ui, &visible, rect, left);
