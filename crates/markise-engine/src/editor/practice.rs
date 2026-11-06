@@ -258,8 +258,7 @@ impl EditorView {
     /// How the blocks checked so far went: how many were right, of how many. A block with no answers
     /// to give counts for nothing.
     pub fn practice_score(&self) -> (usize, usize) {
-        let checked = self.place.practice.iter().filter_map(|p| p.right);
-        checked.fold((0, 0), |(right, all), r| (right + usize::from(r), all + 1))
+        self.place.practice_score
     }
 
     /// Whether anything has been done that Reset All would take back.
@@ -280,6 +279,8 @@ impl EditorView {
 
     /// Hands the view what was done, where the blocks stand now.
     pub(super) fn follow_practice(&mut self) {
+        let checked = self.place.practice.iter().filter_map(|p| p.right);
+        self.place.practice_score = checked.fold((0, 0), |(right, all), r| (right + usize::from(r), all + 1));
         let shows = (self.place.practice.iter()).map(|p| (p.at, p.show.clone())).collect();
         self.view.set_block_practice(shows);
     }

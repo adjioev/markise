@@ -55,6 +55,8 @@ pub(super) struct InPlace {
     pub(super) practice: Vec<super::practice::Practised>,
     /// Someone chose for the whole document: the package's word on what opens in Practice is over.
     pub(super) defaults_off: bool,
+    /// How many of those were right, of how many checked: read per frame, so not worked out per frame.
+    pub(super) practice_score: (usize, usize),
 }
 
 fn plain_value_is_empty(slot: &Slot) -> bool {
