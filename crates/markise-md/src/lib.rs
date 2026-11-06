@@ -68,6 +68,8 @@ pub struct Document {
     /// Document-level inline context (link definitions, footnote labels), built on first use
     /// and kept across edits that touch no definition (ADR 0006 §7.4).
     ctx: OnceLock<Arc<RefContext>>,
+    /// The front matter's `lang`, read on first use and kept until an edit reaches the first block.
+    language: OnceLock<Option<String>>,
     failed_openers: Vec<usize>,
     eol: LineEnding,
     opts: ParseOptions,
@@ -240,6 +242,7 @@ impl Document {
             top: TopBlocks::from_abs(out.blocks),
             abs: OnceLock::new(),
             ctx: OnceLock::new(),
+            language: OnceLock::new(),
             failed_openers: out.failed_openers,
             eol,
             opts,
@@ -377,6 +380,7 @@ impl Document {
         self.top = TopBlocks::from_abs(out.blocks);
         self.abs = OnceLock::new();
         self.ctx = OnceLock::new();
+        self.language = OnceLock::new();
         self.failed_openers = out.failed_openers;
         self.directives = directive::DirectiveIndex::from_raw(out.markers);
         self.label_all_markers();
@@ -467,6 +471,18 @@ impl Document {
         ps.canonical_with(|s| text::normalize_eol(s, eol), |s| text::count_terminators(s) > 0)
     }
 
+    /// The `lang` of the front matter. Reading it costs the front matter once: an edit that does
+    /// not reach the first block keeps the answer.
+    pub fn language(&self) -> Option<&str> {
+        let read = || frontmatter::get(&frontmatter::front_matter(self), "lang").map(str::to_string);
+        self.language.get_or_init(read).as_deref()
+    }
+
+    /// [`Document::language`] would answer without reading the front matter.
+    pub fn language_is_kept(&self) -> bool {
+        self.language.get().is_some()
+    }
+
     /// The literal-line hints.
     pub fn hints(&self) -> &HintSet {
         &self.hints
@@ -548,6 +564,9 @@ impl Document {
             from = old_bom;
         }
         from = from.max(old_bom);
+        if start_idx == 0 {
+            self.language = OnceLock::new();
+        }
 
         // 1b. Nested restart inside a large top-level container (ADR 0006 §7.2.3).
         if let Some(r) = self.edit_nested(&range, &insert, anchor, hint_ps, final_hints) {
