@@ -358,6 +358,8 @@ pub struct LayoutParams<'a> {
     pub site: Option<crate::view::SiteLook>,
     /// Why the card this item opens shows no picture.
     pub note: Option<&'a str>,
+    /// The outline's entries a table of contents leaves out, by their place in it (ADR 0024).
+    pub toc_hidden: Option<&'a [bool]>,
 }
 
 /// How review marks (CriticMarkup, ADR 0012) are shown in the rendered view (issue #88). Display
@@ -2748,6 +2750,27 @@ pub fn layout_item(
                     &model.outline[(*start as usize).min(model.outline.len())..(*end as usize).min(model.outline.len())]
                 }
                 _ => &model.outline[..],
+            };
+            // (a heading it leaves out only in Practice: a table of contents with none left says nothing else)
+            let kept: Vec<crate::model::OutlineEntry>;
+            let entries = match p.toc_hidden {
+                Some(hidden) => {
+                    let first = match &item.segment {
+                        Some(BlockSegment::Toc { start, .. }) => *start as usize,
+                        _ => 0,
+                    };
+                    let shown = |(k, _): &(usize, &crate::model::OutlineEntry)| {
+                        !hidden.get(first + k).copied().unwrap_or(false)
+                    };
+                    kept = entries
+                        .iter()
+                        .enumerate()
+                        .filter(shown)
+                        .map(|(_, o)| o.clone())
+                        .collect();
+                    &kept[..]
+                }
+                None => entries,
             };
             for (ci, chunk) in entries.chunks(CHUNK_LINES).enumerate() {
                 let mut job = StyledText::default();

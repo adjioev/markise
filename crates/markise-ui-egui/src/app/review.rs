@@ -469,11 +469,19 @@ impl MarkiseApp {
             .doc
             .as_ref()
             .is_some_and(|d| d.viewer.ed.session.revision().counter != counter);
+        // what Practice hides, a comment on it included, is listed nowhere (ADR 0024)
+        let kept: Option<Vec<usize>> = self.doc.as_ref().filter(|d| d.viewer.ed.view.practice_on()).map(|d| {
+            (0..list.rows.len())
+                .filter(|&k| !d.viewer.ed.view.practice_conceals(list.rows[k].start))
+                .collect()
+        });
+        let rows = kept.as_ref().map_or(list.rows.len(), Vec::len);
         egui::ScrollArea::vertical()
             .id_salt("markise-comments-list")
             .auto_shrink([false, true])
-            .show_rows(ui, row_h, list.rows.len(), |ui, range| {
-                for r in &list.rows[range] {
+            .show_rows(ui, row_h, rows, |ui, range| {
+                for k in range {
+                    let r = &list.rows[kept.as_ref().map_or(k, |kept| kept[k])];
                     ui.push_id(("markise-review-row", r.start), |ui| {
                         if let Some(a) = row(ui, look, &rc, r, counter, row_h, stale) {
                             act = Some(a);

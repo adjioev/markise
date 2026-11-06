@@ -266,6 +266,8 @@ pub struct DocViewer {
     site_read_at: u64,
     /// The pointer is on a block's control or its first row, this frame: not text.
     pointer_on_block_control: bool,
+    /// [`Self::outline_rows`], and what they were read for.
+    practice_outline: Option<PracticeOutline>,
     /// A press on the scrollbar (issue #123).
     thumb_drag: scrollbar::ThumbDrag,
     /// Wheel / trackpad smoothing (issue #86).
@@ -318,6 +320,7 @@ impl DocViewer {
             block_fields: None,
             site_read_at: u64::MAX,
             pointer_on_block_control: false,
+            practice_outline: None,
             view_press: None,
             caret_screen: None,
             hover: None,
@@ -2279,6 +2282,9 @@ fn hit(visible: &[markise_layout::Visible], p: Pos2, left: f32, top: f32) -> Opt
         (p.y >= y0 && p.y < y0 + v.layout.height).then(|| (v.idx, pos2(p.x - left, p.y - y0), &*v.layout))
     })
 }
+
+/// The outline's rows in Practice ([`DocViewer::outline_rows`]), and what they were read for.
+type PracticeOutline = ((u64, u64), std::sync::Arc<[usize]>);
 
 /// Dash segments one layout may paint per frame (dashes are expanded only inside the clip
 /// rect, so this bounds pathological cases, not normal diagrams).

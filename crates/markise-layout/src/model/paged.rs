@@ -398,6 +398,7 @@ impl DocModel {
                         anchor,
                         item: pages.len(),
                         key,
+                        in_block: it.containers.iter().any(|c| matches!(c, super::Container::Card)),
                     });
                 }
             }
@@ -722,6 +723,7 @@ impl DocModel {
                     anchor: String::new(), // numbered below (its key is affected)
                     item: lo + p,
                     key,
+                    in_block: !doc.named_containers_at(start).is_empty(),
                 }
             })
             .collect();

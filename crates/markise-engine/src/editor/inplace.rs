@@ -53,6 +53,8 @@ pub(super) struct InPlace {
     pending_modes: Vec<(usize, BlockViewMode)>,
     /// What was done in blocks in Practice: never in the document ([`super::practice`]).
     pub(super) practice: Vec<super::practice::Practised>,
+    /// Someone chose for the whole document: the package's word on what opens in Practice is over.
+    pub(super) defaults_off: bool,
 }
 
 fn plain_value_is_empty(slot: &Slot) -> bool {
@@ -85,6 +87,10 @@ impl EditorView {
         (self.place.own_modes.iter())
             .filter_map(|o| Some((self.session.mark(o.mark)?.offset, o.mode)))
             .collect()
+    }
+
+    pub(super) fn has_own_mode(&self, opener: usize) -> bool {
+        self.own_modes_now().iter().any(|m| m.0 == opener)
     }
 
     /// The name of the block whose opener stands at `at`.
@@ -143,7 +149,13 @@ impl EditorView {
             site: self.view.can_draw_site(),
             practice: self.place.fields.as_ref().is_some_and(|f| f.any_practice()),
         };
-        self.place.mode = self.place.mode.next_for(can);
+        let now = if self.practice_by_default() {
+            BlockViewMode::Practice
+        } else {
+            self.place.mode
+        };
+        self.place.mode = now.next_for(can);
+        self.place.defaults_off = true;
         self.clear_own_modes();
         self.follow_block_modes();
         self.leave_block_for_picture(None);
@@ -206,16 +218,19 @@ impl EditorView {
             .opener_name(opener)
             .map_or_else(BlockCan::default, |n| self.can_of(&n));
         let next = self.next_block_view(opener);
+        let document = self
+            .opener_name(opener)
+            .map_or(self.place.mode, |n| self.document_mode(&n));
         let own =
             (self.place.own_modes.iter()).position(|o| self.session.mark(o.mark).is_some_and(|p| p.offset == opener));
         // what shows the same as the document's state needs no state of its own
         match own {
-            Some(i) if next.shown(can) == self.place.mode.shown(can) => {
+            Some(i) if next.shown(can) == document.shown(can) => {
                 let o = self.place.own_modes.remove(i);
                 self.session.remove_mark(o.mark);
             }
             Some(i) => self.place.own_modes[i].mode = next,
-            None if next.shown(can) == self.place.mode.shown(can) => {}
+            None if next.shown(can) == document.shown(can) => {}
             None => {
                 self.add_own_mode(opener, next);
             }
@@ -228,6 +243,7 @@ impl EditorView {
     /// Hands the view where the blocks with a state of their own stand now.
     pub(super) fn follow_block_modes(&mut self) {
         let own = self.own_modes_now();
+        self.view.set_practice_defaults_off(self.place.defaults_off);
         self.view.set_block_modes(self.place.mode, own);
     }
 

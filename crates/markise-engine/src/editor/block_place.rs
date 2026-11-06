@@ -298,7 +298,8 @@ impl EditorView {
             Ok(())
         });
         if done.is_ok() {
-            if self.place.mode != BlockViewMode::Native {
+            // its author is writing it, whatever the document or the package say of the others
+            if self.document_mode(block) != BlockViewMode::Native {
                 self.add_own_mode(opener, BlockViewMode::Native);
             }
             // it may not fit its schema until its fields are filled: it stays native while it is edited

@@ -36,6 +36,32 @@ There are two kinds of practice, told apart by the schema and not by the view's 
 - **With no answers.** Show answer reveals the fields, and Reset hides them. It does not count, as there is
   nothing to be right about.
 
+### Opening in Practice
+
+`"practice": {"reveal": [...], "default": true}` makes Practice what a block of that view opens in. The state of a block is then
+its own if it has one, or else the document's, and the document's is the package's word for such a block until someone chooses for the document
+(`InPlace::defaults_off`, kept with the rest of a document's state). Other packages are not affected.
+
+The package has to be known before the first frame that could show an answer, and it is looked up off the UI thread. So a document opens
+**veiled** (`View::set_blocks_veiled`) where packages can be in use: blocks show only their first rows until the lookup has answered. A document
+with no package loses those few frames of what its blocks hold, and nothing else. Until a package has been accepted Markise does not use it, so at the
+question, or after Not Now, blocks are cards as ever: there is nothing yet to say what hides.
+
+Editing is reached through the view switch, per block or for the document. **On reopening, what is remembered wins**: the state a document was left in is
+kept by path for the session (ADR 0021), so a block switched to edit stays so if its document is closed and opened again, and the next session starts from the
+package's word, as nothing of this is on disk.
+
+A block being written stays writable. One inserted from a preset gets a state of its own, Native. So does one typed by hand, recognised by an edit that reaches its opener line with the caret in it: without this a
+block would close on its author at the first line.
+
+### What lists or finds text
+
+- **Outline and `[toc]`.** A heading can stand in a quote or in content no field takes, and a list of headings cannot read every block to tell. So while any block is in Practice, these leave
+  out every heading directly in a block of a name that can be practised (`OutlineEntry::block`, `View::practice_hides_heading`). `reveal` cannot name a heading, for the same reason.
+- **Find.** Rendered, it leaves out matches in what hides, so there is no count, highlight, jump or replacement for them. They come back when revealed. In Source or Side by Side the search covers the source pane, the author's choice; a hit there changes nothing in the rendered pane.
+- **Word count.** A number for the file, the same in every state. It holds no text. It does not count less in Practice, which would tell how long an answer is by the difference.
+- **The Comments panel** leaves out comments and suggestions on what hides. Accept All and Reject All are the document's, and a block they change loses what was done in it.
+
 ### The state
 
 `BlockViewMode::Practice` comes after `Native` in the order of the view switch, per block and for the

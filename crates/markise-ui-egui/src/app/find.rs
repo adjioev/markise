@@ -22,6 +22,8 @@ pub(super) struct FindState {
     /// The search looks at everything the source holds: Source and Side by Side show it all, the
     /// rendered view leaves out what it hides (ADR 0018).
     all_of_source: bool,
+    /// What Practice hid when this was searched.
+    practice_generation: u64,
     navigation: Option<bool>,
     query_id: Option<egui::Id>,
     /// Only the exact post-Replace-All revision can be undone by the panel button.
@@ -188,12 +190,18 @@ impl MarkiseApp {
             return;
         };
         let identity = (d.id, d.viewer.ed.session.revision().counter);
+        let hides = d.viewer.ed.view.practice_generation();
         let all_of_source = self.source_visible || self.side_by_side;
         if all_of_source != self.find.all_of_source {
             self.find.all_of_source = all_of_source;
             self.find_invalidate();
         }
         if self.find.key.is_some_and(|k| (k.document, k.revision) != identity) {
+            self.find_invalidate();
+        }
+        // what is hidden is not searched, and it just changed (ADR 0024)
+        if hides != self.find.practice_generation {
+            self.find.practice_generation = hides;
             self.find_invalidate();
         }
         if self.find.key.is_none() {

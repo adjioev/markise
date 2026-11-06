@@ -473,3 +473,17 @@ fn reveal_is_not_tied_to_choices() {
         );
     }
 }
+
+#[test]
+fn a_practice_can_be_what_a_block_opens_in() {
+    let practice = |views: &str| {
+        let index = PackageIndex::from_files(&with_views(views)).unwrap();
+        index.block("poll").unwrap().view.unwrap().practice.clone().unwrap()
+    };
+    assert!(!practice(r#"{"poll": {"kind": "choices", "practice": {}}}"#).default);
+    assert!(practice(r#"{"poll": {"kind": "choices", "practice": {"default": true}}}"#).default);
+    let text = refusal(&with_views(
+        r#"{"poll": {"kind": "choices", "practice": {"default": "yes"}}}"#,
+    ));
+    assert!(text.contains("`practice.default`") && text.contains("poll"), "{text}");
+}
