@@ -23,6 +23,9 @@ pub struct ParseOptions {
     pub highlight: bool,
     /// GitHub alerts `> [!NOTE]` (R3.3.4). Default on.
     pub alerts: bool,
+    /// Extended callouts `> [!name]- Title` (ADR 0025, [`crate::callout`]): every name, fold marks
+    /// and titles. The bare `[!NOTE]` forms stay under `alerts`. Default on.
+    pub callouts: bool,
     /// Diagram fences `mermaid`/`sequence`/`flow` (§4.6). Default on (owner, 2026-10-27, DG-2).
     pub diagrams: bool,
     /// Bare URL autolink detection (display only). Default on.
@@ -59,6 +62,7 @@ impl Default for ParseOptions {
             superscript: false,
             highlight: false,
             alerts: true,
+            callouts: true,
             diagrams: true,
             auto_links: true,
             remap_unicode_punctuation: false,

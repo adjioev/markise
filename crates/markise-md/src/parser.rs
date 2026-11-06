@@ -4,7 +4,7 @@
 
 use markise_doc::HintSet;
 
-use crate::block::{AlertKind, Block, BlockKind, MathDelim};
+use crate::block::{Block, BlockKind, MathDelim};
 use crate::directive::RawMarker;
 use crate::options::ParseOptions;
 use crate::scan::{self, HtmlEnd, is_ws};
@@ -532,7 +532,7 @@ impl<'a> Parser<'a> {
                         let (qp, len) = self.quote_marker(&c).unwrap();
                         self.prepare(&mut container, &mut started);
                         c.advance_to(b, qp);
-                        self.push(St::BlockQuote, BlockKind::BlockQuote { alert: None }, qp, clean);
+                        self.push(St::BlockQuote, BlockKind::BlockQuote { callout: None }, qp, clean);
                         c.pos += len;
                         c.col += 1;
                         c.optional_space(b);
@@ -1098,13 +1098,12 @@ impl<'a> Parser<'a> {
                 }
             }
             St::BlockQuote => {
-                if self.opts.alerts
-                    && let Some(first) = block.children.first()
+                if let Some(first) = block.children.first()
                     && matches!(first.kind, BlockKind::Paragraph)
                     && !hinted_line(self.hints, text, first.lines[0].start)
-                    && let Some(kind) = alert_kind(first.lines[0].slice(text))
+                    && let Some(callout) = crate::callout::recognise(first.lines[0].slice(text), self.opts)
                 {
-                    block.kind = BlockKind::BlockQuote { alert: Some(kind) };
+                    block.kind = BlockKind::BlockQuote { callout: Some(callout) };
                 }
             }
             St::Table | St::Fenced { .. } | St::Math(_) | St::FrontMatter => {}
@@ -1164,19 +1163,6 @@ fn is_gap_prefix_only(s: &str) -> bool {
 /// `true` when at least one blank line lies between two sibling blocks.
 fn blank_between(text: &str, a_end: usize, b_start: usize) -> bool {
     a_end < b_start && count_terminators(&text[a_end..b_start]) >= 2
-}
-
-fn alert_kind(first_line: &str) -> Option<AlertKind> {
-    let t = first_line.trim_matches([' ', '\t']);
-    let inner = t.strip_prefix("[!")?.strip_suffix(']')?;
-    Some(match inner.to_ascii_lowercase().as_str() {
-        "note" => AlertKind::Note,
-        "tip" => AlertKind::Tip,
-        "important" => AlertKind::Important,
-        "warning" => AlertKind::Warning,
-        "caution" => AlertKind::Caution,
-        _ => return None,
-    })
 }
 
 /// Removes leading link reference definitions (R3.13.1) from a paragraph and returns them.
@@ -1718,15 +1704,14 @@ pub(crate) fn refinish(text: &str, opts: &ParseOptions, hints: &HintSet, b: &mut
             }
             *tight = t;
         }
-        BlockKind::BlockQuote { alert } => {
-            *alert = None;
-            if opts.alerts
-                && let Some(first) = b.children.first()
+        BlockKind::BlockQuote { callout } => {
+            *callout = None;
+            if let Some(first) = b.children.first()
                 && matches!(first.kind, BlockKind::Paragraph)
                 && let Some(l) = first.lines.first()
                 && !hinted_line(hints, text, l.start + origin)
             {
-                *alert = alert_kind(&text[l.start + origin..l.end + origin]);
+                *callout = crate::callout::recognise(&text[l.start + origin..l.end + origin], opts);
             }
         }
         _ => {}

@@ -42,6 +42,41 @@ The formatting toolbar above the page offers the same commands; **View → Toolb
   empty item ends the list. Click a task box to tick it.
 - <kbd>Alt+↑</kbd> / <kbd>Alt+↓</kbd> move the current block or list item up or down.
 
+## Callouts
+
+A quote whose first line starts with `[!name]` is a callout: a coloured block with an icon and a
+title.
+
+```markdown
+> [!warning] Mind the step
+> The body, any Markdown.
+
+> [!success]- Starts closed
+> Hidden until opened.
+
+> [!info]+ Starts open
+> Can be closed.
+```
+
+- **Type**: the name decides the colour and the icon, in any letter case. Known names are note,
+  info, tip, hint, important, success, check, done, question, help, faq, warning, caution,
+  attention, failure, fail, missing, danger, error, bug, example, quote, cite, abstract, summary,
+  tldr and todo. Any other name of letters, digits, `-` and `_` shows in the note style.
+- **Title**: the text after the tag, with inline Markdown. Without one, the title is the name with a
+  capital first letter.
+- **Folding**: `-` after the tag starts the callout closed, `+` starts it open, and without either it
+  cannot be folded. Click the header to open or close it. A caret or a search hit going inside opens
+  it, and closing it moves the caret past it. This is only how you see it for now: the file does not change, nothing is marked as unsaved,
+  there is nothing to undo, and the callout starts as written when you open the file again.
+
+Typing `[!name]` as the first line of a quote makes the callout and puts the caret in its body. Edit
+the title by moving up from the body with the arrow keys. To add a title or a fold mark to a callout
+that has none, use Source Code Mode, which always shows the text as written. <kbd>Backspace</kbd> at
+the start of the title, or of the body of a callout without a title, removes the tag and leaves a
+plain quote.
+
+Callouts can be nested and can sit in lists. Exports show them too: see [Export](export.md#callouts).
+
 ## Tables
 
 **Paragraph → Table → Insert Table…** (<kbd>Opt+Cmd+T</kbd>, <kbd>Ctrl+Shift+T</kbd> on Windows

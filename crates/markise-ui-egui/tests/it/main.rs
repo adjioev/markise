@@ -9,6 +9,7 @@ mod block_ids;
 mod block_library;
 mod block_packages;
 mod block_views;
+mod callouts;
 mod code_tools;
 mod common;
 mod common_html;

@@ -12,6 +12,11 @@
 //!   state. A placeholder's measured height is valid only while the generations its blocks
 //!   depend on are unchanged.
 //!
+//! - **Foldable callouts** (ADR 0025): a quote folded as one, without paired markers. Every fold
+//!   is known by the start of its first leaf and its extent, read from the format's containers;
+//!   the reader's choice lives on it the way it does on a `<details>` start. They need no pairing,
+//!   so an edit touching one costs no document-wide work here.
+//!
 //! Headings, slugs and anchors are the outline ([`super::OutlineEntry`], document-wide in every
 //! model); reference definitions are resolved by the format's own document-wide context.
 //!
@@ -23,10 +28,13 @@
 //!
 //! Format-neutral: markers come from [`FormatDoc::raw_presentation`] through the items.
 
+use std::sync::Arc;
+
 use markise_doc::chunked::{RelChunks, Relative};
 use markise_doc::{FormatDoc, RawPresentation};
 
 use super::Item;
+use super::PageStats;
 
 /// A disclosure marker: a raw block presenting as `<details>`, `<summary>` or `</details>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +54,81 @@ impl Relative for DisclosureMarker {
     fn shift(&mut self, delta: isize) {
         self.start = (self.start as isize + delta) as usize;
     }
+}
+
+/// A foldable callout, by source position (absolute start while outside the chunked list).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoldMarker {
+    /// Start of the quote's first leaf.
+    pub start: usize,
+    /// Bytes from `start` to the end of the quote.
+    pub len: usize,
+    /// As written: `+` open, `-` closed.
+    pub written_open: bool,
+    /// The reader's open/closed choice (`None`: as written).
+    pub toggled: Option<bool>,
+    /// What the body counts in a page's estimate: its hidden items as they are counted when
+    /// shown, less the line the header keeps. From the items when they were last at hand; only a
+    /// placeholder reads it, and a placeholder is made with its items in hand.
+    pub body: Arc<PageStats>,
+}
+
+impl FoldMarker {
+    pub fn open(&self) -> bool {
+        self.toggled.unwrap_or(self.written_open)
+    }
+    pub fn end(&self) -> usize {
+        self.start + self.len
+    }
+    /// Whether `at` lies in this callout, its first line included.
+    pub fn holds(&self, at: usize) -> bool {
+        self.start <= at && at <= self.end()
+    }
+}
+
+impl Relative for FoldMarker {
+    fn origin(&self) -> usize {
+        self.start
+    }
+    fn shift(&mut self, delta: isize) {
+        self.start = (self.start as isize + delta) as usize;
+    }
+}
+
+/// Bytes from `start` (a callout's first leaf) to the end of its quote: the innermost container
+/// there.
+fn fold_len(doc: &dyn FormatDoc, start: usize) -> usize {
+    doc.containers_at(start)
+        .last()
+        .map_or(0, |c| c.span.end.saturating_sub(start))
+}
+
+/// The foldable callouts among freshly flattened `items` (absolute origins, document order).
+pub(super) fn folds_of(doc: &dyn FormatDoc, items: &[Item]) -> Vec<FoldMarker> {
+    let mut out = Vec::new();
+    for (k, it) in items.iter().enumerate() {
+        for c in it.containers.iter() {
+            if let super::Container::Quote { head: Some(head), .. } = c
+                && let Some(written_open) = head.open
+            {
+                let len = fold_len(doc, it.origin);
+                let end = it.origin + len;
+                let mut body = PageStats::default();
+                for hidden in items[k..].iter().take_while(|h| h.origin <= end) {
+                    body.add(hidden);
+                }
+                body.keep_header();
+                out.push(FoldMarker {
+                    start: it.origin,
+                    len,
+                    written_open,
+                    toggled: None,
+                    body: Arc::new(body),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// A paired disclosure, by source position.
@@ -92,6 +175,8 @@ pub struct CrossBlockIndex {
     markers: RelChunks<DisclosureMarker>,
     /// Pairing of `markers` (document order of the starts).
     groups: Vec<Group>,
+    /// Foldable callouts in document order.
+    folds: RelChunks<FoldMarker>,
     pub gens: DepGens,
     /// Pairings computed (tests: ordinary typing pairs nothing).
     pub pairings: u64,
@@ -140,8 +225,94 @@ impl CrossBlockIndex {
         self.groups.iter().map(|g| self.group_at(g)).collect()
     }
 
+    /// The foldable callouts in document order (absolute starts).
+    pub fn folds(&self) -> Vec<FoldMarker> {
+        self.folds.iter().map(|r| r.to_abs()).collect()
+    }
+
+    /// Starts of the closed folds holding `at`.
+    pub(crate) fn closed_folds_around(&self, at: usize) -> Vec<usize> {
+        let hi = self.folds.partition_point(|r| r.origin <= at);
+        self.folds
+            .range(0..hi)
+            .map(|r| r.to_abs())
+            .filter(|f| !f.open() && f.holds(at))
+            .map(|f| f.start)
+            .collect()
+    }
+
+    /// Calls `f` with the body of each closed fold starting in `lo..hi`. A fold inside a closed
+    /// one is part of its body.
+    pub(crate) fn closed_fold_bodies(&self, lo: usize, hi: usize, mut f: impl FnMut(&PageStats)) {
+        let a = self.folds.partition_point(|r| r.origin < lo);
+        let b = self.folds.partition_point(|r| r.origin < hi).max(a);
+        let mut covered = lo;
+        for r in self.folds.range(a..b) {
+            if r.item.open() || r.origin < covered {
+                continue;
+            }
+            covered = r.origin + r.item.len;
+            f(&r.item.body);
+        }
+    }
+
+    /// The fold starting at `start`.
+    pub(crate) fn fold_at(&self, start: usize) -> Option<FoldMarker> {
+        let k = self.folds.partition_point(|r| r.origin < start);
+        (self.folds.origin(k) == Some(start))
+            .then(|| self.folds.range(k..k + 1).next().map(|r| r.to_abs()))
+            .flatten()
+    }
+
+    /// `items` (absolute origins) become a placeholder: the folds starting in them count what
+    /// the items hold now (an edit in a body changed it without touching the fold's marker).
+    pub(super) fn refresh_fold_bodies(&mut self, doc: &dyn FormatDoc, items: &[Item]) {
+        for fresh in folds_of(doc, items) {
+            let k = self.folds.partition_point(|r| r.origin < fresh.start);
+            if self.folds.origin(k) == Some(fresh.start)
+                && let Some(f) = self.folds.get_mut(k)
+            {
+                f.body = fresh.body;
+            }
+        }
+    }
+
+    /// The reader's choices of markers and folds at their positions after `steps` (see
+    /// [`super::Moved`]): each patch of a composed edit moves them on its own, so one between
+    /// two patches is inside the covering range without being touched. One inside a step goes.
+    pub(super) fn choices_through(&self, steps: &[(usize, usize, isize)]) -> Vec<(usize, bool)> {
+        let through = |mut p: usize| {
+            for &(s, e, delta) in steps {
+                if p >= e {
+                    p = (p as isize + delta) as usize;
+                } else if p >= s {
+                    return None;
+                }
+            }
+            Some(p)
+        };
+        let markers = self
+            .markers
+            .iter()
+            .filter_map(|r| Some((through(r.origin)?, r.item.toggled?)));
+        let folds = self
+            .folds
+            .iter()
+            .filter_map(|r| Some((through(r.origin)?, r.item.toggled?)));
+        markers.chain(folds).collect()
+    }
+
     /// Whether two indexes hold the same markers and pairs (the reader's choices aside).
     pub fn same_disclosures(&self, other: &CrossBlockIndex) -> bool {
+        let f = |c: &CrossBlockIndex| -> Vec<(usize, usize, bool)> {
+            c.folds()
+                .into_iter()
+                .map(|f| (f.start, f.len, f.written_open))
+                .collect()
+        };
+        if f(self) != f(other) {
+            return false;
+        }
         let m = |c: &CrossBlockIndex| -> Vec<(usize, usize, RawPresentation)> {
             c.markers().into_iter().map(|m| (m.start, m.len, m.kind)).collect()
         };
@@ -156,8 +327,9 @@ impl CrossBlockIndex {
 
     /// Adds the markers among freshly flattened `items` (absolute origins), which follow every
     /// marker already known (a model build, in document order).
-    pub(super) fn add_from(&mut self, items: &[Item]) {
+    pub(super) fn add_from(&mut self, doc: &dyn FormatDoc, items: &[Item]) {
         self.markers.extend_abs(markers_of(items));
+        self.folds.extend_abs(folds_of(doc, items));
     }
 
     /// An edit replaced the items starting at `removed` (pre-edit starts, ascending; `at`: the
@@ -179,12 +351,98 @@ impl CrossBlockIndex {
             (Some(&a), Some(&b)) => a..b + 1,
             _ => at..at,
         };
-        self.replace_range(doc, old, markers_of(new_items), changed, delta)
+        self.replace_range(
+            doc,
+            old,
+            markers_of(new_items),
+            folds_of(doc, new_items),
+            changed,
+            delta,
+        )
+    }
+
+    /// The folds starting in `old` (pre-edit offsets) are replaced by `fresh`, and those around
+    /// the edit get their new extents. `true` when any was replaced.
+    fn replace_folds(
+        &mut self,
+        doc: &dyn FormatDoc,
+        old: &std::ops::Range<usize>,
+        fresh: Vec<FoldMarker>,
+        changed: &std::ops::Range<usize>,
+        delta: isize,
+    ) -> bool {
+        let lo = self.folds.partition_point(|r| r.origin < old.start);
+        let hi = self.folds.partition_point(|r| r.origin < old.end).max(lo);
+        if lo == hi && fresh.is_empty() {
+            self.folds.splice(lo..lo, Vec::new(), delta);
+            self.refresh_folds_around(doc, changed.start);
+            return false;
+        }
+        let toggles: Vec<(usize, bool)> = self
+            .folds
+            .range(lo..hi)
+            .filter_map(|r| {
+                let open = r.item.toggled?;
+                let p = if r.origin < changed.start {
+                    r.origin
+                } else if r.origin >= changed.end {
+                    (r.origin as isize + delta) as usize
+                } else {
+                    return None;
+                };
+                Some((p, open))
+            })
+            .collect();
+        let before: Vec<bool> = self.folds.range(lo..hi).map(|r| r.item.open()).collect();
+        let n = fresh.len();
+        self.folds.splice(lo..hi, fresh, delta);
+        self.reapply_toggles(&toggles);
+        let after: Vec<bool> = self.folds.range(lo..lo + n).map(|r| r.item.open()).collect();
+        if before != after {
+            self.gens.disclosures += 1;
+        }
+        self.refresh_folds_around(doc, changed.start);
+        true
+    }
+
+    /// An edit inside a callout's body keeps its first leaf and so its marker: the extents of
+    /// the folds around `at` (after the edit) are read again. Bounded by the top-level block.
+    fn refresh_folds_around(&mut self, doc: &dyn FormatDoc, at: usize) {
+        if self.folds.is_empty() {
+            return;
+        }
+        let outer = |p: usize| doc.containers_at(p).first().map(|c| c.span.start);
+        let Some(top) = outer(at).into_iter().chain(outer(at.saturating_sub(1))).min() else {
+            return;
+        };
+        let lo = self.folds.partition_point(|r| r.origin < top);
+        let hi = self.folds.partition_point(|r| r.origin <= at).max(lo);
+        for k in lo..hi {
+            let Some(start) = self.folds.origin(k) else { continue };
+            let len = fold_len(doc, start);
+            if let Some(f) = self.folds.get_mut(k) {
+                f.len = len;
+            }
+        }
     }
 
     /// [`CrossBlockIndex::replace`] by byte range: the markers starting in `old` (pre-edit
-    /// offsets) are replaced by `fresh` (absolute starts after the edit, document order).
+    /// offsets) are replaced by `fresh` (absolute starts after the edit, document order), the
+    /// folds by `fresh_folds`.
     pub(super) fn replace_range(
+        &mut self,
+        doc: &dyn FormatDoc,
+        old: std::ops::Range<usize>,
+        fresh: Vec<DisclosureMarker>,
+        fresh_folds: Vec<FoldMarker>,
+        changed: std::ops::Range<usize>,
+        delta: isize,
+    ) -> bool {
+        let folds = self.replace_folds(doc, &old, fresh_folds, &changed, delta);
+        self.replace_markers(doc, old, fresh, changed, delta) | folds
+    }
+
+    fn replace_markers(
         &mut self,
         doc: &dyn FormatDoc,
         old: std::ops::Range<usize>,
@@ -258,8 +516,14 @@ impl CrossBlockIndex {
             .markers
             .iter()
             .filter_map(|r| Some((keep(r.origin)?, r.item.toggled?)))
+            .chain(
+                self.folds
+                    .iter()
+                    .filter_map(|r| Some((keep(r.origin)?, r.item.toggled?))),
+            )
             .collect();
         self.markers = RelChunks::default();
+        self.folds = RelChunks::default();
         self.groups.clear();
         out
     }
@@ -278,12 +542,29 @@ impl CrossBlockIndex {
             {
                 m.toggled = Some(open);
             }
+            let k = self.folds.partition_point(|r| r.origin < at);
+            if self.folds.origin(k) == Some(at)
+                && let Some(f) = self.folds.get_mut(k)
+            {
+                f.toggled = Some(open);
+            }
         }
     }
 
     /// Sets the reader's open/closed choice of the disclosure starting at `start`; `false`
     /// when there is none.
     pub fn set_open(&mut self, start: usize, open: bool) -> bool {
+        let k = self.folds.partition_point(|r| r.origin < start);
+        if self.folds.origin(k) == Some(start)
+            && let Some(f) = self.folds.get_mut(k)
+        {
+            let was = f.open();
+            f.toggled = Some(open);
+            if was != open {
+                self.gens.disclosures += 1;
+            }
+            return true;
+        }
         let k = self.markers.partition_point(|r| r.origin < start);
         if self.markers.origin(k) != Some(start) {
             return false;
@@ -307,6 +588,11 @@ impl CrossBlockIndex {
         for m in from.markers() {
             if let Some(open) = m.toggled {
                 self.set_open(m.start, open);
+            }
+        }
+        for f in from.folds() {
+            if let Some(open) = f.toggled {
+                self.set_open(f.start, open);
             }
         }
     }
@@ -367,9 +653,12 @@ impl CrossBlockIndex {
     /// Whether any group's source interval meets `lo..hi` (a page holding part of a disclosure:
     /// its height depends on the disclosure's state).
     pub fn disclosure_meets(&self, lo: usize, hi: usize) -> bool {
-        self.groups
-            .iter()
-            .any(|g| self.marker_start(g.start) < hi && self.marker_start(g.end) >= lo)
+        let fold = self.folds.partition_point(|r| r.origin < lo);
+        self.folds.origin(fold).is_some_and(|s| s < hi)
+            || self
+                .groups
+                .iter()
+                .any(|g| self.marker_start(g.start) < hi && self.marker_start(g.end) >= lo)
     }
 }
 

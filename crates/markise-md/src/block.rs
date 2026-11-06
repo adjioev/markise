@@ -84,7 +84,8 @@ pub enum BlockKind {
         aligns: Vec<Align>,
     },
     BlockQuote {
-        alert: Option<AlertKind>,
+        /// What the first line declares ([`crate::callout`]).
+        callout: Option<crate::callout::Callout>,
     },
     List {
         ordered: bool,
