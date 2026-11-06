@@ -65,6 +65,7 @@ fn all_option_sets() -> Vec<ParseOptions> {
         latex_delimiters: false,
         code_math: false,
         alerts: false,
+        callouts: false,
         auto_links: false,
         block_html: false,
         emoji: false,

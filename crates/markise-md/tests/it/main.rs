@@ -6,6 +6,7 @@
 mod adversarial;
 mod api_fuzz;
 mod block_owner;
+mod callouts;
 mod code_fence;
 mod critic;
 mod critic_edit;

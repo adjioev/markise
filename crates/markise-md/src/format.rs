@@ -18,14 +18,14 @@ use std::any::Any;
 use std::ops::Range;
 
 use markise_doc::{
-    CalloutKind, CodeFenceView, ColumnAlign, CommandDescriptor, ContainerKind, DefaultKey, DocumentFormat,
-    EditBehavior, EditSummary, Effect, FlatContainer, FlatEvent, FlatLeaf, FormatDoc, FormatOptions, HeadingInfo,
-    HintOrigin, HintSet, InlineKind as NK, InlineNode, InlineSource, LeafKind, LeafView, LineEnding, ListMarker,
-    LiteralHint, ParamSchema, PatchSet, Plan, PlanError, PlanRequest, PlanStep, PlannerId, RichInline, Scope,
-    Selection, TableView, TypingPlan, UndoGroup, planners,
+    CodeFenceView, ColumnAlign, CommandDescriptor, ContainerKind, DefaultKey, DocumentFormat, EditBehavior,
+    EditSummary, Effect, FlatContainer, FlatEvent, FlatLeaf, FormatDoc, FormatOptions, HeadingInfo, HintOrigin,
+    HintSet, InlineKind as NK, InlineNode, InlineSource, LeafKind, LeafView, LineEnding, ListMarker, LiteralHint,
+    ParamSchema, PatchSet, Plan, PlanError, PlanRequest, PlanStep, PlannerId, RichInline, Scope, Selection, TableView,
+    TypingPlan, UndoGroup, planners,
 };
 
-use crate::block::{AlertKind, Align, Block, BlockKind};
+use crate::block::{Align, Block, BlockKind};
 use crate::inline::{Inline, InlineKind, decode_entity, parse_inlines, plain_text};
 use crate::options::ParseOptions;
 use crate::text::{Span, line_end};
@@ -739,8 +739,8 @@ impl FormatDoc for Document {
 
 pub(crate) fn container_kind(b: &Block) -> ContainerKind {
     match &b.kind {
-        BlockKind::BlockQuote { alert: None } => ContainerKind::Quote,
-        BlockKind::BlockQuote { alert: Some(k) } => ContainerKind::Callout(callout(*k)),
+        BlockKind::BlockQuote { callout: None } => ContainerKind::Quote,
+        BlockKind::BlockQuote { callout: Some(c) } => ContainerKind::Callout(c.kind()),
         BlockKind::List { ordered, .. } => ContainerKind::List { ordered: *ordered },
         BlockKind::ListItem { number, task, .. } => ContainerKind::ListItem {
             ordered: number.is_some(),
@@ -1359,8 +1359,8 @@ fn scan_tail(children: &[Block]) -> Tail {
 /// The neutral container of a container block (list item: its marker).
 fn flat_container(text: &str, b: &Block, origin: usize) -> FlatContainer {
     match &b.kind {
-        BlockKind::BlockQuote { alert } => FlatContainer::Quote {
-            callout: alert.map(callout),
+        BlockKind::BlockQuote { .. } => FlatContainer::Quote {
+            callout: crate::callout::view(text, b, origin),
         },
         BlockKind::List { ordered, tight, .. } => FlatContainer::List {
             ordered: *ordered,
@@ -1431,9 +1431,9 @@ fn flatten_child(
 fn flatten_block(text: &str, b: &Block, origin: usize, top: usize, sink: &mut dyn FnMut(FlatEvent<'_>)) {
     let abs = |s: Span| Span::new(s.start + origin, s.end + origin);
     match &b.kind {
-        BlockKind::BlockQuote { alert } => {
+        BlockKind::BlockQuote { .. } => {
             sink(FlatEvent::Open(FlatContainer::Quote {
-                callout: alert.map(callout),
+                callout: crate::callout::view(text, b, origin),
             }));
             if b.children.is_empty() {
                 // an empty quote (`> `): a caret anchor after the marker
@@ -1517,16 +1517,6 @@ fn empty_item_span(text: &str, item: &Block, origin: usize) -> Span {
     let e = item.span.end + origin;
     let le = line_end(text, s).0;
     Span::new(s, le.max(e))
-}
-
-fn callout(k: AlertKind) -> CalloutKind {
-    match k {
-        AlertKind::Note => CalloutKind::Note,
-        AlertKind::Tip => CalloutKind::Tip,
-        AlertKind::Important => CalloutKind::Important,
-        AlertKind::Warning => CalloutKind::Warning,
-        AlertKind::Caution => CalloutKind::Caution,
-    }
 }
 
 /// [`leaf_kind`] of a block with spans relative to `origin`.

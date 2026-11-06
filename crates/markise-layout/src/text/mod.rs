@@ -312,6 +312,8 @@ pub enum FragmentKind {
     CodeChunk(u32),
     /// Text run `n` between block-level inline images of a paragraph.
     Run(u32),
+    /// The written title of a callout's header.
+    Title,
     /// Generated text without source (alert titles, list numbers, code labels, placeholders).
     Label,
 }

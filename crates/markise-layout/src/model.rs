@@ -23,15 +23,18 @@ use std::sync::Arc;
 
 use markise_doc::chunked::{RelChunks, Relative};
 use markise_doc::{
-    CalloutKind, EditSummary, FlatContainer, FlatEvent, FlatLeaf, FormatDoc, LeafKind, ListMarker, Span,
+    CalloutAccent, CalloutView, EditSummary, FlatContainer, FlatEvent, FlatLeaf, FormatDoc, LeafKind, ListMarker, Span,
 };
 
 /// One enclosing container of a leaf item, outermost first.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Container {
     Quote {
-        /// A callout (GFM alert) instead of a plain quote.
-        callout: Option<CalloutKind>,
+        /// A callout instead of a plain quote: its colour.
+        callout: Option<CalloutAccent>,
+        /// On the callout's first leaf only: what its header shows. Spent afterwards, so the
+        /// other leaves' hashes do not depend on it.
+        head: Option<Arc<CalloutView>>,
         /// This is the quote's first leaf (its bar starts here; callouts draw their title).
         first: bool,
     },
@@ -1664,7 +1667,10 @@ fn spend_markers(containers: &mut [Container]) {
         match c {
             Container::ListItem { marker, .. } => *marker = None,
             Container::Footnote { label } => *label = None,
-            Container::Quote { first, .. } => *first = false,
+            Container::Quote { first, head, .. } => {
+                *first = false;
+                *head = None;
+            }
             Container::Card => {}
         }
     }
@@ -1746,7 +1752,11 @@ impl Flattener<'_> {
                     self.frames.push(Frame::Card);
                 }
                 FlatContainer::Quote { callout } => {
-                    self.containers.push(Container::Quote { callout, first: true });
+                    self.containers.push(Container::Quote {
+                        callout: callout.as_ref().map(|c| c.accent),
+                        head: callout,
+                        first: true,
+                    });
                     self.frames.push(Frame::Quote);
                 }
                 FlatContainer::List { ordered, tight } => {
@@ -1789,7 +1799,11 @@ impl Flattener<'_> {
                 }
                 // the container's first leaf lies before the region: decorations spent
                 FlatContainer::Quote { callout } => {
-                    self.containers.push(Container::Quote { callout, first: false });
+                    self.containers.push(Container::Quote {
+                        callout: callout.as_ref().map(|c| c.accent),
+                        head: None,
+                        first: false,
+                    });
                     self.frames.push(Frame::Quote);
                 }
                 FlatContainer::List { ordered, tight } => {
