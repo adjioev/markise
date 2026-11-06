@@ -9,6 +9,7 @@ use markise_doc::{DocPos, FormatDoc, HintSet, Patch, PatchSet, PlanStep, Selecti
 
 use super::block_move::{MoveRefused, lift};
 use super::block_place::{after_line, blank_line_at, blocks_of, line_end, separated};
+use super::section_edit::holds_more_than_metadata;
 use super::{EditError, EditorView, TxKind};
 
 const MOVE_LABEL: &str = "Move Section";
@@ -91,6 +92,12 @@ fn plan_past(text: &str, upper: &Part, lower: &Part, eol: &str) -> Option<Result
     }))
 }
 
+/// The section has nothing in it, or only metadata.
+fn is_hollow(doc: &dyn FormatDoc, index: usize) -> bool {
+    doc.section(index)
+        .is_some_and(|s| !holds_more_than_metadata(doc, s, s.end))
+}
+
 impl EditorView {
     /// The section holding the caret, by its place.
     pub fn section_at_caret(&self) -> usize {
@@ -139,6 +146,10 @@ impl EditorView {
         let (Some(a), Some(b)) = (part(doc, upper), part(doc, lower)) else {
             return Ok(false);
         };
+        // a site refuses such a section: it is for filling in or deleting, not for moving around
+        if is_hollow(doc, upper) || is_hollow(doc, lower) {
+            return Err(MoveRefused::WouldLeaveEmpty);
+        }
         let eol = doc.line_ending().as_str();
         let Some(planned) = plan_past(text, &a, &b, eol) else {
             return Ok(false);
