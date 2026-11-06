@@ -412,7 +412,7 @@ mod insert {
     }
 }
 
-mod moves {
+pub(crate) mod moves {
     use egui::{Modifiers, PointerButton, Pos2, pos2};
     use markise_engine::editor::command::Registry;
     use markise_engine::editor::keymap::{Keymap, Platform, reserved_chords};
@@ -473,7 +473,7 @@ mod moves {
 
     /// As a person does it: from inside the block to the handle over frames in which the pointer
     /// hovers, and a press there. The handle is there all the way. The caller goes on from the point.
-    fn pick_up(h: &mut H, inside: &str) -> Pos2 {
+    pub(crate) fn pick_up(h: &mut H, inside: &str) -> Pos2 {
         let body = opener_rect(h, inside);
         let from = pos2(body.left() + 40.0, body.center().y);
         h.hover_at(from);

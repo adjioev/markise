@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
+use markise_doc::FormatDoc;
 use markise_doc::resource::{has_scheme, is_absolute_like};
 use markise_export::{HtmlOptions, escape_html, render_body};
 use markise_md::{Document, ParseOptions};
@@ -432,24 +433,11 @@ fn images_in(html: &str) -> HashSet<String> {
     found
 }
 
-/// A document's language, from its front matter: what its blocks' pages say they are in. A look at
-/// the top of the text alone, so it costs nothing per keystroke.
-pub fn document_language(text: &str) -> String {
-    let mut lines = text.lines();
-    if lines.next().map(str::trim_end) != Some("---") {
-        return String::new();
-    }
-    for line in lines.take(64) {
-        let line = line.trim_end();
-        if line == "---" || line == "..." {
-            break;
-        }
-        if let Some(value) = line.strip_prefix("lang:") {
-            let value = value.trim().trim_matches(['"', '\'']);
-            let fine =
-                !value.is_empty() && value.len() <= 32 && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
-            return if fine { value.to_string() } else { String::new() };
-        }
-    }
-    String::new()
+/// A document's language, from its front matter: what its blocks' pages say they are in, and what
+/// its package's text is shown in. Empty when it names none, or names something that is no tag: this
+/// goes into a page as it stands. The document keeps the answer until an edit reaches its first block.
+pub fn document_language(doc: &dyn FormatDoc) -> String {
+    let value = doc.language().unwrap_or_default();
+    let fine = !value.is_empty() && value.len() <= 32 && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    if fine { value } else { String::new() }
 }

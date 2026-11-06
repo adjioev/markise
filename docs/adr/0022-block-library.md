@@ -27,7 +27,7 @@ package's to say.
 - **A query** takes every word of it, each anywhere in the preset's label, the block's label or description in
   any language the package has, its keywords and the block's name, ignoring case, and with `ё` as `е`. The
   rows stay in the package's order: a query narrows the list and does not rearrange it. Text shows through
-  the lookup of ADR 0019, as English, the app's only language so far.
+  the lookup of ADR 0019, in the document's language.
 
 ### `/`
 

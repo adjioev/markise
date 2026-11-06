@@ -49,7 +49,7 @@ const FILES: &[(&str, &str)] = &[
 pub(crate) const DOC: &str = "# Doc\n\nBefore.\n\n:::question\n\n**1.** A prompt?\n\n- [ ] A) one {#a1}\n- [x] B) two {#a2}\n\n> Explained at length.\n\n:::\n\n:::question many\n\nSeveral?\n\n- [x] First {#b1}\n- [ ] Second {#b2}\n- [x] Third {#b3}\n\n> Because of reasons.\n\n:::\n\n:::exercise\n\nWork this out.\n\n> The worked solution.\n\n:::\n\n:::hint\n\nA hint's task.\n\n> The hint's solution.\n\n:::\n\n:::remark\n\nA remark's task.\n\n> The remark's solution.\n\n:::\n\n:::tip\n\nJust a tip.\n\n:::\n\nAfter.\n";
 
 fn fixture(doc: &str) -> Fixture {
-    Fixture::with_files(doc, FILES)
+    Fixture::with_package(doc, FILES)
 }
 
 fn command(h: &mut H, id: &'static str) -> bool {

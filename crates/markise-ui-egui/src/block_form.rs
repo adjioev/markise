@@ -14,17 +14,18 @@ use egui_schema_form::{FileRequest, FormHost, SchemaForm, Style, Thumbnail};
 use markise_doc::{Affinity, DocPos};
 use markise_doc::{FormatDoc, NamedContainer};
 use markise_engine::block_fields::{BlockFields, FieldsError, decls_from_spec};
+use markise_engine::block_page::document_language;
 use markise_engine::editor::{EditorSession, MarkId};
 use markise_layout::block::{ImageState, Images};
 use markise_md::ParseOptions;
-use markise_package::{InstalledPackage, PackageIndex};
+use markise_package::{BlockEntry, InstalledPackage, PackageIndex};
 use schema_form_core::FormSpec;
 use serde_json::Value;
 
 use crate::images::TextureStore;
 
-/// Texts of a package have no other language to go by yet: the app's words are English.
-pub const LANGUAGE: &str = "en";
+/// A package's text for a document that names no language. The app's own words are English always.
+const DEFAULT_LANGUAGE: &str = "en";
 /// What undo calls a saved form.
 const UNDO_LABEL: &str = "Edit Block";
 const SAVE_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
@@ -84,6 +85,8 @@ pub struct OpenForm {
     marks: [MarkId; 2],
     name: String,
     args: String,
+    /// What the package's text in it is in.
+    language: String,
     title: String,
     /// The variant in words, or the arguments as they stand.
     note: String,
@@ -110,6 +113,28 @@ pub fn block_at(doc: &dyn FormatDoc, at: usize, index: &PackageIndex) -> Option<
         .find(|c| index.block(&c.name).is_some())
 }
 
+/// The language to show a package's text in for this document.
+pub fn package_language(doc: &dyn FormatDoc) -> String {
+    let language = document_language(doc);
+    if language.is_empty() {
+        DEFAULT_LANGUAGE.to_string()
+    } else {
+        language
+    }
+}
+
+/// The form's title and note in `language`: the block's label, and its variant in words or the
+/// arguments as they stand.
+fn heading(entry: &BlockEntry<'_>, name: &str, args: &str, language: &str) -> (String, String) {
+    let schema = entry.schema;
+    let title = schema.label.as_ref().map_or(name, |l| l.get(language)).to_string();
+    let named = !args.is_empty() && schema.variants().any(|v| v == args);
+    let variant_label = schema.variant_label(if named { args } else { "" }, language);
+    // with a field of their own the arguments need no note
+    let args_note = if schema.raw.get("argument").is_some() { "" } else { args };
+    (title, variant_label.unwrap_or(args_note).to_string())
+}
+
 fn clip(text: &str) -> String {
     let line = text.lines().next().unwrap_or("");
     let mut out: String = line.chars().take(MAX_EXTRA_CHARS).collect();
@@ -126,22 +151,14 @@ impl OpenForm {
         c: &NamedContainer,
         session: &mut EditorSession,
         index: &PackageIndex,
+        language: &str,
     ) -> Option<OpenForm> {
         let changes = session.revision().counter;
         let entry = index.block(&c.name)?;
         let schema = entry.schema;
         let args = c.args.to_string();
-        let label = schema.label.as_ref().map_or(c.name.as_ref(), |l| l.get(LANGUAGE));
         let variant = Some(args.as_str()).filter(|a| !a.is_empty() && schema.variants().any(|v| v == *a));
-        let variant_label = schema.variant_label(variant.unwrap_or(""), LANGUAGE);
-        let title = label.to_string();
-        // with a field of their own the arguments need no note
-        let args_note = if schema.raw.get("argument").is_some() {
-            String::new()
-        } else {
-            args.clone()
-        };
-        let note = variant_label.map_or(args_note, str::to_string);
+        let (title, note) = heading(&entry, &c.name, &args, language);
         // a name; a package gives it meaning with a file of that name, or leaves it a name
         let icon_name =
             (entry.view.and_then(|v| v.icon.as_deref())).or_else(|| entry.palette.and_then(|p| p.icon.as_deref()));
@@ -154,7 +171,7 @@ impl OpenForm {
         let range = block_range_at_container(c);
         let read = || -> Result<(BlockFields, FormSpec), String> {
             let input = index
-                .form_input(&c.name, LANGUAGE)
+                .form_input(&c.name, language)
                 .ok_or("the package has no schema for it")?
                 .map_err(|e| e.to_string())?;
             let spec = FormSpec::parse(&input.schema, &input.hints, variant).map_err(|e| e.to_string())?;
@@ -196,6 +213,7 @@ impl OpenForm {
             marks,
             name: c.name.to_string(),
             args,
+            language: language.to_string(),
             title,
             note,
             icon,
@@ -340,6 +358,25 @@ impl OpenForm {
             r.track = Track::Gone;
         }
         dirty
+    }
+
+    /// The document's language changed: the same draft, focus and all, in the package's words for it.
+    /// A composition goes on first. Costs a comparison unless the language changed.
+    pub fn set_language(&mut self, index: &PackageIndex, language: &str) {
+        if self.language == language || self.is_composing() {
+            return;
+        }
+        self.language = language.to_string();
+        let Some(entry) = index.block(&self.name) else { return };
+        (self.title, self.note) = heading(&entry, &self.name, &self.args, language);
+        let Content::Form(r) = &mut self.content else { return };
+        let variant = Some(self.args.as_str()).filter(|a| !a.is_empty() && entry.schema.variants().any(|v| v == *a));
+        // the same package, so the same fields: only its words differ
+        if let Some(Ok(input)) = index.form_input(&self.name, language)
+            && let Ok(spec) = FormSpec::parse(&input.schema, &input.hints, variant)
+        {
+            r.form.set_spec(spec);
+        }
     }
 
     /// The arguments in the document differ from what this form was built for, with no draft to

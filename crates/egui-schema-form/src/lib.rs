@@ -217,6 +217,13 @@ impl SchemaForm {
         self.errors = self.spec.validate(&self.values);
     }
 
+    /// Another spec for the same fields, such as their labels in another language: the values,
+    /// rows and focus stay.
+    pub fn set_spec(&mut self, spec: FormSpec) {
+        self.spec = spec;
+        self.errors = self.spec.validate(&self.values);
+    }
+
     /// Draws the form for a host without files.
     pub fn ui(&mut self, ui: &mut Ui) -> FormOutput {
         self.ui_with(ui, &mut NoHost)

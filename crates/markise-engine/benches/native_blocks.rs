@@ -1,6 +1,7 @@
 //! Native block views on a large document (ADR 0021), headless through the editing surface with
 //! the CPU test fonts (no painting): open, the first screen, scrolling and typing on the same
-//! corpus with no blocks, with many blocks and no package, and with the same blocks shown natively.
+//! corpus with no blocks, with many blocks and no package, and with the same blocks shown natively;
+//! and reading the document's language.
 //!
 //! Run: `cargo bench -p markise-engine --bench native_blocks` (`MARKISE_NATIVE_MB`, default 10).
 
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use markise_corpus::generate;
 use markise_doc::{DocPos, DocumentFormat, Params};
+use markise_engine::block_page::document_language;
 use markise_engine::block_view::PackageViews;
 use markise_engine::editor::EditorView;
 use markise_layout::block::NoImages;
@@ -187,12 +189,31 @@ fn run(label: &str, text: String, views: Option<Arc<PackageViews>>) {
     }
 }
 
+/// What an edit adds for a document with a package: the language read again, from the first block.
+fn language_read(base: &str) {
+    for (label, text) in [
+        ("no front matter", base.to_string()),
+        ("front matter", format!("---\ntitle: T\nlang: ru-RU\n---\n\n{base}")),
+    ] {
+        let doc = markise_md::parse(&text);
+        let reads = (0..200)
+            .map(|_| {
+                let t = Instant::now();
+                std::hint::black_box(document_language(&doc));
+                t.elapsed()
+            })
+            .collect();
+        report(&format!("language, {label}"), reads);
+    }
+}
+
 fn main() {
     let mb: usize = (std::env::var("MARKISE_NATIVE_MB").ok())
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
     let base = generate(mb << 20, 7);
     let blocks = with_blocks(&base, 3);
+    language_read(&base);
     run("no blocks, no package", base.clone(), None);
     run("no blocks, a package", base, Some(package()));
     run("many blocks, no package", blocks.clone(), None);
