@@ -54,6 +54,22 @@ fn bench(c: &mut Criterion) {
             b.iter(|| v.toggle_expanded(0))
         });
     }
+    // ADR 0025: closed callouts cost no shaping per frame, and a toggle is like a disclosure's.
+    for count in [1_000, 10_000] {
+        let mut src = String::new();
+        for i in 0..count {
+            src.push_str(&format!("> [!warning]- Title {i}\n> Body {i}.\n>\n> More.\n\n"));
+        }
+        let shown = testing::Shown::new(std::sync::Arc::new(markise_md::parse(&src)));
+        let mut v = shown.view(Theme::light(), 700.0, 1.0);
+        let mut fonts = testing::fonts();
+        let mut sh = fonts.with_pixels_per_point(1.0);
+        v.frame(800.0, 400.0, &mut sh, &NoImages);
+        g.bench_function(format!("closed-callouts-frame-{count}"), |b| {
+            b.iter(|| v.frame(800.0, 400.0, &mut sh, &NoImages).len())
+        });
+        g.bench_function(format!("callout-toggle-{count}"), |b| b.iter(|| v.toggle_expanded(0)));
+    }
     {
         use epaint::text::{FontData, FontDefinitions, Fonts};
         use markise_layout::block::{FontSet, RoleFaces, register_families};

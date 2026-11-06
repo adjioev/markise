@@ -1476,7 +1476,14 @@ impl Flow<'_> {
             }
             ExBlock::Alert { kind, blocks } => {
                 let col = t.alert[alert_index(*kind)];
-                self.bar_block(col, Rgba::TRANSPARENT, Some((*kind, col)), blocks, ctx)?;
+                let title = [ExInline::Text(alert_title(*kind).to_string())];
+                self.bar_block(col, Rgba::TRANSPARENT, Some((&title, col)), blocks, ctx)?;
+                self.space(gap);
+            }
+            ExBlock::Callout { ty, title, blocks, .. } => {
+                // always open: a page has nothing to click
+                let col = accent_rgba(t, ty.accent());
+                self.bar_block(col, Rgba::TRANSPARENT, Some((title, col)), blocks, ctx)?;
                 self.space(gap);
             }
             ExBlock::List {
@@ -1632,7 +1639,7 @@ impl Flow<'_> {
         &mut self,
         bar: Rgba,
         bg: Rgba,
-        alert: Option<(AlertKind, Rgba)>,
+        alert: Option<(&[ExInline], Rgba)>,
         inner: &[ExBlock],
         ctx: Ctx,
     ) -> Result<(), Cancelled> {
@@ -1648,13 +1655,13 @@ impl Flow<'_> {
         }
         let kind = if alert.is_some() { SKind::Div } else { SKind::BlockQuote };
         let r = self.with_node(kind, |f| {
-            if let Some((k, col)) = alert {
+            if let Some((title, col)) = alert {
                 let c = Ctx {
                     color: col,
                     bold: true,
                     ..ctx
                 };
-                f.paragraph(c, &[ExInline::Text(alert_title(k).to_string())], SKind::P)?;
+                f.paragraph(c, title, SKind::P)?;
                 f.space(f.u(t.block_spacing) * 0.4);
             }
             f.blocks(inner, ctx, false)
@@ -2277,6 +2284,19 @@ fn only_space(v: &[ExInline]) -> bool {
         ExInline::SoftBreak | ExInline::HardBreak | ExInline::RawHtml(_) => true,
         _ => false,
     })
+}
+
+/// The theme colour of a callout's accent (as in `markise-layout`).
+fn accent_rgba(t: &Theme, a: markise_doc::CalloutAccent) -> Rgba {
+    use markise_doc::CalloutAccent as A;
+    match a {
+        A::Note => t.alert[0],
+        A::Tip => t.alert[1],
+        A::Important => t.alert[2],
+        A::Warning => t.alert[3],
+        A::Caution => t.alert[4],
+        A::Quote => t.quote_bar,
+    }
 }
 
 fn alert_index(k: AlertKind) -> usize {

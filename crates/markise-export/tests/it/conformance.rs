@@ -107,6 +107,7 @@ fn conformance_options(ext: Option<&str>) -> ParseOptions {
         latex_delimiters: false,
         code_math: false,
         alerts: false,
+        callouts: false,
         emoji: false,
         auto_links: ext == Some("autolink"),
         strict_number_start: true,
