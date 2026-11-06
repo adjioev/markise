@@ -20,6 +20,13 @@ whether review comments are kept (see
 
 From the command line, `markise-cli html FILE.md -o FILE.html` writes the same kind of HTML.
 
+## Callouts
+
+[Callouts](editing.md#callouts) export with their title and colour. In HTML a foldable one is a
+`<details>` element, closed or open as written. PDF and PNG show every callout open, without its
+icon. Pandoc formats get a `Div` with the classes `callout` and the type, and what becomes of it
+depends on the format.
+
 ## PDF page setup
 
 The PDF page is A4 with 18 mm top and bottom and 16 mm side margins unless the document's front
