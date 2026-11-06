@@ -51,7 +51,7 @@ pub(crate) fn is_section_key(s: &str) -> bool {
 }
 
 /// The grammar of a metadata value, which is literal: one line, not empty, with nothing around it.
-fn is_section_value(s: &str) -> bool {
+pub fn is_section_value(s: &str) -> bool {
     !s.is_empty() && s.trim() == s && s.chars().count() <= MAX_VALUE_CHARS && !s.chars().any(char::is_control)
 }
 

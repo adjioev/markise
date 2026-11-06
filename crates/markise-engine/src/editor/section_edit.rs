@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use markise_doc::{DocPos, FormatDoc, HintSet, PatchSet, PlanStep, Selection, Span};
+use markise_doc::{DocPos, FormatDoc, HintSet, PatchSet, PlanStep, SectionAt, Selection, Span};
 use markise_md::SECTION_METADATA;
 
 use super::block_place::{InsertRefused, after_line, blank_line_at, blocks_of, line_for_block, separated};
@@ -28,13 +28,25 @@ pub fn one_line(title: &str) -> String {
     title.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Whether the section holding `line` has anything before it: what a boundary there would end. A section
-/// with nothing in it is what a site refuses, so that one takes the heading with no boundary.
+fn blank(t: &str) -> bool {
+    t.chars().all(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
+}
+
+/// Whether the section `s` of the document has anything before `to` but blank lines and its metadata. A site
+/// refuses a section with nothing in it or with only metadata.
+pub(super) fn holds_more_than_metadata(doc: &dyn FormatDoc, s: SectionAt, to: usize) -> bool {
+    let text = doc.text();
+    let from = (doc.section_metadata(s.index))
+        .filter(|m| m.closer.end <= to)
+        .map_or(s.start, |m| m.closer.end);
+    from < to && !blank(&text[from..to])
+}
+
+/// Whether the section that `line` ends has anything to end: what a boundary there would leave behind.
 fn has_content_before(doc: &dyn FormatDoc, line: usize) -> bool {
-    // what `line` ends: on a boundary's own line that is the section before it
+    // on a boundary's own line that is the section before it
     let s = doc.section_at(line.saturating_sub(1));
-    let blank = |t: &str| t.chars().all(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
-    s.start < line && !blank(&doc.text()[s.start..line])
+    holds_more_than_metadata(doc, s, line)
 }
 
 /// What stands after `line`, blank lines passed over: whether anything does and whether a boundary is next.
@@ -88,6 +100,20 @@ impl EditorView {
         let leading = has_content_before(doc, line);
         let (follows, boundary_next) = after_it(doc, line);
         let trailing = !leading && follows && !boundary_next;
+        let holding = doc.section_at(line.saturating_sub(1));
+        // metadata of its own in a section that has some already: a second block has no place there, and a
+        // boundary would leave that one as it is
+        let second_metadata = !leading && !new.metadata.is_empty() && doc.section_metadata(holding.index).is_some();
+        // a boundary below it would leave what follows with only metadata
+        let hollow_below = trailing
+            && (doc.section_metadata(holding.index))
+                .is_some_and(|m| m.opener.start >= line && blank(&doc.text()[m.closer.end..holding.end]));
+        if second_metadata || hollow_below {
+            if in_source {
+                self.source_selection_from_session();
+            }
+            return Err(InsertRefused::WouldLeaveEmpty);
+        }
 
         let mut body = String::new();
         if leading {
