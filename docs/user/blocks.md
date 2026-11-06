@@ -157,8 +157,8 @@ document's level, never inside a block or a list, as one undo step, and puts the
 ## Title {#id}
 ```
 
-With nothing before it, at the top of the document or in a section that is still empty, no `---` is written above it, as that would make a section with nothing in
-it. If something follows, the `---` goes after the title instead, and what follows stays a section of its own.
+With nothing before it, at the top of the document or in a section that is still empty or has only its metadata, no `---` is written above it, as that would make a section with nothing in
+it. If something follows, the `---` goes after the title instead, and what follows stays a section of its own. What would leave a section with only metadata is refused with a message, as a site refuses such a section.
 
 ## Images
 
