@@ -39,6 +39,20 @@ pub struct NativeView {
     pub label: Box<str>,
     /// One answer can be marked: answers draw as radio buttons, not check boxes.
     pub single_answer: bool,
+    /// A tinted ground, a frame or both, by its kind. `false`: a thin bar and nothing else.
+    pub fill: bool,
+    /// The first row with [`Self::label`]. `false`: none, unless a warning needs a row; the label
+    /// is then only for accessibility.
+    pub label_row: bool,
+}
+
+impl NativeView {
+    /// `accent: "none"`: neutral colours and thin lines.
+    pub fn neutral(&self) -> bool {
+        self.accent
+            .as_deref()
+            .is_some_and(|a| a.eq_ignore_ascii_case(NO_ACCENT))
+    }
 }
 
 /// What a part of a block is to its view.
@@ -134,6 +148,10 @@ pub trait BlockViews: Send + Sync {
     fn has_schema(&self, name: &str) -> bool {
         self.has_view(name)
     }
+    /// Whether the view of blocks of this name has its first row (height estimates: no source is read).
+    fn label_row(&self, _name: &str) -> bool {
+        true
+    }
     /// Whether the picture of this icon can be drawn. Must not block: a host that loads it off
     /// the UI thread answers `false` until then, and asks for a frame when it comes. Called for
     /// every opener on screen every frame. No such picture stays `false`, with no error.
@@ -187,8 +205,14 @@ const ACCENTS: &[(&str, [u8; 3], [u8; 3])] = &[
     ("pink", [0xbe, 0x18, 0x5d], [0xf4, 0x72, 0xb6]),
 ];
 
+/// The accent that is no colour: labels and marks in the theme's quiet text, lines in its rule.
+pub const NO_ACCENT: &str = "none";
+
 /// The colour of an accent name in this theme.
 pub fn accent_color(name: Option<&str>, t: &Theme) -> Color32 {
+    if name.is_some_and(|n| n.eq_ignore_ascii_case(NO_ACCENT)) {
+        return color(t.meta_block.text);
+    }
     let found = name.and_then(|n| ACCENTS.iter().find(|(k, ..)| k.eq_ignore_ascii_case(n)));
     match found {
         Some((_, light, dark)) => {
@@ -205,6 +229,26 @@ pub(crate) fn tint(c: Color32, t: &Theme) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
 }
 
+/// A view's lines: its accent, or the theme's rule with no accent.
+pub(crate) fn edge_color(v: &NativeView, t: &Theme) -> Color32 {
+    if v.neutral() {
+        color(t.rule)
+    } else {
+        accent_color(v.accent.as_deref(), t)
+    }
+}
+
+/// A view's ground over the page. With no accent it is a very light veil of the text's colour.
+pub(crate) fn ground(v: &NativeView, t: &Theme) -> Color32 {
+    if v.neutral() {
+        let c = color(t.text);
+        let a = if t.dark { 14 } else { 9 };
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+    } else {
+        tint(accent_color(v.accent.as_deref(), t), t)
+    }
+}
+
 /// A title's size in a native view: a heading of any level, since a level is how the file says
 /// what the block's title is, not how large it is here.
 pub(crate) fn title_size(t: &Theme) -> f32 {
@@ -216,10 +260,10 @@ pub(crate) fn title_line(t: &Theme) -> f32 {
     title_size(t) * 1.3
 }
 
-/// How a title draws in a native view: bold body text in the view's accent for a card, the text
-/// colour otherwise. Theme decoration of headings belongs to the document's own headings.
+/// How a title draws in a native view: bold body text in the view's accent for a card that shows
+/// one, the text colour otherwise. Theme decoration of headings belongs to the document's own headings.
 pub(crate) fn title_style(v: &NativeView, t: &Theme) -> (markise_theme::HeadingStyle, markise_theme::HeadingDecor) {
-    let ink = if v.kind == NativeKind::Card {
+    let ink = if v.kind == NativeKind::Card && v.fill && !v.neutral() {
         let [r, g, b, a] = accent_color(v.accent.as_deref(), t).to_srgba_unmultiplied();
         markise_theme::Rgba([r, g, b, a])
     } else {

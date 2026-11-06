@@ -240,6 +240,40 @@ fn view_problems_are_named() {
 }
 
 #[test]
+fn a_view_can_be_quiet_and_says_so_clearly_when_it_cannot() {
+    let quiet = with(
+        "editor/views.json",
+        r#"{"tip":{"kind":"callout","accent":"none","fill":false,"label":false},"poll":{"kind":"choices"}}"#,
+    );
+    let index = PackageIndex::from_files(&quiet).unwrap();
+    let tip = index.block("tip").unwrap().view.unwrap();
+    assert!(!tip.fill && !tip.label);
+    assert_eq!(tip.accent.as_deref(), Some("none"));
+    assert!(tip.extra.is_empty(), "known keys are not kept as others");
+    let poll = index.block("poll").unwrap().view.unwrap();
+    assert!(poll.fill && poll.label, "as today without the keys");
+
+    for (views, says) in [
+        (
+            r#"{"tip":{"kind":"callout","fill":"no"}}"#,
+            r#""tip": "fill" must be true or false"#,
+        ),
+        (
+            r#"{"tip":{"kind":"callout","fill":null}}"#,
+            r#""tip": "fill" must be true or false"#,
+        ),
+        (
+            r#"{"tip":{"kind":"callout","label":0}}"#,
+            r#""tip": "label" must be true or false"#,
+        ),
+    ] {
+        let text = refusal(&with("editor/views.json", views));
+        assert!(text.contains(says), "{text}");
+        assert!(text.contains("editor/views.json"), "{text}");
+    }
+}
+
+#[test]
 fn every_generic_view_kind_is_accepted() {
     for (name, kind) in [
         ("callout", ViewKind::Callout),

@@ -1057,6 +1057,13 @@ impl DocViewer {
         // ---- paint
         images.begin_frame();
         let mut requests = Vec::new();
+        // a native block's ground and bar: one rectangle for all of its items, below all of them
+        let bands = visible
+            .iter()
+            .map(|v| (pos2(left, rect.top() + v.y), v.layout.bands.as_slice()));
+        for (r, fill) in markise_layout::block::merged_bands(bands) {
+            painter.rect_filled(r, 0.0, fill);
+        }
         for v in &visible {
             let origin = pos2(left, rect.top() + v.y);
             paint_layout(

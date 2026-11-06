@@ -107,6 +107,10 @@ impl View {
                 h += n as f32 * (crate::native::title_line(t) - plain);
             }
         }
+        // an opener with no label row has only its padding
+        for (_, n) in s.card_names.iter().filter(|(name, _)| self.native_quiet_name(name)) {
+            h -= *n as f32 * (crate::block::card_opener_height(t) - crate::block::quiet_opener_height(t));
+        }
         // a TOC lists the whole outline, one line per entry
         h += s.tocs as f32 * self.model.outline.len().max(1) as f32 * line;
         h += s.para_lines_at(per_line) * line;

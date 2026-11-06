@@ -95,6 +95,8 @@ impl PackageViews {
                 icon: icon.map(|n| format!("assets/{n}.svg").into()),
                 label: label.into(),
                 single_answer,
+                fill: config.fill,
+                label_row: config.label,
             })
         });
         Some(Variant { spec, decls, view })
@@ -176,6 +178,10 @@ impl BlockViews for PackageViews {
 
     fn has_schema(&self, name: &str) -> bool {
         self.index.block(name).is_some()
+    }
+
+    fn label_row(&self, name: &str) -> bool {
+        (self.index.block(name).and_then(|e| e.view)).is_none_or(|c| c.label)
     }
 
     fn look(&self, name: &str, args: &str, source: &str) -> BlockLook {

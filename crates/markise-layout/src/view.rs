@@ -967,6 +967,9 @@ impl View {
                 _ => t.block_spacing + self.model.outline.len().max(1) as f32 * line,
             },
             ItemKind::Rule | ItemKind::Empty => t.block_spacing + line,
+            ItemKind::ContainerMarker { close: false } if self.native_quiet_opener(i) => {
+                t.block_spacing + crate::block::quiet_opener_height(t)
+            }
             ItemKind::ContainerMarker { close: false } => t.block_spacing + crate::block::card_opener_height(t),
             ItemKind::ContainerMarker { close: true } => crate::block::card_padding(t),
             ItemKind::Paragraph => t.block_spacing + wrapped(it.est_chars, it.est_lines) * line,

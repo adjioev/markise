@@ -373,6 +373,19 @@ impl View {
             && (self.doc.named_containers_at(self.model.item_start(i)).pop()).is_some_and(|c| source.has_view(&c.name))
     }
 
+    /// The opener of item `i` has no label row, as far as its block's name can tell: a block with a
+    /// warning has one after all, and corrects this when it is laid out.
+    pub(super) fn native_quiet_opener(&self, i: usize) -> bool {
+        (self.doc.named_containers_at(self.model.item_start(i)).pop()).is_some_and(|c| self.native_quiet_name(&c.name))
+    }
+
+    /// Blocks of this name show natively with no label row, as far as the name can tell.
+    pub(super) fn native_quiet_name(&self, name: &str) -> bool {
+        self.native
+            .active()
+            .is_some_and(|s| s.has_view(name) && !s.label_row(name))
+    }
+
     /// Whether blocks of this name show natively, as far as the name can tell.
     pub(super) fn native_name(&self, name: &str) -> bool {
         self.native.active().is_some_and(|s| s.has_view(name))
