@@ -1,6 +1,6 @@
 //! From a block's schema to the input of a form (ADR 0020): a package declares `fields: [{name,
 //! type, ...}]`, and `schema-form-core` reads JSON Schema plus hints. Here is the one place that
-//! knows both. The result is plain JSON, so this crate needs no form; `x-markdown` in the hints
+//! knows both. The result is plain JSON, so this crate draws no form; `x-markdown` in the hints
 //! tells the field model where each field lives, so the field declarations come from the same
 //! place and cannot disagree with the form.
 //!
@@ -19,7 +19,7 @@ use crate::schema::{BlockSchema, FieldKind, FieldSchema};
 pub const ARGUMENT_KEY: &str = ":argument";
 
 /// The version of the hints this writes, as `schema-form-core` reads them.
-const HINTS_VERSION: u64 = 2;
+const HINTS_VERSION: u64 = 3;
 
 /// What a preset's `widget` says when it asks for a choice drawn as icon buttons.
 const ICON_CHOICES: &str = "icon-choices";
@@ -318,7 +318,16 @@ impl BlockSchema {
         let mut fields = Map::new();
         let mut variants = Map::new();
         if let Some(argument) = self.raw.get("argument").and_then(Value::as_object) {
-            properties.insert(ARGUMENT_KEY.into(), json!({"type": "string"}));
+            // in a schema with variants the arguments name one, and that is their check
+            let checked = self.variants().next().is_none();
+            let mut schema = json!({"type": "string"});
+            if checked {
+                required.push(json!(ARGUMENT_KEY));
+                if let Some(pattern) = argument.get("pattern") {
+                    schema["pattern"] = pattern.clone();
+                }
+            }
+            properties.insert(ARGUMENT_KEY.into(), schema);
             fields.insert(ARGUMENT_KEY.into(), Value::Object(argument_hint(argument, language)));
             order.push(json!(ARGUMENT_KEY));
         }

@@ -8,6 +8,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# the bounds of an argument's `pattern`: the same as where it is checked
+schema-form-core.workspace = true
 # resource::read_regular (hardened file reads)
 markise-doc.workspace = true
 serde_json.workspace = true
@@ -20,8 +22,6 @@ unicode-normalization.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
-# what the converter writes must parse (tests/it/form.rs)
-schema-form-core.workspace = true
 flate2.workspace = true
 tempfile.workspace = true
 

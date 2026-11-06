@@ -152,6 +152,14 @@ If the block has `variants` and its arguments name none of them, it is outside i
 a field for it, first, called by the argument's `label` (a text), or its `name` made readable, or
 `Argument`, with its `help` (a text) under it. Saving the form changes only those bytes of the opener.
 
+A block whose argument is missing, or does not match the `pattern` the schema gives, gets a `⚠` and counts as
+not filled in, so it keeps its native view and can be saved. `pattern` is a regular expression searched for in
+the argument, so anchor it with `^` and `$`. A pattern of more than 1 KiB, one that would compile too large, or
+one using look-around or backreferences refuses the package when it is validated, saying which. An argument of
+over 4 KiB does not match. If the schema also has `variants`, the arguments name a variant and this check does
+not apply. A preset's sample argument is checked like any other: a sample that matches shows no `⚠`, so an
+author may not notice it was left in.
+
 Every field has a `name` and a `type`, and may have `label`, `help` and, for a repeating field,
 `add_label`. A package adds no types of its own.
 
