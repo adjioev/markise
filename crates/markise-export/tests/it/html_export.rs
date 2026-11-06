@@ -178,3 +178,49 @@ fn headings_inside_a_directive_keep_their_anchors_and_toc_entries() {
     assert!(h.contains("#inside"), "{h}");
     assert!(h.contains("id='inside'") || h.contains("id=\"inside\""), "{h}");
 }
+
+/// Extended callouts (ADR 0025): `<details>` for foldable ones, a `<div>` otherwise; a title with
+/// inline Markdown; classes for the type and the theme's colour.
+#[test]
+fn callouts_in_html() {
+    let h = body("> [!warning] A **bold** title\n> Body.\n");
+    assert!(
+        h.contains("<div class='md-alert md-alert-warning md-callout md-callout-warning warning'>"),
+        "{h}"
+    );
+    assert!(
+        h.contains("<p class='md-callout-title md-alert-text md-alert-text-warning'>A <strong>bold</strong> title</p>"),
+        "{h}"
+    );
+    assert!(h.contains("<p>Body.</p>\n</div>"), "{h}");
+    assert!(!h.contains("[!warning]"), "{h}");
+
+    let h = body("> [!success]- T\n> Hidden.\n");
+    assert!(
+        h.contains("<details class='md-alert md-alert-tip md-callout md-callout-success success'>\n<summary"),
+        "{h}"
+    );
+    assert!(h.contains("<p>Hidden.</p>\n</details>"), "{h}");
+    let h = body("> [!info]+\n> Open.\n");
+    assert!(h.contains("md-callout-info info' open>\n<summary"), "{h}");
+    assert!(h.contains(">Info</summary>"), "{h}");
+
+    let h = body("> [!my-kind]\n> x\n");
+    assert!(h.contains("md-callout-note note' data-callout='my-kind'>"), "{h}");
+    assert!(h.contains(">My-kind</p>"), "{h}");
+
+    // nested, and hostile titles stay escaped
+    let h = body("> [!info] Outer\n>\n> > [!bug]- <script>alert(1)</script>\n> > x\n");
+    assert!(h.contains("md-callout-bug"), "{h}");
+    assert!(!h.contains("<script>alert"), "{h}");
+}
+
+/// The bare form keeps every byte of its old output.
+#[test]
+fn alerts_keep_their_html() {
+    let h = body("> [!NOTE]\n> x\n");
+    assert!(
+        h.contains("<div class='md-alert md-alert-note note'>\n<p><span class='md-alert-text-container'><span class='md-alert-text md-alert-text-note'>Note</span></span></p>\n<p>x</p>\n</div>\n"),
+        "{h}"
+    );
+}

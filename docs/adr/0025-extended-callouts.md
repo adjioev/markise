@@ -71,3 +71,19 @@ can be typed.
 - A `[!name]` that is also a defined reference label reads as a callout, not a link.
 - Pictures in a title are not drawn.
 - PDF and PNG exports do not draw the icon.
+
+## Exports
+
+An extended callout is `ExBlock::Callout` in the export model, with its title resolved to inlines.
+Bare alerts keep `ExBlock::Alert` and every byte of their output.
+
+| Target | Foldable | Not foldable |
+|---|---|---|
+| HTML | `<details class="…"><summary>title</summary>…</details>`, `open` for `+` | `<div class="…"><p>title</p>…</div>` |
+| PDF, PNG | open, bar in the accent colour, bold title, no icon | the same |
+| Pandoc | `Div` classes `callout` and the type, attributes `callout` (the name) and `fold`, a `title` `Div` first | the same without `fold` |
+
+HTML classes are `md-alert md-alert-<accent> md-callout md-callout-<type> <type>`, and the title has
+`md-alert-text-<accent>`. They reuse the theme's alert rules, so no CSS is added and a page without
+callouts is byte-identical to before. A `quote` type has no alert colour there and uses the note
+colour; an unknown name has `data-callout` with its name, escaped.

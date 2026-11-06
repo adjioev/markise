@@ -286,6 +286,34 @@ pub fn default_title(name: &str) -> String {
     }
 }
 
+/// What an export writes for a callout that is not an alert: its class, the name as written,
+/// the title and the folding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportHead<'a> {
+    pub ty: CalloutType,
+    pub fold: Fold,
+    /// The name as written.
+    pub name: &'a str,
+    /// The written title, or `None` for [`ExportHead::label`].
+    pub title: Option<&'a str>,
+    /// The default title.
+    pub label: String,
+}
+
+/// The export head of an extended callout whose first line (the quote's first paragraph's) is
+/// `first_line`. `None` for a plain quote and for an alert, which keeps its own output.
+pub fn export_head<'a>(callout: Option<Callout>, first_line: &'a str) -> Option<ExportHead<'a>> {
+    let c = callout.filter(|c| c.alert.is_none())?;
+    let tag = parse_tag(first_line)?;
+    Some(ExportHead {
+        ty: c.ty,
+        fold: c.fold,
+        name: tag.name,
+        title: tag.title.map(|r| &first_line[r]),
+        label: default_title(tag.name),
+    })
+}
+
 /// The neutral view of quote `b` (spans relative to `origin`), for layout.
 pub(crate) fn view(text: &str, b: &Block, origin: usize) -> Option<Arc<CalloutView>> {
     let BlockKind::BlockQuote { callout: Some(c) } = &b.kind else {
