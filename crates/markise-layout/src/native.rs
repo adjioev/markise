@@ -39,6 +39,20 @@ pub struct NativeView {
     pub label: Box<str>,
     /// One answer can be marked: answers draw as radio buttons, not check boxes.
     pub single_answer: bool,
+    /// A tinted ground, a frame or both, by its kind. `false`: a thin bar and nothing else.
+    pub fill: bool,
+    /// The first row with [`Self::label`]. `false`: none, unless a warning needs a row; the label
+    /// is then only for accessibility.
+    pub label_row: bool,
+}
+
+impl NativeView {
+    /// `accent: "none"`: neutral colours and thin lines.
+    pub fn neutral(&self) -> bool {
+        self.accent
+            .as_deref()
+            .is_some_and(|a| a.eq_ignore_ascii_case(NO_ACCENT))
+    }
 }
 
 /// What a part of a block is to its view.
@@ -58,6 +72,66 @@ pub struct NativeBlock {
     pub view: Arc<NativeView>,
     /// The parts by source range relative to the block's start, ascending and disjoint.
     pub parts: Vec<(Range<u32>, NativeRole)>,
+    /// What Practice needs of it, when its view can be practised (ADR 0024).
+    pub practice: Option<PracticeParts>,
+}
+
+/// One answer of a block that can be practised.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PracticeAnswer {
+    /// Its text's source range, relative to the block's start.
+    pub range: Range<u32>,
+    pub correct: bool,
+    /// Its text, for a screen reader. Not its mark.
+    pub text: Box<str>,
+}
+
+/// What Practice shows and hides of a block. Only ever read by what draws Practice.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PracticeParts {
+    /// The block has answers to check, by its schema. If not, Practice only hides and reveals.
+    pub has_choices: bool,
+    pub answers: Vec<PracticeAnswer>,
+    /// What stays hidden until the answers are checked, relative to the block's start.
+    pub reveal: Vec<Range<u32>>,
+}
+
+impl PracticeParts {
+    /// There is something to practise: answers with a mark to check them against, or with no answers
+    /// to give, something to reveal.
+    pub fn is_ready(&self) -> bool {
+        if self.has_choices {
+            self.answers.iter().any(|a| a.correct)
+        } else {
+            !self.reveal.is_empty()
+        }
+    }
+
+    pub fn answer_at(&self, rel: u32) -> Option<usize> {
+        (self.answers.iter()).position(|a| a.range.contains(&rel) || a.range.end == rel)
+    }
+
+    pub fn reveals(&self, rel: u32) -> bool {
+        self.reveal.iter().any(|r| r.contains(&rel))
+    }
+}
+
+/// What the layout of an item of a practised block needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PracticeItem {
+    /// An answer's mark shows `selected` and not what the file says. `correct` is known once checked.
+    Answer {
+        selected: bool,
+        correct: Option<bool>,
+    },
+    /// The block's closer, which holds the row of its buttons.
+    Row,
+    Other,
+}
+
+/// The height of the row of a practised block's buttons: one line, as a paragraph's.
+pub(crate) fn practice_row_height(t: &Theme) -> f32 {
+    t.line_px()
 }
 
 impl NativeBlock {
@@ -130,9 +204,25 @@ pub trait BlockViews: Send + Sync {
     fn id(&self) -> u64;
     /// Whether blocks of this name have a view at all (height estimates: no source is read).
     fn has_view(&self, name: &str) -> bool;
+    /// Whether blocks of this name can be practised (ADR 0024), from the name alone. Implies a view.
+    fn has_practice(&self, _name: &str) -> bool {
+        false
+    }
+    /// Whether blocks of any name can be practised. `false` costs a comparison per item in Read.
+    fn any_practice(&self) -> bool {
+        false
+    }
+    /// Whether Practice hides the quotes of blocks of this name (page estimates: no source is read).
+    fn practice_hides_quotes(&self, _name: &str) -> bool {
+        false
+    }
     /// Whether blocks of this name can be judged at all; the others are not read.
     fn has_schema(&self, name: &str) -> bool {
         self.has_view(name)
+    }
+    /// Whether the view of blocks of this name has its first row (height estimates: no source is read).
+    fn label_row(&self, _name: &str) -> bool {
+        true
     }
     /// Whether the picture of this icon can be drawn. Must not block: a host that loads it off
     /// the UI thread answers `false` until then, and asks for a frame when it comes. Called for
@@ -165,6 +255,8 @@ pub struct NativeParams<'a> {
     pub role: Option<NativeRole>,
     /// The view's icon can be drawn (the block's opener only).
     pub icon_ready: bool,
+    /// The block is being practised.
+    pub practice: Option<PracticeItem>,
 }
 
 /// The generic colour names a package can use, light then dark: a name means the same hue in every
@@ -187,8 +279,14 @@ const ACCENTS: &[(&str, [u8; 3], [u8; 3])] = &[
     ("pink", [0xbe, 0x18, 0x5d], [0xf4, 0x72, 0xb6]),
 ];
 
+/// The accent that is no colour: labels and marks in the theme's quiet text, lines in its rule.
+pub const NO_ACCENT: &str = "none";
+
 /// The colour of an accent name in this theme.
 pub fn accent_color(name: Option<&str>, t: &Theme) -> Color32 {
+    if name.is_some_and(|n| n.eq_ignore_ascii_case(NO_ACCENT)) {
+        return color(t.meta_block.text);
+    }
     let found = name.and_then(|n| ACCENTS.iter().find(|(k, ..)| k.eq_ignore_ascii_case(n)));
     match found {
         Some((_, light, dark)) => {
@@ -205,6 +303,26 @@ pub(crate) fn tint(c: Color32, t: &Theme) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
 }
 
+/// A view's lines: its accent, or the theme's rule with no accent.
+pub(crate) fn edge_color(v: &NativeView, t: &Theme) -> Color32 {
+    if v.neutral() {
+        color(t.rule)
+    } else {
+        accent_color(v.accent.as_deref(), t)
+    }
+}
+
+/// A view's ground over the page. With no accent it is a very light veil of the text's colour.
+pub(crate) fn ground(v: &NativeView, t: &Theme) -> Color32 {
+    if v.neutral() {
+        let c = color(t.text);
+        let a = if t.dark { 14 } else { 9 };
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+    } else {
+        tint(accent_color(v.accent.as_deref(), t), t)
+    }
+}
+
 /// A title's size in a native view: a heading of any level, since a level is how the file says
 /// what the block's title is, not how large it is here.
 pub(crate) fn title_size(t: &Theme) -> f32 {
@@ -216,10 +334,10 @@ pub(crate) fn title_line(t: &Theme) -> f32 {
     title_size(t) * 1.3
 }
 
-/// How a title draws in a native view: bold body text in the view's accent for a card, the text
-/// colour otherwise. Theme decoration of headings belongs to the document's own headings.
+/// How a title draws in a native view: bold body text in the view's accent for a card that shows
+/// one, the text colour otherwise. Theme decoration of headings belongs to the document's own headings.
 pub(crate) fn title_style(v: &NativeView, t: &Theme) -> (markise_theme::HeadingStyle, markise_theme::HeadingDecor) {
-    let ink = if v.kind == NativeKind::Card {
+    let ink = if v.kind == NativeKind::Card && v.fill && !v.neutral() {
         let [r, g, b, a] = accent_color(v.accent.as_deref(), t).to_srgba_unmultiplied();
         markise_theme::Rgba([r, g, b, a])
     } else {

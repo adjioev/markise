@@ -295,6 +295,8 @@ pub struct OutlineEntry {
     pub item: usize,
     /// Anchor key (base slug reported by the format, lower-cased).
     pub key: String,
+    /// It stands in a block.
+    pub in_block: bool,
 }
 
 /// A parsed document prepared for viewing.
@@ -743,6 +745,7 @@ impl DocModel {
                             anchor: String::new(), // numbered below (its key is affected)
                             item: i,
                             key,
+                            in_block: r.item.containers.iter().any(|c| matches!(c, Container::Card)),
                         });
                     }
                 }
@@ -1340,6 +1343,7 @@ impl DocModel {
                     anchor,
                     item: idx,
                     key,
+                    in_block: item.containers.iter().any(|c| matches!(c, Container::Card)),
                 });
             }
         }

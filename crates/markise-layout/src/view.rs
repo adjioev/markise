@@ -23,10 +23,12 @@ use crate::text::TextShaper;
 
 mod native;
 mod paging;
+mod practice;
 mod sections;
 mod site;
-pub use native::{BlockViewMode, NativeAt};
+pub use native::{BlockCan, BlockViewMode, NativeAt};
 pub use paging::PagingStats;
+pub use practice::PracticeShow;
 pub use sections::{OutlineRow, Plaque, SectionLook};
 pub use site::SiteLook;
 
@@ -614,6 +616,10 @@ impl View {
     }
 
     fn disclosure_hidden(&self, i: usize) -> bool {
+        // before the caret's say: a caret that gets there by any route reveals nothing here
+        if self.practice_hidden(i) {
+            return true;
+        }
         let focused = self.focus.as_ref().is_some_and(|(idx, _, _)| *idx == i);
         if focused {
             return false;
@@ -1045,8 +1051,13 @@ impl View {
                 _ => t.block_spacing + self.model.outline.len().max(1) as f32 * line,
             },
             ItemKind::Rule | ItemKind::Empty => t.block_spacing + line,
+            ItemKind::ContainerMarker { close: false } if self.native_quiet_opener(i) => {
+                t.block_spacing + crate::block::quiet_opener_height(t)
+            }
             ItemKind::ContainerMarker { close: false } => t.block_spacing + crate::block::card_opener_height(t),
-            ItemKind::ContainerMarker { close: true } => crate::block::card_padding(t),
+            ItemKind::ContainerMarker { close: true } => {
+                crate::block::card_padding(t) + self.practice_row_estimate(i, it)
+            }
             // a closed callout shows its header alone (ADR 0025)
             ItemKind::Paragraph if self.disclosures.groups.get(&i).is_some_and(|g| g.fold && !g.open) => {
                 t.block_spacing + line + 2.0
@@ -1130,6 +1141,9 @@ impl View {
             std::hash::Hasher::finish(&h)
         });
         extra ^= self.native_item_key(i, it) ^ self.section_item_key(i, it);
+        if it.kind == ItemKind::Toc && self.practice_on() {
+            extra ^= self.practice_generation().wrapping_mul(0x70c1_0f5b).rotate_left(19);
+        }
         CacheKey {
             item_hash: it.hash,
             ctx_hash: images ^ code_ident ^ diagram ^ self.references_fingerprint(i, it),
@@ -1261,6 +1275,13 @@ impl View {
                     math: Cell::new(false),
                     images: RefCell::new(Vec::new()),
                 };
+                let toc_hidden: Option<Vec<bool>> = (self.practice_on()
+                    && self.model.items.get(i).is_some_and(|it| it.kind == ItemKind::Toc))
+                .then(|| {
+                    (self.model.outline.iter())
+                        .map(|o| self.practice_hides_heading(o))
+                        .collect()
+                });
                 let laid = self.with_native_params(i, |look| {
                     let params = LayoutParams {
                         theme: &self.theme,
@@ -1285,6 +1306,7 @@ impl View {
                         site: look.site,
                         note: look.note,
                         section: look.section,
+                        toc_hidden: toc_hidden.as_deref(),
                     };
                     layout_item(&*self.doc, &self.model, i, &params, shaper, &rec)
                 });
@@ -1430,7 +1452,12 @@ impl View {
                 }
                 let l = self.layout(i, shaper, images);
                 let h = self.height(i);
-                if y + h > 0.0 && y < viewport_h && !self.site_hidden(i) && !self.section_hidden(i) {
+                if y + h > 0.0
+                    && y < viewport_h
+                    && !self.site_hidden(i)
+                    && !self.practice_hidden(i)
+                    && !self.section_hidden(i)
+                {
                     let (pad, _) = self.item_pad(i);
                     out.push(Visible {
                         idx: i,
@@ -1465,6 +1492,12 @@ impl View {
             }
             self.layout(i, shaper, images);
             y -= self.height(i);
+        }
+        if let Some(opener) = out
+            .first()
+            .and_then(|first| self.quiet_opener_above(first, shaper, images))
+        {
+            out.insert(0, opener);
         }
         self.last_visible = out.iter().map(|v| v.idx).collect();
         out

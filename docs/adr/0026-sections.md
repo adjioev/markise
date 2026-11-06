@@ -128,6 +128,13 @@ are upper bounds and the small differences are noise:
 | A warm frame, sections off / on | 8 µs / 15 µs | |
 | 40 outline rows with nothing remembered, a new model included | 1.1 ms | |
 
+### Read mode
+
+In Read (ADR 0024) dividers and plaques read as they do in Edit, with their warnings. No control shows, and a
+block opened as a card in Edit is a plaque there and a card again after. In Edit a plaque's switch follows the
+rule for a block's controls: it shows under the pointer or the caret. While a block is in Practice the outline keeps
+every section and leaves out the headings that ADR 0024 does, and a name never comes from a heading in a block.
+
 ### Exports
 
 With sections on, HTML, PDF, PNG and Pandoc leave a root-level `:::section-metadata` out: they all read

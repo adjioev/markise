@@ -90,6 +90,7 @@ Delete Block works on any block. The others need a block package in use; see [Bl
 | Delete Block | Alt+Cmd+⌫ | Ctrl+Shift+Delete |
 | Switch This Block's View | Shift+Cmd+M | Ctrl+Shift+M |
 | Switch All Blocks' Views | Shift+Alt+Cmd+M | Ctrl+Shift+Alt+M |
+| Read Mode | Shift+Alt+Cmd+Y | Ctrl+Shift+Alt+Y |
 
 ### Inside a block
 

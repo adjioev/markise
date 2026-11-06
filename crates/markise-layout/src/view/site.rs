@@ -109,8 +109,9 @@ impl View {
         if !source.has_schema(&c.name) || self.site.held.contains(&c.opener.start) {
             return None;
         }
-        let wanted = match self.native.mode_of(c.opener.start) {
-            BlockViewMode::Native => !source.has_view(&c.name),
+        let wanted = match self.native.mode_of(c.opener.start, &c.name) {
+            // (a block in Practice has a view; another in a document in Practice is as in Native)
+            BlockViewMode::Native | BlockViewMode::Practice => !source.has_view(&c.name),
             BlockViewMode::Site => true,
             BlockViewMode::Markdown => false,
         };

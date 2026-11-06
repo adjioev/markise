@@ -355,6 +355,69 @@ fn a_section_goes_by_its_first_heading_in_the_outline_and_status() {
     assert_eq!(name, "§ Top");
 }
 
+const READ_DOC: &str = "---\nauthoring: blocks-v3\n---\n\n:::section-metadata\n\nid: top\nnot a pair\n\n:::\n\n# First\n\nOne.\n\n---\n\n:::question\n\n## Hidden prompt\n\n- [x] Yes\n- [ ] No\n\n:::\n\nTwo.\n\n---\n\n## Third\n\nThree.\n";
+
+#[test]
+fn in_read_dividers_and_plaques_stay_and_no_control_does() {
+    let f = Fixture::with_package(READ_DOC, crate::practice::FILES);
+    let mut h = f.ready();
+    // in Edit the switch is there for a block under the pointer or the caret
+    caret(&mut h, READ_DOC.find("id: top").unwrap());
+    assert!(h.query_by_label("Show Markdown: section metadata").is_some());
+    caret(&mut h, READ_DOC.find("One.").unwrap());
+    h.state_mut().viewer().unwrap().ed.set_read_mode(true);
+    common::run(&mut h);
+    let s = shown(&mut h);
+    assert!(s.contains("id: top"), "the plaque reads, {s}");
+    assert!(s.contains("⚠"), "with what is wrong, {s}");
+    assert!(s.contains("Section 2"), "the divider reads, {s}");
+    for gone in [
+        "Show Markdown: section metadata",
+        "Show Native View: section metadata",
+        "Delete Block: section-metadata",
+    ] {
+        assert!(h.query_by_label(gone).is_none(), "{gone}");
+    }
+    // the outline keeps sections, leaves out headings in blocks, and no name tells one
+    assert!(h.query_by_label("top").is_some());
+    assert!(
+        h.query_by_label("Section 2").is_some(),
+        "no name from a heading in a block"
+    );
+    assert_eq!(
+        h.query_all_by_label("Third").count(),
+        2,
+        "a section's name and its heading"
+    );
+    assert!(h.query_by_label("Hidden prompt").is_none());
+    let v = h.state_mut().viewer().unwrap();
+    assert!(!v.section_status(false).unwrap().0.contains("Hidden"));
+    assert_eq!(text(&h), READ_DOC);
+    // back in Edit it lists them
+    h.state_mut().viewer().unwrap().ed.set_read_mode(false);
+    common::run(&mut h);
+    assert!(h.query_by_label("Hidden prompt").is_some());
+}
+
+#[test]
+fn a_block_opened_as_a_card_is_a_plaque_in_read_and_a_card_again_after() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    h.get_all_by_label("Show Markdown: section metadata")
+        .next()
+        .unwrap()
+        .click();
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("section-metadata"));
+    h.state_mut().viewer().unwrap().ed.set_read_mode(true);
+    common::run(&mut h);
+    assert!(!shown(&mut h).contains("section-metadata"), "Read has no card for it");
+    h.state_mut().viewer().unwrap().ed.set_read_mode(false);
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("section-metadata"));
+    assert_eq!(text(&h), DOC);
+}
+
 #[test]
 fn the_outline_has_sections_above_headings_and_a_click_goes_there() {
     let mut doc = String::from("---\nauthoring: blocks-v3\n---\n\n# Top\n\n");

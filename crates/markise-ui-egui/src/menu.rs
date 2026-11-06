@@ -339,6 +339,11 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
         "Switch All Blocks' Views",
         &[both("Shift+Opt+Cmd+M", "Ctrl+Shift+Alt+M")],
     ),
+    app(
+        "view.readMode",
+        "Read Mode",
+        &[both("Shift+Opt+Cmd+Y", "Ctrl+Shift+Alt+Y")],
+    ),
     app("view.rendered", "Rendered", &[]),
     // spec 04 §3.3: ⌃⌘/ on macOS, Ctrl+Alt+/ elsewhere (Ctrl+/ is Source Code Mode)
     app("view.sideBySide", "Side by Side", &[both("Ctrl+Cmd+/", "Ctrl+Alt+/")]),

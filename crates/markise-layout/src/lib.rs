@@ -40,14 +40,17 @@ pub use model::{
     PageStats, Paging, PagingCounters, paging_counters,
 };
 pub use native::{
-    BlockLook, BlockViews, NativeBlock, NativeKind, NativeRole, NativeView, SitePicture, SiteQuery, SiteShot,
+    BlockLook, BlockViews, NativeBlock, NativeKind, NativeRole, NativeView, PracticeAnswer, PracticeItem,
+    PracticeParts, SitePicture, SiteQuery, SiteShot,
 };
 pub use source::{SourceCtx, SourceLayout, SourceLine, SourceParams, SourceView, SourceVisible};
 pub use text::{
     EpaintShaper, FontRole, FragmentId, FragmentKind, MapPiece, ParleyShaper, PieceKind, SourceMap, StyledText,
     TextBlock, TextShaper, TextStyle,
 };
-pub use view::{BlockViewMode, NativeAt, OutlineRow, Plaque, SectionLook, SiteLook, View, Visible};
+pub use view::{
+    BlockCan, BlockViewMode, NativeAt, OutlineRow, Plaque, PracticeShow, SectionLook, SiteLook, View, Visible,
+};
 
 /// Font family names the layout uses; the UI must register all of them
 /// (see [`block::register_families`]).

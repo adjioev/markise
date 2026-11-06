@@ -2,12 +2,13 @@
   "format": 1,
   "groups": [
     { "id": "cooking", "label": "Cooking", "blocks": ["ingredients", "timing"] },
-    { "id": "notes", "label": { "en": "Notes", "fr": "Notes" }, "blocks": ["tip"] }
+    { "id": "notes", "label": { "en": "Notes", "fr": "Notes" }, "blocks": ["tip", "question"] }
   ],
   "blocks": {
     "ingredients": { "description": "What goes in, with an optional photo", "icon": "basket" },
     "timing": { "description": "The steps of a recipe as one bar", "icon": "clock" },
-    "tip": { "description": { "en": "A short hint for the cook", "fr": "Un conseil" }, "icon": "bulb" }
+    "tip": { "description": { "en": "A short hint for the cook", "fr": "Un conseil" }, "icon": "bulb" },
+    "question": { "description": "A question to practise, with its answers" }
   },
   "presets": [
     {
@@ -37,6 +38,13 @@
       "label": "Warning",
       "keywords": "careful danger",
       "markdown": ":::tip warning\n\nWrite the warning here.\n\n:::\n"
+    },
+    {
+      "id": "question",
+      "block": "question",
+      "label": "Question",
+      "keywords": "quiz practice answer",
+      "markdown": ":::question\n\nWrite the question here.\n\n- [ ] A wrong answer {#a1}\n- [x] The right answer {#a2}\n\n> Say why.\n\n:::\n"
     }
   ]
 }

@@ -14,6 +14,8 @@ pub mod history;
 mod image_edit;
 mod inplace;
 pub mod keymap;
+mod practice;
+pub use practice::READ_ONLY_REASON;
 pub mod source;
 pub mod surface;
 

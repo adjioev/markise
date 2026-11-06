@@ -30,11 +30,12 @@ the same items lay out with a little more input, namely the block's view and wha
 
 `markise_layout::native` holds what layout knows, and depends on no package:
 
-- `NativeKind`, `NativeView { kind, accent, icon, label, single_answer }`, `NativeRole` (title, text, quote,
+- `NativeKind`, `NativeView { kind, accent, icon, label, single_answer, fill, label_row }`, `NativeRole` (title, text, quote,
   list item, answer, image).
 - `BlockViews`, a trait the view holds as `Option<Arc<dyn BlockViews>>`: `has_view(name)` and
   `has_schema(name)` from the name alone, `look(name, args, source)`, which is `Generic`, `Outside` or
-  `Unfilled` with its reasons, or `Native` with each part's role by source range, and `icon_ready(icon)`.
+  `Unfilled` with its reasons, or `Native` with each part's role by source range, `icon_ready(icon)`, and
+  `label_row(name)`, from the name alone.
 
 `markise_engine::block_view::PackageViews` implements it from a `PackageIndex` and the field model
 (ADR 0020): the form spec of the block's variant, `BlockFields::decode`, and `.check`. A package's view
@@ -90,6 +91,12 @@ item, and for a placeholder `PageStats::card_heads`, headings per level per bloc
 page is cut. A block that turns out generic after all is corrected when it is laid out, like any
 estimate. A measured page height holds for the views it was measured under (`paging_key`).
 
+An opener with no label row (below) has only what makes the space above the first field the block's
+padding, so its estimate is the same as its layout. `BlockViews::label_row` answers by name, for a real item,
+and `PageStats::card_names`, openers per block name gathered when a page is cut, for a placeholder. A
+block with a warning has the row after all and corrects the estimate when it is laid out: nothing is read to
+estimate a height.
+
 ### Look
 
 Each kind is the generic card's geometry with its own edges, so a block lays out to the same width and
@@ -102,9 +109,44 @@ generic card has `name args`.
   otherwise, from the same `selection` as the form; a marked answer's row has a tint of the accent.
 - **media:** no frame; pictures as usual, each with its alt text below as a caption.
 
+**Quiet views.** On a real page, a tint, a frame, a coloured title and a coloured label per block compete
+with the text. A package can say less, per view, in generic terms; the default stays as above, so a package
+that says nothing does not change.
+
+- **`fill: false`:** no tint and no frame on any kind, only a 2 pt bar of the accent on the left. A marked
+  answer's row has no tint, a card's title and the first row are in the text's colours. A frame is left out
+  because it still draws a box per block, in the accent for `choices`.
+- **`accent: "none"`:** lines in the theme's rule, 2 pt or 1 pt, a card's top edge no heavier than its sides,
+  labels and marks in the theme's quiet text. A `callout` that keeps its fill has a veil of the text's colour,
+  light enough for a code block to stay distinct on it. `none` is a name like the others: an older build reads it
+  as the theme's accent, which is what an unknown name means, and no format change is needed.
+- **`label: false`:** no first row and no icon. The block's own first field comes first, with the block's padding
+  above it. The label goes to the accessibility tree as a node at the block's top edge. A warning or a note
+  still needs the row, so a block with one has a row holding only that. It is the package's call that the
+  block has a heading: nothing checks that a heading is filled in.
+
+A wrong type for `fill` or `label` refuses the package, like any problem in a view.
+
+**A block is one ground.** A tint and a bar are not prims of the item: an item's layout lists them as `bands`,
+and `block::merged_bands` makes one rectangle per block from the items on screen, painted before any item.
+Painted per item they left faint seams (issue #231), because the viewer moves every item's top to a whole pixel
+of its own (issue #86) while heights stay fractional: an item's bottom and the next one's top differ by up to a
+pixel, and rounded apart they leave a line with no tint or with twice the tint, at any zoom. Moving the
+tops would bring back what that rule fixed, and an opaque fill would hide what the page has below, so the
+one rectangle goes from where the first item stands to where the last one ends. An item with a band of another
+block, or none, ends a band: a nested block keeps its own look, and an outer ground does not run under it.
+
+**A block's controls** (the pencil, the switch, delete) show when the pointer is on the block, when it is the
+innermost block around the caret, or when one of them has the keyboard, like the drag grip. They are registered for
+every block on screen in any case and only their painting depends on this, so nothing moves and the keyboard and a
+screen reader have them. The surface keeps Tab for its fields, so from the text the way to them is Esc and then
+Shift+Tab; the commands (Edit Block, Switch This Block's View, Delete Block) do the same for the caret's block. In Read
+there are none of them, and neither is their ground (ADR 0024). On a
+block with no label row they lie over the end of its first row, on a ground of their own.
+
 **Accents** are generic colour names with a light and a dark value (`native::accent_color`): slate, gray,
 red, orange, amber, yellow, green, teal, cyan, blue, indigo, purple, violet, pink. A name that is not one
-of these means the theme's own accent, with no error: a package may say more than a build knows.
+of these or `none` means the theme's own accent, with no error: a package may say more than a build knows.
 
 Everything is in points from the theme's font size, so zoom and themes apply as they do to the rest of
 the document, and the layout cache already keys on them.

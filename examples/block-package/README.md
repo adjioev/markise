@@ -6,16 +6,17 @@ described in [Making block packages](../../docs/user/block-packages.md).
 
 | Path | What it is |
 |---|---|
-| `package/` | the package's source: manifest, three blocks, palette, views, icons, styles and a script |
-| `document/` | a document that uses all three blocks, and its picture |
+| `package/` | the package's source: manifest, four blocks, palette, views, icons, styles and a script |
+| `document/` | a document that uses all four blocks, and its picture |
 
-The blocks show the three ways a block can look:
+The blocks show the ways a block can look:
 
 | Block | Native view | Site's code |
 |---|---|---|
 | `tip` | `callout` | styles only, with a `warning` variant |
 | `ingredients` | `card` | styles only; its argument says how many it serves |
 | `timing` | none, so it shows its picture | styles and a script that draws a bar |
+| `question` | `choices`, which can be [practised](../../docs/user/blocks.md#practice) | styles only |
 
 ## Try it
 

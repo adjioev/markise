@@ -125,38 +125,49 @@ impl View {
         n
     }
 
-    /// Rows of the outline with sections: every section, each followed by its headings.
-    pub fn outline_row_count(&self) -> usize {
-        self.doc.section_count() + self.model.outline.len()
+    /// Outline entries before section `k` that are listed: `only` names them, when not all are (ADR 0024).
+    fn listed_before(&self, k: usize, only: Option<&[usize]>) -> usize {
+        let n = self.heads_before(k);
+        only.map_or(n, |o| o.partition_point(|&e| e < n))
+    }
+
+    /// Rows of the outline with sections: every section, each followed by its listed headings.
+    pub fn outline_row_count(&self, only: Option<&[usize]>) -> usize {
+        self.doc.section_count() + only.map_or(self.model.outline.len(), <[usize]>::len)
     }
 
     /// Row `row` of that outline. O(log sections) lookups: the rows are not built, so a list of
     /// any size costs what is on screen.
-    pub fn outline_row(&self, row: usize) -> OutlineRow {
+    pub fn outline_row(&self, row: usize, only: Option<&[usize]>) -> OutlineRow {
         let (mut lo, mut hi) = (0, self.doc.section_count());
         // the last section whose row is at or before this one
         while lo + 1 < hi {
             let mid = (lo + hi) / 2;
-            if mid + self.heads_before(mid) <= row {
+            if mid + self.listed_before(mid, only) <= row {
                 lo = mid;
             } else {
                 hi = mid;
             }
         }
-        let first = lo + self.heads_before(lo);
-        if first == row {
+        if lo + self.listed_before(lo, only) == row {
             OutlineRow::Section(lo)
         } else {
-            OutlineRow::Heading(row - lo - 1)
+            let i = row - lo - 1;
+            OutlineRow::Heading(only.map_or(i, |o| o.get(i).copied().unwrap_or(i)))
         }
     }
 
-    /// The row of outline entry `k`, or of its section if `k` lies before it. For what is on screen.
-    pub fn outline_row_of(&self, section: usize, heading: Option<usize>) -> usize {
-        let row = section + self.heads_before(section);
-        match heading {
-            Some(k) if k >= self.heads_before(section) => k + section + 1,
-            _ => row,
+    /// The row of outline entry `heading`, or of `section` if the entry is not listed or lies before it.
+    /// For what is on screen.
+    pub fn outline_row_of(&self, section: usize, heading: Option<usize>, only: Option<&[usize]>) -> usize {
+        let before = self.listed_before(section, only);
+        let place = heading.and_then(|k| match only {
+            Some(o) => o.partition_point(|&e| e <= k).checked_sub(1),
+            None => Some(k),
+        });
+        match place {
+            Some(p) if p >= before => p + section + 1,
+            _ => section + before,
         }
     }
 
@@ -266,7 +277,8 @@ impl View {
         };
         if !(m.opener.start..=m.closer.start).contains(&start)
             || self.sections.held.contains(&m.opener.start)
-            || self.native.mode_of(m.opener.start) == BlockViewMode::Markdown
+            // Read shows no card of what it has a plaque for, whatever the block's state in Edit
+            || (self.block_mode_of(m.opener.start) == BlockViewMode::Markdown && !self.native.practice.read())
         {
             return Role::Plain;
         }

@@ -1,4 +1,5 @@
 {
   "ingredients": { "kind": "card", "accent": "green" },
-  "tip": { "kind": "callout", "accent": "amber" }
+  "tip": { "kind": "callout", "accent": "amber" },
+  "question": { "kind": "choices", "accent": "indigo", "practice": { "reveal": ["explanation"] } }
 }
