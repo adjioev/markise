@@ -140,3 +140,17 @@ fn the_label_follows_the_language() {
     assert_eq!(&*b.view.label, "Tipp");
     assert_eq!(b.view.icon.as_deref(), Some("assets/bulb.svg"), "a file of the package");
 }
+
+#[test]
+fn the_language_finds_its_base_and_is_part_of_the_id() {
+    let de = PackageViews::new(index(), "de-AT");
+    let b = native(de.look("tip", "", ":::tip\n\nBody.\n\n:::"));
+    assert_eq!(&*b.view.label, "Tipp");
+    let index = index();
+    let (one, other) = (
+        PackageViews::new(index.clone(), "en"),
+        PackageViews::new(index.clone(), "de"),
+    );
+    assert_ne!(one.id(), other.id(), "another look for every block");
+    assert_eq!(one.id(), PackageViews::new(index, "en").id());
+}

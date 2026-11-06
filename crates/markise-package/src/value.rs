@@ -15,17 +15,32 @@ pub enum Localized {
 }
 
 impl Localized {
-    /// The text for `language`, else English, else the first language there is.
+    /// The text for `language`, as [`pick_language`] finds it.
     pub fn get(&self, language: &str) -> &str {
         match self {
             Localized::Plain(s) => s,
-            Localized::ByLanguage(m) => m
-                .get(language)
-                .or_else(|| m.get("en"))
-                .or_else(|| m.values().next())
-                .map_or("", String::as_str),
+            Localized::ByLanguage(m) => {
+                pick_language(m.iter().map(|(k, v)| (k.as_str(), v.as_str())), language).unwrap_or("")
+            }
         }
     }
+}
+
+/// Of texts per language, the one for `language`: the tag itself, the part before its `-` (`ru-RU`
+/// finds `ru`), English, else the first there is. Tags mean the same in any case (BCP 47), and a
+/// text left empty is no translation.
+pub(crate) fn pick_language<'a>(
+    texts: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+    language: &str,
+) -> Option<&'a str> {
+    let mut filled = texts.filter(|(_, text)| !text.is_empty());
+    let of = |tag: &str| {
+        (filled.clone())
+            .find(|(k, _)| k.eq_ignore_ascii_case(tag))
+            .map(|(_, text)| text)
+    };
+    let base = language.split('-').next().unwrap_or(language);
+    (of(language).or_else(|| of(base)).or_else(|| of("en"))).or_else(|| filled.next().map(|(_, text)| text))
 }
 
 /// Reads a file's bytes as a JSON object.

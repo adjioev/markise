@@ -53,8 +53,28 @@ The types are a closed list of generic primitives: `heading`, `text`, `list`, `c
 `image`. A site adds no types of its own; an unknown type is an error. Other keys of a field (`min`,
 `level`, ...) belong to the field model and are kept as JSON in the index.
 
-**Text** is a string or an object of strings per language. Lookup: the language, English, the
-first language there is.
+**Text** is a string or an object of strings per language. Lookup: the exact tag, the part before
+its `-` (`ru-RU` finds `ru`), English, the first language there is. Tags compare ignoring case, and
+an empty string is no translation.
+
+**Which language.** The document's: the `lang` key of its front matter, through one reader
+(`FormatDoc::language`, `block_page::document_language`) that also gives a block's page its `lang`
+(ADR 0023). A value that is not a tag counts as none. With none it is English; the format has no
+package default and the OS language is not read. A package's text follows it on every surface: the
+native view's label, the form's title, variant and field labels, the block library's groups, labels
+and descriptions, the name of a dragged block, and a field's label inside a reason. Search in the
+library still goes through every language (ADR 0022).
+
+What stays English is the app's own text: buttons (Save, Cancel, + Add), notes and banners, a reason's
+wording (`Required`, `In no field`, the sentence around a name). What stays as written is what never was
+package text: the name and arguments on a generic card and in `Edit Block: name`, and a field with no
+`label`, whose name is made readable.
+
+**It follows edits.** The viewer compares the document's change counter per frame and reads the
+language only when it moved, from the first block alone, so the cost of a keystroke does not grow
+with the document. Only another language builds new views: their id includes it, which empties the
+view's caches of looks and heights once. Nothing asks for a frame. An open form swaps its labels and
+keeps its draft, focus and rows; the library closes on any edit, and opens in the language of then.
 
 **Palette** (`editor/palette.json`, required): optional `format` (`1`), `groups` (`id`, `label`,
 `blocks`), `blocks` (name to `description` and `icon`), `presets` (`id`, `block`, `label`,

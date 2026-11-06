@@ -13,6 +13,7 @@ use serde_json::{Map, Value, json};
 use crate::index::PackageIndex;
 use crate::palette::Preset;
 use crate::schema::{BlockSchema, FieldKind, FieldSchema};
+use crate::value::pick_language;
 
 /// The version of the hints this writes, as `schema-form-core` reads them.
 const HINTS_VERSION: u64 = 2;
@@ -51,15 +52,11 @@ fn refuse<T>(field: &str, reason: impl Into<String>) -> Result<T, FormRefusal> {
     })
 }
 
-/// Text for the user, a string or a string per language: the language, English, the first there is.
+/// Text for the user, a string or a string per language, as [`pick_language`] finds it.
 fn text_of<'a>(v: Option<&'a Value>, language: &str) -> Option<&'a str> {
     match v? {
         Value::String(s) => Some(s),
-        Value::Object(m) => m
-            .get(language)
-            .or_else(|| m.get("en"))
-            .or_else(|| m.values().next())?
-            .as_str(),
+        Value::Object(m) => pick_language(m.iter().filter_map(|(k, v)| Some((k.as_str(), v.as_str()?))), language),
         _ => None,
     }
 }
