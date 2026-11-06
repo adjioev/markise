@@ -164,7 +164,7 @@ impl View {
             && (self.native_item(i))
                 .is_some_and(|at| self.practice_item(&at, self.model.item_start(i), it) == Some(PracticeItem::Row));
         if has_row {
-            crate::native::practice_row_height(&self.theme)
+            self.theme.block_spacing + crate::native::practice_row_height(&self.theme)
         } else {
             0.0
         }
@@ -216,7 +216,7 @@ impl View {
             return 0.0;
         };
         let t = &self.theme;
-        let row = crate::native::practice_row_height(t);
+        let row = t.block_spacing + crate::native::practice_row_height(t);
         let mut h = 0.0;
         for (name, tally) in s.card_tallies.iter().filter(|(name, _)| source.has_practice(name)) {
             h += tally.closers as f32 * row;
