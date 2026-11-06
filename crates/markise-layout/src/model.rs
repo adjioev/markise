@@ -474,7 +474,7 @@ impl DocModel {
             let end = (k + 512).min(n);
             let doc_start = chunks.is_empty();
             let batch = flatten(doc, k..end, doc_start);
-            cross.add_from(&batch);
+            cross.add_from(doc, &batch);
             chunks.extend_abs(batch);
             k = end;
         }
@@ -525,6 +525,24 @@ impl DocModel {
             disclosures: g.disclosures + 1,
         };
         fresh
+    }
+
+    /// [`DocModel::apply`] for an edit made of `steps` (see [`Moved`]): the reader's open/closed
+    /// choices follow each step, not the covering range of them all.
+    pub fn apply_steps(
+        &mut self,
+        doc: &dyn FormatDoc,
+        e: &EditSummary,
+        steps: &[(usize, usize, isize)],
+    ) -> ModelChange {
+        let choices = self.cross.choices_through(steps);
+        let mut change = self.apply(doc, e);
+        let generation = self.cross.gens.disclosures;
+        for (at, open) in choices {
+            self.cross.set_open(at, open);
+        }
+        change.disclosures |= self.cross.gens.disclosures != generation;
+        change
     }
 
     /// Updates the model after `doc` changed by `e` (the summary of the edit that produced
