@@ -25,6 +25,8 @@ pub(super) enum DraftNext {
     StopPackage,
     /// Delete the block with this opener.
     DeleteBlock(usize),
+    /// Read Mode, which has no form.
+    EnterRead,
 }
 
 /// The form of the session.
@@ -163,6 +165,14 @@ impl MarkiseApp {
         // what a comment's card holds goes to the document first, or stays and says so
         if !self.card_edit_saved() {
             return false;
+        }
+        // a form shows the answers: a changed draft is asked about first and never lost silently
+        if read && self.block_draft_changed() {
+            self.set_ask(super::Ask::BlockDraft(DraftNext::EnterRead));
+            return true;
+        }
+        if read {
+            self.block_form_close();
         }
         let Some(d) = &mut self.doc else { return false };
         d.viewer.ed.set_read_mode(read);
@@ -366,6 +376,10 @@ impl MarkiseApp {
                 self.set_view_mode(ViewMode::Rendered);
             }
             self.apply_review_read_only();
+            // (a draft with changes cannot get here: it is asked about before Read)
+            if !self.block_draft_changed() {
+                self.block_form_close();
+            }
         }
         self.block_form.assets.poll(ui.ctx());
         self.block_icons_update(ui.ctx());

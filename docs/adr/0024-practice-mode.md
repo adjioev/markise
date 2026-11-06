@@ -45,6 +45,10 @@ The main control is one switch per document, Read or Edit: the command Read Mode
 
 **There is no switch per block, and no Practice All**: the first steps of this stack had them, and with Read as the main control they were a second way to the same place, so they went. `BlockViewMode::Practice` remains, as what a block is in Read, and nothing switches to it.
 
+**An open form closes on entering Read**, as it shows the answers. A changed draft is asked about first, Save, Discard or Cancel, and Read waits for the answer.
+
+**An answer reads like a list line.** Before a check nothing marks a row but its control. After one, a tick on a correct answer and a cross on a chosen wrong one sit right after the text; a wrong answer not chosen has nothing. Check, Reset and Show answer are quiet text a paragraph's gap below. A thin ring within the column shows where the keyboard is, only while it is the keyboard that went there.
+
 **Copying** in Read leaves out what is hidden (`EditorView::practice_copy`): a hidden field goes, a mark reads `[ ]`, and of a block that cannot be practised only its marker lines stay. What is shown after a check is copied as it stands. Export is a choice about the file, and copies all of it.
 
 **The source pane is not available in Read**: entering Read closes Side by Side or Source mode, and they cannot be opened until Edit. This is the simpler of the two choices: an editable source pane beside a read-only document would be a second state to explain, and it would show the answers.

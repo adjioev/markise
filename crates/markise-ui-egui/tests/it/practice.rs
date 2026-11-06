@@ -1360,3 +1360,122 @@ fn a_document_bound_to_no_package_is_unveiled_with_no_other_input() {
         }
     }
 }
+
+// ---- Codex round 1
+
+#[test]
+fn find_looks_again_when_read_and_edit_change_what_hides_both_ways() {
+    let doc = a_doc_with_one_question();
+    let (_f, mut h) = practising(doc);
+    h.state_mut().open_find(false);
+    h.state_mut().set_find_query(markise_engine::search::Query {
+        text: "Explained".into(),
+        ..Default::default()
+    });
+    common::settle(&mut h);
+    common::run(&mut h);
+    assert!(
+        h.state().find_results().is_none_or(|r| r.matches.is_empty()),
+        "Read: nothing"
+    );
+    command(&mut h, "view.readMode");
+    common::wait_until(&mut h, "Edit: found", |a| {
+        a.find_results().is_some_and(|r| r.matches.len() == 1)
+    });
+    command(&mut h, "view.readMode");
+    common::wait_until(&mut h, "Read: nothing again", |a| {
+        a.find_results().is_some_and(|r| r.matches.is_empty())
+    });
+}
+
+#[test]
+fn a_heading_held_by_a_revealed_quote_stays_out_of_the_outline_and_contents_in_read() {
+    let doc = ":::question\n\nP?\n\n- [ ] No {#a1}\n- [x] Yes {#a2}\n\n> ## The answer is 42\n\n:::\n\n[toc]\n";
+    let f = default_fixture(doc);
+    let mut h = f.ready();
+    assert!(h.state().read_mode_on());
+    assert!(!shown(&mut h).contains("The answer is 42"));
+    assert!(!all_labels(&h).contains("The answer is 42"));
+    command(&mut h, "view.readMode");
+    assert!(all_labels(&h).contains("The answer is 42"), "in Edit it is listed");
+}
+
+#[test]
+fn entering_read_closes_a_form_and_asks_first_about_a_changed_draft() {
+    let doc = a_doc_with_one_question();
+    let f = fixture(doc);
+    let mut h = f.ready();
+    // a form with nothing changed simply closes
+    assert!(h.state_mut().open_block_form(doc.find("A prompt?").unwrap()));
+    common::run(&mut h);
+    assert!(h.state().block_form().is_some());
+    command(&mut h, "view.readMode");
+    assert!(h.state().read_mode_on());
+    assert!(h.state().block_form().is_none(), "it would show the answers");
+    command(&mut h, "view.readMode");
+    // a changed one: Read waits for the answer, and the draft is not lost
+    assert!(h.state_mut().open_block_form(doc.find("A prompt?").unwrap()));
+    common::run(&mut h);
+    h.get_by_label("Prompt").click();
+    common::run(&mut h);
+    h.get_by_label("Prompt").type_text("!");
+    common::run(&mut h);
+    command(&mut h, "view.readMode");
+    assert!(!h.state().read_mode_on(), "not yet");
+    assert!(h.state().block_form().is_some(), "not lost");
+    assert!(h.state().is_asking(), "asked");
+    h.state_mut().answer_question(markise_ui_egui::confirm::Choice::Cancel);
+    common::run(&mut h);
+    assert!(!h.state().read_mode_on(), "cancelled: as it was");
+    assert!(h.state().block_form().is_some());
+    command(&mut h, "view.readMode");
+    h.state_mut()
+        .answer_question(markise_ui_egui::confirm::Choice::DontSave);
+    common::run(&mut h);
+    assert!(h.state().read_mode_on(), "and on");
+    assert!(h.state().block_form().is_none());
+    assert_eq!(text(&h), doc);
+}
+
+#[test]
+fn read_on_accepting_a_package_leaves_full_source_mode() {
+    let doc = a_doc_with_one_question();
+    let f = default_fixture(doc);
+    let mut h = f.opened();
+    assert!(!h.state().read_mode_on());
+    h.state_mut().toggle_source();
+    common::run(&mut h);
+    assert_eq!(h.state().view_mode(), markise_ui_egui::ViewMode::Source);
+    h.get_by_label("Use Package").click();
+    h.step();
+    common::wait_until(&mut h, "the install", |a| a.block_package().is_some());
+    common::settle(&mut h);
+    common::run(&mut h);
+    assert!(h.state().read_mode_on());
+    assert_eq!(
+        h.state().view_mode(),
+        markise_ui_egui::ViewMode::Rendered,
+        "the source pane shows answers"
+    );
+    // and in Read it cannot be opened, in either way
+    h.state_mut().toggle_source();
+    h.state_mut().toggle_side_by_side();
+    common::run(&mut h);
+    assert_eq!(h.state().view_mode(), markise_ui_egui::ViewMode::Rendered);
+}
+
+#[test]
+fn the_score_follows_what_was_done_through_changes_to_the_block() {
+    let doc = format!("{}\n{}", a_doc_with_one_question(), a_doc_with_one_question());
+    let (_f, mut h) = practising(&doc);
+    let first = doc.find(":::question").unwrap();
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.ed.practice_press(doc.find("Right one").unwrap()));
+    assert!(v.ed.practice_check(first));
+    assert_eq!(v.ed.practice_score(), (1, 1));
+    v.ed.set_read_mode(false);
+    let at = doc.find("A prompt?").unwrap();
+    let ps = markise_doc::PatchSet::single_verbatim(at..at, "Well, ");
+    v.ed.edit(|s| s.apply_external(&ps, "edit", false)).unwrap();
+    assert_eq!(v.ed.practice_score(), (0, 0), "the block changed");
+}

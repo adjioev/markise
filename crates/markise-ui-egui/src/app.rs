@@ -1958,6 +1958,9 @@ impl MarkiseApp {
             block_form::DraftNext::DeleteBlock(opener) => {
                 self.delete_block_now(opener);
             }
+            block_form::DraftNext::EnterRead => {
+                self.toggle_read_mode();
+            }
             block_form::DraftNext::Then(Then::Close) => {
                 if self.request_close() {
                     self.allow_close = true;
@@ -2037,8 +2040,8 @@ impl MarkiseApp {
     /// Toggles source-code mode, mapping the viewport middle and the caret in both directions
     /// (spec 02 §12.1). Full Source mode keeps its own undo history (ADR 0006 §4.3).
     pub fn toggle_source(&mut self) {
-        // Read has no source pane (ADR 0024)
-        if self.read_mode_on() {
+        // Read has no source pane (ADR 0024): it can only be left
+        if self.read_mode_on() && !self.source_visible {
             return;
         }
         // the clean review previews are read-only only in the rendered view (issue #88):
@@ -2097,8 +2100,8 @@ impl MarkiseApp {
     /// ⌃⌘/ (spec 04 §3.3): Rendered or Source → Side by Side, remembering that mode; again →
     /// back to the remembered mode.
     pub fn toggle_side_by_side(&mut self) {
-        // Read has no source pane (ADR 0024)
-        if self.read_mode_on() {
+        // Read has no source pane (ADR 0024): it can only be left
+        if self.read_mode_on() && !self.side_by_side {
             return;
         }
         // the clean review previews are read-only only in the rendered view (issue #88):
