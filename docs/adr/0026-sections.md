@@ -158,8 +158,9 @@ values to choose from if any. A site may call a section what it likes, and Marki
 Choosing the item opens a modal form. Nothing is written before Save. An edit, another document or Read closes it with nothing written. `EditorView::insert_section` writes, at root level by the rule that places a
 block (`line_for_block`), with a blank line each side by `separated`, one undo step named Insert Section, the caret at the end of the title, before its hidden id:
 
-- **A boundary above it**, if the section it lands in has anything before that place. A boundary with nothing above it would be an empty section, which a site refuses, and on the first line of a
+- **A boundary above it**, if the section it lands in has anything before that place but its metadata. A boundary with nothing above it would be an empty section, and with only metadata above it a section a site refuses all the same, and on the first line of a
   file it can be front matter. Then the heading goes with no boundary, and if something other than a boundary follows, a boundary after it keeps that a section of its own.
+- **Refused, for what it would leave**: new metadata in a section that has its metadata and nothing else, where a second block has no place and a boundary would leave that section as it is; and a boundary with only metadata below it. A message says so.
 - **Refused**, nothing changed: the heading has to stand as a heading with its id, the number of sections has to be what was meant and every block has to pair as before. An unclosed fence that takes what is put after it is the case, and
   a lone first-line `---` that a second one would turn into front matter.
 - A title is one line. It is Markdown as any heading's text is. A trailing `{#x}` typed in it stays text, since the id written after it is the last.
@@ -185,6 +186,8 @@ pairs as before. The commands Move Section Up, Move Section Down and Delete Sect
 **A boundary is between sections** and belongs to neither: a section moves past one neighbour, and the two change places around it. So of two sections the upper one's bytes are left alone and the lower one goes above it, whichever the command was for: with the boundary it opens when the upper one has one, or, when the upper one is first and has none, with that boundary after it. The first section therefore never gets a boundary, and front matter stays first. What is in a section stays in it: metadata stays first in it, as bytes.
 
 **What it cannot do.** A first section with nothing in it has nothing to change places with, as a section in its place would need a boundary above it; so the commands are off for its neighbour going up. A document's only section cannot be deleted. **Refused**, nothing changed: every section's bytes have to stand at their new places, the number of sections has to stay and blocks have to pair as before, with a message saying so. A stray `:::` that comes to pair, or an unclosed fence that comes to hold what is put after it, are the cases.
+
+**A section with nothing or only metadata**, which a site refuses, is not moved, and nothing moves past it: the move is refused with a message that says to fill it in or delete it. That is the simple rule; a move cannot make such a section, as all bytes stay in their sections, and refusing keeps one from drifting around unnoticed. One elsewhere in the document stops nothing. A delete cannot make one either, for the same reason, and is how one goes away, so it is not refused.
 
 **Delete** takes a section's bytes and its boundary, with the first section's next boundary, so that the next section comes to be first. One undo step, with no question; a changed form's draft of a block in it is asked about first, as a block's delete does, and a move waits while one is open, also as a block's does.
 

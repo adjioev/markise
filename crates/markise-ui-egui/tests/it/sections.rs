@@ -678,6 +678,56 @@ mod inserting {
     }
 
     #[test]
+    fn metadata_values_stay_literal_and_free_text_keeps_to_the_limits() {
+        const SPACED: &str = r#"{"fields":[{"key":"style","values":[{"value":"a  b"}]},{"key":"kind"}]}"#;
+        let mut files = FILES_ON.to_vec();
+        files.push(("editor/sections.json", SPACED));
+        let doc = "One.\n\nTwo.\n";
+        let f = Fixture::with_package(doc, &files);
+        let mut h = f.ready();
+        free_line(&mut h, doc.len() - 1);
+        type_text(&mut h, "/");
+        press(&mut h, Key::Enter);
+        h.state_mut().set_section_form_title("Title");
+        h.state_mut().set_section_form_value("style", "a  b");
+        h.state_mut().set_section_form_value("kind", &"x".repeat(201));
+        assert!(!h.state().section_form().unwrap().can_save(), "201 characters");
+        frames(&mut h);
+        let ctx = h.ctx.clone();
+        assert!(!h.state_mut().save_section_form(&ctx));
+        assert!(h.state().section_form().is_some());
+        h.state_mut().set_section_form_value("kind", &"я".repeat(200));
+        assert!(h.state().section_form().unwrap().can_save(), "characters, not bytes");
+        h.state_mut().set_section_form_value("kind", "  two  words ");
+        assert!(h.state_mut().save_section_form(&ctx));
+        frames(&mut h);
+        let t = text(&h);
+        assert!(t.contains("style: a  b\nkind: two  words\n"), "{t}");
+    }
+
+    #[test]
+    fn nineteen_fields_stay_on_a_small_window_with_save_in_reach() {
+        let fields: Vec<String> = (0..19)
+            .map(|i| format!(r#"{{"key":"k{i}","label":"Key {i}"}}"#))
+            .collect();
+        let many = format!(r#"{{"fields":[{}]}}"#, fields.join(","));
+        let mut files = FILES_ON.to_vec();
+        files.push(("editor/sections.json", many.as_str()));
+        let doc = "One.\n\nTwo.\n";
+        let f = Fixture::with_package(doc, &files);
+        let mut h = f.ready();
+        h.set_size(egui::vec2(800.0, 600.0));
+        frames(&mut h);
+        free_line(&mut h, doc.len() - 1);
+        type_text(&mut h, "/");
+        press(&mut h, Key::Enter);
+        for name in ["Save", "Cancel"] {
+            let r = h.get_by_label(name).rect();
+            assert!(r.top() >= 0.0 && r.bottom() <= 600.0, "{name}: {r:?}");
+        }
+    }
+
+    #[test]
     fn only_a_document_with_sections_shows_it() {
         for doc in ["One.\n", "---\nauthoring: blocks-v2\n---\n\nOne.\n"] {
             let p = plain(doc);

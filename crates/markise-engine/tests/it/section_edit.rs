@@ -144,3 +144,43 @@ fn the_ids_on_the_page_are_those_of_headings_fields_and_sections() {
     let ids: Vec<_> = s.ed.ids_on_page().into_iter().collect();
     assert_eq!(ids, ["a1", "a2", "from-meta", "top"]);
 }
+
+const META: &str = ":::section-metadata\n\nstyle: wide\n\n:::";
+
+#[test]
+fn a_section_with_only_metadata_takes_the_heading_rather_than_a_boundary_after_it() {
+    let doc = format!("A\n\n---\n\n{META}\n\n‸\n---\n\nB\n");
+    assert_eq!(
+        inserted(&doc, &new("T")),
+        format!("A\n\n---\n\n{META}\n\n## T {{#s9}}\n\n---\n\nB\n")
+    );
+    // what follows stays a section of its own, as above
+    let doc = format!("{META}\n\n‸\nB\n");
+    assert_eq!(
+        inserted(&doc, &new("T")),
+        format!("{META}\n\n## T {{#s9}}\n\n---\n\nB\n")
+    );
+}
+
+#[test]
+fn nothing_is_written_that_leaves_a_section_with_only_metadata() {
+    let with = NewSection {
+        metadata: vec![("kind".to_string(), "x".to_string())],
+        ..new("T")
+    };
+    // a second metadata block has no place in it, and a boundary would leave it as it is
+    let doc = format!("A\n\n---\n\n{META}\n");
+    let mut s = surface(&doc);
+    s.caret(doc.len() - 1);
+    assert_eq!(s.ed.insert_section(&with, false), Err(InsertRefused::WouldLeaveEmpty));
+    assert_eq!(s.text(), doc);
+    // a boundary before metadata that is all there is below it
+    let doc = format!("\n{META}\n\n---\n\nB\n");
+    let mut s = surface(&doc);
+    s.caret(0);
+    assert_eq!(
+        s.ed.insert_section(&new("T"), false),
+        Err(InsertRefused::WouldLeaveEmpty)
+    );
+    assert_eq!(s.text(), doc);
+}

@@ -271,3 +271,45 @@ proptest! {
         }
     }
 }
+
+const META: &str = ":::section-metadata\n\nid: m\n\n:::";
+
+#[test]
+fn a_section_with_nothing_or_only_metadata_does_not_move_and_nothing_moves_past_it() {
+    for doc in [
+        format!("A\n\n---\n\n{META}\n\n---\n\nC\n"),
+        "A\n\n---\n\n---\n\nC\n".to_string(),
+    ] {
+        let mut s = surface(&doc);
+        for (k, up) in [(1, true), (1, false), (0, false), (2, true)] {
+            // with a first section next to one with nothing in it the commands are off already
+            let done = s.ed.move_section(k, up, false);
+            assert!(
+                matches!(done, Err(MoveRefused::WouldLeaveEmpty) | Ok(false)),
+                "{doc:?} {k}: {done:?}"
+            );
+            assert_eq!(s.text(), doc);
+        }
+    }
+    // elsewhere in the document it is no reason
+    let doc = format!("A\n\n---\n\nB\n\n---\n\nC\n\n---\n\n{META}\n");
+    let mut s = surface(&doc);
+    assert_eq!(s.ed.move_section(1, true, false), Ok(true));
+}
+
+#[test]
+fn a_delete_creates_no_section_with_only_metadata_and_can_take_one_away() {
+    let doc = format!("A\n\n---\n\n{META}\n\n---\n\nC\n");
+    let mut s = surface(&doc);
+    assert_eq!(s.ed.delete_section(1, false), Ok(true));
+    assert_eq!(s.text(), "A\n\n---\n\nC\n");
+    // metadata goes with what it is in: nothing is left of it behind
+    let doc = format!("A\n\n---\n\n{META}\n\nB\n\n---\n\nC\n");
+    let mut s = surface(&doc);
+    assert_eq!(s.ed.delete_section(1, false), Ok(true));
+    assert_eq!(s.text(), "A\n\n---\n\nC\n");
+    let doc = format!("{META}\n\nA\n\n---\n\nB\n");
+    let mut s = surface(&doc);
+    assert_eq!(s.ed.delete_section(0, false), Ok(true));
+    assert_eq!(s.text(), "B\n");
+}
