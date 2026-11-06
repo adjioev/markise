@@ -335,6 +335,74 @@ fn estimate_of_a_page_follows_an_edit_in_a_body_when_evicted() {
     m.check_against_full(&d).unwrap();
 }
 
+/// A lazy line of a callout's last paragraph becomes a block of its own: the quote ends above the
+/// edit, so the edit is no longer in the fold it changed (seed in
+/// `tests/proptest-regressions/callouts.txt`). The new block is not in the callout: closed, it
+/// stays on screen.
+#[test]
+fn a_block_split_off_a_lazy_line_is_not_in_the_fold_above_it() {
+    use markise_doc::{FormatDoc, PatchSet};
+    let cases: [(&str, &str, &[&str]); 5] = [
+        ("  lazy", "lazy", &["# "]),
+        ("  lazy", "lazy", &["- "]),
+        ("lazy", "lazy", &["# "]),
+        ("lazy", "lazy", &["#", " "]),
+        ("--", "\n\nAfter", &["-"]),
+    ];
+    let fresh_view = |d: &markise_md::Document, m: markise_layout::DocModel, opened: bool| {
+        let doc: Arc<dyn FormatDoc> = Arc::new(d.clone());
+        let mut v = View::new(doc, Arc::new(m), Theme::light(), 600.0, 1.0);
+        if opened {
+            let head = v.model().item_at_offset(d.text().find("[!info]").unwrap());
+            v.toggle_expanded(head);
+        }
+        texts(&mut v)
+    };
+    for (lazy, at, keys) in cases {
+        let src = format!("Top\n\n> [!info]- T\n> Body\n>\n> More\n{lazy}\n\nAfter\n");
+        for paging in [markise_layout::Paging::Full, markise_layout::Paging::Paged { tops: 64 }] {
+            for reader_opened in [false, true] {
+                let ctx = format!("{lazy:?} {keys:?} {paging:?} opened {reader_opened}");
+                let mut d = md(&src);
+                let doc: Arc<dyn FormatDoc> = Arc::new(d.clone());
+                let m = markise_layout::DocModel::build_with(&d, None, paging);
+                let mut v = View::new(doc, Arc::new(m), Theme::light(), 600.0, 1.0);
+                texts(&mut v);
+                if reader_opened {
+                    let head = v.model().item_at_offset(d.text().find("[!info]").unwrap());
+                    v.toggle_expanded(head);
+                    texts(&mut v);
+                }
+                let mut pos = src.find(at).unwrap();
+                for key in keys {
+                    let e = d.apply(&PatchSet::single_verbatim(pos..pos, *key));
+                    pos += key.len();
+                    let ch = v.model_mut().apply(&d, &e);
+                    let doc: Arc<dyn FormatDoc> = Arc::new(d.clone());
+                    v.apply_change(doc, &ch);
+                }
+                let fresh = markise_layout::DocModel::build_with(&d, None, markise_layout::Paging::Full);
+                let end = |m: &markise_layout::DocModel| m.cross.folds().iter().map(|f| f.end()).collect::<Vec<_>>();
+                assert_eq!(end(v.model()), end(&fresh), "{ctx}: the fold's extent");
+                if reader_opened {
+                    let head = v.model().item_at_offset(d.text().find("[!info]").unwrap());
+                    assert_eq!(
+                        texts(&mut v),
+                        fresh_view(&d, markise_layout::DocModel::build_with(&d, None, paging), true),
+                        "{ctx}: open"
+                    );
+                    v.toggle_expanded(head);
+                }
+                assert_eq!(
+                    texts(&mut v),
+                    fresh_view(&d, markise_layout::DocModel::build_with(&d, None, paging), false),
+                    "{ctx}: closed"
+                );
+            }
+        }
+    }
+}
+
 mod props {
     use super::*;
     use markise_doc::{FormatDoc, PatchSet};

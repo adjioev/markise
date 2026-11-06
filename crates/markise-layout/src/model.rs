@@ -658,10 +658,7 @@ impl DocModel {
             // reader's choices of unchanged markers carry over); others shift in O(chunks)
             let mut removed: Vec<usize> = self.items.0.range(lo..hi).map(|r| r.origin).collect();
             removed.dedup();
-            if self
-                .cross
-                .replace(doc, &removed, e.reparsed.start, &new_items, e.changed.clone(), e.delta)
-            {
+            if self.cross.replace(doc, &removed, &new_items, e) {
                 change.disclosures = true;
             }
             self.items.0.splice(lo..hi, new_items, e.delta);

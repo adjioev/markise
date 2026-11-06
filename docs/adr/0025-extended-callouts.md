@@ -94,8 +94,10 @@ heights, caret traversal that jumps over the body, the frame's skipping and `tog
 rather than a `RawPresentation`:
 
 - **No pairing.** A fold knows its extent from the format's containers (`containers_at`, innermost).
-  An edit inside it does not re-pair anything; its extent is read again, bounded by the top-level
-  block. An edit outside touches nothing per fold.
+  An edit inside it does not re-pair anything; its extent is read again, for the folds starting
+  before the edit in the re-parsed top-level blocks. That reaches a quote the edit ended above itself,
+  a lazy line turned into a block of its own, and the view derives what is hidden again when an end
+  moved other than with the text. An edit outside touches nothing per fold.
 - **Its first leaf stays.** The header is the quote's first paragraph, also holding body lines, which
   a closed callout does not draw. Later segments of that paragraph are hidden like the rest.
 - **Nothing is a control and nothing is indented.** The quote is its own frame.

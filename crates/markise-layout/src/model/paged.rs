@@ -765,8 +765,7 @@ impl DocModel {
             }
         }
         // disclosure markers of the region
-        self.cross
-            .replace_range(doc, a..b, markers, folds, e.changed.clone(), e.delta);
+        self.cross.replace_range(doc, a..b, markers, folds, e);
         // document-level inputs
         let mut full = false;
         if e.deps.resources {
