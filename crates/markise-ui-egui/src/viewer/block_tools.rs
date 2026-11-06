@@ -123,6 +123,9 @@ impl BlockViews for ViewsWithIcons {
     fn has_schema(&self, name: &str) -> bool {
         self.views.has_schema(name)
     }
+    fn label_row(&self, name: &str) -> bool {
+        self.views.label_row(name)
+    }
     fn has_practice(&self, name: &str) -> bool {
         self.views.has_practice(name)
     }
@@ -273,6 +276,21 @@ impl DocViewer {
         resp.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("{what}: {all}")));
     }
 
+    /// A block's controls show when the pointer is on the block, it holds the caret, or one of them has
+    /// the keyboard: all are there for the keyboard and a screen reader at all times, and take up no
+    /// room whether they show or not.
+    fn block_controls_show(&self, ui: &Ui, opener: usize, hovered: Option<usize>) -> bool {
+        let at = self.ed.session.selection().primary().focus.offset;
+        let caret = self.ed.session.doc().named_containers_at(at).pop();
+        hovered == Some(opener)
+            || caret.is_some_and(|c| c.opener.start == opener)
+            || ui.memory(|m| {
+                ["markise-block-edit", "markise-block-view", "markise-block-delete"]
+                    .iter()
+                    .any(|name| m.has_focus(ui.scope_id().with((*name, opener))))
+            })
+    }
+
     /// The button that switches a block's view: it says what comes next.
     #[allow(clippy::too_many_arguments)]
     fn block_view_button(
@@ -283,6 +301,7 @@ impl DocViewer {
         opener: usize,
         next: BlockViewMode,
         name: &str,
+        show: bool,
         out: &mut ViewerOutput,
     ) {
         let says = match next {
@@ -298,6 +317,9 @@ impl DocViewer {
         if resp.clicked() {
             out.switch_block_view = Some(opener);
             ui.ctx().request_repaint();
+        }
+        if !show && !resp.hovered() {
+            return;
         }
         let tone = if resp.hovered() {
             ui.visuals().text_color()
@@ -416,6 +438,7 @@ impl DocViewer {
             ui.ctx().request_repaint();
         }
         let pointer = ui.input(|i| i.pointer.hover_pos());
+        let hovered = self.hovered_block(ui, visible, surface);
         let model = self.ed.view.model().clone();
         let side = theme.line_px().min(22.0);
         let board = self.block_site.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -456,26 +479,33 @@ impl DocViewer {
             );
             let has_view = index.block(&c.name).is_some_and(|e| e.view.is_some());
             let outside = self.ed.view.block_outside(v.idx);
-            if pointer.is_some_and(|p| row.contains(p)) {
+            let all = r.union(r.translate(vec2(-(side + 4.0), 0.0)));
+            let read = self.ed.read_mode();
+            if pointer.is_some_and(|p| row.contains(p) || (!read && all.contains(p))) {
                 self.pointer_on_block_control = true;
             }
-            // over a picture the buttons need a ground of their own, and only show when asked for
-            let over_picture = v.layout.has_picture();
-            if over_picture && pointer.is_some_and(|p| row.contains(p)) {
-                let ground = ui.visuals().window_fill().gamma_multiply(0.85);
-                let all = r.union(r.translate(vec2(-(side + 4.0), 0.0)));
-                ui.painter_at(surface).rect_filled(all, 4.0, ground);
+            let show = self.block_controls_show(ui, start, hovered);
+            // over a picture or the block's own first field, the buttons need a ground of their own
+            let quiet = self.quiet_first_row(v);
+            if let Some(name) = &quiet {
+                let at =
+                    pos2(left, surface.top() + v.y) + v.layout.card_top.map_or(vec2(0.0, 0.0), |(a, _)| a.to_vec2());
+                let id = ui.scope_id().with(("markise-block-name", start));
+                let named = ui.interact(Rect::from_min_max(at, top_right + vec2(0.0, side)), id, Sense::hover());
+                named.widget_info(|| WidgetInfo::labeled(Role::Label, true, &**name));
             }
             // Read has no block controls (ADR 0024)
-            if self.ed.read_mode() {
+            if read {
                 continue;
+            }
+            if show && (v.layout.has_picture() || quiet.is_some()) {
+                let ground = ui.visuals().window_fill().gamma_multiply(0.85);
+                ui.painter_at(surface).rect_filled(all, 4.0, ground);
             }
             if (has_view || self.ed.view.can_draw_site()) && !outside {
                 let next = self.ed.next_block_view(start);
                 let m = r.translate(vec2(-(side + 4.0), 0.0));
-                if !v.layout.has_picture() || pointer.is_some_and(|p| row.contains(p)) {
-                    self.block_view_button(ui, m, surface, start, next, &c.name, out);
-                }
+                self.block_view_button(ui, m, surface, start, next, &c.name, show, out);
             }
             let label = format!("Edit Block: {}", c.name);
             let resp = ui
@@ -486,6 +516,9 @@ impl DocViewer {
                 out.open_block_form = Some(start);
                 ui.ctx().request_repaint();
             }
+            if !show && !resp.hovered() {
+                continue;
+            }
             let tone = if resp.hovered() {
                 ui.visuals().text_color()
             } else {
@@ -494,9 +527,6 @@ impl DocViewer {
             let painter = ui.painter_at(surface);
             if resp.hovered() {
                 painter.rect_filled(r, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
-            }
-            if over_picture && !pointer.is_some_and(|p| row.contains(p)) {
-                continue;
             }
             // a pencil: a slanted stroke and its tip
             let s = side * 0.28;
@@ -508,8 +538,14 @@ impl DocViewer {
         }
     }
 
-    /// The delete button of the block under the pointer, next to its other buttons. It shows for any
-    /// paired block, with no package as well: a press takes one undo step away from nothing lost.
+    /// The name of the block item `v` opens, when it shows natively with no first row to say it.
+    fn quiet_first_row(&self, v: &Visible) -> Option<Box<str>> {
+        let view = self.ed.view.native_item(v.idx)?.block.view.clone();
+        (!view.label_row && v.layout.warning.is_none()).then(|| view.label.clone())
+    }
+
+    /// The delete button of a block, next to its other buttons. It is there for any paired block, with
+    /// no package as well: a press takes one undo step away from nothing lost.
     pub(super) fn block_delete_ui(
         &mut self,
         ui: &mut Ui,
@@ -523,74 +559,77 @@ impl DocViewer {
         if self.ed.session.read_only().is_some() || self.review_preview() || self.block_drag_going() {
             return;
         }
-        let Some(hovered) = self.hovered_block(ui, visible, surface) else {
-            return;
-        };
+        let hovered = self.hovered_block(ui, visible, surface);
         let model = self.ed.view.model().clone();
-        let Some(v) = visible.iter().find(|v| model.item_start(v.idx) == hovered) else {
-            return;
-        };
-        let Some((_, b)) = v.layout.card_top else { return };
-        let containers = self.ed.session.doc().named_containers_at(hovered);
-        let Some(c) = containers.last().filter(|c| c.opener.start == hovered) else {
-            return;
-        };
-        // after the buttons the block has
-        let entry = self.block_index.as_ref().and_then(|i| i.block(&c.name));
-        let mut before = 0.0;
-        if let Some(e) = entry {
-            before += 1.0;
-            if (e.view.is_some() || self.ed.view.can_draw_site()) && !self.ed.view.block_outside(v.idx) {
-                before += 1.0;
-            }
-        }
         let side = theme.line_px().min(22.0);
-        let top_right = b + vec2(left, surface.top() + v.y);
-        let r = Rect::from_min_size(
-            pos2(top_right.x - side - 4.0 - before * (side + 4.0), top_right.y + 4.0),
-            vec2(side, side),
-        );
-        if !surface.contains_rect(r) {
-            return;
+        for v in visible {
+            let Some((_, b)) = v.layout.card_top else { continue };
+            let start = model.item_start(v.idx);
+            let containers = self.ed.session.doc().named_containers_at(start);
+            let Some(c) = containers.last().filter(|c| c.opener.start == start) else {
+                continue;
+            };
+            // after the buttons the block has
+            let entry = self.block_index.as_ref().and_then(|i| i.block(&c.name));
+            let mut before = 0.0;
+            if let Some(e) = entry {
+                before += 1.0;
+                if (e.view.is_some() || self.ed.view.can_draw_site()) && !self.ed.view.block_outside(v.idx) {
+                    before += 1.0;
+                }
+            }
+            let top_right = b + vec2(left, surface.top() + v.y);
+            let r = Rect::from_min_size(
+                pos2(top_right.x - side - 4.0 - before * (side + 4.0), top_right.y + 4.0),
+                vec2(side, side),
+            );
+            if !surface.contains_rect(r) {
+                continue;
+            }
+            let id = ui.scope_id().with(("markise-block-delete", start));
+            let resp = ui.interact(r, id, Sense::click()).on_hover_text("Delete Block");
+            let label = format!("Delete Block: {}", c.name);
+            resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+            if resp.clicked() {
+                out.delete_block = Some(start);
+                ui.ctx().request_repaint();
+            }
+            let on_it = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| r.contains(p));
+            if on_it || hovered == Some(start) {
+                self.block_delete_button = Some(r);
+            }
+            if on_it {
+                self.pointer_on_block_control = true;
+            }
+            if !on_it && !self.block_controls_show(ui, start, hovered) {
+                continue;
+            }
+            let tone = if resp.hovered() {
+                ui.visuals().text_color()
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            let painter = ui.painter_at(surface);
+            if resp.hovered() {
+                painter.rect_filled(r, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
+            } else if v.layout.has_picture() || self.quiet_first_row(v).is_some() {
+                painter.rect_filled(r, 4.0, ui.visuals().window_fill().gamma_multiply(0.85));
+            }
+            // a bin: a lid, and a body narrowing to its foot
+            let (c0, s) = (r.center(), side * 0.26);
+            let stroke = Stroke::new((side * 0.08).max(1.0), tone);
+            painter.line_segment(
+                [c0 + vec2(-s * 1.15, -s * 0.75), c0 + vec2(s * 1.15, -s * 0.75)],
+                stroke,
+            );
+            painter.line_segment([c0 + vec2(-s * 0.4, -s * 1.1), c0 + vec2(s * 0.4, -s * 1.1)], stroke);
+            let body = [
+                c0 + vec2(-s * 0.85, -s * 0.75),
+                c0 + vec2(-s * 0.6, s * 1.15),
+                c0 + vec2(s * 0.6, s * 1.15),
+                c0 + vec2(s * 0.85, -s * 0.75),
+            ];
+            painter.add(egui::Shape::line(body.to_vec(), stroke));
         }
-        let name = c.name.clone();
-        let id = ui.scope_id().with(("markise-block-delete", hovered));
-        let resp = ui.interact(r, id, Sense::click()).on_hover_text("Delete Block");
-        let label = format!("Delete Block: {name}");
-        resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
-        self.block_delete_button = Some(r);
-        if resp.hovered() {
-            self.pointer_on_block_control = true;
-        }
-        if resp.clicked() {
-            out.delete_block = Some(hovered);
-            ui.ctx().request_repaint();
-        }
-        let tone = if resp.hovered() {
-            ui.visuals().text_color()
-        } else {
-            ui.visuals().weak_text_color()
-        };
-        let painter = ui.painter_at(surface);
-        if resp.hovered() {
-            painter.rect_filled(r, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
-        } else if v.layout.has_picture() {
-            painter.rect_filled(r, 4.0, ui.visuals().window_fill().gamma_multiply(0.85));
-        }
-        // a bin: a lid, and a body narrowing to its foot
-        let (c0, s) = (r.center(), side * 0.26);
-        let stroke = Stroke::new((side * 0.08).max(1.0), tone);
-        painter.line_segment(
-            [c0 + vec2(-s * 1.15, -s * 0.75), c0 + vec2(s * 1.15, -s * 0.75)],
-            stroke,
-        );
-        painter.line_segment([c0 + vec2(-s * 0.4, -s * 1.1), c0 + vec2(s * 0.4, -s * 1.1)], stroke);
-        let body = [
-            c0 + vec2(-s * 0.85, -s * 0.75),
-            c0 + vec2(-s * 0.6, s * 1.15),
-            c0 + vec2(s * 0.6, s * 1.15),
-            c0 + vec2(s * 0.85, -s * 0.75),
-        ];
-        painter.add(egui::Shape::line(body.to_vec(), stroke));
     }
 }

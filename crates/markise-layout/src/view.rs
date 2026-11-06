@@ -1041,6 +1041,9 @@ impl View {
                 _ => t.block_spacing + self.model.outline.len().max(1) as f32 * line,
             },
             ItemKind::Rule | ItemKind::Empty => t.block_spacing + line,
+            ItemKind::ContainerMarker { close: false } if self.native_quiet_opener(i) => {
+                t.block_spacing + crate::block::quiet_opener_height(t)
+            }
             ItemKind::ContainerMarker { close: false } => t.block_spacing + crate::block::card_opener_height(t),
             ItemKind::ContainerMarker { close: true } => {
                 crate::block::card_padding(t) + self.practice_row_estimate(i, it)
@@ -1470,6 +1473,12 @@ impl View {
             }
             self.layout(i, shaper, images);
             y -= self.height(i);
+        }
+        if let Some(opener) = out
+            .first()
+            .and_then(|first| self.quiet_opener_above(first, shaper, images))
+        {
+            out.insert(0, opener);
         }
         self.last_visible = out.iter().map(|v| v.idx).collect();
         out

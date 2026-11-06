@@ -36,10 +36,26 @@ pub struct ViewConfig {
     pub accent: Option<String>,
     /// An icon name; the package supplies what it means.
     pub icon: Option<String>,
+    /// `false`: no tinted ground, a thin bar instead. Default `true`.
+    pub fill: bool,
+    /// `false`: no label row; the block's own heading is enough. Default `true`.
+    pub label: bool,
     /// The block can be practised (ADR 0024).
     pub practice: Option<PracticeConfig>,
     /// Every other key, kept as the package wrote it.
     pub extra: serde_json::Map<String, Value>,
+}
+
+/// An optional `true` or `false` of a view; both default to what a view does without the key.
+fn opt_switch(file: &str, name: &str, key: &str, def: &serde_json::Map<String, Value>, issues: &mut Issues) -> bool {
+    match def.get(key) {
+        None | Some(Value::Bool(true)) => true,
+        Some(Value::Bool(false)) => false,
+        Some(_) => {
+            issues.push(file, format!("the view of \"{name}\": \"{key}\" must be true or false"));
+            true
+        }
+    }
 }
 
 /// `"practice"` of a view: what a block shows while someone answers it.
@@ -166,10 +182,12 @@ pub(crate) fn parse(
         };
         let accent = opt_token(file, &format!("\"{name}\" accent"), def.get("accent"), issues);
         let icon = opt_token(file, &format!("\"{name}\" icon"), def.get("icon"), issues);
+        let fill = opt_switch(file, &name, "fill", def, issues);
+        let label = opt_switch(file, &name, "label", def, issues);
         let practice = parse_practice(file, &name, kind, def.get("practice"), issues);
         let extra = def
             .iter()
-            .filter(|(k, _)| !matches!(k.as_str(), "kind" | "accent" | "icon" | "practice"))
+            .filter(|(k, _)| !matches!(k.as_str(), "kind" | "accent" | "icon" | "fill" | "label" | "practice"))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         out.insert(
@@ -178,6 +196,8 @@ pub(crate) fn parse(
                 kind,
                 accent,
                 icon,
+                fill,
+                label,
                 practice,
                 extra,
             },
