@@ -105,14 +105,8 @@ fn immediate_rule(
         return Some("Task List");
     }
     // `[!NOTE]` … as the first line of a quote (spec 02 §2.1)
-    if quote_first && opts.alerts {
-        let u = t.to_ascii_uppercase();
-        if matches!(
-            u.as_str(),
-            "[!NOTE]" | "[!TIP]" | "[!IMPORTANT]" | "[!WARNING]" | "[!CAUTION]"
-        ) {
-            return Some("Callout");
-        }
+    if quote_first && crate::callout::is_bare_tag(t, opts) {
+        return Some("Callout");
     }
     None
 }
@@ -137,11 +131,11 @@ fn pending_rule(
     if item_first == Some(false) && scan::task_box(b, 0, b.len()).is_some() {
         return typed_end < lead + 3;
     }
-    if quote_first && opts.alerts {
-        let tag = t.trim_end_matches([' ', '\t']);
-        if immediate_rule(tag, None, true, opts) == Some("Callout") {
-            return typed_end < lead + tag.len();
-        }
+    if quote_first
+        && let Some(tag) = crate::callout::parse_tag(t)
+        && crate::callout::recognise(t, opts).is_some()
+    {
+        return typed_end < lead + tag.end;
     }
     false
 }

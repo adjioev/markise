@@ -119,6 +119,8 @@ impl MarkiseApp {
         d.viewer.ed.source_selection_from_session();
         d.viewer.ed.reveal = true;
         d.viewer.ed.refresh_focus();
+        // (also when the caret was on this item already)
+        d.viewer.ed.view.reveal_offset(range.start);
         d.viewer.find_reveal = true;
         d.source_ui.find_reveal = true;
         if let Some(ctx) = &self.ctx {
