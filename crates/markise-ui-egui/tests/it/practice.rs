@@ -752,6 +752,7 @@ fn the_example_package_can_be_practised_through_the_real_path() {
     assert_eq!(score_label(&h).as_deref(), Some("0 of 1"));
     assert_eq!(text(&h), source);
     assert!(!h.state_mut().viewer().unwrap().ed.session.is_dirty());
+}
 
 #[test]
 fn an_answer_partly_scrolled_or_taller_than_the_window_still_works() {
