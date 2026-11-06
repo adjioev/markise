@@ -96,6 +96,56 @@ pub struct NamedContainer {
     pub closer: Span,
 }
 
+/// A section of a document ([`crate::FormatDoc::section_at`], ADR 0026): what lies between two
+/// boundaries a format recognises. Absolute offsets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SectionAt {
+    /// Its place among the document's sections, from 0.
+    pub index: usize,
+    /// The boundary that opens it (its syntax, no line terminator). The first section has none.
+    pub boundary: Option<Span>,
+    /// Where its content starts: after its boundary or the format's document header.
+    pub start: usize,
+    /// Where the next section's boundary starts, or the end of the text.
+    pub end: usize,
+}
+
+/// One `key: value` of a section's metadata, as written.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SectionPair {
+    pub key: String,
+    pub value: String,
+}
+
+/// A line of a section's metadata that does not fit its grammar.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FlaggedLine {
+    /// The start of the line (absolute).
+    pub at: usize,
+    /// The start of the line's text, for showing it.
+    pub text: String,
+    /// What is wrong, in words.
+    pub reason: &'static str,
+}
+
+/// What a section's metadata says, in the order written. Absolute spans.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SectionMetadata {
+    /// The opening line (its syntax only, no line terminator).
+    pub opener: Span,
+    /// The closing line (its syntax only, no line terminator).
+    pub closer: Span,
+    pub pairs: Vec<SectionPair>,
+    pub flagged: Vec<FlaggedLine>,
+}
+
+impl SectionMetadata {
+    /// The value of `key`.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.pairs.iter().find(|p| p.key == key).map(|p| p.value.as_str())
+    }
+}
+
 /// Optional display semantics supplied by a format for otherwise raw markup.
 /// These describe presentation, not a parser change; source spans remain authoritative.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -170,10 +170,51 @@ impl EditorView {
 
     /// What comes after this block's state. Asked of the switch before it is pressed, to say so.
     pub fn next_block_view(&self, opener: usize) -> BlockViewMode {
-        let can = self
-            .opener_name(opener)
-            .map_or_else(BlockCan::default, |n| self.can_of(&n));
+        if self.view.is_section_metadata(opener) {
+            return match self.view.block_mode_of(opener) {
+                BlockViewMode::Markdown => BlockViewMode::Native,
+                _ => BlockViewMode::Markdown,
+            };
+        }
+        let can = self.block_can(opener);
         (self.view.block_mode_of(opener)).next_for(can)
+    }
+
+    /// What this state of the document or a block shows of the block with this opener.
+    fn state_shown(&self, opener: usize, mode: BlockViewMode) -> BlockViewMode {
+        // a metadata block is a plaque in every state but one (ADR 0026)
+        if self.view.is_section_metadata(opener) {
+            return match mode {
+                BlockViewMode::Markdown => BlockViewMode::Markdown,
+                _ => BlockViewMode::Native,
+            };
+        }
+        mode.shown(self.block_can(opener))
+    }
+
+    /// What this block can show, besides its Markdown.
+    fn block_can(&self, opener: usize) -> BlockCan {
+        self.opener_name(opener)
+            .map_or_else(BlockCan::default, |n| self.can_of(&n))
+    }
+
+    /// A plaque shows what no caret can stand in, as a picture does: whoever asks for one gets it.
+    fn leave_block_for_plaque(&mut self, opener: usize) {
+        let p = self.session.selection().primary();
+        let at = p.focus.offset;
+        if !p.is_caret() || self.view.block_mode_of(opener) == BlockViewMode::Markdown {
+            return;
+        }
+        let Some(c) = self.session.doc().named_containers_at(at).into_iter().next() else {
+            return;
+        };
+        if c.opener.start == opener && at < c.closer.end {
+            let after = match self.session.doc().gap_virt(c.closer.end) {
+                Some(virt) => DocPos::with_virt(c.closer.end, virt),
+                None => DocPos::new(c.closer.end),
+            };
+            self.set_selection(Selection::caret_at(after));
+        }
     }
 
     /// A picture shows what no caret can stand in, and a block holding a selection's end shows what it
@@ -206,27 +247,29 @@ impl EditorView {
 
     /// The next state for the block with this opener.
     pub fn switch_block_view(&mut self, opener: usize) {
-        let can = self
-            .opener_name(opener)
-            .map_or_else(BlockCan::default, |n| self.can_of(&n));
+        let metadata = self.view.is_section_metadata(opener);
         let next = self.next_block_view(opener);
-        let document = self.place.mode;
+        let same = self.state_shown(opener, next) == self.state_shown(opener, self.place.mode);
         let own =
             (self.place.own_modes.iter()).position(|o| self.session.mark(o.mark).is_some_and(|p| p.offset == opener));
         // what shows the same as the document's state needs no state of its own
         match own {
-            Some(i) if next.shown(can) == document.shown(can) => {
+            Some(i) if same => {
                 let o = self.place.own_modes.remove(i);
                 self.session.remove_mark(o.mark);
             }
             Some(i) => self.place.own_modes[i].mode = next,
-            None if next.shown(can) == document.shown(can) => {}
+            None if same => {}
             None => {
                 self.add_own_mode(opener, next);
             }
         }
         self.follow_block_modes();
-        self.leave_block_for_picture(Some(opener));
+        if metadata {
+            self.leave_block_for_plaque(opener);
+        } else {
+            self.leave_block_for_picture(Some(opener));
+        }
     }
 
     /// Hands the view where the blocks with a state of their own stand now.

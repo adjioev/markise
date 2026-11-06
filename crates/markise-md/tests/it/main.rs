@@ -18,5 +18,6 @@ mod language;
 mod nested;
 mod regressions;
 mod roundtrip;
+mod sections;
 mod spec01;
 mod wikilinks;

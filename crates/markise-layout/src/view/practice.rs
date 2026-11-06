@@ -108,6 +108,7 @@ impl View {
             self.native.practice.settle();
             self.native.items.borrow_mut().clear();
             self.site.forget();
+            self.sections.forget();
             self.reset_heights();
         }
     }

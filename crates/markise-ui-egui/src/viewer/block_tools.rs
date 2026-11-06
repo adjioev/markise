@@ -280,7 +280,7 @@ impl DocViewer {
     /// A block's controls show when the pointer is on the block, it holds the caret, or one of them has
     /// the keyboard: all are there for the keyboard and a screen reader at all times, and take up no
     /// room whether they show or not.
-    fn block_controls_show(&self, ui: &Ui, opener: usize, hovered: Option<usize>) -> bool {
+    pub(super) fn block_controls_show(&self, ui: &Ui, opener: usize, hovered: Option<usize>) -> bool {
         let at = self.ed.session.selection().primary().focus.offset;
         let caret = self.ed.session.doc().named_containers_at(at).pop();
         hovered == Some(opener)
@@ -294,7 +294,7 @@ impl DocViewer {
 
     /// The button that switches a block's view: it says what comes next.
     #[allow(clippy::too_many_arguments)]
-    fn block_view_button(
+    pub(super) fn block_view_button(
         &self,
         ui: &mut Ui,
         r: Rect,
@@ -573,6 +573,10 @@ impl DocViewer {
             // after the buttons the block has
             let entry = self.block_index.as_ref().and_then(|i| i.block(&c.name));
             let mut before = 0.0;
+            // a metadata block's switch stands where a block's Edit does
+            if self.ed.view.is_section_metadata(start) {
+                before += 1.0;
+            }
             if let Some(e) = entry {
                 before += 1.0;
                 if (e.view.is_some() || self.ed.view.can_draw_site()) && !self.ed.view.block_outside(v.idx) {
