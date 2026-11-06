@@ -98,7 +98,7 @@ The status bar shows how it went: `3 of 5` means 3 right of the 5 blocks you hav
 
 What you select is kept in memory, for as long as the document stays open. It lasts while you scroll, and goes if the block changes or the document is closed or reloaded. Nothing is written to disk.
 
-Nothing hidden gets out: what you copy leaves it out, Find does not find it, and while a document has blocks being practised the outline, a table of contents and the Comments panel leave out what is in them. The word count counts the whole file. A block that cannot be practised as it stands, such as one with no marked answer, shows only its first row and `⚠ Not ready to practice`. Switch to Edit to see what is missing.
+Nothing hidden gets out: what you copy leaves it out, Find does not find it, and while a document has blocks being practised the outline, a table of contents and the Comments panel leave out what is in them. The word count counts the whole file. A block that cannot be practised as it stands, such as one with no marked answer, shows only its first row and `⚠ Not ready to practice`. Switch to Edit to see what is missing. A block with nothing to work out, such as an exercise whose optional solution is empty, is not practised at all and shows as it is.
 
 ## Edit in place
 

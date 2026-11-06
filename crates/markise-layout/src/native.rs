@@ -107,6 +107,12 @@ impl PracticeParts {
         }
     }
 
+    /// Nothing here for anyone to work out: no answers and nothing to reveal, as when what would be revealed
+    /// is an optional field left empty. Such a block is not practised: it shows as it is (ADR 0024).
+    pub fn nothing_to_practise(&self) -> bool {
+        self.answers.is_empty() && self.reveal.is_empty()
+    }
+
     pub fn answer_at(&self, rel: u32) -> Option<usize> {
         (self.answers.iter()).position(|a| a.range.contains(&rel) || a.range.end == rel)
     }

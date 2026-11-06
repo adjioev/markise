@@ -247,11 +247,22 @@ impl PackageViews {
             Err(e) => return BlockVerdict::NoForm(e.to_string()),
         };
         match misfit(&variant, &fields, source) {
+            // what fits and has answers with none marked is not ready to practise, as the view says in Read
+            None if variant.view.is_some() && self.practice_parts(name, &fields).is_some_and(not_ready) => {
+                BlockVerdict::Unfilled(vec![BlockReason {
+                    text: "No answer is marked, so it cannot be practised.".to_string(),
+                    range: None,
+                }])
+            }
             None => BlockVerdict::Fits,
             Some((true, reasons)) => BlockVerdict::Unfilled(reasons),
             Some((false, reasons)) => BlockVerdict::Outside(reasons),
         }
     }
+}
+
+fn not_ready(parts: PracticeParts) -> bool {
+    !parts.is_ready() && !parts.nothing_to_practise()
 }
 
 impl PackageViews {

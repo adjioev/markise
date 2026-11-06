@@ -245,6 +245,13 @@ impl View {
             BlockViewMode::Practice if !self.native.source.as_ref().is_some_and(|s| s.has_practice(&c.name)) => {
                 BlockViewMode::Native
             }
+            // nothing in it to work out: it fits, and shows as it is
+            BlockViewMode::Practice
+                if matches!(self.look_of(c), Looked::Native(b)
+                    if b.practice.as_ref().is_some_and(|p| p.nothing_to_practise())) =>
+            {
+                BlockViewMode::Native
+            }
             mode => mode,
         }
     }

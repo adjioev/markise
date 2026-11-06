@@ -251,3 +251,65 @@ fn a_sections_metadata_block_is_unknown_only_outside_the_dialect() {
         ProblemKind::UnknownBlock
     );
 }
+
+/// What `blocks check` says of a block and what the view does with it in Read agree (ADR 0024).
+#[test]
+fn the_check_and_practice_agree() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use markise_layout::NativeBlock;
+    use markise_package::PackageIndex;
+
+    let files: BTreeMap<String, Vec<u8>> = [
+        (
+            "manifest.json",
+            r#"{"format":"markise-block-package/2","library":"s","version":"1","blocks":["task","pick"]}"#,
+        ),
+        (
+            "components/task/task.json",
+            r#"{"fields":[{"name":"do","type":"text"},{"name":"done","type":"quote","min":0}]}"#,
+        ),
+        (
+            "components/pick/pick.json",
+            r#"{"fields":[{"name":"do","type":"text"},{"name":"ones","type":"choices","minItems":0},{"name":"why","type":"quote","min":0}]}"#,
+        ),
+        ("editor/palette.json", r#"{"format":1}"#),
+        (
+            "editor/views.json",
+            r#"{"task":{"kind":"card","practice":{"reveal":["done"]}},"pick":{"kind":"choices","practice":{"reveal":["why"]}}}"#,
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
+    .collect();
+    let index = Arc::new(PackageIndex::from_files(&files).unwrap());
+    let views = PackageViews::new(index.clone(), "en");
+    let parts = |source: &str, name: &str| {
+        let block: NativeBlock = match views.look(name, "", source) {
+            BlockLook::Native(b) => b,
+            _ => panic!("{source}"),
+        };
+        block.practice.unwrap()
+    };
+    let says = |source: &str| BlockChecker::new(index.clone()).check(source).problems;
+    // nothing to reveal: clean, and not practised
+    for (name, source) in [("task", ":::task\n\nDo.\n\n:::"), ("pick", ":::pick\n\nDo.\n\n:::")] {
+        assert!(says(source).is_empty(), "{source}");
+        assert!(parts(source, name).nothing_to_practise(), "{source}");
+    }
+    // something to practise: clean, and ready
+    for (name, source) in [
+        ("task", ":::task\n\nDo.\n\n> Done.\n\n:::"),
+        ("pick", ":::pick\n\nDo.\n\n- [x] One {#a1}\n- [ ] Two {#a2}\n\n:::"),
+    ] {
+        assert!(says(source).is_empty(), "{source}");
+        assert!(parts(source, name).is_ready(), "{source}");
+    }
+    // answers and no mark: the view says not ready, and so does the check
+    let source = ":::pick\n\nDo.\n\n- [ ] One {#a1}\n- [ ] Two {#a2}\n\n> Why.\n\n:::";
+    assert!(!parts(source, "pick").is_ready() && !parts(source, "pick").nothing_to_practise());
+    let problems = says(source);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].reason.contains("No answer is marked"), "{problems:?}");
+}

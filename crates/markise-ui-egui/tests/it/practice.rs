@@ -1479,3 +1479,25 @@ fn the_score_follows_what_was_done_through_changes_to_the_block() {
     v.ed.edit(|s| s.apply_external(&ps, "edit", false)).unwrap();
     assert_eq!(v.ed.practice_score(), (0, 0), "the block changed");
 }
+
+#[test]
+fn a_block_with_nothing_to_reveal_is_simply_not_practised() {
+    let doc = "Before.\n\n:::exercise\n\nDo this and that.\n\n:::\n\nAfter.\n";
+    let f = fixture(doc);
+    let mut h = f.ready();
+    command(&mut h, "view.readMode");
+    let s = shown(&mut h);
+    assert!(s.contains("Do this and that."), "its text shows: {s}");
+    assert!(!s.contains("Not ready"), "{s}");
+    assert!(!s.contains("Show answer"), "nothing to show: {s}");
+    assert_eq!(mode_of(&mut h, "Do this"), BlockViewMode::Native);
+    assert_eq!(text(&h), doc);
+    // with something to reveal, as ever
+    let doc = "Before.\n\n:::exercise\n\nDo this and that.\n\n> The solution.\n\n:::\n\nAfter.\n";
+    let f = fixture(doc);
+    let mut h = f.ready();
+    command(&mut h, "view.readMode");
+    let s = shown(&mut h);
+    assert!(!s.contains("The solution"), "{s}");
+    assert_eq!(mode_of(&mut h, "Do this"), BlockViewMode::Practice);
+}
