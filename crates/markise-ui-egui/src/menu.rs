@@ -340,8 +340,8 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
         &[both("Shift+Opt+Cmd+M", "Ctrl+Shift+Alt+M")],
     ),
     app(
-        "view.practiceAll",
-        "Practice All Blocks",
+        "view.readMode",
+        "Read Mode",
         &[both("Shift+Opt+Cmd+Y", "Ctrl+Shift+Alt+Y")],
     ),
     app("view.rendered", "Rendered", &[]),

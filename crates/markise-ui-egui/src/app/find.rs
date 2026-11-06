@@ -231,16 +231,6 @@ impl MarkiseApp {
                     match patches {
                         Ok(patches) if !patches.is_empty() => {
                             let d = self.doc.as_mut().unwrap();
-                            // what is being practiced does not change, by this either (ADR 0024)
-                            let patches = if d.viewer.ed.view.practice_on() {
-                                let kept = (patches.patches().iter())
-                                    .filter(|p| !d.viewer.ed.practice_touches(p.range.clone()))
-                                    .cloned()
-                                    .collect();
-                                markise_doc::PatchSet::new(kept).unwrap_or(patches)
-                            } else {
-                                patches
-                            };
                             let all = self.find.operation.as_ref().is_some_and(|o| o.only.is_none());
                             match d.viewer.ed.edit(|s| {
                                 s.apply_external(&patches, if all { "Replace All" } else { "Replace" }, false)

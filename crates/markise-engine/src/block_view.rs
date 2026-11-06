@@ -32,7 +32,8 @@ pub struct PackageViews {
     language: String,
     id: u64,
     variants: Mutex<Variants>,
-    any_default: bool,
+    /// The blocks whose presence opens a document in Read.
+    default_names: Vec<String>,
 }
 
 fn kind_of(k: ViewKind) -> NativeKind {
@@ -61,11 +62,14 @@ impl PackageViews {
     pub fn new(index: Arc<PackageIndex>, language: &str) -> PackageViews {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (Arc::as_ptr(&index) as usize, language).hash(&mut h);
-        let any_default = (index.block_names()).any(|n| {
-            (index.block(n)).is_some_and(|e| e.view.and_then(|v| v.practice.as_ref()).is_some_and(|p| p.default))
-        });
+        let default_names = (index.block_names())
+            .filter(|n| {
+                (index.block(n)).is_some_and(|e| e.view.and_then(|v| v.practice.as_ref()).is_some_and(|p| p.default))
+            })
+            .map(str::to_string)
+            .collect();
         PackageViews {
-            any_default,
+            default_names,
             index,
             language: language.to_string(),
             id: h.finish(),
@@ -173,6 +177,11 @@ impl PackageViews {
 }
 
 impl PackageViews {
+    /// The blocks whose presence opens a document in Read.
+    pub fn read_by_default(&self) -> &[String] {
+        &self.default_names
+    }
+
     /// Whether any block of the package can be practised.
     pub fn any_practice(&self) -> bool {
         (self.index.block_names()).any(|n| {
@@ -217,12 +226,8 @@ impl BlockViews for PackageViews {
             .is_some_and(|e| e.view.is_some_and(|v| v.practice.is_some()))
     }
 
-    fn practice_default(&self, name: &str) -> bool {
-        (self.index.block(name)).is_some_and(|e| e.view.and_then(|v| v.practice.as_ref()).is_some_and(|p| p.default))
-    }
-
-    fn any_practice_default(&self) -> bool {
-        self.any_default
+    fn any_practice(&self) -> bool {
+        PackageViews::any_practice(self)
     }
 
     fn practice_hides_quotes(&self, name: &str) -> bool {

@@ -126,11 +126,8 @@ impl BlockViews for ViewsWithIcons {
     fn has_practice(&self, name: &str) -> bool {
         self.views.has_practice(name)
     }
-    fn practice_default(&self, name: &str) -> bool {
-        self.views.practice_default(name)
-    }
-    fn any_practice_default(&self) -> bool {
-        self.views.any_practice_default()
+    fn any_practice(&self) -> bool {
+        BlockViews::any_practice(&*self.views)
     }
     fn practice_hides_quotes(&self, name: &str) -> bool {
         self.views.practice_hides_quotes(name)
@@ -290,7 +287,7 @@ impl DocViewer {
     ) {
         let says = match next {
             BlockViewMode::Native => "Show Native View",
-            BlockViewMode::Practice => "Practice",
+            BlockViewMode::Practice => "Show Native View",
             BlockViewMode::Site => "Show as on the Site",
             BlockViewMode::Markdown => "Show Markdown",
         };
@@ -314,16 +311,6 @@ impl DocViewer {
         let (c, s) = (r.center(), r.width() * 0.26);
         let stroke = Stroke::new((r.width() * 0.08).max(1.0), tone);
         match next {
-            // a tick in a ring: answers to check
-            BlockViewMode::Practice => {
-                painter.circle_stroke(c, s * 1.1, stroke);
-                let pts = [
-                    c + vec2(-s * 0.5, 0.0),
-                    c + vec2(-s * 0.1, s * 0.45),
-                    c + vec2(s * 0.55, -s * 0.45),
-                ];
-                painter.add(egui::Shape::line(pts.to_vec(), stroke));
-            }
             // the source: an M
             BlockViewMode::Markdown => {
                 let pts = [
@@ -343,7 +330,7 @@ impl DocViewer {
                 painter.add(egui::Shape::ellipse_stroke(c, waist.size() * 0.5, stroke));
             }
             // a card
-            BlockViewMode::Native => {
+            BlockViewMode::Native | BlockViewMode::Practice => {
                 let rect = Rect::from_center_size(c, vec2(2.0 * s, 1.6 * s));
                 painter.rect_stroke(rect, 1.0, stroke, egui::StrokeKind::Middle);
                 painter.line_segment(
@@ -405,19 +392,6 @@ impl DocViewer {
         self.ed.view.set_block_views(views);
         self.ed.set_block_fields(fields);
         self.block_index = index;
-    }
-
-    /// What is on screen but for what is in a block in Practice.
-    pub(super) fn outside_practice<'a>(&self, visible: &'a [Visible]) -> std::borrow::Cow<'a, [Visible]> {
-        if !self.ed.view.practice_on() {
-            return visible.into();
-        }
-        let model = self.ed.view.model();
-        (visible.iter())
-            .filter(|v| !self.ed.in_practice(model.item_start(v.idx)))
-            .cloned()
-            .collect::<Vec<_>>()
-            .into()
     }
 
     /// The pictures of block icons this viewer shows.
@@ -492,16 +466,16 @@ impl DocViewer {
                 let all = r.union(r.translate(vec2(-(side + 4.0), 0.0)));
                 ui.painter_at(surface).rect_filled(all, 4.0, ground);
             }
-            if (has_view || self.ed.view.can_draw_site()) && (!outside || self.ed.in_practice(start)) {
+            // Read has no block controls (ADR 0024)
+            if self.ed.read_mode() {
+                continue;
+            }
+            if (has_view || self.ed.view.can_draw_site()) && !outside {
                 let next = self.ed.next_block_view(start);
                 let m = r.translate(vec2(-(side + 4.0), 0.0));
                 if !v.layout.has_picture() || pointer.is_some_and(|p| row.contains(p)) {
                     self.block_view_button(ui, m, surface, start, next, &c.name, out);
                 }
-            }
-            // a block being practiced has no commands (ADR 0024)
-            if self.ed.in_practice(start) {
-                continue;
             }
             let label = format!("Edit Block: {}", c.name);
             let resp = ui
@@ -552,9 +526,6 @@ impl DocViewer {
         let Some(hovered) = self.hovered_block(ui, visible, surface) else {
             return;
         };
-        if self.ed.in_practice(hovered) {
-            return;
-        }
         let model = self.ed.view.model().clone();
         let Some(v) = visible.iter().find(|v| model.item_start(v.idx) == hovered) else {
             return;

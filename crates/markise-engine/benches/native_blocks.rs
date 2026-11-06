@@ -113,7 +113,7 @@ fn run_in(label: &str, text: String, views: Option<Arc<PackageViews>>, practice:
     ed.view.set_block_views(views.map(|v| v as Arc<dyn BlockViews>));
     ed.set_block_fields(fields);
     if practice {
-        ed.toggle_practice_all();
+        ed.set_read_mode(true);
     }
     let open = t.elapsed();
     let t = Instant::now();

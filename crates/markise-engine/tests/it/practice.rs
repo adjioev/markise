@@ -77,7 +77,7 @@ fn measured_total(ed: &mut EditorView) -> f64 {
 fn a_page_in_a_document_in_practice_is_estimated_as_what_it_shows() {
     let mut ed = editor(questions(1500));
     assert!(ed.view.model().is_paged(), "this has to be about pages");
-    ed.toggle_practice_all();
+    ed.set_read_mode(true);
     let estimated = ed.view.total_height();
     let measured = measured_total(&mut ed);
     let off = (estimated - measured).abs() / measured;
@@ -94,7 +94,7 @@ fn frame(ed: &mut EditorView) {
 fn what_was_done_lasts_through_scrolling_paging_and_eviction_and_heights_follow() {
     let text = questions(1500);
     let mut ed = editor(text.clone());
-    ed.toggle_practice_all();
+    ed.set_read_mode(true);
     frame(&mut ed);
     let answer = text.find("Another answer").unwrap();
     let opener = text.find(":::question").unwrap();
@@ -143,7 +143,7 @@ fn what_was_done_lasts_through_scrolling_paging_and_eviction_and_heights_follow(
 fn a_hidden_field_at_the_top_of_the_viewport_leaves_the_viewport_on_what_comes_next() {
     let text = questions(40);
     let mut ed = editor(text.clone());
-    ed.toggle_practice_all();
+    ed.set_read_mode(true);
     frame(&mut ed);
     let opener = text.find(":::question").unwrap();
     assert!(ed.practice_press(text.find("Another answer").unwrap()));
@@ -167,7 +167,7 @@ fn a_hidden_field_at_the_top_of_the_viewport_leaves_the_viewport_on_what_comes_n
 fn reset_all_reaches_pages_long_gone() {
     let text = questions(1500);
     let mut ed = editor(text.clone());
-    ed.toggle_practice_all();
+    ed.set_read_mode(true);
     frame(&mut ed);
     let plain = measured_total(&mut ed);
     ed.view.scroll_to_y(0.0);

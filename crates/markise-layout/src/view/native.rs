@@ -26,8 +26,8 @@ pub enum BlockViewMode {
     /// A block's own view, or its site's picture if it has none.
     #[default]
     Native,
-    /// Answers to give, with what tells them hidden (ADR 0024). A block that cannot be practised
-    /// shows as in [`BlockViewMode::Native`].
+    /// Answers to give, with what tells them hidden: a block that can be practised, in a document in
+    /// Read (ADR 0024). No state a block can be switched to.
     Practice,
     /// As its site draws it (ADR 0023).
     Site,
@@ -38,8 +38,9 @@ impl BlockViewMode {
     /// The state after this one, in the order a switch goes through them.
     pub fn next(self) -> BlockViewMode {
         match self {
-            BlockViewMode::Native => BlockViewMode::Practice,
-            BlockViewMode::Practice => BlockViewMode::Site,
+            BlockViewMode::Native => BlockViewMode::Site,
+            // no switch goes through it: it comes with Read (ADR 0024)
+            BlockViewMode::Practice => BlockViewMode::Native,
             BlockViewMode::Site => BlockViewMode::Markdown,
             BlockViewMode::Markdown => BlockViewMode::Native,
         }
@@ -48,7 +49,6 @@ impl BlockViewMode {
     /// What a block shows in this state, as far as what it can show goes.
     pub fn shown(self, can: BlockCan) -> BlockViewMode {
         match self {
-            BlockViewMode::Practice if can.practice => BlockViewMode::Practice,
             BlockViewMode::Native | BlockViewMode::Practice if can.view => BlockViewMode::Native,
             BlockViewMode::Site if can.site => BlockViewMode::Site,
             BlockViewMode::Native | BlockViewMode::Practice if can.site => BlockViewMode::Site,
@@ -75,8 +75,6 @@ pub struct BlockCan {
     pub view: bool,
     /// Something can draw it.
     pub site: bool,
-    /// It can be practised.
-    pub practice: bool,
 }
 
 /// What an item's layout gets of its block.
@@ -150,26 +148,26 @@ impl NativeState {
     /// What shows blocks natively, as far as the document's state can tell: for what is estimated
     /// by name, with no block read.
     fn active(&self) -> Option<&Arc<dyn BlockViews>> {
-        (self.source.as_ref()).filter(|_| matches!(self.mode, BlockViewMode::Native | BlockViewMode::Practice))
+        self.source
+            .as_ref()
+            .filter(|_| self.mode == BlockViewMode::Native || self.practice.read())
     }
 
-    /// The state of a block with this opener and name: its own, or the document's, which is the
-    /// package's word for it until someone chooses for the document (ADR 0024).
+    /// The state of a block with this opener and name. In Read, one that can be practised is, whatever
+    /// else it is in Edit (ADR 0024).
     pub(super) fn mode_of(&self, opener: usize, name: &str) -> BlockViewMode {
+        if self.practice.read() && self.source.as_ref().is_some_and(|s| s.has_practice(name)) {
+            return BlockViewMode::Practice;
+        }
         match self.own_modes.binary_search_by_key(&opener, |m| m.0) {
             Ok(i) => self.own_modes[i].1,
-            Err(_)
-                if self.practice.defaults_apply() && self.source.as_ref().is_some_and(|s| s.practice_default(name)) =>
-            {
-                BlockViewMode::Practice
-            }
             Err(_) => self.mode,
         }
     }
 
     fn practice_source_changed(&mut self) {
-        let any = self.source.as_ref().is_some_and(|s| s.any_practice_default());
-        self.practice.package_defaults(any, self.mode, &self.own_modes);
+        let any = self.source.as_ref().is_some_and(|s| s.any_practice());
+        self.practice.package_changed(any);
     }
 }
 
@@ -212,7 +210,6 @@ impl View {
         self.native.mode = mode;
         self.native.own_modes = own;
         self.native.items.borrow_mut().clear();
-        self.native.practice.modes_changed(mode, &self.native.own_modes);
         self.site.forget();
         if !same_states {
             self.reset_heights();
