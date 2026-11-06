@@ -33,6 +33,8 @@ pub enum SectionLook<'a> {
     Plaque(&'a Plaque),
     /// The closer of a block shown as a plaque: no height, and the gap after it stays.
     End,
+    /// A quiet word about this item, on the row of a rule or under a paragraph.
+    Hint(&'a str),
 }
 
 /// What an item is to its section.
@@ -43,12 +45,23 @@ pub(super) enum Role {
     Opener(Arc<Plaque>),
     Inside,
     Closer,
+    Hint(Arc<str>),
+    /// A card with a warning: a metadata block where none can be.
+    Warned(Arc<[String]>),
 }
+
+/// A rule written nearly as a boundary.
+const NEAR_RULE: &str = "No section starts here: a separator is exactly --- alone on its line";
+/// A metadata opener that pairs with nothing.
+const UNCLOSED: &str = "Malformed: this metadata block has no closing marker, or a fence inside it took it";
+/// A metadata block not first in its section.
+const MISPLACED: &str = "Section metadata goes first in its section: this one means nothing here";
 
 impl Role {
     pub(super) fn look(&self) -> Option<SectionLook<'_>> {
         match self {
-            Role::Plain | Role::Inside => None,
+            Role::Plain | Role::Inside | Role::Warned(_) => None,
+            Role::Hint(text) => Some(SectionLook::Hint(text)),
             Role::Divider(label) => Some(SectionLook::Divider(label)),
             Role::Opener(plaque) => Some(SectionLook::Plaque(plaque)),
             Role::Closer => Some(SectionLook::End),
@@ -88,17 +101,15 @@ impl View {
         self.sections.on
     }
 
-    /// What to call section `index`: its `id` or else its number from 1, then what its metadata says
-    /// it is, if it does. A site's words are only shown.
+    /// What to call section `index`: its `id`, else its first heading, else its number from 1.
     pub fn section_name(&self, index: usize) -> String {
-        let meta = self.doc.section_metadata(index);
-        let say = |key: &str| meta.as_ref().and_then(|m| m.get(key));
-        let what = say("kind").or_else(|| say("type")).or_else(|| say("style"));
-        match (say("id"), what) {
-            (Some(id), Some(what)) => format!("{id} · {what}"),
-            (Some(id), None) => id.to_string(),
-            (None, Some(what)) => format!("Section {} · {what}", index + 1),
-            (None, None) => format!("Section {}", index + 1),
+        if let Some(id) = (self.doc.section_metadata(index)).and_then(|m| m.get("id").map(str::to_string)) {
+            return id;
+        }
+        let heading = (self.doc.section_first_heading(index)).and_then(|at| self.doc.heading(at));
+        match heading.map(|h| h.text.trim().to_string()).filter(|t| !t.is_empty()) {
+            Some(text) => text,
+            None => format!("Section {}", index + 1),
         }
     }
 
@@ -125,18 +136,23 @@ impl View {
         if !self.sections.on {
             return Role::Plain;
         }
-        let rule = it.kind == ItemKind::Rule;
-        if !rule && !it.containers.iter().any(|c| matches!(c, Container::Card)) {
+        let card = it.containers.iter().any(|c| matches!(c, Container::Card));
+        let rule = it.kind == ItemKind::Rule && it.containers.is_empty();
+        let paragraph = it.kind == ItemKind::Paragraph && it.containers.is_empty();
+        if !card && !rule && !paragraph {
             return Role::Plain;
         }
         let start = self.model.item_start(i);
         if let Some(found) = self.sections.roles.borrow().get(&start) {
             return found.clone();
         }
-        let role = if rule {
+        // a rule in a metadata block is what the block makes of it
+        let role = if card {
+            self.card_role(start, it)
+        } else if rule {
             self.rule_role(start)
         } else {
-            self.card_role(start, it)
+            self.paragraph_role(start)
         };
         self.sections.roles.borrow_mut().insert(start, role.clone());
         role
@@ -146,11 +162,23 @@ impl View {
         let section = self.doc.section_at(start);
         match section.boundary {
             Some(b) if b.start == start => Role::Divider(self.section_name(section.index).into()),
+            _ if self.doc.section_near_boundary(start) => Role::Hint(NEAR_RULE.into()),
+            _ => Role::Plain,
+        }
+    }
+
+    fn paragraph_role(&self, start: usize) -> Role {
+        let section = self.doc.section_at(start);
+        match self.doc.section_metadata_unclosed(section.index) {
+            Some(opener) if opener.start == start => Role::Hint(UNCLOSED.into()),
             _ => Role::Plain,
         }
     }
 
     fn card_role(&self, start: usize, it: &Item) -> Role {
+        if it.kind == (ItemKind::ContainerMarker { close: false }) && self.doc.section_metadata_misplaced(start) {
+            return Role::Warned(Arc::new([MISPLACED.to_string()]));
+        }
         let Some(m) = self.metadata_at(start) else {
             return Role::Plain;
         };
@@ -184,7 +212,8 @@ impl View {
         let mut h = crate::model::hasher();
         match self.section_role(i, it) {
             Role::Plain | Role::Inside => return 0,
-            Role::Divider(label) => label.hash(&mut h),
+            Role::Divider(label) | Role::Hint(label) => label.hash(&mut h),
+            Role::Warned(why) => why.hash(&mut h),
             Role::Opener(plaque) => plaque.hash(&mut h),
             Role::Closer => 1u8.hash(&mut h),
         }
@@ -214,6 +243,7 @@ impl View {
         let it = self.model.items.get(i)?;
         match self.section_role(i, it) {
             Role::Opener(plaque) if !plaque.warnings.is_empty() => Some(plaque.warnings.clone()),
+            Role::Warned(why) => Some(why.to_vec()),
             _ => None,
         }
     }

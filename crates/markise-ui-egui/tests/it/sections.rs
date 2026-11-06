@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use markise_layout::BlockViewMode;
 use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp, ViewMode};
 
 use crate::block_views::{Fixture, caret, shown, text};
@@ -173,6 +174,99 @@ fn the_switch_opens_a_plaque_as_a_card_and_back() {
 }
 
 #[test]
+fn the_switch_works_with_the_document_in_another_state() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.restore_block_view_state(BlockViewMode::Site, &[]);
+    common::run(&mut h);
+    assert!(
+        !shown(&mut h).contains("section-metadata"),
+        "a plaque in that state too"
+    );
+    h.get_all_by_label("Show Markdown: section metadata")
+        .next()
+        .unwrap()
+        .click();
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("section-metadata"), "it opens");
+    h.get_by_label("Show Native View: section metadata").click();
+    common::run(&mut h);
+    assert!(!shown(&mut h).contains("section-metadata"), "and closes");
+    assert_eq!(text(&h), DOC);
+}
+
+#[test]
+fn a_plaque_says_what_is_wrong_when_its_lines_are_tight_or_more_than_one_paragraph() {
+    for doc in [
+        "---\nauthoring: blocks-v3\n---\n\n:::section-metadata\nid: a\n:::\n\nText.\n",
+        "---\nauthoring: blocks-v3\n---\n\n:::section-metadata\n\nid: a\n\nkind: b\n\n:::\n\nText.\n",
+        "---\nauthoring: blocks-v3\n---\n\n:::section-metadata\n\n- id: a\n\n:::\n\nText.\n",
+    ] {
+        let p = plain(doc);
+        let mut h = opened(&p);
+        let s = shown(&mut h);
+        assert!(s.contains("⚠ Malformed"), "{s}");
+        assert_eq!(text(&h), doc);
+    }
+}
+
+#[test]
+fn horizontal_line_writes_stars_on_a_page_with_sections_and_dashes_elsewhere() {
+    for (head, rule) in [("---\nauthoring: blocks-v3\n---\n\n", "***"), ("", "---")] {
+        let doc = format!("{head}One.\n");
+        let p = plain(&doc);
+        let mut h = opened(&p);
+        caret(&mut h, doc.find("One").unwrap());
+        let ctx = h.ctx.clone();
+        (h.state_mut().viewer().unwrap())
+            .run(&ctx, None, "block.insertRule", &markise_doc::Params::new())
+            .unwrap();
+        common::run(&mut h);
+        assert!(
+            text(&h).ends_with(&format!("One.\n\n{rule}\n")) || text(&h).contains(&format!("\n\n{rule}")),
+            "{}",
+            text(&h)
+        );
+        if rule == "***" {
+            let count = h.state_mut().viewer().unwrap().ed.session.doc().section_count();
+            assert_eq!(count, 1, "no section started");
+        }
+    }
+}
+
+#[test]
+fn typed_dashes_and_enter_make_a_boundary_and_backspace_after_it_takes_it() {
+    let doc = "---\nauthoring: blocks-v3\n---\n\nOne.\n\nTwo.\n";
+    let p = plain(doc);
+    let mut h = opened(&p);
+    // a new line between them, then the three dashes and Enter
+    caret(&mut h, doc.find("One.").unwrap() + 4);
+    h.key_press(egui::Key::Enter);
+    common::run(&mut h);
+    h.key_press(egui::Key::Enter);
+    common::run(&mut h);
+    h.event(egui::Event::Text("---".to_string()));
+    common::run(&mut h);
+    let count = |h: &mut H| h.state_mut().viewer().unwrap().ed.session.doc().section_count();
+    assert_eq!(count(&mut h), 1, "literal until Enter");
+    h.key_press(egui::Key::Enter);
+    common::run(&mut h);
+    assert_eq!(count(&mut h), 2, "{:?}", text(&h));
+    assert!(text(&h).contains("\n---\n"), "{:?}", text(&h));
+    // backspace at the start of what follows takes the rule, and undo brings it back
+    let two = text(&h).find("Two.").unwrap();
+    caret(&mut h, two);
+    h.key_press(egui::Key::Backspace);
+    common::run(&mut h);
+    assert_eq!(text(&h), doc, "the sections are one again");
+    assert_eq!(count(&mut h), 1);
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    common::run(&mut h);
+    assert_eq!(count(&mut h), 2, "undo brings the boundary back");
+}
+
+#[test]
 fn keys_go_past_a_plaque_and_a_divider() {
     let p = plain(DOC);
     let mut h = opened(&p);
@@ -226,7 +320,7 @@ fn the_example_document_opens_as_written() {
     let p = plain(&bytes);
     let mut h = opened(&p);
     let s = shown(&mut h);
-    assert!(s.contains("zones · reading"), "{s}");
+    assert!(s.contains("zones"), "{s}");
     assert_eq!(text(&h), bytes);
     assert_eq!(std::fs::read_to_string(&p.doc).unwrap(), bytes);
 }

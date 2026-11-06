@@ -198,6 +198,7 @@ impl MarkiseApp {
         let Some(text) = self.document_text() else { return };
         let doc_path = self.document_path().map(Path::to_path_buf);
         let theme = self.theme().clone();
+        let sections = self.viewer().is_some_and(|v| v.ed.view.sections_on());
         let req = match a {
             ExportAction::Export(kind) => {
                 let ext = kind.extension();
@@ -205,7 +206,9 @@ impl MarkiseApp {
                 let Some(output) = save_dialog(&proposal, &kind.label(), &ext) else {
                     return;
                 };
-                ExportRequest::new(kind, text, doc_path, output, theme)
+                let mut req = ExportRequest::new(kind, text, doc_path, output, theme);
+                req.sections = sections;
+                req
             }
             ExportAction::Previous => {
                 let Some(prev) = self.export.last.clone() else { return };

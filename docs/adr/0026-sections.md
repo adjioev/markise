@@ -84,8 +84,11 @@ Nothing here is new layout state in the model: as with a picture (ADR 0023), the
 A document without sections pays one comparison per item.
 
 - **A boundary** is a quiet divider on the line's own row, so it has the line's height and estimates
-  stand: the section's name, then the line to the right edge. The name is its `id` or else `Section N`,
-  then `kind`, `type` or `style` if it says. No caret stands in it, as in any rule.
+  stand: the section's name, then the line to the right edge. The name is its `id`, else its first heading
+  among the section's own top-level blocks (a bounded look, as this is asked on the UI thread), else
+  `Section N`. Only `id` and `style` are engine keys, and no other key is ranked. No caret stands in it, as in
+  any rule.
+- **A rule nearly a boundary** (`----`, `- - -`, ` ---`, `--- `) at the root says so on its own row, quietly.
 - **A metadata block** is a compact plaque: `key: value` as written, and `⚠` with the first reason for what
   does not fit, all of them on hover. Its opener item holds it, the content items are hidden as a closed
   disclosure's are, the closer has no height and the gap after it stays. Pages, marks and source positions
@@ -101,18 +104,24 @@ A document without sections pays one comparison per item.
 
 ### Exports
 
-Unchanged in this phase, deliberately: exporters read the document, not the view, and do not know the
-dialect. So `---` is a rule (`<hr />`, a line in PDF and PNG, `HorizontalRule` for Pandoc) and
-`:::section-metadata` the block every name is (ADR 0018): a `div.md-directive` with its label and its body as
-a paragraph in HTML, a labelled bar in PDF and PNG, a `Div` for Pandoc. Its lines therefore reach an export
-as text. Whether they should is a question for when the syntax settles.
+With sections on, HTML, PDF, PNG and Pandoc leave a root-level `:::section-metadata` out: they all read
+`Document::export_tree`. The dialect comes to an export as a request's flag, for what a package says, and from
+the document's own front matter, which wins; the command line knows only the front matter. `---` in exports stays
+as it is for now: `<hr />`, a line in PDF and PNG, `HorizontalRule` for Pandoc.
+
+### Writing
+
+On a page with sections Horizontal Line writes `***`, as it would start a section otherwise (`EditPrefs::
+rule_stars`, set while sections are on). A typed `---` and Enter does make a boundary, which is correct, and
+Backspace at the start of what follows takes it, as for any rule, with an undo step.
 
 ## Consequences
 
 - The bytes of a file do not depend on any of this: the index only reads.
-- What moves blocks does not know sections: a block dropped above a plaque makes it not first, and it reads
-  as an ordinary block from then on.
-- A metadata block not first, or a second one, stays a generic card with no warning.
+- What moves blocks does not know sections: a block dropped above a plaque is allowed, and the metadata
+  block then shows as a card with the warning above. No move is refused.
+- A metadata block not first, or a second one, is a generic card with a warning.
+- A metadata opener with no closer stays text, with a warning under it.
 - A first line `---` with a later `---` is front matter, as ever, so a document that starts with a
   boundary and has no front matter loses its first two boundaries to it. The draft refuses a leading
   boundary anyway.

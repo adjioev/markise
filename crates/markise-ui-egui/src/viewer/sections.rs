@@ -58,6 +58,10 @@ impl DocViewer {
             }
             let start = model.item_start(v.idx);
             if !self.ed.view.is_section_metadata(start) {
+                // a metadata block where none can be says so
+                if let Some(rect) = v.layout.warning {
+                    self.section_warning_tip(ui, v, rect.translate(origin), surface);
+                }
                 continue;
             }
             // the top right corner of the plaque, or of the card it opened as

@@ -100,6 +100,9 @@ pub struct ExportRequest {
     /// page is larger than this (many `[toc]` blocks, issue #29). `None` once the
     /// user chose to export anyway.
     pub confirm_html_above: Option<u64>,
+    /// The document is in a dialect with sections by way of its package; its own front matter is
+    /// read here. Metadata blocks are then left out (ADR 0026).
+    pub sections: bool,
 }
 
 impl ExportRequest {
@@ -120,6 +123,7 @@ impl ExportRequest {
             critic_markup: true,
             comments: CommentExport::Keep,
             confirm_html_above: Some(LARGE_HTML_BYTES),
+            sections: false,
         }
     }
 
@@ -214,7 +218,7 @@ fn stem(p: &Path) -> String {
 pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDone, String> {
     let t0 = Instant::now();
     control.check().map_err(|e| e.to_string())?;
-    let doc = Document::parse(
+    let mut doc = Document::parse(
         req.text.clone(),
         ParseOptions {
             wikilinks: req.wikilinks,
@@ -222,6 +226,11 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
             ..ParseOptions::default()
         },
     );
+    let leave_out = match doc.authoring() {
+        Some(named) => named == crate::sections::SECTIONS_DIALECT,
+        None => req.sections,
+    };
+    doc.set_export_leaves_out_section_metadata(leave_out);
     let base_dir = req.doc_path.as_deref().and_then(Path::parent).map(Path::to_path_buf);
     let fallback = req.doc_path.as_deref().map(stem).unwrap_or_else(|| stem(&req.output));
     let today = vars::today();
@@ -531,6 +540,50 @@ mod tests {
             dir.join(name),
             Theme::light(),
         )
+    }
+
+    /// ADR 0026: with sections on, no export shows a metadata block's lines; a rule stays.
+    #[test]
+    fn metadata_stays_out_of_an_export_with_sections_on() {
+        let d = tempfile::tempdir().unwrap();
+        let body = ":::section-metadata\n\nid: secret-line\n\n:::\n\n# One\n\n---\n\n:::note\n\nkept\n\n:::\n";
+        let run = |text: String, sections: bool, name: &str| {
+            let mut r = ExportRequest::new(ExportKind::HtmlPlain, text, None, d.path().join(name), Theme::light());
+            r.sections = sections;
+            run_export(&r, &JobControl::new()).unwrap();
+            std::fs::read_to_string(d.path().join(name)).unwrap()
+        };
+        let on = run(format!("---\nauthoring: blocks-v3\n---\n\n{body}"), false, "a.html");
+        assert!(!on.contains("secret-line") && !on.contains("section-metadata"), "{on}");
+        assert!(on.contains("<hr") && on.contains("kept"), "{on}");
+        assert!(
+            !run(body.to_string(), true, "b.html").contains("secret-line"),
+            "by way of a package"
+        );
+        assert!(
+            run(body.to_string(), false, "c.html").contains("secret-line"),
+            "no dialect"
+        );
+        let other = format!("---\nauthoring: blocks-v2\n---\n\n{body}");
+        assert!(run(other, true, "d.html").contains("secret-line"), "front matter wins");
+    }
+
+    /// PDF, PNG and Pandoc are built from the same tree.
+    #[test]
+    fn the_model_of_the_other_exports_leaves_it_out_too() {
+        let mut doc = Document::parse(
+            ":::section-metadata\n\nid: secret-line\n\n:::\n\nText.\n",
+            ParseOptions::default(),
+        );
+        doc.set_export_leaves_out_section_metadata(true);
+        let shown = format!("{:?}", markise_export::model::ExDoc::build(&doc, &Default::default()));
+        assert!(
+            !shown.contains("secret-line") && !shown.contains("section-metadata"),
+            "{shown}"
+        );
+        doc.set_export_leaves_out_section_metadata(false);
+        let shown = format!("{:?}", markise_export::model::ExDoc::build(&doc, &Default::default()));
+        assert!(shown.contains("section-metadata"), "{shown}");
     }
 
     /// Issue #29: an HTML export above the limit writes nothing and reports its exact size; without the limit it writes; "Export with Previous" asks again.

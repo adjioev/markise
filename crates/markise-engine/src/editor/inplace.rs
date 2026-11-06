@@ -149,16 +149,31 @@ impl EditorView {
 
     /// What comes after this block's state. Asked of the switch before it is pressed, to say so.
     pub fn next_block_view(&self, opener: usize) -> BlockViewMode {
+        if self.view.is_section_metadata(opener) {
+            return match self.view.block_mode_of(opener) {
+                BlockViewMode::Markdown => BlockViewMode::Native,
+                _ => BlockViewMode::Markdown,
+            };
+        }
         let (has_view, site) = self.block_can_show(opener);
         (self.view.block_mode_of(opener)).next_for(has_view, site)
     }
 
-    /// Whether this block has a view of its own, and whether it can show as a picture. A section's
-    /// metadata block has its plaque and nothing else (ADR 0026).
-    fn block_can_show(&self, opener: usize) -> (bool, bool) {
+    /// What this state of the document or a block shows of the block with this opener.
+    fn state_shown(&self, opener: usize, mode: BlockViewMode) -> BlockViewMode {
+        // a metadata block is a plaque in every state but one (ADR 0026)
         if self.view.is_section_metadata(opener) {
-            return (true, false);
+            return match mode {
+                BlockViewMode::Markdown => BlockViewMode::Markdown,
+                _ => BlockViewMode::Native,
+            };
         }
+        let (has_view, site) = self.block_can_show(opener);
+        mode.shown(has_view, site)
+    }
+
+    /// Whether this block has a view of its own, and whether it can show as a picture.
+    fn block_can_show(&self, opener: usize) -> (bool, bool) {
         let has_view = self.opener_name(opener).is_some_and(|n| self.name_has_view(&n));
         (has_view, self.view.can_draw_site())
     }
@@ -212,19 +227,19 @@ impl EditorView {
 
     /// The next state for the block with this opener.
     pub fn switch_block_view(&mut self, opener: usize) {
-        let (has_view, site) = self.block_can_show(opener);
         let metadata = self.view.is_section_metadata(opener);
         let next = self.next_block_view(opener);
+        let same = self.state_shown(opener, next) == self.state_shown(opener, self.place.mode);
         let own =
             (self.place.own_modes.iter()).position(|o| self.session.mark(o.mark).is_some_and(|p| p.offset == opener));
         // what shows the same as the document's state needs no state of its own
         match own {
-            Some(i) if next.shown(has_view, site) == self.place.mode.shown(has_view, site) => {
+            Some(i) if same => {
                 let o = self.place.own_modes.remove(i);
                 self.session.remove_mark(o.mark);
             }
             Some(i) => self.place.own_modes[i].mode = next,
-            None if next.shown(has_view, site) == self.place.mode.shown(has_view, site) => {}
+            None if same => {}
             None => {
                 self.add_own_mode(opener, next);
             }

@@ -361,7 +361,10 @@ impl View {
         let section = it.map(|it| self.section_role(i, it));
         f(ItemLook {
             native: params,
-            warnings: why.as_deref(),
+            warnings: why.as_deref().or(match &section {
+                Some(super::sections::Role::Warned(w)) => Some(w),
+                _ => None,
+            }),
             site,
             note: note.as_deref(),
             section: section.as_ref().and_then(|r| r.look()),
