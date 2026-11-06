@@ -70,9 +70,9 @@ wording (`Required`, `In no field`, the sentence around a name). What stays as w
 package text: the name and arguments on a generic card and in `Edit Block: name`, and a field with no
 `label`, whose name is made readable.
 
-**It follows edits.** The viewer compares the document's change counter per frame and reads the
-language only when it moved, from the first block alone, so the cost of a keystroke does not grow
-with the document. Only another language builds new views: their id includes it, which empties the
+**It follows edits.** The viewer compares the document's change counter per frame and asks for the
+language only when it moved. The document keeps the answer until an edit reaches its first block, so
+a keystroke in the body reads nothing, however long the document or its front matter. Only another language builds new views: their id includes it, which empties the
 view's caches of looks and heights once. Nothing asks for a frame. An open form swaps its labels and
 keeps its draft, focus and rows; the library closes on any edit, and opens in the language of then.
 

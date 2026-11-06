@@ -718,7 +718,7 @@ impl FormatDoc for Document {
         crate::frontmatter::resource_root(self)
     }
     fn language(&self) -> Option<String> {
-        crate::frontmatter::get(&crate::frontmatter::front_matter(self), "lang").map(str::to_string)
+        Document::language(self).map(str::to_string)
     }
     fn as_any(&self) -> &dyn Any {
         self

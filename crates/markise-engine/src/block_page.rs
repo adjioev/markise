@@ -433,7 +433,7 @@ fn images_in(html: &str) -> HashSet<String> {
 
 /// A document's language, from its front matter: what its blocks' pages say they are in, and what
 /// its package's text is shown in. Empty when it names none, or names something that is no tag: this
-/// goes into a page as it stands. Reads the first block alone, so a long document costs no more.
+/// goes into a page as it stands. The document keeps the answer until an edit reaches its first block.
 pub fn document_language(doc: &dyn FormatDoc) -> String {
     let value = doc.language().unwrap_or_default();
     let fine = !value.is_empty() && value.len() <= 32 && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
