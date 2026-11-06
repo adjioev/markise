@@ -39,6 +39,14 @@ impl DocViewer {
     /// the caret is on screen, else the one at the top of the screen. Per frame: a comparison unless the
     /// document or the section changed.
     pub fn section_status(&mut self, partial: bool) -> Option<(String, String)> {
+        if self.section_dialect.as_ref().is_some_and(Dialect::is_invalid) {
+            return Some((
+                "§ off".to_string(),
+                "The front matter's authoring is empty or is no name of a dialect, so sections are off. \
+                 A package's value is not used instead."
+                    .to_string(),
+            ));
+        }
         if !self.ed.view.sections_on() {
             return None;
         }

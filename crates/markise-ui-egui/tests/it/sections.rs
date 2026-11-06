@@ -326,6 +326,36 @@ fn the_example_document_opens_as_written() {
 }
 
 #[test]
+fn an_empty_or_non_string_authoring_is_said_quietly_and_never_goes_to_the_package() {
+    for value in ["", " 3", " [blocks-v3]"] {
+        let doc = format!("---\nauthoring:{value}\n---\n\nOne.\n\n---\n\nTwo.\n");
+        let f = Fixture::with_package(&doc, FILES_ON);
+        let mut h = f.opened();
+        h.get_by_label("Use Package").click();
+        h.step();
+        wait_until(&mut h, "the install", |a| a.block_package().is_some());
+        common::run(&mut h);
+        let v = h.state_mut().viewer().unwrap();
+        assert!(!v.ed.view.sections_on(), "{value:?}");
+        let (name, about) = v.section_status(false).unwrap();
+        assert_eq!(name, "§ off");
+        assert!(about.contains("not used"), "{about}");
+    }
+}
+
+#[test]
+fn a_section_goes_by_its_first_heading_in_the_outline_and_status() {
+    let doc =
+        "---\nauthoring: blocks-v3\n---\n\n# Top\n\nOne.\n\n---\n\n## Second part {#x}\n\nTwo.\n\n---\n\nThree.\n";
+    let p = plain(doc);
+    let mut h = opened(&p);
+    assert!(h.query_all_by_label("Second part").count() >= 1);
+    assert!(h.query_by_label("Section 3").is_some());
+    let (name, _) = h.state_mut().viewer().unwrap().section_status(false).unwrap();
+    assert_eq!(name, "§ Top");
+}
+
+#[test]
 fn the_outline_has_sections_above_headings_and_a_click_goes_there() {
     let mut doc = String::from("---\nauthoring: blocks-v3\n---\n\n# Top\n\n");
     for i in 0..40 {

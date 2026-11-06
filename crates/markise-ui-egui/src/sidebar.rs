@@ -1478,7 +1478,7 @@ pub fn section_outline(
 ) -> Option<markise_layout::OutlineRow> {
     use markise_layout::OutlineRow;
     let model = view.model();
-    let min_level = model.outline.iter().map(|e| e.level).min().unwrap_or(1);
+    let min_level = model.outline_min_level();
     let sections = view.doc().section_count();
     let mut clicked = None;
     let rows = view.outline_row_count() + usize::from(partial);

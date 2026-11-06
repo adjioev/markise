@@ -113,7 +113,8 @@ until the document changes. A click materializes the target's page and goes ther
 The status bar names the current section: the caret's while the caret is on screen, else the one at the top
 of the screen. On hover it says which of how many, and where the dialect came from, with the package's
 version. While a document is partial the last section's name ends in `…`, the count in `+`, and the outline
-says that more is to come.
+says that more is to come. A front matter `authoring` that is empty or no string shows as `§ off`, its reason on
+hover.
 
 Measured with `cargo bench -p markise-layout --bench layout -- sections/`: 10 MiB, about 4,700 sections, each
 with metadata, a paged view, macOS, release, 2026-11-06, with other builds running on the machine, so these
