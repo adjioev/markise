@@ -215,3 +215,5 @@ fn html_max_size_and_usage_on_small_input() {
         .unwrap();
     assert!(out.status.success() && out.stderr.is_empty());
 }
+
+mod blocks;

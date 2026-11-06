@@ -13,6 +13,7 @@ editing in the rendered view, and a site's own blocks through block packages. Op
 cargo run -p markise --release -- FILE.md|FOLDER          # desktop app (egui)
 cargo run -p markise-cli -- html FILE.md -o FILE.html    # HTML export from the command line
 cargo run -p markise-cli -- roundtrip FILE.md            # byte-identical round-trip check
+cargo run -p markise-cli -- blocks check FILE.md         # a document's blocks against its package
 cargo xtask ci                                           # fmt, clippy, tests, layer and asset checks
 ```
 

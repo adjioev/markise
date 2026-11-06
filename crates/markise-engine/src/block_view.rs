@@ -10,7 +10,7 @@ use markise_layout::{
     BlockLook, BlockViews, NativeBlock, NativeKind, NativeRole, NativeView, PracticeAnswer, PracticeParts,
 };
 use markise_md::ParseOptions;
-use markise_package::{PackageIndex, ViewKind};
+use markise_package::{BlockSchema, PackageIndex, ViewKind};
 use schema_form_core::{Control, FormSpec, Selection};
 
 use crate::block_fields::{BlockFields, BlockFit, FieldDecl, FieldKind, decls_from_spec};
@@ -42,6 +42,61 @@ fn kind_of(k: ViewKind) -> NativeKind {
         ViewKind::Card => NativeKind::Card,
         ViewKind::Choices => NativeKind::Choices,
         ViewKind::Media => NativeKind::Media,
+    }
+}
+
+/// The form of block `name` for `variant` and where its fields live, or why a form cannot be made,
+/// in the words the panel shows.
+pub fn read_form(
+    index: &PackageIndex,
+    name: &str,
+    language: &str,
+    variant: Option<&str>,
+) -> Result<(FormSpec, Vec<FieldDecl>), String> {
+    let input = (index.form_input(name, language))
+        .ok_or("the package has no schema for it")?
+        .map_err(|e| e.to_string())?;
+    let spec = FormSpec::parse(&input.schema, &input.hints, variant).map_err(|e| e.to_string())?;
+    let decls = decls_from_spec(&spec).map_err(|f| format!("field `{f}` has no place in the block"))?;
+    Ok((spec, decls))
+}
+
+/// One reason a block does not fit, as its `⚠` words it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockReason {
+    pub text: String,
+    /// The piece of the block it is about, in source coordinates of the block.
+    pub range: Option<std::ops::Range<usize>>,
+}
+
+/// What is wrong with a block, the answer the view gets in other terms ([`BlockLook`]) and what
+/// `markise-cli blocks check` reports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockVerdict {
+    Fits,
+    /// The package has no block of this name.
+    NoSchema,
+    /// The package says something a form cannot honour about it; the reason the panel shows.
+    NoForm(String),
+    /// Not filled in yet: the block keeps its native view.
+    Unfilled(Vec<BlockReason>),
+    /// Outside its schema: a card.
+    Outside(Vec<BlockReason>),
+}
+
+/// The block's variant for these arguments: `Err` when they name none, in a block that has some.
+fn named_variant(schema: &BlockSchema, args: &str) -> Result<Option<String>, ()> {
+    let named = schema.variants().any(|v| v == args);
+    if !args.is_empty() && !named && schema.variants().next().is_some() {
+        return Err(());
+    }
+    Ok(named.then(|| args.to_string()).filter(|a| !a.is_empty()))
+}
+
+fn no_variant(args: &str) -> BlockReason {
+    BlockReason {
+        text: format!("The block has no variant `{args}`."),
+        range: None,
     }
 }
 
@@ -79,9 +134,7 @@ impl PackageViews {
 
     fn read_variant(&self, name: &str, variant: Option<&str>) -> Option<Variant> {
         let entry = self.index.block(name)?;
-        let input = self.index.form_input(name, &self.language)?.ok()?;
-        let spec = FormSpec::parse(&input.schema, &input.hints, variant).ok()?;
-        let decls = decls_from_spec(&spec).ok()?;
+        let (spec, decls) = read_form(&self.index, name, &self.language, variant).ok()?;
         let single_answer = spec.fields.iter().any(|f| {
             matches!(
                 f.control,
@@ -116,11 +169,7 @@ impl PackageViews {
         let Some(schema) = self.index.block(name).map(|e| e.schema) else {
             return Ok(None);
         };
-        let named = schema.variants().any(|v| v == args);
-        if !args.is_empty() && !named && schema.variants().next().is_some() {
-            return Err(());
-        }
-        let variant = named.then(|| args.to_string()).filter(|a| !a.is_empty());
+        let variant = named_variant(schema, args)?;
         let mut known = self.variants.lock().unwrap_or_else(|e| e.into_inner());
         let found = known
             .entry((name.to_string(), variant.clone()))
@@ -130,7 +179,7 @@ impl PackageViews {
 }
 
 /// A block's misfit in words: a field by its label, and an item by its place in the field.
-fn reasons(spec: &FormSpec, fit: &BlockFit, source: &str) -> Vec<String> {
+fn reasons(spec: &FormSpec, fit: &BlockFit, source: &str) -> Vec<BlockReason> {
     let field_error = |e: &schema_form_core::FieldError| {
         let mut path = e.path.split('/');
         let key = path.next().unwrap_or("");
@@ -139,10 +188,11 @@ fn reasons(spec: &FormSpec, fit: &BlockFit, source: &str) -> Vec<String> {
             .iter()
             .find(|f| f.key == key)
             .map_or(key, |f| f.label.as_str());
-        match path.next().and_then(|n| n.parse::<usize>().ok()) {
+        let text = match path.next().and_then(|n| n.parse::<usize>().ok()) {
             Some(n) => format!("{label} {}: {}", n + 1, e.kind),
             None => format!("{label}: {}", e.kind),
-        }
+        };
+        BlockReason { text, range: None }
     };
     let extra = |r: &std::ops::Range<usize>| {
         let piece = source.get(r.clone()).unwrap_or("");
@@ -151,11 +201,55 @@ fn reasons(spec: &FormSpec, fit: &BlockFit, source: &str) -> Vec<String> {
         if shown.len() < piece.len() {
             shown.push('…');
         }
-        format!("In no field: {shown}")
+        BlockReason {
+            text: format!("In no field: {shown}"),
+            range: Some(r.clone()),
+        }
     };
     (fit.errors.iter().map(field_error))
         .chain(fit.extras.iter().map(extra))
         .collect()
+}
+
+/// `Some` when the block does not fit: whether it is only yet to be filled in, and why. Only a block
+/// with a view has a way of showing that, so one with none is outside its schema (ADR 0021).
+fn misfit(variant: &Variant, fields: &BlockFields, source: &str) -> Option<(bool, Vec<BlockReason>)> {
+    let fit = fields.check(&variant.spec);
+    (!fit.fits()).then(|| {
+        let unfilled = variant.view.is_some() && fit.only_unfilled(&fields.values());
+        (unfilled, reasons(&variant.spec, &fit, source))
+    })
+}
+
+fn texts(reasons: Vec<BlockReason>) -> Vec<String> {
+    reasons.into_iter().map(|r| r.text).collect()
+}
+
+impl PackageViews {
+    /// What is wrong with a block, in the words of its `⚠`, or that the package does not know it.
+    pub fn verdict(&self, name: &str, args: &str, source: &str) -> BlockVerdict {
+        let Some(entry) = self.index.block(name) else {
+            return BlockVerdict::NoSchema;
+        };
+        let variant = match self.variant_of(name, args) {
+            Ok(Some(variant)) => variant,
+            Ok(None) => {
+                let wanted = named_variant(entry.schema, args).ok().flatten();
+                let why = read_form(&self.index, name, &self.language, wanted.as_deref());
+                return BlockVerdict::NoForm(why.err().unwrap_or_default());
+            }
+            Err(()) => return BlockVerdict::Outside(vec![no_variant(args)]),
+        };
+        let fields = match BlockFields::decode(source, 0, &variant.decls, &ParseOptions::default()) {
+            Ok(fields) => fields,
+            Err(e) => return BlockVerdict::NoForm(e.to_string()),
+        };
+        match misfit(&variant, &fields, source) {
+            None => BlockVerdict::Fits,
+            Some((true, reasons)) => BlockVerdict::Unfilled(reasons),
+            Some((false, reasons)) => BlockVerdict::Outside(reasons),
+        }
+    }
 }
 
 impl PackageViews {
@@ -256,7 +350,7 @@ impl BlockViews for PackageViews {
             Ok(None) => return BlockLook::Generic,
             Err(()) => {
                 return BlockLook::Outside {
-                    reasons: vec![format!("The block has no variant `{args}`.")],
+                    reasons: texts(vec![no_variant(args)]),
                     native: None,
                 };
             }
@@ -271,14 +365,16 @@ impl BlockViews for PackageViews {
                 .collect(),
             practice: self.practice_parts(name, &fields),
         });
-        let fit = fields.check(&variant.spec);
-        if !fit.fits() {
-            let reasons = reasons(&variant.spec, &fit, source);
-            return match native {
-                Some(block) if fit.only_unfilled(&fields.values()) => BlockLook::Unfilled { reasons, block },
-                native => BlockLook::Outside { reasons, native },
-            };
+        match (misfit(&variant, &fields, source), native) {
+            (None, native) => native.map_or(BlockLook::Generic, BlockLook::Native),
+            (Some((true, reasons)), Some(block)) => BlockLook::Unfilled {
+                reasons: texts(reasons),
+                block,
+            },
+            (Some((_, reasons)), native) => BlockLook::Outside {
+                reasons: texts(reasons),
+                native,
+            },
         }
-        native.map_or(BlockLook::Generic, BlockLook::Native)
     }
 }

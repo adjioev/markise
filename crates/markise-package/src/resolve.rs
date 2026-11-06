@@ -184,6 +184,22 @@ fn inspect(binding: &Binding, store: &Store) -> Result<Pending, Problem> {
     })
 }
 
+/// A bound package read for a look only: from its archive, in memory, with its pin and its identity
+/// checked as a document's would be, and no question, no store and nothing written.
+#[derive(Clone, Debug)]
+pub struct BoundPackage {
+    pub binding: Binding,
+    pub index: PackageIndex,
+}
+
+/// Reads the package the binding `file` names. Unlike [`resolve`], the archive has to be there: an
+/// accepted package that lives on in the store is not looked at.
+pub fn read_bound_package(file: &Path) -> Result<BoundPackage, Problem> {
+    let binding = read_binding(file).map_err(Problem::Binding)?;
+    let index = verified_source(&binding)?.index;
+    Ok(BoundPackage { binding, index })
+}
+
 struct Verified {
     files: Files,
     index: PackageIndex,

@@ -41,7 +41,7 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 pub use block::{AlertKind, Align, Block, BlockKind, MathDelim};
-pub use directive::{DirectiveView, MAX_DIRECTIVE_DEPTH};
+pub use directive::{BadMarker, BadMarkerKind, DirectiveView, MAX_DIRECTIVE_DEPTH};
 pub use edit::inline_fmt::{EXACT_QUERY_LIMIT, FORMAT_SELECTION_LIMIT};
 pub use edit::tables::{INSERT_TABLE_DEFAULT, INSERT_TABLE_MAX};
 pub use format::MarkdownFormat;

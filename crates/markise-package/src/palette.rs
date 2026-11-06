@@ -28,6 +28,8 @@ pub struct PaletteGroup {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaletteBlock {
     pub description: Option<Localized>,
+    /// When an author should reach for this block rather than another. Only for the reference.
+    pub when: Option<Localized>,
     /// An icon name; the package supplies what it means.
     pub icon: Option<String>,
 }
@@ -152,6 +154,7 @@ fn parse_blocks(
             name.clone(),
             PaletteBlock {
                 description: opt_localized(file, &format!("{what} description"), def.get("description"), issues),
+                when: opt_localized(file, &format!("{what} when"), def.get("when"), issues),
                 icon: opt_token(file, &format!("{what} icon"), def.get("icon"), issues),
             },
         );

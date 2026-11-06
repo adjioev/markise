@@ -5,10 +5,10 @@
     { "id": "notes", "label": { "en": "Notes", "fr": "Notes" }, "blocks": ["tip", "question"] }
   ],
   "blocks": {
-    "ingredients": { "description": "What goes in, with an optional photo", "icon": "basket" },
-    "timing": { "description": "The steps of a recipe as one bar", "icon": "clock" },
-    "tip": { "description": { "en": "A short hint for the cook", "fr": "Un conseil" }, "icon": "bulb" },
-    "question": { "description": "A question to practise, with its answers" }
+    "ingredients": { "description": "What goes in, with an optional photo", "when": "Once at the top of a recipe, before any step", "icon": "basket" },
+    "timing": { "description": "The steps of a recipe as one bar", "when": "When the order and the minutes matter more than the details", "icon": "clock" },
+    "tip": { "description": { "en": "A short hint for the cook", "fr": "Un conseil" }, "when": "For something a cook can skip; the `warning` variant for what can go wrong", "icon": "bulb" },
+    "question": { "description": "A question to practise, with its answers", "when": "To check that the reader followed a step" }
   },
   "presets": [
     {

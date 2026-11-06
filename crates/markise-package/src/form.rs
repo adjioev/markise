@@ -57,7 +57,7 @@ fn refuse<T>(field: &str, reason: impl Into<String>) -> Result<T, FormRefusal> {
 }
 
 /// Text for the user, a string or a string per language, as [`pick_language`] finds it.
-fn text_of<'a>(v: Option<&'a Value>, language: &str) -> Option<&'a str> {
+pub(crate) fn text_of<'a>(v: Option<&'a Value>, language: &str) -> Option<&'a str> {
     match v? {
         Value::String(s) => Some(s),
         Value::Object(m) => pick_language(m.iter().filter_map(|(k, v)| Some((k.as_str(), v.as_str()?))), language),

@@ -3,6 +3,7 @@
 //! plus a `mod` line below), not as a new `tests/*.rs` file: each of those builds and
 //! links its own executable.
 
+mod block_check;
 mod block_fields;
 mod block_forms;
 mod block_gaps;
