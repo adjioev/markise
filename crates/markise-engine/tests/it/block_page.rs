@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use markise_engine::block_page::{BlockPage, document_language, unreachable_image};
 use markise_engine::block_view::PackageViews;
+use markise_md::{Document, ParseOptions};
 use markise_package::{InstalledPackage, PackageIndex};
 use markise_web_render::JobSource;
 use markise_web_render::proto::Area;
@@ -394,11 +395,15 @@ fn a_block_that_cannot_be_read_says_so() {
 }
 
 #[test]
-fn the_language_comes_from_the_top_of_the_text() {
-    assert_eq!(document_language("---\ntitle: T\nlang: de\n---\n# H\n"), "de");
-    assert_eq!(document_language("---\nlang: \"pt-BR\"\n---\n"), "pt-BR");
-    assert_eq!(document_language("# H\nlang: de\n"), "");
-    assert_eq!(document_language("---\ntitle: T\n---\nlang: de\n"), "");
-    assert_eq!(document_language("---\nlang: a\"><b\n---\n"), "");
-    assert_eq!(document_language(""), "");
+fn the_language_comes_from_the_front_matter() {
+    let language = |text: &str| document_language(&Document::parse(text, ParseOptions::default()));
+    assert_eq!(language("---\ntitle: T\nlang: de\n---\n# H\n"), "de");
+    assert_eq!(language("---\nlang: \"pt-BR\"\n---\n"), "pt-BR");
+    assert_eq!(language("---\nlang: de # German\n---\n"), "de");
+    assert_eq!(language("# H\nlang: de\n"), "");
+    assert_eq!(language("---\ntitle: T\n---\nlang: de\n"), "");
+    assert_eq!(language("---\nlang: a\"><b\n---\n"), "");
+    assert_eq!(language(""), "");
+    let long = format!("---\n{}lang: de\n---\n", "note: x\n".repeat(200));
+    assert_eq!(language(&long), "de", "however long the front matter");
 }

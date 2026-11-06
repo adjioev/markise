@@ -144,7 +144,9 @@ Other keys are ignored.
 
 `label`, optional `variants` (a name to a text; `""` is the block with no variant), optional
 `argument` (see below), and `fields`. A **text** is a string or an object of strings per language,
-looked up as the language, English, then the first there is; the app shows English so far.
+looked up as the document's `lang` tag, the part before its `-` (`ru-RU` finds `ru`), English, then
+the first there is; a document with no `lang` shows English. See
+[Language](blocks.md#language) for what follows it.
 
 If the block has `variants` and its arguments name none of them, it is outside its schema.
 

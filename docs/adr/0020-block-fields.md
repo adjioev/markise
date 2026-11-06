@@ -389,7 +389,7 @@ own: it decides which block, and what becomes of a draft when the document chang
 - **Cost.** A document with no package pays one comparison per frame. With a package, one index
   lookup per block opener on screen. An open panel adds a search of the text only when the document
   changed and the block is not where it was.
-- **Language.** Package texts are looked up as English, the app's only language so far.
+- **Language.** Package texts follow the document's language (ADR 0019), live, keeping the draft.
 
 ### Limits
 

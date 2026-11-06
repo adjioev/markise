@@ -175,6 +175,18 @@ that fits.
 If a site's code cannot draw a block, the block stays a card with a quiet reason on its first row,
 and no `⚠`.
 
+## Language
+
+A package's words follow the document: set `lang` in its front matter (`lang: ru`, `lang: ru-RU`)
+and block labels, the block library and the form's labels show in that language, if the package has
+it. Otherwise they show in the language before the `-`, then English, then whatever the package has.
+With no `lang`, English. Changing `lang` changes them at once, and an open form keeps what you typed.
+Search in the library finds a block by its words in any language.
+
+Markise's own words stay English: Save, Cancel, the reasons it gives, and the sentence around a block's
+name. A field the package gives no label to shows its name, and a block without a view shows its name
+from the file.
+
 ## Limits
 
 - **Site pictures are macOS only, on macOS 14 or later.** On Windows, on Linux and on older macOS,
