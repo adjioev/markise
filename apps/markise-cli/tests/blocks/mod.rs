@@ -385,7 +385,10 @@ fn docs_read_a_folder_an_archive_a_binding_or_the_nearest_binding() {
         text.contains("markise-cli blocks docs --package recipe.tar.gz --lang fr\n"),
         "{text}"
     );
-    assert!(text.contains("### `tip`: Astuce\n\nUn conseil\n"), "{text}");
+    assert!(
+        text.contains("### `tip`: Astuce\n\n**Description:** Un conseil\n"),
+        "{text}"
+    );
     let bound = stdout(&site.run(&["docs", "--binding", "blocks.config.json"]));
     assert!(bound.contains(&format!("sha256 `{}`, language `en`", site.sha256)));
     let nearest = stdout(&site.run(&["docs"]));
@@ -431,4 +434,129 @@ fn a_rule_of_docs_is_what_check_does() {
         "{text}"
     );
     assert!(text.contains("same.md:11: Marker: `:::` closes nothing"), "{text}");
+}
+
+/// A link counts where its file lives, as the app resolves it before it looks for a binding.
+#[cfg(unix)]
+#[test]
+fn a_link_to_a_bound_file_is_checked_against_that_files_binding() {
+    let site = Site::new();
+    site.doc("real.md", ":::tip\n\n:::\n");
+    let elsewhere = tempfile::tempdir().unwrap();
+    let link = elsewhere.path().join("link.md");
+    std::os::unix::fs::symlink(site.folder().join("real.md"), &link).unwrap();
+    let out = site.run(&["check", link.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains(":1: tip: Not filled in yet: Text: Required"),
+        "{}",
+        stdout(&out)
+    );
+    // and the other way: a link in a bound folder to a file with no binding has none
+    let plain = elsewhere.path().join("plain.md");
+    std::fs::write(&plain, ":::tip\n\n:::\n").unwrap();
+    let inside = site.folder().join("inside.md");
+    std::os::unix::fs::symlink(&plain, &inside).unwrap();
+    let out = site.run(&["check", "inside.md"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("no blocks.config.json applies"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+/// The example package with a field label and a block label that clear a terminal.
+fn hostile_site() -> Site {
+    let root = tempfile::tempdir().unwrap();
+    let package = root.path().join("package");
+    copy_folder(&repo().join("examples/block-package/package"), &package);
+    let schema = package.join("components/tip/tip.json");
+    let mut tip: Value = serde_json::from_slice(&std::fs::read(&schema).unwrap()).unwrap();
+    let evil = "\u{1b}[2J\u{1b}[H\u{9b}1m\u{202e}Text\n# Heading";
+    tip["label"] = evil.into();
+    tip["fields"][1]["label"] = evil.into();
+    std::fs::write(&schema, tip.to_string()).unwrap();
+    let packed = markise_package::pack_folder(&package).unwrap();
+    let site = root.path().join("home/site");
+    std::fs::create_dir_all(&site).unwrap();
+    std::fs::write(site.join("recipe.tar.gz"), &packed.bytes).unwrap();
+    std::fs::write(
+        site.join("blocks.config.json"),
+        format!(
+            r#"{{"library":"recipe-site","version":"1.0.0","source":"recipe.tar.gz","sha256":"{}"}}"#,
+            packed.sha256
+        ),
+    )
+    .unwrap();
+    Site {
+        sha256: packed.sha256.to_string(),
+        root,
+    }
+}
+
+fn copy_folder(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_folder(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn raw_hidden(text: &str) -> Vec<char> {
+    text.chars()
+        .filter(|c| markise_package::is_hidden_char(*c) && *c != '\n')
+        .collect()
+}
+
+#[test]
+fn hostile_package_text_stays_data() {
+    let site = hostile_site();
+    site.doc("a.md", ":::tip\n\n:::\n");
+    // the text of check
+    let text = stdout(&site.run(&["check", "a.md"]));
+    assert_eq!(raw_hidden(&text), [], "{text:?}");
+    assert!(
+        text.contains(r"a.md:1: tip: Not filled in yet: \u{1b}[2J\u{1b}[H\u{9b}1m\u{202e}Text\u{a}# Heading: Required"),
+        "{text}"
+    );
+    assert_eq!(text.lines().count(), 2, "{text}");
+    // the JSON of check: still JSON, every such character an escape, the value intact
+    let out = site.run(&["check", "--json", "a.md"]);
+    let json = stdout(&out);
+    assert_eq!(raw_hidden(&json), [], "{json:?}");
+    assert!(
+        json.contains(r"\u001b[2J") && json.contains(r"\u009b1m") && json.contains(r"\u202e"),
+        "{json}"
+    );
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        report["files"][0]["problems"][0]["reason"],
+        "\u{1b}[2J\u{1b}[H\u{9b}1m\u{202e}Text\n# Heading: Required"
+    );
+    // the reference
+    let docs = stdout(&site.run(&["docs", "--package", "recipe.tar.gz"]));
+    assert_eq!(raw_hidden(&docs), [], "{docs:?}");
+    assert!(!docs.lines().any(|l| l.starts_with("# Heading")), "{docs}");
+    assert!(
+        docs.contains(r"### `tip`: \\u\{1b\}\[2J\\u\{1b\}\[H\\u\{9b\}1m\\u\{202e\}Text \# Heading"),
+        "{docs}"
+    );
+    // an error that quotes a package
+    let package = site.folder().join("broken");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("manifest.json"),
+        "{\"format\":\"markise-block-package/2\",\"library\":\"\\u001b[2J\",\"version\":\"1\",\"blocks\":[]}",
+    )
+    .unwrap();
+    let out = site.run(&["docs", "--package", "broken"]);
+    assert_eq!(out.status.code(), Some(2));
+    let error = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(raw_hidden(&error), [], "{error:?}");
 }

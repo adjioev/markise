@@ -240,3 +240,14 @@ fn a_document_with_no_blocks_is_clean_and_a_marker_is_read_without_blank_lines()
     assert_eq!((check.blocks, check.problems.len()), (0, 0));
     assert_eq!(checker.check("Text.\n:::tip\nBody.\n:::\nText.\n").problems, []);
 }
+
+#[test]
+fn a_sections_metadata_block_is_unknown_only_outside_the_dialect() {
+    let body = ":::section-metadata\n\nid: one\n\n:::\n";
+    assert_eq!(problems(body)[0].kind, ProblemKind::UnknownBlock);
+    assert_eq!(problems(&format!("---\nauthoring: blocks-v3\n---\n\n{body}")), []);
+    assert_eq!(
+        problems("---\nauthoring: blocks-v3\n---\n\n:::elsewhere\n\n:::\n")[0].kind,
+        ProblemKind::UnknownBlock
+    );
+}

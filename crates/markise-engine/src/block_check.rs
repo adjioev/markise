@@ -9,11 +9,12 @@ use std::sync::Arc;
 
 use markise_layout::BlockViews;
 use markise_layout::native::MAX_NATIVE_BLOCK_BYTES;
-use markise_md::{BadMarkerKind, Document, ParseOptions};
+use markise_md::{BadMarkerKind, Document, ParseOptions, SECTION_METADATA};
 use markise_package::PackageIndex;
 
 use crate::block_page::package_language;
 use crate::block_view::{BlockReason, BlockVerdict, PackageViews};
+use crate::sections::section_dialect;
 
 /// What kind of problem a [`Problem`] is. The names are part of the JSON of `blocks check`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +101,7 @@ impl BlockChecker {
         let language = package_language(&doc);
         let index = self.index.clone();
         let views = (self.views.entry(language.clone())).or_insert_with(|| PackageViews::new(index, &language));
+        let sections = section_dialect(doc.authoring(), Some(&self.index)).is_some_and(|d| d.has_sections());
         let directives = doc.directives();
         let mut problems = Vec::new();
         for d in &directives {
@@ -114,6 +116,10 @@ impl BlockChecker {
                     reason,
                 });
             };
+            // a section's metadata is the dialect's, not a block of the package (ADR 0026)
+            if sections && name == SECTION_METADATA && !views.has_schema(name) {
+                continue;
+            }
             let source = &text[d.opener.start..d.closer.end];
             if views.has_schema(name) && source.len() > MAX_NATIVE_BLOCK_BYTES {
                 let limit = MAX_NATIVE_BLOCK_BYTES >> 10;

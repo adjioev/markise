@@ -11,8 +11,8 @@ use std::sync::Arc;
 use markise_engine::block_check::{BlockChecker, DocumentCheck};
 use markise_engine::block_page::is_language_tag;
 use markise_package::{
-    BINDING_FILE, Binding, PackageIndex, ReferenceHeader, Sha256Hex, find_binding, pack_folder, read_archive,
-    read_bound_package,
+    BINDING_FILE, Binding, PackageIndex, ReferenceHeader, Sha256Hex, find_binding, is_hidden_char, pack_folder,
+    printable, read_archive, read_bound_package,
 };
 use serde_json::{Value, json};
 
@@ -70,13 +70,14 @@ fn binding_json(binding: &Binding) -> Value {
     })
 }
 
-/// The path the app would have for this file, so that the same binding is found.
+/// The path the app opens this file by, links resolved, so that the same binding is found.
 fn document_path(file: &str) -> Result<PathBuf, String> {
-    let path = std::path::absolute(file).map_err(|e| format!("{file}: {e}"))?;
-    let folder = path.parent().ok_or_else(|| format!("{file}: not a file"))?;
-    let folder = std::fs::canonicalize(folder).map_err(|e| format!("{file}: {e}"))?;
-    let name = path.file_name().ok_or_else(|| format!("{file}: not a file"))?;
-    Ok(folder.join(name))
+    std::fs::canonicalize(file).map_err(|e| format!("{file}: {e}"))
+}
+
+/// An error that may quote a package, on one line and with nothing a terminal would act on.
+fn error_line(error: &str) -> String {
+    printable(&error.replace('\n', "; "))
 }
 
 fn check_file(file: &str, known: &mut HashMap<PathBuf, Bound>) -> Outcome {
@@ -156,22 +157,32 @@ fn check_text(results: &[(&str, Outcome)]) -> String {
     let (mut blocks, mut problems) = (0, 0);
     for (file, outcome) in results {
         match outcome {
-            Outcome::Unbound => out.push_str(&format!("{file}: note: {NO_BINDING}\n")),
-            Outcome::Failed { error, .. } => out.push_str(&format!("{file}: package or file error: {error}\n")),
+            Outcome::Unbound => out.push_str(&format!("{}: note: {NO_BINDING}\n", printable(file))),
+            Outcome::Failed { error, .. } => {
+                out.push_str(&format!(
+                    "{}: package or file error: {}\n",
+                    printable(file),
+                    error_line(error)
+                ));
+            }
             Outcome::Checked { check, .. } => {
                 blocks += check.blocks;
                 problems += check.problems.len();
                 for p in &check.problems {
-                    let block = p.block.as_ref().map_or(String::new(), |b| format!("{b}: "));
+                    let block = p
+                        .block
+                        .as_ref()
+                        .map_or(String::new(), |b| format!("{}: ", printable(b)));
                     out.push_str(&format!(
-                        "{file}:{}: {block}{}: {}\n",
+                        "{}:{}: {block}{}: {}\n",
+                        printable(file),
                         p.line,
                         p.kind.headline(),
-                        p.reason
+                        printable(&p.reason)
                     ));
                 }
                 if check.problems.is_empty() {
-                    out.push_str(&format!("{file}: ok, {} blocks\n", check.blocks));
+                    out.push_str(&format!("{}: ok, {} blocks\n", printable(file), check.blocks));
                 }
             }
         }
@@ -217,9 +228,22 @@ fn check_json(results: &[(&str, Outcome)]) -> String {
         "files": files,
         "summary": {"files": results.len(), "blocks": blocks, "problems": problems, "errors": errors, "unbound": unbound},
     });
-    let mut text = serde_json::to_string_pretty(&report).unwrap_or_default();
-    text.push('\n');
-    text
+    let text = serde_json::to_string_pretty(&report).unwrap_or_default();
+    let mut out = String::with_capacity(text.len() + 1);
+    // serde_json escapes C0 itself, so a line break here is the layout's. The rest it leaves as they
+    // are, valid JSON that could still reach a terminal, and these can only be inside strings.
+    for c in text.chars() {
+        if is_hidden_char(c) && c as u32 >= 0x7f {
+            let mut units = [0; 2];
+            for unit in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\n');
+    out
 }
 
 /// A word of the regenerate command, quoted when a shell would read it otherwise.
@@ -236,14 +260,14 @@ fn shell_word(word: &str) -> String {
 fn read_package(path: &str) -> Result<(PackageIndex, Sha256Hex), String> {
     let at = Path::new(path);
     let bytes = if at.is_dir() {
-        pack_folder(at).map_err(|e| format!("{path}: {e}"))?.bytes
+        pack_folder(at).map_err(|e| error_line(&format!("{path}: {e}")))?.bytes
     } else {
         markise_doc::resource::read_regular(at, markise_package::limits::MAX_ARCHIVE_BYTES)
-            .map_err(|e| format!("{path}: {e}"))?
+            .map_err(|e| error_line(&format!("{path}: {e}")))?
     };
     let sha256 = Sha256Hex::of(&bytes);
-    let files = read_archive(&bytes).map_err(|e| format!("{path}: {e}"))?;
-    let index = PackageIndex::from_files(&files).map_err(|e| format!("{path}: {e}"))?;
+    let files = read_archive(&bytes).map_err(|e| error_line(&format!("{path}: {e}")))?;
+    let index = PackageIndex::from_files(&files).map_err(|e| error_line(&format!("{path}: {e}")))?;
     Ok((index, sha256))
 }
 
@@ -285,6 +309,7 @@ fn docs(args: &[String]) -> Result<ExitCode, String> {
     let header = ReferenceHeader {
         sha256: sha256.as_str(),
         command: &command.join(" "),
+        sections: index.authoring() == Some(markise_md::SECTIONS_DIALECT),
     };
     print(&index.reference(header, lang.unwrap_or("en")))?;
     Ok(ExitCode::SUCCESS)
@@ -293,6 +318,6 @@ fn docs(args: &[String]) -> Result<ExitCode, String> {
 fn bound_package(file: &Path) -> Result<(PackageIndex, Sha256Hex), String> {
     // its `source` is relative to its folder, which a bare file name would not have
     let file = std::path::absolute(file).map_err(|e| format!("{}: {e}", file.display()))?;
-    let bound = read_bound_package(&file).map_err(|problem| format!("{}: {problem}", file.display()))?;
+    let bound = read_bound_package(&file).map_err(|problem| error_line(&format!("{}: {problem}", file.display())))?;
     Ok((bound.index, bound.binding.sha256))
 }

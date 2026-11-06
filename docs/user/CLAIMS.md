@@ -108,6 +108,7 @@ Claims of `block-packages.md`.
 | `blocks check`: resolves as the app, no consent, nothing written, the archive must be there | ADR 0019 "Looking without consent"; `crates/markise-package/src/resolve.rs` (`read_bound_package`); `apps/markise-cli/src/blocks.rs`; `apps/markise-cli/tests/blocks/mod.rs` (`check_writes_nothing_and_asks_nothing`) |
 | `blocks check`: kinds, words, lines, 64 KiB, what a marker problem is, blank lines not reported | `crates/markise-engine/src/block_check.rs`, `block_view.rs` (`verdict`); `crates/markise-md/src/directive.rs` (`bad_directive_markers`); `crates/markise-engine/tests/it/block_check.rs` |
 | `blocks check`: exit codes, the JSON's shape and what its keys mean | `apps/markise-cli/src/blocks.rs` (`check_json`); `apps/markise-cli/tests/blocks/mod.rs` |
+| Escaping of text from a package, in both commands; text kept as data in the reference; the sections rule | `crates/markise-package/src/value.rs` (`printable`), `reference.rs` (`inline`, `fenced`); `apps/markise-cli/src/blocks.rs`; `apps/markise-cli/tests/blocks/mod.rs` (`hostile_package_text_stays_data`) |
 | `blocks docs`: sources, content and order, language, stable bytes; `when` in a palette | `crates/markise-package/src/reference.rs`, `palette.rs`; `crates/markise-package/tests/it/reference.rs`; the snapshot `apps/markise-cli/tests/blocks/recipe-site.md` |
 | The example package passes validation and draws | `apps/markise-web-helper/tests/it/example_package.rs`; `xtask/src/block_package.rs` |
 

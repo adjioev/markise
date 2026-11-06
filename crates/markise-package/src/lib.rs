@@ -38,7 +38,7 @@ pub use reference::ReferenceHeader;
 pub use resolve::{BoundPackage, InstalledPackage, Pending, Problem, Resolution, accept, read_bound_package, resolve};
 pub use schema::{BlockSchema, FieldKind, FieldSchema};
 pub use store::{Accepted, Sha256Hex, Store, files_digest};
-pub use value::Localized;
+pub use value::{Localized, is_hidden_char, printable};
 pub use views::{PracticeConfig, ViewConfig, ViewKind};
 
 /// The one package format this build reads, as `manifest.json` names it.

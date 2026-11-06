@@ -355,7 +355,7 @@ markise-cli blocks check lesson.md more/*.md
 For each file this finds the binding as the app does, reads the archive it names, checks the hash, the
 identity and the package as a whole, and checks each block in memory. It writes nothing, and the
 store of accepted packages is not read or changed, so the archive has to be there even when the app
-still has a copy.
+still has a copy. Links are resolved first, as the app does when it opens a file, so a link to a file counts where that file lives.
 
 ```text
 lesson.md:13: tip: Not filled in yet: Text: Required
@@ -413,6 +413,7 @@ parser does not need them.
 - `binding` is `null` when none applies. With an `error` it may hold only `file`, or be `null`.
 - `language` is `null` unless the file was checked.
 - `block` is `null` for a line that names no block; `block_line` is the opener's line, or the line itself.
+- Characters a terminal would act on or hide are escaped in the strings as `\uXXXX`, and in text output as `\u{1b}`.
 - Keys and values mean this for as long as `format` says `markise-blocks-check/1`. The wording of `reason` can change.
 
 ### A reference for authors
@@ -431,6 +432,11 @@ It prints Markdown, made only from the package's data:
 - each block in the palette's order, then those in no group by name, with its name, label, description, `when`, arguments
   and their pattern or variants, fields with their type and rules, what Practice hides, and each preset as an example;
 - the general rules: the `:::` syntax, blank lines, the fence length for nesting, ids, and what `check` reports.
+
+A package's text is treated as data, since an agent may act on this page. Each piece stands on one line after a fixed lead-in, what
+would be Markdown is escaped, characters a terminal would act on or hide are written out, and a preset is in a fence no line of it can
+close, so it cannot pose as a heading, a fence or part of the reference. A first paragraph says that it is quoted. A package whose
+manifest names the sections dialect gets one more rule on them; others get nothing about sections.
 
 The same package gives the same bytes: no dates, nothing from the machine, so it can sit in a repository with small diffs. For a
 folder, the hash is that of the archive Markise packs from it in memory, which a `tar` of the same files
