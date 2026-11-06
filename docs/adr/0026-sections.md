@@ -164,6 +164,17 @@ block (`line_for_block`), with a blank line each side by `separated`, one undo s
   a lone first-line `---` that a second one would turn into front matter.
 - A title is one line. It is Markdown as any heading's text is. A trailing `{#x}` typed in it stays text, since the id written after it is the last.
 
+**Its id** follows the title until someone edits it (`markise_engine::section_id`). A letter, then up to 63 letters, digits, `_` and `-`, as sites read an id. From a title: lower case, Latin only, Cyrillic by a fixed table, so that the same title gives the
+same id everywhere, whatever a machine's language says; anything else that is no ASCII letter or digit separates words, so a letter of another script does not carry over, and an apostrophe joins. It starts at the first letter. A title with no usable letters is `section-1`, the first free number. On a page where the id is taken it gets the
+first free number after a hyphen, `-2` on, within the length. Taken is any `{#id}` written anywhere on the page, also in code, as for a block's ids (ADR 0022), and any section's metadata `id`: all of them share one namespace on a site. The form reads that once, when it opens, as an edit closes it. An edited id that is no id or is taken cannot be saved, and the form says why. The table:
+
+| | | | | | | | | | |
+|---|---|---|---|---|---|---|---|---|---|
+| а a | б b | в v | г g | ґ g | д d | е e | ё e | є ye | ж zh |
+| з z | и i | і i | ї yi | й y | к k | л l | м m | н n | о o |
+| п p | р r | с s | т t | у u | ў u | ф f | х kh | ц ts | ч ch |
+| ш sh | щ shch | ъ – | ы y | ь – | э e | ю yu | я ya | | |
+
 ## Consequences
 
 - The bytes of a file do not depend on any of this: the index only reads.

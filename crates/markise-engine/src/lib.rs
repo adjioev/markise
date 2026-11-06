@@ -24,6 +24,7 @@ pub mod lease;
 pub mod load;
 pub mod save;
 pub mod search;
+pub mod section_id;
 pub mod sections;
 pub mod settings;
 pub mod tree;

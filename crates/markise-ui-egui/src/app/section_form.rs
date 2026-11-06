@@ -2,8 +2,11 @@
 //! declares any. Nothing is written until Save. See [`markise_engine::editor::NewSection`].
 
 use egui::accesskit::Role;
+use std::collections::BTreeSet;
+
 use egui::{Context, Id, Key, RichText, TextEdit};
 use markise_engine::editor::NewSection;
+use markise_engine::section_id::{is_section_id, section_id};
 use markise_package::{DEFAULT_SECTION_LABEL, SectionConfig};
 
 use super::MarkiseApp;
@@ -28,6 +31,10 @@ pub struct SectionForm {
     in_source: bool,
     heading: String,
     title: String,
+    /// The ids on the page when it opened; an edit closes it, so they stand.
+    taken: BTreeSet<String>,
+    /// What someone typed as its id. `None`: it follows the title.
+    id: Option<String>,
     fields: Vec<FormField>,
     focus: bool,
     previous_focus: Option<Id>,
@@ -44,9 +51,26 @@ impl SectionForm {
         self.fields.iter().map(|f| f.key.as_str()).collect()
     }
 
-    /// Save can go on: a heading needs some text.
+    /// The id Save would write.
+    pub fn id(&self) -> String {
+        match &self.id {
+            Some(id) => id.trim().to_string(),
+            None => section_id(&self.title, &self.taken),
+        }
+    }
+
+    /// What is wrong with the id, in words.
+    pub fn id_problem(&self) -> Option<&'static str> {
+        let id = self.id();
+        if !is_section_id(&id) {
+            return Some("An id is a letter, then up to 63 Latin letters, digits, _ and -.");
+        }
+        self.taken.contains(&id).then_some("This id is taken on this page.")
+    }
+
+    /// Save can go on: a heading needs some text, and the id has to be one.
     pub fn can_save(&self) -> bool {
-        !self.title.trim().is_empty()
+        !self.title.trim().is_empty() && self.id_problem().is_none()
     }
 
     fn metadata(&self) -> Vec<(String, String)> {
@@ -89,6 +113,13 @@ impl MarkiseApp {
         }
     }
 
+    /// Sets what the open form's id field holds (tests).
+    pub fn set_section_form_id(&mut self, text: &str) {
+        if let Some(f) = &mut self.section_form {
+            f.id = Some(text.to_string());
+        }
+    }
+
     /// Sets what the open form holds for this key (tests).
     pub fn set_section_form_value(&mut self, key: &str, value: &str) {
         if let Some(f) = (self.section_form.as_mut()).and_then(|o| o.fields.iter_mut().find(|f| f.key == key)) {
@@ -109,6 +140,8 @@ impl MarkiseApp {
             in_source,
             heading: shown(config.and_then(|c| c.label.as_ref()), &language, DEFAULT_SECTION_LABEL),
             title: String::new(),
+            taken: d.viewer.ed.ids_on_page(),
+            id: None,
             fields: form_fields(config, &language),
             focus: true,
             previous_focus: ctx.memory(|m| m.focused()),
@@ -137,7 +170,7 @@ impl MarkiseApp {
         let Some(d) = &mut self.doc else { return false };
         let new = NewSection {
             title: form.title.clone(),
-            id: d.viewer.ed.free_section_id(),
+            id: form.id(),
             metadata: form.metadata(),
         };
         let result = d.viewer.ed.insert_section(&new, form.in_source);
@@ -184,6 +217,21 @@ impl MarkiseApp {
             if std::mem::take(&mut form.focus) {
                 ui.memory_mut(|m| m.request_focus(id));
             }
+            ui.add_space(8.0);
+            ui.label(RichText::new("Id").color(look.weak));
+            let mut id_text = form.id();
+            let edit = TextEdit::singleline(&mut id_text).desired_width(f32::INFINITY);
+            let resp = ui.add(edit);
+            resp.widget_info(|| egui::WidgetInfo::labeled(Role::TextInput, true, "Id"));
+            if resp.changed() {
+                form.id = Some(id_text);
+            }
+            if let Some(problem) = form
+                .id_problem()
+                .filter(|_| !form.title.trim().is_empty() || form.id.is_some())
+            {
+                ui.label(RichText::new(problem).color(look.danger).small());
+            }
             for field in &mut form.fields {
                 ui.add_space(8.0);
                 let named = ui.label(RichText::new(&field.label).color(look.weak));
@@ -208,7 +256,7 @@ impl MarkiseApp {
                         .labelled_by(named.id);
                 }
             }
-            let can_save = !form.title.trim().is_empty();
+            let can_save = form.can_save();
             let mut act = None;
             footer(ui, |ui| {
                 if ui
