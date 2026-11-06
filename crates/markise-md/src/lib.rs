@@ -49,7 +49,7 @@ pub use markise_doc::{DepChange, HintOrigin, HintSet, LiteralHint, Patch, PatchS
 pub use options::{HeadingStyle, IndentSize, OrderedStyle, ParseOptions, WriteOptions};
 pub use parser::{MAX_NESTING, MAX_QUOTE_DEPTH, bom_len};
 pub use prefix::progressive_prefix;
-pub use section::{MAX_METADATA_BYTES, SECTION_METADATA};
+pub use section::{MALFORMED_BODY, MALFORMED_TIGHT, MAX_METADATA_BYTES, SECTION_METADATA};
 pub use text::{LineEnding, Span};
 pub use tops::Top;
 

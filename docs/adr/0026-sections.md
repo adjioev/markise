@@ -20,16 +20,19 @@ on opening or viewing.
   directly under text is a setext heading, as Markdown says. Inside a list, a quote or a paired
   `:::` block it is no boundary, and front matter delimiters are none.
 - **Metadata** is a paired `:::section-metadata` block that is the first block of its section. Any
-  other one is an ordinary block. Its body has a grammar of its own, not Markdown and not the block
-  field grammar: `key: value` lines split at the first colon, both trimmed, values literal. Keys are
-  `[a-z][a-z0-9-]*`, values one line up to 200 characters, at most 20 keys. Blank lines say nothing.
+  other one is an ordinary block, flagged when the rendered view shows it. Between the markers the parsed
+  tree holds exactly one paragraph, with a blank line on either side of it, and no other node. Its
+  lines have a grammar of their own, not Markdown and not the block field grammar: `key: value` split at
+  the first colon, both trimmed, values literal. Keys are `[a-z][a-z0-9-]*`, values one line up to 200
+  characters, at most 20 keys. Only `id` and `style` mean anything to the engine; all keys are data here.
 
 ### The dialect
 
 Sections are on when the document's dialect is `blocks-v3`. The document's front matter `authoring`
 says, and if it does not, the manifest of its accepted package, a flat `"authoring": "blocks-v3"`.
-Front matter wins, so another value there turns them off whatever the package says, and an empty one
-says nothing. A document needs no package: its own front matter is enough. A package without the key
+Front matter wins, so another value there turns them off whatever the package says. An empty value, or
+one that is no string in YAML, is an error shown quietly: sections are off, and it never falls back to the
+package. A document needs no package: its own front matter is enough. A package without the key
 reads as before, and this key is read, not validated (ADR 0019: a known format ignores what it does
 not need). `sections::section_dialect` is the whole rule, and it says where the answer came from,
 with the package's version when it came from a package.
@@ -40,7 +43,11 @@ The reader is a small line parser into ordered pairs, by the lines of the source
 so that a line Markdown would read otherwise (`---` under a line, `# x`) is seen for what the author
 wrote. A line that does not fit is flagged with a reason and takes nothing else with it. A long
 value is kept and flagged; of a repeated key the first counts. Refusing is for whoever publishes.
-A block over 64 KiB is not read, since this is asked on the UI thread, and counts as no metadata.
+Anything but that one paragraph between the markers is malformed, and so is a marker with a line right
+next to it: both flagged, with the lines still read for what they say. A fence inside takes the closer, so
+the opener pairs with nothing, and that is flagged as well. A block over 64 KiB, markers included, is not read,
+since this is asked on the UI thread, and counts as no metadata; its extent comes from the index, so
+that no line of it is read to find that out.
 
 ### The index
 

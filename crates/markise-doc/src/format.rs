@@ -483,6 +483,26 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
         let _ = index;
         None
     }
+    /// A block that says it is metadata opens at `opener`, and it is not first in its section.
+    fn section_metadata_misplaced(&self, opener: usize) -> bool {
+        let _ = opener;
+        false
+    }
+    /// The first block of section `index` tries to be its metadata and does not pair: where.
+    fn section_metadata_unclosed(&self, index: usize) -> Option<Span> {
+        let _ = index;
+        None
+    }
+    /// Where the first heading of section `index` starts, as far as a cheap look goes.
+    fn section_first_heading(&self, index: usize) -> Option<usize> {
+        let _ = index;
+        None
+    }
+    /// A rule at `at` looks like a boundary and is none.
+    fn section_near_boundary(&self, at: usize) -> bool {
+        let _ = at;
+        false
+    }
     /// Resolves an image source against the document folder and [`FormatDoc::resource_root`].
     fn resolve_resource(&self, doc_dir: &Path, src: &str) -> PathBuf {
         crate::resource::resolve(doc_dir, self.resource_root().as_deref(), src)
