@@ -13,6 +13,7 @@ mod block_ownership;
 mod block_page;
 mod block_place;
 mod block_views;
+mod callouts;
 mod common;
 mod directive_edit;
 mod editor;
