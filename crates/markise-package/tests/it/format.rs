@@ -72,6 +72,28 @@ fn localized_falls_back_to_english_then_first() {
 }
 
 #[test]
+fn localized_looks_for_the_tag_its_base_english_then_first() {
+    let text = |pairs: &[(&str, &str)]| {
+        Localized::ByLanguage(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    };
+    let all = text(&[("en", "e"), ("ru", "r"), ("ru-BY", "b")]);
+    assert_eq!(all.get("ru-BY"), "b", "the exact tag");
+    assert_eq!(all.get("ru-RU"), "r", "the part before the dash");
+    assert_eq!(all.get("ru"), "r");
+    assert_eq!(all.get("RU-by"), "b", "a tag in any case");
+    assert_eq!(all.get("de-DE"), "e", "English");
+    assert_eq!(all.get("en"), "e");
+    assert_eq!(text(&[("fr", "f"), ("ru", "r")]).get("de"), "f", "the first there is");
+    assert_eq!(
+        text(&[("en", "e"), ("ru", "")]).get("ru"),
+        "e",
+        "an empty text is no translation"
+    );
+    assert_eq!(text(&[("ru", "")]).get("ru"), "");
+    assert_eq!(text(&[]).get("ru"), "");
+}
+
+#[test]
 fn other_format_versions_refuse_cleanly() {
     for found in ["markise-block-package/1", "markise-block-package/3"] {
         let f = with(

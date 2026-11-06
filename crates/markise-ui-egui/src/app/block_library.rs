@@ -6,7 +6,7 @@ use markise_layout::block::color;
 
 use super::block_form::DraftNext;
 use super::{Ask, MarkiseApp};
-use crate::block_form::{LANGUAGE, style_for};
+use crate::block_form::{package_language, style_for};
 use crate::block_library::{LibraryAct, OpenLibrary, Opened};
 
 /// The library of the session.
@@ -253,7 +253,8 @@ impl MarkiseApp {
                 true
             }
             Err(why) => {
-                let label = preset.label.as_ref().map_or(preset.id.as_str(), |l| l.get(LANGUAGE));
+                let language = package_language(d.viewer.ed.session.doc());
+                let label = preset.label.as_ref().map_or(preset.id.as_str(), |l| l.get(&language));
                 self.banner = Some(super::Banner::Error(format!("“{label}” was not inserted: {why}.")));
                 false
             }
@@ -272,7 +273,7 @@ impl MarkiseApp {
             return false;
         };
         let Some(d) = &self.doc else { return false };
-        let library = package.index.library(LANGUAGE);
+        let library = package.index.library(&package_language(d.viewer.ed.session.doc()));
         if library.is_empty() {
             return false;
         }

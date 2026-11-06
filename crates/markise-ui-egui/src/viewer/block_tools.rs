@@ -190,7 +190,7 @@ impl DocViewer {
         let mut again = false;
         if self.site_read_at != changes {
             self.site_read_at = changes;
-            let language = markise_engine::block_page::document_language(self.ed.session.text());
+            let language = markise_engine::block_page::document_language(self.ed.session.doc());
             again |= board.set_language(language);
         }
         again |= board.take_arrivals(ctx);
@@ -351,22 +351,43 @@ impl DocViewer {
         }
     }
 
-    /// The package whose blocks have a form; `None` when there is none in use.
+    /// The language this viewer shows package text in, as of the last frame.
+    pub fn block_language(&self) -> &str {
+        &self.block_language
+    }
+
+    /// What the blocks are read with now: built anew only for another package or language.
+    pub fn block_fields(&self) -> Option<&Arc<PackageViews>> {
+        self.block_fields.as_ref()
+    }
+
+    /// The package whose blocks have a form; `None` when there is none in use. Its text follows the
+    /// document's language. Called per frame: a comparison unless the document changed, and only a
+    /// changed language rebuilds anything.
     pub fn set_block_index(&mut self, index: Option<Arc<PackageIndex>>) {
         let same = match (&index, &self.block_index) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             (None, None) => true,
             _ => false,
         };
-        if same {
+        let changes = self.ed.changes();
+        if same && (index.is_none() || self.block_language_read_at == changes) {
             return;
         }
-        self.block_icons.clear();
-        // what it drew is another package's
-        *self.block_site.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.block_language_read_at = changes;
+        let language = crate::block_form::package_language(self.ed.session.doc());
+        if same && language == self.block_language {
+            return;
+        }
+        self.block_language = language;
+        if !same {
+            self.block_icons.clear();
+            // what it drew is another package's
+            *self.block_site.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
         let fields = index
             .clone()
-            .map(|i| Arc::new(PackageViews::new(i, crate::block_form::LANGUAGE)));
+            .map(|i| Arc::new(PackageViews::new(i, &self.block_language)));
         let views = fields.clone().map(|views| -> Arc<dyn BlockViews> {
             Arc::new(ViewsWithIcons {
                 views,
