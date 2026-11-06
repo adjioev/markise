@@ -76,6 +76,16 @@ impl View {
         {
             return f32::from_bits(h);
         }
+        // what closed callouts in the page hide: their bodies, counted as they are when shown
+        let mut h = self.stats_height(s);
+        self.model
+            .cross
+            .closed_fold_bodies(source.start, source.end, |body| h -= self.stats_height(body));
+        h.max(self.theme.line_px())
+    }
+
+    /// The height of the items counted in `s`, shown. Linear in the statistics.
+    fn stats_height(&self, s: &PageStats) -> f32 {
         let t = &self.theme;
         let line = t.line_px();
         let avg_char = t.font_size * 0.5;
@@ -110,10 +120,7 @@ impl View {
         // a TOC lists the whole outline, one line per entry
         h += s.tocs as f32 * self.model.outline.len().max(1) as f32 * line;
         h += s.para_lines_at(per_line) * line;
-        // what closed callouts in the page hide: their bodies, estimated from the source
-        let (lines, bytes, blocks) = self.model.cross.closed_fold_body(source.start, source.end);
-        let hidden = (lines as f32).max(bytes as f32 / per_line) * line + blocks as f32 * t.block_spacing;
-        (h - hidden).max(line)
+        h
     }
 
     /// Key of the parameters a measured page height is valid for (theme, fonts, ppp, the

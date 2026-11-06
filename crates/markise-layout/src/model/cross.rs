@@ -28,10 +28,13 @@
 //!
 //! Format-neutral: markers come from [`FormatDoc::raw_presentation`] through the items.
 
+use std::sync::Arc;
+
 use markise_doc::chunked::{RelChunks, Relative};
 use markise_doc::{FormatDoc, RawPresentation};
 
 use super::Item;
+use super::PageStats;
 
 /// A disclosure marker: a raw block presenting as `<details>`, `<summary>` or `</details>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,10 +67,10 @@ pub struct FoldMarker {
     pub written_open: bool,
     /// The reader's open/closed choice (`None`: as written).
     pub toggled: Option<bool>,
-    /// Source lines after the tag line and the blocks after the first: what hiding the body
-    /// takes from a page's estimate ([`CrossBlockIndex::closed_fold_body`]).
-    pub body_lines: u32,
-    pub body_blocks: u32,
+    /// What the body counts in a page's estimate: its hidden items as they are counted when
+    /// shown, less the line the header keeps. From the items when they were last at hand; only a
+    /// placeholder reads it, and a placeholder is made with its items in hand.
+    pub body: Arc<PageStats>,
 }
 
 impl FoldMarker {
@@ -79,7 +82,7 @@ impl FoldMarker {
     }
     /// Whether `at` lies in this callout, its first line included.
     pub fn holds(&self, at: usize) -> bool {
-        self.start <= at && at < self.end().max(self.start + 1)
+        self.start <= at && at <= self.end()
     }
 }
 
@@ -89,40 +92,6 @@ impl Relative for FoldMarker {
     }
     fn shift(&mut self, delta: isize) {
         self.start = (self.start as isize + delta) as usize;
-    }
-}
-
-/// What the body of a fold counts for a page estimate, from the source (at most a sample of it:
-/// this runs for the callout being typed in).
-const FOLD_SAMPLE_BYTES: usize = 64 * 1024;
-
-fn fold_body(text: &str, start: usize, len: usize) -> (u32, u32) {
-    let bytes = text.as_bytes();
-    let end = (start + len).min(bytes.len());
-    let sample = &bytes[start.min(end)..end.min(start + FOLD_SAMPLE_BYTES)];
-    let (mut lines, mut blocks) = (0u64, 0u64);
-    for line in sample.split(|&c| c == b'\n').skip(1) {
-        if line.iter().all(|c| matches!(c, b'>' | b' ' | b'\t' | b'\r')) {
-            blocks += 1;
-        } else {
-            lines += 1;
-        }
-    }
-    let scale = |n: u64| (n * len.max(1) as u64 / sample.len().max(1) as u64) as u32;
-    (scale(lines), scale(blocks))
-}
-
-/// The fold starting at `start`, with `written_open`, in `doc` now.
-fn fold_at(doc: &dyn FormatDoc, start: usize, written_open: bool) -> FoldMarker {
-    let len = fold_len(doc, start);
-    let (body_lines, body_blocks) = fold_body(doc.text(), start, len);
-    FoldMarker {
-        start,
-        len,
-        written_open,
-        toggled: None,
-        body_lines,
-        body_blocks,
     }
 }
 
@@ -137,12 +106,25 @@ fn fold_len(doc: &dyn FormatDoc, start: usize) -> usize {
 /// The foldable callouts among freshly flattened `items` (absolute origins, document order).
 pub(super) fn folds_of(doc: &dyn FormatDoc, items: &[Item]) -> Vec<FoldMarker> {
     let mut out = Vec::new();
-    for it in items {
+    for (k, it) in items.iter().enumerate() {
         for c in it.containers.iter() {
             if let super::Container::Quote { head: Some(head), .. } = c
-                && let Some(open) = head.open
+                && let Some(written_open) = head.open
             {
-                out.push(fold_at(doc, it.origin, open));
+                let len = fold_len(doc, it.origin);
+                let end = it.origin + len;
+                let mut body = PageStats::default();
+                for hidden in items[k..].iter().take_while(|h| h.origin <= end) {
+                    body.add(hidden);
+                }
+                body.keep_header();
+                out.push(FoldMarker {
+                    start: it.origin,
+                    len,
+                    written_open,
+                    toggled: None,
+                    body: Arc::new(body),
+                });
             }
         }
     }
@@ -259,23 +241,65 @@ impl CrossBlockIndex {
             .collect()
     }
 
-    /// What the bodies of the closed folds starting in `lo..hi` count: source lines, bytes and
-    /// blocks. A fold inside a closed one is part of its body.
-    pub(crate) fn closed_fold_body(&self, lo: usize, hi: usize) -> (u32, usize, u32) {
+    /// Calls `f` with the body of each closed fold starting in `lo..hi`. A fold inside a closed
+    /// one is part of its body.
+    pub(crate) fn closed_fold_bodies(&self, lo: usize, hi: usize, mut f: impl FnMut(&PageStats)) {
         let a = self.folds.partition_point(|r| r.origin < lo);
         let b = self.folds.partition_point(|r| r.origin < hi).max(a);
-        let (mut lines, mut bytes, mut blocks) = (0, 0, 0);
         let mut covered = lo;
-        for f in self.folds.range(a..b).map(|r| r.to_abs()) {
-            if f.open() || f.start < covered {
+        for r in self.folds.range(a..b) {
+            if r.item.open() || r.origin < covered {
                 continue;
             }
-            covered = f.end();
-            lines += f.body_lines;
-            bytes += f.len;
-            blocks += f.body_blocks;
+            covered = r.origin + r.item.len;
+            f(&r.item.body);
         }
-        (lines, bytes, blocks)
+    }
+
+    /// The fold starting at `start`.
+    pub(crate) fn fold_at(&self, start: usize) -> Option<FoldMarker> {
+        let k = self.folds.partition_point(|r| r.origin < start);
+        (self.folds.origin(k) == Some(start))
+            .then(|| self.folds.range(k..k + 1).next().map(|r| r.to_abs()))
+            .flatten()
+    }
+
+    /// `items` (absolute origins) become a placeholder: the folds starting in them count what
+    /// the items hold now (an edit in a body changed it without touching the fold's marker).
+    pub(super) fn refresh_fold_bodies(&mut self, doc: &dyn FormatDoc, items: &[Item]) {
+        for fresh in folds_of(doc, items) {
+            let k = self.folds.partition_point(|r| r.origin < fresh.start);
+            if self.folds.origin(k) == Some(fresh.start)
+                && let Some(f) = self.folds.get_mut(k)
+            {
+                f.body = fresh.body;
+            }
+        }
+    }
+
+    /// The reader's choices of markers and folds at their positions after `steps` (see
+    /// [`super::Moved`]): each patch of a composed edit moves them on its own, so one between
+    /// two patches is inside the covering range without being touched. One inside a step goes.
+    pub(super) fn choices_through(&self, steps: &[(usize, usize, isize)]) -> Vec<(usize, bool)> {
+        let through = |mut p: usize| {
+            for &(s, e, delta) in steps {
+                if p >= e {
+                    p = (p as isize + delta) as usize;
+                } else if p >= s {
+                    return None;
+                }
+            }
+            Some(p)
+        };
+        let markers = self
+            .markers
+            .iter()
+            .filter_map(|r| Some((through(r.origin)?, r.item.toggled?)));
+        let folds = self
+            .folds
+            .iter()
+            .filter_map(|r| Some((through(r.origin)?, r.item.toggled?)));
+        markers.chain(folds).collect()
     }
 
     /// Whether two indexes hold the same markers and pairs (the reader's choices aside).
@@ -396,11 +420,8 @@ impl CrossBlockIndex {
         for k in lo..hi {
             let Some(start) = self.folds.origin(k) else { continue };
             let len = fold_len(doc, start);
-            let (body_lines, body_blocks) = fold_body(doc.text(), start, len);
             if let Some(f) = self.folds.get_mut(k) {
                 f.len = len;
-                f.body_lines = body_lines;
-                f.body_blocks = body_blocks;
             }
         }
     }

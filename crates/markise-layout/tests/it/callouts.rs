@@ -282,6 +282,59 @@ fn typing_outside_a_callout_does_no_fold_work() {
     v.model().check_against_full(&d).unwrap();
 }
 
+/// The estimate takes off what the hidden blocks count, not their bytes: a very long code line
+/// is one line of code, shown or not.
+#[test]
+fn a_page_estimate_subtracts_hidden_blocks_not_bytes() {
+    use markise_doc::FormatDoc;
+    let code = "x".repeat(100_000);
+    let mut src = String::new();
+    for i in 0..40 {
+        src.push_str(&format!("Paragraph {i}\n\n"));
+    }
+    src.push_str(&format!("> [!info]- T\n> ```\n> {code}\n> ```\n\n"));
+    for i in 0..40 {
+        src.push_str(&format!("Tail {i}\n\n"));
+    }
+    let d = md(&src);
+    let doc: Arc<dyn FormatDoc> = Arc::new(d.clone());
+    let v = View::new(doc.clone(), Arc::new(paged(&d, 8)), Theme::light(), 700.0, 1.0);
+    let full = markise_layout::DocModel::build_with(&d, None, markise_layout::Paging::Full);
+    let fv = View::new(doc, Arc::new(full), Theme::light(), 700.0, 1.0);
+    let (a, b) = (v.total_height(), fv.total_height());
+    assert!(a > 1000.0, "the page collapsed: {a}");
+    assert!((a - b).abs() < 60.0, "paged {a}, full {b}");
+}
+
+/// A closed callout offers the caret no place in what it hides.
+#[test]
+fn a_closed_callout_has_no_anchor_in_its_body() {
+    let src = "> [!info]-\n> Secret\n\nAfter\n";
+    let mut v = view_in(src, Theme::light());
+    let mut fonts = testing::fonts();
+    let mut sh = fonts.with_pixels_per_point(1.0);
+    let shown = v.frame(4000.0, 0.0, &mut sh, &NoImages);
+    assert!(shown[0].layout.empty_anchor.is_none());
+    assert!(shown[0].layout.toggle.is_some());
+}
+
+/// An edit in a body changes what its fold counts without touching its marker.
+#[test]
+fn estimate_of_a_page_follows_an_edit_in_a_body_when_evicted() {
+    use markise_doc::{FormatDoc, PatchSet};
+    let mut src = String::from("Top\n\n> [!info]- T\n> Body\n");
+    for i in 0..60 {
+        src.push_str(&format!("\nTail {i}\n"));
+    }
+    let mut d = md(&src);
+    let mut m = paged(&d, 4);
+
+    let at = src.find("Body").unwrap() + 4;
+    let e = d.apply(&PatchSet::single_verbatim(at..at, "\n>\n> a new block\n>\n> another"));
+    m.apply(&d, &e);
+    m.check_against_full(&d).unwrap();
+}
+
 mod props {
     use super::*;
     use markise_doc::{FormatDoc, PatchSet};

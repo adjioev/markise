@@ -2243,8 +2243,6 @@ pub fn layout_item(
                 // drop the `[!KIND]` marker line (spec 01 R3.3.4), as the export does
                 content_lines = content_lines.get(1..).unwrap_or(&[]);
             }
-            // a closed callout's stop for the caret is where its body starts
-            let body_start = content_lines.first().map(|l| l.start);
             if callout_closed {
                 content_lines = &[];
             }
@@ -2257,8 +2255,9 @@ pub fn layout_item(
                 empty = true;
             }
             let titled = callout_head.is_some_and(|(h, _)| h.title.is_some());
-            if empty && item.segment.is_none() && !titled {
-                let rel = body_start.map_or(0, |at| at.saturating_sub(origin)) as u32;
+            // (a closed callout offers no place in what it hides)
+            if empty && item.segment.is_none() && !titled && !callout_closed {
+                let rel = content_lines.first().map_or(0, |l| l.start.saturating_sub(origin)) as u32;
                 empty_anchor = Some((Rect::from_min_size(pos2(x, y), vec2(0.0, line_px)), rel));
             }
             if let Some(rich) = rich.filter(|_| !empty) {

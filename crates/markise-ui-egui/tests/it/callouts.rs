@@ -191,3 +191,104 @@ fn a_search_hit_on_the_item_the_caret_is_on_opens_it() {
     common::run(&mut h);
     assert!(shown(&mut h).contains("Secret body"));
 }
+
+/// Replace All on both sides of a callout the reader opened: the patches do not touch it, though
+/// it lies inside their covering range.
+#[test]
+fn replace_all_keeps_the_readers_choice_between_its_patches() {
+    let src = "foo\n\n> [!info]- T\n> Secret\n\nfoo\n";
+    let mut h = open_text("replace-all", src);
+    click_toggle_at(&mut h, src.find("[!info]").unwrap());
+    assert!(shown(&mut h).contains("Secret"));
+    h.state_mut().open_find(true);
+    h.state_mut().set_find_query(Query {
+        text: "foo".into(),
+        ..Default::default()
+    });
+    common::wait_until(&mut h, "find results", |a| a.find_results().is_some());
+    h.state_mut().replace_find("longer".into(), true);
+    common::wait_until(&mut h, "replace all", |a| {
+        a.viewed_text() == Some("longer\n\n> [!info]- T\n> Secret\n\nlonger\n")
+    });
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("Secret"), "{}", shown(&mut h));
+}
+
+fn open_text(name: &str, src: &str) -> Harness<'static, MarkiseApp> {
+    let dir = std::env::temp_dir().join(format!("markise-callouts-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("doc.md");
+    std::fs::write(&path, src).unwrap();
+    let app = MarkiseApp::new(AppOptions {
+        open: vec![path],
+        ..common::no_watch()
+    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 800.0))
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), app);
+    let t = Instant::now();
+    while h.state().model().is_none() || h.state().is_loading() {
+        assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for the load");
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    common::run(&mut h);
+    h
+}
+
+fn click_toggle_at(h: &mut Harness<'static, MarkiseApp>, offset: usize) {
+    let v = h.state_mut().viewer().unwrap();
+    let r = v.item_screen_rect(offset).unwrap();
+    let i = v.ed.view.model().item_at_offset(offset);
+    let l = v.ed.view.cache_peek(i).unwrap();
+    let p = r.min + l.toggle.expect("a foldable header").center().to_vec2();
+    h.hover_at(p);
+    h.step();
+    h.drag_at(p);
+    h.step();
+    h.drop_at(p);
+    common::run(h);
+}
+
+/// Closing an untitled callout with the caret in its body: what is typed lands after it.
+#[test]
+fn closing_moves_the_caret_out_and_typing_lands_outside() {
+    for (name, src, stays) in [
+        (
+            "untitled",
+            "> [!info]+\n> Secret\n\nAfter\n",
+            "> [!info]+\n> Secret\n\nxAfter\n",
+        ),
+        (
+            "titled",
+            "> [!info]+ T\n> Secret\n\nAfter\n",
+            "> [!info]+ T\n> Secret\n\nxAfter\n",
+        ),
+    ] {
+        let mut h = open_text(name, src);
+        let ed = &mut h.state_mut().viewer().unwrap().ed;
+        ed.set_selection(Selection::caret(src.find("Secret").unwrap()));
+        ed.refresh_focus();
+        common::run(&mut h);
+        let undo = h.state_mut().viewer().unwrap().ed.session.history().undo_len();
+        click_toggle_at(&mut h, src.find("[!info]").unwrap());
+        assert!(!shown(&mut h).contains("Secret"), "{name}");
+        assert_eq!(h.state_mut().viewer().unwrap().ed.session.history().undo_len(), undo);
+        assert!(!h.state().is_dirty());
+        type_x(&mut h);
+        assert_eq!(h.state().viewed_text(), Some(stays), "{name}");
+        assert!(!shown(&mut h).contains("Secret"), "stays closed: {name}");
+    }
+}
+
+/// A file may start with a closed callout: the caret at offset 0 does not open it.
+#[test]
+fn a_document_starting_with_a_closed_callout_opens_closed() {
+    let src = "> [!info]- T\n> Secret\n\nAfter\n";
+    let mut h = open_text("first", src);
+    assert!(!shown(&mut h).contains("Secret"), "{}", shown(&mut h));
+    let src = "> [!info]-\n> Secret\n\nAfter\n";
+    let mut h = open_text("first-untitled", src);
+    assert!(!shown(&mut h).contains("Secret"), "{}", shown(&mut h));
+}

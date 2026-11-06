@@ -66,7 +66,7 @@ title.
   capital first letter.
 - **Folding**: `-` after the tag starts the callout closed, `+` starts it open, and without either it
   cannot be folded. Click the header to open or close it. A caret or a search hit going inside opens
-  it. This is only how you see it for now: the file does not change, nothing is marked as unsaved,
+  it, and closing it moves the caret past it. This is only how you see it for now: the file does not change, nothing is marked as unsaved,
   there is nothing to undo, and the callout starts as written when you open the file again.
 
 Typing `[!name]` as the first line of a quote makes the callout and puts the caret in its body. Edit

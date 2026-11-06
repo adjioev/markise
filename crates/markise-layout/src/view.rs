@@ -84,6 +84,8 @@ pub struct View {
     /// Editing state of the item holding the caret (ADR 0006 §2.4): part of that item's key.
     focus: Option<(usize, ItemFocus, u64)>,
     caret_item: Option<usize>,
+    /// Where the caret is ([`View::set_caret_source`]).
+    caret_source: Option<usize>,
     /// What a paged model keeps materialized ([`paging`]).
     paging: paging::PagingState,
     /// The scroll position by source when the model was handed out for an in-place update
@@ -127,6 +129,7 @@ impl View {
             refs: Default::default(),
             focus: None,
             caret_item: None,
+            caret_source: None,
             paging: Default::default(),
             pre_edit_anchor: None,
             native: Default::default(),
@@ -542,6 +545,48 @@ impl View {
         true
     }
 
+    /// Item `idx` heads a closed callout holding source offset `at`: where a caret there goes, the
+    /// next thing shown (else the previous one, else the end of the text).
+    pub fn caret_out_of_closed_fold(&self, idx: usize, at: usize) -> Option<usize> {
+        if !self.disclosures.groups.get(&idx).is_some_and(|g| g.fold && !g.open) {
+            return None;
+        }
+        let fold = self.model.cross.fold_at(self.model.item_start(idx))?;
+        if !fold.holds(at) {
+            return None;
+        }
+        Some(if let Some(next) = self.adjacent_visible(idx, true) {
+            self.model.item_start(next)
+        } else if let Some(previous) = self.adjacent_visible(idx, false) {
+            self.model.item_span(previous).end
+        } else {
+            self.doc.text().len()
+        })
+    }
+
+    /// The source offset of the caret for the next [`View::set_focus`].
+    pub fn set_caret_source(&mut self, offset: usize) {
+        self.caret_source = Some(offset);
+    }
+
+    /// The caret resting at the start of a closed callout's header, coming from no item: it has
+    /// not gone in. A document opens with the caret at offset 0, and the selection fix takes it to
+    /// the title's start. An edit there opens it through [`View::reveal_offset`].
+    fn caret_rests_on_closed_head(&self, i: usize) -> bool {
+        if self.caret_item.is_some() || !self.disclosures.groups.get(&i).is_some_and(|g| g.fold && !g.open) {
+            return false;
+        }
+        let start = self.model.item_start(i);
+        let title = self.model.items.get(i).and_then(|it| {
+            it.containers.iter().find_map(|c| match c {
+                crate::model::Container::Quote { head: Some(h), .. } => h.title.as_ref().map(|t| t.start as usize),
+                _ => None,
+            })
+        });
+        self.caret_source
+            .is_some_and(|at| at == start || title.is_some_and(|t| at == start + t))
+    }
+
     /// Opens what hides source offset `at`: an edit or a search hit landed there, whichever item
     /// the caret was on before. O(log items) when nothing hides it.
     pub fn reveal_offset(&mut self, at: usize) -> bool {
@@ -881,7 +926,8 @@ impl View {
     /// clears it. Only that item's cache key changes; returns `true` when the focus changed.
     pub fn set_focus(&mut self, focus: Option<(usize, ItemFocus)>) -> bool {
         let caret_item = focus.as_ref().map(|(i, _)| *i);
-        let opened = caret_item != self.caret_item && caret_item.is_some_and(|i| self.reveal_item(i));
+        let opened = caret_item != self.caret_item
+            && caret_item.is_some_and(|i| !self.caret_rests_on_closed_head(i) && self.reveal_item(i));
         self.caret_item = caret_item;
         let focus = focus.filter(|(i, f)| *i < self.len() && !f.is_empty());
         let same = match (&self.focus, &focus) {

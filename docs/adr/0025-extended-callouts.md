@@ -102,17 +102,24 @@ rather than a `RawPresentation`:
 
 Clicking the header toggles, chevron or not; the whole header is the control, so a click there sets no
 caret. The caret reaches the title with the arrow keys. A caret entering a closed callout opens it,
-the title included; so does a search hit, or an edit such as an undo landing there. Closing it with
-the caret inside moves the caret to the next stop, as the frame does for any hidden item, so nothing
-is typed out of sight.
+the title included; so does a search hit, or an edit such as an undo landing there. A document opening
+with the caret at offset 0, on a closed callout, has not gone in: it stays closed. Closing a
+callout around the caret moves the caret to the next thing shown, so nothing is typed out of sight.
+A closed callout without a title offers no caret stop at all, since a stop in its body could be typed
+into: the arrow keys pass it, and the click or a search opens it.
+
+The reader's choices follow each patch of a composed edit, such as Replace All, not their covering
+range, up to the session's limit of 256 position steps. Beyond that, a choice inside the covering
+range goes back to as written.
 
 **Keyboard and accessibility** are those of `<details>`: the caret opens it, and there is no key to
 close it and no accessibility node for the control. Both kinds would gain these together.
 
 **Heights.** A closed header's estimate is its line. A placeholder page takes off the bodies of the
-closed folds starting in it, estimated from their source lines and blocks (sampled above 64 KiB, as
-this runs for the callout being typed in). A measured page height depends on `DepGens::disclosures`
-as for `<details>`, which a toggle bumps.
+closed folds starting in it, each counted by `PageStats` as its items are when shown, less the line the
+header keeps. A body's statistics are taken from its items when a marker is made and again when its
+page is evicted, the two times a placeholder is made with the items in hand. A measured page height
+depends on `DepGens::disclosures` as for `<details>`, which a toggle bumps.
 
 ## Measurement (2026-11-06)
 
@@ -133,6 +140,11 @@ The keystroke rows include the test's copy of the document per edit, which rebui
 context because the text holds `[`; the editor edits in place. A keystroke in a first leaf derives the
 fold list again, O(folds), still far inside the 16 ms budget. The model build costs about 0.6 µs a
 fold. Criterion cases `closed-callouts-frame-*` and `callout-toggle-*` are in the layout bench.
+
+Rerun the same day after page estimates moved to counting hidden blocks, with more load on the machine:
+10,000 callouts gave keystroke outside 0.412 → 0.298 ms, scroll frame 0.067 → 0.052 ms, toggle and frame
+0.686 ms, keystroke in a first leaf 0.983 ms, the same picture. The model build, 59.5 → 46.8 ms in that
+run, was dominated by the load and says nothing of the difference.
 
 ## Limits
 
