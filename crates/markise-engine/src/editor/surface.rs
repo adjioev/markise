@@ -182,6 +182,9 @@ impl EditorView {
                     ch.moved = Some(markise_layout::Moved::from_steps(steps));
                 }
                 self.view.apply_change(self.session.doc_arc().clone(), &ch);
+                // typing never goes on out of sight: a closed disclosure or callout around the
+                // caret opens
+                self.view.reveal_offset(self.session.selection().primary().focus.offset);
                 if let Some(p) = self.source.as_mut() {
                     p.view.apply(self.session.doc().text(), &e);
                 }

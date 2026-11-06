@@ -68,7 +68,7 @@ impl View {
 
     /// Height estimate of a page placeholder with statistics `s` (its measured height while
     /// the view parameters are those it was measured with).
-    pub(super) fn page_estimate(&self, s: &PageStats) -> f32 {
+    pub(super) fn page_estimate(&self, s: &PageStats, source: std::ops::Range<usize>) -> f32 {
         if let Some((w, k, h)) = s.measured
             && w == (self.width * 4.0) as u32
             && k == self.paging_key()
@@ -110,7 +110,10 @@ impl View {
         // a TOC lists the whole outline, one line per entry
         h += s.tocs as f32 * self.model.outline.len().max(1) as f32 * line;
         h += s.para_lines_at(per_line) * line;
-        h
+        // what closed callouts in the page hide: their bodies, estimated from the source
+        let (lines, bytes, blocks) = self.model.cross.closed_fold_body(source.start, source.end);
+        let hidden = (lines as f32).max(bytes as f32 / per_line) * line + blocks as f32 * t.block_spacing;
+        (h - hidden).max(line)
     }
 
     /// Key of the parameters a measured page height is valid for (theme, fonts, ppp, the

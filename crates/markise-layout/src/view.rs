@@ -529,6 +529,7 @@ impl View {
             .iter()
             .filter(|g| !g.open && g.start < o && o <= g.end)
             .map(|g| g.start)
+            .chain(self.model.cross.closed_folds_around(o))
             .collect();
         if starts.is_empty() {
             return false;
@@ -539,6 +540,24 @@ impl View {
         }
         self.disclosures.update(&self.model);
         true
+    }
+
+    /// Opens what hides source offset `at`: an edit or a search hit landed there, whichever item
+    /// the caret was on before. O(log items) when nothing hides it.
+    pub fn reveal_offset(&mut self, at: usize) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        let i = self.model.item_at_offset(at);
+        let closed_head = self.disclosures.groups.get(&i).is_some_and(|g| g.fold && !g.open);
+        if !closed_head && self.disclosures.closed_end(i).is_none() {
+            return false;
+        }
+        let opened = self.reveal_item(i);
+        if opened {
+            self.reset_heights();
+        }
+        opened
     }
 
     fn disclosure_hidden(&self, i: usize) -> bool {
@@ -940,7 +959,10 @@ impl View {
         let wrapped = |chars: u32, lines: u32| -> f32 { (lines as f32).max(chars as f32 / per_line).ceil() };
         let h = match &it.kind {
             ItemKind::Hidden => return pa + pb,
-            ItemKind::Page(st) => return self.page_estimate(st) + pa + pb,
+            ItemKind::Page(st) => {
+                let start = self.model.item_start(i);
+                return self.page_estimate(st, start..start + it.len) + pa + pb;
+            }
             ItemKind::Heading { .. } if self.native_title_estimate(i, it) => {
                 t.block_spacing + crate::native::title_line(t)
             }
@@ -969,6 +991,10 @@ impl View {
             ItemKind::Rule | ItemKind::Empty => t.block_spacing + line,
             ItemKind::ContainerMarker { close: false } => t.block_spacing + crate::block::card_opener_height(t),
             ItemKind::ContainerMarker { close: true } => crate::block::card_padding(t),
+            // a closed callout shows its header alone (ADR 0025)
+            ItemKind::Paragraph if self.disclosures.groups.get(&i).is_some_and(|g| g.fold && !g.open) => {
+                t.block_spacing + line + 2.0
+            }
             ItemKind::Paragraph => t.block_spacing + wrapped(it.est_chars, it.est_lines) * line,
         };
         h + pa + pb
@@ -1183,7 +1209,13 @@ impl View {
                     let params = LayoutParams {
                         theme: &self.theme,
                         width: self.width,
-                        disclosure: self.disclosures.groups.get(&i).map(|g| (g.title.as_str(), g.open)),
+                        disclosure: self
+                            .disclosures
+                            .groups
+                            .get(&i)
+                            .filter(|g| !g.fold)
+                            .map(|g| (g.title.as_str(), g.open)),
+                        callout_open: self.disclosures.groups.get(&i).filter(|g| g.fold).map(|g| g.open),
                         disclosure_depth: self.disclosures.depth(i),
                         expanded: self.expanded.contains(&i),
                         code_runs: runs.as_deref(),

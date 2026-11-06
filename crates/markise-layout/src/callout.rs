@@ -2,7 +2,7 @@
 //! from primitives so it follows the theme and needs no asset. The syntax is the format's: layout
 //! reads [`CalloutView`] through the seam.
 
-use epaint::{Color32, Pos2, Stroke, pos2};
+use epaint::{Color32, Pos2, Stroke, pos2, vec2};
 use markise_doc::{CalloutAccent, CalloutIcon};
 use markise_theme::{Rgba, Theme};
 
@@ -10,6 +10,8 @@ use crate::block::Prim;
 
 /// Width of the icon's slot in a header.
 pub(crate) const ICON_SLOT: f32 = 20.0;
+/// Width of the chevron's slot in a foldable header.
+pub(crate) const CHEVRON_SLOT: f32 = 16.0;
 
 /// The theme colour of an accent: the theme's alert colours, or its quote bar.
 pub(crate) fn accent_rgba(t: &Theme, a: CalloutAccent) -> Rgba {
@@ -20,6 +22,22 @@ pub(crate) fn accent_rgba(t: &Theme, a: CalloutAccent) -> Rgba {
         CalloutAccent::Warning => t.alert[3],
         CalloutAccent::Caution => t.alert[4],
         CalloutAccent::Quote => t.quote_bar,
+    }
+}
+
+/// The triangle of a foldable header, the shape a `<details>` header has.
+pub(crate) fn chevron(center: Pos2, open: bool, color: Color32) -> Prim {
+    let offsets = if open {
+        [[-4.0, -2.0], [4.0, -2.0], [0.0, 3.0]]
+    } else {
+        [[-2.0, -4.0], [-2.0, 4.0], [3.0, 0.0]]
+    };
+    Prim::Path {
+        points: offsets.into_iter().map(|[dx, dy]| center + vec2(dx, dy)).collect(),
+        closed: true,
+        fill: color,
+        stroke: Stroke::NONE,
+        dash: None,
     }
 }
 
@@ -89,9 +107,10 @@ pub(crate) fn icon_prims(icon: CalloutIcon, center: Pos2, size: f32, color: Colo
             line(&[(-0.65, -0.65), (0.65, 0.65)]),
             line(&[(0.65, -0.65), (-0.65, 0.65)]),
         ],
+        // (each shape convex: filled paths must be)
         CalloutIcon::Bolt => vec![
-            filled(&[(0.2, -0.95), (-0.55, 0.15), (-0.05, 0.15), (-0.2, 0.95)]),
-            filled(&[(0.2, -0.95), (0.55, -0.15), (0.05, -0.15), (-0.2, 0.95)]),
+            filled(&[(0.3, -0.95), (-0.55, 0.15), (0.12, 0.15)]),
+            filled(&[(-0.3, 0.95), (0.55, -0.15), (-0.12, -0.15)]),
         ],
         CalloutIcon::Bulb => vec![
             ring(0.0, -0.25, 0.62),
@@ -140,18 +159,13 @@ pub(crate) fn icon_prims(icon: CalloutIcon, center: Pos2, size: f32, color: Colo
             .into_iter()
             .flat_map(|y| [dot(-0.75, y, 0.12), line(&[(-0.35, y), (0.9, y)])])
             .collect(),
-        CalloutIcon::Quote => [-0.5, 0.35]
+        CalloutIcon::Quote => [-0.7, 0.15]
             .into_iter()
-            .map(|x| {
-                filled(&[
-                    (x, -0.55),
-                    (x + 0.5, -0.55),
-                    (x + 0.5, 0.0),
-                    (x + 0.15, 0.6),
-                    (x - 0.1, 0.6),
-                    (x + 0.1, 0.0),
-                    (x, 0.0),
-                ])
+            .flat_map(|x| {
+                [
+                    filled(&[(x, -0.55), (x + 0.55, -0.55), (x + 0.55, 0.05), (x, 0.05)]),
+                    filled(&[(x + 0.55, 0.05), (x + 0.1, 0.6), (x + 0.15, 0.05)]),
+                ]
             })
             .collect(),
         CalloutIcon::Lines => vec![
@@ -176,7 +190,6 @@ pub(crate) fn icon_prims(icon: CalloutIcon, center: Pos2, size: f32, color: Colo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use epaint::vec2;
 
     #[test]
     fn every_icon_stays_in_its_box() {

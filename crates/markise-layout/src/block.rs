@@ -332,6 +332,8 @@ pub struct LayoutParams<'a> {
     /// Paired disclosure header and child indentation, supplied by the view.
     pub disclosure: Option<(&'a str, bool)>,
     pub disclosure_depth: usize,
+    /// A foldable callout's header (its first leaf): whether it is open now.
+    pub callout_open: Option<bool>,
     /// Collapsible block (front matter) expanded.
     pub expanded: bool,
     /// Highlight runs of a code item (content offsets, see [`crate::highlight`]); `None` =
@@ -2034,6 +2036,7 @@ pub fn layout_item(
     }
     let mut quote_bgs: Vec<(f32, bool)> = Vec::new();
     let mut callout_head: Option<(&CalloutView, Color32)> = None;
+    let mut callout_closed = false;
     // plain (non-alert) quote styling of the innermost quote
     let mut in_quote = false;
     // first leaf of a quote with generated `::before` text
@@ -2112,10 +2115,18 @@ pub fn layout_item(
     let mut note = None;
 
     if let Some((head, accent)) = callout_head {
+        // the quote bar's colour is too faint for text
+        let accent = if head.accent == markise_doc::CalloutAccent::Quote {
+            color(t.quote_text)
+        } else {
+            accent
+        };
         let mut st = Style::base(t.font_size, line_px, accent);
         st.fam = FontRole::Bold;
-        let icon_x = x;
-        let text_x = x + head.icon.map_or(0.0, |_| crate::callout::ICON_SLOT);
+        let open = head.open.map(|written| p.callout_open.unwrap_or(written));
+        callout_closed = open == Some(false);
+        let icon_x = x + open.map_or(0.0, |_| crate::callout::CHEVRON_SLOT);
+        let text_x = icon_x + head.icon.map_or(0.0, |_| crate::callout::ICON_SLOT);
         let room = (width - (text_x - x)).max(40.0);
         let written = head.title.as_ref().zip(lines.first()).map(|(r, first)| {
             let at = first.start + r.start as usize;
@@ -2156,6 +2167,15 @@ pub fn layout_item(
         if let Some(icon) = head.icon {
             let center = pos2(icon_x + crate::callout::ICON_SLOT / 2.0 - 2.0, top + line_px / 2.0);
             out.prims.extend(crate::callout::icon_prims(icon, center, 14.0, accent));
+        }
+        if let Some(open) = open {
+            out.prims.push(crate::callout::chevron(
+                pos2(x + 7.0, top + line_px / 2.0),
+                open,
+                accent,
+            ));
+            // the whole header is the control (no caret from a click there)
+            toggle = Some(Rect::from_min_size(pos2(x, top), vec2(width, y - top)));
         }
         y += 2.0;
     }
@@ -2223,6 +2243,11 @@ pub fn layout_item(
                 // drop the `[!KIND]` marker line (spec 01 R3.3.4), as the export does
                 content_lines = content_lines.get(1..).unwrap_or(&[]);
             }
+            // a closed callout's stop for the caret is where its body starts
+            let body_start = content_lines.first().map(|l| l.start);
+            if callout_closed {
+                content_lines = &[];
+            }
             // (lines joined with `\n` are empty only for no lines or one empty line)
             let mut empty = content_lines.is_empty() || (content_lines.len() == 1 && content_lines[0].is_empty());
             let rich = (!empty).then(|| doc.inline(InlineSource::Lines(content_lines), origin));
@@ -2233,7 +2258,7 @@ pub fn layout_item(
             }
             let titled = callout_head.is_some_and(|(h, _)| h.title.is_some());
             if empty && item.segment.is_none() && !titled {
-                let rel = content_lines.first().map_or(0, |l| l.start.saturating_sub(origin)) as u32;
+                let rel = body_start.map_or(0, |at| at.saturating_sub(origin)) as u32;
                 empty_anchor = Some((Rect::from_min_size(pos2(x, y), vec2(0.0, line_px)), rel));
             }
             if let Some(rich) = rich.filter(|_| !empty) {

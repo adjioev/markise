@@ -332,7 +332,7 @@ impl DocModel {
             if items.is_empty() {
                 continue;
             }
-            cross.add_from(&items);
+            cross.add_from(doc, &items);
             for it in &items {
                 if let ItemKind::Heading { level } = it.kind {
                     let info = doc.heading(it.origin).unwrap_or_default();
@@ -631,6 +631,7 @@ impl DocModel {
         let mut pages: Vec<Item> = Vec::new();
         let mut heads: Vec<(usize, u8, usize)> = Vec::new(); // (page, level, heading start)
         let mut markers = Vec::new();
+        let mut folds = Vec::new();
         let mut k = t0;
         while k < t1 {
             let end = (k + tops).min(t1);
@@ -645,6 +646,7 @@ impl DocModel {
                 }
             }
             markers.extend(super::cross::markers_of(&items));
+            folds.extend(super::cross::folds_of(doc, &items));
             pages.push(page_item(&items, PageStats::of(&items, doc)));
         }
         if lo == 0 && pages.is_empty() && hi < n_before && !self.is_page(hi) {
@@ -689,7 +691,8 @@ impl DocModel {
             }
         }
         // disclosure markers of the region
-        self.cross.replace_range(doc, a..b, markers, e.changed.clone(), e.delta);
+        self.cross
+            .replace_range(doc, a..b, markers, folds, e.changed.clone(), e.delta);
         // document-level inputs
         let mut full = false;
         if e.deps.resources {

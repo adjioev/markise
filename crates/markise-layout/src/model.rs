@@ -474,7 +474,7 @@ impl DocModel {
             let end = (k + 512).min(n);
             let doc_start = chunks.is_empty();
             let batch = flatten(doc, k..end, doc_start);
-            cross.add_from(&batch);
+            cross.add_from(doc, &batch);
             chunks.extend_abs(batch);
             k = end;
         }

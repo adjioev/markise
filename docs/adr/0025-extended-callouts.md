@@ -66,12 +66,6 @@ can be typed.
 
 **Icons** are drawn from primitives in `markise-layout/src/callout.rs` (original, no assets).
 
-## Limits
-
-- A `[!name]` that is also a defined reference label reads as a callout, not a link.
-- Pictures in a title are not drawn.
-- PDF and PNG exports do not draw the icon.
-
 ## Exports
 
 An extended callout is `ExBlock::Callout` in the export model, with its title resolved to inlines.
@@ -87,3 +81,63 @@ HTML classes are `md-alert md-alert-<accent> md-callout md-callout-<type> <type>
 `md-alert-text-<accent>`. They reuse the theme's alert rules, so no CSS is added and a page without
 callouts is byte-identical to before. A `quote` type has no alert colour there and uses the note
 colour; an unknown name has `data-callout` with its name, escaped.
+
+## Folding
+
+The state is view state, kept by source position beside the disclosures' in `CrossBlockIndex`: in
+memory, for the session, never in the file, with no dirty state and no undo entry. It survives edits
+elsewhere, eviction of the page and trips to source mode; reopening the file starts as written.
+
+A fold reuses what `<details>` has: `Disclosures` holds its hidden range and its group, so zero
+heights, caret traversal that jumps over the body, the frame's skipping and `toggle` in a
+`BlockLayout` all work as they do. It differs in three ways, so it is a `FoldMarker` list of its own
+rather than a `RawPresentation`:
+
+- **No pairing.** A fold knows its extent from the format's containers (`containers_at`, innermost).
+  An edit inside it does not re-pair anything; its extent is read again, bounded by the top-level
+  block. An edit outside touches nothing per fold.
+- **Its first leaf stays.** The header is the quote's first paragraph, also holding body lines, which
+  a closed callout does not draw. Later segments of that paragraph are hidden like the rest.
+- **Nothing is a control and nothing is indented.** The quote is its own frame.
+
+Clicking the header toggles, chevron or not; the whole header is the control, so a click there sets no
+caret. The caret reaches the title with the arrow keys. A caret entering a closed callout opens it,
+the title included; so does a search hit, or an edit such as an undo landing there. Closing it with
+the caret inside moves the caret to the next stop, as the frame does for any hidden item, so nothing
+is typed out of sight.
+
+**Keyboard and accessibility** are those of `<details>`: the caret opens it, and there is no key to
+close it and no accessibility node for the control. Both kinds would gain these together.
+
+**Heights.** A closed header's estimate is its line. A placeholder page takes off the bodies of the
+closed folds starting in it, estimated from their source lines and blocks (sampled above 64 KiB, as
+this runs for the callout being typed in). A measured page height depends on `DepGens::disclosures`
+as for `<details>`, which a toggle bumps.
+
+## Measurement (2026-11-06)
+
+`heavy_suite_many_closed_callouts_do_not_regress`, local release build, Apple Silicon, other builds
+running at times. Paged model of 128 blocks a page, viewport 800 points. Baseline: the same bytes with
+the tag spoiled, so they are plain quotes. Two runs gave the same picture; numbers from the second.
+
+| | 1,000 callouts | 10,000 callouts |
+|---|---|---|
+| Model build, baseline → callouts | 0.9 → 1.3 ms | 7.2 → 12.7 ms |
+| Keystroke outside (model, view, frame), p50 | 0.027 → 0.027 ms | 0.311 → 0.264 ms |
+| Scroll frame, p50 | 0.069 → 0.048 ms | 0.069 → 0.052 ms |
+| Toggle and frame, p50 | 0.072 ms | 0.524 ms |
+| Keystroke in the first leaf of an open callout, p50 | 0.082 ms | 0.807 ms |
+| Total height, baseline → callouts | 139,571 → 78,285 pt | 1,385,171 → 755,037 pt |
+
+The keystroke rows include the test's copy of the document per edit, which rebuilds the reference
+context because the text holds `[`; the editor edits in place. A keystroke in a first leaf derives the
+fold list again, O(folds), still far inside the 16 ms budget. The model build costs about 0.6 µs a
+fold. Criterion cases `closed-callouts-frame-*` and `callout-toggle-*` are in the layout bench.
+
+## Limits
+
+- A `[!name]` that is also a defined reference label reads as a callout, not a link.
+- Pictures in a title are not drawn.
+- PDF and PNG exports do not draw the icon.
+- In a list, the bullet of an item that starts with a callout sits beside the first body line, not the
+  header. A bare alert does the same.
