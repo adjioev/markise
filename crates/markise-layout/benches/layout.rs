@@ -57,13 +57,13 @@ fn sections(c: &mut Criterion) {
     }
     let mut v = shown.view(Theme::light(), 700.0, 2.0);
     v.set_sections(true);
-    let rows = v.outline_row_count();
+    let rows = v.outline_row_count(None);
     g.bench_function("outline-40-rows-cold", |b| {
         b.iter(|| {
             let doc = shown.model.clone();
             v.set_model(v.doc().clone(), doc);
             (rows / 2..rows / 2 + 40)
-                .filter(|&r| v.outline_row(r) == markise_layout::OutlineRow::Section(0))
+                .filter(|&r| v.outline_row(r, None) == markise_layout::OutlineRow::Section(0))
                 .count()
         })
     });
