@@ -11,7 +11,7 @@ use std::sync::Arc;
 use epaint::text::{FontData, FontDefinitions, FontFamily};
 use epaint::{Color32, Pos2, Rect, Stroke, emath::Align, pos2, vec2};
 use markise_doc::{
-    CalloutKind, ColumnAlign, CriticKind, FormatDoc, InlineKind, InlineNode, InlineSource, PieceKind, RichInline,
+    CalloutView, ColumnAlign, CriticKind, FormatDoc, InlineKind, InlineNode, InlineSource, PieceKind, RichInline,
     SourceMap, Span,
 };
 use markise_theme::{BoxStyle, Rgba, TextAlign, TextTransform, Theme, TokenKind, TokenRun};
@@ -1919,34 +1919,6 @@ fn wrapped(width: f32) -> Option<f32> {
     Some(width.max(1.0))
 }
 
-/// Theme slot of a callout kind (`Theme::alert` order); unknown kinds use the note slot.
-fn alert_index(k: &CalloutKind) -> usize {
-    match k {
-        CalloutKind::Note | CalloutKind::Other(_) => 0,
-        CalloutKind::Tip => 1,
-        CalloutKind::Important => 2,
-        CalloutKind::Warning => 3,
-        CalloutKind::Caution => 4,
-    }
-}
-
-/// Title of a callout ("Note", "Tip", …).
-fn callout_title(k: &CalloutKind) -> String {
-    let s = match k {
-        CalloutKind::Note => "note",
-        CalloutKind::Tip => "tip",
-        CalloutKind::Important => "important",
-        CalloutKind::Warning => "warning",
-        CalloutKind::Caution => "caution",
-        CalloutKind::Other(s) => s,
-    };
-    let mut t = s.to_string();
-    if let Some(c) = t.get_mut(..1) {
-        c.make_ascii_uppercase();
-    }
-    t
-}
-
 const CARD_LABEL_CHARS: usize = 200;
 
 /// A card's padding: between its edges and its content, on every side (ADR 0018).
@@ -2061,8 +2033,7 @@ pub fn layout_item(
         quote_bars.push(((x - 8.0).max(0.0), color(t.rule), false));
     }
     let mut quote_bgs: Vec<(f32, bool)> = Vec::new();
-    let mut alert_title: Option<(usize, String)> = None;
-    let mut in_alert_first = false;
+    let mut callout_head: Option<(&CalloutView, Color32)> = None;
     // plain (non-alert) quote styling of the innermost quote
     let mut in_quote = false;
     // first leaf of a quote with generated `::before` text
@@ -2084,9 +2055,13 @@ pub fn layout_item(
                 card_right += card_inset;
                 quote_prefix_here = false;
             }
-            Container::Quote { callout: alert, first } => {
+            Container::Quote {
+                callout: alert,
+                head,
+                first,
+            } => {
                 let bar = match alert {
-                    Some(k) => color(t.alert[alert_index(k)]),
+                    Some(k) => color(crate::callout::accent_rgba(t, *k)),
                     None => color(t.quote_bar),
                 };
                 if t.quote_bar_width > 0.0 || alert.is_some() {
@@ -2097,10 +2072,7 @@ pub fn layout_item(
                 }
                 in_quote = alert.is_none();
                 quote_prefix_here = alert.is_none() && *first && t.quote_prefix.is_some();
-                if let (Some(k), true) = (alert, *first) {
-                    alert_title = Some((alert_index(k), callout_title(k)));
-                    in_alert_first = true;
-                }
+                callout_head = head.as_deref().map(|h| (h, bar)).or(callout_head);
                 x += t.quote_indent;
                 if alert.is_none() {
                     text_color = color(t.quote_text);
@@ -2139,13 +2111,53 @@ pub fn layout_item(
     let mut warning = None;
     let mut note = None;
 
-    if let Some((ai, title)) = &alert_title {
-        let mut st = Style::base(t.font_size, line_px, color(t.alert[*ai]));
+    if let Some((head, accent)) = callout_head {
+        let mut st = Style::base(t.font_size, line_px, accent);
         st.fam = FontRole::Bold;
-        let g = shaper.shape(&StyledText::single(title.clone(), st.text_style()), wrapped(width));
-        let h = g.size().y;
-        out.text(pos2(x, y), g, Vec::new(), FragmentId::label());
-        y += h + 2.0;
+        let icon_x = x;
+        let text_x = x + head.icon.map_or(0.0, |_| crate::callout::ICON_SLOT);
+        let room = (width - (text_x - x)).max(40.0);
+        let written = head.title.as_ref().zip(lines.first()).map(|(r, first)| {
+            let at = first.start + r.start as usize;
+            doc.inline(
+                InlineSource::Lines(&[Span::new(at, first.start + r.end as usize)]),
+                origin,
+            )
+        });
+        let top = y;
+        let mut b = InlineBuilder::new(t, model, true)
+            .with_math(images, p.ppp, room)
+            .with_links(p.links)
+            .review_view(p.review)
+            .reveal(&text[origin..], p.focus);
+        if let Some(rich) = &written {
+            b.nodes(rich, &rich.nodes, &st, true);
+            b.flush();
+        }
+        let mut drawn = false;
+        for seg in b.segments {
+            if let Segment::Text(job, links) = seg {
+                let g = shaper.shape(&job, wrapped(room));
+                let h = g.size().y;
+                out.text(pos2(text_x, y), g, links, FragmentId::new(FragmentKind::Title));
+                y += h;
+                drawn = true;
+            }
+        }
+        if !drawn {
+            let g = shaper.shape(
+                &StyledText::single(head.label.to_string(), st.text_style()),
+                wrapped(room),
+            );
+            let h = g.size().y;
+            out.text(pos2(text_x, y), g, Vec::new(), FragmentId::label());
+            y += h;
+        }
+        if let Some(icon) = head.icon {
+            let center = pos2(icon_x + crate::callout::ICON_SLOT / 2.0 - 2.0, top + line_px / 2.0);
+            out.prims.extend(crate::callout::icon_prims(icon, center, 14.0, accent));
+        }
+        y += 2.0;
     }
 
     let content_top = y;
@@ -2207,7 +2219,7 @@ pub fn layout_item(
             // a segment of a very large paragraph shows its line pieces: inline markup
             // spanning segment borders is not matched (documented approximation)
             let mut content_lines: &[Span] = &lines;
-            if in_alert_first {
+            if callout_head.is_some() {
                 // drop the `[!KIND]` marker line (spec 01 R3.3.4), as the export does
                 content_lines = content_lines.get(1..).unwrap_or(&[]);
             }
@@ -2219,7 +2231,8 @@ pub fn layout_item(
             if rich.as_ref().is_some_and(|r| only_hidden(r, p.focus)) {
                 empty = true;
             }
-            if empty && item.segment.is_none() {
+            let titled = callout_head.is_some_and(|(h, _)| h.title.is_some());
+            if empty && item.segment.is_none() && !titled {
                 let rel = content_lines.first().map_or(0, |l| l.start.saturating_sub(origin)) as u32;
                 empty_anchor = Some((Rect::from_min_size(pos2(x, y), vec2(0.0, line_px)), rel));
             }

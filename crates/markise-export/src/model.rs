@@ -414,7 +414,8 @@ impl Builder<'_> {
                     rows: body,
                 });
             }
-            BlockKind::BlockQuote { alert } => {
+            BlockKind::BlockQuote { callout } => {
+                let alert = callout.and_then(|c| c.alert);
                 let mut inner = Vec::new();
                 for (i, c) in b.children.iter().enumerate() {
                     if alert.is_some() && i == 0 && matches!(c.kind, BlockKind::Paragraph) {
@@ -431,10 +432,7 @@ impl Builder<'_> {
                     self.block(c, &mut inner);
                 }
                 out.push(match alert {
-                    Some(kind) => ExBlock::Alert {
-                        kind: *kind,
-                        blocks: inner,
-                    },
+                    Some(kind) => ExBlock::Alert { kind, blocks: inner },
                     None => ExBlock::Quote(inner),
                 });
             }

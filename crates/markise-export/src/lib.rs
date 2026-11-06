@@ -826,7 +826,7 @@ impl<'a> Ctx<'a> {
                 out.push('\n');
             }
             BlockKind::Table { aligns } => self.table(b, aligns, out),
-            BlockKind::BlockQuote { alert } => match alert {
+            BlockKind::BlockQuote { callout } => match callout.and_then(|c| c.alert) {
                 Some(kind) => {
                     let k = kind.as_str();
                     let _ = writeln!(out, "<div class='md-alert md-alert-{k} {k}'>");
