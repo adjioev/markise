@@ -115,14 +115,9 @@ pub enum PracticeItem {
     Other,
 }
 
-/// The height of the row of a practised block's buttons.
+/// The height of the row of a practised block's buttons: one line, as a paragraph's.
 pub(crate) fn practice_row_height(t: &Theme) -> f32 {
-    (t.font_size * 2.2).round()
-}
-
-/// The room an answer's text leaves for what says whether it is right.
-pub(crate) fn practice_verdict_room(t: &Theme) -> f32 {
-    (t.font_size * 1.8).round()
+    t.line_px()
 }
 
 impl NativeBlock {

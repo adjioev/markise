@@ -760,6 +760,60 @@ fn the_example_package_can_be_practised_through_the_real_path() {
     assert_eq!(score_label(&h).as_deref(), Some("0 of 1"));
     assert_eq!(text(&h), source);
     assert!(!h.state_mut().viewer().unwrap().ed.session.is_dirty());
+
+#[test]
+fn an_answer_partly_scrolled_or_taller_than_the_window_still_works() {
+    let long = "A very long answer that goes on. ".repeat(400);
+    let doc = format!(":::question\n\nPrompt?\n\n- [ ] {long}{{#a1}}\n- [x] Short {{#a2}}\n\n> Why.\n\n:::\n");
+    let (f, mut h) = practising(&doc);
+    // taller than the window, or scrolled to where only its middle shows
+    let label = long.trim_end().to_string();
+    h.state_mut().viewer().unwrap().ed.view.scroll_by(300.0);
+    common::run(&mut h);
+    let node = h.get_by_label(&label);
+    node.click();
+    common::run(&mut h);
+    assert!(is_selected(&h, &label), "the part that shows takes the click");
+    untouched(&mut h, &f, &doc);
+}
+
+#[test]
+fn a_ring_shows_for_the_keyboard_and_not_after_a_click() {
+    let doc = a_doc_with_one_question();
+    let (_f, mut h) = practising(doc);
+    press(&mut h, "Right one");
+    assert!(!h.state_mut().viewer().unwrap().practice_ring_shown(), "a click");
+    h.key_press(Key::ArrowDown);
+    common::run(&mut h);
+    assert!(h.state_mut().viewer().unwrap().practice_ring_shown(), "a key");
+}
+
+#[test]
+fn only_what_means_something_gets_a_mark() {
+    let doc = a_doc_with_one_question();
+    let (_f, mut h) = practising(doc);
+    let lines = |h: &mut H, needle: &str| {
+        let at = doc.find(needle).unwrap();
+        let v = &mut h.state_mut().viewer().unwrap().ed.view;
+        let i = v.model().item_at_offset(at);
+        let layout = v.cache_peek(i).unwrap().clone();
+        (layout.prims.iter())
+            .filter(|p| matches!(p, markise_layout::Prim::Line { .. }))
+            .count()
+    };
+    press(&mut h, "Wrong one");
+    h.get_by_label("Check").click();
+    common::run(&mut h);
+    // (the block's frame is lines too: what a row with no mark has)
+    let plain = lines(&mut h, "Wrong two");
+    assert_eq!(lines(&mut h, "Right one"), plain + 2, "a tick on the correct one");
+    assert_eq!(lines(&mut h, "Wrong one"), plain + 2, "a cross on the chosen wrong one");
+    let v = &mut h.state_mut().viewer().unwrap().ed.view;
+    let i = v.model().item_at_offset(doc.find("Right one").unwrap());
+    let rects = (v.cache_peek(i).unwrap().prims.iter())
+        .filter(|p| matches!(p, markise_layout::Prim::Rect { .. }))
+        .count();
+    assert_eq!(rects, 0, "no row fill");
 }
 
 // ---- what a document opens in

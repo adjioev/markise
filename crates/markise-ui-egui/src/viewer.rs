@@ -271,6 +271,8 @@ pub struct DocViewer {
     pointer_on_block_control: bool,
     /// [`Self::outline_rows`], and what they were read for.
     practice_outline: Option<PracticeOutline>,
+    /// The keyboard went to the answer at the caret, and not the pointer.
+    practice_ring: bool,
     /// A press on the scrollbar (issue #123).
     thumb_drag: scrollbar::ThumbDrag,
     /// Wheel / trackpad smoothing (issue #86).
@@ -326,6 +328,7 @@ impl DocViewer {
             block_language_read_at: u64::MAX,
             pointer_on_block_control: false,
             practice_outline: None,
+            practice_ring: false,
             view_press: None,
             caret_screen: None,
             hover: None,
@@ -1169,7 +1172,9 @@ impl DocViewer {
                 let y = y0 + smooth_scroll::shift_at(&tops, y0) + rect.top();
                 let r = Rect::from_min_size(pos2(left + c.min.x - 0.75, y), vec2(1.5, c.height().max(4.0)));
                 self.caret_screen = Some(r);
-                if on && r.intersects(rect) {
+                // (nothing to type in a block being practiced: an answer has its own ring)
+                let in_practice = self.ed.in_practice(self.ed.session.selection().primary().focus.offset);
+                if on && !in_practice && r.intersects(rect) {
                     painter.rect_filled(r, 0.0, color(theme.text));
                 }
                 // IME: allowed while the surface has focus; the candidate window follows the

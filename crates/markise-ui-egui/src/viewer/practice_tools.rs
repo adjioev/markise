@@ -2,7 +2,7 @@
 //! touches the document, and nothing here is labelled with a mark before the block is checked.
 
 use egui::accesskit::Role;
-use egui::{Rect, Sense, Stroke, Ui, UiBuilder, WidgetInfo, pos2, vec2};
+use egui::{Rect, Sense, Stroke, Ui, UiBuilder, WidgetInfo, vec2};
 use markise_doc::Selection;
 use markise_layout::{PracticeItem, Visible};
 
@@ -31,10 +31,27 @@ impl DocViewer {
         Some(rows)
     }
 
+    /// Whether a ring would show on the answer at the caret: the keyboard went there (tests).
+    pub fn practice_ring_shown(&self) -> bool {
+        self.practice_ring
+    }
+
     pub(super) fn practice_ui(&mut self, ui: &mut Ui, visible: &[Visible], surface: Rect, left: f32) {
         if !self.ed.view.practice_on() {
             return;
         }
+        // the ring says where the keyboard is, for as long as it is the keyboard that went there
+        ui.input(|i| {
+            if i.pointer.any_pressed() {
+                self.practice_ring = false;
+            }
+            if i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))
+            {
+                self.practice_ring = true;
+            }
+        });
         for v in visible {
             match self.ed.view.practice_item_of(v.idx) {
                 Some(PracticeItem::Answer { selected, correct }) => {
@@ -57,12 +74,11 @@ impl DocViewer {
         }) else {
             return;
         };
-        let y = surface.top() + v.y;
-        let r = Rect::from_min_max(
-            pos2(left, y + v.layout.gap),
-            pos2(left + self.ed.view.width(), y + v.layout.height),
-        );
-        if !surface.contains_rect(r) {
+        let Some(row) = v.layout.practice_answer else { return };
+        let r = row.translate(vec2(left, surface.top() + v.y));
+        // what shows of it, so that one partly scrolled, or taller than the window, still works
+        let shown = r.intersect(surface);
+        if !shown.is_positive() {
             return;
         }
         let single = block.block.view.single_answer;
@@ -74,7 +90,7 @@ impl DocViewer {
             Some(false) => format!("{}: wrong", answer.text),
         };
         let id = ui.scope_id().with(("markise-practice-answer", start));
-        let resp = ui.interact(r, id, Sense::click());
+        let resp = ui.interact(shown, id, Sense::click());
         resp.widget_info(|| WidgetInfo::selected(kind, correct.is_none(), selected, &label));
         if resp.hovered() {
             self.pointer_on_block_control = true;
@@ -88,23 +104,21 @@ impl DocViewer {
         }
         // where the keyboard is: Space works on this one
         let p = self.ed.session.selection().primary();
-        if p.is_caret() && p.focus.offset >= start && p.focus.offset <= block.range.start + answer.range.end as usize {
-            let stroke = Stroke::new(1.5, ui.visuals().selection.stroke.color);
-            let ring = r.shrink2(vec2(self.answer_ring_inset(), 0.0));
+        if self.practice_ring
+            && p.is_caret()
+            && p.focus.offset >= start
+            && p.focus.offset <= block.range.start + answer.range.end as usize
+        {
+            let stroke = Stroke::new(1.0, ui.visuals().selection.stroke.color);
             ui.painter_at(surface)
-                .rect_stroke(ring, 3.0, stroke, egui::StrokeKind::Inside);
+                .rect_stroke(r, 3.0, stroke, egui::StrokeKind::Inside);
         }
-    }
-
-    /// The ring around an answer keeps inside the block's frame.
-    fn answer_ring_inset(&self) -> f32 {
-        4.0
     }
 
     fn buttons_ui(&mut self, ui: &mut Ui, v: &Visible, surface: Rect, left: f32) {
         let Some(row) = v.layout.practice_row else { return };
         let row = row.translate(vec2(left, surface.top() + v.y));
-        if !surface.contains_rect(row) {
+        if !row.intersect(surface).is_positive() {
             return;
         }
         let Some(block) = self.ed.view.native_item(v.idx) else {
@@ -126,8 +140,16 @@ impl DocViewer {
             .id_salt(("markise-practice-row", opener))
             .max_rect(row)
             .layout(egui::Layout::left_to_right(egui::Align::Center));
+        let size = self.ed.view.theme().font_size;
         let resp = ui
-            .scope_builder(builder, |ui| ui.add_enabled(enabled, egui::Button::new(label)))
+            .scope_builder(builder, |ui| {
+                // text that can be pressed: as quiet as the rest of a block's controls
+                ui.spacing_mut().button_padding = vec2(0.0, 0.0);
+                let text = egui::RichText::new(label)
+                    .size(size)
+                    .color(ui.visuals().weak_text_color());
+                ui.add_enabled(enabled, egui::Button::new(text).frame(false))
+            })
             .inner;
         if resp.hovered() {
             self.pointer_on_block_control = true;
