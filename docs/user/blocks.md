@@ -106,6 +106,10 @@ its first row and `⚠ Not ready to practice`. Switch its view to see what is mi
 Source Code Mode and the source side of Side by Side show the file as it is, answers included, and a
 selection you copy is the file's text. Find in the rendered view leaves out what is hidden. The word count counts the whole file.
 
+A package can make Practice what its blocks open in, for lessons. Then answers stay hidden from the first moment, and you reach editing through the view switch of a block or of the document. Your choice lasts until you quit; the next time, blocks open in Practice again. A block you insert or type yourself stays open for writing. While you have not yet accepted a package, Markise does not know what it hides, so blocks show as cards.
+
+While any block is in Practice, the outline and a table of contents leave out headings inside blocks.
+
 ## Edit in place
 
 In the native view, click and type. Each field is a place of its own: arrow keys cross between

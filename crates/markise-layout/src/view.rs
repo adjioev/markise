@@ -1128,6 +1128,9 @@ impl View {
             std::hash::Hasher::finish(&h)
         });
         extra ^= self.native_item_key(i, it);
+        if it.kind == ItemKind::Toc && self.practice_on() {
+            extra ^= self.practice_generation().wrapping_mul(0x70c1_0f5b).rotate_left(19);
+        }
         CacheKey {
             item_hash: it.hash,
             ctx_hash: images ^ code_ident ^ diagram ^ self.references_fingerprint(i, it),
@@ -1259,6 +1262,13 @@ impl View {
                     math: Cell::new(false),
                     images: RefCell::new(Vec::new()),
                 };
+                let toc_hidden: Option<Vec<bool>> = (self.practice_on()
+                    && self.model.items.get(i).is_some_and(|it| it.kind == ItemKind::Toc))
+                .then(|| {
+                    (self.model.outline.iter())
+                        .map(|o| self.practice_hides_heading(o))
+                        .collect()
+                });
                 let laid = self.with_native_params(i, |look| {
                     let params = LayoutParams {
                         theme: &self.theme,
@@ -1282,6 +1292,7 @@ impl View {
                         warnings: look.warnings,
                         site: look.site,
                         note: look.note,
+                        toc_hidden: toc_hidden.as_deref(),
                     };
                     layout_item(&*self.doc, &self.model, i, &params, shaper, &rec)
                 });

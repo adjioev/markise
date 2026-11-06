@@ -4,7 +4,7 @@
 use std::ops::Range;
 
 use markise_doc::{DocPos, Params, Selection};
-use markise_layout::{NativeAt, PracticeShow};
+use markise_layout::{BlockViewMode, BlockViews, NativeAt, PracticeShow};
 
 use super::EditorView;
 use super::command::CommandError;
@@ -96,16 +96,62 @@ impl EditorView {
 
     /// Whether the document as a whole is in Practice.
     pub fn practice_whole(&self) -> bool {
-        self.place.mode == markise_layout::BlockViewMode::Practice
+        self.place.mode == BlockViewMode::Practice || self.practice_by_default()
+    }
+
+    /// The package opens blocks in Practice, and no one has chosen otherwise for the document.
+    pub(super) fn practice_by_default(&self) -> bool {
+        !self.place.defaults_off && self.place.fields.as_ref().is_some_and(|f| f.any_practice_default())
+    }
+
+    /// The state of the document, for a block of this name with none of its own.
+    pub(super) fn document_mode(&self, name: &str) -> BlockViewMode {
+        let by_default =
+            !self.place.defaults_off && self.place.fields.as_ref().is_some_and(|f| f.practice_default(name));
+        if by_default {
+            BlockViewMode::Practice
+        } else {
+            self.place.mode
+        }
+    }
+
+    /// For what remembers a document's state: whether someone chose for the document as a whole.
+    pub fn practice_defaults_off(&self) -> bool {
+        self.place.defaults_off
+    }
+
+    pub fn set_practice_defaults_off(&mut self, off: bool) {
+        self.place.defaults_off = off;
+        self.follow_block_modes();
+    }
+
+    /// A block being written here stays what it can be written in. With no such thing, a block that
+    /// opens in Practice would close on the first character of it. `edits`: as for [`Self::prune_practice`].
+    pub(super) fn keep_written_block_native(&mut self, edits: &[(usize, usize, isize)]) {
+        if !self.practice_by_default() {
+            return;
+        }
+        let at = self.session.selection().primary().focus.offset;
+        let Some(c) = self.session.doc().named_containers_at(at).pop() else {
+            return;
+        };
+        let written = (edits.iter()).any(|&(start, end, delta)| {
+            let end = end.saturating_add_signed(delta).max(start);
+            start <= c.opener.end && c.opener.start <= end
+        });
+        if written && self.document_mode(&c.name) == BlockViewMode::Practice && !self.has_own_mode(c.opener.start) {
+            self.add_own_mode(c.opener.start, BlockViewMode::Native);
+        }
     }
 
     /// Practice for the whole document, or out of it. A block with no practice is as it was.
     pub fn toggle_practice_all(&mut self) {
         self.place.mode = if self.practice_whole() {
-            markise_layout::BlockViewMode::Native
+            BlockViewMode::Native
         } else {
-            markise_layout::BlockViewMode::Practice
+            BlockViewMode::Practice
         };
+        self.place.defaults_off = true;
         self.clear_own_modes();
         self.follow_block_modes();
         self.practice_place_caret();
@@ -120,7 +166,7 @@ impl EditorView {
     fn practice_block(&self, at: usize) -> Option<NativeAt> {
         self.view
             .native_block(at)
-            .filter(|b| self.view.block_mode_of(b.range.start) == markise_layout::BlockViewMode::Practice)
+            .filter(|b| self.view.block_mode_of(b.range.start) == BlockViewMode::Practice)
     }
 
     fn practice_entry(&mut self, block: &NativeAt) -> &mut Practised {

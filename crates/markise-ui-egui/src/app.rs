@@ -1522,6 +1522,8 @@ impl MarkiseApp {
         viewer.partial = partial;
         viewer.set_font_generation(self.font_gen);
         self.document_changed(&mut viewer);
+        // nothing in a block shows until it is known whether a package hides it (ADR 0024)
+        viewer.ed.view.set_blocks_veiled(self.block_package_store_in_use());
         let id = self.next_doc_id;
         self.next_doc_id += 1;
         self.doc = Some(DocState {
@@ -3098,7 +3100,8 @@ impl MarkiseApp {
                             let clicked = {
                                 let model = d.viewer.model().clone();
                                 let cur = model.current_heading(d.viewer.ed.view.anchor().0);
-                                outline(ui, &model.outline, cur, &look, d.partial)
+                                let rows = d.viewer.outline_rows();
+                                outline(ui, &model.outline, rows.as_deref(), cur, &look, d.partial)
                             };
                             // a paged model materializes the heading's page first
                             if let Some(item) = clicked.and_then(|k| d.viewer.ed.view.ensure_heading(k)) {

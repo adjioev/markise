@@ -126,6 +126,12 @@ impl BlockViews for ViewsWithIcons {
     fn has_practice(&self, name: &str) -> bool {
         self.views.has_practice(name)
     }
+    fn practice_default(&self, name: &str) -> bool {
+        self.views.practice_default(name)
+    }
+    fn any_practice_default(&self) -> bool {
+        self.views.any_practice_default()
+    }
     fn practice_hides_quotes(&self, name: &str) -> bool {
         self.views.practice_hides_quotes(name)
     }

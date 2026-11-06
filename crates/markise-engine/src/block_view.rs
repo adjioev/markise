@@ -32,6 +32,7 @@ pub struct PackageViews {
     language: String,
     id: u64,
     variants: Mutex<Variants>,
+    any_default: bool,
 }
 
 fn kind_of(k: ViewKind) -> NativeKind {
@@ -60,7 +61,11 @@ impl PackageViews {
     pub fn new(index: Arc<PackageIndex>, language: &str) -> PackageViews {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (Arc::as_ptr(&index) as usize, language).hash(&mut h);
+        let any_default = (index.block_names()).any(|n| {
+            (index.block(n)).is_some_and(|e| e.view.and_then(|v| v.practice.as_ref()).is_some_and(|p| p.default))
+        });
         PackageViews {
+            any_default,
             index,
             language: language.to_string(),
             id: h.finish(),
@@ -210,6 +215,14 @@ impl BlockViews for PackageViews {
         self.index
             .block(name)
             .is_some_and(|e| e.view.is_some_and(|v| v.practice.is_some()))
+    }
+
+    fn practice_default(&self, name: &str) -> bool {
+        (self.index.block(name)).is_some_and(|e| e.view.and_then(|v| v.practice.as_ref()).is_some_and(|p| p.default))
+    }
+
+    fn any_practice_default(&self) -> bool {
+        self.any_default
     }
 
     fn practice_hides_quotes(&self, name: &str) -> bool {

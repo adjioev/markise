@@ -232,6 +232,8 @@ answer, and does not count. `reveal` cannot name the answers themselves, or a he
 shows every heading. A package that breaks any of this is refused, with a message naming the block and the field. A block with no
 `practice` has no Practice. Answers keep the rule of their schema, so ids stay as your `choices` field has them.
 
+With `"default": true` beside `reveal`, a block of that view opens in Practice, so that answers do not show until asked for. Authors reach editing through the view switch. A block inserted from a preset stays in the native view, as its author is writing it.
+
 ### Icons
 
 An icon is a name such as `pin`, which means the file `assets/pin.svg`. Without that file nothing

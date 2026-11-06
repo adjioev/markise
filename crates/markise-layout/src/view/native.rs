@@ -153,12 +153,23 @@ impl NativeState {
         (self.source.as_ref()).filter(|_| matches!(self.mode, BlockViewMode::Native | BlockViewMode::Practice))
     }
 
-    /// The state of the block with this opener.
-    pub(super) fn mode_of(&self, opener: usize) -> BlockViewMode {
+    /// The state of a block with this opener and name: its own, or the document's, which is the
+    /// package's word for it until someone chooses for the document (ADR 0024).
+    pub(super) fn mode_of(&self, opener: usize, name: &str) -> BlockViewMode {
         match self.own_modes.binary_search_by_key(&opener, |m| m.0) {
             Ok(i) => self.own_modes[i].1,
+            Err(_)
+                if self.practice.defaults_apply() && self.source.as_ref().is_some_and(|s| s.practice_default(name)) =>
+            {
+                BlockViewMode::Practice
+            }
             Err(_) => self.mode,
         }
+    }
+
+    fn practice_source_changed(&mut self) {
+        let any = self.source.as_ref().is_some_and(|s| s.any_practice_default());
+        self.practice.package_defaults(any, self.mode, &self.own_modes);
     }
 }
 
@@ -177,6 +188,7 @@ impl View {
         self.native.source = views;
         self.native.items.borrow_mut().clear();
         self.native.looks.borrow_mut().clear();
+        self.native.practice_source_changed();
         self.site.forget();
         self.reset_heights();
     }
@@ -214,7 +226,12 @@ impl View {
 
     /// The state the block with this opener is in.
     pub fn block_mode_of(&self, opener: usize) -> BlockViewMode {
-        self.native.mode_of(opener)
+        let around = self.doc.named_containers_at(opener);
+        let name = around
+            .iter()
+            .rfind(|c| c.opener.start == opener)
+            .map_or("", |c| &*c.name);
+        self.native.mode_of(opener, name)
     }
 
     pub fn block_view_mode(&self) -> BlockViewMode {
@@ -224,7 +241,7 @@ impl View {
     /// The state the block `c` is in, as far as it can be: Practice is for blocks that can be practised,
     /// and any other block in a document in Practice is as it is outside it.
     pub(super) fn mode_shown(&self, c: &NamedContainer) -> BlockViewMode {
-        match self.native.mode_of(c.opener.start) {
+        match self.native.mode_of(c.opener.start, &c.name) {
             BlockViewMode::Practice if !self.native.source.as_ref().is_some_and(|s| s.has_practice(&c.name)) => {
                 BlockViewMode::Native
             }

@@ -42,7 +42,9 @@ pub(super) struct BlockFormState {
     view_states: HashMap<PathBuf, ViewState>,
 }
 
-type ViewState = (BlockViewMode, Vec<(usize, BlockViewMode)>);
+/// How a document shows its blocks: the document's state, the blocks with their own, and whether someone
+/// chose for the document, so that the package's word on what opens in Practice is over.
+type ViewState = (BlockViewMode, Vec<(usize, BlockViewMode)>, bool);
 
 impl BlockFormState {
     pub(super) fn new(picker: Option<ImagePicker>) -> BlockFormState {
@@ -186,15 +188,17 @@ impl MarkiseApp {
         if let Some(d) = &self.doc
             && !d.untitled
         {
-            let state = d.viewer.ed.block_view_state();
-            self.block_form.view_states.insert(d.path.clone(), state);
+            let (mode, own) = d.viewer.ed.block_view_state();
+            let off = d.viewer.ed.practice_defaults_off();
+            self.block_form.view_states.insert(d.path.clone(), (mode, own, off));
         }
     }
 
     /// What was kept for this document, in its new viewer.
     pub(super) fn bring_back_block_views(&mut self) {
         let Some(d) = &mut self.doc else { return };
-        if let Some((mode, own)) = self.block_form.view_states.get(&d.path) {
+        if let Some((mode, own, off)) = self.block_form.view_states.get(&d.path) {
+            d.viewer.ed.set_practice_defaults_off(*off);
             d.viewer.ed.restore_block_view_state(*mode, own);
         }
     }
@@ -324,10 +328,16 @@ impl MarkiseApp {
     pub(super) fn block_form_panel(&mut self, ui: &mut egui::Ui) {
         let index = self.block_package().map(|p| p.index.clone());
         let package = self.block_package().cloned();
+        let looked_up = self.block_package_looked_up();
         if let Some(d) = self.doc.as_mut() {
             d.viewer.set_block_index(index.clone());
             d.viewer
                 .set_block_site(package.as_ref(), self.web_helpers.as_ref(), ui.ctx());
+            // now that a package has said what it hides, if there is one (ADR 0024)
+            if looked_up && d.viewer.ed.view.blocks_veiled() {
+                d.viewer.ed.view.set_blocks_veiled(false);
+                ui.ctx().request_repaint();
+            }
         }
         self.block_form.assets.poll(ui.ctx());
         self.block_icons_update(ui.ctx());

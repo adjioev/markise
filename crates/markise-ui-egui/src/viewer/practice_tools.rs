@@ -9,6 +9,28 @@ use markise_layout::{PracticeItem, Visible};
 use super::DocViewer;
 
 impl DocViewer {
+    /// The outline's entries to list, when Practice leaves some out. Kept until the outline or what is in
+    /// Practice changes.
+    pub fn outline_rows(&mut self) -> Option<std::sync::Arc<[usize]>> {
+        let view = &self.ed.view;
+        if !view.practice_on() {
+            return None;
+        }
+        let model = view.model();
+        let key = (model.cross.gens.outline, view.practice_generation());
+        if let Some((k, rows)) = &self.practice_outline
+            && *k == key
+        {
+            return Some(rows.clone());
+        }
+        let rows: std::sync::Arc<[usize]> = (model.outline.iter().enumerate())
+            .filter(|(_, o)| !view.practice_hides_heading(o))
+            .map(|(k, _)| k)
+            .collect();
+        self.practice_outline = Some((key, rows.clone()));
+        Some(rows)
+    }
+
     /// Whether a ring would show on the answer at the caret: the keyboard went there (tests).
     pub fn practice_ring_shown(&self) -> bool {
         self.practice_ring

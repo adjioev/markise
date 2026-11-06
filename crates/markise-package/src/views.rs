@@ -47,6 +47,8 @@ pub struct ViewConfig {
 pub struct PracticeConfig {
     /// The fields hidden until the answers are checked, by name.
     pub reveal: Vec<String>,
+    /// A block of this view opens in Practice, until someone chooses otherwise.
+    pub default: bool,
 }
 
 /// `"practice"` as far as it can be read without the block's schema ([`check_practice`] has the rest).
@@ -90,7 +92,15 @@ fn parse_practice(
         }
         Some(_) => issues.push(file, format!("`practice.reveal` of \"{name}\" must be a list")),
     }
-    Some(PracticeConfig { reveal })
+    let default = match def.get("default") {
+        None => false,
+        Some(Value::Bool(default)) => *default,
+        Some(_) => {
+            issues.push(file, format!("`practice.default` of \"{name}\" must be true or false"));
+            false
+        }
+    };
+    Some(PracticeConfig { reveal, default })
 }
 
 /// What `"practice"` asks of the block's schema: answers to check or something to reveal, and fields

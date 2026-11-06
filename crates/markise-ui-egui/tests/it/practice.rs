@@ -808,3 +808,410 @@ fn only_what_means_something_gets_a_mark() {
         .count();
     assert_eq!(rects, 0, "no row fill");
 }
+
+// ---- opening in Practice
+
+const DEFAULT_VIEWS: &str = r#"{
+    "question": {"kind": "choices", "accent": "purple", "practice": {"reveal": ["explanation"], "default": true}},
+    "exercise": {"kind": "card", "practice": {"reveal": ["solution"], "default": true}},
+    "hint": {"kind": "callout", "practice": {"reveal": ["solution"]}},
+    "remark": {"kind": "choices", "practice": {"reveal": ["solution"]}},
+    "tip": {"kind": "callout"}
+}"#;
+const PRESET_PALETTE: &str = r#"{"format": 1, "presets": [{"id": "q", "block": "question", "label": "Question",
+    "markdown": ":::question\n\nNew prompt?\n\n- [ ] Nope {#a1}\n- [x] Yep {#a2}\n\n> New explanation.\n\n:::\n"}]}"#;
+
+fn default_files() -> Vec<(&'static str, &'static str)> {
+    (FILES.iter().copied())
+        .map(|(path, text)| match path {
+            "editor/views.json" => (path, DEFAULT_VIEWS),
+            "editor/palette.json" => (path, PRESET_PALETTE),
+            _ => (path, text),
+        })
+        .collect()
+}
+
+fn default_fixture(doc: &str) -> Fixture {
+    Fixture::with_package(doc, &default_files())
+}
+
+fn new_app(f: &Fixture) -> H {
+    let opts = markise_ui_egui::AppOptions {
+        config: markise_ui_egui::ConfigDir::Dir(f.config.clone()),
+        ..common::no_watch()
+    };
+    Harness::builder()
+        .with_size(egui::vec2(1100.0, 1400.0))
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), MarkiseApp::new(opts))
+}
+
+/// Opens the document in an app whose package is already accepted, looking at every frame from the first.
+fn open_watching_every_frame(h: &mut H, f: &Fixture, secrets: &[&str]) {
+    h.state_mut().open(f.doc.clone());
+    let start = std::time::Instant::now();
+    let mut frames = 0;
+    loop {
+        h.step();
+        frames += 1;
+        if h.state_mut().viewer().is_none() {
+            assert!(start.elapsed() < common::HANG_GUARD, "never loaded");
+            continue;
+        }
+        let s = shown(h);
+        for secret in secrets {
+            assert!(!s.contains(secret), "frame {frames}: {secret}: {s}");
+            assert!(
+                !all_labels(h).contains(secret),
+                "frame {frames}: {secret} for a screen reader"
+            );
+        }
+        let ready = h.state().block_package().is_some() && !h.state().is_loading();
+        if ready && !h.state_mut().viewer().unwrap().ed.view.blocks_veiled() && !s.is_empty() {
+            break;
+        }
+        assert!(start.elapsed() < common::HANG_GUARD, "never ready");
+    }
+    common::run(h);
+}
+
+#[test]
+fn a_block_with_the_default_opens_in_practice_with_no_spoiler_on_any_frame() {
+    let f = default_fixture(DOC);
+    // the first time, a question is asked: from here on the package is accepted
+    drop(f.ready());
+    let mut h = new_app(&f);
+    let secrets = ["Explained", "Because of", "worked solution"];
+    open_watching_every_frame(&mut h, &f, &secrets);
+    assert_eq!(mode_of(&mut h, "A prompt?"), BlockViewMode::Practice);
+    assert_eq!(mode_of(&mut h, "Work this out"), BlockViewMode::Practice);
+    assert_eq!(
+        mode_of(&mut h, "A hint's task"),
+        BlockViewMode::Native,
+        "no default, no Practice"
+    );
+    assert!(shown(&mut h).contains("The hint's solution"));
+    assert!(h.query_all_by_label("Check").next().is_some());
+    untouched(&mut h, &f, DOC);
+}
+
+#[test]
+fn without_the_default_a_document_opens_as_before() {
+    let f = fixture(DOC);
+    let mut h = f.ready();
+    assert!(shown(&mut h).contains("Explained at length"));
+    assert!(!h.state_mut().viewer().unwrap().ed.view.practice_on());
+    assert!(!h.state_mut().viewer().unwrap().ed.practice_whole());
+}
+
+#[test]
+fn editing_is_reached_through_the_switch_and_the_choice_is_kept_for_the_session_only() {
+    let doc = a_doc_with_one_question();
+    let f = default_fixture(doc);
+    let mut h = f.ready();
+    assert!(!shown(&mut h).contains("Explained"));
+    // this block: on through the states to its native view, where it edits
+    while mode_of(&mut h, "A prompt?") == BlockViewMode::Practice {
+        let opener = text(&h).find(":::question").unwrap();
+        h.state_mut().viewer().unwrap().ed.switch_block_view(opener);
+        common::run(&mut h);
+    }
+    let next = |h: &mut H| {
+        let opener = text(h).find(":::question").unwrap();
+        h.state_mut().viewer().unwrap().ed.view.block_mode_of(opener)
+    };
+    while next(&mut h) != BlockViewMode::Native {
+        let opener = text(&h).find(":::question").unwrap();
+        h.state_mut().viewer().unwrap().ed.switch_block_view(opener);
+        common::run(&mut h);
+    }
+    assert!(shown(&mut h).contains("Explained"), "the author sees it");
+    // (as the button and the command do)
+    let ctx = h.ctx.clone();
+    h.state_mut()
+        .menu_action(&ctx, &MenuAction::Command("view.switchBlockView"));
+    common::run(&mut h);
+    let opener = text(&h).find(":::question").unwrap();
+    while h.state_mut().viewer().unwrap().ed.view.block_mode_of(opener) != BlockViewMode::Native {
+        caret(&mut h, a_doc_with_one_question().find("Right one").unwrap());
+        h.state_mut()
+            .menu_action(&ctx, &MenuAction::Command("view.switchBlockView"));
+        common::run(&mut h);
+    }
+    // reopened in this session: as chosen
+    let other = f.doc.with_file_name("other.md");
+    std::fs::write(&other, "Elsewhere.\n").unwrap();
+    h.state_mut().open(other);
+    common::wait_until(&mut h, "the other document", |a| {
+        a.document_text().is_some_and(|t| t.starts_with("Elsewhere"))
+    });
+    common::run(&mut h);
+    h.state_mut().open(f.doc.clone());
+    common::wait_until(&mut h, "back", |a| {
+        a.document_text().is_some_and(|t| t == a_doc_with_one_question())
+    });
+    common::settle(&mut h);
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("Explained"), "the choice is remembered");
+    // a new session: the package's word again
+    let mut h = new_app(&f);
+    open_watching_every_frame(&mut h, &f, &["Explained"]);
+    assert_eq!(mode_of(&mut h, "A prompt?"), BlockViewMode::Practice);
+}
+
+#[test]
+fn the_document_can_leave_the_default_as_a_whole_and_is_remembered() {
+    let f = default_fixture(DOC);
+    let mut h = f.ready();
+    assert!(h.state_mut().viewer().unwrap().ed.practice_whole());
+    command(&mut h, "view.practiceAll");
+    assert!(!h.state_mut().viewer().unwrap().ed.practice_whole());
+    let s = shown(&mut h);
+    assert!(s.contains("Explained") && s.contains("worked solution"), "{s}");
+    assert_eq!(mode_of(&mut h, "A prompt?"), BlockViewMode::Native);
+    let other = f.doc.with_file_name("other.md");
+    std::fs::write(&other, "Elsewhere.\n").unwrap();
+    h.state_mut().open(other);
+    common::wait_until(&mut h, "the other document", |a| {
+        a.document_text().is_some_and(|t| t.starts_with("Elsewhere"))
+    });
+    common::run(&mut h);
+    h.state_mut().open(f.doc.clone());
+    common::wait_until(&mut h, "back", |a| a.document_text().is_some_and(|t| t == DOC));
+    common::settle(&mut h);
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("Explained"), "as chosen");
+    // and with the shortcut's command, back
+    command(&mut h, "view.practiceAll");
+    assert!(!shown(&mut h).contains("Explained"));
+    // the switch for all blocks leaves it too
+    let f = default_fixture(DOC);
+    let mut h = f.ready();
+    command(&mut h, "view.switchAllBlockViews");
+    assert_ne!(mode_of(&mut h, "A prompt?"), BlockViewMode::Practice);
+}
+
+#[test]
+fn a_block_inserted_from_a_preset_stays_native_for_its_author() {
+    let doc = format!("{}\nThe end.\n", a_doc_with_one_question());
+    let f = default_fixture(&doc);
+    let mut h = f.ready();
+    let at = doc.len();
+    caret(&mut h, at);
+    let v = h.state_mut().viewer().unwrap();
+    let preset = ":::question\n\nNew prompt?\n\n- [ ] Nope {#a1}\n- [x] Yep {#a2}\n\n> New explanation.\n\n:::\n";
+    v.ed.insert_block("question", preset, false).unwrap();
+    common::run(&mut h);
+    let t = text(&h);
+    let s = shown(&mut h);
+    assert!(s.contains("New explanation"), "{s}");
+    assert!(!s.contains("Explained"), "the others stay as they were: {s}");
+    assert_eq!(mode_of(&mut h, "New prompt?"), BlockViewMode::Native);
+    assert_eq!(mode_of(&mut h, "A prompt?"), BlockViewMode::Practice);
+    assert!(t.contains("New prompt?"));
+}
+
+#[test]
+fn a_block_typed_by_hand_in_such_a_document_stays_open_to_its_author() {
+    let doc = format!("{}\nThe end.\n\n", a_doc_with_one_question());
+    let typed = |f: Fixture| {
+        let mut h = f.ready();
+        caret(&mut h, doc.len());
+        h.key_press(Key::Enter);
+        common::run(&mut h);
+        h.event(Event::Text(":::question".into()));
+        common::run(&mut h);
+        h.key_press(Key::Enter);
+        common::run(&mut h);
+        h.event(Event::Text("Typed here".into()));
+        common::run(&mut h);
+        let t = text(&h);
+        let opener = t.rfind(":::question").unwrap();
+        let v = &h.state_mut().viewer().unwrap().ed.view;
+        (t.clone(), v.practised_around(opener).is_some(), v.block_mode_of(opener))
+    };
+    let (by_default, in_practice, mode) = typed(default_fixture(&doc));
+    let (plain, ..) = typed(fixture(&doc));
+    assert_eq!(by_default, plain, "as in a document with no default");
+    assert!(!in_practice, "its author is writing it");
+    assert_eq!(mode, BlockViewMode::Native);
+}
+
+// ---- what lists or finds text
+
+fn with_headings() -> String {
+    ":::question\n\nA prompt?\n\n- [ ] Wrong one {#a1}\n- [x] Right one {#a2}\n\n> # A hidden heading\n\n:::\n\n# Open heading\n\n[toc]\n".to_string()
+}
+
+#[test]
+fn the_outline_and_a_table_of_contents_leave_out_what_practice_hides() {
+    let doc = with_headings();
+    let f = default_fixture(&doc);
+    let mut h = f.ready();
+    let labels = all_labels(&h);
+    let s = shown(&mut h);
+    assert!(s.contains("Open heading"), "{s}");
+    assert!(
+        !s.contains("A hidden heading"),
+        "not in a table of contents either: {s}"
+    );
+    assert!(!labels.contains("A hidden heading"), "not in the outline: {labels}");
+    assert!(labels.contains("Open heading"), "the outline is there: {labels}");
+    // out of Practice, all of it
+    command(&mut h, "view.practiceAll");
+    assert!(all_labels(&h).contains("A hidden heading"));
+    assert!(shown(&mut h).contains("A hidden heading"));
+    untouched(&mut h, &f, &doc);
+}
+
+#[test]
+fn a_click_in_a_filtered_outline_goes_to_the_heading_it_names() {
+    let doc = format!(
+        "{}\n\n{}\n\n# Further down\n",
+        with_headings(),
+        "A line.\n\n".repeat(200)
+    );
+    let f = default_fixture(&doc);
+    let mut h = f.ready();
+    h.get_by_label("Further down").click();
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("Further down"));
+    assert!(h.state_mut().viewer().unwrap().ed.view.scroll_y() > 100.0);
+}
+
+#[test]
+fn the_word_count_says_a_number_and_no_word_of_what_is_hidden() {
+    let doc = a_doc_with_one_question();
+    let f = default_fixture(doc);
+    let mut h = f.ready();
+    common::settle(&mut h);
+    common::run(&mut h);
+    let labels = all_labels(&h);
+    let count = labels
+        .lines()
+        .find(|l| l.contains("word"))
+        .expect("a word count")
+        .to_string();
+    assert!(!count.contains("Explained"), "{count}");
+    assert!(
+        count.split(' ').next().is_some_and(|n| n.parse::<u32>().is_ok()),
+        "{count}"
+    );
+    command(&mut h, "view.practiceAll");
+    common::settle(&mut h);
+    common::run(&mut h);
+    let same = all_labels(&h);
+    assert!(
+        same.lines().any(|l| l == count),
+        "the file's count, in any state: {count}"
+    );
+}
+
+#[test]
+fn a_find_hit_does_not_open_or_highlight_what_is_hidden_and_the_source_pane_is_the_authors_choice() {
+    let doc = a_doc_with_one_question();
+    let f = default_fixture(doc);
+    let mut h = f.ready();
+    h.state_mut().open_find(true);
+    let query = |t: &str| markise_engine::search::Query {
+        text: t.into(),
+        ..Default::default()
+    };
+    h.state_mut().set_find_query(query("Explained"));
+    common::settle(&mut h);
+    common::run(&mut h);
+    assert!(
+        h.state().find_results().is_none_or(|r| r.matches.is_empty()),
+        "rendered: nothing"
+    );
+    assert!(!shown(&mut h).contains("Explained"));
+    // Replace All cannot reach it
+    h.state_mut().replace_find("Told".into(), true);
+    common::settle(&mut h);
+    common::run(&mut h);
+    untouched(&mut h, &f, doc);
+    // once revealed it is there to find, and hidden again it is not
+    h.state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .practice_press(doc.find("Right one").unwrap());
+    h.state_mut().viewer().unwrap().ed.practice_check(0);
+    common::run(&mut h);
+    common::settle(&mut h);
+    h.state_mut().set_find_query(query("Explained"));
+    common::settle(&mut h);
+    common::run(&mut h);
+    assert_eq!(
+        h.state().find_results().map(|r| r.matches.len()),
+        Some(1),
+        "revealed: found"
+    );
+    h.state_mut().viewer().unwrap().ed.practice_reset(0);
+    common::run(&mut h);
+    common::settle(&mut h);
+    common::run(&mut h);
+    assert!(
+        h.state().find_results().is_none_or(|r| r.matches.is_empty()),
+        "hidden again: not found"
+    );
+
+    // Side by Side: the source pane shows the file, and a hit there opens nothing in the rendered pane
+    command(&mut h, "view.sideBySide");
+    h.state_mut().set_find_query(query("Explained"));
+    common::settle(&mut h);
+    common::run(&mut h);
+    assert_eq!(
+        h.state().find_results().map(|r| r.matches.len()),
+        Some(1),
+        "the source has it"
+    );
+    h.state_mut().find_next(false);
+    common::run(&mut h);
+    assert!(!shown(&mut h).contains("Explained"), "the rendered pane stays as it is");
+    untouched(&mut h, &f, doc);
+}
+
+#[test]
+fn the_comments_panel_lists_nothing_on_what_is_hidden() {
+    let doc = ":::question\n\nA prompt?\n\n- [ ] Wrong one {#a1}\n- [x] Right one {#a2}\n\n> Told {>>a secret note<<} here.\n\n:::\n\nOpen {>>a plain note<<} text.\n";
+    let f = default_fixture(doc);
+    let mut h = f.ready();
+    h.state_mut().set_sidebar_tab(markise_ui_egui::sidebar::Tab::Comments);
+    let start = std::time::Instant::now();
+    while !h.state().comments_panel_ready() {
+        assert!(start.elapsed() < common::HANG_GUARD, "never listed");
+        h.step();
+    }
+    common::run(&mut h);
+    let labels = all_labels(&h);
+    assert!(labels.contains("a plain note"), "{labels}");
+    assert!(!labels.contains("a secret note"), "{labels}");
+}
+
+#[test]
+fn a_document_bound_to_no_package_is_unveiled_with_no_other_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(dir.path()).unwrap().join("plain.md");
+    std::fs::write(&path, ":::note\n\nHeld.\n\n:::\n").unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let opts = markise_ui_egui::AppOptions {
+        config: markise_ui_egui::ConfigDir::Dir(config),
+        ..common::no_watch()
+    };
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 700.0))
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), MarkiseApp::new(opts));
+    h.state_mut().open(path);
+    common::wait_until(&mut h, "load", |a| a.document_text().is_some());
+    // from here on a frame only when one is asked for, as in a window with nobody at it
+    let start = std::time::Instant::now();
+    while h.state_mut().viewer().unwrap().ed.view.blocks_veiled() {
+        assert!(start.elapsed() < common::HANG_GUARD, "never unveiled");
+        if h.ctx.has_requested_repaint() {
+            h.step();
+        } else {
+            std::thread::yield_now();
+        }
+    }
+}

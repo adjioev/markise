@@ -33,12 +33,22 @@ pub(super) struct PracticeState {
     on: bool,
     /// The document as a whole is.
     whole: bool,
+    /// A block of its own is.
+    own_any: bool,
     /// What was done, by a block's opener, ascending. A block with nothing done is not here.
     shows: Vec<(usize, PracticeShow)>,
     /// Whether an item hides, by its start, for the document and states as they stand.
     hidden: RefCell<HashMap<usize, bool>>,
     /// Goes up when measured page heights stop holding for what they hid.
     epoch: u64,
+    /// The package has blocks that open in Practice …
+    package_defaults: bool,
+    /// … and someone has chosen something else for the document.
+    defaults_off: bool,
+    /// What a package might hide is not known yet: blocks show their first rows only, until it is.
+    veiled: bool,
+    /// Goes up when what hides changes: who searched has to look again.
+    generation: u64,
 }
 
 impl PracticeState {
@@ -50,13 +60,28 @@ impl PracticeState {
 
     pub(super) fn modes_changed(&mut self, mode: BlockViewMode, own: &[(usize, BlockViewMode)]) {
         self.whole = mode == BlockViewMode::Practice;
-        self.on = self.whole || own.iter().any(|m| m.1 == BlockViewMode::Practice);
+        self.own_any = own.iter().any(|m| m.1 == BlockViewMode::Practice);
+        self.settle();
+    }
+
+    fn settle(&mut self) {
+        self.on = self.whole || self.own_any || self.defaults_apply() || self.veiled;
         self.hidden.borrow_mut().clear();
+        self.generation += 1;
+    }
+
+    pub(super) fn defaults_apply(&self) -> bool {
+        self.package_defaults && !self.defaults_off
+    }
+
+    pub(super) fn package_defaults(&mut self, any: bool, mode: BlockViewMode, own: &[(usize, BlockViewMode)]) {
+        self.package_defaults = any;
+        self.modes_changed(mode, own);
     }
 
     pub(super) fn key(&self) -> u64 {
         if self.on {
-            (u64::from(self.whole) + 1) ^ self.epoch.rotate_left(7)
+            (u64::from(self.whole) + 1) ^ u64::from(self.defaults_apply()).rotate_left(3) ^ self.epoch.rotate_left(7)
         } else {
             self.epoch.rotate_left(7)
         }
@@ -78,6 +103,44 @@ impl View {
     /// Whether any block is in Practice.
     pub fn practice_on(&self) -> bool {
         self.native.practice.on
+    }
+
+    /// Changes when what Practice hides may have.
+    pub fn practice_generation(&self) -> u64 {
+        self.native.practice.generation
+    }
+
+    /// Whether someone has chosen for the document, so that the package's word no longer counts.
+    pub fn set_practice_defaults_off(&mut self, off: bool) {
+        if self.native.practice.defaults_off != off {
+            self.native.practice.defaults_off = off;
+            self.native.practice.settle();
+            self.native.items.borrow_mut().clear();
+            if self.native.practice.package_defaults {
+                self.reset_heights();
+            }
+        }
+    }
+
+    /// Until it is known what a package would hide, nothing in a block shows, as it may be what should not:
+    /// the first frames of a document, while its package is looked up.
+    pub fn set_blocks_veiled(&mut self, veiled: bool) {
+        if self.native.practice.veiled != veiled {
+            self.native.practice.veiled = veiled;
+            self.native.practice.settle();
+            self.reset_heights();
+        }
+    }
+
+    pub fn blocks_veiled(&self) -> bool {
+        self.native.practice.veiled
+    }
+
+    /// Whether Practice takes this heading out of what lists headings: any heading in a block, while
+    /// any block is in Practice. Which of them hides is not known without reading the block, and a list of
+    /// headings is no place to do so.
+    pub fn practice_hides_heading(&self, entry: &crate::model::OutlineEntry) -> bool {
+        self.native.practice.on && entry.in_block
     }
 
     /// What `c` is, when it is in Practice.
@@ -105,6 +168,10 @@ impl View {
         if !self.native.practice.on {
             return false;
         }
+        // not yet known what a package hides: anything in a block may be it
+        if self.native.practice.veiled {
+            return !self.doc.named_containers_at(at).is_empty();
+        }
         self.doc
             .named_containers_at(at)
             .iter()
@@ -130,7 +197,7 @@ impl View {
 
     /// What an item of a block in Practice lays out by.
     pub(super) fn practice_item(&self, at: &NativeAt, start: usize, it: &Item) -> Option<PracticeItem> {
-        if !self.native.practice.on || self.native.mode_of(at.range.start) != BlockViewMode::Practice {
+        if !self.native.practice.on || self.block_mode_of(at.range.start) != BlockViewMode::Practice {
             return None;
         }
         let parts = at.block.practice.as_ref()?;
@@ -191,6 +258,10 @@ impl View {
     }
 
     fn read_practice_hidden(&self, start: usize, it: &Item) -> bool {
+        if self.native.practice.veiled {
+            let first_level = self.doc.named_containers_at(start).len() <= 1;
+            return !(first_level && matches!(it.kind, ItemKind::ContainerMarker { .. }));
+        }
         self.doc
             .named_containers_at(start)
             .iter()
@@ -212,13 +283,15 @@ impl View {
     /// block, less the quotes of blocks that reveal them. Other fields are corrected when they are laid
     /// out, like any estimate.
     pub(super) fn practice_page_estimate(&self, s: &PageStats, per_line: f32) -> f32 {
-        let Some(source) = self.native.source.as_ref().filter(|_| self.native.practice.whole) else {
+        let (whole, defaults) = (self.native.practice.whole, self.native.practice.defaults_apply());
+        let Some(source) = self.native.source.as_ref().filter(|_| whole || defaults) else {
             return 0.0;
         };
         let t = &self.theme;
         let row = t.block_spacing + crate::native::practice_row_height(t);
         let mut h = 0.0;
-        for (name, tally) in s.card_tallies.iter().filter(|(name, _)| source.has_practice(name)) {
+        let practised = |name: &str| source.has_practice(name) && (whole || source.practice_default(name));
+        for (name, tally) in s.card_tallies.iter().filter(|(name, _)| practised(name)) {
             h += tally.closers as f32 * row;
             if source.practice_hides_quotes(name) {
                 h -= tally.paras as f32 * t.block_spacing + tally.lines_at(per_line) * t.line_px();
@@ -246,6 +319,7 @@ impl View {
         // (the same blocks moved by an edit are the same blocks: their heights did not change)
         let moved = old.len() == shows.len() && old.iter().zip(&shows).all(|(a, b)| a.1 == b.1);
         self.native.practice.shows = shows;
+        self.native.practice.generation += 1;
         self.native.items.borrow_mut().clear();
         self.native.practice.hidden.borrow_mut().clear();
         if !moved {

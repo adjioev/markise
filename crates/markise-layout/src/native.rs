@@ -194,6 +194,14 @@ pub trait BlockViews: Send + Sync {
     fn has_practice(&self, _name: &str) -> bool {
         false
     }
+    /// Whether blocks of this name open in Practice, by the package's word (ADR 0024). Implies a practice.
+    fn practice_default(&self, _name: &str) -> bool {
+        false
+    }
+    /// Whether any block opens in Practice. `false` costs a comparison per block.
+    fn any_practice_default(&self) -> bool {
+        false
+    }
     /// Whether Practice hides the quotes of blocks of this name (page estimates: no source is read).
     fn practice_hides_quotes(&self, _name: &str) -> bool {
         false
