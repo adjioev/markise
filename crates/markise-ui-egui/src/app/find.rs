@@ -212,7 +212,11 @@ impl MarkiseApp {
             match c {
                 Completion::Found(mut r) if self.find_current(r.key) => {
                     if !all_of_source && let Some(d) = &self.doc {
-                        r.drop_hidden(d.viewer.ed.session.doc());
+                        let view = &d.viewer.ed.view;
+                        let concealed = |m: &std::ops::Range<usize>| view.practice_conceals(m.start);
+                        let also: Option<markise_engine::search::IsHidden<'_>> =
+                            view.practice_on().then_some(&concealed);
+                        r.drop_hidden_and(d.viewer.ed.session.doc(), also);
                     }
                     self.find.error = r.error.clone();
                     self.find.results = Some(r);
@@ -221,6 +225,16 @@ impl MarkiseApp {
                     match patches {
                         Ok(patches) if !patches.is_empty() => {
                             let d = self.doc.as_mut().unwrap();
+                            // what is being practiced does not change, by this either (ADR 0024)
+                            let patches = if d.viewer.ed.view.practice_on() {
+                                let kept = (patches.patches().iter())
+                                    .filter(|p| !d.viewer.ed.practice_touches(p.range.clone()))
+                                    .cloned()
+                                    .collect();
+                                markise_doc::PatchSet::new(kept).unwrap_or(patches)
+                            } else {
+                                patches
+                            };
                             let all = self.find.operation.as_ref().is_some_and(|o| o.only.is_none());
                             match d.viewer.ed.edit(|s| {
                                 s.apply_external(&patches, if all { "Replace All" } else { "Replace" }, false)

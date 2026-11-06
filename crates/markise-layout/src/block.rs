@@ -2864,6 +2864,12 @@ pub fn layout_item(
                 );
                 tasks.push((rect, li));
                 if let Some(n) = p.native.filter(|n| n.role == Some(crate::native::NativeRole::Answer)) {
+                    // in Practice what the file says stays unsaid, and the mark is the reader's
+                    let checked = match n.practice {
+                        Some(crate::native::PracticeItem::Answer { selected }) => selected,
+                        Some(crate::native::PracticeItem::Other) => false,
+                        None => checked,
+                    };
                     answer_mark(
                         &mut deco,
                         n.view,

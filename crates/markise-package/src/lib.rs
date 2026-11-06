@@ -37,7 +37,7 @@ pub use resolve::{InstalledPackage, Pending, Problem, Resolution, accept, resolv
 pub use schema::{BlockSchema, FieldKind, FieldSchema};
 pub use store::{Accepted, Sha256Hex, Store, files_digest};
 pub use value::Localized;
-pub use views::{ViewConfig, ViewKind};
+pub use views::{PracticeConfig, ViewConfig, ViewKind};
 
 /// The one package format this build reads, as `manifest.json` names it.
 pub const FORMAT: &str = "markise-block-package/2";

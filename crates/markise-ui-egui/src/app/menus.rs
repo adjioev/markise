@@ -518,6 +518,10 @@ impl MarkiseApp {
         if self.block_package().is_some() {
             entries.push(self.app_item("view.switchBlockView", self.block_view_available(), Check::None));
             entries.push(self.app_item("view.switchAllBlockViews", has_doc, Check::None));
+            if self.block_practice_available() {
+                let on = self.doc.as_ref().is_some_and(|d| d.viewer.ed.practice_whole());
+                entries.push(self.app_item("view.practiceAll", has_doc, Check::Toggle(on)));
+            }
             entries.push(Entry::Separator);
         }
         entries.extend([
@@ -729,6 +733,7 @@ impl MarkiseApp {
             "block.delete" => return self.delete_block_at_caret(),
             "view.switchBlockView" => return self.switch_block_view_at_caret(),
             "view.switchAllBlockViews" => return self.switch_all_block_views(),
+            "view.practiceAll" => return self.toggle_practice_all(),
             "file.quickOpen" => self.open_quick(ctx),
             "file.clearRecent" => self.clear_recent_paths(),
             "file.recover" => self.workflow.show_recovery = true,

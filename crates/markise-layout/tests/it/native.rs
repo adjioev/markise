@@ -66,6 +66,7 @@ impl BlockViews for Stand {
                 single_answer: args != "many",
             }),
             parts: role_ranges(source),
+            practice: None,
         })
     }
 }
@@ -411,6 +412,7 @@ fn a_label_is_one_row_whatever_the_package_wrote() {
                     single_answer: true,
                 }),
                 parts: role_ranges(source),
+                practice: None,
             })
         }
     }
@@ -467,6 +469,7 @@ fn a_long_name_leaves_room_for_the_warning_and_an_icon_for_the_label() {
                     single_answer: true,
                 }),
                 parts: role_ranges(source),
+                practice: None,
             })
         }
     }

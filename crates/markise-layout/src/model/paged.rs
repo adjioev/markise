@@ -97,6 +97,9 @@ pub struct PageStats {
     /// Headings per level, per name of the block they are directly in (ADR 0021: the estimate of
     /// a page depends on which names show natively).
     pub card_heads: Vec<(Box<str>, [u32; 6])>,
+    /// Quote paragraphs per name of the block they are directly in (ADR 0024: Practice can hide
+    /// them, and the estimate of a page has to know without reading its blocks).
+    pub card_quotes: Vec<(Box<str>, CardQuotes)>,
     /// `[toc]` blocks (each lists the whole outline).
     pub tocs: u32,
     /// Headings whose text may use a reference definition (their outline entries are
@@ -122,11 +125,24 @@ pub struct PageStats {
     pub measured_gens: DepGens,
 }
 
-impl PageStats {
-    /// Estimated paragraph lines at `per_line` characters per line (interpolated).
-    pub fn para_lines_at(&self, per_line: f32) -> f32 {
+/// Quote paragraphs of one block name in a page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CardQuotes {
+    pub paras: u32,
+    pub wrapped: [u32; PARA_LINE_CHARS.len()],
+}
+
+impl CardQuotes {
+    /// Their estimated lines at `per_line` characters per line.
+    pub fn lines_at(&self, per_line: f32) -> f32 {
+        lines_at(&self.wrapped, per_line)
+    }
+}
+
+/// Estimated lines at `per_line` characters per line (interpolated), from the sums for [`PARA_LINE_CHARS`].
+fn lines_at(w: &[u32; PARA_LINE_CHARS.len()], per_line: f32) -> f32 {
+    {
         let t = &PARA_LINE_CHARS;
-        let w = &self.para_wrapped;
         let k = t.partition_point(|&n| (n as f32) < per_line);
         if k == 0 {
             return w[0] as f32;
@@ -137,6 +153,13 @@ impl PageStats {
         let (a, b) = (t[k - 1] as f32, t[k] as f32);
         let f = (per_line - a) / (b - a);
         w[k - 1] as f32 + f * (w[k] as f32 - w[k - 1] as f32)
+    }
+}
+
+impl PageStats {
+    /// Estimated paragraph lines at `per_line` characters per line (interpolated).
+    pub fn para_lines_at(&self, per_line: f32) -> f32 {
+        lines_at(&self.para_wrapped, per_line)
     }
 
     /// Headings in the page.
@@ -160,6 +183,27 @@ impl PageStats {
                         heads[li] = 1;
                         s.card_heads.push((c.name, heads));
                     }
+                }
+            }
+            if it.kind == ItemKind::Paragraph
+                && it.containers.iter().any(|c| matches!(c, super::Container::Card))
+                && it
+                    .containers
+                    .iter()
+                    .any(|c| matches!(c, super::Container::Quote { .. }))
+                && let Some(c) = doc.named_containers_at(it.origin).pop()
+            {
+                let at = match s.card_quotes.iter().position(|(n, _)| *n == c.name) {
+                    Some(at) => at,
+                    None => {
+                        s.card_quotes.push((c.name, CardQuotes::default()));
+                        s.card_quotes.len() - 1
+                    }
+                };
+                let q = &mut s.card_quotes[at].1;
+                q.paras += 1;
+                for (w, &n) in q.wrapped.iter_mut().zip(&PARA_LINE_CHARS) {
+                    *w += it.est_lines.max(it.est_chars.div_ceil(n));
                 }
             }
             s.images += it.has_image as u32;

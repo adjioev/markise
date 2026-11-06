@@ -142,6 +142,28 @@ impl MarkiseApp {
         true
     }
 
+    /// The package has blocks that can be practiced (ADR 0024).
+    pub(super) fn block_practice_available(&self) -> bool {
+        (self.block_package()).is_some_and(|p| {
+            (p.index.block_names()).any(|n| {
+                p.index
+                    .block(n)
+                    .is_some_and(|e| e.view.is_some_and(|v| v.practice.is_some()))
+            })
+        })
+    }
+
+    /// Practice for the whole document, or out of it.
+    pub(super) fn toggle_practice_all(&mut self) -> bool {
+        if !self.block_practice_available() {
+            return false;
+        }
+        let Some(d) = &mut self.doc else { return false };
+        d.viewer.ed.toggle_practice_all();
+        self.remember_block_views();
+        true
+    }
+
     /// Keeps how this document shows its blocks, for the session (ADR 0021).
     pub(super) fn remember_block_views(&mut self) {
         if let Some(d) = &self.doc
@@ -177,6 +199,10 @@ impl MarkiseApp {
             return false;
         };
         let Some(d) = &mut self.doc else { return false };
+        // a block being practiced has no commands (ADR 0024)
+        if d.viewer.ed.in_practice(at) {
+            return false;
+        }
         let Some(c) = block_at(d.viewer.ed.session.doc(), at, &package.index) else {
             return false;
         };

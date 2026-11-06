@@ -1078,8 +1078,10 @@ impl DocViewer {
             let mut sh = |f: &mut dyn FnMut(&mut dyn TextShaper, &dyn markise_layout::Images)| {
                 with_shaper(&ctx, parley.as_deref_mut(), |s| f(s, imgs))
             };
-            self.code_tools_ui(ui, &visible, rect, left, theme, focused, editable, &mut out, &mut sh);
-            self.image_tools_ui(ui, &visible, rect, left, theme, imgs, &mut out);
+            // (what edits a part of a block has no place in a block being practiced)
+            let plain = self.outside_practice(&visible);
+            self.code_tools_ui(ui, &plain, rect, left, theme, focused, editable, &mut out, &mut sh);
+            self.image_tools_ui(ui, &plain, rect, left, theme, imgs, &mut out);
             self.block_tools_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_delete_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_move_ui(ui, &visible, rect, left, theme, &mut out);

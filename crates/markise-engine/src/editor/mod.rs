@@ -14,6 +14,7 @@ pub mod history;
 mod image_edit;
 mod inplace;
 pub mod keymap;
+mod practice;
 pub mod source;
 pub mod surface;
 
