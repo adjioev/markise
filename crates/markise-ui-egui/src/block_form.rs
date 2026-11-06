@@ -13,8 +13,9 @@ use egui::{ColorImage, Context, Key, KeyboardShortcut, Modifiers, RichText, Text
 use egui_schema_form::{FileRequest, FormHost, SchemaForm, Style, Thumbnail};
 use markise_doc::{Affinity, DocPos};
 use markise_doc::{FormatDoc, NamedContainer};
-use markise_engine::block_fields::{BlockFields, FieldsError, decls_from_spec};
-use markise_engine::block_page::document_language;
+use markise_engine::block_fields::{BlockFields, FieldsError};
+pub use markise_engine::block_page::package_language;
+use markise_engine::block_view::read_form;
 use markise_engine::editor::{EditorSession, MarkId};
 use markise_layout::block::{ImageState, Images};
 use markise_md::ParseOptions;
@@ -24,8 +25,6 @@ use serde_json::Value;
 
 use crate::images::TextureStore;
 
-/// A package's text for a document that names no language. The app's own words are English always.
-const DEFAULT_LANGUAGE: &str = "en";
 /// What undo calls a saved form.
 const UNDO_LABEL: &str = "Edit Block";
 const SAVE_KEY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter);
@@ -113,16 +112,6 @@ pub fn block_at(doc: &dyn FormatDoc, at: usize, index: &PackageIndex) -> Option<
         .find(|c| index.block(&c.name).is_some())
 }
 
-/// The language to show a package's text in for this document.
-pub fn package_language(doc: &dyn FormatDoc) -> String {
-    let language = document_language(doc);
-    if language.is_empty() {
-        DEFAULT_LANGUAGE.to_string()
-    } else {
-        language
-    }
-}
-
 /// The form's title and note in `language`: the block's label, and its variant in words or the
 /// arguments as they stand.
 fn heading(entry: &BlockEntry<'_>, name: &str, args: &str, language: &str) -> (String, String) {
@@ -170,12 +159,7 @@ impl OpenForm {
         }
         let range = block_range_at_container(c);
         let read = || -> Result<(BlockFields, FormSpec), String> {
-            let input = index
-                .form_input(&c.name, language)
-                .ok_or("the package has no schema for it")?
-                .map_err(|e| e.to_string())?;
-            let spec = FormSpec::parse(&input.schema, &input.hints, variant).map_err(|e| e.to_string())?;
-            let decls = decls_from_spec(&spec).map_err(|f| format!("field `{f}` has no place in the block"))?;
+            let (spec, decls) = read_form(index, &c.name, language, variant)?;
             let source = session
                 .text()
                 .get(range.clone())

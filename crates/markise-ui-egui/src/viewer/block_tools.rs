@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use egui::accesskit::Role;
 use egui::{Pos2, Rect, Sense, Stroke, TextureId, Ui, WidgetInfo, pos2, vec2};
+use markise_engine::block_check::ProblemKind;
 use markise_engine::block_view::PackageViews;
 use markise_layout::block::Prim;
 use markise_layout::{BlockLook, BlockViewMode, BlockViews, ItemKind, SiteQuery, SiteShot, Visible};
@@ -269,9 +270,9 @@ impl DocViewer {
         let what = if self.ed.in_practice(at) {
             "Practice"
         } else if self.ed.view.block_outside(v.idx) {
-            "Outside its schema"
+            ProblemKind::Structure.headline()
         } else {
-            "Not filled in yet"
+            ProblemKind::NotFilled.headline()
         };
         resp.widget_info(|| WidgetInfo::labeled(Role::Label, true, format!("{what}: {all}")));
     }

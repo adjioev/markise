@@ -18,6 +18,7 @@ pub mod limits;
 mod pack;
 mod palette;
 mod paths;
+mod reference;
 mod resolve;
 mod schema;
 mod store;
@@ -33,10 +34,11 @@ pub use library::{Library, LibraryEntry};
 pub use pack::{Packed, pack_folder};
 pub use palette::{Palette, PaletteBlock, PaletteGroup, Preset};
 pub use paths::clean_relative;
-pub use resolve::{InstalledPackage, Pending, Problem, Resolution, accept, resolve};
+pub use reference::ReferenceHeader;
+pub use resolve::{BoundPackage, InstalledPackage, Pending, Problem, Resolution, accept, read_bound_package, resolve};
 pub use schema::{BlockSchema, FieldKind, FieldSchema};
 pub use store::{Accepted, Sha256Hex, Store, files_digest};
-pub use value::Localized;
+pub use value::{Localized, is_hidden_char, printable};
 pub use views::{PracticeConfig, ViewConfig, ViewKind};
 
 /// The one package format this build reads, as `manifest.json` names it.

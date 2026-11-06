@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use markise_corpus::generate;
 use markise_doc::{DocPos, DocumentFormat, Params};
+use markise_engine::block_check::BlockChecker;
 use markise_engine::block_page::document_language;
 use markise_engine::block_view::PackageViews;
 use markise_engine::editor::EditorView;
@@ -51,6 +52,10 @@ fn practice_package() -> Arc<PackageViews> {
 }
 
 fn package_with(views: &str) -> Arc<PackageViews> {
+    Arc::new(PackageViews::new(index_with(views), "en"))
+}
+
+fn index_with(views: &str) -> Arc<PackageIndex> {
     let mut files = BTreeMap::new();
     let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1","blocks":["tip","poll"]}"#;
     files.insert("manifest.json".to_string(), manifest.as_bytes().to_vec());
@@ -64,8 +69,7 @@ fn package_with(views: &str) -> Arc<PackageViews> {
     files.insert("components/poll/poll.json".to_string(), poll.as_bytes().to_vec());
     files.insert("editor/palette.json".to_string(), br#"{"format": 1}"#.to_vec());
     files.insert("editor/views.json".to_string(), views.as_bytes().to_vec());
-    let index = PackageIndex::from_files(&files).expect("a valid package");
-    Arc::new(PackageViews::new(Arc::new(index), "en"))
+    Arc::new(PackageIndex::from_files(&files).expect("a valid package"))
 }
 
 /// `text` with a block after every `every` top-level blocks on a clean line.
@@ -252,6 +256,21 @@ fn language_read(base: &str) {
     }
 }
 
+/// What `markise-cli blocks check` spends on a document, once its package is read.
+fn check_document(text: &str) {
+    let mut checker = BlockChecker::new(index_with(
+        r#"{"tip": {"kind": "callout"}, "poll": {"kind": "choices"}}"#,
+    ));
+    let runs = (0..5)
+        .map(|_| {
+            let t = Instant::now();
+            std::hint::black_box(checker.check(text));
+            t.elapsed()
+        })
+        .collect();
+    report("blocks check, many blocks", runs);
+}
+
 fn main() {
     let mb: usize = (std::env::var("MARKISE_NATIVE_MB").ok())
         .and_then(|v| v.parse().ok())
@@ -259,6 +278,7 @@ fn main() {
     let base = generate(mb << 20, 7);
     let blocks = with_blocks(&base, 3);
     language_read(&base);
+    check_document(&blocks);
     run("no blocks, no package", base.clone(), None);
     run("no blocks, a package", base, Some(package()));
     run("many blocks, no package", blocks.clone(), None);

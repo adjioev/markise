@@ -1,6 +1,6 @@
 [package]
 name = "markise-cli"
-description = "Markise command line: round-trip check, HTML export, theme import"
+description = "Markise command line: round-trip check, HTML export, theme import, block check and reference"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,9 @@ markise-export.workspace = true
 similar.workspace = true
 markise-theme.workspace = true
 serde_json.workspace = true
+markise-doc.workspace = true
+markise-engine.workspace = true
+markise-package.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

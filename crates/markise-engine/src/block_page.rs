@@ -438,6 +438,21 @@ fn images_in(html: &str) -> HashSet<String> {
 /// goes into a page as it stands. The document keeps the answer until an edit reaches its first block.
 pub fn document_language(doc: &dyn FormatDoc) -> String {
     let value = doc.language().unwrap_or_default();
-    let fine = !value.is_empty() && value.len() <= 32 && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
-    if fine { value } else { String::new() }
+    if is_language_tag(&value) { value } else { String::new() }
+}
+
+/// Whether `value` can be a language tag; anything else counts as no language.
+pub fn is_language_tag(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 32 && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// The language to show a package's text in for this document: English when it names none. The
+/// app's own words are English always.
+pub fn package_language(doc: &dyn FormatDoc) -> String {
+    let language = document_language(doc);
+    if language.is_empty() {
+        "en".to_string()
+    } else {
+        language
+    }
 }

@@ -4,8 +4,11 @@
 //! markise-cli roundtrip <file>          parse + serialize; exit 1 and print a diff on change
 //! markise-cli html <file> [-o <out>] [--max-size <size>]   export HTML (spec 03 DOM contract) to stdout or <out>
 //! markise-cli theme-import <theme.css> [--json]   import a CSS theme (spec 03 §2), print summary + report
+//! markise-cli blocks check [--json] <file.md>...   a document's blocks against its package; exit 0, 1 or 2
+//! markise-cli blocks docs [...]                    a package's reference as Markdown
 //! ```
 
+mod blocks;
 mod theme;
 
 use std::io::Write;
@@ -23,6 +26,8 @@ const USAGE: &str = "usage:
   markise-cli html <file> [-o <out.html>] [--trusted] [--no-highlight | --inline-colors] [--no-diagrams]
                     [--max-size <size>]
   markise-cli theme-import <theme.css> [--json]
+  markise-cli blocks check [--json] <file.md>...
+  markise-cli blocks docs [--package <archive or folder> | --binding <blocks.config.json>] [--lang <tag>]
   markise-cli --version
 
   --trusted         keep raw HTML and all URL schemes (default: sanitized, safe schemes only)
@@ -32,7 +37,17 @@ const USAGE: &str = "usage:
   --max-size <size> refuse (exit 1, nothing written) when the HTML would be larger than
                     <size>: bytes, or with a K/M/G suffix (decimal), e.g. 500M. Without it,
                     HTML above 200M is written with a warning on stderr (every [TOC] lists
-                    all headings, so many [TOC] blocks make very large files)";
+                    all headings, so many [TOC] blocks make very large files)
+
+  blocks check      check each document's blocks against the package it is bound to, as the app
+                    reads them, with no question, no network and nothing written. Prints
+                    file:line: block: headline: reason, in the words of the editor's warning.
+                    Exit 0 clean, 1 problems, 2 a package or usage error or an unreadable file.
+                    A file no blocks.config.json applies to is noted and passes. --json prints
+                    the stable shape described in docs/user/block-packages.md
+  blocks docs       print a Markdown reference of a package on stdout, generated only from its
+                    data, in the language --lang names (default English). Without --package or
+                    --binding it reads the binding nearest the current folder";
 
 fn read_markdown(path: &str) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
@@ -191,6 +206,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             }
             theme::import(file.ok_or(USAGE)?, json)
         }
+        [cmd, rest @ ..] if cmd == "blocks" => blocks::run(rest),
         [flag] if flag == "-V" || flag == "--version" => {
             println!("markise-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(ExitCode::SUCCESS)

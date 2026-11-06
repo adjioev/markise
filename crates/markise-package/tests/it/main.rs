@@ -6,4 +6,5 @@ mod form;
 mod format;
 mod library;
 mod pack;
+mod reference;
 mod resolve;

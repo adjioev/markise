@@ -187,7 +187,8 @@ card. A key Markise does not know is ignored.
 
 - `format`: optional, `1`.
 - `groups`: `id`, `label`, `blocks`. A block can be listed once.
-- `blocks`: a name to `description` and `icon`.
+- `blocks`: a name to `description`, `when` and `icon`. `when` says when to reach for this block rather than
+  another. Only [the reference](#the-command-line) shows it.
 - `presets`: `id`, `block`, `label`, `keywords`, `markdown`. A block with no preset cannot be
   inserted from the library.
 
@@ -339,6 +340,107 @@ folder.
 An archive holds regular files and folders only. A link or device refuses it whole, and so do two
 names that differ only by case or Unicode form. A changed hash asks the author again, whatever the
 version says.
+
+## The command line
+
+Two commands of `markise-cli` let a person or a coding agent write correct blocks without opening the
+app. Neither draws anything, runs a package's code, uses the network or a helper, or asks for consent.
+
+### Checking a document
+
+```sh
+markise-cli blocks check lesson.md more/*.md
+```
+
+For each file this finds the binding as the app does, reads the archive it names, checks the hash, the
+identity and the package as a whole, and checks each block in memory. It writes nothing, and the
+store of accepted packages is not read or changed, so the archive has to be there even when the app
+still has a copy. Links are resolved first, as the app does when it opens a file, so a link to a file counts where that file lives.
+
+```text
+lesson.md:13: tip: Not filled in yet: Text: Required
+lesson.md:35: question: Outside its schema: Answers 1: Has no id
+lesson.md:71: sidebar: Unknown block: The package has no block `sidebar`.
+lesson.md:77: Marker: `::: tip` is not a marker, so it stays text. ...
+files: 1, blocks: 9, problems: 4
+```
+
+A reason about one piece of a block has that piece's line; others have the opener's. The words of the
+reasons are those of the editor's `⚠`, field labels in the document's language.
+
+| Kind | Headline | Means |
+|---|---|---|
+| `not-filled` | Not filled in yet | a block with a view lacks something: a required field, enough items, a marked answer, an argument, or an argument of the form its `pattern` says |
+| `structure` | Outside its schema | content in no field, arguments naming no variant, an answer with no id or a repeated one, too many items or marks, any reason of a block with no view, or a block of over 64 KiB, which stays a card |
+| `unknown-block` | Unknown block | the package has no block of this name. In the editor this is a plain card with no `⚠` |
+| `no-form` | No form | the package says something a form cannot honour, the panel's reason. The block stays a card |
+| `marker` | Marker | an opener with no closer, a closer with nothing to close, a line of three or more colons that is not of a marker's form, or a marker inside a quote or a list. In the editor these are text |
+
+| Exit code | |
+|---|---|
+| 0 | every file is clean, or no binding applies to it |
+| 1 | at least one problem |
+| 2 | a usage error, a file that cannot be read, or a binding or package that cannot be used, whatever else was found |
+
+A file no binding applies to gets a note and passes: nothing says which blocks it should have. Other
+files are still checked after an error. Missing blank lines around markers are not reported, since the
+parser does not need them.
+
+`--json` prints this on stdout instead, except for a usage error, which is plain text on stderr:
+
+```json
+{
+  "format": "markise-blocks-check/1",
+  "files": [
+    {
+      "file": "lesson.md",
+      "status": "problems",
+      "note": null,
+      "error": null,
+      "binding": { "file": "/site/blocks.config.json", "library": "notes", "version": "1.0.0", "sha256": "<64 hexadecimal digits>" },
+      "language": "en",
+      "blocks": 9,
+      "problems": [
+        { "line": 13, "block_line": 13, "block": "tip", "kind": "not-filled", "headline": "Not filled in yet", "reason": "Text: Required" }
+      ]
+    }
+  ],
+  "summary": { "files": 1, "blocks": 9, "problems": 1, "errors": 0, "unbound": 0 }
+}
+```
+
+- `status` is `clean`, `problems`, `unbound` (with `note`) or `error` (with `error`).
+- `binding` is `null` when none applies. With an `error` it may hold only `file`, or be `null`.
+- `language` is `null` unless the file was checked.
+- `block` is `null` for a line that names no block; `block_line` is the opener's line, or the line itself.
+- Characters a terminal would act on or hide are escaped in the strings as `\uXXXX`, and in text output as `\u{1b}`.
+- Keys and values mean this for as long as `format` says `markise-blocks-check/1`. The wording of `reason` can change.
+
+### A reference for authors
+
+```sh
+markise-cli blocks docs --package blocks/notes-1.0.0.tar.gz --lang ru > BLOCKS.md
+```
+
+`--package` takes an archive or a package's folder. `--binding` takes a `blocks.config.json`, whose pin and
+identity are checked. With neither, it reads the binding nearest the current folder. The text of the
+package follows `--lang` as a document's `lang` would, English by default; the rest is English.
+
+It prints Markdown, made only from the package's data:
+
+- a first line saying it is generated, from which version and hash, and the command that makes it again, as you typed it;
+- each block in the palette's order, then those in no group by name, with its name, label, description, `when`, arguments
+  and their pattern or variants, fields with their type and rules, what Practice hides, and each preset as an example;
+- the general rules: the `:::` syntax, blank lines, the fence length for nesting, ids, and what `check` reports.
+
+A package's text is treated as data, since an agent may act on this page. Each piece stands on one line after a fixed lead-in, what
+would be Markdown is escaped, characters a terminal would act on or hide are written out, and a preset is in a fence no line of it can
+close, so it cannot pose as a heading, a fence or part of the reference. A first paragraph says that it is quoted. A package whose
+manifest names the sections dialect gets one more rule on them; others get nothing about sections.
+
+The same package gives the same bytes: no dates, nothing from the machine, so it can sit in a repository with small diffs. For a
+folder, the hash is that of the archive Markise packs from it in memory, which a `tar` of the same files
+would not match.
 
 ## Limits
 

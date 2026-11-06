@@ -78,7 +78,7 @@ view's caches of looks and heights once. Nothing asks for a frame. An open form 
 keeps its draft, focus and rows; the library closes on any edit, and opens in the language of then.
 
 **Palette** (`editor/palette.json`, required): optional `format` (`1`), `groups` (`id`, `label`,
-`blocks`), `blocks` (name to `description` and `icon`), `presets` (`id`, `block`, `label`,
+`blocks`), `blocks` (name to `description`, `when` and `icon`; `when` is a text only the generated reference shows), `presets` (`id`, `block`, `label`,
 `keywords`, `markdown`). A preset's Markdown must open the block it names. Any other key of a preset
 is kept untouched for later phases; the form reads a few of them (ADR 0020, icon choices).
 
@@ -223,6 +223,15 @@ Consent is recorded against the package's identity and hash: `library`, `version
   close it at a cost across platforms that this does not justify.
 - An archive changed under an unchanged pin is an error when it is read. While the cache holds that
   hash the archive is not read at all: the pin is what counts, and the cache already matches it.
+
+### Looking without consent
+
+`markise-cli blocks check` and `blocks docs` read a bound package for a look only
+(`read_bound_package`): the same discovery, pin, validation and identity check, in memory, with no
+question, no `Store` and nothing written, as nothing from the package runs. So the archive has to be
+there, even for a package the app still has in its store. What a block is checked against and how is the
+app's (`PackageViews::verdict`, `BlockChecker`), and the package's own data, `PackageIndex::reference`,
+makes the reference. The app does not use the reference.
 
 ### On screen
 

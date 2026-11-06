@@ -43,6 +43,30 @@ pub(crate) fn pick_language<'a>(
     (of(language).or_else(|| of(base)).or_else(|| of("en"))).or_else(|| filled.next().map(|(_, text)| text))
 }
 
+/// A character a terminal or a reader acts on or hides rather than shows: control characters (which
+/// move a terminal's cursor or clear its screen), those that reorder or hide the text around them,
+/// line and paragraph separators, and tag characters. ZWJ and ZWNJ stay, as some scripts need them.
+pub fn is_hidden_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c as u32,
+            0x061C | 0x180E | 0x200B | 0x200E | 0x200F | 0x2028..=0x202E | 0x2060..=0x206F
+            | 0xFEFF | 0xFFF9..=0xFFFB | 0xE0000..=0xE007F)
+}
+
+/// `text` with every [`is_hidden_char`] written out as `\u{1b}`, so that text from a package or a
+/// document can go to a terminal and stays one line.
+pub fn printable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if is_hidden_char(c) {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Reads a file's bytes as a JSON object.
 pub(crate) fn parse_object(file: &str, bytes: &[u8], issues: &mut Issues) -> Option<serde_json::Map<String, Value>> {
     if bytes.len() > MAX_JSON_BYTES {

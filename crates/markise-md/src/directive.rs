@@ -87,10 +87,56 @@ pub struct DirectiveView {
     pub closer: Span,
 }
 
+/// A line meant as a marker that does not work as one (ADR 0018): to the document it is text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BadMarker {
+    /// The line from its first colon, line terminator excluded.
+    pub line: Span,
+    pub kind: BadMarkerKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BadMarkerKind {
+    /// A marker's opener that pairs with no closer; `name` is the name after the colons.
+    NoCloser { name: Span },
+    /// A closer that closes nothing.
+    NoOpener,
+    /// Colons at the start of a line, and not of the form of a marker: `::: note`, `:::note:`.
+    NotAMarker,
+    /// Of the form of a marker, inside a quote or a list, where markers do not count.
+    NotAtTopLevel,
+}
+
 impl DirectiveView {
     /// From the first colon of the opener to the end of the closer line.
     pub fn span(&self) -> Span {
         Span::new(self.opener.start, self.closer.end)
+    }
+}
+
+/// `line` without the blanks before its text.
+fn colons_first(text: &str, line: Span) -> Span {
+    let body = &text[line.start..line.end];
+    Span::new(line.end - body.trim_start_matches([' ', '\t']).len(), line.end)
+}
+
+/// Text inside a quote or a list that starts with colons. Code and the like stay out of this:
+/// only a paragraph's lines are looked at.
+fn bad_markers_inside(text: &str, block: &Block, out: &mut Vec<BadMarker>) {
+    if matches!(block.kind, BlockKind::Paragraph) {
+        for l in &block.lines {
+            let line = colons_first(text, *l);
+            if text[line.start..line.end].starts_with(":::") {
+                let kind = match scan::directive_marker(text, line.start, line.end) {
+                    Some(_) => BadMarkerKind::NotAtTopLevel,
+                    None => BadMarkerKind::NotAMarker,
+                };
+                out.push(BadMarker { line, kind });
+            }
+        }
+    }
+    for child in &block.children {
+        bad_markers_inside(text, child, out);
     }
 }
 
@@ -426,6 +472,47 @@ impl Document {
     pub fn directives(&self) -> Vec<DirectiveView> {
         let n = self.directives.markers.len() as u32;
         (0..n).filter_map(|i| self.directive_view(i)).collect()
+    }
+
+    /// Every line meant as a marker that does not work as one, in document order. Reads the
+    /// top-level blocks, O(document), and nothing at all in a text with no `:::`.
+    pub fn bad_directive_markers(&self) -> Vec<BadMarker> {
+        let text = self.text();
+        let mut out = Vec::new();
+        if !text.contains(":::") {
+            return out;
+        }
+        let markers: Vec<usize> = self.directives.markers.iter().map(|m| m.origin).collect();
+        for m in self.directives.markers.iter().filter(|m| m.item.partner == NONE) {
+            let line = Span::new(m.origin, m.origin + m.item.line_len);
+            let scanned = scan::directive_marker(text, line.start, line.end);
+            let kind = match scanned {
+                Some(d) if !d.close => BadMarkerKind::NoCloser { name: d.name },
+                _ => BadMarkerKind::NoOpener,
+            };
+            out.push(BadMarker { line, kind });
+        }
+        for t in self.tops() {
+            match t.block.kind {
+                BlockKind::Paragraph => {
+                    for l in &t.block.lines {
+                        let line = colons_first(text, t.abs(*l));
+                        if text[line.start..line.end].starts_with(":::") && markers.binary_search(&line.start).is_err()
+                        {
+                            let kind = BadMarkerKind::NotAMarker;
+                            out.push(BadMarker { line, kind });
+                        }
+                    }
+                }
+                BlockKind::BlockQuote { .. } | BlockKind::List { .. } => {
+                    let block = t.to_abs();
+                    bad_markers_inside(text, &block, &mut out);
+                }
+                _ => {}
+            }
+        }
+        out.sort_by_key(|b| b.line.start);
+        out
     }
 
     /// The directives around `pos`, outermost first; both marker lines belong to their

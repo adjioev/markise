@@ -599,3 +599,42 @@ fn the_export_tree_leaves_the_id_out_and_the_document_alone() {
             .is_none()
     );
 }
+
+#[test]
+fn lines_meant_as_markers_that_do_not_work() {
+    use markise_md::BadMarkerKind as K;
+    let kinds = |s: &str| {
+        let doc = parse(s);
+        (doc.bad_directive_markers().iter())
+            .map(|b| {
+                let what = match b.kind {
+                    K::NoCloser { name } => format!("no closer {}", name.slice(s)),
+                    K::NoOpener => "no opener".to_string(),
+                    K::NotAMarker => "not a marker".to_string(),
+                    K::NotAtTopLevel => "not at top level".to_string(),
+                };
+                (b.line.slice(s).to_string(), what)
+            })
+            .collect::<Vec<_>>()
+    };
+    let pair = |line: &str, what: &str| (line.to_string(), what.to_string());
+    assert_eq!(kinds("plain text\n"), []);
+    assert_eq!(kinds(":::a\n\nx\n\n:::\n\n::::b\n\n:::c\n\n:::\n\n::::\n"), []);
+    assert_eq!(kinds(":::a\n\nx\n"), [pair(":::a", "no closer a")]);
+    assert_eq!(kinds("x\n\n:::\n"), [pair(":::", "no opener")]);
+    // the same fence does not nest: the second opener ends the first, and the last closer is left over
+    assert_eq!(
+        kinds(":::a\n\n:::b\n\n:::\n\n:::\n"),
+        [pair(":::a", "no closer a"), pair(":::", "no opener")]
+    );
+    assert_eq!(kinds("::: a\n"), [pair("::: a", "not a marker")]);
+    assert_eq!(kinds("text\n:::a{b} tail\n"), [pair(":::a{b} tail", "not a marker")]);
+    assert_eq!(
+        kinds("> :::a\n>\n> :::\n"),
+        [pair(":::a", "not at top level"), pair(":::", "not at top level")]
+    );
+    assert_eq!(kinds("- item\n\n  :::a\n"), [pair(":::a", "not at top level")]);
+    // code is code, two colons are nothing, and an escape was meant
+    assert_eq!(kinds("```\n:::a\n```\n\n    :::b\n\n::c\n\n\\:::d\n"), []);
+    assert_eq!(kinds("| a |\n|---|\n"), []);
+}

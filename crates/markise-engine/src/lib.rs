@@ -7,6 +7,7 @@
 //! Nothing here runs on the UI thread except cheap channel polls.
 
 pub mod attach;
+pub mod block_check;
 pub mod block_fields;
 pub mod block_page;
 pub mod block_view;
