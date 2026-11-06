@@ -107,6 +107,7 @@ impl View {
                 h += n as f32 * (crate::native::title_line(t) - plain);
             }
         }
+        h -= self.practice_quotes_estimate(s, per_line);
         // a TOC lists the whole outline, one line per entry
         h += s.tocs as f32 * self.model.outline.len().max(1) as f32 * line;
         h += s.para_lines_at(per_line) * line;

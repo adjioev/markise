@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use markise_doc::{DocPos, Params, Patch, PatchSet, Selection};
 use markise_layout::caret::Geometry;
-use markise_layout::{BlockViewMode, BlockViews, Images, NativeAt, TextShaper};
+use markise_layout::{BlockCan, BlockViewMode, BlockViews, Images, NativeAt, TextShaper};
 
 use super::command::CommandError;
 use super::{EditorView, MarkId, StateId, TypingDir};
@@ -127,7 +127,7 @@ impl EditorView {
         self.follow_block_modes();
     }
 
-    fn clear_own_modes(&mut self) {
+    pub(super) fn clear_own_modes(&mut self) {
         for o in std::mem::take(&mut self.place.own_modes) {
             self.session.remove_mark(o.mark);
         }
@@ -136,10 +136,16 @@ impl EditorView {
 
     /// The next state for the whole document. Blocks that differed follow it.
     pub fn switch_all_block_views(&mut self) {
-        self.place.mode = self.place.mode.next_for(true, self.view.can_draw_site());
+        let can = BlockCan {
+            view: true,
+            site: self.view.can_draw_site(),
+            practice: self.place.fields.as_ref().is_some_and(|f| f.any_practice()),
+        };
+        self.place.mode = self.place.mode.next_for(can);
         self.clear_own_modes();
         self.follow_block_modes();
         self.leave_block_for_picture(None);
+        self.practice_place_caret();
     }
 
     /// Whether a block of this name has a view of its own. With no package to say, nothing is ruled out.
@@ -147,10 +153,21 @@ impl EditorView {
         self.place.fields.as_ref().is_none_or(|f| f.has_view(name))
     }
 
+    /// What a block of this name can show here.
+    fn can_of(&self, name: &str) -> BlockCan {
+        BlockCan {
+            view: self.name_has_view(name),
+            site: self.view.can_draw_site(),
+            practice: self.place.fields.as_ref().is_some_and(|f| f.has_practice(name)),
+        }
+    }
+
     /// What comes after this block's state. Asked of the switch before it is pressed, to say so.
     pub fn next_block_view(&self, opener: usize) -> BlockViewMode {
-        let has_view = self.opener_name(opener).is_some_and(|n| self.name_has_view(&n));
-        (self.view.block_mode_of(opener)).next_for(has_view, self.view.can_draw_site())
+        let can = self
+            .opener_name(opener)
+            .map_or_else(BlockCan::default, |n| self.can_of(&n));
+        (self.view.block_mode_of(opener)).next_for(can)
     }
 
     /// A picture shows what no caret can stand in, and a block holding a selection's end shows what it
@@ -167,10 +184,10 @@ impl EditorView {
             return;
         };
         let inside = c.opener.start < at && at < c.closer.end;
-        let site = self
-            .view
-            .block_mode_of(c.opener.start)
-            .shown(self.name_has_view(&c.name), true);
+        let site = self.view.block_mode_of(c.opener.start).shown(BlockCan {
+            site: true,
+            ..self.can_of(&c.name)
+        });
         if !inside || site != BlockViewMode::Site {
             return;
         }
@@ -183,25 +200,27 @@ impl EditorView {
 
     /// The next state for the block with this opener.
     pub fn switch_block_view(&mut self, opener: usize) {
-        let has_view = self.opener_name(opener).is_some_and(|n| self.name_has_view(&n));
-        let site = self.view.can_draw_site();
+        let can = self
+            .opener_name(opener)
+            .map_or_else(BlockCan::default, |n| self.can_of(&n));
         let next = self.next_block_view(opener);
         let own =
             (self.place.own_modes.iter()).position(|o| self.session.mark(o.mark).is_some_and(|p| p.offset == opener));
         // what shows the same as the document's state needs no state of its own
         match own {
-            Some(i) if next.shown(has_view, site) == self.place.mode.shown(has_view, site) => {
+            Some(i) if next.shown(can) == self.place.mode.shown(can) => {
                 let o = self.place.own_modes.remove(i);
                 self.session.remove_mark(o.mark);
             }
             Some(i) => self.place.own_modes[i].mode = next,
-            None if next.shown(has_view, site) == self.place.mode.shown(has_view, site) => {}
+            None if next.shown(can) == self.place.mode.shown(can) => {}
             None => {
                 self.add_own_mode(opener, next);
             }
         }
         self.follow_block_modes();
         self.leave_block_for_picture(Some(opener));
+        self.practice_place_caret();
     }
 
     /// Hands the view where the blocks with a state of their own stand now.
@@ -284,6 +303,9 @@ impl EditorView {
     /// not in such a block, or it holds the block whole.
     pub fn field_replace(&mut self, r: Range<usize>, text: &str) -> Option<Result<(), CommandError>> {
         self.place.fields.as_ref()?;
+        if self.practice_touches(r.clone()) {
+            return Some(Err(NOT_HERE));
+        }
         let at = self.view.native_block(r.start)?;
         if r.start <= at.range.start && r.end >= at.range.end {
             return None;
@@ -321,6 +343,9 @@ impl EditorView {
         images: &dyn Images,
     ) -> Option<Result<(), CommandError>> {
         self.place.fields.as_ref()?;
+        if let Some(refused) = self.practice_refuses(id) {
+            return Some(refused);
+        }
         let p = self.session.selection().primary();
         let r = p.range();
         let at = (self.view.native_block(r.start)).or_else(|| self.view.native_block(r.end))?;
@@ -371,7 +396,7 @@ impl EditorView {
         }
     }
 
-    fn is_mutating(&self, id: &str) -> bool {
+    pub(super) fn is_mutating(&self, id: &str) -> bool {
         (self.registry.get(id)).is_some_and(|c| matches!(c.desc.effect, markise_doc::Effect::Mutates { .. }))
     }
 
@@ -537,6 +562,9 @@ impl EditorView {
 
     /// A press on the mark of the answer item at `at`. Returns whether the document changed.
     pub fn press_answer_mark(&mut self, at: usize) -> bool {
+        if self.in_practice(at) {
+            return false;
+        }
         let Some(block) = self.view.native_block(at) else {
             return false;
         };
@@ -645,6 +673,7 @@ impl EditorView {
         if self.place.fields.is_none() {
             return sel;
         }
+        let sel = self.practice_selection(sel);
         let p = sel.primary();
         if p.is_caret() {
             let virt_inside = p.focus.virt > 0

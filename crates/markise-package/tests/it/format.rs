@@ -351,3 +351,125 @@ fn an_argument_s_pattern_that_cannot_be_run_refuses_the_package_at_once() {
     let schema = serde_json::json!({"label": "G", "argument": {"pattern": "^(a+)+$"}, "fields": []});
     assert!(PackageIndex::from_files(&with("components/gallery/gallery.json", &schema.to_string())).is_ok());
 }
+
+fn with_views(views: &str) -> BTreeMap<String, Vec<u8>> {
+    with("editor/views.json", views)
+}
+
+#[test]
+fn a_view_can_be_practised_and_says_so_clearly_when_it_cannot() {
+    let fields: Vec<String> = {
+        let index = PackageIndex::from_files(&files()).unwrap();
+        let poll = index.block("poll").unwrap();
+        poll.schema
+            .fields
+            .iter()
+            .map(|f| format!("{}:{:?}", f.name, f.kind))
+            .collect()
+    };
+    let field_of = |kind: &str| -> String {
+        fields
+            .iter()
+            .find(|f| f.ends_with(kind))
+            .map(|f| f.split(':').next().unwrap().to_string())
+            .unwrap()
+    };
+    let answers = field_of("Choices");
+    let heading = fields
+        .iter()
+        .find(|f| f.ends_with("Heading"))
+        .map(|f| f.split(':').next().unwrap().to_string());
+
+    // with nothing to reveal, the answers are enough
+    let index = PackageIndex::from_files(&with_views(r#"{"poll": {"kind": "choices", "practice": {}}}"#)).unwrap();
+    assert!(
+        index
+            .block("poll")
+            .unwrap()
+            .view
+            .unwrap()
+            .practice
+            .as_ref()
+            .unwrap()
+            .reveal
+            .is_empty()
+    );
+    // no config, no practice
+    let index = PackageIndex::from_files(&with_views(r#"{"poll": {"kind": "choices"}}"#)).unwrap();
+    assert!(index.block("poll").unwrap().view.unwrap().practice.is_none());
+
+    for (views, expected) in [
+        (
+            r#"{"poll": {"kind": "media", "practice": {}}}"#.to_string(),
+            "a `media` view cannot have",
+        ),
+        (
+            r#"{"poll": {"kind": "choices", "practice": 3}}"#.to_string(),
+            "must be an object",
+        ),
+        (
+            r#"{"poll": {"kind": "choices", "practice": {"reveal": "x"}}}"#.to_string(),
+            "must be a list",
+        ),
+        (
+            r#"{"poll": {"kind": "choices", "practice": {"reveal": [1]}}}"#.to_string(),
+            "must list field names",
+        ),
+        (
+            r#"{"poll": {"kind": "choices", "practice": {"reveal": ["nope"]}}}"#.to_string(),
+            "the unknown field \"nope\"",
+        ),
+        (
+            format!(r#"{{"poll": {{"kind": "choices", "practice": {{"reveal": ["{answers}"]}}}}}}"#),
+            "the answers themselves",
+        ),
+        (
+            r#"{"poll": {"kind": "choices", "practice": {"reveal": ["nope", "nope"]}}}"#.to_string(),
+            "twice",
+        ),
+        // with no answers there has to be something to reveal
+        (
+            r#"{"tip": {"kind": "callout", "practice": {}}}"#.to_string(),
+            "nothing in `reveal`",
+        ),
+    ] {
+        let text = refusal(&with_views(&views));
+        assert!(text.contains(expected), "{views}: {text}");
+        assert!(text.contains("editor/views.json"), "{text}");
+    }
+    if let Some(heading) = heading {
+        let views = format!(r#"{{"poll": {{"kind": "choices", "practice": {{"reveal": ["{heading}"]}}}}}}"#);
+        assert!(refusal(&with_views(&views)).contains("which the outline shows"));
+    }
+}
+
+#[test]
+fn reveal_is_not_tied_to_choices() {
+    let mut f = files();
+    f.insert(
+        "components/tip/tip.json".to_string(),
+        br#"{"label": "Tip", "fields": [
+            {"name": "body", "type": "text"}, {"name": "solution", "type": "quote", "min": 0}]}"#
+            .to_vec(),
+    );
+    for kind in ["callout", "card", "choices"] {
+        f.insert(
+            "editor/views.json".to_string(),
+            format!(r#"{{"tip": {{"kind": "{kind}", "practice": {{"reveal": ["solution"]}}}}}}"#).into_bytes(),
+        );
+        let index = PackageIndex::from_files(&f).unwrap();
+        assert_eq!(
+            index
+                .block("tip")
+                .unwrap()
+                .view
+                .unwrap()
+                .practice
+                .as_ref()
+                .unwrap()
+                .reveal,
+            ["solution"],
+            "{kind}"
+        );
+    }
+}

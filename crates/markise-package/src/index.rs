@@ -100,6 +100,11 @@ impl PackageIndex {
             && let Some(map) = parse_object(VIEWS, bytes, &mut issues)
         {
             view_map = views::parse(VIEWS, map, &known, &mut issues);
+            for (name, view) in &view_map {
+                if let (Some(practice), Some(schema)) = (&view.practice, blocks.get(name)) {
+                    views::check_practice(VIEWS, name, practice, schema, &mut issues);
+                }
+            }
         }
 
         issues.into_result(|| PackageIndex {

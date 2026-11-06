@@ -23,9 +23,11 @@ use crate::text::TextShaper;
 
 mod native;
 mod paging;
+mod practice;
 mod site;
-pub use native::{BlockViewMode, NativeAt};
+pub use native::{BlockCan, BlockViewMode, NativeAt};
 pub use paging::PagingStats;
+pub use practice::PracticeShow;
 pub use site::SiteLook;
 
 /// An item to paint this frame.
@@ -542,6 +544,10 @@ impl View {
     }
 
     fn disclosure_hidden(&self, i: usize) -> bool {
+        // before the caret's say: a caret that gets there by any route reveals nothing here
+        if self.practice_hidden(i) {
+            return true;
+        }
         let focused = self.focus.as_ref().is_some_and(|(idx, _, _)| *idx == i);
         if focused {
             return false;
@@ -1338,7 +1344,7 @@ impl View {
                 }
                 let l = self.layout(i, shaper, images);
                 let h = self.height(i);
-                if y + h > 0.0 && y < viewport_h && !self.site_hidden(i) {
+                if y + h > 0.0 && y < viewport_h && !self.site_hidden(i) && !self.practice_hidden(i) {
                     let (pad, _) = self.item_pad(i);
                     out.push(Visible {
                         idx: i,

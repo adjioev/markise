@@ -280,6 +280,15 @@ impl BlockFields {
             .collect()
     }
 
+    /// The source ranges of the field of this name, ascending.
+    pub fn regions_of(&self, name: &str) -> Vec<Range<usize>> {
+        let at = self.fields.iter().position(|f| f.name == name);
+        (self.chunks.iter())
+            .filter(|c| at.is_some() && c.field == at)
+            .map(|c| c.range.clone())
+            .collect()
+    }
+
     /// Applies `edits` as one change. No edit changes nothing, and neither do edits that give
     /// the same values: the patches are empty.
     pub fn apply(&self, edits: &[FieldEdit]) -> Result<Applied, FieldsError> {

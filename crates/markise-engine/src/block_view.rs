@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
-use markise_layout::{BlockLook, BlockViews, NativeBlock, NativeKind, NativeRole, NativeView};
+use markise_layout::{
+    BlockLook, BlockViews, NativeBlock, NativeKind, NativeRole, NativeView, PracticeAnswer, PracticeParts,
+};
 use markise_md::ParseOptions;
 use markise_package::{PackageIndex, ViewKind};
 use schema_form_core::{Control, FormSpec, Selection};
@@ -165,7 +167,58 @@ impl PackageViews {
     }
 }
 
+impl PackageViews {
+    /// Whether any block of the package can be practised.
+    pub fn any_practice(&self) -> bool {
+        (self.index.block_names()).any(|n| {
+            self.index
+                .block(n)
+                .is_some_and(|e| e.view.is_some_and(|v| v.practice.is_some()))
+        })
+    }
+
+    /// What Practice needs of a block, when its view can be practised. Read for what the view holds and
+    /// no further, so that a block with no practice pays nothing.
+    fn practice_parts(&self, name: &str, fields: &BlockFields) -> Option<PracticeParts> {
+        let practice = self.index.block(name)?.view?.practice.as_ref()?;
+        let answers = (fields.slots().into_iter())
+            .filter(|s| s.kind == FieldKind::Choices)
+            .map(|s| {
+                let correct = fields.slot_is_marked(s.at);
+                let r = s.range();
+                PracticeAnswer {
+                    range: r.start as u32..r.end as u32,
+                    correct,
+                    text: s.value().into(),
+                }
+            })
+            .collect();
+        let reveal = (practice.reveal.iter())
+            .flat_map(|field| fields.regions_of(field))
+            .map(|r| r.start as u32..r.end as u32)
+            .collect();
+        Some(PracticeParts {
+            has_choices: fields.fields().iter().any(|f| f.kind == FieldKind::Choices),
+            answers,
+            reveal,
+        })
+    }
+}
+
 impl BlockViews for PackageViews {
+    fn has_practice(&self, name: &str) -> bool {
+        self.index
+            .block(name)
+            .is_some_and(|e| e.view.is_some_and(|v| v.practice.is_some()))
+    }
+
+    fn practice_hides_quotes(&self, name: &str) -> bool {
+        self.index.block(name).is_some_and(|e| {
+            let reveal = e.view.and_then(|v| v.practice.as_ref()).map_or(&[][..], |p| &p.reveal);
+            (e.schema.fields.iter()).any(|f| f.kind == markise_package::FieldKind::Quote && reveal.contains(&f.name))
+        })
+    }
+
     fn id(&self) -> u64 {
         self.id
     }
@@ -198,6 +251,7 @@ impl BlockViews for PackageViews {
             parts: (fields.field_regions().into_iter())
                 .map(|(r, kind)| (r.start as u32..r.end as u32, role_of(kind)))
                 .collect(),
+            practice: self.practice_parts(name, &fields),
         });
         let fit = fields.check(&variant.spec);
         if !fit.fits() {

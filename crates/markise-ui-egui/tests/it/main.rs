@@ -29,6 +29,7 @@ mod lifecycle;
 mod lists_e2e;
 mod menus;
 mod open_latency;
+mod practice;
 mod preferences;
 mod progressive_open;
 mod qa_sweep;

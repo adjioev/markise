@@ -52,7 +52,7 @@ pub(crate) struct Fixture {
 
 fn archive(palette: &str) -> Vec<u8> {
     let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip","poll","steps","plain","plate","sign"]}"#;
-    let files = [
+    pack(&[
         ("manifest.json", manifest),
         ("components/tip/tip.json", TIP),
         ("components/poll/poll.json", POLL),
@@ -63,9 +63,12 @@ fn archive(palette: &str) -> Vec<u8> {
         ("editor/palette.json", palette),
         ("editor/views.json", VIEWS),
         ("assets/bulb.svg", ICON),
-    ];
+    ])
+}
+
+fn pack(files: &[(&str, &str)]) -> Vec<u8> {
     let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
-    for (path, content) in files {
+    for &(path, content) in files {
         let mut header = tar::Header::new_gnu();
         header.set_size(content.len() as u64);
         header.set_mode(0o644);
@@ -81,6 +84,15 @@ impl Fixture {
     }
 
     pub(crate) fn with_palette(text: &str, palette: &str) -> Fixture {
+        Self::with_archive(text, &archive(palette))
+    }
+
+    /// A document and a package of these files.
+    pub(crate) fn with_files(text: &str, files: &[(&str, &str)]) -> Fixture {
+        Self::with_archive(text, &pack(files))
+    }
+
+    fn with_archive(text: &str, bytes: &[u8]) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(dir.path()).unwrap();
         let folder = root.join("site");
@@ -89,9 +101,8 @@ impl Fixture {
         fs::create_dir_all(&config).unwrap();
         let doc = folder.join("doc.md");
         fs::write(&doc, text).unwrap();
-        let bytes = archive(palette);
-        let sha = Sha256Hex::of(&bytes);
-        fs::write(folder.join("p.tar.gz"), &bytes).unwrap();
+        let sha = Sha256Hex::of(bytes);
+        fs::write(folder.join("p.tar.gz"), bytes).unwrap();
         fs::write(
             folder.join(markise_package::BINDING_FILE),
             format!(r#"{{"library":"sample","version":"1.0.0","source":"p.tar.gz","sha256":"{sha}"}}"#),

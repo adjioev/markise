@@ -232,6 +232,14 @@ impl BlockFields {
             .find(|s| s.range().contains(&at) || s.range().end == at)
     }
 
+    /// Whether the answer at this slot carries its mark in the source.
+    pub fn slot_is_marked(&self, at: SlotAt) -> bool {
+        let Some(super::FieldValue::Items(items)) = self.fields.get(at.field).map(|f| &f.value) else {
+            return false;
+        };
+        (items.iter()).any(|i| Some(i.id) == at.item && matches!(i.data, ItemData::Choice { correct: true, .. }))
+    }
+
     pub fn slot(&self, at: SlotAt) -> Option<Slot> {
         self.slots().into_iter().find(|s| s.at == at)
     }

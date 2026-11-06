@@ -96,7 +96,8 @@ impl DocViewer {
         // while one is dragged, the pointer passing over others offers nothing
         let hovered = (drag_opener.is_none())
             .then(|| self.hovered_block(ui, visible, surface))
-            .flatten();
+            .flatten()
+            .filter(|&opener| !self.ed.in_practice(opener));
         let model = self.ed.view.model().clone();
         let mut handle = None;
         for v in visible {

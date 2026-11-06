@@ -110,7 +110,8 @@ impl View {
             return None;
         }
         let wanted = match self.native.mode_of(c.opener.start) {
-            BlockViewMode::Native => !source.has_view(&c.name),
+            // (a block in Practice has a view; another in a document in Practice is as in Native)
+            BlockViewMode::Native | BlockViewMode::Practice => !source.has_view(&c.name),
             BlockViewMode::Site => true,
             BlockViewMode::Markdown => false,
         };
