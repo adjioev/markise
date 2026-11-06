@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use markise_doc::FormatDoc;
-use markise_layout::block::{NoImages, Prim};
+use markise_layout::block::{Band, NoImages, Prim, merged_bands};
 use markise_layout::native::accent_color;
 use markise_layout::{
     BlockLook, BlockViewMode, BlockViews, ItemKind, NativeBlock, NativeKind, NativeRole, NativeView, Paging, View,
@@ -64,6 +64,8 @@ impl BlockViews for Stand {
                 icon: Some("assets/shown.svg".into()),
                 label: "Shown label".into(),
                 single_answer: args != "many",
+                fill: true,
+                label_row: true,
             }),
             parts: role_ranges(source),
             practice: None,
@@ -410,6 +412,8 @@ fn a_label_is_one_row_whatever_the_package_wrote() {
                     icon: None,
                     label: self.0.as_str().into(),
                     single_answer: true,
+                    fill: true,
+                    label_row: true,
                 }),
                 parts: role_ranges(source),
                 practice: None,
@@ -467,6 +471,8 @@ fn a_long_name_leaves_room_for_the_warning_and_an_icon_for_the_label() {
                     icon: Some("assets/a.svg".into()),
                     label: "word ".repeat(1000).into(),
                     single_answer: true,
+                    fill: true,
+                    label_row: true,
                 }),
                 parts: role_ranges(source),
                 practice: None,
@@ -498,4 +504,298 @@ fn a_long_name_leaves_room_for_the_warning_and_an_icon_for_the_label() {
         })
         .fold(0.0, f32::max);
     assert!(right <= 700.0 - 34.0, "{right}");
+}
+
+/// A view of every block named `shown`, with the options of `editor/views.json`.
+struct Options {
+    kind: NativeKind,
+    accent: &'static str,
+    fill: bool,
+    label_row: bool,
+}
+
+impl BlockViews for Options {
+    fn id(&self) -> u64 {
+        u64::from(self.fill) + 2 * u64::from(self.label_row) + 100
+    }
+    fn has_view(&self, name: &str) -> bool {
+        name == "shown"
+    }
+    fn label_row(&self, name: &str) -> bool {
+        name != "shown" || self.label_row
+    }
+    fn look(&self, _name: &str, args: &str, source: &str) -> BlockLook {
+        let block = NativeBlock {
+            view: Arc::new(NativeView {
+                kind: self.kind,
+                accent: Some(self.accent.into()),
+                icon: None,
+                label: "Shown label".into(),
+                single_answer: true,
+                fill: self.fill,
+                label_row: self.label_row,
+            }),
+            parts: role_ranges(source),
+            practice: None,
+        };
+        if args == "unfilled" {
+            BlockLook::Unfilled {
+                reasons: vec!["Title: Required".to_string()],
+                block,
+            }
+        } else {
+            BlockLook::Native(block)
+        }
+    }
+}
+
+fn options(kind: NativeKind, accent: &'static str, fill: bool, label_row: bool) -> Arc<dyn BlockViews> {
+    Arc::new(Options {
+        kind,
+        accent,
+        fill,
+        label_row,
+    })
+}
+
+/// Everything a view paints of its own, in one item at a time: bands, then lines.
+fn chrome(views: Arc<dyn BlockViews>, theme: Theme) -> (Vec<Band>, Vec<Prim>) {
+    let mut v = testing::Shown::full(Arc::new(markise_md::parse(BLOCK))).view(theme, 700.0, 1.0);
+    v.set_block_views(Some(views));
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let (mut bands, mut prims) = (Vec::new(), Vec::new());
+    for s in v.frame(4000.0, 0.0, &mut f, &NoImages) {
+        bands.extend(s.layout.bands.iter().copied());
+        prims.extend(s.layout.prims.iter().cloned());
+    }
+    (bands, prims)
+}
+
+fn lines(prims: &[Prim]) -> usize {
+    prims.iter().filter(|p| matches!(p, Prim::Line { .. })).count()
+}
+
+fn rects_with_alpha(prims: &[Prim]) -> usize {
+    prims
+        .iter()
+        .filter(|p| matches!(p, Prim::Rect { fill, .. } if fill.a() != 255 && fill.a() != 0))
+        .count()
+}
+
+#[test]
+fn without_a_fill_a_view_is_a_thin_bar_of_its_accent_in_every_kind() {
+    for kind in [NativeKind::Callout, NativeKind::Card, NativeKind::Choices] {
+        let (bands, prims) = chrome(options(kind, "blue", false, true), Theme::light());
+        assert!(!bands.is_empty(), "{kind:?}");
+        let blue = accent_color(Some("blue"), &Theme::light());
+        for b in &bands {
+            assert_eq!(b.fill, blue, "{kind:?}: no tint");
+            assert_eq!(b.rect.width(), 2.0, "{kind:?}");
+        }
+        assert_eq!(lines(&prims), 0, "{kind:?}: no frame");
+        assert_eq!(rects_with_alpha(&prims), 0, "{kind:?}: a marked answer has no tint");
+    }
+    // what it has with a fill, as today
+    let (bands, _) = chrome(options(NativeKind::Callout, "blue", true, true), Theme::light());
+    assert!(bands.iter().any(|b| b.fill.a() < 255 && b.rect.width() > 100.0));
+    assert!(bands.iter().any(|b| b.rect.width() == 3.0));
+    let (bands, prims) = chrome(options(NativeKind::Card, "blue", true, true), Theme::light());
+    assert!(bands.is_empty());
+    assert!(lines(&prims) > 0);
+}
+
+#[test]
+fn no_accent_is_neutral_in_both_themes_with_a_thin_line() {
+    for theme in [Theme::light(), Theme::dark()] {
+        let rule = markise_layout::block::color(theme.rule);
+        let (bands, _) = chrome(options(NativeKind::Callout, "none", false, true), theme.clone());
+        assert!(bands.iter().all(|b| b.fill == rule && b.rect.width() == 2.0));
+        // a very light ground of the text's own colour, and no hue of an accent
+        let (bands, _) = chrome(options(NativeKind::Callout, "none", true, true), theme.clone());
+        let ground = bands.iter().find(|b| b.rect.width() > 100.0).unwrap().fill;
+        assert!(ground.a() <= 14, "{ground:?}");
+        // the choices' frame and a card's top edge are rule, a line wide
+        for kind in [NativeKind::Card, NativeKind::Choices] {
+            let (_, prims) = chrome(options(kind, "none", true, true), theme.clone());
+            for p in &prims {
+                if let Prim::Line { stroke, .. } = p {
+                    assert_eq!(stroke.color, rule, "{kind:?}");
+                    assert_eq!(stroke.width, 1.0, "{kind:?}");
+                }
+            }
+        }
+        assert_ne!(accent_color(Some("none"), &theme), accent_color(None, &theme));
+    }
+}
+
+#[test]
+fn no_label_row_takes_the_row_away_and_the_estimates_follow() {
+    let mut f_fonts = testing::fonts();
+    let mut f = f_fonts.with_pixels_per_point(1.0);
+    for theme in [Theme::light(), Theme::dark()] {
+        let src = format!("Before.\n\n{BLOCK}");
+        let mut with = testing::Shown::full(Arc::new(markise_md::parse(&src))).view(theme.clone(), 700.0, 1.0);
+        with.set_block_views(Some(options(NativeKind::Callout, "blue", true, true)));
+        let mut without = testing::Shown::full(Arc::new(markise_md::parse(&src))).view(theme, 700.0, 1.0);
+        without.set_block_views(Some(options(NativeKind::Callout, "blue", true, false)));
+        let opener = (0..without.model().items.len())
+            .find(|&i| without.model().items[i].kind == (ItemKind::ContainerMarker { close: false }))
+            .unwrap();
+        let (est_with, est_without) = (with.estimate(opener), without.estimate(opener));
+        assert!(est_without < est_with);
+        let real_with = with.frame(4000.0, 0.0, &mut f, &NoImages)[opener].layout.height;
+        let shown = without.frame(4000.0, 0.0, &mut f, &NoImages);
+        let real_without = shown[opener].layout.height;
+        assert!(real_without < real_with);
+        assert!(
+            (est_without - real_without).abs() < 0.01,
+            "{est_without} {real_without}"
+        );
+        assert!(
+            shown[opener].layout.card_top.is_some(),
+            "the buttons still have a place"
+        );
+    }
+    assert!(!texts_with(options(NativeKind::Callout, "blue", true, false)).contains("Shown label"));
+    assert!(texts_with(options(NativeKind::Callout, "blue", true, true)).contains("Shown label"));
+    // a warning needs its row, and its row holds no label
+    let mut v = view_of(&BLOCK.replace(":::shown", ":::shown unfilled"));
+    v.set_block_views(Some(options(NativeKind::Callout, "blue", true, false)));
+    let all = texts(&mut v).join("\n");
+    assert!(all.contains("Title: Required") && !all.contains("Shown label"), "{all}");
+}
+
+fn texts_with(views: Arc<dyn BlockViews>) -> String {
+    let mut v = view_of(BLOCK);
+    v.set_block_views(Some(views));
+    texts(&mut v).join("\n")
+}
+
+#[test]
+fn a_page_estimate_follows_a_view_with_no_label_row() {
+    let block = ":::shown\n\n### A title\n\nBody.\n\n:::\n\n";
+    let src = block.repeat(600);
+    let doc: Arc<dyn FormatDoc> = Arc::new(markise_md::parse(&src));
+    let model = Arc::new(markise_layout::DocModel::build_with(
+        &*doc,
+        None,
+        Paging::Paged { tops: 32 },
+    ));
+    let page = (1..model.items.len())
+        .find(|&i| model.is_page(i))
+        .expect("a placeholder");
+    let estimate = |label_row| {
+        let mut v = View::new(doc.clone(), model.clone(), Theme::light(), 700.0, 1.0);
+        v.set_block_views(Some(options(NativeKind::Callout, "blue", true, label_row)));
+        v.estimate(page)
+    };
+    let in_page = model.page_items(&*doc, page).len() as f32 / 4.0;
+    // the row, as laid out
+    let row = {
+        let mut fonts = testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        let mut height = |label_row| {
+            let mut v = view_of(BLOCK);
+            v.set_block_views(Some(options(NativeKind::Callout, "blue", true, label_row)));
+            v.frame(4000.0, 0.0, &mut f, &NoImages)[0].layout.height
+        };
+        height(true) - height(false)
+    };
+    let less = estimate(true) - estimate(false);
+    assert!(
+        (less - in_page * row).abs() < 1.0,
+        "{less} less for {in_page} blocks of {row}"
+    );
+
+    // and the page's estimate is what its items lay out to, a block at a time
+    let full = testing::Shown::full(doc.clone());
+    let mut items = View::new(doc.clone(), full.model.clone(), Theme::light(), 700.0, 1.0);
+    items.set_block_views(Some(options(NativeKind::Callout, "blue", true, false)));
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let shown = items.frame(1200.0, 0.0, &mut f, &NoImages);
+    let opener = |at: usize| full.model.items[shown[at].idx].kind == (ItemKind::ContainerMarker { close: false });
+    let first = (0..shown.len()).find(|&i| opener(i)).unwrap();
+    let second = (first + 1..shown.len()).find(|&i| opener(i)).unwrap();
+    let laid: f32 = shown[second..second + 4].iter().map(|s| s.layout.height).sum();
+    assert!(
+        (estimate(false) / in_page - laid).abs() < 8.0,
+        "{} per block, {laid} laid out",
+        estimate(false) / in_page
+    );
+}
+
+#[test]
+fn a_blocks_bands_are_whole_wherever_its_items_are_moved_to_a_pixel() {
+    let (bands, prims) = chrome(options(NativeKind::Callout, "green", true, true), Theme::light());
+    assert_eq!(rects_with_alpha(&prims), 1, "only a marked answer's row: {prims:?}");
+    let items = bands.len() / 2;
+    assert!(items >= 4, "{items}");
+    // each item's part, with heights no pixel divides, tops rounded on their own as a host does
+    let mut parts = Vec::new();
+    let mut y = 0.0_f32;
+    for pair in bands.chunks(2) {
+        let height = 17.3;
+        let mut own: Vec<Band> = pair.to_vec();
+        for b in &mut own {
+            b.rect = egui_rect(b.rect.min.x, b.rect.max.x, 0.0, height);
+        }
+        parts.push((epaint::pos2(0.0, y.round()), own));
+        y += height;
+    }
+    let bottom = parts.last().unwrap().0.y + 17.3;
+    let runs = merged_bands(parts.iter().map(|(o, b)| (*o, b.as_slice())));
+    assert_eq!(runs.len(), 2, "a ground and a bar: {runs:?}");
+    for (r, _) in &runs {
+        assert_eq!((r.min.y, r.max.y), (0.0, bottom));
+    }
+    assert!(runs[0].1.a() < 255, "the ground first, below the bar");
+}
+
+fn egui_rect(l: f32, r: f32, t: f32, b: f32) -> epaint::Rect {
+    epaint::Rect::from_min_max(epaint::pos2(l, t), epaint::pos2(r, b))
+}
+
+#[test]
+fn another_block_is_another_band_and_so_is_what_a_gap_of_items_lets_through() {
+    let band = |opens| Band {
+        rect: egui_rect(0.0, 100.0, 0.0, 10.0),
+        fill: epaint::Color32::from_rgba_unmultiplied(0, 128, 0, 26),
+        opens,
+    };
+    let at = |y| epaint::pos2(0.0, y);
+    // two blocks one after the other: an opener starts anew
+    let (a, b, c) = ([band(true)], [band(false)], [band(true)]);
+    let runs = merged_bands([(at(0.0), &a[..]), (at(10.0), &b[..]), (at(20.0), &c[..])]);
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].0.max.y, 20.0);
+    // a nested block's items hold none of the outer one's: it does not paint over them
+    let none: [Band; 0] = [];
+    let runs = merged_bands([(at(0.0), &a[..]), (at(10.0), &none[..]), (at(20.0), &b[..])]);
+    assert_eq!(runs.len(), 2);
+}
+
+#[test]
+fn an_opener_with_no_label_row_stays_while_its_controls_are_in_view() {
+    let src = format!("Before.\n\n{BLOCK}\n{}", "After.\n\n".repeat(100));
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut first_at = |label_row: bool, below: f64| {
+        let mut v = testing::Shown::full(Arc::new(markise_md::parse(&src))).view(Theme::light(), 700.0, 1.0);
+        v.set_block_views(Some(options(NativeKind::Callout, "blue", true, label_row)));
+        v.frame(400.0, 0.0, &mut f, &NoImages);
+        let title = item_of(&v, src.find("The title").unwrap());
+        let y = v.item_y(title);
+        v.scroll_to_y(y + below);
+        let shown = v.frame(400.0, 0.0, &mut f, &NoImages);
+        (shown[0].idx, shown[0].y, title)
+    };
+    // its height is gone from the viewport, and what stands on it is not
+    let (first, y, title) = first_at(false, 2.0);
+    assert_eq!(first, title - 1, "the opener");
+    assert!(y < 0.0, "{y}");
+    // past them, and with a row of its own, nothing extra
+    assert!(first_at(false, 40.0).0 >= title);
+    assert_eq!(first_at(true, 2.0).0, title);
 }

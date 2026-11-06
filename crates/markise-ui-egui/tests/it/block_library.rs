@@ -986,12 +986,11 @@ mod deletes {
         let d = doc();
         let f = Fixture::with_palette(&d, PALETTE);
         let mut h = f.ready();
-        assert!(
-            h.query_by_label("Delete Block: tip").is_none(),
-            "quiet until the block is under the pointer"
-        );
+        // there for the keyboard, and not drawn until the block is under the pointer
+        assert!(!crate::quiet_views::drawn(&mut h, "Delete Block: tip"));
         let r = rect_of(&h, "Hello");
         hover(&mut h, r.center());
+        assert!(crate::quiet_views::drawn(&mut h, "Delete Block: tip"));
         let bin = h.get_by_label("Delete Block: tip").rect();
         let pencil = h.get_by_label("Edit Block: tip").rect();
         assert_eq!(bin.top(), pencil.top());

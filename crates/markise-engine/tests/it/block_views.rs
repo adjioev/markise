@@ -89,6 +89,14 @@ fn a_fitting_block_has_its_view_and_its_parts() {
 }
 
 #[test]
+fn a_view_without_the_keys_is_as_it_was() {
+    let b = native(views().look("poll", "", POLL));
+    assert!(b.view.fill && b.view.label_row);
+    assert!(views().label_row("poll"));
+    assert!(views().label_row("no such block"), "nothing says otherwise");
+}
+
+#[test]
 fn a_variant_says_how_answers_are_marked_and_how_it_is_called() {
     let text = POLL.replace(":::poll", ":::poll many");
     let b = native(views().look("poll", "many", &text));

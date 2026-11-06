@@ -97,6 +97,8 @@ pub struct PageStats {
     /// Headings per level, per name of the block they are directly in (ADR 0021: the estimate of
     /// a page depends on which names show natively).
     pub card_heads: Vec<(Box<str>, [u32; 6])>,
+    /// Openers per name of their block (ADR 0021: a view can have no label row).
+    pub card_names: Vec<(Box<str>, u32)>,
     /// Closers and quote paragraphs per name of the block they are directly in (ADR 0024: Practice
     /// adds a row to one and can hide the other, and the estimate of a page has to know without
     /// reading its blocks).
@@ -186,6 +188,14 @@ impl PageStats {
                         heads[li] = 1;
                         s.card_heads.push((c.name, heads));
                     }
+                }
+            }
+            if it.kind == (ItemKind::ContainerMarker { close: false })
+                && let Some(c) = doc.named_containers_at(it.origin).pop()
+            {
+                match s.card_names.iter_mut().find(|(n, _)| *n == c.name) {
+                    Some((_, n)) => *n += 1,
+                    None => s.card_names.push((c.name, 1)),
                 }
             }
             let closes = it.kind == (ItemKind::ContainerMarker { close: true });

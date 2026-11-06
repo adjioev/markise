@@ -35,6 +35,7 @@ mod practice;
 mod preferences;
 mod progressive_open;
 mod qa_sweep;
+mod quiet_views;
 mod review;
 mod safety;
 mod select_all;
