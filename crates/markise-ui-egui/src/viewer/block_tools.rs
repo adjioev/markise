@@ -279,7 +279,7 @@ impl DocViewer {
     /// A block's controls show when the pointer is on the block, it holds the caret, or one of them has
     /// the keyboard: all are there for the keyboard and a screen reader at all times, and take up no
     /// room whether they show or not.
-    fn block_controls_show(&self, ui: &Ui, opener: usize, hovered: Option<usize>) -> bool {
+    pub(super) fn block_controls_show(&self, ui: &Ui, opener: usize, hovered: Option<usize>) -> bool {
         let at = self.ed.session.selection().primary().focus.offset;
         let caret = self.ed.session.doc().named_containers_at(at).pop();
         hovered == Some(opener)

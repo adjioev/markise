@@ -185,7 +185,7 @@ impl View {
         if !(m.opener.start..=m.closer.start).contains(&start)
             || self.sections.held.contains(&m.opener.start)
             // Read shows no card of what it has a plaque for, whatever the block's state in Edit
-            || (self.native.mode_of(m.opener.start) == BlockViewMode::Markdown && !self.native.practice.read())
+            || (self.block_mode_of(m.opener.start) == BlockViewMode::Markdown && !self.native.practice.read())
         {
             return Role::Plain;
         }
