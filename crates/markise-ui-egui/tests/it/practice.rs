@@ -678,3 +678,78 @@ fn replacing_the_document_ends_all_of_it() {
     common::run(&mut h);
     assert!(h.state_mut().viewer().unwrap().ed.practice_show(opener).is_none());
 }
+
+// ---- the document as a whole
+
+fn score_label(h: &H) -> Option<String> {
+    (h.query_all(egui_kittest::kittest::by()))
+        .filter_map(|n| n.accesskit_node().label().or(n.accesskit_node().value()))
+        .find(|l| {
+            let w: Vec<&str> = l.split(' ').collect();
+            w.len() == 3 && w[1] == "of" && w[0].parse::<u32>().is_ok() && w[2].parse::<u32>().is_ok()
+        })
+}
+
+#[test]
+fn the_score_counts_the_blocks_checked_and_reset_all_starts_over() {
+    let q = |n: u32| {
+        format!(":::question\n\nAsked {n}?\n\n- [ ] No {n} {{#a1}}\n- [x] Yes {n} {{#a2}}\n\n> Told {n}.\n\n:::\n\n")
+    };
+    let doc = format!("{}{}{}:::exercise\n\nWork.\n\n> Worked.\n\n:::\n", q(1), q(2), q(3));
+    let (f, mut h) = practising(&doc);
+    assert_eq!(score_label(&h), None, "nothing yet");
+    assert!(h.query_by_label("Reset All").is_none());
+    press(&mut h, "Yes 1");
+    assert_eq!(score_label(&h), None, "selected, not checked");
+    assert!(h.query_by_label("Reset All").is_some());
+    let check = |h: &mut H| {
+        h.get_all_by_label("Check")
+            .find(|b| !b.accesskit_node().is_disabled())
+            .unwrap()
+            .click();
+        common::run(h);
+    };
+    check(&mut h);
+    assert_eq!(score_label(&h).as_deref(), Some("1 of 1"));
+    press(&mut h, "No 2");
+    check(&mut h);
+    assert_eq!(score_label(&h).as_deref(), Some("1 of 2"));
+    // a block with no answers counts for nothing
+    h.get_by_label("Show answer").click();
+    common::run(&mut h);
+    assert_eq!(score_label(&h).as_deref(), Some("1 of 2"));
+    let before = h.state_mut().viewer().unwrap().ed.view.total_height();
+    h.get_by_label("Reset All").click();
+    common::run(&mut h);
+    assert_eq!(score_label(&h), None);
+    assert!(h.query_by_label("Reset All").is_none());
+    let s = shown(&mut h);
+    for telling in ["Told 1", "Told 2", "Worked"] {
+        assert!(!s.contains(telling), "{telling}: {s}");
+    }
+    assert!(h.state_mut().viewer().unwrap().ed.view.total_height() < before);
+    untouched(&mut h, &f, &doc);
+}
+
+#[test]
+fn the_example_package_can_be_practised_through_the_real_path() {
+    let f = Fixture::example();
+    let mut h = f.ready();
+    let source = text(&h);
+    assert!(shown(&mut h).contains("Yeast feeds") || source.contains("Yeast feeds"));
+    command(&mut h, "view.practiceAll");
+    h.state_mut().viewer().unwrap().ed.view.scroll_to_y(f64::MAX);
+    common::run(&mut h);
+    let s = shown(&mut h);
+    assert!(s.contains("What makes the dough rise?"), "{s}");
+    assert!(!s.contains("Yeast feeds"), "{s}");
+    press(&mut h, "The salt");
+    h.get_by_label("Check").click();
+    common::run(&mut h);
+    h.state_mut().viewer().unwrap().ed.view.scroll_to_y(f64::MAX);
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("Yeast feeds"));
+    assert_eq!(score_label(&h).as_deref(), Some("0 of 1"));
+    assert_eq!(text(&h), source);
+    assert!(!h.state_mut().viewer().unwrap().ed.session.is_dirty());
+}

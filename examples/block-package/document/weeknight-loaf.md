@@ -48,3 +48,15 @@ Tap the bottom of the loaf. It should sound hollow.
 Let the tin cool before you wash it. Cold water can warp hot metal.
 
 :::
+
+:::question
+
+What makes the dough rise?
+
+- [ ] The salt {#a1}
+- [x] The yeast {#a2}
+- [ ] The warm tin {#a3}
+
+> Yeast feeds on the flour and gives off gas, and the dough holds it.
+
+:::

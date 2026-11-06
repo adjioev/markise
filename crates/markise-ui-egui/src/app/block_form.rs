@@ -162,6 +162,23 @@ impl MarkiseApp {
         true
     }
 
+    /// The status bar's item: how the blocks checked so far went, and Reset All (ADR 0024).
+    pub(super) fn practice_status_item(&mut self, ui: &mut egui::Ui) {
+        let Some(d) = &mut self.doc else { return };
+        if !d.viewer.ed.practice_started() {
+            return;
+        }
+        let (right, all) = d.viewer.ed.practice_score();
+        if all > 0 {
+            let words = format!("{right} of {all}");
+            ui.weak(words).on_hover_text(format!("{right} right of {all} checked"));
+        }
+        if ui.small_button("Reset All").clicked() {
+            d.viewer.ed.practice_reset_all();
+            ui.ctx().request_repaint();
+        }
+    }
+
     /// Keeps how this document shows its blocks, for the session (ADR 0021).
     pub(super) fn remember_block_views(&mut self) {
         if let Some(d) = &self.doc

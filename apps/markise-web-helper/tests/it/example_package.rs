@@ -154,7 +154,7 @@ fn the_archive_holds_the_folder_and_the_same_files_give_the_same_archive() {
     assert_eq!(a.id.library, "recipe-site");
     let files = read_archive(&a.bytes).unwrap();
     assert!(files.contains_key("components/timing/timing.js"));
-    assert_eq!(PackageIndex::from_files(&files).unwrap().block_count(), 3);
+    assert_eq!(PackageIndex::from_files(&files).unwrap().block_count(), 4);
 }
 
 #[test]
@@ -162,11 +162,20 @@ fn every_block_of_the_sample_document_fits_and_shows_as_the_readme_says() {
     let site = recipes();
     let blocks = site.blocks();
     let names: Vec<&str> = blocks.iter().map(|b| b.0.as_str()).collect();
-    assert_eq!(names, ["ingredients", "timing", "tip", "tip"]);
+    assert_eq!(names, ["ingredients", "timing", "tip", "tip", "question"]);
+    // its Practice comes through the real path: answers and what hides, and nothing to run
+    let question = &blocks[4];
+    let BlockLook::Native(look) = site.views.look(&question.0, &question.1, &question.2) else {
+        panic!("the question fits");
+    };
+    let practice = look.practice.expect("the package offers a practice");
+    assert!(practice.is_ready() && practice.has_choices);
+    assert_eq!(practice.answers.iter().filter(|a| a.correct).count(), 1);
+    assert_eq!(practice.reveal.len(), 1);
     for block in &blocks {
         let look = site.views.look(&block.0, &block.1, &block.2);
         match (block.0.as_str(), &look) {
-            ("tip" | "ingredients", BlockLook::Native(_)) | ("timing", BlockLook::Generic) => {}
+            ("tip" | "ingredients" | "question", BlockLook::Native(_)) | ("timing", BlockLook::Generic) => {}
             _ => panic!("{}: {look:?}", block.0),
         }
     }
@@ -177,7 +186,7 @@ fn every_block_of_the_sample_document_fits_and_shows_as_the_readme_says() {
 fn every_preset_of_the_example_is_one_block_of_its_name_that_fits() {
     let site = recipes();
     let presets = site.package.index.presets();
-    assert_eq!(presets.len(), 4);
+    assert_eq!(presets.len(), 5);
     for preset in presets {
         let doc = Document::parse(&preset.markdown, ParseOptions::default());
         let found = doc.directives();
@@ -248,7 +257,7 @@ fn an_archive_made_as_the_guide_says_is_taken() {
         .expect("tar");
     assert!(done.success());
     let files = read_archive(&fs::read(&archive).unwrap()).unwrap();
-    assert_eq!(PackageIndex::from_files(&files).unwrap().block_count(), 3);
+    assert_eq!(PackageIndex::from_files(&files).unwrap().block_count(), 4);
 }
 
 #[cfg(target_os = "macos")]
