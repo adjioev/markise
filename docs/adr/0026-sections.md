@@ -148,6 +148,22 @@ On a page with sections Horizontal Line writes `***`, as it would start a sectio
 rule_stars`, set while sections are on). A typed `---` and Enter does make a boundary, which is correct, and
 Backspace at the start of what follows takes it, as for any rule, with an undo step.
 
+### Starting one
+
+`---` is no block, so ADR 0019's rule that a preset opens the block it names stays, and a new section is no preset: the library has one item of another kind
+(`LibraryItem::Section`), first and in no group, while the document's dialect has sections. It needs no package, as sections do not. What it says comes from
+`editor/sections.json`, optional and validated like the package's other files: `label`, default `Section`, `description`, `keywords`, `icon`, and `fields`, the keys the form asks for, with
+values to choose from if any. A site may call a section what it likes, and Markise does not know what.
+
+Choosing the item opens a modal form. Nothing is written before Save. An edit, another document or Read closes it with nothing written. `EditorView::insert_section` writes, at root level by the rule that places a
+block (`line_for_block`), with a blank line each side by `separated`, one undo step named Insert Section, the caret at the end of the title, before its hidden id:
+
+- **A boundary above it**, if the section it lands in has anything before that place. A boundary with nothing above it would be an empty section, which a site refuses, and on the first line of a
+  file it can be front matter. Then the heading goes with no boundary, and if something other than a boundary follows, a boundary after it keeps that a section of its own.
+- **Refused**, nothing changed: the heading has to stand as a heading with its id, the number of sections has to be what was meant and every block has to pair as before. An unclosed fence that takes what is put after it is the case, and
+  a lone first-line `---` that a second one would turn into front matter.
+- A title is one line. It is Markdown as any heading's text is. A trailing `{#x}` typed in it stays text, since the id written after it is the last.
+
 ## Consequences
 
 - The bytes of a file do not depend on any of this: the index only reads.

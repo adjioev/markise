@@ -51,7 +51,7 @@ what the package offers. Type to narrow the list, use the arrow keys and <kbd>Re
 choose, <kbd>Esc</kbd> to close.
 
 `/` opens the library only on an empty line outside any block, list or quote, and only when the
-package offers something. Anywhere else, and in Source Code Mode, it is a slash. To type a line
+package offers something or the document [has sections](#sections). Anywhere else, and in Source Code Mode, it is a slash. To type a line
 that starts with a slash, press <kbd>/</kbd> twice, or type the text and press <kbd>Return</kbd>
 when nothing matches.
 
@@ -142,6 +142,23 @@ Some sites divide a page into sections, each a run of text and blocks. A package
 so, or a document with `authoring: blocks-v3` in its front matter, has them on: a line that is exactly
 `---`, at the document's level, starts a section. Markise shows it as a quiet divider with the
 section's name, and the outline and status bar follow. What a section means is the site's business.
+
+### Start a section
+
+The block library (<kbd>/</kbd> on an empty line, or **Insert Block…**) has an item for it, first in the list and shown only while the document has
+sections. It says `Section`, or whatever the package calls one. A document with `authoring: blocks-v3` of its own needs no package for this.
+
+Choosing it opens a small form: a title, and metadata only if the site declares some. **Save** (<kbd>Return</kbd>) writes it after what the caret is in, at the
+document's level, never inside a block or a list, as one undo step, and puts the caret at the end of the title. **Cancel** (<kbd>Esc</kbd>) writes nothing.
+
+```text
+---
+
+## Title {#id}
+```
+
+With nothing before it, at the top of the document or in a section that is still empty, no `---` is written above it, as that would make a section with nothing in
+it. If something follows, the `---` goes after the title instead, and what follows stays a section of its own.
 
 ## Images
 

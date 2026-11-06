@@ -394,7 +394,7 @@ impl MarkiseApp {
         let Some(doc) = self.doc.as_ref().map(|d| d.id) else {
             return;
         };
-        if self.is_asking() || self.insert_table.is_some() {
+        if self.is_asking() || self.insert_table.is_some() || self.section_form.is_some() {
             return;
         }
         let (content, size) = match target {

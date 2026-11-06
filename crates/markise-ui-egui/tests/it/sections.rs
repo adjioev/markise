@@ -504,3 +504,189 @@ fn a_first_part_says_more_is_to_come_and_the_whole_document_completes_it() {
     assert!(!name.ends_with('…'), "{name}");
     assert_eq!(text(&h), doc);
 }
+
+/// A new section from the library (ADR 0026).
+mod inserting {
+    use egui::{Event, Key};
+    use markise_doc::{DocPos, Selection};
+    use markise_ui_egui::menu::MenuAction;
+
+    use super::*;
+    use crate::block_library::frames;
+
+    const WORDS: &str = r#"{"format":1,"label":{"en":"Part","fr":"Partie"},"description":"A part of the page","keywords":"chapter",
+        "fields":[{"key":"style","label":"Style","values":[{"value":"wide","label":"Wide"},{"value":"tall"}]},{"key":"kind"}]}"#;
+
+    fn type_text(h: &mut H, t: &str) {
+        h.event(Event::Text(t.to_string()));
+        frames(h);
+    }
+
+    fn press(h: &mut H, key: Key) {
+        h.key_press(key);
+        frames(h);
+    }
+
+    /// The caret on the empty line after what ends at `end`.
+    fn free_line(h: &mut H, end: usize) {
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.set_selection(Selection::caret_at(DocPos::with_virt(end, 1)));
+        v.ed.refresh_focus();
+        v.request_refocus();
+        common::run(h);
+    }
+
+    fn with_words(body: &str) -> Fixture {
+        let mut files = FILES_ON.to_vec();
+        files.push(("editor/sections.json", WORDS));
+        Fixture::with_package(body, &files)
+    }
+
+    #[test]
+    fn with_no_package_the_item_says_section_and_save_inserts_one_undo_step() {
+        let doc = "---\nauthoring: blocks-v3\n---\n\nOne.\n\nTwo.\n";
+        let p = plain(doc);
+        let mut h = opened(&p);
+        free_line(&mut h, doc.find("\n\nTwo").unwrap());
+        type_text(&mut h, "/");
+        assert_eq!(h.state().block_library().unwrap().titles(), ["Section"]);
+        press(&mut h, Key::Enter);
+        assert!(h.state().block_library().is_none());
+        assert_eq!(h.state().section_form().unwrap().heading(), "Section");
+        assert!(h.state().section_form().unwrap().keys().is_empty());
+        assert_eq!(text(&h), doc, "nothing is written before Save");
+        type_text(&mut h, "New one");
+        assert!(h.state().section_form().unwrap().can_save());
+        press(&mut h, Key::Enter);
+        assert!(h.state().section_form().is_none());
+        let t = text(&h);
+        assert!(t.contains("One.\n\n---\n\n## New one {#"), "{t}");
+        assert!(t.ends_with("}\n\nTwo.\n"), "{t}");
+        assert!(shown(&mut h).contains("New one"));
+        h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+        common::run(&mut h);
+        assert_eq!(text(&h), doc);
+    }
+
+    #[test]
+    fn cancel_inserts_nothing_and_empty_cannot_be_saved() {
+        let doc = "---\nauthoring: blocks-v3\n---\n\nOne.\n";
+        let p = plain(doc);
+        let mut h = opened(&p);
+        free_line(&mut h, doc.len() - 1);
+        assert!(
+            h.state()
+                .menu_model()
+                .item("block.insertFromLibrary")
+                .is_some_and(|i| i.enabled)
+        );
+        type_text(&mut h, "/");
+        press(&mut h, Key::Enter);
+        press(&mut h, Key::Enter);
+        assert!(h.state().section_form().is_some(), "no title: Return saves nothing");
+        press(&mut h, Key::Escape);
+        assert!(h.state().section_form().is_none());
+        assert_eq!(text(&h), doc);
+        assert!(!h.state().is_dirty());
+    }
+
+    #[test]
+    fn the_package_gives_its_word_and_fields_and_metadata_goes_first() {
+        let doc = "One.\n\nTwo.\n";
+        let f = with_words(doc);
+        let mut h = f.ready();
+        free_line(&mut h, doc.len() - 1);
+        type_text(&mut h, "/");
+        let open = h.state().block_library().unwrap();
+        assert_eq!(open.titles(), ["Part"], "first, in the package's word");
+        type_text(&mut h, "chapter");
+        assert_eq!(h.state().block_library().unwrap().titles(), ["Part"], "by its keywords");
+        press(&mut h, Key::Enter);
+        let form = h.state().section_form().unwrap();
+        assert_eq!(form.heading(), "Part");
+        assert_eq!(form.keys(), ["style", "kind"]);
+        h.state_mut().set_section_form_title("Title");
+        h.state_mut().set_section_form_value("style", "wide");
+        common::run(&mut h);
+        let ctx = h.ctx.clone();
+        assert!(h.state_mut().save_section_form(&ctx));
+        common::run(&mut h);
+        let t = text(&h);
+        assert!(
+            t.starts_with("One.\n\nTwo.\n\n---\n\n:::section-metadata\n\nstyle: wide\n\n:::\n\n## Title {#"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn the_command_in_source_mode_goes_by_the_pane_s_caret() {
+        let doc = "---\nauthoring: blocks-v3\n---\n\nOne.\n\nTwo.\n";
+        let p = plain(doc);
+        let mut h = opened(&p);
+        free_line(&mut h, doc.find("\n\nTwo").unwrap());
+        h.state_mut().set_view_mode(ViewMode::Source);
+        frames(&mut h);
+        assert!(h.state().source_caret().is_some());
+        let ctx = h.ctx.clone();
+        assert!(
+            h.state_mut()
+                .menu_action(&ctx, &MenuAction::Command("block.insertFromLibrary"))
+        );
+        frames(&mut h);
+        assert_eq!(h.state().block_library().unwrap().titles(), ["Section"]);
+        press(&mut h, Key::Enter);
+        type_text(&mut h, "Mid");
+        press(&mut h, Key::Enter);
+        let t = text(&h);
+        assert!(t.contains("One.\n\n---\n\n## Mid {#"), "{t}");
+        assert!(t.ends_with("}\n\nTwo.\n"), "{t}");
+    }
+
+    #[test]
+    fn only_a_document_with_sections_shows_it() {
+        for doc in ["One.\n", "---\nauthoring: blocks-v2\n---\n\nOne.\n"] {
+            let p = plain(doc);
+            let mut h = opened(&p);
+            free_line(&mut h, doc.len() - 1);
+            type_text(&mut h, "/");
+            assert!(h.state().block_library().is_none(), "{doc:?}");
+            assert!(
+                text(&h).contains("One.\n\n/"),
+                "a slash as ever: {doc:?}: {:?}",
+                text(&h)
+            );
+            assert!(
+                h.state().menu_model().item("block.insertFromLibrary").is_none(),
+                "{doc:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_has_none_of_it() {
+        let doc = "---\nauthoring: blocks-v3\n---\n\nOne.\n";
+        let p = plain(doc);
+        let mut h = opened(&p);
+        h.state_mut().viewer().unwrap().ed.set_read_mode(true);
+        common::run(&mut h);
+        free_line(&mut h, doc.len() - 1);
+        type_text(&mut h, "/");
+        assert!(h.state().block_library().is_none());
+        assert!(
+            !h.state()
+                .menu_model()
+                .item("block.insertFromLibrary")
+                .is_some_and(|i| i.enabled)
+        );
+        assert_eq!(text(&h), doc);
+    }
+
+    #[test]
+    fn a_broken_declaration_refuses_the_package_as_any_broken_file_does() {
+        let mut files = FILES_ON.to_vec();
+        files.push(("editor/sections.json", r#"{"fields":[{"key":"id"}]}"#));
+        let f = Fixture::with_package("One.\n", &files);
+        let h = f.opened();
+        assert!(h.state().block_package().is_none());
+    }
+}

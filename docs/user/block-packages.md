@@ -203,6 +203,39 @@ A preset can also say how answers are chosen, with buttons: `widget: "icon-choic
 here is the path of a file in the package. An answer's value is its `label`, the text it has in the
 Markdown.
 
+### sections.json
+
+`editor/sections.json` is optional, and says what your site makes of [sections](blocks.md#sections). Without it a document
+with sections still offers a new one in the block library, called `Section`.
+
+```json
+{
+  "format": 1,
+  "label": { "en": "Part", "fr": "Partie" },
+  "description": { "en": "A new part of the page" },
+  "keywords": "chapter",
+  "icon": "flag",
+  "fields": [
+    { "key": "style", "label": "Look",
+      "values": [ { "value": "wide", "label": "Wide" }, { "value": "plain" } ] },
+    { "key": "kind", "label": "Kind" }
+  ]
+}
+```
+
+| Key | Value |
+|---|---|
+| `format` | optional, `1` |
+| `label` | text, what the library and the form call a section. Default `Section` |
+| `description`, `keywords` | as for a block in the palette |
+| `icon` | a name, as a block's |
+| `fields` | the metadata the form for a new section asks for, in this order, at most 19. None: it asks for none |
+
+A field has a `key` (`[a-z][a-z0-9-]*`, not `id`, as the form has its own field for that), an optional `label`, and optional `values`,
+each with a `value` of one line up to 200 characters and an optional `label`. With `values` the form offers those; without, any one line.
+A field left empty is not written. If no field is filled, the section has no metadata block. This file says nothing about what a value
+means, and Markise checks a section's metadata in a file against it nowhere: it is only what the form offers.
+
 ### Views
 
 `editor/views.json` maps a block to a `kind`, with optional `accent`, `icon`, `fill` and `label`. A

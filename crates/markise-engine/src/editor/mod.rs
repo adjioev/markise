@@ -15,6 +15,7 @@ mod image_edit;
 mod inplace;
 pub mod keymap;
 mod practice;
+mod section_edit;
 pub use practice::READ_ONLY_REASON;
 pub mod source;
 pub mod surface;
@@ -33,6 +34,7 @@ pub use block_move::MoveRefused;
 pub use block_place::InsertRefused;
 pub use history::{History, HistoryLimits, StateId, Step, Transaction, TxKind, TypingDir};
 pub use image_edit::{ImageParts, ImageRefused, image_dest_for};
+pub use section_edit::{NewSection, one_line};
 pub use source::{SourceCaret, SourcePane};
 pub use surface::{CaretGeometry, Continued, EditorView, ViewCaret};
 

@@ -36,7 +36,7 @@ impl fmt::Display for InsertRefused {
 
 /// Where the next line ending after `at` starts, or the end of the text. A line ends in LF, CRLF or a
 /// lone CR, any of them in one file.
-fn line_end(text: &str, at: usize) -> usize {
+pub(super) fn line_end(text: &str, at: usize) -> usize {
     text.as_bytes()[at..]
         .iter()
         .position(|b| matches!(b, b'\r' | b'\n'))
@@ -91,7 +91,7 @@ pub(super) fn blank_before(text: &str, start: usize) -> bool {
 
 /// The line a block goes to for the caret at `at`: the line itself when it is blank, in no block and
 /// nothing else; otherwise the line after the outermost block or the top-level block holding it.
-fn line_for_block(doc: &dyn FormatDoc, at: DocPos) -> usize {
+pub(super) fn line_for_block(doc: &dyn FormatDoc, at: DocPos) -> usize {
     let text = doc.text();
     // the virtual paragraph after a closer shares its end, and is outside the block
     let chain = doc.named_containers_at(at.offset);
