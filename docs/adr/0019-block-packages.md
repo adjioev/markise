@@ -61,8 +61,9 @@ an empty string is no translation.
 (`FormatDoc::language`, `block_page::document_language`) that also gives a block's page its `lang`
 (ADR 0023). A value that is not a tag counts as none. With none it is English; the format has no
 package default and the OS language is not read. A package's text follows it on every surface: the
-native view's label, the form's title, variant and field labels, the block library's groups, labels
-and descriptions, the name of a dragged block, and a field's label inside a reason. Search in the
+native view's label, the form's title, variant and field labels, the argument's label and help, the
+block library's groups, labels and descriptions, the name of a dragged block, and a field's or the
+argument's label inside a reason. Search in the
 library still goes through every language (ADR 0022).
 
 What stays English is the app's own text: buttons (Save, Cancel, + Add), notes and banners, a reason's

@@ -7,14 +7,16 @@
 
 mod choice;
 mod parse;
+mod pattern;
 mod validate;
 
 pub use choice::{ChoiceOption, ChoiceShape, selected_options, toggle_option, unknown_rows, write_selected};
+pub use pattern::{MAX_MATCHED_BYTES, MAX_PATTERN_BYTES, Pattern};
 pub use validate::{ErrorKind, FieldError};
 
 /// The newest version of the subset and of the hints format this crate reads. Version 1 hints
-/// still mean what they meant: `enum` and choice buttons need version 2.
-pub const SPEC_VERSION: u64 = 2;
+/// still mean what they meant: `enum` and choice buttons need version 2, `pattern` version 3.
+pub const SPEC_VERSION: u64 = 3;
 
 /// How many answers can be marked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +89,8 @@ pub struct ValueRule {
     pub choices: Option<CorrectRule>,
     /// `enum`: the only strings allowed.
     pub one_of: Option<Vec<String>>,
+    /// `pattern`: what a string must look like.
+    pub pattern: Option<Pattern>,
     /// The options of choice buttons over an array.
     pub options: Option<OptionsRule>,
 }

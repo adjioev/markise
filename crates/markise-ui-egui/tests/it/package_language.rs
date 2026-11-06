@@ -16,8 +16,7 @@ use crate::common;
 
 type H = egui_kittest::Harness<'static, MarkiseApp>;
 
-const MANIFEST: &str =
-    r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip","only","memo"]}"#;
+const MANIFEST: &str = r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip","only","memo","plate"]}"#;
 const TIP: &str = r#"{"label": {"en": "Tip", "ru": "Совет"},
     "variants": {"": {"en": "plain", "ru": "обычный"}, "big": {"en": "large", "ru": "большой"}},
     "fields": [
@@ -28,7 +27,11 @@ const TIP: &str = r#"{"label": {"en": "Tip", "ru": "Совет"},
 const ONLY: &str = r#"{"label": {"en": "Only English"}, "fields": [{"name": "body", "type": "text", "min": 1}]}"#;
 // no English: the first language there is
 const MEMO: &str = r#"{"label": {"ru": "Заметка"}, "fields": [{"name": "body", "type": "text", "min": 1}]}"#;
-const VIEWS: &str = r#"{"tip": {"kind": "callout"}, "only": {"kind": "callout"}, "memo": {"kind": "callout"}}"#;
+const PLATE: &str = r#"{"label": {"en": "Plate", "ru": "Табличка"},
+    "argument": {"name": "set", "pattern": "^[a-z]+/[a-z]+$",
+        "label": {"en": "Image set", "ru": "Набор картинок"}, "help": {"en": "Where they are", "ru": "Где они лежат"}},
+    "fields": [{"name": "body", "type": "text", "min": 0}]}"#;
+const VIEWS: &str = r#"{"tip": {"kind": "callout"}, "only": {"kind": "callout"}, "memo": {"kind": "callout"}, "plate": {"kind": "card"}}"#;
 const PALETTE: &str = r#"{"format": 1,
     "groups": [{"id": "g", "label": {"en": "Teaching", "ru": "Обучение"}, "blocks": ["tip"]}],
     "blocks": {"tip": {"description": {"en": "A short hint", "ru": "Короткая подсказка"}}},
@@ -54,6 +57,7 @@ fn fixture(text: &str) -> Fixture {
             ("components/tip/tip.json", TIP),
             ("components/only/only.json", ONLY),
             ("components/memo/memo.json", MEMO),
+            ("components/plate/plate.json", PLATE),
             ("editor/views.json", VIEWS),
             ("editor/palette.json", PALETTE),
         ],
@@ -147,6 +151,34 @@ fn a_reason_names_the_field_in_the_language_in_the_app_s_words() {
     assert!(s.contains("Совет"), "{s}");
     // the field is the package's, what is wrong with it the app's
     assert!(s.contains("Содержание: Required"), "{s}");
+}
+
+#[test]
+fn the_argument_field_and_its_reason_follow_the_language() {
+    let d = "---\nlang: ru\n---\n\n:::plate\n\nHello\n\n:::\n";
+    let f = fixture(d);
+    let mut h = f.ready();
+    // the argument's label is the package's, what is wrong with it the app's
+    let s = shown(&mut h);
+    assert!(s.contains("Набор картинок: Required"), "{s}");
+    open_form(&mut h, "Hello");
+    assert!(h.query_by_label("Набор картинок").is_some());
+    assert!(h.query_by_label("Image set").is_none());
+    assert!(h.query_by_label_contains("Где они лежат").is_some(), "its help");
+    // live, with the form open and what was typed into the argument kept
+    h.get_by_label("Набор картинок").click();
+    common::run(&mut h);
+    h.get_by_label("Набор картинок").type_text("some/set");
+    common::run(&mut h);
+    let draft = h.state().block_form().unwrap().values().unwrap().clone();
+    set_lang(&mut h, "en");
+    assert!(h.query_by_label("Image set").is_some());
+    assert!(h.query_by_label("Набор картинок").is_none());
+    assert!(h.query_by_label_contains("Where they are").is_some());
+    assert_eq!(h.state().block_form().unwrap().values(), Some(&draft));
+    let s = shown(&mut h);
+    assert!(s.contains("Image set: Required"), "{s}");
+    assert_eq!(h.state().block_form().unwrap().title(), "Plate");
 }
 
 #[test]

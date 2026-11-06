@@ -130,7 +130,9 @@ fn heading(entry: &BlockEntry<'_>, name: &str, args: &str, language: &str) -> (S
     let title = schema.label.as_ref().map_or(name, |l| l.get(language)).to_string();
     let named = !args.is_empty() && schema.variants().any(|v| v == args);
     let variant_label = schema.variant_label(if named { args } else { "" }, language);
-    (title, variant_label.map_or_else(|| args.to_string(), str::to_string))
+    // with a field of their own the arguments need no note
+    let args_note = if schema.raw.get("argument").is_some() { "" } else { args };
+    (title, variant_label.unwrap_or(args_note).to_string())
 }
 
 fn clip(text: &str) -> String {

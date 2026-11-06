@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use schema_form_core::Pattern;
 use serde_json::Value;
 
 use crate::error::Issues;
@@ -70,10 +71,10 @@ pub(crate) fn parse(file: &str, name: &str, map: serde_json::Map<String, Value>,
             _ => issues.push(file, "variants must be an object"),
         }
     }
-    if let Some(argument) = map.get("argument")
-        && !argument.is_object()
-    {
-        issues.push(file, "argument must be an object");
+    match map.get("argument") {
+        None => {}
+        Some(Value::Object(argument)) => check_argument_pattern(file, argument, issues),
+        Some(_) => issues.push(file, "argument must be an object"),
     }
     let mut fields = Vec::new();
     match map.get("fields") {
@@ -98,6 +99,20 @@ pub(crate) fn parse(file: &str, name: &str, map: serde_json::Map<String, Value>,
         label,
         fields,
         raw: Value::Object(map),
+    }
+}
+
+/// A pattern that could not be run within its bounds is the package's mistake, and it is said here,
+/// not on the first block that would use it.
+fn check_argument_pattern(file: &str, argument: &serde_json::Map<String, Value>, issues: &mut Issues) {
+    match argument.get("pattern") {
+        None => {}
+        Some(Value::String(pattern)) => {
+            if let Err(why) = Pattern::new(pattern) {
+                issues.push(file, format!("the argument's pattern {why}"));
+            }
+        }
+        Some(_) => issues.push(file, "the argument's pattern must be a string"),
     }
 }
 

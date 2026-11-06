@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use markise_package::{FormInput, FormRefusal, PackageIndex};
+use markise_package::{ARGUMENT_KEY, FormInput, FormRefusal, PackageIndex};
 use schema_form_core::{ChoiceShape, Control, CorrectRule, ErrorKind, FormSpec, Selection};
 use serde_json::{Value, json};
 
@@ -274,4 +274,84 @@ fn keys_it_does_not_know_are_data_for_later() {
 #[test]
 fn a_name_outside_the_package_has_no_form() {
     assert!(index(&all_types(), &[]).form_input("other", "en").is_none());
+}
+
+#[test]
+fn an_argument_is_the_first_field_with_a_key_no_field_can_have() {
+    let block = json!({"label": "Plate", "argument": {"name": "image_set"}, "fields": [
+        {"name": "image_set", "type": "text", "min": 0},
+    ]});
+    let spec = spec_of(&block, &[], None);
+    let keys: Vec<&str> = spec.fields.iter().map(|f| f.key.as_str()).collect();
+    assert_eq!(keys, [ARGUMENT_KEY, "image_set"]);
+    let field = &spec.fields[0];
+    assert_eq!(field.label, "Image set");
+    assert_eq!(field.control, Control::Text { multiline: false });
+    assert_eq!(field.extensions["x-markdown"]["kind"], "argument");
+}
+
+#[test]
+fn an_argument_s_label_comes_from_the_package_or_a_plain_default() {
+    let label_of = |argument: Value| {
+        let block = json!({"label": "Plate", "argument": argument, "fields": []});
+        spec_of(&block, &[], None).fields[0].label.clone()
+    };
+    assert_eq!(label_of(json!({"name": "set", "label": "Which set"})), "Which set");
+    assert_eq!(
+        label_of(json!({"label": {"en": "Which set", "de": "Welche"}})),
+        "Which set"
+    );
+    assert_eq!(label_of(json!({"name": "set"})), "Set");
+    assert_eq!(label_of(json!({})), "Argument");
+    let block = json!({"label": "Plate", "argument": {"help": "As set/name"}, "fields": []});
+    assert_eq!(
+        spec_of(&block, &[], None).fields[0].help.as_deref(),
+        Some("As set/name")
+    );
+}
+
+#[test]
+fn a_block_with_no_argument_has_no_such_field() {
+    let spec = spec_of(&all_types(), &[], None);
+    assert!(spec.fields.iter().all(|f| f.key != ARGUMENT_KEY));
+    let block = json!({"label": "V", "variants": {"": "one", "many": "several"}, "fields": []});
+    assert!(
+        spec_of(&block, &[], Some("many")).fields.is_empty(),
+        "a variant stays what it was"
+    );
+}
+
+#[test]
+fn an_argument_is_required_and_answers_to_its_pattern() {
+    let block = json!({"label": "Plate", "argument": {"name": "set", "pattern": "^[a-z]+/[a-z]+$"}, "fields": []});
+    let spec = spec_of(&block, &[], None);
+    assert!(spec.fields[0].required);
+    let kinds = |v: Value| spec.validate(&v).into_iter().map(|e| e.kind).collect::<Vec<_>>();
+    assert!(kinds(json!({ARGUMENT_KEY: "a/b"})).is_empty());
+    assert_eq!(kinds(json!({ARGUMENT_KEY: ""})), [ErrorKind::Required]);
+    assert_eq!(
+        kinds(json!({ARGUMENT_KEY: "bad arg!"})),
+        [ErrorKind::NoMatch {
+            pattern: "^[a-z]+/[a-z]+$".to_string()
+        }]
+    );
+    // no pattern: anything goes, as long as something is there
+    let block = json!({"label": "Plate", "argument": {"name": "set"}, "fields": []});
+    let spec = spec_of(&block, &[], None);
+    assert!(spec.validate(&json!({ARGUMENT_KEY: "any thing!"})).is_empty());
+    assert_eq!(spec.validate(&json!({ARGUMENT_KEY: ""}))[0].kind, ErrorKind::Required);
+}
+
+#[test]
+fn beside_variants_an_argument_is_checked_by_naming_one() {
+    let block = json!({"label": "Sign", "variants": {"": "plain", "loud": "loud"},
+        "argument": {"name": "how", "pattern": "^x$"}, "fields": []});
+    let spec = spec_of(&block, &[], Some("loud"));
+    assert!(!spec.fields[0].required);
+    assert!(spec.validate(&json!({ARGUMENT_KEY: "loud"})).is_empty());
+    assert!(
+        spec_of(&block, &[], None)
+            .validate(&json!({ARGUMENT_KEY: ""}))
+            .is_empty()
+    );
 }

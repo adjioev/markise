@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 serde_json.workspace = true
+# `pattern`: no backtracking, so no pattern can hang a check (ADR 0020)
+regex = "1.12"
 
 [dev-dependencies]
 proptest.workspace = true

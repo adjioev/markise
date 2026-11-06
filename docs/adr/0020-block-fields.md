@@ -92,12 +92,12 @@ reason per field, stays editable and can be saved, because strict checks belong 
 publishes. `BlockFields::check` gives the reasons plus the extras.
 
 The rules live in `schema-form-core`: no GUI, no Markdown, used by the engine here and by a form
-crate above. It reads a **declared, versioned subset** (`SPEC_VERSION` 2) and refuses the rest by
+crate above. It reads a **declared, versioned subset** (`SPEC_VERSION` 3) and refuses the rest by
 name, so an arbitrary schema cannot silently become a promise:
 
 - JSON Schema: `type` (one of string, boolean, array, object), `properties`, `required`, `items`,
   `minLength`, `maxLength`, `minItems`, `maxItems`, `additionalProperties` as true or false, and
-  `enum` of distinct strings on a string. Annotations are ignored. `pattern`, `format`, `$ref` and
+  `enum` of distinct strings and `pattern` on a string. Annotations are ignored. `format`, `$ref` and
   combinators are refused, and so is a keyword that would mean nothing on its type. This holds at any depth, in the entries of
   choices and images and below a custom widget too; a custom widget may only leave `type` out.
 - UI hints, our own small format and not JSON Forms: `version`, `order`, `fields`, and per field
@@ -108,8 +108,21 @@ name, so an arbitrary schema cannot silently become a promise:
   quote) there, so the rest stays free of Markdown.
 - Correctness (`exactly-one`, `at-least-one`), missing and duplicate answer ids, an option that
   excludes the others: these are not JSON Schema, so a validator would not have given them anyway.
-- Version 1 hints keep their meaning: `enum` and choice buttons need version 2, which an older
-  build refuses by version rather than by a keyword it has not heard of.
+- Version 1 hints keep their meaning: `enum` and choice buttons need version 2, and `pattern` version
+  3, which an older build refuses by version rather than by a keyword it has not heard of.
+
+**`pattern`** was refused until a block's argument had something to be checked against. It comes from a
+package, so what it can cost is bounded on every side (`schema_form_core::Pattern`):
+
+- The engine is the `regex` crate (MIT or Apache-2.0, already in the tree through `markise-engine`). It
+  has no backtracking, so its time is linear in the text and no `(a+)+$` can hang a check. It also has
+  no look-around and no backreferences: those are refused with the crate's reason, not emulated.
+- A pattern is at most 1 KiB. What it compiles to is at most 256 KiB, so `(a{1000}){1000}` is refused,
+  and it nests at most 32 levels.
+- It reads at most 4 KiB of text (`MAX_MATCHED_BYTES`). A longer value does not match, unread. A check
+  runs on the UI thread, and this bounds it by the compiled size times the text.
+- As in JSON Schema it is not anchored. Like the other limits it says nothing about an empty field, which
+  is a matter of `required`.
 
 Empty is how missing content looks in a document, so an empty string or array as a field's value
 fails `required` and passes the other limits. An entry of an array exists, so its strings answer
@@ -224,6 +237,7 @@ field lives, so the form and the field declarations come from one source.
 | `list` | array of non-empty strings | list | `minItems` is 0 or absent |
 | `choices` | array of answers with non-empty `text` | choices | `minItems` is 0 or absent |
 | `image` | array of `{alt, path}` with non-empty `path` | images | `min` is 0 or absent |
+| the schema's `argument` | string with its `pattern`, under a key no field can have (`:argument`), first | text | the schema has `variants` |
 
 - **Labels.** A field's `label` (string or per language), else its name made readable, as nothing
   else knows better. `help` and `add_label` go through too.
@@ -241,12 +255,41 @@ field lives, so the form and the field declarations come from one source.
   is every variant. A `field` or `variant` that is not a string is refused. An option's value is its `label`, the text the answer has
   in the Markdown. `icon` is a file of the package, which the host resolves. Other `widget`
   values stay data for later.
-- **The block's `argument` is not checked in this phase**: it is not a field, and the subset has no
-  `pattern`.
+- **The block's `argument`** is the one field that is not in the body. A schema with an `argument` gets a
+  one-line text field first in its form, labelled by the argument's `label`, else its `name` made
+  readable, else `Argument`, with its `help` if any. The value is the opener's arguments as they stand; its
+  `x-markdown` kind is `argument`, and `FieldKind::Argument` takes no block of the body. A variant is
+  still picked as before, by the arguments naming it, with no control of its own. In a schema with both,
+  the field is one line for what is one string in the file, and what it says goes on deciding the variant.
+- **The argument's check.** Declared, it has to be there and, with a `pattern`, to match it. A missing one is
+  `Required`, a wrong one `NoMatch`; both are a report like any other (below "Validation"), so saving stays
+  allowed, and both count as not filled in (`BlockFit::only_unfilled`, ADR 0021): a preset's placeholder
+  forgotten is the usual case, and a view reads nothing from it. There is no way to declare an argument
+  optional. Beside `variants` the arguments have their check already, naming one, so neither `required` nor
+  `pattern` applies there and the reason stays the variant's. A preset's placeholder gets no rule of its own:
+  one that matches the pattern reads as a real argument.
+- **A pattern that cannot be run** refuses the package when it is validated (`schema.rs`, with the bounds of
+  `schema_form_core::Pattern`), with the file and the reason, so `markise-package` depends on
+  `schema-form-core` for that one check. One a backtracking engine would hang on is harmless here and stays.
 
 `tests/it/block_forms.rs` in the engine holds the agreement: for every variant, a full and an empty
 block, the engine's values have the type the spec declares at every depth and no other key,
 and storing them unchanged gives no edits.
+
+### Writing an argument
+
+`FieldEdit::SetText` on the argument changes the opener and nothing else: the new bytes go where the old
+arguments stood, so the fence, the name, the blanks between and after, and the line ending stay. An
+argument with none before it gets one blank after the name, and one going away takes the blanks before it.
+Blanks at the ends of a typed value are not part of it, as the parser would not read them, and they count
+as spaces and tabs only, as they do in the parser: a value that differs only by those is no change.
+A line break is refused. The result has to read back as the same arguments or nothing is written. It goes
+through `edits_from_values` and `apply_to_session` like every other field, so it is the form's one undo
+step and a stale block refuses it as usual.
+
+It is no place for the keyboard: it has no slot and no region of the block, and an opener has no stops
+(ADR 0021). The form and the Markdown are the ways to it. What depends on the arguments, the variant,
+the view's label and the panel's form, reads them from the document as it did, so it follows.
 
 ### Images and host widgets
 
@@ -340,7 +383,7 @@ own: it decides which block, and what becomes of a draft when the document chang
   features off (Apache-2.0 OR MIT; its tree adds `usvg`, `tiny-skia`, `roxmltree` and a few small
   crates, all MIT, Apache-2.0 or BSD).
 - **Header and footer.** The block's label at 15 points, with its icon if the package has one, and the
-  variant or the arguments as a muted note. Save, filled with the accent, and Cancel stay pinned at the
+  variant or, when no field holds them, the arguments as a muted note. Save, filled with the accent, and Cancel stay pinned at the
   bottom; Tab reaches Cancel, then Save.
 - **Theme and zoom.** Colours come from `Style` as above, sizes from the whole-window zoom. The width is the user's for the session, from 280 points up to 60 % of the window.
 - **Cost.** A document with no package pays one comparison per frame. With a package, one index
@@ -354,7 +397,7 @@ own: it decides which block, and what becomes of a draft when the document chang
   declares one after it.
 - A setext heading is not a heading field: it goes to text or stays an extra.
 - Hard-break trailing spaces of an answer's last line belong to its text.
-- The block's name and arguments are not fields.
+- The block's name is not a field, and neither are its arguments unless its schema declares an `argument`.
 
 ## Alternatives
 

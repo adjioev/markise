@@ -27,6 +27,7 @@ pub(super) fn apply(old: &BlockFields, edits: &[FieldEdit]) -> Result<Applied, F
     let source = render(old, &draft.fields, &draft.kept);
     let patches = PatchSet::new(line_patches(&old.source, &source)).map_err(FieldsError::Patch)?;
     let mut next = super::decode::decode(&source, old.base, &old.decls, &old.opts)?;
+    argument_reads_back(&draft.fields, &next)?;
     next.retired = draft.retired;
     next.next_item = draft.next_item;
     carry(&draft.fields, &mut next, old);
@@ -35,6 +36,37 @@ pub(super) fn apply(old: &BlockFields, edits: &[FieldEdit]) -> Result<Applied, F
         fields: next,
         inserted: draft.inserted,
     })
+}
+
+/// The blanks the parser does not count as part of the arguments.
+pub(super) fn trim_argument(text: &str) -> &str {
+    text.trim_matches([' ', '\t'])
+}
+
+fn argument_reads_back(edited: &[Field], next: &BlockFields) -> Result<(), FieldsError> {
+    for f in edited.iter().filter(|f| f.kind == FieldKind::Argument) {
+        if f.value != FieldValue::Text(next.args().to_string()) {
+            return Err(FieldsError::WrongKind { field: f.name.clone() });
+        }
+    }
+    Ok(())
+}
+
+/// The opener line, with only the bytes of its arguments changed: its fence, its name, what stands
+/// between and after them stay. An argument coming or going takes the one blank before it with it.
+fn render_opener(old: &BlockFields, fields: &[Field]) -> String {
+    let s = old.source.as_str();
+    let wanted = fields.iter().find(|f| f.kind == FieldKind::Argument);
+    let Some(FieldValue::Text(new)) = wanted.map(|f| &f.value) else {
+        return s[..old.opener_end].to_string();
+    };
+    let (args, end) = (&old.args, old.opener_end);
+    match (args.is_empty(), new.is_empty()) {
+        (true, true) => s[..end].to_string(),
+        (true, false) => format!("{} {new}{}", &s[..old.name.end], &s[old.name.end..end]),
+        (false, true) => format!("{}{}", &s[..old.name.end], &s[args.end..end]),
+        (false, false) => format!("{}{new}{}", &s[..args.start], &s[args.end..end]),
+    }
 }
 
 /// Whole lines that moved stay whole; a changed line narrows to the characters that differ. A
@@ -143,6 +175,15 @@ impl Draft {
             field: name.to_string(),
         };
         let items = match (&mut f.value, e) {
+            (FieldValue::Text(_), FieldEdit::SetText { text, .. })
+                if f.kind == FieldKind::Argument && text.contains(['\n', '\r']) =>
+            {
+                return Err(wrong());
+            }
+            (FieldValue::Text(t), FieldEdit::SetText { text, .. }) if f.kind == FieldKind::Argument => {
+                *t = trim_argument(text).to_string();
+                return Ok(());
+            }
             (FieldValue::Text(t), FieldEdit::SetText { text, .. }) => {
                 t.clone_from(text);
                 return Ok(());
@@ -321,7 +362,7 @@ fn render(old: &BlockFields, fields: &[Field], kept: &BTreeSet<usize>) -> String
         _ => (old.opener_end..old.closer_start, old.opener_end..old.closer_start),
     };
     let mut out = String::with_capacity(s.len() + 64);
-    out.push_str(&s[..old.opener_end]);
+    out.push_str(&render_opener(old, fields));
     out.push_str(&s[first_gap]);
     for (n, (at, text)) in pieces.iter().enumerate() {
         if n > 0 {
@@ -464,6 +505,10 @@ fn render_lines(old: &BlockFields, lines: &[Line], new: &[String], st: &Style, o
 fn render_field(old: &BlockFields, f: &Field) -> String {
     let s = old.source.as_str();
     let mut out = String::new();
+    if f.kind == FieldKind::Argument {
+        // it is in the opener
+        return out;
+    }
     let v = match &f.value {
         FieldValue::Items(items) => {
             render_items(old, f, items, &mut out);

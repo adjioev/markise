@@ -1,6 +1,6 @@
 //! From a block's schema to the input of a form (ADR 0020): a package declares `fields: [{name,
 //! type, ...}]`, and `schema-form-core` reads JSON Schema plus hints. Here is the one place that
-//! knows both. The result is plain JSON, so this crate needs no form; `x-markdown` in the hints
+//! knows both. The result is plain JSON, so this crate draws no form; `x-markdown` in the hints
 //! tells the field model where each field lives, so the field declarations come from the same
 //! place and cannot disagree with the form.
 //!
@@ -15,8 +15,12 @@ use crate::palette::Preset;
 use crate::schema::{BlockSchema, FieldKind, FieldSchema};
 use crate::value::pick_language;
 
+/// The form's key for a block's argument: not a field's name, so no field can be called this (a field
+/// named like the argument is another thing).
+pub const ARGUMENT_KEY: &str = ":argument";
+
 /// The version of the hints this writes, as `schema-form-core` reads them.
-const HINTS_VERSION: u64 = 2;
+const HINTS_VERSION: u64 = 3;
 
 /// What a preset's `widget` says when it asks for a choice drawn as icon buttons.
 const ICON_CHOICES: &str = "icon-choices";
@@ -278,6 +282,25 @@ fn preset_text<'a>(p: &'a Preset, key: &str) -> Result<Option<&'a str>, FormRefu
     }
 }
 
+/// The field for the block's `argument`, if it declares one: a line of text. `x-markdown` says it
+/// lives in the opener, so it takes nothing from the body.
+fn argument_hint(argument: &Map<String, Value>, language: &str) -> Map<String, Value> {
+    let label = text_of(argument.get("label"), language).map_or_else(
+        || {
+            let name = argument.get("name").and_then(Value::as_str).unwrap_or("argument");
+            name_as_label(name)
+        },
+        str::to_string,
+    );
+    let mut hint = Map::new();
+    hint.insert("label".into(), json!(label));
+    if let Some(help) = text_of(argument.get("help"), language) {
+        hint.insert("help".into(), json!(help));
+    }
+    hint.insert("x-markdown".into(), json!({"kind": "argument"}));
+    hint
+}
+
 impl BlockSchema {
     /// The form of this block. `presets` are the block's own: one can ask that a variant's choice
     /// is drawn as icon buttons.
@@ -288,9 +311,23 @@ impl BlockSchema {
     ) -> Result<FormInput, FormRefusal> {
         let mut properties = Map::new();
         let mut required = Vec::new();
-        let mut order = Vec::with_capacity(self.fields.len());
+        let mut order = Vec::with_capacity(self.fields.len() + 1);
         let mut fields = Map::new();
         let mut variants = Map::new();
+        if let Some(argument) = self.raw.get("argument").and_then(Value::as_object) {
+            // in a schema with variants the arguments name one, and that is their check
+            let checked = self.variants().next().is_none();
+            let mut schema = json!({"type": "string"});
+            if checked {
+                required.push(json!(ARGUMENT_KEY));
+                if let Some(pattern) = argument.get("pattern") {
+                    schema["pattern"] = pattern.clone();
+                }
+            }
+            properties.insert(ARGUMENT_KEY.into(), schema);
+            fields.insert(ARGUMENT_KEY.into(), Value::Object(argument_hint(argument, language)));
+            order.push(json!(ARGUMENT_KEY));
+        }
         for f in &self.fields {
             let mut c = convert_field(f)?;
             let label = text_of(f.raw.get("label"), language).map_or_else(|| name_as_label(&f.name), str::to_string);

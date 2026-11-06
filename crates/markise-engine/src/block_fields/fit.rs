@@ -23,7 +23,7 @@ impl BlockFit {
     }
 
     /// All that is wrong is that the author has yet to fill it in: an empty required field, too few
-    /// items or characters, no marked answer. Any other reason, and content in no field, is a matter
+    /// items or characters, no marked answer, an argument not of its form. Any other reason, and content in no field, is a matter
     /// of the block's structure. `values` are those the fit was checked for.
     pub fn only_unfilled(&self, values: &Value) -> bool {
         self.extras.is_empty() && self.errors.iter().all(|e| unfilled(e, values))
@@ -32,9 +32,12 @@ impl BlockFit {
 
 fn unfilled(e: &FieldError, values: &Value) -> bool {
     match e.kind {
-        ErrorKind::Required | ErrorKind::TooShort { .. } | ErrorKind::TooFew { .. } | ErrorKind::AtLeastOneCorrect => {
-            true
-        }
+        ErrorKind::Required
+        | ErrorKind::TooShort { .. }
+        | ErrorKind::TooFew { .. }
+        | ErrorKind::AtLeastOneCorrect
+        // a preset's placeholder not yet replaced is the usual case, and nothing in the view depends on it
+        | ErrorKind::NoMatch { .. } => true,
         // none marked is yet to come; two marked where one can be is something else
         ErrorKind::ExactlyOneCorrect => values[e.path.as_str()]
             .as_array()
@@ -69,6 +72,7 @@ fn kind_of(f: &FieldSpec) -> Option<FieldKind> {
         Some("list") => Some(FieldKind::List),
         Some("choices") => Some(FieldKind::Choices),
         Some("image") => Some(FieldKind::Image),
+        Some("argument") => Some(FieldKind::Argument),
         Some(_) => None,
         None => match f.control {
             Control::Text { .. } => Some(FieldKind::Text),

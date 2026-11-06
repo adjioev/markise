@@ -1,6 +1,9 @@
 //! What parses is what is promised: everything outside the subset is refused by name.
 
-use schema_form_core::{ChoiceShape, Control, CorrectRule, ErrorKind, FormSpec, SPEC_VERSION, Selection};
+use schema_form_core::{
+    ChoiceShape, Control, CorrectRule, ErrorKind, FormSpec, MAX_MATCHED_BYTES, MAX_PATTERN_BYTES, SPEC_VERSION,
+    Selection,
+};
 use serde_json::{Value, json};
 
 fn schema() -> Value {
@@ -96,9 +99,7 @@ fn another_version_is_refused() {
 
 #[test]
 fn keywords_outside_the_subset_are_refused_by_name() {
-    for bad in [
-        "pattern", "oneOf", "anyOf", "allOf", "$ref", "if", "format", "const", "default",
-    ] {
+    for bad in ["oneOf", "anyOf", "allOf", "$ref", "if", "format", "const", "default"] {
         let mut s = schema();
         s["properties"]["title"][bad] = json!("x");
         let e = FormSpec::parse(&s, &hints(), None).expect_err(bad);
@@ -166,10 +167,10 @@ fn the_subset_holds_at_any_depth() {
     };
     let props = |extra: Value| json!({"id": {"type": "string"}, "text": extra, "correct": {"type": "boolean"}});
     let choices = |extra: Value| json!({"type": "object", "properties": props(extra)});
-    let refused = inner(choices(json!({"type": "string", "pattern": "x"})), "choices").expect_err("refused");
-    assert_eq!(refused.path, "a/items/text/pattern");
+    let refused = inner(choices(json!({"type": "string", "format": "x"})), "choices").expect_err("refused");
+    assert_eq!(refused.path, "a/items/text/format");
     assert!(inner(choices(json!({"type": "string", "const": "x"})), "choices").is_err());
-    let images = json!({"type": "object", "pattern": "x", "properties": {
+    let images = json!({"type": "object", "format": "x", "properties": {
         "alt": {"type": "string"}, "path": {"type": "string"},
     }});
     assert!(inner(images, "images").is_err());
@@ -199,7 +200,7 @@ fn a_custom_widget_cannot_declare_what_the_subset_lacks() {
     for c in [
         json!({"type": "integer"}),
         json!({"type": ["string", "null"]}),
-        json!({"type": "string", "pattern": "x"}),
+        json!({"type": "string", "format": "x"}),
         json!({"type": "object", "properties": {"n": {"type": "integer"}}}),
         json!({"type": "array", "items": {"type": "number"}}),
     ] {
@@ -365,4 +366,90 @@ fn the_overlay_named_empty_is_for_no_variant_alone() {
     assert_eq!(label(Some("")), "Plain");
     assert_eq!(label(Some("other")), "x", "not inherited");
     assert_eq!(label(Some("unknown")), "x");
+}
+
+fn with_pattern(pattern: Value) -> Result<FormSpec, schema_form_core::SpecError> {
+    let s = json!({"type": "object", "properties": {"a": {"type": "string", "pattern": pattern}}});
+    FormSpec::parse(&s, &json!({"version": SPEC_VERSION}), None)
+}
+
+#[test]
+fn a_pattern_checks_a_string_and_empty_stays_a_matter_of_required() {
+    let spec = with_pattern(json!("^[a-z]+/[a-z]+$")).expect("in the subset");
+    assert!(spec.validate(&json!({"a": "one/two"})).is_empty());
+    assert!(spec.validate(&json!({"a": ""})).is_empty());
+    assert!(spec.validate(&json!({})).is_empty());
+    let errors = spec.validate(&json!({"a": "one two!"}));
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].path, "a");
+    assert_eq!(
+        errors[0].kind,
+        ErrorKind::NoMatch {
+            pattern: "^[a-z]+/[a-z]+$".to_string()
+        }
+    );
+    // unanchored, as JSON Schema has it
+    let spec = with_pattern(json!("b")).expect("in the subset");
+    assert!(spec.validate(&json!({"a": "abc"})).is_empty());
+}
+
+#[test]
+fn a_pattern_needs_version_3_and_means_nothing_on_another_type() {
+    let s = json!({"type": "object", "properties": {"a": {"type": "string", "pattern": "x"}}});
+    for version in [1, 2] {
+        let e = FormSpec::parse(&s, &json!({"version": version}), None).expect_err("an older format");
+        assert_eq!(e.path, "hints/version");
+    }
+    let s = json!({"type": "object", "properties": {"a": {"type": "boolean", "pattern": "x"}}});
+    let e = FormSpec::parse(&s, &json!({"version": SPEC_VERSION}), None).expect_err("refused");
+    assert_eq!(e.path, "a/pattern");
+}
+
+#[test]
+fn what_cannot_be_run_within_its_bounds_is_refused_with_a_reason() {
+    for (pattern, word) in [
+        (json!(3), "string"),
+        (json!("(unclosed"), "cannot be used"),
+        (json!("(?=look)ahead"), "look-around"),
+        (json!(r"(a)\1"), "backreference"),
+        (json!("a".repeat(MAX_PATTERN_BYTES + 1)), "limit"),
+        (json!("(a{1000}){1000}"), "too large"),
+        (
+            json!(format!("{}a{}", "(".repeat(64), ")".repeat(64))),
+            "cannot be used",
+        ),
+    ] {
+        let e = with_pattern(pattern.clone()).expect_err("refused");
+        assert_eq!(e.path, "a/pattern", "{pattern}");
+        assert!(e.reason.contains(word), "{pattern}: {}", e.reason);
+        assert_eq!(e.reason.lines().count(), 1, "{}", e.reason);
+    }
+}
+
+#[test]
+fn no_pattern_hangs_a_check() {
+    // each of these takes a backtracking engine longer than anyone would wait
+    let text = "a".repeat(MAX_MATCHED_BYTES - 1) + "!";
+    let started = std::time::Instant::now();
+    for hostile in [
+        "^(a+)+$",
+        "^(a|a)*$",
+        "^(a|aa)+$",
+        "^(a*)*$",
+        "^(a+)*b$",
+        "^(.*a){20}$",
+        "^(a?){30}a{30}$",
+    ] {
+        let spec = with_pattern(json!(hostile)).expect(hostile);
+        assert!(!spec.validate(&json!({"a": text})).is_empty(), "{hostile}");
+    }
+    assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
+    // past the bound it is not read at all, and so it does not match
+    let spec = with_pattern(json!("^a+$")).expect("in the subset");
+    assert!(spec.validate(&json!({"a": "a".repeat(MAX_MATCHED_BYTES)})).is_empty());
+    assert!(
+        !spec
+            .validate(&json!({"a": "a".repeat(MAX_MATCHED_BYTES + 1)}))
+            .is_empty()
+    );
 }
