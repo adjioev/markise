@@ -269,10 +269,17 @@ pub struct BlockLayout {
     pub diagram_controls: Option<Rect>,
     /// The top edge of the card this item opens (item-local, left and right ends).
     pub card_top: Option<(Pos2, Pos2)>,
+    /// A native view's grounds and bars in this item, bottom first. They go through
+    /// [`merged_bands`], not the prims: one block's are one rectangle however many items it has.
+    pub bands: Vec<Band>,
     /// The warning on the card this item opens (item-local).
     pub warning: Option<Rect>,
     /// The quiet reason this card shows no picture (item-local).
     pub note: Option<Rect>,
+    /// Where the buttons of a practised block go (item-local, on its closer).
+    pub practice_row: Option<Rect>,
+    /// The line or lines of a practised answer, its control and text (item-local).
+    pub practice_answer: Option<Rect>,
 }
 
 impl BlockLayout {
@@ -358,6 +365,8 @@ pub struct LayoutParams<'a> {
     pub site: Option<crate::view::SiteLook>,
     /// Why the card this item opens shows no picture.
     pub note: Option<&'a str>,
+    /// The outline's entries a table of contents leaves out, by their place in it (ADR 0024).
+    pub toc_hidden: Option<&'a [bool]>,
 }
 
 /// How review marks (CriticMarkup, ADR 0012) are shown in the rendered view (issue #88). Display
@@ -1928,6 +1937,61 @@ pub(crate) fn card_padding(t: &Theme) -> f32 {
     (t.font_size * 0.8).round()
 }
 
+/// The part of a native block's ground or bar that lies in one item (ADR 0021).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Band {
+    pub rect: Rect,
+    pub fill: Color32,
+    /// The block's first item: this starts another block, whatever came before it.
+    pub opens: bool,
+}
+
+/// The bands of the items on screen, in order, each with where its item stands, as whole rectangles.
+/// A host moves each item to a pixel of its own, so an item's bottom and the next one's top need not
+/// be the same `y`: painted item by item, a translucent ground leaves a line of nothing or of twice
+/// the tint there. Here a band goes on from where the one before it in the same block went.
+pub fn merged_bands<'a>(items: impl IntoIterator<Item = (Pos2, &'a [Band])>) -> Vec<(Rect, Color32)> {
+    let mut runs: Vec<(Rect, Color32)> = Vec::new();
+    let mut open: Vec<usize> = Vec::new();
+    for (origin, bands) in items {
+        let mut going = Vec::with_capacity(bands.len());
+        for b in bands {
+            let r = b.rect.translate(origin.to_vec2());
+            let run = (!b.opens)
+                .then(|| {
+                    open.iter().copied().find(|&i| {
+                        let (had, fill) = runs[i];
+                        fill == b.fill && had.min.x == r.min.x && had.max.x == r.max.x
+                    })
+                })
+                .flatten();
+            match run {
+                Some(i) => {
+                    runs[i].0.max.y = r.max.y;
+                    going.push(i);
+                }
+                None => {
+                    going.push(runs.len());
+                    runs.push((r, b.fill));
+                }
+            }
+        }
+        open = going;
+    }
+    runs
+}
+
+/// A native opener with no label row, without the gap before it: what makes the space above the
+/// block's first field its padding, as below its last.
+pub(crate) fn quiet_opener_height(t: &Theme) -> f32 {
+    (card_padding(t) - t.block_spacing).max(0.0)
+}
+
+/// How far below a card's top edge its controls reach (the viewer's buttons: a margin, then a side).
+pub(crate) fn card_controls_reach(t: &Theme) -> f32 {
+    4.0 + t.line_px().min(22.0)
+}
+
 /// Height of a card's opener without the gap before it: padding, then one line of label.
 pub(crate) fn card_opener_height(t: &Theme) -> f32 {
     let size = t.font_size * 0.85;
@@ -2113,6 +2177,8 @@ pub fn layout_item(
     let mut empty_anchor = None;
     let mut warning = None;
     let mut note = None;
+    let mut practice_row = None;
+    let mut practice_answer = None;
 
     if let Some((head, accent)) = callout_head {
         // the quote bar's colour is too faint for text
@@ -2615,7 +2681,18 @@ pub fn layout_item(
         }
         // no height of its own: the picture above it is the block
         ItemKind::ContainerMarker { close: true } if p.site.is_some() => {}
-        ItemKind::ContainerMarker { close: true } => y += card_inset,
+        ItemKind::ContainerMarker { close: true } => {
+            if p.native
+                .is_some_and(|n| n.practice == Some(crate::native::PracticeItem::Row))
+            {
+                let h = crate::native::practice_row_height(t);
+                // the gap a paragraph has before it, then a line
+                y += t.block_spacing;
+                practice_row = Some(Rect::from_min_size(pos2(x, y), vec2(width, h)));
+                y += h;
+            }
+            y += card_inset;
+        }
         ItemKind::ContainerMarker { close: false } if p.site.is_some() => {
             if let (Some(crate::view::SiteLook::Picture(picture)), Some(&(left, right))) = (p.site, cards.last()) {
                 let w = (p.width - left - right).max(40.0);
@@ -2627,10 +2704,18 @@ pub fn layout_item(
                 y += h;
             }
         }
+        // no label and nothing else for the row: the block's own first field comes first
+        ItemKind::ContainerMarker { close: false }
+            if p.native.is_some_and(|n| !n.view.label_row) && p.warnings.is_none() && p.note.is_none() =>
+        {
+            y += crate::block::quiet_opener_height(t);
+        }
         ItemKind::ContainerMarker { close: false } => {
             // the name and arguments as written: uninterpreted, cut for display at a size that
             // lays out at once (a marker is one item, not segmented like a long paragraph)
             let label = match p.native {
+                // a row only for what else it holds
+                Some(n) if !n.view.label_row => String::new(),
                 // data from a package: one row of it, whatever it holds
                 Some(n) => card_label(&n.view.label, ""),
                 None => doc
@@ -2640,7 +2725,8 @@ pub fn layout_item(
             };
             y += card_inset;
             let size = t.font_size * 0.85;
-            let ink = p.native.map_or(color(t.meta_block.text), |n| {
+            // a view with no fill keeps its accent to its bar and its marks
+            let ink = p.native.filter(|n| n.view.fill).map_or(color(t.meta_block.text), |n| {
                 crate::native::accent_color(n.view.accent.as_deref(), t)
             });
             let mut st = Style::base(size, size * 1.4, ink);
@@ -2654,7 +2740,9 @@ pub fn layout_item(
                     BADGE_RIGHT_ROOM
                 };
             let mut label_x = x;
-            if let Some(name) = (p.native.filter(|n| n.icon_ready)).and_then(|n| n.view.icon.as_deref()) {
+            if let Some(name) =
+                (p.native.filter(|n| n.icon_ready && n.view.label_row)).and_then(|n| n.view.icon.as_deref())
+            {
                 let side = size * 1.2;
                 let rect = Rect::from_min_size(pos2(x, y + (size * 1.4 - side) * 0.5), vec2(side, side));
                 out.prims.push(Prim::Icon {
@@ -2768,6 +2856,27 @@ pub fn layout_item(
                 }
                 _ => &model.outline[..],
             };
+            // (a heading it leaves out only in Practice: a table of contents with none left says nothing else)
+            let kept: Vec<crate::model::OutlineEntry>;
+            let entries = match p.toc_hidden {
+                Some(hidden) => {
+                    let first = match &item.segment {
+                        Some(BlockSegment::Toc { start, .. }) => *start as usize,
+                        _ => 0,
+                    };
+                    let shown = |(k, _): &(usize, &crate::model::OutlineEntry)| {
+                        !hidden.get(first + k).copied().unwrap_or(false)
+                    };
+                    kept = entries
+                        .iter()
+                        .enumerate()
+                        .filter(shown)
+                        .map(|(_, o)| o.clone())
+                        .collect();
+                    &kept[..]
+                }
+                None => entries,
+            };
             for (ci, chunk) in entries.chunks(CHUNK_LINES).enumerate() {
                 let mut job = StyledText::default();
                 let mut links = Vec::new();
@@ -2864,15 +2973,33 @@ pub fn layout_item(
                 );
                 tasks.push((rect, li));
                 if let Some(n) = p.native.filter(|n| n.role == Some(crate::native::NativeRole::Answer)) {
+                    // in Practice what the file says stays unsaid, and the mark is the reader's
+                    let (checked, verdict) = match n.practice {
+                        Some(crate::native::PracticeItem::Answer { selected, correct }) => (selected, correct),
+                        Some(_) => (false, None),
+                        None => (checked, None),
+                    };
+                    // a tint is the file's mark in the native view; in Practice a row stays a list line
                     answer_mark(
                         &mut deco,
                         n.view,
                         t,
                         rect,
                         checked,
+                        n.practice.is_none(),
                         (x - mw, content_bottom, gap),
                         p.width - card_right,
                     );
+                    if n.practice.is_some() {
+                        let right = p.width - card_right;
+                        practice_answer = Some(Rect::from_min_max(
+                            pos2(x - mw, content_top),
+                            pos2(right, content_bottom),
+                        ));
+                    }
+                    if let Some(correct) = verdict {
+                        verdict_mark(&mut deco, &out.prims, t, correct, checked, cy, p.width - card_right);
+                    }
                     continue;
                 }
                 deco.push(Prim::Checkbox {
@@ -2971,6 +3098,7 @@ pub fn layout_item(
     // they are continuous from item to item; top and bottom edges at the markers
     let stroke = Stroke::new(1.0, color(t.rule));
     let mut card_top = None;
+    let mut bands = Vec::new();
     for (i, &(left, right)) in cards.iter().enumerate() {
         let (l, r) = (left, p.width - right);
         // a marker is its own card's top or bottom edge, the innermost around it
@@ -2990,6 +3118,7 @@ pub fn layout_item(
         if own && let Some(n) = p.native {
             native_chrome(
                 &mut deco,
+                &mut bands,
                 n.view,
                 t,
                 Rect::from_min_max(pos2(l, top), pos2(r, bottom)),
@@ -3046,8 +3175,11 @@ pub fn layout_item(
         comments,
         diagram_controls,
         card_top,
+        bands,
         warning,
         note,
+        practice_row,
+        practice_answer,
     }
 }
 
@@ -3078,36 +3210,38 @@ fn warning_badge(
 }
 
 /// A native view's own edges around one item of its block (`r`: the item's part of the block).
-/// Its background goes below everything else in the item.
-fn native_chrome(deco: &mut Vec<Prim>, v: &crate::native::NativeView, t: &Theme, r: Rect, opens: bool, closes: bool) {
-    use crate::native::{NativeKind, accent_color, tint};
-    let accent = accent_color(v.accent.as_deref(), t);
-    let rule = color(t.rule);
-    let (fill, edge) = match v.kind {
-        NativeKind::Callout => (tint(accent, t), None),
-        NativeKind::Card => (Color32::TRANSPARENT, Some(rule)),
-        NativeKind::Choices => (Color32::TRANSPARENT, Some(accent)),
-        NativeKind::Media => (Color32::TRANSPARENT, None),
+/// Its ground and bar are bands, below everything in any item.
+fn native_chrome(
+    deco: &mut Vec<Prim>,
+    bands: &mut Vec<Band>,
+    v: &crate::native::NativeView,
+    t: &Theme,
+    r: Rect,
+    opens: bool,
+    closes: bool,
+) {
+    use crate::native::{NativeKind, edge_color, ground};
+    let accent = edge_color(v, t);
+    if v.kind == NativeKind::Media {
+        return;
+    }
+    let mut band = |rect, fill| bands.push(Band { rect, fill, opens });
+    if v.fill && v.kind == NativeKind::Callout {
+        band(r, ground(v, t));
+    }
+    if !v.fill || v.kind == NativeKind::Callout {
+        let thin = !v.fill || v.neutral();
+        let side = if thin { 2.0 } else { 3.0 };
+        band(Rect::from_min_max(r.min, pos2(r.min.x + side, r.max.y)), accent);
+    }
+    if !v.fill {
+        return;
+    }
+    let edge = match v.kind {
+        NativeKind::Card => Some(color(t.rule)),
+        NativeKind::Choices => Some(accent),
+        NativeKind::Callout | NativeKind::Media => None,
     };
-    if fill != Color32::TRANSPARENT {
-        deco.insert(
-            0,
-            Prim::Rect {
-                rect: r,
-                fill,
-                stroke: Stroke::NONE,
-                radius: 0.0,
-            },
-        );
-    }
-    if v.kind == NativeKind::Callout {
-        deco.push(Prim::Rect {
-            rect: Rect::from_min_max(r.min, pos2(r.min.x + 3.0, r.max.y)),
-            fill: accent,
-            stroke: Stroke::NONE,
-            radius: 0.0,
-        });
-    }
     let Some(edge) = edge else { return };
     let stroke = Stroke::new(1.0, edge);
     for x in [r.min.x, r.max.x] {
@@ -3119,7 +3253,8 @@ fn native_chrome(deco: &mut Vec<Prim>, v: &crate::native::NativeView, t: &Theme,
     }
     if opens {
         // a card's accent is its top edge
-        let top = Stroke::new(if v.kind == NativeKind::Card { 2.0 } else { 1.0 }, accent);
+        let heavy = v.kind == NativeKind::Card && !v.neutral();
+        let top = Stroke::new(if heavy { 2.0 } else { 1.0 }, accent);
         deco.push(Prim::Line {
             a: r.left_top(),
             b: r.right_top(),
@@ -3135,26 +3270,60 @@ fn native_chrome(deco: &mut Vec<Prim>, v: &crate::native::NativeView, t: &Theme,
     }
 }
 
-/// An answer's mark, a radio button or a check box in the view's accent, and a tint on the row of
-/// one that is marked. `row`: the row's left edge, its bottom and its top; `right`: its right edge.
+/// What a checked answer says, right after its text: a tick on a right answer and a cross on a wrong one
+/// chosen, so that colour is not all there is. A wrong answer not chosen says nothing.
+fn verdict_mark(deco: &mut Vec<Prim>, text: &[Prim], t: &Theme, correct: bool, chosen: bool, cy: f32, right: f32) {
+    use crate::native::accent_color;
+    if !correct && !chosen {
+        return;
+    }
+    let s = t.font_size * 0.26;
+    // the end of the text's last row, or of the line where it has none
+    let end = text.iter().rev().find_map(|p| match p {
+        Prim::Text { pos, text, .. } => {
+            let line = text.lines().pop()?;
+            Some(pos2(
+                pos.x + line.origin.x + line.size.x,
+                pos.y + line.origin.y + line.size.y * 0.5,
+            ))
+        }
+        _ => None,
+    });
+    let (x, y) = end.map_or((right, cy), |e| (e.x, e.y));
+    let c = pos2((x + t.font_size * 0.7).min(right - s), y);
+    let stroke = Stroke::new(1.5, accent_color(Some(if correct { "green" } else { "red" }), t));
+    let line = |a: Pos2, b: Pos2| Prim::Line { a, b, stroke };
+    if correct {
+        deco.push(line(c + vec2(-s, 0.0), c + vec2(-s * 0.25, s * 0.8)));
+        deco.push(line(c + vec2(-s * 0.25, s * 0.8), c + vec2(s, -s * 0.8)));
+    } else {
+        deco.push(line(c + vec2(-s * 0.8, -s * 0.8), c + vec2(s * 0.8, s * 0.8)));
+        deco.push(line(c + vec2(-s * 0.8, s * 0.8), c + vec2(s * 0.8, -s * 0.8)));
+    }
+}
+
+/// An answer's mark, a radio button or a check box in the view's accent, and if `tinted` a tint on the
+/// row of one that is marked. `row`: the row's left edge, its bottom and its top; `right`: its right edge.
+#[allow(clippy::too_many_arguments)]
 fn answer_mark(
     deco: &mut Vec<Prim>,
     v: &crate::native::NativeView,
     t: &Theme,
     rect: Rect,
     checked: bool,
+    tinted: bool,
     row: (f32, f32, f32),
     right: f32,
 ) {
-    use crate::native::{accent_color, tint};
+    use crate::native::{accent_color, ground};
     let accent = accent_color(v.accent.as_deref(), t);
-    if checked {
+    if checked && tinted && v.fill {
         let (left, bottom, top) = row;
         deco.insert(
             0,
             Prim::Rect {
                 rect: Rect::from_min_max(pos2(left.max(0.0), top), pos2(right, bottom)),
-                fill: tint(accent, t),
+                fill: ground(v, t),
                 stroke: Stroke::NONE,
                 radius: 3.0,
             },

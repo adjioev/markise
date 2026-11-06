@@ -33,6 +33,7 @@ mod card_edit;
 mod code_tools;
 mod comment_place;
 mod comment_presence;
+mod practice_tools;
 mod scrollbar;
 mod site_board;
 pub use block_move::BlockDragShown;
@@ -268,6 +269,10 @@ pub struct DocViewer {
     block_language_read_at: u64,
     /// The pointer is on a block's control or its first row, this frame: not text.
     pointer_on_block_control: bool,
+    /// [`Self::outline_rows`], and what they were read for.
+    practice_outline: Option<PracticeOutline>,
+    /// The keyboard went to the answer at the caret, and not the pointer.
+    practice_ring: bool,
     /// A press on the scrollbar (issue #123).
     thumb_drag: scrollbar::ThumbDrag,
     /// Wheel / trackpad smoothing (issue #86).
@@ -322,6 +327,8 @@ impl DocViewer {
             block_language: String::new(),
             block_language_read_at: u64::MAX,
             pointer_on_block_control: false,
+            practice_outline: None,
+            practice_ring: false,
             view_press: None,
             caret_screen: None,
             hover: None,
@@ -447,6 +454,7 @@ impl DocViewer {
         let _ = self.ed.session.take_change();
         let _ = self.ed.session.take_steps();
         self.ed.view.set_model(doc, model);
+        self.ed.practice_document_replaced();
         let caret = self.ed.session.selection().clone();
         let len = self.ed.session.text().len();
         if caret.primary().end().offset > len {
@@ -532,7 +540,7 @@ impl DocViewer {
     /// the document is partial).
     pub fn command_enabled(&self, id: &str) -> bool {
         !(self.partial && WHOLE_DOCUMENT_COMMANDS.contains(&id))
-            && !(self.review_preview() && self.mutates(id))
+            && !((self.review_preview() || self.ed.read_mode()) && self.mutates(id))
             && self.ed.registry.enabled(&self.ed.session, id).is_ok()
     }
 
@@ -632,7 +640,7 @@ impl DocViewer {
     ) -> ViewerOutput {
         let mut out = ViewerOutput::default();
         // No Markup / Original (issue #88): a read-only preview
-        let editable = editable && !self.review_preview();
+        let editable = editable && !self.review_preview() && !self.ed.read_mode();
         self.editable = editable;
         if !editable {
             // a read-only surface (Side by Side's rendered pane) edits no comment (refused: the
@@ -1057,6 +1065,13 @@ impl DocViewer {
         // ---- paint
         images.begin_frame();
         let mut requests = Vec::new();
+        // a native block's ground and bar: one rectangle for all of its items, below all of them
+        let bands = visible
+            .iter()
+            .map(|v| (pos2(left, rect.top() + v.y), v.layout.bands.as_slice()));
+        for (r, fill) in markise_layout::block::merged_bands(bands) {
+            painter.rect_filled(r, 0.0, fill);
+        }
         for v in &visible {
             let origin = pos2(left, rect.top() + v.y);
             paint_layout(
@@ -1083,6 +1098,7 @@ impl DocViewer {
             self.block_tools_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_delete_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_move_ui(ui, &visible, rect, left, theme, &mut out);
+            self.practice_ui(ui, &visible, rect, left);
         }
 
         // ---- review comments: margin cards or bubble popovers (visible items only)
@@ -1163,7 +1179,9 @@ impl DocViewer {
                 let y = y0 + smooth_scroll::shift_at(&tops, y0) + rect.top();
                 let r = Rect::from_min_size(pos2(left + c.min.x - 0.75, y), vec2(1.5, c.height().max(4.0)));
                 self.caret_screen = Some(r);
-                if on && r.intersects(rect) {
+                // (nothing to type in a block being practiced: an answer has its own ring)
+                let in_practice = self.ed.in_practice(self.ed.session.selection().primary().focus.offset);
+                if on && !in_practice && r.intersects(rect) {
                     painter.rect_filled(r, 0.0, color(theme.text));
                 }
                 // IME: allowed while the surface has focus; the candidate window follows the
@@ -1196,7 +1214,7 @@ impl DocViewer {
         if let Some(p) = resp.hover_pos()
             && let Some((hit_item, local, layout)) = hit(&visible, p, left, rect.top())
         {
-            let link = layout.link_at(local).is_some() && (modifiers.command || !focused);
+            let link = layout.link_at(local).is_some() && (modifiers.command || !focused || self.ed.read_mode());
             let on_toggle = layout.toggle.is_some_and(|t| t.contains(local));
             let on_task = editable && task_box_hit(layout, local).is_some();
             if link || on_toggle || on_task {
@@ -1214,7 +1232,7 @@ impl DocViewer {
             if layout.toggle.is_some_and(|t| t.contains(local)) {
                 self.ed.toggle_collapsible(idx);
                 ctx.request_repaint();
-            } else if modifiers.command
+            } else if (modifiers.command || self.ed.read_mode())
                 && let Some(target) = layout.link_at(local).map(str::to_string)
             {
                 if target.starts_with('#') {
@@ -1648,7 +1666,8 @@ impl DocViewer {
             if local.y < 0.0 || local.y >= l.height {
                 continue;
             }
-            return l.toggle.is_some_and(|t| t.contains(local)) || (m.command && l.link_at(local).is_some());
+            let links = m.command || self.ed.read_mode();
+            return l.toggle.is_some_and(|t| t.contains(local)) || (links && l.link_at(local).is_some());
         }
         false
     }
@@ -1980,6 +1999,19 @@ impl DocViewer {
         editable: bool,
         vh: f32,
     ) -> bool {
+        // Read types nothing, and these work the block being practiced at the caret (ADR 0024)
+        if self.ed.read_mode() {
+            match &e {
+                Event::Text(t) if t == " " => return self.ed.practice_space(),
+                Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.is_none() => return self.ed.practice_enter(),
+                _ => {}
+            }
+        }
         match e {
             Event::Text(t) if editable && !t.is_empty() && !t.chars().any(char::is_control) => {
                 self.exec("edit.insertText", &Params::text("text", t), sh, images, vh)
@@ -2005,6 +2037,8 @@ impl DocViewer {
                     // copied after the shaper closure (the context is locked inside it); in a
                     // clean review view what is shown (issue #88: accepted / rejected text)
                     let shown = match self.comment_view {
+                        // what is hidden stays hidden here too (ADR 0024)
+                        _ if self.ed.view.practice_on() => self.ed.practice_copy(r),
                         markise_engine::settings::CommentView::Final => {
                             markise_doc::review::visible_text(self.ed.session.doc(), r, true)
                         }
@@ -2280,6 +2314,9 @@ fn hit(visible: &[markise_layout::Visible], p: Pos2, left: f32, top: f32) -> Opt
         (p.y >= y0 && p.y < y0 + v.layout.height).then(|| (v.idx, pos2(p.x - left, p.y - y0), &*v.layout))
     })
 }
+
+/// The outline's rows in Practice ([`DocViewer::outline_rows`]), and what they were read for.
+type PracticeOutline = ((u64, u64), std::sync::Arc<[usize]>);
 
 /// Dash segments one layout may paint per frame (dashes are expanded only inside the clip
 /// rect, so this bounds pathological cases, not normal diagrams).

@@ -97,6 +97,12 @@ pub struct PageStats {
     /// Headings per level, per name of the block they are directly in (ADR 0021: the estimate of
     /// a page depends on which names show natively).
     pub card_heads: Vec<(Box<str>, [u32; 6])>,
+    /// Openers per name of their block (ADR 0021: a view can have no label row).
+    pub card_names: Vec<(Box<str>, u32)>,
+    /// Closers and quote paragraphs per name of the block they are directly in (ADR 0024: Practice
+    /// adds a row to one and can hide the other, and the estimate of a page has to know without
+    /// reading its blocks).
+    pub card_tallies: Vec<(Box<str>, CardTally)>,
     /// `[toc]` blocks (each lists the whole outline).
     pub tocs: u32,
     /// Headings whose text may use a reference definition (their outline entries are
@@ -122,11 +128,26 @@ pub struct PageStats {
     pub measured_gens: DepGens,
 }
 
-impl PageStats {
-    /// Estimated paragraph lines at `per_line` characters per line (interpolated).
-    pub fn para_lines_at(&self, per_line: f32) -> f32 {
+/// What one block name has in a page, for Practice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CardTally {
+    pub closers: u32,
+    /// Quote paragraphs.
+    pub paras: u32,
+    pub wrapped: [u32; PARA_LINE_CHARS.len()],
+}
+
+impl CardTally {
+    /// Their estimated lines at `per_line` characters per line.
+    pub fn lines_at(&self, per_line: f32) -> f32 {
+        lines_at(&self.wrapped, per_line)
+    }
+}
+
+/// Estimated lines at `per_line` characters per line (interpolated), from the sums for [`PARA_LINE_CHARS`].
+fn lines_at(w: &[u32; PARA_LINE_CHARS.len()], per_line: f32) -> f32 {
+    {
         let t = &PARA_LINE_CHARS;
-        let w = &self.para_wrapped;
         let k = t.partition_point(|&n| (n as f32) < per_line);
         if k == 0 {
             return w[0] as f32;
@@ -137,6 +158,13 @@ impl PageStats {
         let (a, b) = (t[k - 1] as f32, t[k] as f32);
         let f = (per_line - a) / (b - a);
         w[k - 1] as f32 + f * (w[k] as f32 - w[k - 1] as f32)
+    }
+}
+
+impl PageStats {
+    /// Estimated paragraph lines at `per_line` characters per line (interpolated).
+    pub fn para_lines_at(&self, per_line: f32) -> f32 {
+        lines_at(&self.para_wrapped, per_line)
     }
 
     /// Headings in the page.
@@ -159,6 +187,40 @@ impl PageStats {
                         let mut heads = [0; 6];
                         heads[li] = 1;
                         s.card_heads.push((c.name, heads));
+                    }
+                }
+            }
+            if it.kind == (ItemKind::ContainerMarker { close: false })
+                && let Some(c) = doc.named_containers_at(it.origin).pop()
+            {
+                match s.card_names.iter_mut().find(|(n, _)| *n == c.name) {
+                    Some((_, n)) => *n += 1,
+                    None => s.card_names.push((c.name, 1)),
+                }
+            }
+            let closes = it.kind == (ItemKind::ContainerMarker { close: true });
+            let quote = it.kind == ItemKind::Paragraph
+                && it.containers.iter().any(|c| matches!(c, super::Container::Card))
+                && it
+                    .containers
+                    .iter()
+                    .any(|c| matches!(c, super::Container::Quote { .. }));
+            if (closes || quote)
+                && let Some(c) = doc.named_containers_at(it.origin).pop()
+            {
+                let at = match s.card_tallies.iter().position(|(n, _)| *n == c.name) {
+                    Some(at) => at,
+                    None => {
+                        s.card_tallies.push((c.name, CardTally::default()));
+                        s.card_tallies.len() - 1
+                    }
+                };
+                let tally = &mut s.card_tallies[at].1;
+                tally.closers += u32::from(closes);
+                if quote {
+                    tally.paras += 1;
+                    for (w, &n) in tally.wrapped.iter_mut().zip(&PARA_LINE_CHARS) {
+                        *w += it.est_lines.max(it.est_chars.div_ceil(n));
                     }
                 }
             }
@@ -355,6 +417,7 @@ impl DocModel {
                         anchor,
                         item: pages.len(),
                         key,
+                        in_block: it.containers.iter().any(|c| matches!(c, super::Container::Card)),
                     });
                 }
             }
@@ -682,6 +745,7 @@ impl DocModel {
                     anchor: String::new(), // numbered below (its key is affected)
                     item: lo + p,
                     key,
+                    in_block: !doc.named_containers_at(start).is_empty(),
                 }
             })
             .collect();
