@@ -129,7 +129,7 @@ impl egui::DroppedFile for Dropped {
     }
 }
 
-fn drop_files(h: &mut H, at: egui::Pos2, files: &[PathBuf]) {
+pub(crate) fn drop_files(h: &mut H, at: egui::Pos2, files: &[PathBuf]) {
     h.hover_at(at);
     h.step();
     for f in files {

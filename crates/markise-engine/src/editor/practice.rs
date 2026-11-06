@@ -1,15 +1,15 @@
-//! Blocks in Practice (ADR 0024). A practised block's text does not change by anything done in it:
-//! typing and block commands are off, and what someone answers is never in the document.
+//! Read and Edit, and blocks in Practice (ADR 0024). Read is a document's state: the session refuses
+//! every change, and what someone answers is never in the document.
 
 use std::ops::Range;
 
-use markise_doc::{DocPos, Params, Selection};
-use markise_layout::{BlockViewMode, BlockViews, NativeAt, PracticeShow};
+use markise_doc::{DocPos, Selection};
+use markise_layout::{BlockViewMode, NativeAt, PracticeShow};
 
 use super::EditorView;
-use super::command::CommandError;
 
-const IN_PRACTICE: CommandError = CommandError::Disabled("the block is being practiced");
+/// Why the session refuses a change in Read.
+pub const READ_ONLY_REASON: &str = "Read Mode is on: switch to Edit to change the document.";
 
 /// What was done in one block. A block is who stands at this offset with this length: every edit
 /// moves the offset, and any edit that touches those bytes ends this (ADR 0024).
@@ -27,47 +27,134 @@ impl EditorView {
         self.view.practised_around(at).is_some()
     }
 
-    /// Whether changing source range `r` would change a block in Practice. Over a long range this
-    /// answers by what the range holds: any block's marker line, while any block is in Practice.
-    pub fn practice_touches(&self, r: Range<usize>) -> bool {
-        if !self.view.practice_on() {
-            return false;
-        }
-        if self.in_practice(r.start) || self.in_practice(r.end) {
-            return true;
-        }
-        self.session.text().get(r).is_some_and(|t| t.contains(":::"))
+    /// Whether the document is in Read.
+    pub fn read_mode(&self) -> bool {
+        self.place.read
     }
 
-    /// A command in a block in Practice: Space selects the answer at the caret and Enter checks, or
-    /// resets what is checked. Any other that would change the block does nothing. Undo and redo are the
-    /// document's, of what was done before; the other commands (a caret's moves) run as ever.
-    pub(super) fn practice_command(&mut self, id: &str, params: &Params) -> Option<Result<(), CommandError>> {
-        if !self.view.practice_on() || matches!(id, "edit.undo" | "edit.redo") || !self.is_mutating(id) {
-            return None;
+    /// Read or Edit, by someone's choice, which a package then has no say over.
+    pub fn set_read_mode(&mut self, read: bool) {
+        self.place.read_chosen = true;
+        self.apply_read(read);
+    }
+
+    fn apply_read(&mut self, read: bool) {
+        self.place.read = read;
+        self.session.close_typing();
+        self.session.set_read_only(read.then_some(READ_ONLY_REASON));
+        self.end_sticky();
+        self.view.set_read_mode(read);
+        self.follow_block_modes();
+        self.practice_place_caret();
+    }
+
+    /// What is remembered of a document's state: `Some` when someone chose.
+    pub fn read_choice(&self) -> Option<bool> {
+        self.place.read_chosen.then_some(self.place.read)
+    }
+
+    /// What was remembered of a document's state comes back.
+    pub fn restore_read_choice(&mut self, choice: Option<bool>) {
+        if let Some(read) = choice {
+            self.set_read_mode(read);
         }
+    }
+
+    /// A package can say that a document holding some of its blocks opens in Read. One that says so was
+    /// not looked up yet when the document came, or the document has only now come whole.
+    pub(super) fn open_as_the_package_says(&mut self) {
+        if self.place.read_chosen || self.place.read {
+            return;
+        }
+        let Some(names) = self.place.fields.as_ref().map(|f| f.read_by_default().to_vec()) else {
+            return;
+        };
+        if names.iter().any(|name| self.holds_block(name)) {
+            self.apply_read(true);
+        }
+    }
+
+    /// Whether the document holds a block of this name.
+    fn holds_block(&self, name: &str) -> bool {
+        let text = self.session.text();
+        let doc = self.session.doc();
+        let wanted = format!(":::{name}");
+        let mut from = 0;
+        while let Some(i) = text[from..].find(&wanted) {
+            let at = from + i;
+            let around = doc.named_containers_at(at + 1);
+            if around
+                .iter()
+                .any(|c| &*c.name == name && c.opener.start <= at && at < c.opener.end)
+            {
+                return true;
+            }
+            from = at + wanted.len();
+        }
+        false
+    }
+
+    /// Space in Read: the answer at the caret. `true`: something happened.
+    pub fn practice_space(&mut self) -> bool {
         let p = self.session.selection().primary();
-        if p.is_caret() && p.focus.virt == 0 && self.in_practice(p.focus.offset) {
-            match id {
-                "edit.insertText" if params.get_text("text") == Some(" ") => {
-                    self.practice_press(p.focus.offset);
-                    return Some(Ok(()));
-                }
-                "edit.newline" => {
-                    if let Some(at) = self.view.native_block(p.focus.offset) {
-                        if self.practice_show(at.range.start).is_some_and(|s| s.checked) {
-                            self.practice_reset(at.range.start);
-                        } else {
-                            self.practice_check(at.range.start);
-                        }
-                    }
-                    return Some(Ok(()));
-                }
-                _ => {}
+        p.is_caret() && p.focus.virt == 0 && self.practice_press(p.focus.offset)
+    }
+
+    /// Return in Read: checks the block at the caret, or resets what is checked.
+    pub fn practice_enter(&mut self) -> bool {
+        let p = self.session.selection().primary();
+        if !p.is_caret() || p.focus.virt > 0 {
+            return false;
+        }
+        let Some(at) = self.practice_block(p.focus.offset) else {
+            return false;
+        };
+        let opener = at.range.start;
+        if self.practice_show(opener).is_some_and(|s| s.checked) {
+            self.practice_reset(opener);
+            true
+        } else {
+            self.practice_check(opener)
+        }
+    }
+
+    /// The text of source range `r` for the clipboard, with what Practice hides left out.
+    pub fn practice_copy(&self, r: Range<usize>) -> String {
+        let text = self.session.text();
+        let mut cuts = Vec::new();
+        let mut pos = r.start;
+        while pos < r.end {
+            // the outermost block in Practice standing here
+            let around = self.session.doc().named_containers_at(pos);
+            let block = (around.iter()).find(|c| c.opener.start <= pos && self.in_practice(c.opener.start));
+            if let Some(c) = block {
+                cuts.extend(self.view.practice_copy_cuts(c));
+                pos = c.closer.end.max(pos + 1);
+                continue;
+            }
+            match text[pos..r.end].find(":::") {
+                // a marker line is where anything changes; past this one if we stand on it
+                Some(0) => pos += 3,
+                Some(i) => pos += i,
+                None => break,
             }
         }
-        let touched = (self.session.selection().ranges().iter()).any(|s| self.practice_touches(s.range()));
-        touched.then_some(Err(IN_PRACTICE))
+        let mut out = String::with_capacity(r.len());
+        let mut at = r.start;
+        for (cut, instead) in cuts {
+            let (start, end) = (cut.start.max(r.start), cut.end.min(r.end));
+            if start >= end || start < at {
+                continue;
+            }
+            out.push_str(&text[at..start]);
+            // (part of a mark's source is not a mark)
+            if end - start == cut.len() {
+                out.push_str(instead);
+            }
+            at = end;
+        }
+        out.push_str(&text[at..r.end]);
+        out
     }
 
     /// A caret on what Practice hides stands after the block instead. It would show nothing there, and
@@ -92,69 +179,6 @@ impl EditorView {
             let sel = self.session.selection().clone();
             self.set_selection(sel);
         }
-    }
-
-    /// Whether the document as a whole is in Practice.
-    pub fn practice_whole(&self) -> bool {
-        self.place.mode == BlockViewMode::Practice || self.practice_by_default()
-    }
-
-    /// The package opens blocks in Practice, and no one has chosen otherwise for the document.
-    pub(super) fn practice_by_default(&self) -> bool {
-        !self.place.defaults_off && self.place.fields.as_ref().is_some_and(|f| f.any_practice_default())
-    }
-
-    /// The state of the document, for a block of this name with none of its own.
-    pub(super) fn document_mode(&self, name: &str) -> BlockViewMode {
-        let by_default =
-            !self.place.defaults_off && self.place.fields.as_ref().is_some_and(|f| f.practice_default(name));
-        if by_default {
-            BlockViewMode::Practice
-        } else {
-            self.place.mode
-        }
-    }
-
-    /// For what remembers a document's state: whether someone chose for the document as a whole.
-    pub fn practice_defaults_off(&self) -> bool {
-        self.place.defaults_off
-    }
-
-    pub fn set_practice_defaults_off(&mut self, off: bool) {
-        self.place.defaults_off = off;
-        self.follow_block_modes();
-    }
-
-    /// A block being written here stays what it can be written in. With no such thing, a block that
-    /// opens in Practice would close on the first character of it. `edits`: as for [`Self::prune_practice`].
-    pub(super) fn keep_written_block_native(&mut self, edits: &[(usize, usize, isize)]) {
-        if !self.practice_by_default() {
-            return;
-        }
-        let at = self.session.selection().primary().focus.offset;
-        let Some(c) = self.session.doc().named_containers_at(at).pop() else {
-            return;
-        };
-        let written = (edits.iter()).any(|&(start, end, delta)| {
-            let end = end.saturating_add_signed(delta).max(start);
-            start <= c.opener.end && c.opener.start <= end
-        });
-        if written && self.document_mode(&c.name) == BlockViewMode::Practice && !self.has_own_mode(c.opener.start) {
-            self.add_own_mode(c.opener.start, BlockViewMode::Native);
-        }
-    }
-
-    /// Practice for the whole document, or out of it. A block with no practice is as it was.
-    pub fn toggle_practice_all(&mut self) {
-        self.place.mode = if self.practice_whole() {
-            BlockViewMode::Native
-        } else {
-            BlockViewMode::Practice
-        };
-        self.place.defaults_off = true;
-        self.clear_own_modes();
-        self.follow_block_modes();
-        self.practice_place_caret();
     }
 
     /// What was done in the block with this opener.
@@ -275,6 +299,13 @@ impl EditorView {
             self.view.practice_forgotten();
         }
         self.practice_place_caret();
+    }
+
+    /// The document was replaced whole, past the edits that say what moved: a reload from disk or an edit
+    /// made as source. What was done is lost with it.
+    pub fn practice_document_replaced(&mut self) {
+        self.place.practice.clear();
+        self.follow_practice();
     }
 
     /// Hands the view what was done, where the blocks stand now.

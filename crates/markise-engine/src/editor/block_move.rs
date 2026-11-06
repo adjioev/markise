@@ -215,10 +215,6 @@ impl EditorView {
             .iter()
             .filter(|c| !(at.virt > 0 && at.offset >= c.closer.end))
             .count();
-        // a block being practiced has no commands (ADR 0024)
-        if inside > 0 && self.in_practice(at.offset) {
-            return None;
-        }
         moving(doc, &chain, inside.checked_sub(1)?)
     }
 
@@ -267,9 +263,6 @@ impl EditorView {
 
     /// Moves the block with this opener to line `to`, as [`Self::drop_line`] gave it.
     pub fn move_block_to(&mut self, opener: usize, to: usize) -> Result<bool, MoveRefused> {
-        if self.in_practice(opener) {
-            return Ok(false);
-        }
         let Some(m) = self.block_with_opener(opener) else {
             return Ok(false);
         };
@@ -379,9 +372,6 @@ impl EditorView {
     /// Deletes the block with this opener, with what is inside it: one undo step, with nothing taken but
     /// its lines and the blank lines it leaves behind. `Ok(false)`: no block stands there.
     pub fn delete_block(&mut self, opener: usize, in_source: bool) -> Result<bool, MoveRefused> {
-        if !in_source && self.in_practice(opener) {
-            return Ok(false);
-        }
         if in_source {
             self.source_selection_to_session();
         }

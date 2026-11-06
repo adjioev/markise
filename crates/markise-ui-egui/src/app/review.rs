@@ -226,7 +226,11 @@ impl MarkiseApp {
     pub(super) fn apply_review_read_only(&mut self) {
         let rendered = !self.source_visible && !self.side_by_side;
         if let Some(d) = self.doc.as_mut() {
-            let want = (rendered && d.viewer.review_preview()).then_some(PREVIEW_READ_ONLY);
+            let want = if d.viewer.ed.read_mode() {
+                Some(markise_engine::editor::READ_ONLY_REASON)
+            } else {
+                (rendered && d.viewer.review_preview()).then_some(PREVIEW_READ_ONLY)
+            };
             if d.viewer.ed.session.read_only() != want {
                 d.viewer.ed.session.set_read_only(want);
             }
@@ -429,6 +433,7 @@ impl MarkiseApp {
             return;
         };
         let (comments, suggestions) = (list.comments, list.suggestions);
+        let read = self.doc.as_ref().is_some_and(|d| d.viewer.ed.read_mode());
         // how comments are shown in the document: the same setting as Preferences
         let display = self.themes.comment_display();
         let picked = display_toggle(ui, look, display);
@@ -444,13 +449,13 @@ impl MarkiseApp {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(suggestions > 0, egui::Button::new("Accept All"))
+                .add_enabled(suggestions > 0 && !read, egui::Button::new("Accept All"))
                 .clicked()
             {
                 act = Some(PanelAction::Run("review.acceptAll", None));
             }
             if ui
-                .add_enabled(suggestions > 0, egui::Button::new("Reject All"))
+                .add_enabled(suggestions > 0 && !read, egui::Button::new("Reject All"))
                 .clicked()
             {
                 act = Some(PanelAction::Run("review.rejectAll", None));

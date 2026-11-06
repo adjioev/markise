@@ -504,24 +504,27 @@ impl MarkiseApp {
             .get("view.sourceMode")
             .map_or("Source Code Mode", |s| s.desc.label);
         let mut entries = vec![
+            self.app_item("view.readMode", has_doc, Check::Toggle(self.read_mode_on())),
+            Entry::Separator,
             self.app_item("view.rendered", has_doc, Check::Radio(mode == ViewMode::Rendered)),
             self.item(
                 MenuAction::Command("view.sourceMode"),
                 src_label,
-                has_doc,
+                has_doc && !self.read_mode_on(),
                 Check::Radio(mode == ViewMode::Source),
             ),
-            self.app_item("view.sideBySide", has_doc, Check::Radio(mode == ViewMode::SideBySide)),
+            self.app_item(
+                "view.sideBySide",
+                has_doc && !self.read_mode_on(),
+                Check::Radio(mode == ViewMode::SideBySide),
+            ),
             Entry::Separator,
         ];
         // only where a package can give a block a view (ADR 0021)
         if self.block_package().is_some() {
-            entries.push(self.app_item("view.switchBlockView", self.block_view_available(), Check::None));
-            entries.push(self.app_item("view.switchAllBlockViews", has_doc, Check::None));
-            if self.block_practice_available() {
-                let on = self.doc.as_ref().is_some_and(|d| d.viewer.ed.practice_whole());
-                entries.push(self.app_item("view.practiceAll", has_doc, Check::Toggle(on)));
-            }
+            let edit = !self.read_mode_on();
+            entries.push(self.app_item("view.switchBlockView", edit && self.block_view_available(), Check::None));
+            entries.push(self.app_item("view.switchAllBlockViews", edit && has_doc, Check::None));
             entries.push(Entry::Separator);
         }
         entries.extend([
@@ -733,7 +736,7 @@ impl MarkiseApp {
             "block.delete" => return self.delete_block_at_caret(),
             "view.switchBlockView" => return self.switch_block_view_at_caret(),
             "view.switchAllBlockViews" => return self.switch_all_block_views(),
-            "view.practiceAll" => return self.toggle_practice_all(),
+            "view.readMode" => return self.toggle_read_mode(),
             "file.quickOpen" => self.open_quick(ctx),
             "file.clearRecent" => self.clear_recent_paths(),
             "file.recover" => self.workflow.show_recovery = true,

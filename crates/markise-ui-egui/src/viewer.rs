@@ -454,6 +454,7 @@ impl DocViewer {
         let _ = self.ed.session.take_change();
         let _ = self.ed.session.take_steps();
         self.ed.view.set_model(doc, model);
+        self.ed.practice_document_replaced();
         let caret = self.ed.session.selection().clone();
         let len = self.ed.session.text().len();
         if caret.primary().end().offset > len {
@@ -539,7 +540,7 @@ impl DocViewer {
     /// the document is partial).
     pub fn command_enabled(&self, id: &str) -> bool {
         !(self.partial && WHOLE_DOCUMENT_COMMANDS.contains(&id))
-            && !(self.review_preview() && self.mutates(id))
+            && !((self.review_preview() || self.ed.read_mode()) && self.mutates(id))
             && self.ed.registry.enabled(&self.ed.session, id).is_ok()
     }
 
@@ -639,7 +640,7 @@ impl DocViewer {
     ) -> ViewerOutput {
         let mut out = ViewerOutput::default();
         // No Markup / Original (issue #88): a read-only preview
-        let editable = editable && !self.review_preview();
+        let editable = editable && !self.review_preview() && !self.ed.read_mode();
         self.editable = editable;
         if !editable {
             // a read-only surface (Side by Side's rendered pane) edits no comment (refused: the
@@ -1085,10 +1086,8 @@ impl DocViewer {
             let mut sh = |f: &mut dyn FnMut(&mut dyn TextShaper, &dyn markise_layout::Images)| {
                 with_shaper(&ctx, parley.as_deref_mut(), |s| f(s, imgs))
             };
-            // (what edits a part of a block has no place in a block being practiced)
-            let plain = self.outside_practice(&visible);
-            self.code_tools_ui(ui, &plain, rect, left, theme, focused, editable, &mut out, &mut sh);
-            self.image_tools_ui(ui, &plain, rect, left, theme, imgs, &mut out);
+            self.code_tools_ui(ui, &visible, rect, left, theme, focused, editable, &mut out, &mut sh);
+            self.image_tools_ui(ui, &visible, rect, left, theme, imgs, &mut out);
             self.block_tools_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_delete_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_move_ui(ui, &visible, rect, left, theme, &mut out);
@@ -1208,7 +1207,7 @@ impl DocViewer {
         if let Some(p) = resp.hover_pos()
             && let Some((hit_item, local, layout)) = hit(&visible, p, left, rect.top())
         {
-            let link = layout.link_at(local).is_some() && (modifiers.command || !focused);
+            let link = layout.link_at(local).is_some() && (modifiers.command || !focused || self.ed.read_mode());
             let on_toggle = layout.toggle.is_some_and(|t| t.contains(local));
             let on_task = editable && task_box_hit(layout, local).is_some();
             if link || on_toggle || on_task {
@@ -1226,7 +1225,7 @@ impl DocViewer {
             if layout.toggle.is_some_and(|t| t.contains(local)) {
                 self.ed.toggle_collapsible(idx);
                 ctx.request_repaint();
-            } else if modifiers.command
+            } else if (modifiers.command || self.ed.read_mode())
                 && let Some(target) = layout.link_at(local).map(str::to_string)
             {
                 if target.starts_with('#') {
@@ -1660,7 +1659,8 @@ impl DocViewer {
             if local.y < 0.0 || local.y >= l.height {
                 continue;
             }
-            return l.toggle.is_some_and(|t| t.contains(local)) || (m.command && l.link_at(local).is_some());
+            let links = m.command || self.ed.read_mode();
+            return l.toggle.is_some_and(|t| t.contains(local)) || (links && l.link_at(local).is_some());
         }
         false
     }
@@ -1992,6 +1992,19 @@ impl DocViewer {
         editable: bool,
         vh: f32,
     ) -> bool {
+        // Read types nothing, and these work the block being practiced at the caret (ADR 0024)
+        if self.ed.read_mode() {
+            match &e {
+                Event::Text(t) if t == " " => return self.ed.practice_space(),
+                Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.is_none() => return self.ed.practice_enter(),
+                _ => {}
+            }
+        }
         match e {
             Event::Text(t) if editable && !t.is_empty() && !t.chars().any(char::is_control) => {
                 self.exec("edit.insertText", &Params::text("text", t), sh, images, vh)
@@ -2017,6 +2030,8 @@ impl DocViewer {
                     // copied after the shaper closure (the context is locked inside it); in a
                     // clean review view what is shown (issue #88: accepted / rejected text)
                     let shown = match self.comment_view {
+                        // what is hidden stays hidden here too (ADR 0024)
+                        _ if self.ed.view.practice_on() => self.ed.practice_copy(r),
                         markise_engine::settings::CommentView::Final => {
                             markise_doc::review::visible_text(self.ed.session.doc(), r, true)
                         }

@@ -53,8 +53,9 @@ pub(super) struct InPlace {
     pending_modes: Vec<(usize, BlockViewMode)>,
     /// What was done in blocks in Practice: never in the document ([`super::practice`]).
     pub(super) practice: Vec<super::practice::Practised>,
-    /// Someone chose for the whole document: the package's word on what opens in Practice is over.
-    pub(super) defaults_off: bool,
+    /// The document is in Read, and whether that was someone's choice: a package has no say then.
+    pub(super) read: bool,
+    pub(super) read_chosen: bool,
     /// How many of those were right, of how many checked: read per frame, so not worked out per frame.
     pub(super) practice_score: (usize, usize),
 }
@@ -74,6 +75,7 @@ impl EditorView {
     pub fn set_block_fields(&mut self, fields: Option<Arc<PackageViews>>) {
         self.place.fields = fields;
         self.place.model = None;
+        self.open_as_the_package_says();
         self.end_sticky();
     }
 
@@ -89,10 +91,6 @@ impl EditorView {
         (self.place.own_modes.iter())
             .filter_map(|o| Some((self.session.mark(o.mark)?.offset, o.mode)))
             .collect()
-    }
-
-    pub(super) fn has_own_mode(&self, opener: usize) -> bool {
-        self.own_modes_now().iter().any(|m| m.0 == opener)
     }
 
     /// The name of the block whose opener stands at `at`.
@@ -135,9 +133,10 @@ impl EditorView {
             self.add_own_mode(opener.saturating_add_signed(moved), m);
         }
         self.follow_block_modes();
+        self.open_as_the_package_says();
     }
 
-    pub(super) fn clear_own_modes(&mut self) {
+    fn clear_own_modes(&mut self) {
         for o in std::mem::take(&mut self.place.own_modes) {
             self.session.remove_mark(o.mark);
         }
@@ -149,19 +148,11 @@ impl EditorView {
         let can = BlockCan {
             view: true,
             site: self.view.can_draw_site(),
-            practice: self.place.fields.as_ref().is_some_and(|f| f.any_practice()),
         };
-        let now = if self.practice_by_default() {
-            BlockViewMode::Practice
-        } else {
-            self.place.mode
-        };
-        self.place.mode = now.next_for(can);
-        self.place.defaults_off = true;
+        self.place.mode = self.place.mode.next_for(can);
         self.clear_own_modes();
         self.follow_block_modes();
         self.leave_block_for_picture(None);
-        self.practice_place_caret();
     }
 
     /// Whether a block of this name has a view of its own. With no package to say, nothing is ruled out.
@@ -174,7 +165,6 @@ impl EditorView {
         BlockCan {
             view: self.name_has_view(name),
             site: self.view.can_draw_site(),
-            practice: self.place.fields.as_ref().is_some_and(|f| f.has_practice(name)),
         }
     }
 
@@ -220,9 +210,7 @@ impl EditorView {
             .opener_name(opener)
             .map_or_else(BlockCan::default, |n| self.can_of(&n));
         let next = self.next_block_view(opener);
-        let document = self
-            .opener_name(opener)
-            .map_or(self.place.mode, |n| self.document_mode(&n));
+        let document = self.place.mode;
         let own =
             (self.place.own_modes.iter()).position(|o| self.session.mark(o.mark).is_some_and(|p| p.offset == opener));
         // what shows the same as the document's state needs no state of its own
@@ -239,13 +227,11 @@ impl EditorView {
         }
         self.follow_block_modes();
         self.leave_block_for_picture(Some(opener));
-        self.practice_place_caret();
     }
 
     /// Hands the view where the blocks with a state of their own stand now.
     pub(super) fn follow_block_modes(&mut self) {
         let own = self.own_modes_now();
-        self.view.set_practice_defaults_off(self.place.defaults_off);
         self.view.set_block_modes(self.place.mode, own);
     }
 
@@ -323,9 +309,6 @@ impl EditorView {
     /// not in such a block, or it holds the block whole.
     pub fn field_replace(&mut self, r: Range<usize>, text: &str) -> Option<Result<(), CommandError>> {
         self.place.fields.as_ref()?;
-        if self.practice_touches(r.clone()) {
-            return Some(Err(NOT_HERE));
-        }
         let at = self.view.native_block(r.start)?;
         if r.start <= at.range.start && r.end >= at.range.end {
             return None;
@@ -363,9 +346,6 @@ impl EditorView {
         images: &dyn Images,
     ) -> Option<Result<(), CommandError>> {
         self.place.fields.as_ref()?;
-        if let Some(done) = self.practice_command(id, params) {
-            return Some(done);
-        }
         let p = self.session.selection().primary();
         let r = p.range();
         let at = (self.view.native_block(r.start)).or_else(|| self.view.native_block(r.end))?;
@@ -582,9 +562,6 @@ impl EditorView {
 
     /// A press on the mark of the answer item at `at`. Returns whether the document changed.
     pub fn press_answer_mark(&mut self, at: usize) -> bool {
-        if self.in_practice(at) {
-            return false;
-        }
         let Some(block) = self.view.native_block(at) else {
             return false;
         };

@@ -1,4 +1,4 @@
-# ADR 0024: Practice mode
+# ADR 0024: Read mode and Practice
 
 Status: accepted for issue #178.
 
@@ -6,7 +6,7 @@ Status: accepted for issue #178.
 
 A block can hold what a reader is meant to work out: answers with correct marks, a worked solution.
 In the editor those show at once, which is what an author wants and not what someone preparing from
-the document wants. Blocks that hold such things can be practised in the editor: the telling parts hide, the
+the document wants. A document can be read as well as edited, and in Read blocks that hold such things are practised: the telling parts hide, the
 reader answers, and then sees how it went. This needs no helper and no site code, and Markise learns
 no vocabulary: it knows a view with fields, a `choices` field with a correctness mark, and field names
 a package gives it. Nothing about it may touch the file.
@@ -36,37 +36,47 @@ There are two kinds of practice, told apart by the schema and not by the view's 
 - **With no answers.** Show answer reveals the fields, and Reset hides them. It does not count, as there is
   nothing to be right about.
 
-### Opening in Practice
+### Read and Edit
 
-`"practice": {"reveal": [...], "default": true}` makes Practice what a block of that view opens in. The state of a block is then
-its own if it has one, or else the document's, and the document's is the package's word for such a block until someone chooses for the document
-(`InPlace::defaults_off`, kept with the rest of a document's state). Other packages are not affected.
+The main control is one switch per document, Read or Edit: the command Read Mode (View menu, Shift+Opt+Cmd+Y; Ctrl+Shift+Alt+Y) and a button in the status bar that says which it is. It works in any document, with a package or with none.
+
+- **Edit** is as it was: everything visible and editable, answers shown, and the view switch of a block goes through its native view, the site's picture and its Markdown.
+- **Read**: the session is read-only (`EditorSession::set_read_only`, the one point every change goes through), so no typing, paste, drop, undo, Replace, block command or form. No block controls show but Check, Reset and Show answer, and the toolbar's formatting is off. Blocks with a `practice` are in Practice whatever their state in Edit, and have that state again after. Other blocks and text simply read. A link works with a plain click. Selection and Find work.
+
+**There is no switch per block, and no Practice All**: the first steps of this stack had them, and with Read as the main control they were a second way to the same place, so they went. `BlockViewMode::Practice` remains, as what a block is in Read, and nothing switches to it.
+
+**An open form closes on entering Read**, as it shows the answers. A changed draft is asked about first, Save, Discard or Cancel, and Read waits for the answer.
+
+**An answer reads like a list line.** Before a check nothing marks a row but its control. After one, a tick on a correct answer and a cross on a chosen wrong one sit right after the text; a wrong answer not chosen has nothing. Check, Reset and Show answer are quiet text a paragraph's gap below. A thin ring within the column shows where the keyboard is, only while it is the keyboard that went there.
+
+**Copying** in Read leaves out what is hidden (`EditorView::practice_copy`): a hidden field goes, a mark reads `[ ]`, and of a block that cannot be practised only its marker lines stay. What is shown after a check is copied as it stands. Export is a choice about the file, and copies all of it.
+
+**The source pane is not available in Read**: entering Read closes Side by Side or Source mode, and they cannot be opened until Edit. This is the simpler of the two choices: an editable source pane beside a read-only document would be a second state to explain, and it would show the answers.
+
+**The file never changes.** Nothing can make the document dirty in Read. Unsaved edits made before entering Read stay unsaved, and saving them still works: Read does not discard them. A change on disk reloads under the existing rules, as replacing the document goes past read-only, and what was answered goes with it.
+
+### What a document opens in
+
+`"practice": {"reveal": [...], "default": true}` on a view makes a document that holds a block of that view open in Read (`PackageViews::read_by_default`, a search of the text checked against the parsed blocks, once when the package is known and once when a large file has come whole). Any other document opens in Edit. Other packages are not affected.
 
 The package has to be known before the first frame that could show an answer, and it is looked up off the UI thread. So a document opens
-**veiled** (`View::set_blocks_veiled`) where packages can be in use: blocks show only their first rows until the lookup has answered. A document
+**veiled** (`View::set_blocks_veiled`) where packages can be in use: blocks show only their first rows until the lookup has answered, and Side by Side draws only the rendered pane. A document
 with no package loses those few frames of what its blocks hold, and nothing else. Until a package has been accepted Markise does not use it, so at the
-question, or after Not Now, blocks are cards as ever: there is nothing yet to say what hides.
+question, or after Not Now, the document is in Edit and blocks are cards: there is nothing yet to say what hides.
 
-Editing is reached through the view switch, per block or for the document. **On reopening, what is remembered wins**: the state a document was left in is
-kept by path for the session (ADR 0021), so a block switched to edit stays so if its document is closed and opened again, and the next session starts from the
-package's word, as nothing of this is on disk.
-
-A block being written stays writable. One inserted from a preset gets a state of its own, Native. So does one typed by hand, recognised by an edit that reaches its opener line with the caret in it: without this a
-block would close on its author at the first line.
+The choice is per document for the session, kept by path with the rest of its state (ADR 0021), and **what someone chose wins over the package's word**. The next session starts from the package's word, as nothing of this is on disk. A block inserted from a preset is inserted in Edit, so it shows as ever.
 
 ### What lists or finds text
 
 - **Outline and `[toc]`.** A heading can stand in a quote or in content no field takes, and a list of headings cannot read every block to tell. So while any block is in Practice, these leave
   out every heading directly in a block of a name that can be practised (`OutlineEntry::block`, `View::practice_hides_heading`). `reveal` cannot name a heading, for the same reason.
-- **Find.** Rendered, it leaves out matches in what hides, so there is no count, highlight, jump or replacement for them. They come back when revealed. In Source or Side by Side the search covers the source pane, the author's choice; a hit there changes nothing in the rendered pane.
+- **Find.** It leaves out matches in what hides, so there is no count, highlight or jump for them. They come back when revealed.
 - **Word count.** A number for the file, the same in every state. It holds no text. It does not count less in Practice, which would tell how long an answer is by the difference.
 - **The Comments panel** leaves out comments and suggestions on what hides. Accept All and Reject All are the document's, and a block they change loses what was done in it.
 
 ### The state
 
-`BlockViewMode::Practice` comes after `Native` in the order of the view switch, per block and for the
-document, and `BlockCan` says what a block can show. A separate command, Practice All Blocks, goes to it and
-back for the document, since going through the switch's other states would run site code on the way.
+`BlockViewMode::Practice` is what a block with a `practice` is in Read (`View::set_read_mode`). A block with none, and a document with none, are not touched by it.
 
 ### Hiding
 
@@ -86,30 +96,23 @@ No part of a practised block may tell an answer, so:
   placed on what hides stands after the block.
 - Find in the rendered view leaves out matches in what hides, as it does for hidden ids.
 
-What this does not hide: Source mode and the source pane of Side by Side show the file, as they are for.
-Copying a selection copies the file's text. The word count counts the file.
+The word count counts the file.
 
 ### Nothing reaches the file
 
 What a reader does lives in `EditorView` only: never in the session's text, hints, history or marks, so there
-is nothing to be dirty about and no undo step. `practice_refuses` turns down every mutating command when the selection touches a
-practised block, and the routes around commands are closed where they start: the block's buttons, the form,
-moving, deleting, link completion, code and image tools, Replace. A long selection is judged by what it holds:
-any `:::` in it, while something is in Practice, does nothing. That can refuse more than it has to, and never less.
-
-Undo and redo still work, as they are about what was done before, and if they touch a block its answers go.
+is nothing to be dirty about and no undo step. Every other change is refused at the session while in Read.
 
 ### Identity
 
 **A block's practice state is its opener's offset and its length, moved by every edit, and any edit that
 touches those bytes ends it.** Answers are by their place among the block's answers, which cannot change
 while the block does not. So it lasts through scrolling, paging and eviction, none of which change offsets, and
-through edits elsewhere. It goes with a change to the block from anywhere, and with the document being replaced, as a
+through edits elsewhere, made in Edit. It goes with a change to the block from anywhere, and with the document being replaced, as a
 reload is. Nothing is written to disk. A content hash was the alternative, and it needs a tie-break for two equal
 blocks and reads each block again.
 
-The state of a block in the view switch (Practice or not) is kept by path for the session like any other (ADR
-0021). The answers are not: they end with the viewer.
+Read or Edit is kept by path for the session (above). The answers are not: they end with the viewer.
 
 ### Cost
 

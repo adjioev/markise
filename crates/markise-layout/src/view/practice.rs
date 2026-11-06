@@ -1,4 +1,4 @@
-//! Blocks in Practice (ADR 0024): what hides, by what a block's parts say. Nothing is known here of
+//! Blocks in Practice, in a document in Read (ADR 0024): what hides, by what a block's parts say. Nothing is known here of
 //! who answered what but what the host hands over ([`View::set_block_practice`]); the file is never
 //! read for it but through a block's parts. A document with no block in Practice pays one comparison.
 
@@ -29,22 +29,18 @@ pub struct PracticeShow {
 
 #[derive(Default)]
 pub(super) struct PracticeState {
-    /// Some block is in Practice: all the rest of this is only asked about then.
+    /// Some block is in Practice, or may be: all the rest of this is only asked about then.
     on: bool,
-    /// The document as a whole is.
-    whole: bool,
-    /// A block of its own is.
-    own_any: bool,
+    /// The document is in Read.
+    read: bool,
+    /// The package has blocks that can be practised.
+    any_practice: bool,
     /// What was done, by a block's opener, ascending. A block with nothing done is not here.
     shows: Vec<(usize, PracticeShow)>,
     /// Whether an item hides, by its start, for the document and states as they stand.
     hidden: RefCell<HashMap<usize, bool>>,
     /// Goes up when measured page heights stop holding for what they hid.
     epoch: u64,
-    /// The package has blocks that open in Practice …
-    package_defaults: bool,
-    /// … and someone has chosen something else for the document.
-    defaults_off: bool,
     /// What a package might hide is not known yet: blocks show their first rows only, until it is.
     veiled: bool,
     /// Goes up when what hides changes: who searched has to look again.
@@ -58,30 +54,24 @@ impl PracticeState {
         }
     }
 
-    pub(super) fn modes_changed(&mut self, mode: BlockViewMode, own: &[(usize, BlockViewMode)]) {
-        self.whole = mode == BlockViewMode::Practice;
-        self.own_any = own.iter().any(|m| m.1 == BlockViewMode::Practice);
-        self.settle();
-    }
-
     fn settle(&mut self) {
-        self.on = self.whole || self.own_any || self.defaults_apply() || self.veiled;
+        self.on = (self.read && self.any_practice) || self.veiled;
         self.hidden.borrow_mut().clear();
         self.generation += 1;
     }
 
-    pub(super) fn defaults_apply(&self) -> bool {
-        self.package_defaults && !self.defaults_off
+    pub(super) fn read(&self) -> bool {
+        self.read
     }
 
-    pub(super) fn package_defaults(&mut self, any: bool, mode: BlockViewMode, own: &[(usize, BlockViewMode)]) {
-        self.package_defaults = any;
-        self.modes_changed(mode, own);
+    pub(super) fn package_changed(&mut self, any_practice: bool) {
+        self.any_practice = any_practice;
+        self.settle();
     }
 
     pub(super) fn key(&self) -> u64 {
         if self.on {
-            (u64::from(self.whole) + 1) ^ u64::from(self.defaults_apply()).rotate_left(3) ^ self.epoch.rotate_left(7)
+            1 ^ u64::from(self.veiled).rotate_left(3) ^ self.epoch.rotate_left(7)
         } else {
             self.epoch.rotate_left(7)
         }
@@ -110,15 +100,15 @@ impl View {
         self.native.practice.generation
     }
 
-    /// Whether someone has chosen for the document, so that the package's word no longer counts.
-    pub fn set_practice_defaults_off(&mut self, off: bool) {
-        if self.native.practice.defaults_off != off {
-            self.native.practice.defaults_off = off;
+    /// The document in Read or in Edit (ADR 0024). In Read a block that can be practised is, whatever
+    /// state it has in Edit, and has it again after.
+    pub fn set_read_mode(&mut self, read: bool) {
+        if self.native.practice.read != read {
+            self.native.practice.read = read;
             self.native.practice.settle();
             self.native.items.borrow_mut().clear();
-            if self.native.practice.package_defaults {
-                self.reset_heights();
-            }
+            self.site.forget();
+            self.reset_heights();
         }
     }
 
@@ -163,7 +153,7 @@ impl View {
         (self.doc.named_containers_at(at).into_iter()).rfind(|c| self.mode_shown(c) == BlockViewMode::Practice)
     }
 
-    /// Whether the document's source range `r` hides from the reader now: Find and the caret do not go there.
+    /// Whether what stands at `at` hides from the reader now: Find and the caret do not go there.
     pub fn practice_conceals(&self, at: usize) -> bool {
         if !self.native.practice.on {
             return false;
@@ -279,25 +269,54 @@ impl View {
             })
     }
 
-    /// What Practice adds to a page's estimate, while the document is in Practice: a row of buttons per
+    /// What Practice adds to a page's estimate, while the document is in Read: a row of buttons per
     /// block, less the quotes of blocks that reveal them. Other fields are corrected when they are laid
     /// out, like any estimate.
     pub(super) fn practice_page_estimate(&self, s: &PageStats, per_line: f32) -> f32 {
-        let (whole, defaults) = (self.native.practice.whole, self.native.practice.defaults_apply());
-        let Some(source) = self.native.source.as_ref().filter(|_| whole || defaults) else {
+        let Some(source) = self.native.source.as_ref().filter(|_| self.native.practice.read) else {
             return 0.0;
         };
         let t = &self.theme;
         let row = t.block_spacing + crate::native::practice_row_height(t);
         let mut h = 0.0;
-        let practised = |name: &str| source.has_practice(name) && (whole || source.practice_default(name));
-        for (name, tally) in s.card_tallies.iter().filter(|(name, _)| practised(name)) {
+        for (name, tally) in s.card_tallies.iter().filter(|(name, _)| source.has_practice(name)) {
             h += tally.closers as f32 * row;
             if source.practice_hides_quotes(name) {
                 h -= tally.paras as f32 * t.block_spacing + tally.lines_at(per_line) * t.line_px();
             }
         }
         h
+    }
+
+    /// What copying from a block in Practice leaves out or changes: `(source range, what stands there
+    /// instead)`, ascending. Hidden fields go, a mark reads as no mark, and of a block that cannot be
+    /// practised only the lines around it stay.
+    pub fn practice_copy_cuts(&self, c: &NamedContainer) -> Vec<(std::ops::Range<usize>, &'static str)> {
+        let base = c.opener.start;
+        let parts = match self.practice_of(c) {
+            None => return Vec::new(),
+            Some(Practiced::NotReady) => return vec![(c.opener.end..c.closer.start, "\n\n")],
+            Some(Practiced::Ready(b)) => b,
+        };
+        if self.native.practice.show_of(base).is_some_and(|s| s.checked) {
+            return Vec::new();
+        }
+        let Some(parts) = parts.practice.as_ref() else {
+            return Vec::new();
+        };
+        let text = self.doc.text();
+        let mut cuts: Vec<(std::ops::Range<usize>, &'static str)> = (parts.reveal.iter())
+            .map(|r| (base + r.start as usize..base + r.end as usize, ""))
+            .collect();
+        for a in &parts.answers {
+            let at = base + a.range.start as usize;
+            let line = text[..at].rfind('\n').map_or(0, |n| n + 1);
+            if let Some(mark) = text[line..at].find("[x]").or_else(|| text[line..at].find("[X]")) {
+                cuts.push((line + mark..line + mark + 3, "[ ]"));
+            }
+        }
+        cuts.sort_by_key(|c| c.0.start);
+        cuts
     }
 
     /// What was done in the blocks in Practice, by opener. Only the items of blocks that changed are

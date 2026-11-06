@@ -1958,6 +1958,9 @@ impl MarkiseApp {
             block_form::DraftNext::DeleteBlock(opener) => {
                 self.delete_block_now(opener);
             }
+            block_form::DraftNext::EnterRead => {
+                self.toggle_read_mode();
+            }
             block_form::DraftNext::Then(Then::Close) => {
                 if self.request_close() {
                     self.allow_close = true;
@@ -2037,6 +2040,10 @@ impl MarkiseApp {
     /// Toggles source-code mode, mapping the viewport middle and the caret in both directions
     /// (spec 02 §12.1). Full Source mode keeps its own undo history (ADR 0006 §4.3).
     pub fn toggle_source(&mut self) {
+        // Read has no source pane (ADR 0024): it can only be left
+        if self.read_mode_on() && !self.source_visible {
+            return;
+        }
         // the clean review previews are read-only only in the rendered view (issue #88):
         // cleared before the switch (opening the source pane materializes literal hints),
         // set again after it when the rendered view is shown
@@ -2093,6 +2100,10 @@ impl MarkiseApp {
     /// ⌃⌘/ (spec 04 §3.3): Rendered or Source → Side by Side, remembering that mode; again →
     /// back to the remembered mode.
     pub fn toggle_side_by_side(&mut self) {
+        // Read has no source pane (ADR 0024): it can only be left
+        if self.read_mode_on() && !self.side_by_side {
+            return;
+        }
         // the clean review previews are read-only only in the rendered view (issue #88):
         // cleared before the switch (opening the source pane materializes literal hints),
         // set again after it when the rendered view is shown
@@ -2123,6 +2134,10 @@ impl MarkiseApp {
     /// Sets the view mode directly (View menu radio items); Rendered and Source become the
     /// mode ⌃⌘/ returns to.
     pub fn set_view_mode(&mut self, m: ViewMode) {
+        // Read has no source pane (ADR 0024)
+        if self.read_mode_on() && m != ViewMode::Rendered {
+            return;
+        }
         // the clean review previews are read-only only in the rendered view (issue #88):
         // cleared before the switch (opening the source pane materializes literal hints),
         // set again after it when the rendered view is shown
@@ -2952,6 +2967,7 @@ impl MarkiseApp {
                 self.comment_view_switch(ui);
                 self.package_status_item(ui);
                 self.practice_status_item(ui);
+                self.read_mode_status_item(ui);
             });
         });
     }
@@ -3149,7 +3165,9 @@ impl MarkiseApp {
             .frame(egui::Frame::new().fill(color(t.page_bg)))
             .show(ui, |ui| {
                 self.banner_ui(ui, &t);
-                if self.side_by_side && self.doc.is_some() {
+                // (what a document hides is not known until it is known: a frame or two with no source)
+                let veiled = self.doc.as_ref().is_some_and(|d| d.viewer.ed.view.blocks_veiled());
+                if self.side_by_side && self.doc.is_some() && !veiled {
                     tool_area = self.side_by_side_ui(ui, &t);
                     return;
                 }

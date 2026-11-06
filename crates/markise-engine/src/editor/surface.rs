@@ -213,9 +213,6 @@ impl EditorView {
         if let Some(edits) = &mode_edits {
             self.view.site_follow_edits(edits);
         }
-        if let Some(edits) = &mode_edits {
-            self.keep_written_block_native(edits);
-        }
         if !self.place_is_idle() {
             if let Some(edits) = mode_edits {
                 self.prune_block_modes(&edits);

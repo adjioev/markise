@@ -426,24 +426,8 @@ fn a_nested_block_in_a_picture_is_inside_it() {
 #[test]
 fn the_switch_goes_through_what_a_block_can_show() {
     use BlockViewMode::{Markdown, Native, Practice, Site};
-    let can = |view, site| BlockCan {
-        view,
-        site,
-        practice: false,
-    };
-    // something to practise comes right after the view
-    let all = BlockCan {
-        view: true,
-        site: true,
-        practice: true,
-    };
-    assert_eq!(Native.next_for(all), Practice);
-    assert_eq!(Practice.next_for(all), Site);
-    assert_eq!(Site.next_for(all), Markdown);
-    assert_eq!(Markdown.next_for(all), Native);
-    let no_site = BlockCan { site: false, ..all };
-    assert_eq!(Practice.next_for(no_site), Markdown);
-    // a document in Practice, a block with none: as in Native
+    let can = |view, site| BlockCan { view, site };
+    // Practice is no state to switch to; a block that is in it goes on from Native (ADR 0024)
     assert_eq!(Practice.shown(can(true, true)), Native);
     assert_eq!(Practice.shown(can(false, true)), Site);
     assert_eq!(Practice.shown(can(false, false)), Markdown);
