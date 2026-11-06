@@ -53,6 +53,8 @@ pub(super) struct InPlace {
     pending_modes: Vec<(usize, BlockViewMode)>,
     /// What was done in blocks in Practice: never in the document ([`super::practice`]).
     pub(super) practice: Vec<super::practice::Practised>,
+    /// How many of those were right, of how many checked: read per frame, so not worked out per frame.
+    pub(super) practice_score: (usize, usize),
 }
 
 fn plain_value_is_empty(slot: &Slot) -> bool {
