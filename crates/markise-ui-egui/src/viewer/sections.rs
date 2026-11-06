@@ -11,6 +11,14 @@ use markise_theme::Theme;
 
 use super::{DocViewer, ViewerOutput};
 
+/// What a control on a section's divider asks for, by the section's place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SectionAct {
+    MoveUp(usize),
+    MoveDown(usize),
+    Delete(usize),
+}
+
 /// The status bar's words, and the state they are for: the document, the section, whether it is whole.
 pub(super) type SectionStatus = ((u64, usize, bool), (String, String));
 
@@ -103,6 +111,10 @@ impl DocViewer {
         let hovered = self.hovered_block(ui, visible, surface);
         for v in visible {
             let origin = vec2(left, surface.top() + v.y);
+            if (model.items.get(v.idx)).is_some_and(|it| it.kind == ItemKind::Rule) {
+                self.divider_controls(ui, v, surface, origin.x, theme, out);
+                continue;
+            }
             let opener = model
                 .items
                 .get(v.idx)
@@ -141,6 +153,108 @@ impl DocViewer {
             self.block_view_button(ui, r, surface, start, next, "section metadata", show, out);
             if ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| r.contains(p)) {
                 self.pointer_on_block_control = true;
+            }
+        }
+    }
+
+    /// A boundary's quiet controls, under the pointer or for the caret's section as a block's are (ADR 0026),
+    /// at the right end of its row. Read has none. Only what can be done has a control.
+    fn divider_controls(
+        &mut self,
+        ui: &mut Ui,
+        v: &Visible,
+        surface: Rect,
+        left: f32,
+        theme: &Theme,
+        out: &mut ViewerOutput,
+    ) {
+        if self.ed.read_mode() || self.ed.session.read_only().is_some() {
+            return;
+        }
+        let start = self.ed.view.model().item_start(v.idx);
+        let section = self.ed.session.doc().section_at(start);
+        if section.boundary.is_none_or(|b| b.start != start) {
+            return;
+        }
+        let k = section.index;
+        let side = (theme.line_px() * 0.85).min(20.0);
+        let y = surface.top() + v.y + (v.layout.height - side) * 0.5;
+        let right = left + self.ed.view.width();
+        let row = Rect::from_min_max(
+            pos2(surface.left(), surface.top() + v.y),
+            pos2(surface.right(), surface.top() + v.y + v.layout.height),
+        );
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let over_row = pointer.is_some_and(|p| row.contains(p))
+            && pointer.and_then(|p| ui.ctx().layer_id_at(p)) == Some(ui.layer_id());
+        let caret = self.ed.session.selection().primary().focus.offset;
+        let in_it = self.ed.session.doc().section_at(caret).index == k;
+        let acts = [
+            (
+                self.ed.can_move_section(k, true),
+                "Move Section Up",
+                SectionAct::MoveUp(k),
+            ),
+            (
+                self.ed.can_move_section(k, false),
+                "Move Section Down",
+                SectionAct::MoveDown(k),
+            ),
+            (self.ed.can_delete_section(k), "Delete Section", SectionAct::Delete(k)),
+        ];
+        let mut x = right;
+        for (i, (can, label, act)) in acts.into_iter().enumerate().rev() {
+            x -= side + 2.0;
+            if !can {
+                continue;
+            }
+            let r = Rect::from_min_size(pos2(x, y), vec2(side, side));
+            if !surface.contains_rect(r) {
+                continue;
+            }
+            let id = ui.scope_id().with(("markise-section-control", label, start));
+            let resp = ui.interact(r, id, Sense::click()).on_hover_text(label);
+            resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
+            self.section_buttons.push(r);
+            if resp.clicked() {
+                out.section_act = Some(act);
+                ui.ctx().request_repaint();
+            }
+            let on_it = pointer.is_some_and(|p| r.contains(p));
+            if on_it {
+                self.pointer_on_block_control = true;
+            }
+            if !(over_row || in_it || resp.has_focus()) {
+                continue;
+            }
+            let tone = if resp.hovered() {
+                ui.visuals().text_color()
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            let painter = ui.painter_at(surface);
+            let ground = if resp.hovered() {
+                ui.visuals().widgets.hovered.weak_bg_fill
+            } else {
+                ui.visuals().window_fill().gamma_multiply(0.85)
+            };
+            painter.rect_filled(r, 4.0, ground);
+            let stroke = egui::Stroke::new((side * 0.08).max(1.0), tone);
+            let (c, s) = (r.center(), side * 0.22);
+            match i {
+                0 => {
+                    painter.add(egui::Shape::line(
+                        vec![c + vec2(-s, s * 0.5), c + vec2(0.0, -s * 0.5), c + vec2(s, s * 0.5)],
+                        stroke,
+                    ));
+                }
+                1 => {
+                    painter.add(egui::Shape::line(
+                        vec![c + vec2(-s, -s * 0.5), c + vec2(0.0, s * 0.5), c + vec2(s, -s * 0.5)],
+                        stroke,
+                    ));
+                }
+                _ => super::block_tools::paint_bin(&painter, r, side, tone),
             }
         }
     }

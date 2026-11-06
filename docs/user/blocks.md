@@ -162,6 +162,16 @@ The form makes the `id` from the title as you type: lower case, in Latin letters
 With nothing before it, at the top of the document or in a section that is still empty, no `---` is written above it, as that would make a section with nothing in
 it. If something follows, the `---` goes after the title instead, and what follows stays a section of its own.
 
+### Move and delete a section
+
+**Move Section Up** and **Down** (<kbd>Shift+Alt+Cmd+↑</kbd>, <kbd>Shift+Alt+Cmd+↓</kbd>; <kbd>Ctrl+Shift+Alt+↑</kbd>, <kbd>Ctrl+Shift+Alt+↓</kbd> on Windows and Linux) and **Delete Section** (<kbd>Shift+Alt+Cmd+⌫</kbd>; <kbd>Ctrl+Shift+Alt+Backspace</kbd>), in the
+Paragraph menu, act on the section holding the caret. Under the pointer a divider has the same three as small buttons for the section it opens. Read has none of this.
+
+A section moves past one neighbour, with everything in it, its metadata first as it was. Its bytes do not change, and blank lines around the dividers it touches come out as one on each side. The first section has no `---` above it, and whichever comes to be first still has none: the `---` stays between them. Front matter stays where it is.
+A first section with nothing in it stays first, as a section cannot take its place without a divider above it. If something would pair differently afterwards, such as a stray `:::` in each of two sections, a message says so and nothing changes.
+
+Delete takes the section's bytes and one divider, with no question. The only section of a document cannot be deleted this way. Each move and each deletion is one undo step that brings back the exact file.
+
 ## Images
 
 A picture in a block's native view belongs to the form: **Choose file** opens the image picker. A

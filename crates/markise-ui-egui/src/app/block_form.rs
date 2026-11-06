@@ -25,6 +25,8 @@ pub(super) enum DraftNext {
     StopPackage,
     /// Delete the block with this opener.
     DeleteBlock(usize),
+    /// Delete the section at this place.
+    DeleteSection(usize),
     /// Read Mode, which has no form.
     EnterRead,
 }

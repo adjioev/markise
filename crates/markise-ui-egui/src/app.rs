@@ -1961,6 +1961,9 @@ impl MarkiseApp {
             block_form::DraftNext::DeleteBlock(opener) => {
                 self.delete_block_now(opener);
             }
+            block_form::DraftNext::DeleteSection(index) => {
+                self.delete_section_now(index);
+            }
             block_form::DraftNext::EnterRead => {
                 self.toggle_read_mode();
             }
@@ -3256,6 +3259,7 @@ impl MarkiseApp {
                         let origin = (d.id, d.viewer.ed.session.revision().counter);
                         self.block_library.request_move(out.move_block.take(), Some(origin));
                         self.block_library.request_delete(out.delete_block.take(), Some(origin));
+                        self.block_library.request_section(out.section_act.take(), Some(origin));
                         self.image_edit.request(out.replace_image.take(), out.edit_image.take(), Some(origin));
                         if let Some(n) = d.viewer.take_notice() {
                             self.banner = Some(Banner::Info(n));
@@ -3388,6 +3392,7 @@ impl MarkiseApp {
         let origin = self.block_edit_origin();
         self.block_library.request_move(out.move_block, origin);
         self.block_library.request_delete(out.delete_block, origin);
+        self.block_library.request_section(out.section_act, origin);
         self.image_edit.request(out.replace_image, out.edit_image, origin);
         if let Some(link) = out.link {
             self.open_link(&ctx, &link);

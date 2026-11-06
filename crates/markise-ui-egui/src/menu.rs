@@ -330,6 +330,21 @@ pub static APP_COMMANDS: &[CommandDescriptor] = &[
         &[both("Opt+Cmd+Backspace", "Ctrl+Shift+Delete")],
     ),
     app(
+        "section.moveUp",
+        "Move Section Up",
+        &[both("Shift+Opt+Cmd+Up", "Ctrl+Shift+Alt+Up")],
+    ),
+    app(
+        "section.moveDown",
+        "Move Section Down",
+        &[both("Shift+Opt+Cmd+Down", "Ctrl+Shift+Alt+Down")],
+    ),
+    app(
+        "section.delete",
+        "Delete Section",
+        &[both("Shift+Opt+Cmd+Backspace", "Ctrl+Shift+Alt+Backspace")],
+    ),
+    app(
         "view.switchBlockView",
         "Switch This Block's View",
         &[both("Shift+Cmd+M", "Ctrl+Shift+M")],

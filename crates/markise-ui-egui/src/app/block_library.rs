@@ -9,6 +9,7 @@ use super::block_form::DraftNext;
 use super::{Ask, MarkiseApp};
 use crate::block_form::{package_language, style_for};
 use crate::block_library::{LibraryAct, OpenLibrary, Opened};
+use crate::viewer::SectionAct;
 
 /// The library of the session.
 #[derive(Default)]
@@ -20,6 +21,8 @@ pub(super) struct BlockLibraryState {
     requested_move: Option<((usize, usize), (u64, u64))>,
     /// A block's delete button was pressed, by its opener, in this document and revision.
     requested_delete: Option<(usize, (u64, u64))>,
+    /// A control on a section's divider was pressed, in this document and revision.
+    requested_section: Option<(SectionAct, (u64, u64))>,
 }
 
 impl BlockLibraryState {
@@ -32,6 +35,12 @@ impl BlockLibraryState {
     pub(super) fn request_delete(&mut self, opener: Option<usize>, origin: Option<(u64, u64)>) {
         if let (Some(opener), Some(origin)) = (opener, origin) {
             self.requested_delete = Some((opener, origin));
+        }
+    }
+
+    pub(super) fn request_section(&mut self, act: Option<SectionAct>, origin: Option<(u64, u64)>) {
+        if let (Some(act), Some(origin)) = (act, origin) {
+            self.requested_section = Some((act, origin));
         }
     }
 
@@ -237,6 +246,141 @@ impl MarkiseApp {
         }
     }
 
+    /// A section can be changed now: the document has them and is whole, as the last section of a part is cut
+    /// short (ADR 0026), and nothing is being edited in a field of its own.
+    fn section_edit_allowed(&self) -> bool {
+        self.progressive.is_none()
+            && self.doc.as_ref().is_some_and(|d| {
+                d.viewer.ed.view.sections_on()
+                    && d.viewer.ed.session.read_only().is_none()
+                    && d.viewer.card_edit().is_none()
+            })
+    }
+
+    /// Move Section Up or Down is possible for the caret. A form's changed draft holds its block by marks a
+    /// move would end, and it is not lost silently, as for a block's move.
+    pub(super) fn section_move_available(&self, up: bool) -> bool {
+        self.section_edit_allowed()
+            && !self.block_draft_changed()
+            && (self.doc.as_ref()).is_some_and(|d| d.viewer.ed.can_move_section(d.viewer.ed.section_at_caret(), up))
+    }
+
+    /// Delete Section is possible for the caret.
+    pub(super) fn section_delete_available(&self) -> bool {
+        self.section_edit_allowed()
+            && (self.doc.as_ref()).is_some_and(|d| d.viewer.ed.can_delete_section(d.viewer.ed.section_at_caret()))
+    }
+
+    /// Move Section Up or Down, for the section holding the caret.
+    pub(super) fn move_section_at_caret(&mut self, up: bool) -> bool {
+        if self.keyboard_elsewhere() {
+            return false;
+        }
+        let in_source = self.source_focused();
+        let Some(d) = &mut self.doc else { return false };
+        let index = d.viewer.ed.section_in_pane(in_source);
+        self.move_section(index, up)
+    }
+
+    fn move_section(&mut self, index: usize, up: bool) -> bool {
+        if !self.section_edit_allowed() {
+            return false;
+        }
+        if self.block_draft_changed() {
+            self.block_form_message("Save or cancel this draft before moving a section.");
+            return false;
+        }
+        let in_source = self.source_focused();
+        let Some(d) = &mut self.doc else { return false };
+        let result = d.viewer.ed.move_section(index, up, in_source);
+        if in_source {
+            d.source_ui.find_reveal = true;
+        } else {
+            d.viewer.find_reveal = true;
+        }
+        match result {
+            Ok(moved) => {
+                self.remember_block_views();
+                moved
+            }
+            Err(why) => {
+                self.banner = Some(super::Banner::Error(format!("The section was not moved: {why}.")));
+                false
+            }
+        }
+    }
+
+    /// Delete Section, for the section holding the caret.
+    pub(super) fn delete_section_at_caret(&mut self) -> bool {
+        if self.keyboard_elsewhere() {
+            return false;
+        }
+        let in_source = self.source_focused();
+        let Some(d) = &mut self.doc else { return false };
+        let index = d.viewer.ed.section_in_pane(in_source);
+        self.delete_section_asking(index)
+    }
+
+    /// Deletes this section, once a changed draft of a block in it is answered for.
+    fn delete_section_asking(&mut self, index: usize) -> bool {
+        let Some(d) = &self.doc else { return false };
+        let Some(lines) = d.viewer.ed.section_lines(index) else {
+            return false;
+        };
+        if let Some(open) = self.block_form()
+            && open.doc() == d.id
+            && open.is_dirty()
+            && lines.contains(&open.key())
+        {
+            self.set_ask(Ask::BlockDraft(DraftNext::DeleteSection(index)));
+            return true;
+        }
+        self.delete_section_now(index)
+    }
+
+    /// The draft is answered for, or there was none.
+    pub(super) fn delete_section_now(&mut self, index: usize) -> bool {
+        if !self.section_edit_allowed() {
+            return false;
+        }
+        let in_source = self.source_focused();
+        let Some(d) = &mut self.doc else { return false };
+        let result = d.viewer.ed.delete_section(index, in_source);
+        if in_source {
+            d.source_ui.find_reveal = true;
+        } else {
+            d.viewer.request_refocus();
+        }
+        match result {
+            Ok(done) => {
+                if done {
+                    self.remember_block_views();
+                }
+                done
+            }
+            Err(why) => {
+                self.banner = Some(super::Banner::Error(format!("The section was not deleted: {why}.")));
+                false
+            }
+        }
+    }
+
+    /// What a control on a section's divider asked for in the last frame.
+    fn section_control_pressed(&mut self) {
+        let Some((act, origin)) = self.block_library.requested_section.take() else {
+            return;
+        };
+        // named from the last frame: in another document or revision it means nothing
+        if self.block_edit_origin() != Some(origin) {
+            return;
+        }
+        match act {
+            SectionAct::MoveUp(index) => self.move_section(index, true),
+            SectionAct::MoveDown(index) => self.move_section(index, false),
+            SectionAct::Delete(index) => self.delete_section_asking(index),
+        };
+    }
+
     /// Inserts the preset at this place in the package: one undo step, shown natively, the caret in its
     /// first field. Package data is not trusted: a preset that is not what it says is refused here.
     pub fn insert_block_preset(&mut self, preset: usize) -> bool {
@@ -311,6 +455,7 @@ impl MarkiseApp {
     pub(super) fn block_library_window(&mut self, ctx: &Context) {
         self.block_drop();
         self.block_delete_pressed();
+        self.section_control_pressed();
         if let Some(query) = self.block_library.requested.take() {
             // the rest of a large file is on its way: an id in it could not be seen, so it is typing
             if self.progressive.is_none() {

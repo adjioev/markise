@@ -80,7 +80,7 @@ default key.
 
 ## Blocks
 
-Delete Block works on any block. The others need a block package in use; see [Blocks](blocks.md).
+Delete Block works on any block. The other block commands need a block package in use, and the section commands a document with [sections](blocks.md#sections). See [Blocks](blocks.md).
 
 | Command | macOS | Windows and Linux |
 |---|---|---|
@@ -88,6 +88,8 @@ Delete Block works on any block. The others need a block package in use; see [Bl
 | Edit Block… | Shift+Cmd+E | Ctrl+Shift+E |
 | Move Block Up / Down | Alt+Cmd+↑ / ↓ | Ctrl+Shift+↑ / ↓ |
 | Delete Block | Alt+Cmd+⌫ | Ctrl+Shift+Delete |
+| Move Section Up / Down | Shift+Alt+Cmd+↑ / ↓ | Ctrl+Shift+Alt+↑ / ↓ |
+| Delete Section | Shift+Alt+Cmd+⌫ | Ctrl+Shift+Alt+Backspace |
 | Switch This Block's View | Shift+Cmd+M | Ctrl+Shift+M |
 | Switch All Blocks' Views | Shift+Alt+Cmd+M | Ctrl+Shift+Alt+M |
 | Read Mode | Shift+Alt+Cmd+Y | Ctrl+Shift+Alt+Y |

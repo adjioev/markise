@@ -725,3 +725,168 @@ mod inserting {
         assert!(h.state().block_package().is_none());
     }
 }
+
+/// Moving and deleting a section (ADR 0026).
+mod moving {
+    use egui::Pos2;
+    use markise_doc::{DocPos, Selection};
+    use markise_ui_egui::menu::MenuAction;
+
+    use super::*;
+    use crate::block_library::frames;
+
+    const DOC: &str = "---\nauthoring: blocks-v3\n---\n\nOne.\n\n---\n\nTwo.\n\n---\n\nThree.\n";
+    const UP: &str = "---\nauthoring: blocks-v3\n---\n\nTwo.\n\n---\n\nOne.\n\n---\n\nThree.\n";
+
+    fn caret_at(h: &mut H, needle: &str) {
+        let at = text(h).find(needle).unwrap();
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.set_selection(Selection::caret_at(DocPos::new(at)));
+        v.ed.refresh_focus();
+        v.request_refocus();
+        common::run(h);
+    }
+
+    fn command(h: &mut H, id: &'static str) -> bool {
+        let ctx = h.ctx.clone();
+        let done = h.state_mut().menu_action(&ctx, &MenuAction::Command(id));
+        frames(h);
+        done
+    }
+
+    fn undo(h: &mut H) {
+        h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+        frames(h);
+    }
+
+    fn pointer_to(h: &mut H, p: Pos2) {
+        h.hover_at(p);
+        frames(h);
+    }
+
+    #[test]
+    fn the_commands_act_on_the_section_of_the_caret_one_undo_step_each() {
+        let p = plain(DOC);
+        let mut h = opened(&p);
+        caret_at(&mut h, "Two");
+        let menu = h.state().menu_model();
+        for id in ["section.moveUp", "section.moveDown", "section.delete"] {
+            assert!(menu.item(id).is_some_and(|i| i.enabled), "{id}");
+        }
+        assert!(command(&mut h, "section.moveUp"));
+        assert_eq!(text(&h), UP);
+        assert_eq!(h.state_mut().viewer().unwrap().ed.section_at_caret(), 0);
+        undo(&mut h);
+        assert_eq!(text(&h), DOC);
+        caret_at(&mut h, "Three");
+        assert!(command(&mut h, "section.delete"));
+        assert_eq!(text(&h), "---\nauthoring: blocks-v3\n---\n\nOne.\n\n---\n\nTwo.\n");
+        undo(&mut h);
+        assert_eq!(text(&h), DOC);
+    }
+
+    #[test]
+    fn the_keys_are_on_the_commands_and_at_the_ends_they_are_off() {
+        let p = plain(DOC);
+        let mut h = opened(&p);
+        caret_at(&mut h, "One");
+        let menu = h.state().menu_model();
+        assert!(!menu.item("section.moveUp").unwrap().enabled);
+        assert!(menu.item("section.moveDown").unwrap().enabled);
+        let (m, k) = if cfg!(target_os = "macos") {
+            (
+                egui::Modifiers::MAC_CMD | egui::Modifiers::ALT | egui::Modifiers::SHIFT,
+                egui::Key::ArrowDown,
+            )
+        } else {
+            (
+                egui::Modifiers::CTRL | egui::Modifiers::ALT | egui::Modifiers::SHIFT,
+                egui::Key::ArrowDown,
+            )
+        };
+        h.key_press_modifiers(m, k);
+        frames(&mut h);
+        assert_eq!(text(&h), UP);
+    }
+
+    #[test]
+    fn no_dialect_has_no_commands_and_read_has_them_off() {
+        let p = plain("One.\n\n---\n\nTwo.\n");
+        let h = opened(&p);
+        assert!(h.state().menu_model().item("section.moveUp").is_none());
+        let p = plain(DOC);
+        let mut h = opened(&p);
+        caret_at(&mut h, "Two");
+        h.state_mut().viewer().unwrap().ed.set_read_mode(true);
+        common::run(&mut h);
+        let menu = h.state().menu_model();
+        for id in ["section.moveUp", "section.moveDown", "section.delete"] {
+            assert!(!menu.item(id).is_some_and(|i| i.enabled), "{id}");
+        }
+        command(&mut h, "section.delete");
+        assert_eq!(text(&h), DOC);
+    }
+
+    fn row_of_divider(h: &mut H, nth: usize) -> Pos2 {
+        let doc = text(h);
+        // past the front matter's two
+        let at = doc.match_indices("---\n").map(|(i, _)| i).nth(nth + 2).unwrap();
+        h.state().viewer_item_rect(at).expect("on screen").center()
+    }
+
+    fn click_at(h: &mut H, p: Pos2) {
+        pointer_to(h, p);
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: p,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            // quickly: a long press is no click
+            h.step();
+        }
+        frames(h);
+    }
+
+    #[test]
+    fn a_divider_has_quiet_controls_under_the_pointer_and_none_in_read() {
+        let p = plain(DOC);
+        let mut h = opened(&p);
+        caret_at(&mut h, "One");
+        // the second divider opens the last section: it cannot go down
+        let p2 = row_of_divider(&mut h, 1);
+        pointer_to(&mut h, p2);
+        let up = h.query_all_by_label("Move Section Up").count();
+        assert_eq!(up, 2, "one on each divider");
+        assert_eq!(h.query_all_by_label("Move Section Down").count(), 1);
+        assert_eq!(h.query_all_by_label("Delete Section").count(), 2);
+        h.state_mut().viewer().unwrap().ed.set_read_mode(true);
+        frames(&mut h);
+        assert_eq!(h.query_all_by_label("Move Section Up").count(), 0);
+        assert_eq!(h.query_all_by_label("Delete Section").count(), 0);
+    }
+
+    #[test]
+    fn pressing_a_control_moves_or_deletes_the_section_it_stands_on() {
+        let p = plain(DOC);
+        let mut h = opened(&p);
+        caret_at(&mut h, "One");
+        let row = row_of_divider(&mut h, 0);
+        pointer_to(&mut h, row);
+        // the first of the two dividers: "Two."
+        let up: Vec<_> = h.query_all_by_label("Move Section Up").map(|n| n.rect()).collect();
+        let first = up.iter().min_by(|a, b| a.top().total_cmp(&b.top())).copied().unwrap();
+        click_at(&mut h, first.center());
+        frames(&mut h);
+        assert_eq!(text(&h), UP);
+        undo(&mut h);
+        let row = row_of_divider(&mut h, 0);
+        pointer_to(&mut h, row);
+        let bins: Vec<_> = h.query_all_by_label("Delete Section").map(|n| n.rect()).collect();
+        let first = bins.iter().min_by(|a, b| a.top().total_cmp(&b.top())).copied().unwrap();
+        click_at(&mut h, first.center());
+        frames(&mut h);
+        assert_eq!(text(&h), "---\nauthoring: blocks-v3\n---\n\nOne.\n\n---\n\nThree.\n");
+    }
+}

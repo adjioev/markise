@@ -657,6 +657,9 @@ pub(crate) mod moves {
                 "block.moveUp",
                 "block.moveDown",
                 "block.delete",
+                "section.moveUp",
+                "section.moveDown",
+                "section.delete",
             ] {
                 let d = markise_ui_egui::menu::app_command(id).unwrap();
                 let c = descriptor_chord(d, platform).expect("a chord");
