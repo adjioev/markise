@@ -33,6 +33,7 @@ mod card_edit;
 mod code_tools;
 mod comment_place;
 mod comment_presence;
+mod practice_tools;
 mod scrollbar;
 mod site_board;
 pub use block_move::BlockDragShown;
@@ -268,6 +269,8 @@ pub struct DocViewer {
     block_language_read_at: u64,
     /// The pointer is on a block's control or its first row, this frame: not text.
     pointer_on_block_control: bool,
+    /// The keyboard went to the answer at the caret, and not the pointer.
+    practice_ring: bool,
     /// A press on the scrollbar (issue #123).
     thumb_drag: scrollbar::ThumbDrag,
     /// Wheel / trackpad smoothing (issue #86).
@@ -322,6 +325,7 @@ impl DocViewer {
             block_language: String::new(),
             block_language_read_at: u64::MAX,
             pointer_on_block_control: false,
+            practice_ring: false,
             view_press: None,
             caret_screen: None,
             hover: None,
@@ -1085,6 +1089,7 @@ impl DocViewer {
             self.block_tools_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_delete_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_move_ui(ui, &visible, rect, left, theme, &mut out);
+            self.practice_ui(ui, &visible, rect, left);
         }
 
         // ---- review comments: margin cards or bubble popovers (visible items only)
@@ -1165,7 +1170,9 @@ impl DocViewer {
                 let y = y0 + smooth_scroll::shift_at(&tops, y0) + rect.top();
                 let r = Rect::from_min_size(pos2(left + c.min.x - 0.75, y), vec2(1.5, c.height().max(4.0)));
                 self.caret_screen = Some(r);
-                if on && r.intersects(rect) {
+                // (nothing to type in a block being practiced: an answer has its own ring)
+                let in_practice = self.ed.in_practice(self.ed.session.selection().primary().focus.offset);
+                if on && !in_practice && r.intersects(rect) {
                     painter.rect_filled(r, 0.0, color(theme.text));
                 }
                 // IME: allowed while the surface has focus; the candidate window follows the

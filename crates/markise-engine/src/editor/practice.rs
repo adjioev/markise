@@ -3,12 +3,21 @@
 
 use std::ops::Range;
 
-use markise_doc::{DocPos, Selection};
+use markise_doc::{DocPos, Params, Selection};
+use markise_layout::{NativeAt, PracticeShow};
 
 use super::EditorView;
 use super::command::CommandError;
 
 const IN_PRACTICE: CommandError = CommandError::Disabled("the block is being practiced");
+
+/// What was done in one block. A block is who stands at this offset with this length: every edit
+/// moves the offset, and any edit that touches those bytes ends this (ADR 0024).
+pub(super) struct Practised {
+    at: usize,
+    len: usize,
+    show: PracticeShow,
+}
 
 impl EditorView {
     /// Whether the block around `at` is in Practice.
@@ -28,11 +37,32 @@ impl EditorView {
         self.session.text().get(r).is_some_and(|t| t.contains(":::"))
     }
 
-    /// A command that would change a block in Practice does nothing. Undo and redo are the document's,
-    /// of what was done before; the other commands (a caret's moves) run as ever.
-    pub(super) fn practice_refuses(&self, id: &str) -> Option<Result<(), CommandError>> {
+    /// A command in a block in Practice: Space selects the answer at the caret and Enter checks, or
+    /// resets what is checked. Any other that would change the block does nothing. Undo and redo are the
+    /// document's, of what was done before; the other commands (a caret's moves) run as ever.
+    pub(super) fn practice_command(&mut self, id: &str, params: &Params) -> Option<Result<(), CommandError>> {
         if !self.view.practice_on() || matches!(id, "edit.undo" | "edit.redo") || !self.is_mutating(id) {
             return None;
+        }
+        let p = self.session.selection().primary();
+        if p.is_caret() && p.focus.virt == 0 && self.in_practice(p.focus.offset) {
+            match id {
+                "edit.insertText" if params.get_text("text") == Some(" ") => {
+                    self.practice_press(p.focus.offset);
+                    return Some(Ok(()));
+                }
+                "edit.newline" => {
+                    if let Some(at) = self.view.native_block(p.focus.offset) {
+                        if self.practice_show(at.range.start).is_some_and(|s| s.checked) {
+                            self.practice_reset(at.range.start);
+                        } else {
+                            self.practice_check(at.range.start);
+                        }
+                    }
+                    return Some(Ok(()));
+                }
+                _ => {}
+            }
         }
         let touched = (self.session.selection().ranges().iter()).any(|s| self.practice_touches(s.range()));
         touched.then_some(Err(IN_PRACTICE))
@@ -77,5 +107,118 @@ impl EditorView {
         self.clear_own_modes();
         self.follow_block_modes();
         self.practice_place_caret();
+    }
+
+    /// What was done in the block with this opener.
+    pub fn practice_show(&self, opener: usize) -> Option<&PracticeShow> {
+        (self.place.practice.iter()).find(|p| p.at == opener).map(|p| &p.show)
+    }
+
+    /// The block in Practice around `at`, ready to be practised.
+    fn practice_block(&self, at: usize) -> Option<NativeAt> {
+        self.view
+            .native_block(at)
+            .filter(|b| self.view.block_mode_of(b.range.start) == markise_layout::BlockViewMode::Practice)
+    }
+
+    fn practice_entry(&mut self, block: &NativeAt) -> &mut Practised {
+        let opener = block.range.start;
+        let i = match self.place.practice.iter().position(|p| p.at == opener) {
+            Some(i) => i,
+            None => {
+                self.place.practice.push(Practised {
+                    at: opener,
+                    len: block.range.len(),
+                    show: PracticeShow::default(),
+                });
+                self.place.practice.len() - 1
+            }
+        };
+        &mut self.place.practice[i]
+    }
+
+    /// Selects the answer at `at`, or for one of several takes it back. Returns whether it is an answer
+    /// that can still change. Nothing in the document changes.
+    pub fn practice_press(&mut self, at: usize) -> bool {
+        let Some(block) = self.practice_block(at) else {
+            return false;
+        };
+        let Some(parts) = &block.block.practice else {
+            return false;
+        };
+        let Some(n) = parts.answer_at((at - block.range.start) as u32).map(|n| n as u32) else {
+            return false;
+        };
+        let single = block.block.view.single_answer;
+        let show = &mut self.practice_entry(&block).show;
+        if show.checked {
+            return false;
+        }
+        match show.selected.iter().position(|&s| s == n) {
+            Some(_) if single => {}
+            Some(i) => {
+                show.selected.remove(i);
+            }
+            None if single => show.selected = vec![n],
+            None => {
+                show.selected.push(n);
+                show.selected.sort_unstable();
+            }
+        }
+        if self.place.practice.iter().any(|p| p.show == PracticeShow::default()) {
+            self.place.practice.retain(|p| p.show != PracticeShow::default());
+        }
+        self.follow_practice();
+        true
+    }
+
+    /// Checks the block with this opener, which also reveals what it hides. With answers to give, some
+    /// have to be given.
+    pub fn practice_check(&mut self, opener: usize) -> bool {
+        let Some(block) = self.practice_block(opener) else {
+            return false;
+        };
+        let Some(parts) = &block.block.practice else {
+            return false;
+        };
+        let answered = self.practice_show(opener).is_some_and(|s| !s.selected.is_empty());
+        if parts.has_choices && !answered {
+            return false;
+        }
+        self.practice_entry(&block).show.checked = true;
+        self.follow_practice();
+        true
+    }
+
+    /// As if the block with this opener had not been practised.
+    pub fn practice_reset(&mut self, opener: usize) {
+        self.place.practice.retain(|p| p.at != opener);
+        self.follow_practice();
+        self.practice_place_caret();
+    }
+
+    /// Hands the view what was done, where the blocks stand now.
+    pub(super) fn follow_practice(&mut self) {
+        let shows = (self.place.practice.iter()).map(|p| (p.at, p.show.clone())).collect();
+        self.view.set_block_practice(shows);
+    }
+
+    /// After the document changed: what was done goes with any block an edit touched. `edits`: `(start,
+    /// end, delta)` of each step, each in the coordinates after the ones before. None: the document was replaced.
+    pub(super) fn prune_practice(&mut self, edits: &[(usize, usize, isize)]) {
+        if edits.is_empty() {
+            self.place.practice.clear();
+            return;
+        }
+        self.place.practice.retain_mut(|p| {
+            for &(start, end, delta) in edits {
+                if end <= p.at {
+                    p.at = p.at.saturating_add_signed(delta);
+                } else if start < p.at + p.len {
+                    return false;
+                }
+            }
+            true
+        });
     }
 }

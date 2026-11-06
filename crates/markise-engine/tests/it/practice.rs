@@ -83,3 +83,82 @@ fn a_page_in_a_document_in_practice_is_estimated_as_what_it_shows() {
     let off = (estimated - measured).abs() / measured;
     assert!(off < 0.15, "estimated {estimated}, measured {measured}");
 }
+
+fn frame(ed: &mut EditorView) {
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(2.0);
+    ed.view.frame(VH, VH * 0.5, &mut f, &NoImages);
+}
+
+#[test]
+fn what_was_done_lasts_through_scrolling_paging_and_eviction_and_heights_follow() {
+    let text = questions(1500);
+    let mut ed = editor(text.clone());
+    ed.toggle_practice_all();
+    frame(&mut ed);
+    let answer = text.find("Another answer").unwrap();
+    let opener = text.find(":::question").unwrap();
+    let explanation = text.find("The explanation").unwrap();
+    assert!(ed.practice_press(answer));
+    frame(&mut ed);
+    let closed = ed.view.total_height();
+    let at_top = ed.view.scroll_y();
+    assert!(ed.practice_check(opener));
+    frame(&mut ed);
+    let open = ed.view.total_height();
+    let grown = open - closed;
+    assert!(grown > 20.0, "{closed} to {open}");
+    assert_eq!(ed.view.scroll_y(), at_top, "what is on screen stays where it is");
+    assert!(!ed.view.practice_conceals(explanation));
+
+    // far enough for the page to be evicted, and back
+    let evicted_before = ed.view.paging_stats().evicted;
+    ed.view.scroll_to_y(ed.view.total_height() * 0.8);
+    for _ in 0..5 {
+        frame(&mut ed);
+        ed.view.scroll_by(VH);
+    }
+    assert!(ed.view.paging_stats().evicted > evicted_before, "its page went");
+    assert!(ed.practice_show(opener).is_some_and(|s| s.checked));
+    assert!(
+        (ed.view.total_height() - open).abs() < open * 0.05,
+        "a measured page keeps what it showed"
+    );
+    ed.view.scroll_to_y(0.0);
+    frame(&mut ed);
+    assert!(ed.practice_show(opener).is_some_and(|s| s.checked && s.selected == [1]));
+    assert!(!ed.view.practice_conceals(explanation), "still revealed");
+    let top = ed.view.total_height();
+
+    // Reset takes off what Check added, on a block on screen, and moves nothing above it
+    ed.practice_reset(opener);
+    frame(&mut ed);
+    assert!(ed.view.practice_conceals(explanation));
+    assert!((top - ed.view.total_height() - grown).abs() < 1.0);
+    assert_eq!(ed.session.text(), text);
+    assert!(!ed.session.is_dirty() && !ed.session.history().can_undo());
+}
+
+#[test]
+fn a_hidden_field_at_the_top_of_the_viewport_leaves_the_viewport_on_what_comes_next() {
+    let text = questions(40);
+    let mut ed = editor(text.clone());
+    ed.toggle_practice_all();
+    frame(&mut ed);
+    let opener = text.find(":::question").unwrap();
+    assert!(ed.practice_press(text.find("Another answer").unwrap()));
+    assert!(ed.practice_check(opener));
+    frame(&mut ed);
+    // the viewport starts inside the revealed text
+    let i = ed.view.model().item_at_offset(text.find("The explanation").unwrap());
+    ed.view.scroll_to_item(i);
+    ed.view.scroll_by(5.0);
+    frame(&mut ed);
+    ed.practice_reset(opener);
+    frame(&mut ed);
+    let total = ed.view.total_height();
+    let y = ed.view.scroll_y();
+    assert!(y >= 0.0 && y <= total, "{y} of {total}");
+    let (anchor, off) = ed.view.anchor();
+    assert!(ed.view.height(anchor) >= off, "{off} into {}", ed.view.height(anchor));
+}

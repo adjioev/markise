@@ -3,7 +3,7 @@
 
 use egui::{Event, Key, Modifiers};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use markise_doc::Selection;
 use markise_engine::editor::command::Registry;
 use markise_engine::editor::keymap::{Keymap, Platform, reserved_chords};
@@ -354,4 +354,382 @@ fn the_shortcut_of_practice_clashes_with_nothing() {
             );
         }
     }
+}
+
+// ---- answering
+
+fn press(h: &mut H, label: &str) {
+    h.get_by_label(label).click();
+    common::run(h);
+}
+
+fn is_selected(h: &H, label: &str) -> bool {
+    use egui::accesskit::Toggled;
+    let node = h.get_by_label(label);
+    let node = node.accesskit_node();
+    node.is_selected() == Some(true) || node.toggled() == Some(Toggled::True)
+}
+
+/// All that a screen reader can read.
+fn all_labels(h: &H) -> String {
+    (h.query_all(egui_kittest::kittest::by()))
+        .filter_map(|n| n.accesskit_node().label().or(n.accesskit_node().value()))
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        )
+}
+
+fn a_doc_with_one_question() -> &'static str {
+    ":::question\n\nA prompt?\n\n- [ ] Wrong one {#a1}\n- [x] Right one {#a2}\n- [ ] Wrong two {#a3}\n\n> Explained here.\n\n:::\n\nAfter.\n"
+}
+
+fn practising(doc: &str) -> (Fixture, H) {
+    let f = fixture(doc);
+    let mut h = f.ready();
+    command(&mut h, "view.practiceAll");
+    (f, h)
+}
+
+/// The tick and cross lines an item with this text draws, as how many answers say right and wrong.
+fn verdict_counts(h: &mut H) -> (usize, usize) {
+    let view = &mut h.state_mut().viewer().unwrap().ed.view;
+    let (mut right, mut wrong) = (0, 0);
+    for i in 0..view.len() {
+        if let Some(markise_layout::PracticeItem::Answer { correct: Some(c), .. }) = view.practice_item_of(i) {
+            if c {
+                right += 1;
+            } else {
+                wrong += 1;
+            }
+        }
+    }
+    (right, wrong)
+}
+
+#[test]
+fn a_whole_practice_session_leaves_the_bytes_and_the_dirty_state_as_they_were() {
+    let doc = DOC;
+    let (f, mut h) = practising(doc);
+    let bytes = std::fs::read(&f.doc).unwrap();
+    let state = h.state_mut().viewer().unwrap().ed.session.state_id();
+    let check = |h: &mut H, when: &str| {
+        assert_eq!(text(h).as_bytes(), bytes, "{when}: the text");
+        let session = &h.state_mut().viewer().unwrap().ed.session;
+        assert!(!session.is_dirty(), "{when}: dirty");
+        assert!(!session.history().can_undo(), "{when}: an undo step");
+        assert_eq!(session.state_id(), state, "{when}: another state of the document");
+        assert_eq!(std::fs::read(&f.doc).unwrap(), bytes, "{when}: the file");
+    };
+    press(&mut h, "A) one");
+    check(&mut h, "a click");
+    press(&mut h, "B) two");
+    check(&mut h, "a second click");
+    // the keyboard, on the other question
+    caret(&mut h, doc.find("Second").unwrap());
+    h.event(Event::Text(" ".into()));
+    common::run(&mut h);
+    check(&mut h, "Space");
+    for key in [Key::ArrowDown, Key::ArrowUp, Key::ArrowRight, Key::ArrowLeft] {
+        h.key_press(key);
+        common::run(&mut h);
+    }
+    check(&mut h, "arrows");
+    h.event(Event::Text("not a space".into()));
+    h.key_press(Key::Backspace);
+    common::run(&mut h);
+    check(&mut h, "typing");
+    h.get_all_by_label("Check")
+        .find(|b| !b.accesskit_node().is_disabled())
+        .unwrap()
+        .click();
+    common::run(&mut h);
+    check(&mut h, "Check");
+    h.get_all_by_label("Show answer").next().unwrap().click();
+    common::run(&mut h);
+    check(&mut h, "Show answer");
+    for _ in 0..3 {
+        let Some(b) = h.query_all_by_label("Reset").next() else {
+            break;
+        };
+        b.click();
+        common::run(&mut h);
+    }
+    check(&mut h, "Reset");
+    command(&mut h, "view.practiceAll");
+    check(&mut h, "out of Practice");
+}
+
+#[test]
+fn check_says_right_or_wrong_shows_the_correct_answer_and_reveals_and_reset_takes_it_back() {
+    let doc = a_doc_with_one_question();
+    let (f, mut h) = practising(doc);
+    assert!(
+        h.get_by_label("Check").accesskit_node().is_disabled(),
+        "nothing to check yet"
+    );
+    press(&mut h, "Wrong one");
+    assert!(is_selected(&h, "Wrong one"));
+    press(&mut h, "Wrong two");
+    assert!(
+        is_selected(&h, "Wrong two") && !is_selected(&h, "Wrong one"),
+        "one for single correctness"
+    );
+    assert!(!shown(&mut h).contains("Explained"));
+    h.get_by_label("Check").click();
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("Explained here"), "revealed");
+    assert_eq!(verdict_counts(&mut h), (1, 2));
+    assert!(
+        h.query_by_label("Right one: correct").is_some(),
+        "in words for a screen reader"
+    );
+    assert!(h.query_by_label("Wrong two: wrong").is_some());
+    // what is checked stays until Reset
+    press(&mut h, "Right one: correct");
+    assert!(is_selected(&h, "Wrong two: wrong"));
+    h.get_by_label("Reset").click();
+    common::run(&mut h);
+    assert!(!shown(&mut h).contains("Explained"));
+    assert_eq!(verdict_counts(&mut h), (0, 0));
+    assert!(!is_selected(&h, "Wrong two"));
+    assert!(h.query_by_label("Check").is_some());
+    untouched(&mut h, &f, doc);
+}
+
+#[test]
+fn several_answers_can_be_selected_when_several_can_be_right() {
+    let doc = ":::question many\n\nWhich?\n\n- [x] Aa {#a1}\n- [ ] Bb {#a2}\n- [x] Cc {#a3}\n\n:::\n";
+    let (f, mut h) = practising(doc);
+    press(&mut h, "Aa");
+    press(&mut h, "Bb");
+    press(&mut h, "Cc");
+    assert!(is_selected(&h, "Aa") && is_selected(&h, "Bb") && is_selected(&h, "Cc"));
+    press(&mut h, "Bb");
+    assert!(!is_selected(&h, "Bb"), "and taken back");
+    h.get_by_label("Check").click();
+    common::run(&mut h);
+    assert_eq!(verdict_counts(&mut h), (2, 1));
+    untouched(&mut h, &f, doc);
+}
+
+#[test]
+fn the_keyboard_alone_goes_through_a_question() {
+    let doc = a_doc_with_one_question();
+    let (f, mut h) = practising(doc);
+    caret(&mut h, doc.find("Wrong one").unwrap());
+    h.key_press(Key::ArrowDown);
+    common::run(&mut h);
+    let at = h
+        .state_mut()
+        .viewer()
+        .unwrap()
+        .ed
+        .session
+        .selection()
+        .primary()
+        .focus
+        .offset;
+    assert!(
+        at >= doc.find("Right one").unwrap() && at <= doc.find("Wrong two").unwrap(),
+        "the next answer: {at}"
+    );
+    h.event(Event::Text(" ".into()));
+    common::run(&mut h);
+    assert!(is_selected(&h, "Right one"));
+    h.key_press(Key::Enter);
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("Explained"), "Enter checks");
+    assert_eq!(verdict_counts(&mut h), (1, 2));
+    h.key_press(Key::Enter);
+    common::run(&mut h);
+    assert!(!shown(&mut h).contains("Explained"), "and on a checked block resets");
+    untouched(&mut h, &f, doc);
+}
+
+#[test]
+fn nothing_for_a_screen_reader_tells_an_answer_before_it_is_checked() {
+    let (_f, h) = practising(a_doc_with_one_question());
+    let labels = all_labels(&h);
+    for telling in ["Explained", "correct", "wrong", "Mark exactly"] {
+        assert!(!labels.contains(telling), "{telling}: {labels}");
+    }
+    for n in ["Wrong one", "Right one", "Wrong two"] {
+        assert!(!is_selected(&h, n), "{n}");
+    }
+}
+
+#[test]
+fn a_block_with_no_answers_reveals_behind_show_answer_in_any_view_kind() {
+    for (block, task, solution) in [
+        ("exercise", "Work this out", "The worked solution"),
+        ("hint", "A hint's task", "The hint's solution"),
+        ("remark", "A remark's task", "The remark's solution"),
+    ] {
+        let doc = format!(":::{block}\n\n{task}.\n\n> {solution}.\n\n:::\n");
+        let (f, mut h) = practising(&doc);
+        let s = shown(&mut h);
+        assert!(s.contains(task) && !s.contains(solution), "{block}: {s}");
+        assert!(!all_labels(&h).contains(solution), "{block}: for a screen reader");
+        assert!(h.query_by_label("Check").is_none(), "{block}");
+        let before = h.state_mut().viewer().unwrap().ed.view.total_height();
+        h.get_by_label("Show answer").click();
+        common::run(&mut h);
+        assert!(shown(&mut h).contains(solution), "{block}");
+        let open = h.state_mut().viewer().unwrap().ed.view.total_height();
+        assert!(open > before + 10.0, "{block}: {before} to {open}");
+        h.get_by_label("Reset").click();
+        common::run(&mut h);
+        assert!(!shown(&mut h).contains(solution), "{block}");
+        assert!(h.query_by_label("Show answer").is_some(), "{block}");
+        let closed = h.state_mut().viewer().unwrap().ed.view.total_height();
+        assert!((closed - before).abs() < 0.5, "{block}: {before} to {closed}");
+        untouched(&mut h, &f, &doc);
+    }
+}
+
+#[test]
+fn enter_reveals_a_block_with_no_answers_too() {
+    let doc = ":::exercise\n\nWork this out.\n\n> The worked solution.\n\n:::\n";
+    let (f, mut h) = practising(doc);
+    caret(&mut h, doc.find("Work").unwrap() + 2);
+    h.key_press(Key::Enter);
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("worked solution"));
+    h.key_press(Key::Enter);
+    common::run(&mut h);
+    assert!(!shown(&mut h).contains("worked solution"));
+    untouched(&mut h, &f, doc);
+}
+
+#[test]
+fn an_answered_block_keeps_its_state_through_an_edit_elsewhere_and_loses_it_with_its_own() {
+    let doc = format!(
+        "{}\n{}",
+        a_doc_with_one_question(),
+        ":::tip\n\nA tip.\n\n:::\n\nThe end.\n"
+    );
+    let (_f, mut h) = practising(&doc);
+    press(&mut h, "Right one");
+    // above and below it, as anywhere
+    caret(&mut h, doc.find("The end").unwrap());
+    h.event(Event::Text("x".into()));
+    common::run(&mut h);
+    assert!(is_selected(&h, "Right one"), "after an edit below");
+    caret(&mut h, 0);
+    h.event(Event::Text("Before.\n\n".into()));
+    common::run(&mut h);
+    assert!(is_selected(&h, "Right one"), "after an edit above");
+    // a change from outside: through the same door as any patch
+    let t = text(&h);
+    let at = t.find("Explained").unwrap();
+    let v = h.state_mut().viewer().unwrap();
+    let ps = markise_doc::PatchSet::single_verbatim(at..at, "Well ");
+    v.ed.edit(|s| s.apply_external(&ps, "edit", false)).unwrap();
+    common::run(&mut h);
+    assert!(!is_selected(&h, "Right one"), "the block changed");
+    assert!(
+        h.state_mut()
+            .viewer()
+            .unwrap()
+            .ed
+            .practice_show(t.find(":::question").unwrap())
+            .is_none()
+    );
+}
+
+#[test]
+fn two_blocks_with_the_same_text_are_two_blocks() {
+    let q = a_doc_with_one_question();
+    let doc = format!("{q}\n{q}");
+    let (f, mut h) = practising(&doc);
+    let first = doc.find(":::question").unwrap();
+    let second = doc.rfind(":::question").unwrap();
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.ed.practice_press(doc[first..].find("Right one").unwrap() + first));
+    common::run(&mut h);
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.ed.practice_show(first).is_some());
+    assert!(v.ed.practice_show(second).is_none());
+    untouched(&mut h, &f, &doc);
+}
+
+#[test]
+fn replacing_the_document_ends_all_of_it() {
+    let doc = a_doc_with_one_question();
+    let (_f, mut h) = practising(doc);
+    press(&mut h, "Right one");
+    let v = h.state_mut().viewer().unwrap();
+    let opener = 0;
+    assert!(v.ed.practice_show(opener).is_some());
+    let next = doc.replace("Explained", "Told");
+    let format = v.ed.session.format().clone();
+    let replaced = format.parse(next, &markise_doc::FormatOptions::default());
+    v.ed.edit(|s| {
+        s.replace_doc(
+            replaced.into(),
+            "Reload",
+            markise_engine::editor::TxKind::Structural,
+            false,
+        )
+    })
+    .unwrap();
+    common::run(&mut h);
+    assert!(h.state_mut().viewer().unwrap().ed.practice_show(opener).is_none());
+}
+
+#[test]
+fn an_answer_partly_scrolled_or_taller_than_the_window_still_works() {
+    let long = "A very long answer that goes on. ".repeat(400);
+    let doc = format!(":::question\n\nPrompt?\n\n- [ ] {long}{{#a1}}\n- [x] Short {{#a2}}\n\n> Why.\n\n:::\n");
+    let (f, mut h) = practising(&doc);
+    // taller than the window, or scrolled to where only its middle shows
+    let label = long.trim_end().to_string();
+    h.state_mut().viewer().unwrap().ed.view.scroll_by(300.0);
+    common::run(&mut h);
+    let node = h.get_by_label(&label);
+    node.click();
+    common::run(&mut h);
+    assert!(is_selected(&h, &label), "the part that shows takes the click");
+    untouched(&mut h, &f, &doc);
+}
+
+#[test]
+fn a_ring_shows_for_the_keyboard_and_not_after_a_click() {
+    let doc = a_doc_with_one_question();
+    let (_f, mut h) = practising(doc);
+    press(&mut h, "Right one");
+    assert!(!h.state_mut().viewer().unwrap().practice_ring_shown(), "a click");
+    h.key_press(Key::ArrowDown);
+    common::run(&mut h);
+    assert!(h.state_mut().viewer().unwrap().practice_ring_shown(), "a key");
+}
+
+#[test]
+fn only_what_means_something_gets_a_mark() {
+    let doc = a_doc_with_one_question();
+    let (_f, mut h) = practising(doc);
+    let lines = |h: &mut H, needle: &str| {
+        let at = doc.find(needle).unwrap();
+        let v = &mut h.state_mut().viewer().unwrap().ed.view;
+        let i = v.model().item_at_offset(at);
+        let layout = v.cache_peek(i).unwrap().clone();
+        (layout.prims.iter())
+            .filter(|p| matches!(p, markise_layout::Prim::Line { .. }))
+            .count()
+    };
+    press(&mut h, "Wrong one");
+    h.get_by_label("Check").click();
+    common::run(&mut h);
+    // (the block's frame is lines too: what a row with no mark has)
+    let plain = lines(&mut h, "Wrong two");
+    assert_eq!(lines(&mut h, "Right one"), plain + 2, "a tick on the correct one");
+    assert_eq!(lines(&mut h, "Wrong one"), plain + 2, "a cross on the chosen wrong one");
+    let v = &mut h.state_mut().viewer().unwrap().ed.view;
+    let i = v.model().item_at_offset(doc.find("Right one").unwrap());
+    let rects = (v.cache_peek(i).unwrap().prims.iter())
+        .filter(|p| matches!(p, markise_layout::Prim::Rect { .. }))
+        .count();
+    assert_eq!(rects, 0, "no row fill");
 }

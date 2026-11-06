@@ -105,11 +105,19 @@ impl PracticeParts {
 /// What the layout of an item of a practised block needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PracticeItem {
-    /// An answer's mark shows this and not what the file says.
+    /// An answer's mark shows `selected` and not what the file says. `correct` is known once checked.
     Answer {
         selected: bool,
+        correct: Option<bool>,
     },
+    /// The block's closer, which holds the row of its buttons.
+    Row,
     Other,
+}
+
+/// The height of the row of a practised block's buttons: one line, as a paragraph's.
+pub(crate) fn practice_row_height(t: &Theme) -> f32 {
+    t.line_px()
 }
 
 impl NativeBlock {

@@ -97,9 +97,10 @@ pub struct PageStats {
     /// Headings per level, per name of the block they are directly in (ADR 0021: the estimate of
     /// a page depends on which names show natively).
     pub card_heads: Vec<(Box<str>, [u32; 6])>,
-    /// Quote paragraphs per name of the block they are directly in (ADR 0024: Practice can hide
-    /// them, and the estimate of a page has to know without reading its blocks).
-    pub card_quotes: Vec<(Box<str>, CardQuotes)>,
+    /// Closers and quote paragraphs per name of the block they are directly in (ADR 0024: Practice
+    /// adds a row to one and can hide the other, and the estimate of a page has to know without
+    /// reading its blocks).
+    pub card_tallies: Vec<(Box<str>, CardTally)>,
     /// `[toc]` blocks (each lists the whole outline).
     pub tocs: u32,
     /// Headings whose text may use a reference definition (their outline entries are
@@ -125,14 +126,16 @@ pub struct PageStats {
     pub measured_gens: DepGens,
 }
 
-/// Quote paragraphs of one block name in a page.
+/// What one block name has in a page, for Practice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct CardQuotes {
+pub struct CardTally {
+    pub closers: u32,
+    /// Quote paragraphs.
     pub paras: u32,
     pub wrapped: [u32; PARA_LINE_CHARS.len()],
 }
 
-impl CardQuotes {
+impl CardTally {
     /// Their estimated lines at `per_line` characters per line.
     pub fn lines_at(&self, per_line: f32) -> f32 {
         lines_at(&self.wrapped, per_line)
@@ -185,25 +188,30 @@ impl PageStats {
                     }
                 }
             }
-            if it.kind == ItemKind::Paragraph
+            let closes = it.kind == (ItemKind::ContainerMarker { close: true });
+            let quote = it.kind == ItemKind::Paragraph
                 && it.containers.iter().any(|c| matches!(c, super::Container::Card))
                 && it
                     .containers
                     .iter()
-                    .any(|c| matches!(c, super::Container::Quote { .. }))
+                    .any(|c| matches!(c, super::Container::Quote { .. }));
+            if (closes || quote)
                 && let Some(c) = doc.named_containers_at(it.origin).pop()
             {
-                let at = match s.card_quotes.iter().position(|(n, _)| *n == c.name) {
+                let at = match s.card_tallies.iter().position(|(n, _)| *n == c.name) {
                     Some(at) => at,
                     None => {
-                        s.card_quotes.push((c.name, CardQuotes::default()));
-                        s.card_quotes.len() - 1
+                        s.card_tallies.push((c.name, CardTally::default()));
+                        s.card_tallies.len() - 1
                     }
                 };
-                let q = &mut s.card_quotes[at].1;
-                q.paras += 1;
-                for (w, &n) in q.wrapped.iter_mut().zip(&PARA_LINE_CHARS) {
-                    *w += it.est_lines.max(it.est_chars.div_ceil(n));
+                let tally = &mut s.card_tallies[at].1;
+                tally.closers += u32::from(closes);
+                if quote {
+                    tally.paras += 1;
+                    for (w, &n) in tally.wrapped.iter_mut().zip(&PARA_LINE_CHARS) {
+                        *w += it.est_lines.max(it.est_chars.div_ceil(n));
+                    }
                 }
             }
             s.images += it.has_image as u32;
