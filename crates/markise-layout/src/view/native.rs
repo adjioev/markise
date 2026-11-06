@@ -373,6 +373,31 @@ impl View {
             && (self.doc.named_containers_at(self.model.item_start(i)).pop()).is_some_and(|c| source.has_view(&c.name))
     }
 
+    /// The opener just above the first item on screen, when it has no label row and its block's
+    /// controls are still in view. Such an opener has next to no height, and the controls stand on it
+    /// over the next row, so it has scrolled away long before they have. A host finds them by the opener.
+    pub(super) fn quiet_opener_above(
+        &mut self,
+        first: &super::Visible,
+        shaper: &mut dyn crate::text::TextShaper,
+        images: &dyn crate::block::Images,
+    ) -> Option<super::Visible> {
+        let i = first.idx.checked_sub(1)?;
+        let it = self.model.items.get(i)?;
+        if it.kind != (ItemKind::ContainerMarker { close: false }) || self.disclosure_hidden(i) || self.site_hidden(i) {
+            return None;
+        }
+        if self.native_item(i)?.block.view.label_row {
+            return None;
+        }
+        let layout = self.layout(i, shaper, images);
+        let (pad, _) = self.item_pad(i);
+        let y = first.y - self.height(i) + pad;
+        let (edge, _) = layout.card_top?;
+        (layout.warning.is_none() && y + edge.y + crate::block::card_controls_reach(&self.theme) > 0.0)
+            .then_some(super::Visible { idx: i, y, layout })
+    }
+
     /// The opener of item `i` has no label row, as far as its block's name can tell: a block with a
     /// warning has one after all, and corrects this when it is laid out.
     pub(super) fn native_quiet_opener(&self, i: usize) -> bool {

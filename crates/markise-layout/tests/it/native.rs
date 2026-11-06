@@ -771,3 +771,27 @@ fn another_block_is_another_band_and_so_is_what_a_gap_of_items_lets_through() {
     let runs = merged_bands([(at(0.0), &a[..]), (at(10.0), &none[..]), (at(20.0), &b[..])]);
     assert_eq!(runs.len(), 2);
 }
+
+#[test]
+fn an_opener_with_no_label_row_stays_while_its_controls_are_in_view() {
+    let src = format!("Before.\n\n{BLOCK}\n{}", "After.\n\n".repeat(100));
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut first_at = |label_row: bool, below: f64| {
+        let mut v = testing::Shown::full(Arc::new(markise_md::parse(&src))).view(Theme::light(), 700.0, 1.0);
+        v.set_block_views(Some(options(NativeKind::Callout, "blue", true, label_row)));
+        v.frame(400.0, 0.0, &mut f, &NoImages);
+        let title = item_of(&v, src.find("The title").unwrap());
+        let y = v.item_y(title);
+        v.scroll_to_y(y + below);
+        let shown = v.frame(400.0, 0.0, &mut f, &NoImages);
+        (shown[0].idx, shown[0].y, title)
+    };
+    // its height is gone from the viewport, and what stands on it is not
+    let (first, y, title) = first_at(false, 2.0);
+    assert_eq!(first, title - 1, "the opener");
+    assert!(y < 0.0, "{y}");
+    // past them, and with a row of its own, nothing extra
+    assert!(first_at(false, 40.0).0 >= title);
+    assert_eq!(first_at(true, 2.0).0, title);
+}

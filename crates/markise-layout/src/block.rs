@@ -2007,6 +2007,11 @@ pub(crate) fn quiet_opener_height(t: &Theme) -> f32 {
     (card_padding(t) - t.block_spacing).max(0.0)
 }
 
+/// How far below a card's top edge its controls reach (the viewer's buttons: a margin, then a side).
+pub(crate) fn card_controls_reach(t: &Theme) -> f32 {
+    4.0 + t.line_px().min(22.0)
+}
+
 /// Height of a card's opener without the gap before it: padding, then one line of label.
 pub(crate) fn card_opener_height(t: &Theme) -> f32 {
     let size = t.font_size * 0.85;

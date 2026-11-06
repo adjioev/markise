@@ -1377,6 +1377,12 @@ impl View {
             self.layout(i, shaper, images);
             y -= self.height(i);
         }
+        if let Some(opener) = out
+            .first()
+            .and_then(|first| self.quiet_opener_above(first, shaper, images))
+        {
+            out.insert(0, opener);
+        }
         self.last_visible = out.iter().map(|v| v.idx).collect();
         out
     }

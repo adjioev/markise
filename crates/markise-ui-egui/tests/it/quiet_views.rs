@@ -209,3 +209,49 @@ fn a_callout_is_one_ground_at_a_fractional_zoom() {
         assert!(grounds[0].top() < top.top() + 1.0 && grounds[0].bottom() > bottom.bottom() - 1.0);
     }
 }
+
+#[test]
+fn the_controls_of_a_block_with_no_label_row_last_as_long_as_they_are_in_view() {
+    let d = format!(
+        "Before.\n\n:::quiet\n\n### Its heading\n\nIts body.\n\n:::\n\n{}",
+        "After.\n\n".repeat(200)
+    );
+    let f = Fixture::with_package(
+        &d,
+        &[
+            ("manifest.json", MANIFEST),
+            ("components/note/note.json", NOTE),
+            ("components/quiet/quiet.json", QUIET),
+            ("editor/palette.json", PALETTE),
+            ("editor/views.json", VIEWS),
+        ],
+    );
+    let mut h = f.ready();
+    caret(&mut h, d.find("After").unwrap());
+    let heading = {
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.view.model().item_at_offset(d.find("Its heading").unwrap())
+    };
+    // the first row of the block has scrolled away, and the buttons over it have not
+    let y = h.state_mut().viewer().unwrap().ed.view.item_y(heading);
+    h.state_mut().viewer().unwrap().ed.view.scroll_to_y(y + 1.0);
+    common::run(&mut h);
+    let heading_rect = h
+        .state()
+        .viewer_item_rect(d.find("Its heading").unwrap())
+        .expect("in view");
+    let surface_top = heading_rect.top() + 1.0;
+    for label in ["Edit Block: quiet", "Show Markdown: quiet", "Delete Block: quiet"] {
+        let node = h.query_by_label(label).unwrap_or_else(|| panic!("{label} is gone"));
+        assert!(node.rect().top() >= surface_top, "{label}: {:?}", node.rect());
+    }
+    // and the pointer on the block shows them
+    h.hover_at(heading_rect.center());
+    common::run(&mut h);
+    assert!(drawn(&mut h, "Edit Block: quiet"));
+    assert!(drawn(&mut h, "Delete Block: quiet"));
+    // scrolled past them, they go, like the buttons of any row
+    h.state_mut().viewer().unwrap().ed.view.scroll_to_y(y + 40.0);
+    common::run(&mut h);
+    assert!(h.query_by_label("Edit Block: quiet").is_none());
+}
