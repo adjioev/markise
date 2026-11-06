@@ -273,7 +273,8 @@ mod drawn {
             for (key, outcome) in client.take_results() {
                 match outcome {
                     Outcome::Drawn(shot) => shots.insert(key, shot),
-                    Outcome::Failed(why) => panic!("job {key}: {why}"),
+                    // The example package must draw: a missing image fails this test too.
+                    Outcome::Failed(why) | Outcome::MissingImage(why) => panic!("job {key}: {why}"),
                 };
             }
             std::thread::sleep(Duration::from_millis(10));
