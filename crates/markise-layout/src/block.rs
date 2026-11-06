@@ -272,6 +272,8 @@ pub struct BlockLayout {
     /// A native view's grounds and bars in this item, bottom first. They go through
     /// [`merged_bands`], not the prims: one block's are one rectangle however many items it has.
     pub bands: Vec<Band>,
+    /// Where a section's boundary has its row: its controls stand there.
+    pub divider_mid: Option<f32>,
     /// The warning on the card this item opens (item-local).
     pub warning: Option<Rect>,
     /// The quiet reason this card shows no picture (item-local).
@@ -1948,14 +1950,28 @@ pub struct Band {
     pub fill: Color32,
     /// The block's first item: this starts another block, whatever came before it.
     pub opens: bool,
+    /// Its last: nothing below it goes on from it, whatever looks the same.
+    pub closes: bool,
+    /// An edge around all of it, and how round its corners are: a section's frame (ADR 0026).
+    pub stroke: Stroke,
+    pub radius: f32,
+}
+
+/// All of a band, however many items it takes up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BandRun {
+    pub rect: Rect,
+    pub fill: Color32,
+    pub stroke: Stroke,
+    pub radius: f32,
 }
 
 /// The bands of the items on screen, in order, each with where its item stands, as whole rectangles.
 /// A host moves each item to a pixel of its own, so an item's bottom and the next one's top need not
 /// be the same `y`: painted item by item, a translucent ground leaves a line of nothing or of twice
 /// the tint there. Here a band goes on from where the one before it in the same block went.
-pub fn merged_bands<'a>(items: impl IntoIterator<Item = (Pos2, &'a [Band])>) -> Vec<(Rect, Color32)> {
-    let mut runs: Vec<(Rect, Color32)> = Vec::new();
+pub fn merged_bands<'a>(items: impl IntoIterator<Item = (Pos2, &'a [Band])>) -> Vec<BandRun> {
+    let mut runs: Vec<BandRun> = Vec::new();
     let mut open: Vec<usize> = Vec::new();
     for (origin, bands) in items {
         let mut going = Vec::with_capacity(bands.len());
@@ -1964,20 +1980,31 @@ pub fn merged_bands<'a>(items: impl IntoIterator<Item = (Pos2, &'a [Band])>) -> 
             let run = (!b.opens)
                 .then(|| {
                     open.iter().copied().find(|&i| {
-                        let (had, fill) = runs[i];
-                        fill == b.fill && had.min.x == r.min.x && had.max.x == r.max.x
+                        let had = &runs[i];
+                        had.fill == b.fill
+                            && had.stroke == b.stroke
+                            && had.rect.min.x == r.min.x
+                            && had.rect.max.x == r.max.x
                     })
                 })
                 .flatten();
-            match run {
+            let at = match run {
                 Some(i) => {
-                    runs[i].0.max.y = r.max.y;
-                    going.push(i);
+                    runs[i].rect.max.y = r.max.y;
+                    i
                 }
                 None => {
-                    going.push(runs.len());
-                    runs.push((r, b.fill));
+                    runs.push(BandRun {
+                        rect: r,
+                        fill: b.fill,
+                        stroke: b.stroke,
+                        radius: b.radius,
+                    });
+                    runs.len() - 1
                 }
+            };
+            if !b.closes {
+                going.push(at);
             }
         }
         open = going;
@@ -2177,6 +2204,7 @@ pub fn layout_item(
         col: (x, x + width),
     };
     let mut y = gap;
+    let mut divider_mid = None;
     let mut toggle = None;
     let mut empty_anchor = None;
     let mut warning = None;
@@ -2795,14 +2823,18 @@ pub fn layout_item(
             }
             y += h;
         }
-        ItemKind::Rule
-            if matches!(
-                p.section,
-                Some(crate::view::SectionLook::Divider(_) | crate::view::SectionLook::Hint(_))
-            ) =>
-        {
-            if let Some(crate::view::SectionLook::Divider(label) | crate::view::SectionLook::Hint(label)) = p.section {
-                layout_divider(&mut out, shaper, t, label, x, width, y + line_px * 0.5);
+        ItemKind::Rule if matches!(p.section, Some(crate::view::SectionLook::Divider { .. })) => {
+            if let Some(crate::view::SectionLook::Divider { number, name, style }) = p.section {
+                let m = divider_metrics(t, style.frame, number.is_some() || name.is_some());
+                let mid = y + m.row + line_px * 0.5;
+                layout_divider(&mut out, shaper, t, number, name, style, x, width, mid);
+                divider_mid = Some(mid);
+                y += m.end;
+            }
+        }
+        ItemKind::Rule if matches!(p.section, Some(crate::view::SectionLook::Hint(_))) => {
+            if let Some(crate::view::SectionLook::Hint(label)) = p.section {
+                layout_quiet_rule(&mut out, shaper, t, label, x, width, y + line_px * 0.5);
             }
             y += line_px;
         }
@@ -3218,6 +3250,7 @@ pub fn layout_item(
         diagram_controls,
         card_top,
         bands,
+        divider_mid,
         warning,
         note,
         plaque: plaque_rect,
@@ -3311,8 +3344,8 @@ fn layout_plaque(
     (rect, warning)
 }
 
-/// A section's boundary: its name, quiet, then the line to the right edge, on the line's own row.
-fn layout_divider(out: &mut Out, shaper: &mut dyn TextShaper, t: &Theme, label: &str, x: f32, width: f32, mid: f32) {
+/// A rule nearly a boundary says so, quietly, then the line to the right edge, on the line's own row.
+fn layout_quiet_rule(out: &mut Out, shaper: &mut dyn TextShaper, t: &Theme, label: &str, x: f32, width: f32, mid: f32) {
     let size = t.font_size * 0.8;
     let st = Style::base(size, size * 1.4, color(t.meta_block.text));
     let g = one_row(shaper, &card_label(label, ""), &st, width * 0.7);
@@ -3323,6 +3356,109 @@ fn layout_divider(out: &mut Out, shaper: &mut dyn TextShaper, t: &Theme, label: 
         b: pos2(x + width, mid),
         stroke: Stroke::new(1.0, color(t.rule)),
     });
+}
+
+/// Where the parts of a boundary stand, from where its gap ends (ADR 0026).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DividerMetrics {
+    /// With a frame: where the frame above ends.
+    pub tail: f32,
+    /// With a frame: where the frame below starts.
+    pub opens: f32,
+    /// The top of the row of its number and name.
+    pub row: f32,
+    /// Its end.
+    pub end: f32,
+}
+
+/// How far a section's frame stands out from what it holds.
+pub(crate) fn section_frame_padding(t: &Theme) -> f32 {
+    (t.font_size * 1.4).round()
+}
+
+pub(crate) fn divider_metrics(t: &Theme, frame: bool, has_row: bool) -> DividerMetrics {
+    let line = t.line_px();
+    let row_h = if has_row { line } else { 0.0 };
+    if frame {
+        let pad = section_frame_padding(t);
+        let opens = pad + line * 1.4;
+        let row = opens + pad * 0.8;
+        DividerMetrics {
+            tail: pad,
+            opens,
+            row,
+            end: row + row_h,
+        }
+    } else {
+        let row = line * 1.9;
+        DividerMetrics {
+            tail: 0.0,
+            opens: 0.0,
+            row,
+            end: row + row_h + line * 0.5,
+        }
+    }
+}
+
+/// What a boundary is drawn in: stronger than a rule, whatever the theme.
+pub(crate) fn section_color(style: &crate::view::SectionStyle, t: &Theme) -> Color32 {
+    match style.accent.as_deref() {
+        Some(a) if !a.eq_ignore_ascii_case(crate::native::NO_ACCENT) => crate::native::accent_color(Some(a), t),
+        _ => color(t.text).lerp_to_gamma(color(t.page_bg), if t.dark { 0.35 } else { 0.45 }),
+    }
+}
+
+/// A section's boundary: a badge with its number at the start, its name if it has one to say, and with
+/// no frame the line to the right edge.
+#[allow(clippy::too_many_arguments)]
+fn layout_divider(
+    out: &mut Out,
+    shaper: &mut dyn TextShaper,
+    t: &Theme,
+    number: Option<usize>,
+    name: Option<&str>,
+    style: &crate::view::SectionStyle,
+    x: f32,
+    width: f32,
+    mid: f32,
+) {
+    let strong = section_color(style, t);
+    let size = (t.font_size * 0.8).round();
+    let mut at = x;
+    if let Some(n) = number {
+        let st = Style::base(size, size * 1.3, color(t.page_bg));
+        let g = one_row(shaper, &n.to_string(), &st, width * 0.2);
+        let (w, h) = (g.size().x, g.size().y);
+        let side = (h + 4.0).max(w + size);
+        let rect = Rect::from_min_max(pos2(at, mid - (h + 4.0) * 0.5), pos2(at + side, mid + (h + 4.0) * 0.5));
+        out.prims.push(Prim::Rect {
+            rect,
+            fill: strong,
+            stroke: Stroke::NONE,
+            radius: (h + 4.0) * 0.5,
+        });
+        out.text(
+            pos2(at + (side - w) * 0.5, mid - h * 0.5),
+            g,
+            Vec::new(),
+            FragmentId::label(),
+        );
+        at += side + size * 0.6;
+    }
+    if let Some(name) = name {
+        let st = Style::base(size, size * 1.4, strong);
+        let g = one_row(shaper, &card_label(name, ""), &st, (width - (at - x)) * 0.7);
+        let (w, h) = (g.size().x, g.size().y);
+        out.text(pos2(at, mid - h * 0.5), g, Vec::new(), FragmentId::label());
+        at += w + size * 0.6;
+    }
+    if !style.frame {
+        out.prims.push(Prim::Line {
+            a: pos2(at, mid),
+            b: pos2(x + width, mid),
+            stroke: Stroke::new(2.0, strong),
+        });
+    }
 }
 
 /// A native view's own edges around one item of its block (`r`: the item's part of the block).
@@ -3341,7 +3477,16 @@ fn native_chrome(
     if v.kind == NativeKind::Media {
         return;
     }
-    let mut band = |rect, fill| bands.push(Band { rect, fill, opens });
+    let mut band = |rect, fill| {
+        bands.push(Band {
+            rect,
+            fill,
+            opens,
+            closes: false,
+            stroke: Stroke::NONE,
+            radius: 0.0,
+        })
+    };
     if v.fill && v.kind == NativeKind::Callout {
         band(r, ground(v, t));
     }

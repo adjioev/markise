@@ -175,3 +175,34 @@ fn what_a_section_declaration_cannot_say_refuses_the_package() {
         assert!(format!("{why:?}").contains(says), "{sections}: {why:?}");
     }
 }
+
+#[test]
+fn a_section_view_is_validated_and_has_defaults() {
+    let with = |view: serde_json::Value| {
+        let mut f = common::files();
+        f.insert(
+            "editor/sections.json".to_string(),
+            json!({"view": view}).to_string().into_bytes(),
+        );
+        PackageIndex::from_files(&f)
+    };
+    let index = with(json!({"frame": true, "accent": "blue", "numbered": false})).unwrap();
+    let view = &index.sections().unwrap().view;
+    assert!(view.frame && !view.numbered);
+    assert_eq!(view.accent.as_deref(), Some("blue"));
+    let index = with(json!({})).unwrap();
+    assert_eq!(index.sections().unwrap().view, markise_package::SectionView::default());
+    assert!(markise_package::SectionView::default().numbered);
+    for (bad, says) in [
+        (json!(true), "view must be an object"),
+        (json!({"frame": "yes"}), "view.frame must be true or false"),
+        (json!({"numbered": 1}), "view.numbered must be true or false"),
+        (json!({"accent": 3}), "view.accent"),
+        (json!({"accent": "not a token"}), "view.accent"),
+    ] {
+        let Err(why) = with(bad.clone()) else {
+            panic!("{bad}");
+        };
+        assert!(format!("{why:?}").contains(says), "{bad}: {why:?}");
+    }
+}

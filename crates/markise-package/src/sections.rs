@@ -24,6 +24,29 @@ pub struct SectionConfig {
     pub icon: Option<String>,
     /// The metadata a new section's form asks for, in this order. None: the form asks for none.
     pub fields: Vec<SectionField>,
+    /// How a section looks on screen.
+    pub view: SectionView,
+}
+
+/// `"view"` of `editor/sections.json`: how sections look on screen, in generic terms. Nothing about the file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionView {
+    /// Each section is a card, rather than the sections being divided by a line. Default `false`.
+    pub frame: bool,
+    /// A colour name, as a view's accent (ADR 0021).
+    pub accent: Option<String>,
+    /// A boundary says the section's number. Default `true`.
+    pub numbered: bool,
+}
+
+impl Default for SectionView {
+    fn default() -> SectionView {
+        SectionView {
+            frame: false,
+            accent: None,
+            numbered: true,
+        }
+    }
 }
 
 /// One key of a section's metadata the site declares.
@@ -67,7 +90,29 @@ pub(crate) fn parse(file: &str, map: serde_json::Map<String, Value>, issues: &mu
         keywords: opt_text(file, "keywords", map.get("keywords"), MAX_TEXT_BYTES, issues),
         icon: opt_token(file, "icon", map.get("icon"), issues),
         fields: parse_fields(file, map.get("fields"), issues),
+        view: parse_view(file, map.get("view"), issues),
     }
+}
+
+fn parse_view(file: &str, v: Option<&Value>, issues: &mut Issues) -> SectionView {
+    let mut view = SectionView::default();
+    let map = match v {
+        None | Some(Value::Null) => return view,
+        Some(Value::Object(map)) => map,
+        Some(_) => {
+            issues.push(file, "view must be an object");
+            return view;
+        }
+    };
+    let mut flag = |key: &str, into: &mut bool| match map.get(key) {
+        None => {}
+        Some(Value::Bool(b)) => *into = *b,
+        Some(_) => issues.push(file, format!("view.{key} must be true or false")),
+    };
+    flag("frame", &mut view.frame);
+    flag("numbered", &mut view.numbered);
+    view.accent = opt_token(file, "view.accent", map.get("accent"), issues);
+    view
 }
 
 fn parse_fields(file: &str, v: Option<&Value>, issues: &mut Issues) -> Vec<SectionField> {

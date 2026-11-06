@@ -29,7 +29,7 @@ mod site;
 pub use native::{BlockCan, BlockViewMode, NativeAt};
 pub use paging::PagingStats;
 pub use practice::PracticeShow;
-pub use sections::{OutlineRow, Plaque, SectionLook};
+pub use sections::{OutlineRow, Plaque, SectionLook, SectionStyle};
 pub use site::SiteLook;
 
 /// An item to paint this frame.
@@ -1310,6 +1310,13 @@ impl View {
                     };
                     layout_item(&*self.doc, &self.model, i, &params, shaper, &rec)
                 });
+                let mut laid = laid;
+                if let Some(it) = self.model.items.get(i) {
+                    let frame = self.section_frame_bands(i, it, laid.height, laid.gap);
+                    // below what the item's own blocks draw
+                    laid.bands.splice(0..0, frame);
+                    laid.divider_mid = laid.divider_mid.filter(|_| self.sections_on());
+                }
                 let l = Arc::new(laid);
                 if !self.missing_glyphs {
                     self.missing_glyphs = lacks_glyphs(&l, shaper);

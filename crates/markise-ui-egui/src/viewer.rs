@@ -708,9 +708,13 @@ impl DocViewer {
         if self.gutter {
             content_w -= comment_place::GUTTER_W;
         }
+        // a section's frame stands around the column, inside what the column would have had
+        self.follow_section_dialect();
+        let inset = self.ed.view.section_frame_inset(theme);
         let col_w = (content_w - 2.0 * theme.column_padding_x)
             .min(theme.column_max_width)
-            .max(120.0);
+            .max(120.0 + 2.0 * inset)
+            - 2.0 * inset;
         let mut left = rect.left() + ((content_w - col_w) * 0.5).max(4.0);
         let snap = smooth_scroll::snap_enabled();
         if snap {
@@ -1087,8 +1091,8 @@ impl DocViewer {
         let bands = visible
             .iter()
             .map(|v| (pos2(left, rect.top() + v.y), v.layout.bands.as_slice()));
-        for (r, fill) in markise_layout::block::merged_bands(bands) {
-            painter.rect_filled(r, 0.0, fill);
+        for run in markise_layout::block::merged_bands(bands) {
+            painter.rect(run.rect, run.radius, run.fill, run.stroke, egui::StrokeKind::Inside);
         }
         for v in &visible {
             let origin = pos2(left, rect.top() + v.y);

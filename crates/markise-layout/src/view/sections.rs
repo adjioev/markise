@@ -25,11 +25,37 @@ pub struct Plaque {
     pub warnings: Vec<String>,
 }
 
+/// How sections look on screen, for what the package says of them: the defaults with none.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SectionStyle {
+    /// Each section is a card, rather than being divided from the next by a line.
+    pub frame: bool,
+    /// A colour's name, as a view's accent (ADR 0021).
+    pub accent: Option<Arc<str>>,
+    /// A boundary says the section's number.
+    pub numbered: bool,
+}
+
+impl Default for SectionStyle {
+    fn default() -> SectionStyle {
+        SectionStyle {
+            frame: false,
+            accent: None,
+            numbered: true,
+        }
+    }
+}
+
 /// What item `i`'s layout gets of its section.
 #[derive(Clone, Copy, Debug)]
 pub enum SectionLook<'a> {
-    /// A boundary, with what to call the section it opens.
-    Divider(&'a str),
+    /// A boundary, with the number of the section it opens, and what to call it if there is more to say
+    /// than what stands below it.
+    Divider {
+        number: Option<usize>,
+        name: Option<&'a str>,
+        style: &'a SectionStyle,
+    },
     Plaque(&'a Plaque),
     /// The closer of a block shown as a plaque: no height, and the gap after it stays.
     End,
@@ -41,7 +67,11 @@ pub enum SectionLook<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Role {
     Plain,
-    Divider(Arc<str>),
+    Divider {
+        number: Option<usize>,
+        name: Option<Arc<str>>,
+        style: Arc<SectionStyle>,
+    },
     Opener(Arc<Plaque>),
     Inside,
     Closer,
@@ -62,7 +92,11 @@ impl Role {
         match self {
             Role::Plain | Role::Inside | Role::Warned(_) => None,
             Role::Hint(text) => Some(SectionLook::Hint(text)),
-            Role::Divider(label) => Some(SectionLook::Divider(label)),
+            Role::Divider { number, name, style } => Some(SectionLook::Divider {
+                number: *number,
+                name: name.as_deref(),
+                style,
+            }),
             Role::Opener(plaque) => Some(SectionLook::Plaque(plaque)),
             Role::Closer => Some(SectionLook::End),
         }
@@ -72,6 +106,7 @@ impl Role {
 #[derive(Default)]
 pub(super) struct SectionsState {
     on: bool,
+    style: Arc<SectionStyle>,
     /// By item start, for the document and states as they stand.
     roles: RefCell<HashMap<usize, Role>>,
     /// The openers of the metadata blocks around the selection's ends: those show what they hold.
@@ -194,6 +229,105 @@ impl View {
         self.sections.on
     }
 
+    /// How sections look, for what the package says of them.
+    pub fn set_section_style(&mut self, style: SectionStyle) {
+        if *self.sections.style != style {
+            self.sections.style = Arc::new(style);
+            self.sections.roles.borrow_mut().clear();
+            self.reset_heights();
+        }
+    }
+
+    /// How far the column has to stay in from its edges for a section's frame to stand around it.
+    pub fn section_frame_inset(&self, theme: &markise_theme::Theme) -> f32 {
+        if self.sections.on && self.sections.style.frame {
+            crate::block::section_frame_padding(theme)
+        } else {
+            0.0
+        }
+    }
+
+    /// The number a boundary says, from 1 among what shows: a first section with nothing in it is none.
+    fn section_number(&self, index: usize) -> usize {
+        let empty_first = (self.doc.section(0)).is_some_and(|s| {
+            (self.doc.text().get(s.start..s.end)).is_some_and(|t| t.trim_matches([' ', '\t', '\r', '\n']).is_empty())
+        });
+        if empty_first { index } else { index + 1 }
+    }
+
+    /// What a boundary calls its section besides its number: its `id`, unless that is what the first heading
+    /// below says. A heading says itself, and a number with nothing else is enough.
+    fn divider_name(&self, index: usize) -> Option<Arc<str>> {
+        let id = (self.doc.section_metadata(index)).and_then(|m| m.get("id").map(str::to_string))?;
+        let heading = (self.doc.section_first_heading(index)).and_then(|at| self.doc.heading(at));
+        (heading.is_none_or(|h| h.text.trim() != id)).then(|| id.into())
+    }
+
+    /// What a section's frame comes to in item `i`, whose layout has this height and gap (ADR 0026). All the
+    /// items of a section have one, so that it is one shape however many items and pages it takes up, as a
+    /// native block's ground is (`merged_bands`), and it stands out from the column over the inset.
+    pub(super) fn section_frame_bands(&self, i: usize, it: &Item, height: f32, gap: f32) -> Vec<crate::block::Band> {
+        use crate::block::Band;
+        let style = &self.sections.style;
+        if !self.sections.on || !style.frame || it.kind == ItemKind::FrontMatter {
+            return Vec::new();
+        }
+        let t = &self.theme;
+        let pad = crate::block::section_frame_padding(t);
+        let colour = crate::block::section_color(style, t);
+        let fill = {
+            let c = if style.accent.is_some() {
+                colour
+            } else {
+                crate::block::color(t.text)
+            };
+            let a = match (style.accent.is_some(), t.dark) {
+                (true, true) => 22,
+                (true, false) => 14,
+                (false, true) => 12,
+                (false, false) => 8,
+            };
+            epaint::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+        };
+        let band = |top: f32, bottom: f32, opens: bool, closes: bool| Band {
+            rect: epaint::Rect::from_min_max(epaint::pos2(-pad, top), epaint::pos2(self.width() + pad, bottom)),
+            fill,
+            opens,
+            closes,
+            stroke: epaint::Stroke::new(1.5, colour),
+            radius: (t.font_size * 0.7).round(),
+        };
+        let after_front = i > 0
+            && self
+                .model
+                .items
+                .get(i - 1)
+                .is_some_and(|p| p.kind == ItemKind::FrontMatter);
+        let first = i == 0 || after_front;
+        let last = i + 1 == self.model.items.len();
+        if let Role::Divider { number, name, .. } = self.section_role(i, it) {
+            let m = crate::block::divider_metrics(t, true, number.is_some() || name.is_some());
+            let below = band(gap + m.opens, if last { height + pad } else { height }, true, last);
+            // a first section with nothing in it has no frame to end
+            return if first {
+                vec![below]
+            } else {
+                vec![band(0.0, gap + m.tail, false, true), below]
+            };
+        }
+        vec![band(
+            // above a document's first item there is room; under front matter only its gap
+            match (first, after_front) {
+                (true, true) => gap * 0.3,
+                (true, false) => -pad,
+                _ => 0.0,
+            },
+            if last { height + pad } else { height },
+            first,
+            last,
+        )]
+    }
+
     /// What to call section `index`: its `id`, else its first heading, else its number from 1.
     pub fn section_name(&self, index: usize) -> String {
         if let Some(id) = (self.doc.section_metadata(index)).and_then(|m| m.get("id").map(str::to_string)) {
@@ -208,7 +342,12 @@ impl View {
 
     /// Part of what a measured page height holds for.
     pub(super) fn sections_key(&self) -> u64 {
-        u64::from(self.sections.on)
+        if !self.sections.on {
+            return 0;
+        }
+        let mut h = crate::model::hasher();
+        self.sections.style.hash(&mut h);
+        h.finish() | 1
     }
 
     /// The block with this opener is a section's metadata block, in a document with sections.
@@ -254,7 +393,14 @@ impl View {
     fn rule_role(&self, start: usize) -> Role {
         let section = self.doc.section_at(start);
         match section.boundary {
-            Some(b) if b.start == start => Role::Divider(self.section_name(section.index).into()),
+            Some(b) if b.start == start => {
+                let style = self.sections.style.clone();
+                Role::Divider {
+                    number: style.numbered.then(|| self.section_number(section.index)),
+                    name: self.divider_name(section.index),
+                    style,
+                }
+            }
             _ if self.doc.section_near_boundary(start) => Role::Hint(NEAR_RULE.into()),
             _ => Role::Plain,
         }
@@ -304,9 +450,24 @@ impl View {
             return 0;
         }
         let mut h = crate::model::hasher();
+        // a frame's ends are in the items at the document's ends, and all of them hold it
+        if self.sections.style.frame {
+            self.sections.style.hash(&mut h);
+            (i == 0
+                || self
+                    .model
+                    .items
+                    .get(i - 1)
+                    .is_some_and(|p| p.kind == ItemKind::FrontMatter))
+            .hash(&mut h);
+            (i + 1 == self.model.items.len()).hash(&mut h);
+        } else if matches!(self.section_role(i, it), Role::Plain | Role::Inside) {
+            return 0;
+        }
         match self.section_role(i, it) {
-            Role::Plain | Role::Inside => return 0,
-            Role::Divider(label) | Role::Hint(label) => label.hash(&mut h),
+            Role::Plain | Role::Inside => {}
+            Role::Divider { number, name, style } => (number, name, style).hash(&mut h),
+            Role::Hint(label) => label.hash(&mut h),
             Role::Warned(why) => why.hash(&mut h),
             Role::Opener(plaque) => plaque.hash(&mut h),
             Role::Closer => 1u8.hash(&mut h),
@@ -318,9 +479,29 @@ impl View {
     pub(super) fn section_estimate(&self, i: usize, it: &Item) -> Option<f32> {
         match self.section_role(i, it) {
             Role::Opener(_) => Some(self.theme.block_spacing + crate::block::plaque_row_height(&self.theme)),
+            Role::Divider { number, name, style } => {
+                let m = crate::block::divider_metrics(&self.theme, style.frame, number.is_some() || name.is_some());
+                Some(self.theme.block_spacing + m.end)
+            }
             Role::Closer => Some(0.0),
             _ => None,
         }
+    }
+
+    /// What a page's boundaries add to what its rules are counted as: `source` is what the page holds.
+    pub(super) fn section_page_estimate(&self, source: std::ops::Range<usize>) -> f32 {
+        if !self.sections.on || source.is_empty() {
+            return 0.0;
+        }
+        let first = self.doc.section_at(source.start);
+        let last = self.doc.section_at(source.end - 1);
+        let mut boundaries = last.index - first.index;
+        if first.boundary.is_some_and(|b| b.start == source.start) {
+            boundaries += 1;
+        }
+        let style = &self.sections.style;
+        let m = crate::block::divider_metrics(&self.theme, style.frame, style.numbered);
+        boundaries as f32 * (m.end - self.theme.line_px())
     }
 
     /// Where the plaque around item `i` is, when it hides `i`.

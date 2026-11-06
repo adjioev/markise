@@ -77,7 +77,7 @@ impl View {
             return f32::from_bits(h);
         }
         // what closed callouts in the page hide: their bodies, counted as they are when shown
-        let mut h = self.stats_height(s);
+        let mut h = self.stats_height(s) + self.section_page_estimate(source.clone());
         self.model
             .cross
             .closed_fold_bodies(source.start, source.end, |body| h -= self.stats_height(body));

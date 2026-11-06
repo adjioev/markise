@@ -141,7 +141,7 @@ no question. Undo brings it back exactly. Each move and each deletion is one und
 Some sites divide a page into sections, each a run of text and blocks. A package whose manifest says
 so, or a document with `authoring: blocks-v3` in its front matter, has them on: a line that is exactly
 `---`, at the document's level, starts a section. Markise shows it as a quiet divider with the
-section's name, and the outline and status bar follow. What a section means is the site's business.
+section's number and, when it says more than the heading below it, its name, with a gap above and below and a strong line across: a division you can see when you scroll. The first section has no `---` and needs none, so it has no number either. The outline and status bar follow. A package can have each section drawn as a card instead. This is only how it looks: the file does not change. What a section means is the site's business.
 
 ### Start a section
 

@@ -15,6 +15,11 @@ type H = Harness<'static, MarkiseApp>;
 
 const DOC: &str = "---\nauthoring: blocks-v3\n---\n\n:::section-metadata\n\nid: top\nkind: opening\nnot a pair\n\n:::\n\n# First\n\nOne.\n\n---\n\nTwo.\n\n***\n\nStill two.\n\n---\n\n:::section-metadata\n\nstyle: wide\n\n:::\n\nThree.\n";
 
+/// A boundary's number stands on a row of its own in what shows.
+fn badge(shown: &str, number: &str) -> bool {
+    shown.lines().any(|l| l.trim() == number)
+}
+
 struct Plain {
     _dir: tempfile::TempDir,
     config: PathBuf,
@@ -73,7 +78,7 @@ fn a_document_in_the_dialect_shows_dividers_and_plaques_and_stays_as_it_was() {
     let p = plain(DOC);
     let mut h = opened(&p);
     let s = shown(&mut h);
-    assert!(s.contains("Section 2"), "{s}");
+    assert!(badge(&s, "2"), "{s}");
     assert!(s.contains("wide"), "{s}");
     assert!(s.contains("id: top   kind: opening"), "{s}");
     assert!(s.contains("⚠"), "{s}");
@@ -93,7 +98,7 @@ fn no_dialect_or_another_one_leaves_the_document_as_ever() {
         let mut h = opened(&p);
         let s = shown(&mut h);
         assert!(s.contains("section-metadata"), "a card, {s}");
-        assert!(!s.contains("Section 2"), "{s}");
+        assert!(!badge(&s, "2"), "{s}");
         assert!(!h.state_mut().viewer().unwrap().ed.view.sections_on());
     }
 }
@@ -126,7 +131,7 @@ fn an_accepted_package_turns_them_on_and_front_matter_wins_over_it() {
     let v = h.state_mut().viewer().unwrap();
     assert!(v.ed.view.sections_on());
     assert_eq!(v.section_dialect().unwrap().origin(), "package sample 1.0.0");
-    assert!(shown(&mut h).contains("Section 2"));
+    assert!(badge(&shown(&mut h), "2"));
 
     let doc = format!("---\nauthoring: blocks-v2\n---\n\n{body}");
     let f = Fixture::with_package(&doc, FILES_ON);
@@ -136,7 +141,7 @@ fn an_accepted_package_turns_them_on_and_front_matter_wins_over_it() {
     wait_until(&mut h, "the install", |a| a.block_package().is_some());
     common::run(&mut h);
     assert!(!h.state_mut().viewer().unwrap().ed.view.sections_on());
-    assert!(!shown(&mut h).contains("Section 2"));
+    assert!(!badge(&shown(&mut h), "2"));
 }
 
 #[test]
@@ -310,7 +315,7 @@ fn source_mode_shows_the_text() {
     assert_eq!(text(&h), DOC);
     h.state_mut().set_view_mode(ViewMode::Rendered);
     common::run(&mut h);
-    assert!(shown(&mut h).contains("Section 2"));
+    assert!(badge(&shown(&mut h), "2"));
 }
 
 #[test]
@@ -370,7 +375,7 @@ fn in_read_dividers_and_plaques_stay_and_no_control_does() {
     let s = shown(&mut h);
     assert!(s.contains("id: top"), "the plaque reads, {s}");
     assert!(s.contains("⚠"), "with what is wrong, {s}");
-    assert!(s.contains("Section 2"), "the divider reads, {s}");
+    assert!(badge(&s, "2"), "the divider reads, {s}");
     for gone in [
         "Show Markdown: section metadata",
         "Show Native View: section metadata",
@@ -938,5 +943,61 @@ mod moving {
         click_at(&mut h, first.center());
         frames(&mut h);
         assert_eq!(text(&h), "---\nauthoring: blocks-v3\n---\n\nOne.\n\n---\n\nThree.\n");
+    }
+}
+
+/// How a boundary looks, and a package's say in it (ADR 0026).
+mod looks {
+    use super::*;
+
+    fn with_view(body: &str, view: &str) -> Fixture {
+        let declared = format!(r#"{{"format":1,"view":{view}}}"#);
+        let mut files: Vec<(&str, &str)> = FILES_ON.to_vec();
+        files.push(("editor/sections.json", &declared));
+        Fixture::with_package(body, &files)
+    }
+
+    #[test]
+    fn a_frame_changes_what_shows_and_no_byte_and_read_has_no_control() {
+        let doc = "One.\n\n---\n\n## Two\n\nText.\n\n---\n\nThree.\n";
+        let f = with_view(doc, r#"{"frame":true,"accent":"blue"}"#);
+        let mut h = f.ready();
+        common::run(&mut h);
+        let v = h.state_mut().viewer().unwrap();
+        let inset = v.ed.view.section_frame_inset(&markise_theme::Theme::light());
+        assert!(inset > 0.0);
+        let s = shown(&mut h);
+        assert!(badge(&s, "2") && badge(&s, "3"), "{s}");
+        assert_eq!(text(&h), doc);
+        assert_eq!(std::fs::read_to_string(&f.doc).unwrap(), doc);
+        // the controls are as they are with no frame, and Read has none
+        let at = doc.find("---").unwrap();
+        let row = h.state().viewer_item_rect(at).unwrap().center();
+        h.hover_at(row);
+        common::run(&mut h);
+        assert_eq!(h.query_all_by_label("Delete Section").count(), 2);
+        h.state_mut().viewer().unwrap().ed.set_read_mode(true);
+        common::run(&mut h);
+        assert_eq!(h.query_all_by_label("Delete Section").count(), 0);
+        assert!(badge(&shown(&mut h), "2"), "the same look");
+        assert_eq!(text(&h), doc);
+    }
+
+    #[test]
+    fn a_number_can_be_left_out() {
+        let f = with_view("One.\n\n---\n\nTwo.\n", r#"{"numbered":false}"#);
+        let mut h = f.ready();
+        common::run(&mut h);
+        assert!(!badge(&shown(&mut h), "2"));
+    }
+
+    #[test]
+    fn a_boundary_says_the_first_heading_below_it_only_once() {
+        let doc = "---\nauthoring: blocks-v3\n---\n\nOne.\n\n---\n\n## The heading\n\n---\n\n:::section-metadata\n\nid: named\n\n:::\n\n## Other\n";
+        let p = plain(doc);
+        let mut h = opened(&p);
+        let s = shown(&mut h);
+        assert_eq!(s.matches("The heading").count(), 1, "{s}");
+        assert!(s.contains("named"), "an id is not what the heading says: {s}");
     }
 }
