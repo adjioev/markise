@@ -1228,7 +1228,7 @@ impl DocViewer {
             && let Some((idx, local, layout)) = hit(&visible, p, left, rect.top())
         {
             if layout.toggle.is_some_and(|t| t.contains(local)) {
-                self.ed.view.toggle_expanded(idx);
+                self.ed.toggle_collapsible(idx);
                 ctx.request_repaint();
             } else if modifiers.command
                 && let Some(target) = layout.link_at(local).map(str::to_string)

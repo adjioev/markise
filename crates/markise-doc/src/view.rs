@@ -26,6 +26,54 @@ pub enum CalloutKind {
     Other(Box<str>),
 }
 
+/// The theme colour of a callout (the order of the theme's alert colours, then the quote's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CalloutAccent {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+    Quote,
+}
+
+/// The icon of a callout, drawn by layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CalloutIcon {
+    Pencil,
+    Info,
+    Bulb,
+    Star,
+    Check,
+    Question,
+    Warning,
+    Cross,
+    Bolt,
+    Bug,
+    List,
+    Quote,
+    Lines,
+    Task,
+}
+
+/// How a callout's header shows (ADR 0025). The first line of the quote's first leaf holds its
+/// tag: `title` and `tag_end` are offsets into that line, so the view does not depend on where
+/// the block is.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CalloutView {
+    pub accent: CalloutAccent,
+    /// `None`: no icon (a bare alert draws its name only).
+    pub icon: Option<CalloutIcon>,
+    /// `None`: not foldable; else whether it starts open.
+    pub open: Option<bool>,
+    /// The written title on the first line.
+    pub title: Option<std::ops::Range<u32>>,
+    /// End of the tag on the first line.
+    pub tag_end: u32,
+    /// The title when none is written.
+    pub label: Box<str>,
+}
+
 /// A container around a leaf, outermost first in [`LeafView::containers`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ContainerKind {
@@ -428,7 +476,7 @@ pub enum ListMarker {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FlatContainer {
     Quote {
-        callout: Option<CalloutKind>,
+        callout: Option<std::sync::Arc<CalloutView>>,
     },
     List {
         ordered: bool,

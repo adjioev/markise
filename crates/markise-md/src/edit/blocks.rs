@@ -821,7 +821,7 @@ impl Document {
         // §2.1): Enter
         // keeps the caret there instead of leaving an empty callout behind
         if levels == 0
-            && matches!(x.kind, BlockKind::BlockQuote { alert: Some(_) })
+            && matches!(x.kind, BlockKind::BlockQuote { callout: Some(_) })
             && x.children.len() == 1
             && matches!(x.children[0].kind, BlockKind::Paragraph)
             && x.children[0].lines.len() == 1

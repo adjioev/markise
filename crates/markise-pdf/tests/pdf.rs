@@ -469,3 +469,21 @@ fn h1_page_breaks_apply_inside_directives() {
     let (_, pages) = pdf_of(":::note\n\n# One\n\n# Two\n\n:::\n", PdfOptions::default());
     assert_eq!(pages, 1, "no breaks without the option");
 }
+
+/// Extended callouts (ADR 0025): open whatever the fold mark says, with the title, no tag.
+#[test]
+fn callouts_are_open_with_their_title() {
+    if !has_fonts() {
+        return;
+    }
+    let (bytes, _) = pdf_of(
+        "> [!warning]- Mind the step\n> Hidden body text\n\n> [!mine]\n> Other body\n",
+        PdfOptions::default(),
+    );
+    let pdf = Pdf::load_mem(&bytes).expect("lopdf parses the PDF");
+    let t = text_of(&pdf);
+    for want in ["Mind the step", "Hidden body text", "Mine", "Other body"] {
+        assert!(t.contains(want), "{want} missing from {t:?}");
+    }
+    assert!(!t.contains("[!"), "{t:?}");
+}

@@ -131,10 +131,12 @@ impl Document {
         if line_start(text, first.start) != line_start(text, qs) {
             return None;
         }
+        // only what the document reads as a callout has a tag: the options and literal hints decide
+        let callout = matches!(leaf.containers.last(), Some(markise_doc::ContainerKind::Callout(_)));
         // alert: caret at the start of the body line after `[!KIND]`
-        if leaf.lines.len() >= 2 && leaf.lines[1].start == at {
-            let tag = first.slice(text).trim().to_ascii_uppercase();
-            if tag.starts_with("[!") && tag.ends_with(']') {
+        if callout && leaf.lines.len() >= 2 && leaf.lines[1].start == at {
+            // (a title stays: then the two lines join like any others)
+            if crate::callout::parse_tag(first.slice(text)).is_some_and(|t| t.title.is_none()) {
                 let ls1 = line_start(text, leaf.lines[1].start);
                 let ps = PatchSet::delete(line_start(text, first.start)..ls1);
                 let caret = at - (ls1 - line_start(text, first.start));
@@ -142,6 +144,19 @@ impl Document {
                     Plan::single(PlanStep::patches(ps), Some(Selection::caret(caret))).labeled("Paragraph")
                 ));
             }
+        }
+        // callout: caret at the start of the title; the tag before it goes
+        if callout
+            && at > first.start
+            && let Some(tag) = crate::callout::parse_tag(first.slice(text))
+            && tag.title.is_some_and(|t| first.start + t.start == at)
+        {
+            let ps = PatchSet::delete(first.start..at);
+            return Some(Ok(Plan::single(
+                PlanStep::patches(ps),
+                Some(Selection::caret(first.start)),
+            )
+            .labeled("Paragraph")));
         }
         if at != first.start {
             return None;

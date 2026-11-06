@@ -13,6 +13,7 @@
 //! - Inline content is parsed lazily, per block ([`inline`]).
 
 pub mod block;
+pub mod callout;
 mod directive;
 mod edit;
 pub mod format;
@@ -1174,8 +1175,13 @@ pub fn debug_tree(doc: &Document) -> String {
                 BlockKind::MathBlock { .. } => "math".into(),
                 BlockKind::HtmlBlock => "html".into(),
                 BlockKind::Table { aligns } => format!("table{}", aligns.len()),
-                BlockKind::BlockQuote { alert: None } => "quote".into(),
-                BlockKind::BlockQuote { alert: Some(k) } => format!("alert-{}", k.as_str()),
+                BlockKind::BlockQuote { callout: None } => "quote".into(),
+                BlockKind::BlockQuote { callout: Some(c) } => match (c.alert, c.fold) {
+                    (Some(k), _) => format!("alert-{}", k.as_str()),
+                    (None, callout::Fold::None) => format!("callout-{}", c.ty.as_str()),
+                    (None, callout::Fold::Open) => format!("callout-{}+", c.ty.as_str()),
+                    (None, callout::Fold::Closed) => format!("callout-{}-", c.ty.as_str()),
+                },
                 BlockKind::List { ordered, tight, .. } => {
                     format!(
                         "{}{}",

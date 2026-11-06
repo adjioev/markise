@@ -18,6 +18,9 @@ pub(crate) struct Group {
     pub summary: Option<usize>,
     pub title: String,
     pub open: bool,
+    /// A foldable callout (ADR 0025): its first leaf stays as its header and shows no
+    /// `<details>` header; nothing is a control, nothing is indented.
+    pub fold: bool,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -71,6 +74,7 @@ impl Disclosures {
                         summary,
                         title: g.title.clone(),
                         open: g.open,
+                        fold: false,
                     },
                 );
             }
@@ -89,6 +93,33 @@ impl Disclosures {
                 if !range.is_empty() {
                     self.hidden.push(range);
                 }
+            }
+        }
+        for f in model.cross.folds() {
+            let (s, s_real) = locate(model, f.start);
+            // the first item past the quote; a placeholder holding its end also holds what
+            // follows, so it is not hidden
+            let mut e = model.items.partition_point_start(f.end().max(f.start + 1));
+            if e > s + 1
+                && model.is_page(e - 1)
+                && model.item_start(e - 1) + model.items.get(e - 1).map_or(0, |it| it.len) > f.end()
+            {
+                e -= 1;
+            }
+            if s_real {
+                self.groups.insert(
+                    s,
+                    Group {
+                        end: e.saturating_sub(1).max(s),
+                        summary: None,
+                        title: String::new(),
+                        open: f.open(),
+                        fold: true,
+                    },
+                );
+            }
+            if !f.open() && s + 1 < e {
+                self.hidden.push(s + 1..e);
             }
         }
         self.hidden.sort_by_key(|r| r.start);
