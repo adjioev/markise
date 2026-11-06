@@ -2582,9 +2582,12 @@ pub fn layout_item(
             );
         }
         // no height of its own: the picture above it is the block
-        ItemKind::ContainerMarker { close: true } if p.site.is_some() || p.section.is_some() => {}
+        ItemKind::ContainerMarker { close: true }
+            if p.site.is_some() || matches!(p.section, Some(crate::view::SectionLook::End)) => {}
         ItemKind::ContainerMarker { close: true } => y += card_inset,
-        ItemKind::ContainerMarker { close: false } if p.section.is_some() => {
+        ItemKind::ContainerMarker { close: false }
+            if matches!(p.section, Some(crate::view::SectionLook::Plaque(_))) =>
+        {
             if let (Some(crate::view::SectionLook::Plaque(plaque)), Some(&(left, right))) = (p.section, cards.last()) {
                 let (rect, why) = layout_plaque(&mut out, shaper, t, plaque, left, p.width - right, y);
                 plaque_rect = Some(rect);
@@ -2667,8 +2670,13 @@ pub fn layout_item(
             }
             y += h;
         }
-        ItemKind::Rule if matches!(p.section, Some(crate::view::SectionLook::Divider(_))) => {
-            if let Some(crate::view::SectionLook::Divider(label)) = p.section {
+        ItemKind::Rule
+            if matches!(
+                p.section,
+                Some(crate::view::SectionLook::Divider(_) | crate::view::SectionLook::Hint(_))
+            ) =>
+        {
+            if let Some(crate::view::SectionLook::Divider(label) | crate::view::SectionLook::Hint(label)) = p.section {
                 layout_divider(&mut out, shaper, t, label, x, width, y + line_px * 0.5);
             }
             y += line_px;
@@ -2785,6 +2793,16 @@ pub fn layout_item(
             y += line_px;
         }
         ItemKind::Hidden | ItemKind::Page(_) => {}
+    }
+    // a quiet word under a paragraph; a rule's stands on its own row
+    if let (crate::view::SectionLook::Hint(text), ItemKind::Paragraph) =
+        (p.section.unwrap_or(crate::view::SectionLook::End), &item.kind)
+    {
+        let size = t.font_size * 0.8;
+        let st = Style::base(size, size * 1.4, color(t.alert[3]));
+        let g = one_row(shaper, &format!("⚠ {text}"), &st, width);
+        out.text(pos2(x, y), g, Vec::new(), FragmentId::label());
+        y += size * 1.4;
     }
     let content_bottom = y;
 
@@ -2962,12 +2980,16 @@ pub fn layout_item(
         let top = if opens { gap } else { 0.0 };
         // a virtual paragraph after a closer is outside that card
         let bottom = if closes { content_bottom } else { height };
+        let plaque = matches!(
+            p.section,
+            Some(crate::view::SectionLook::Plaque(_) | crate::view::SectionLook::End)
+        );
         // a plaque is no card to act on: it has no buttons but its own
-        if opens && p.section.is_none() {
+        if opens && !plaque {
             card_top = Some((pos2(l, top), pos2(r, top)));
         }
         // a picture or a plaque draws its own edges
-        if own && (p.site.is_some() || p.section.is_some()) {
+        if own && (p.site.is_some() || plaque) {
             continue;
         }
         if own && let Some(n) = p.native {

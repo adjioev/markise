@@ -42,6 +42,8 @@ pub struct EditPrefs {
     pub quotes: [char; 4],
     /// List indentation unit in columns for Tab in lists ("Indent Size", default 2); 0 = tab.
     pub indent: u8,
+    /// A thematic break is written `***`: in a dialect where `---` means something else (ADR 0026).
+    pub rule_stars: bool,
 }
 
 impl Default for EditPrefs {
@@ -53,6 +55,7 @@ impl Default for EditPrefs {
             smart_dashes: SmartDashes::EnEm,
             quotes: ['\u{201C}', '\u{201D}', '\u{2018}', '\u{2019}'],
             indent: 2,
+            rule_stars: false,
         }
     }
 }

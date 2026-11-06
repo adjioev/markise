@@ -22,10 +22,15 @@ use crate::block::{Block, BlockKind};
 use crate::text::{Span, line_end};
 use crate::{Document, line_start};
 
+/// The one authoring dialect in which `---` divides a document. Front matter or a package name it;
+/// what it means to their site is not known here.
+pub const SECTIONS_DIALECT: &str = "blocks-v3";
+
 /// The name of the block that holds a section's metadata.
 pub const SECTION_METADATA: &str = "section-metadata";
 
-/// A metadata block larger than this is not read: it is asked about on the UI thread.
+/// A metadata block larger than this, markers included, is not read: it is asked about on the UI
+/// thread.
 pub const MAX_METADATA_BYTES: usize = 64 * 1024;
 
 /// Values longer than this, in characters, are flagged.
@@ -34,6 +39,16 @@ const MAX_VALUE_CHARS: usize = 200;
 const MAX_KEYS: usize = 20;
 /// How much of a flagged line is kept to show.
 const FLAGGED_TEXT_CHARS: usize = 80;
+/// Top-level blocks of a section looked through for its first heading.
+const HEADING_SCAN_BLOCKS: usize = 512;
+/// A marker line longer than this is not read as one.
+const MARKER_LINE_BYTES: usize = 4096;
+
+/// A marker with its lines right next to it.
+pub const MALFORMED_TIGHT: &str = "Malformed: a marker stands apart, with a blank line between it and the lines";
+/// Anything but one paragraph between the markers.
+pub const MALFORMED_BODY: &str =
+    "Malformed: between the markers there is one paragraph of key: value lines and nothing else";
 
 #[derive(Clone, Copy, Debug)]
 struct Rule {
@@ -177,27 +192,61 @@ impl Document {
             .expect("the index counts the boundaries before `at`")
     }
 
+    /// The index of the first top-level block of section `index`, if it has one.
+    fn section_first_top(&self, section: &SectionAt) -> Option<usize> {
+        let first = self.top.partition_point(|t| t.start() < section.start);
+        self.top.get(first).filter(|t| t.start() < section.end).map(|_| first)
+    }
+
+    /// `true` when `t` opens a paired block of the metadata name.
+    fn opens_metadata(&self, t: &crate::Top<'_>) -> bool {
+        match &t.block.kind {
+            BlockKind::DirectiveOpen { name, .. } => t.abs(*name).slice(self.text()) == SECTION_METADATA,
+            _ => false,
+        }
+    }
+
     /// What the metadata block of section `index` says, when one is the first block of the
     /// section. O(log blocks + log markers + the block's size); a block over
-    /// [`MAX_METADATA_BYTES`] is not read and counts as none.
+    /// [`MAX_METADATA_BYTES`] is not read and counts as none: that is decided from the index, before
+    /// any of its lines is.
     pub fn section_metadata(&self, index: usize) -> Option<SectionMetadata> {
         let section = self.section(index)?;
-        let first = self.top.partition_point(|t| t.start() < section.start);
-        let block = self.top.get(first).filter(|t| t.start() < section.end)?;
-        if !matches!(block.block.kind, BlockKind::DirectiveOpen { .. }) {
+        let first = self.section_first_top(&section)?;
+        let block = self.top.get(first)?;
+        if !self.opens_metadata(&block) || self.paired_extent(block.start()).is_none_or(|n| n > MAX_METADATA_BYTES) {
             return None;
         }
         let d = self.directives_at(block.start()).into_iter().next()?;
         let text = self.text();
-        if d.name.slice(text) != SECTION_METADATA || d.opener.start != block.start() {
-            return None;
-        }
         let (_, body) = line_end(text, d.opener.start);
         let end = line_start(text, d.closer.start);
-        if end.saturating_sub(body) > MAX_METADATA_BYTES {
-            return None;
-        }
         let mut parsed = read_metadata(text, body..end);
+        let closer = self.top.partition_point(|t| t.start() < d.closer.start);
+        let inside: Vec<_> = (first + 1..closer).filter_map(|i| self.top.get(i)).collect();
+        let shape = match inside.as_slice() {
+            [one] if matches!(one.block.kind, BlockKind::Paragraph) => {
+                let all = &text[body..end];
+                // the last line: the terminator before the closer's line is not a line
+                let all_but = all
+                    .strip_suffix("\r\n")
+                    .or_else(|| all.strip_suffix(['\n', '\r']))
+                    .unwrap_or(all);
+                let blank = |l: Option<&str>| l.is_none_or(|l| l.trim().is_empty());
+                (!blank(all.lines().next()) || !blank(all_but.rsplit(['\n', '\r']).next())).then_some(MALFORMED_TIGHT)
+            }
+            _ => Some(MALFORMED_BODY),
+        };
+        if let Some(reason) = shape {
+            parsed.flagged.insert(
+                0,
+                FlaggedLine {
+                    at: d.opener.start,
+                    text: clipped(&text[d.opener.start..d.opener.end]),
+                    reason,
+                },
+            );
+        }
         if !d.args.is_empty() {
             parsed.flagged.insert(
                 0,
@@ -215,14 +264,79 @@ impl Document {
         })
     }
 
-    /// The `authoring` of the front matter. Reading it costs the front matter once: an edit that does
-    /// not reach the first block keeps the answer. An empty value counts as none.
-    pub fn authoring(&self) -> Option<&str> {
-        let read = || {
-            crate::frontmatter::get(&crate::frontmatter::front_matter(self), "authoring")
-                .filter(|v| !v.is_empty())
-                .map(str::to_string)
+    /// A block of the metadata name that opens at `opener` and is not the first block of its section.
+    pub fn section_metadata_misplaced(&self, opener: usize) -> bool {
+        let t = self.top.partition_point(|t| t.start() < opener);
+        if !self
+            .top
+            .get(t)
+            .is_some_and(|b| b.start() == opener && self.opens_metadata(&b))
+        {
+            return false;
+        }
+        let section = self.section_at(opener);
+        self.section_first_top(&section) != Some(t)
+    }
+
+    /// The first block of section `index` is a metadata opener that pairs with nothing, as when a fence
+    /// inside it took its closer: where it is.
+    pub fn section_metadata_unclosed(&self, index: usize) -> Option<Span> {
+        let section = self.section(index)?;
+        let first = self.section_first_top(&section)?;
+        let t = self.top.get(first)?;
+        let span = t.span();
+        if !matches!(t.block.kind, BlockKind::Paragraph) || span.len() > MARKER_LINE_BYTES {
+            return None;
+        }
+        let (end, _) = line_end(self.text(), span.start);
+        let marker = crate::scan::directive_marker(self.text(), span.start, end)?;
+        (marker.name.slice(self.text()) == SECTION_METADATA).then_some(span)
+    }
+
+    /// Where the first heading of section `index` starts, among its top-level blocks and not inside a
+    /// block. Looks through a bounded number of them, as this is asked on the UI thread: a section
+    /// whose first heading lies further on has none as far as this goes.
+    pub fn section_first_heading(&self, index: usize) -> Option<usize> {
+        let section = self.section(index)?;
+        let mut i = self.section_first_top(&section)?;
+        for _ in 0..HEADING_SCAN_BLOCKS {
+            let t = self.top.get(i).filter(|t| t.start() < section.end)?;
+            match t.block.kind {
+                BlockKind::Heading { .. } => return Some(t.start()),
+                BlockKind::DirectiveOpen { .. } => {
+                    let closer = self.directive_closer_at(t.start())?;
+                    i = self.top.partition_point(|b| b.start() <= closer);
+                }
+                _ => i += 1,
+            }
+        }
+        None
+    }
+
+    /// A rule at `at`, at the root and outside any block, written with dashes but not as a boundary:
+    /// `----`, `- - -`, ` ---`, `--- `.
+    pub fn section_near_boundary(&self, at: usize) -> bool {
+        let t = self.top.partition_point(|t| t.start() < at);
+        let Some(block) = self.top.get(t).filter(|b| b.start() == at) else {
+            return false;
         };
+        matches!(block.block.kind, BlockKind::ThematicBreak)
+            && self.text().as_bytes().get(at) == Some(&b'-')
+            && self.directive_depth_at(at) == 0
+            && self.section_at(at).boundary.is_none_or(|b| b.start != at)
+    }
+
+    /// Exports leave a metadata block out (ADR 0026). Whether the document has sections is not its to
+    /// know, as a package can say so too.
+    pub fn set_export_leaves_out_section_metadata(&mut self, leave_out: bool) {
+        self.export_leaves_out_metadata = leave_out;
+    }
+
+    /// The `authoring` of the front matter, as written: empty when the key has no value, which is
+    /// not the same as no key. Reading it costs the front matter once: an edit that does not reach
+    /// the first block keeps the answer.
+    pub fn authoring(&self) -> Option<&str> {
+        let read = || crate::frontmatter::get(&crate::frontmatter::front_matter(self), "authoring").map(str::to_string);
         self.authoring.get_or_init(read).as_deref()
     }
 }

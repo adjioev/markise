@@ -2,9 +2,7 @@
 
 use markise_package::{PackageId, PackageIndex};
 
-/// The one authoring dialect in which `---` divides a document. Front matter or a package name it;
-/// what it means to their site is not known here.
-pub const SECTIONS_DIALECT: &str = "blocks-v3";
+pub use markise_md::SECTIONS_DIALECT;
 
 /// Who named a document's dialect.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +22,18 @@ impl Dialect {
     /// Sections are on.
     pub fn has_sections(&self) -> bool {
         self.name == SECTIONS_DIALECT
+    }
+
+    /// The front matter's `authoring` is no name of a dialect: empty, or a value that is no string in
+    /// YAML. An error to show quietly: sections are off, and the package's value is not used instead.
+    /// The shallow front matter reader has taken any quotes off by now, so `"3"` reads as `3` here.
+    pub fn is_invalid(&self) -> bool {
+        let v = self.name.as_str();
+        self.source == DialectSource::FrontMatter
+            && (v.is_empty()
+                || matches!(v, "~" | "null" | "true" | "false")
+                || v.starts_with(['[', '{'])
+                || v.parse::<f64>().is_ok())
     }
 
     /// Where the dialect came from, in words.
@@ -104,6 +114,22 @@ mod tests {
             section_dialect(Some(SECTIONS_DIALECT), Some(&off))
                 .unwrap()
                 .has_sections()
+        );
+    }
+
+    #[test]
+    fn a_front_matter_value_that_is_no_name_is_an_error_and_no_way_to_the_package() {
+        let on = package(r#","authoring":"blocks-v3""#);
+        for bad in ["", "3", "true", "null", "[blocks-v3]", "{a: b}"] {
+            let d = section_dialect(Some(bad), Some(&on)).unwrap();
+            assert!(d.is_invalid(), "{bad:?}");
+            assert!(!d.has_sections(), "{bad:?}");
+        }
+        assert!(!section_dialect(Some("blocks-v2"), None).unwrap().is_invalid());
+        assert!(
+            !section_dialect(None, Some(&package(r#","authoring":"3""#)))
+                .unwrap()
+                .is_invalid()
         );
     }
 

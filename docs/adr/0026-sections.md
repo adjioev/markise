@@ -20,16 +20,19 @@ on opening or viewing.
   directly under text is a setext heading, as Markdown says. Inside a list, a quote or a paired
   `:::` block it is no boundary, and front matter delimiters are none.
 - **Metadata** is a paired `:::section-metadata` block that is the first block of its section. Any
-  other one is an ordinary block. Its body has a grammar of its own, not Markdown and not the block
-  field grammar: `key: value` lines split at the first colon, both trimmed, values literal. Keys are
-  `[a-z][a-z0-9-]*`, values one line up to 200 characters, at most 20 keys. Blank lines say nothing.
+  other one is an ordinary block, flagged when the rendered view shows it. Between the markers the parsed
+  tree holds exactly one paragraph, with a blank line on either side of it, and no other node. Its
+  lines have a grammar of their own, not Markdown and not the block field grammar: `key: value` split at
+  the first colon, both trimmed, values literal. Keys are `[a-z][a-z0-9-]*`, values one line up to 200
+  characters, at most 20 keys. Only `id` and `style` mean anything to the engine; all keys are data here.
 
 ### The dialect
 
 Sections are on when the document's dialect is `blocks-v3`. The document's front matter `authoring`
 says, and if it does not, the manifest of its accepted package, a flat `"authoring": "blocks-v3"`.
-Front matter wins, so another value there turns them off whatever the package says, and an empty one
-says nothing. A document needs no package: its own front matter is enough. A package without the key
+Front matter wins, so another value there turns them off whatever the package says. An empty value, or
+one that is no string in YAML, is an error shown quietly: sections are off, and it never falls back to the
+package. A document needs no package: its own front matter is enough. A package without the key
 reads as before, and this key is read, not validated (ADR 0019: a known format ignores what it does
 not need). `sections::section_dialect` is the whole rule, and it says where the answer came from,
 with the package's version when it came from a package.
@@ -40,7 +43,11 @@ The reader is a small line parser into ordered pairs, by the lines of the source
 so that a line Markdown would read otherwise (`---` under a line, `# x`) is seen for what the author
 wrote. A line that does not fit is flagged with a reason and takes nothing else with it. A long
 value is kept and flagged; of a repeated key the first counts. Refusing is for whoever publishes.
-A block over 64 KiB is not read, since this is asked on the UI thread, and counts as no metadata.
+Anything but that one paragraph between the markers is malformed, and so is a marker with a line right
+next to it: both flagged, with the lines still read for what they say. A fence inside takes the closer, so
+the opener pairs with nothing, and that is flagged as well. A block over 64 KiB, markers included, is not read,
+since this is asked on the UI thread, and counts as no metadata; its extent comes from the index, so
+that no line of it is read to find that out.
 
 ### The index
 
@@ -77,8 +84,11 @@ Nothing here is new layout state in the model: as with a picture (ADR 0023), the
 A document without sections pays one comparison per item.
 
 - **A boundary** is a quiet divider on the line's own row, so it has the line's height and estimates
-  stand: the section's name, then the line to the right edge. The name is its `id` or else `Section N`,
-  then `kind`, `type` or `style` if it says. No caret stands in it, as in any rule.
+  stand: the section's name, then the line to the right edge. The name is its `id`, else its first heading
+  among the section's own top-level blocks (a bounded look, as this is asked on the UI thread), else
+  `Section N`. Only `id` and `style` are engine keys, and no other key is ranked. No caret stands in it, as in
+  any rule.
+- **A rule nearly a boundary** (`----`, `- - -`, ` ---`, `--- `) at the root says so on its own row, quietly.
 - **A metadata block** is a compact plaque: `key: value` as written, and `⚠` with the first reason for what
   does not fit, all of them on hover. Its opener item holds it, the content items are hidden as a closed
   disclosure's are, the closer has no height and the gap after it stays. Pages, marks and source positions
@@ -119,18 +129,24 @@ are upper bounds and the small differences are noise:
 
 ### Exports
 
-Unchanged in this phase, deliberately: exporters read the document, not the view, and do not know the
-dialect. So `---` is a rule (`<hr />`, a line in PDF and PNG, `HorizontalRule` for Pandoc) and
-`:::section-metadata` the block every name is (ADR 0018): a `div.md-directive` with its label and its body as
-a paragraph in HTML, a labelled bar in PDF and PNG, a `Div` for Pandoc. Its lines therefore reach an export
-as text. Whether they should is a question for when the syntax settles.
+With sections on, HTML, PDF, PNG and Pandoc leave a root-level `:::section-metadata` out: they all read
+`Document::export_tree`. The dialect comes to an export as a request's flag, for what a package says, and from
+the document's own front matter, which wins; the command line knows only the front matter. `---` in exports stays
+as it is for now: `<hr />`, a line in PDF and PNG, `HorizontalRule` for Pandoc.
+
+### Writing
+
+On a page with sections Horizontal Line writes `***`, as it would start a section otherwise (`EditPrefs::
+rule_stars`, set while sections are on). A typed `---` and Enter does make a boundary, which is correct, and
+Backspace at the start of what follows takes it, as for any rule, with an undo step.
 
 ## Consequences
 
 - The bytes of a file do not depend on any of this: the index only reads.
-- What moves blocks does not know sections: a block dropped above a plaque makes it not first, and it reads
-  as an ordinary block from then on.
-- A metadata block not first, or a second one, stays a generic card with no warning.
+- What moves blocks does not know sections: a block dropped above a plaque is allowed, and the metadata
+  block then shows as a card with the warning above. No move is refused.
+- A metadata block not first, or a second one, is a generic card with a warning.
+- A metadata opener with no closer stays text, with a warning under it.
 - A first line `---` with a later `---` is front matter, as ever, so a document that starts with a
   boundary and has no front matter loses its first two boundaries to it. The draft refuses a leading
   boundary anyway.

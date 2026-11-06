@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use markise_doc::{FormatDoc, PatchSet};
 use markise_layout::block::{NoImages, Prim};
+use markise_layout::caret::Geometry;
 use markise_layout::{BlockViewMode, DocModel, ItemKind, OutlineRow, Paging, View, testing};
 use markise_theme::Theme;
 use proptest::prelude::*;
@@ -202,7 +203,7 @@ fn a_boundary_is_a_labelled_divider_and_other_rules_stay_lines() {
     frame(&mut v);
     let (a, b) = (rule_item(&v, 1), rule_item(&v, 2));
     assert_eq!(texts(&lay_out(&mut v, a)), ["Section 2"], "no metadata: its number");
-    assert_eq!(texts(&lay_out(&mut v, b)), ["Section 3 · wide"]);
+    assert_eq!(texts(&lay_out(&mut v, b)), ["Section 3"], "style is no name");
     let line = item_of(&v, "***");
     assert!(texts(&lay_out(&mut v, line)).is_empty());
     assert!(
@@ -229,6 +230,80 @@ fn a_metadata_block_is_a_plaque_and_its_items_hide() {
     assert_eq!(v.height(closer), 0.0);
     assert!(!markise_layout::caret::has_stops(&l));
     assert_eq!(v.section_warnings(opener).unwrap().len(), 1);
+}
+
+#[test]
+fn a_name_is_the_id_else_the_first_heading_else_the_number() {
+    let s = "One.\n\n---\n\n:::section-metadata\n\nid: named\nkind: a\n\n:::\n\n## Heading\n\n---\n\n:::section-metadata\n\nkind: a\n\n:::\n\n:::card\n\n## In a block\n\n:::\n\n## Mine {#hidden}\n\n---\n\nNothing.\n";
+    let v = view_of(s, true);
+    let names: Vec<String> = (0..4).map(|i| v.section_name(i)).collect();
+    assert_eq!(names, ["Section 1", "named", "Mine", "Section 4"]);
+}
+
+#[test]
+fn a_rule_nearly_a_boundary_and_a_block_where_none_can_be_say_so() {
+    let s = "One.\n\n----\n\n- - -\n\n***\n\n:::section-metadata\n\na: b\n\n:::\n\nTwo.\n";
+    let mut v = view_of(s, true);
+    frame(&mut v);
+    let i = item_of(&v, "----");
+    assert!(texts(&lay_out(&mut v, i))[0].starts_with("No section starts here"));
+    let i = item_of(&v, "- - -");
+    assert!(texts(&lay_out(&mut v, i))[0].starts_with("No section starts here"));
+    let i = item_of(&v, "***");
+    assert!(texts(&lay_out(&mut v, i)).is_empty());
+    let i = item_of(&v, ":::section-metadata");
+    let l = lay_out(&mut v, i);
+    assert!(l.plaque.is_none() && l.card_top.is_some(), "a card");
+    assert!(l.warning.is_some(), "that says why");
+    assert!(texts(&l).iter().any(|t| t.contains("goes first")), "{:?}", texts(&l));
+    assert_eq!(v.section_warnings(i).unwrap().len(), 1);
+    // with sections off none of it
+    let mut off = view_of(s, false);
+    frame(&mut off);
+    let i = item_of(&off, "----");
+    assert!(texts(&lay_out(&mut off, i)).is_empty());
+}
+
+#[test]
+fn an_unclosed_metadata_block_says_so_under_its_opener() {
+    let s = "One.\n\n---\n\n:::section-metadata\n\n```\na: b\n```\n\nText.\n";
+    let mut v = view_of(s, true);
+    frame(&mut v);
+    let i = item_of(&v, ":::section-metadata");
+    let t = texts(&lay_out(&mut v, i));
+    assert!(t.iter().any(|t| t.contains("no closing marker")), "{t:?}");
+    let i = item_of(&v, "One.");
+    assert!(!texts(&lay_out(&mut v, i)).iter().any(|t| t.contains('⚠')));
+}
+
+#[test]
+fn a_rule_in_a_metadata_block_hides_with_the_rest_and_a_click_stays_out() {
+    let s = "One.\n\n---\n\n:::section-metadata\n\na: b\n\n---\n\nc: d\n\n:::\n\nTwo.\n";
+    let mut v = view_of(s, true);
+    frame(&mut v);
+    let inner = s.match_indices("---").nth(1).unwrap().0;
+    let rule = v.model().item_at_offset(inner);
+    assert_eq!(v.model().item_start(rule), inner);
+    assert_eq!(v.height(rule), 0.0, "under the plaque");
+    assert!(lay_out(&mut v, rule).prims.is_empty());
+    let opener = item_of(&v, ":::section-metadata");
+    let (open, close) = (s.find(":::section").unwrap(), s.rfind(":::").unwrap() + 3);
+    let l = lay_out(&mut v, opener);
+    let plaque = l.plaque.unwrap();
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut g = Geometry {
+        view: &mut v,
+        shaper: &mut f,
+        images: &NoImages,
+    };
+    let (mut high, mut low) = (plaque.center_top(), plaque.center_bottom());
+    high.y += 1.0;
+    low.y -= 1.0;
+    for pt in [high, low] {
+        let at = g.hit(opener, pt).expect("a place");
+        assert!(at.offset <= open || at.offset >= close, "{pt:?}: {at:?}");
+    }
 }
 
 #[test]
