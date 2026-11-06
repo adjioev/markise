@@ -777,7 +777,7 @@ fn default_files() -> Vec<(&'static str, &'static str)> {
 }
 
 fn default_fixture(doc: &str) -> Fixture {
-    Fixture::with_files(doc, &default_files())
+    Fixture::with_package(doc, &default_files())
 }
 
 fn new_app(f: &Fixture) -> H {
