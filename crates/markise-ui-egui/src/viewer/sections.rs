@@ -47,6 +47,7 @@ impl DocViewer {
         }
         let model = self.ed.view.model().clone();
         let side = theme.line_px().min(22.0);
+        let hovered = self.hovered_block(ui, visible, surface);
         for v in visible {
             let origin = vec2(left, surface.top() + v.y);
             let opener = model
@@ -77,9 +78,14 @@ impl DocViewer {
             if !surface.contains_rect(r) {
                 continue;
             }
+            // Read has no block controls (ADR 0024); a plaque's say only when asked for, as a block's do
+            if self.ed.read_mode() {
+                continue;
+            }
             self.section_buttons.push(r);
+            let show = self.block_controls_show(ui, start, hovered);
             let next = self.ed.next_block_view(start);
-            self.block_view_button(ui, r, surface, start, next, "section metadata", out);
+            self.block_view_button(ui, r, surface, start, next, "section metadata", show, out);
             if ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| r.contains(p)) {
                 self.pointer_on_block_control = true;
             }

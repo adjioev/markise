@@ -76,6 +76,30 @@ file. It lasts until you quit, and a document opens in the native view.
 
 Source Code Mode always shows the Markdown as it is.
 
+## Read and Edit
+
+Every document is in one of two states, and the status bar says which, with a button to switch. **View → Read Mode** (<kbd>Shift+Alt+Cmd+Y</kbd>; <kbd>Ctrl+Shift+Alt+Y</kbd> on Windows and Linux) does the same.
+
+**Edit** is what you know: everything shows and everything can be changed.
+
+**Read** is for reading and practising, in any document, with or without a package. Nothing can be typed, pasted, dropped, undone or replaced, and blocks have no buttons but the ones below. **Your file does not change.** A link opens with a plain click. You can still select, copy and find. A change to the file on disk reloads as usual. Source Code Mode and Side by Side are not available in Read, and switching to Read closes them.
+
+A package can make a document with its lessons open in Read, so that answers stay hidden from the first moment. Otherwise a document opens in Edit. Your choice for a document lasts until you quit. While you have not accepted a package, Markise does not know what it hides, so the document opens in Edit and its blocks are cards.
+
+## Practice
+
+Some blocks hold what you are meant to work out: a question with its marked answers, an exercise with its solution. If the package says so, such a block is practised in Read.
+
+**A block with answers.** The marks and the explanation are hidden. Click an answer, or move to it with the arrow keys and press <kbd>Space</kbd>: one answer where one is right, several where several can be. **Check** (or <kbd>Return</kbd>) says right or wrong per answer with a tick or a cross, shows the correct ones and reveals the explanation. **Reset** (or <kbd>Return</kbd> again) starts that block over.
+
+**A block with no answers.** Its solution is hidden behind **Show answer**, and **Reset** hides it again. It does not count in the score.
+
+The status bar shows how it went: `3 of 5` means 3 right of the 5 blocks you have checked. **Reset All** there starts the document over.
+
+What you select is kept in memory, for as long as the document stays open. It lasts while you scroll, and goes if the block changes or the document is closed or reloaded. Nothing is written to disk.
+
+Nothing hidden gets out: what you copy leaves it out, Find does not find it, and while a document has blocks being practised the outline, a table of contents and the Comments panel leave out what is in them. The word count counts the whole file. A block that cannot be practised as it stands, such as one with no marked answer, shows only its first row and `⚠ Not ready to practice`. Switch to Edit to see what is missing.
+
 ## Edit in place
 
 In the native view, click and type. Each field is a place of its own: arrow keys cross between

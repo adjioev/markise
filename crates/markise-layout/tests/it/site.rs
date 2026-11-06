@@ -9,7 +9,8 @@ use markise_doc::DocPos;
 use markise_layout::block::{NoImages, Prim};
 use markise_layout::caret::Geometry;
 use markise_layout::{
-    BlockLook, BlockViewMode, BlockViews, DocModel, ItemKind, Paging, SitePicture, SiteQuery, SiteShot, View, testing,
+    BlockCan, BlockLook, BlockViewMode, BlockViews, DocModel, ItemKind, Paging, SitePicture, SiteQuery, SiteShot, View,
+    testing,
 };
 use markise_theme::Theme;
 
@@ -424,26 +425,31 @@ fn a_nested_block_in_a_picture_is_inside_it() {
 
 #[test]
 fn the_switch_goes_through_what_a_block_can_show() {
-    use BlockViewMode::{Markdown, Native, Site};
+    use BlockViewMode::{Markdown, Native, Practice, Site};
+    let can = |view, site| BlockCan { view, site };
+    // Practice is no state to switch to; a block that is in it goes on from Native (ADR 0024)
+    assert_eq!(Practice.shown(can(true, true)), Native);
+    assert_eq!(Practice.shown(can(false, true)), Site);
+    assert_eq!(Practice.shown(can(false, false)), Markdown);
     // a view and something to draw with: all three, in order
-    assert_eq!(Native.next_for(true, true), Site);
-    assert_eq!(Site.next_for(true, true), Markdown);
-    assert_eq!(Markdown.next_for(true, true), Native);
+    assert_eq!(Native.next_for(can(true, true)), Site);
+    assert_eq!(Site.next_for(can(true, true)), Markdown);
+    assert_eq!(Markdown.next_for(can(true, true)), Native);
     // no view: Native is the site's picture, and is skipped
-    assert_eq!(Native.next_for(false, true), Markdown);
-    assert_eq!(Site.next_for(false, true), Markdown);
-    assert_eq!(Markdown.next_for(false, true), Site);
+    assert_eq!(Native.next_for(can(false, true)), Markdown);
+    assert_eq!(Site.next_for(can(false, true)), Markdown);
+    assert_eq!(Markdown.next_for(can(false, true)), Site);
     // nothing to draw with: as before this phase
-    assert_eq!(Native.next_for(true, false), Markdown);
+    assert_eq!(Native.next_for(can(true, false)), Markdown);
     assert_eq!(
-        Site.next_for(true, false),
+        Site.next_for(can(true, false)),
         Native,
         "shown as Markdown: the helper went away"
     );
-    assert_eq!(Markdown.next_for(true, false), Native);
+    assert_eq!(Markdown.next_for(can(true, false)), Native);
     // neither: one state
-    assert_eq!(Markdown.next_for(false, false), Markdown);
-    assert_eq!(Native.next_for(false, false), Markdown);
+    assert_eq!(Markdown.next_for(can(false, false)), Markdown);
+    assert_eq!(Native.next_for(can(false, false)), Markdown);
 }
 
 #[test]

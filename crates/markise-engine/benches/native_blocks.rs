@@ -39,6 +39,18 @@ fn report(name: &str, mut v: Vec<Duration>) {
 }
 
 fn package() -> Arc<PackageViews> {
+    package_with(r#"{"tip": {"kind": "callout", "accent": "green"}, "poll": {"kind": "choices", "accent": "purple"}}"#)
+}
+
+/// The same blocks, with a practice for each kind of them.
+fn practice_package() -> Arc<PackageViews> {
+    package_with(
+        r#"{"tip": {"kind": "callout", "practice": {"reveal": ["body"]}},
+            "poll": {"kind": "choices", "practice": {"reveal": ["why"]}}}"#,
+    )
+}
+
+fn package_with(views: &str) -> Arc<PackageViews> {
     let mut files = BTreeMap::new();
     let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1","blocks":["tip","poll"]}"#;
     files.insert("manifest.json".to_string(), manifest.as_bytes().to_vec());
@@ -46,11 +58,11 @@ fn package() -> Arc<PackageViews> {
         {"name": "title", "type": "heading", "level": 3, "min": 0}, {"name": "body", "type": "text", "min": 1}]}"#;
     let poll = r#"{"label": "Poll", "fields": [
         {"name": "question", "type": "heading", "level": 2},
-        {"name": "answers", "type": "choices", "ids": "required", "minItems": 2, "correct": "exactly-one"}]}"#;
+        {"name": "answers", "type": "choices", "ids": "required", "minItems": 2, "correct": "exactly-one"},
+        {"name": "why", "type": "quote", "min": 0}]}"#;
     files.insert("components/tip/tip.json".to_string(), tip.as_bytes().to_vec());
     files.insert("components/poll/poll.json".to_string(), poll.as_bytes().to_vec());
     files.insert("editor/palette.json".to_string(), br#"{"format": 1}"#.to_vec());
-    let views = r#"{"tip": {"kind": "callout", "accent": "green"}, "poll": {"kind": "choices", "accent": "purple"}}"#;
     files.insert("editor/views.json".to_string(), views.as_bytes().to_vec());
     let index = PackageIndex::from_files(&files).expect("a valid package");
     Arc::new(PackageViews::new(Arc::new(index), "en"))
@@ -75,7 +87,7 @@ fn with_blocks(text: &str, every: usize) -> String {
             ));
         } else {
             out.push_str(&format!(
-                ":::poll\n\n## Which of these, number {i}?\n\n- [ ] This one {{#a1}}\n- [x] That one {{#a2}}\n\n:::\n\n"
+                ":::poll\n\n## Which of these, number {i}?\n\n- [ ] This one {{#a1}}\n- [x] That one {{#a2}}\n\n> Because of how it is, number {i}.\n\n:::\n\n"
             ));
         }
     }
@@ -84,6 +96,10 @@ fn with_blocks(text: &str, every: usize) -> String {
 }
 
 fn run(label: &str, text: String, views: Option<Arc<PackageViews>>) {
+    run_in(label, text, views, false);
+}
+
+fn run_in(label: &str, text: String, views: Option<Arc<PackageViews>>, practice: bool) {
     let fields = views.clone();
     let blocks = text.lines().filter(|l| l.starts_with(":::") && l.len() > 3).count();
     println!(
@@ -96,6 +112,9 @@ fn run(label: &str, text: String, views: Option<Arc<PackageViews>>) {
     let mut ed = EditorView::open(format, text, Theme::light(), 700.0);
     ed.view.set_block_views(views.map(|v| v as Arc<dyn BlockViews>));
     ed.set_block_fields(fields);
+    if practice {
+        ed.set_read_mode(true);
+    }
     let open = t.elapsed();
     let t = Instant::now();
     {
@@ -117,6 +136,32 @@ fn run(label: &str, text: String, views: Option<Arc<PackageViews>>) {
         scroll.push(t0.elapsed());
     }
     report("scroll frame", scroll);
+    println!("  total height {:.0}", ed.view.total_height());
+    if practice {
+        // an answer, a check and a reset on a block on screen
+        let mut press = Vec::new();
+        let first = ed.session.text().find(":::poll").unwrap_or(0);
+        let answer = first + ed.session.text()[first..].find("That one").unwrap_or(0);
+        {
+            let mut f = fonts.with_pixels_per_point(2.0);
+            ed.view.scroll_to_y(0.0);
+            ed.set_caret(DocPos::new(answer), false);
+            ed.refresh_focus();
+            ed.scroll_to_caret(VH, &mut f, &NoImages);
+            ed.view.frame(VH, VH * 0.5, &mut f, &NoImages);
+        }
+        for _ in 0..50 {
+            let mut f = fonts.with_pixels_per_point(2.0);
+            let t0 = Instant::now();
+            ed.practice_press(answer);
+            ed.practice_check(first);
+            ed.view.frame(VH, VH * 0.5, &mut f, &NoImages);
+            ed.practice_reset(first);
+            ed.view.frame(VH, VH * 0.5, &mut f, &NoImages);
+            press.push(t0.elapsed() / 2);
+        }
+        report("check or reset, a frame", press);
+    }
     // prose in the middle
     let at = {
         let s = ed.session.text();
@@ -217,5 +262,11 @@ fn main() {
     run("no blocks, no package", base.clone(), None);
     run("no blocks, a package", base, Some(package()));
     run("many blocks, no package", blocks.clone(), None);
-    run("many blocks, shown natively", blocks, Some(package()));
+    run("many blocks, shown natively", blocks.clone(), Some(package()));
+    run(
+        "many blocks, a practice, not in it",
+        blocks.clone(),
+        Some(practice_package()),
+    );
+    run_in("many blocks, in Practice", blocks, Some(practice_package()), true);
 }

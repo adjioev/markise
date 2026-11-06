@@ -50,17 +50,35 @@ pub struct Replacement {
     /// Matches left alone, ascending.
     pub skip: Arc<Vec<usize>>,
 }
+/// Whether the reader cannot see a match.
+pub type IsHidden<'a> = &'a dyn Fn(&Range<usize>) -> bool;
+
 impl Results {
     /// Takes out the matches inside a note the rendered view does not show: a reader of that
     /// view has no way to see them, and Replace All must not change them unseen (ADR 0018).
     pub fn drop_hidden(&mut self, doc: &dyn FormatDoc) {
-        let hidden = |r: &Range<usize>| {
+        self.drop_hidden_and(doc, None);
+    }
+
+    /// [`Self::drop_hidden`], and the matches `also` says the reader cannot see either. Those can be
+    /// any match, where only some can stand in a note.
+    pub fn drop_hidden_and(&mut self, doc: &dyn FormatDoc, also: Option<IsHidden<'_>>) {
+        let in_note = |r: &Range<usize>| {
             doc.hidden_note(r.start)
                 .is_some_and(|n| n.start <= r.start && r.end <= n.end)
         };
-        let dropped: Vec<usize> = (self.candidates.iter().copied())
-            .filter(|&i| self.matches.get(i).is_some_and(hidden))
+        let mut dropped: Vec<usize> = (self.candidates.iter().copied())
+            .filter(|&i| self.matches.get(i).is_some_and(in_note))
             .collect();
+        if let Some(also) = also {
+            dropped.extend(
+                (self.matches.iter().enumerate())
+                    .filter(|(_, r)| also(r))
+                    .map(|(i, _)| i),
+            );
+            dropped.sort_unstable();
+            dropped.dedup();
+        }
         if dropped.is_empty() {
             return;
         }

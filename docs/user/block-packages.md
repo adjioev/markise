@@ -202,8 +202,8 @@ Markdown.
 
 ### Views
 
-`editor/views.json` maps a block to a `kind`, with optional `accent` and `icon`. A block without an
-entry has no native view.
+`editor/views.json` maps a block to a `kind`, with optional `accent`, `icon`, `fill` and `label`. A
+block without an entry has no native view.
 
 | `kind` | Looks |
 |---|---|
@@ -213,9 +213,42 @@ entry has no native view.
 | `media` | no frame; pictures with their alt text as a caption |
 
 `accent` is one of slate, gray, red, orange, amber, yellow, green, teal, cyan, blue, indigo, purple,
-violet or pink, each with a light and a dark value. Any other name means the theme's accent. The
-first row shows the block's `label`, with the variant's label after it. A block of over 64 KiB
-stays a card.
+violet or pink, each with a light and a dark value, or `none`. Any other name means the theme's
+accent. The first row shows the block's `label`, with the variant's label after it. A block of over
+64 KiB stays a card.
+
+Three options make a view quieter. A page with many blocks reads better with its text first. Each
+is off by default, and a value of the wrong type refuses the package.
+
+| Key | Looks |
+|---|---|
+| `"fill": false` | no tint, no frame, a thin bar of the accent on the left. A marked answer's row has no tint, a title and the first row are in the text's colours. `media` has neither to begin with |
+| `"accent": "none"` | neutral: thin lines in the theme's rule, labels and marks in its quiet text. With a `fill` a `callout` has a very light neutral ground |
+| `"label": false` | no first row and no icon: the block's own heading is enough. The label still reaches a screen reader. A warning still gets its row |
+
+```json
+{ "note": { "kind": "callout", "accent": "none", "fill": false, "label": false } }
+```
+
+A block's buttons show when the pointer is on the block, when it holds the caret, or when one of them
+has the keyboard, and they take up no room otherwise.
+
+A `callout`, `card` or `choices` view can be practised in [Read](blocks.md#practice):
+
+```json
+{
+  "question": { "kind": "choices", "practice": { "reveal": ["explanation"] } },
+  "exercise": { "kind": "card", "practice": { "reveal": ["solution"] } }
+}
+```
+
+`reveal` names the fields hidden until the reader asks for them. A block whose schema has a `choices`
+field is checked against its marks, and counts in the score. One with none needs something in `reveal`, shows it behind Show
+answer, and does not count. `reveal` cannot name the answers themselves, or a heading, as the outline
+shows every heading. A package that breaks any of this is refused, with a message naming the block and the field. A block with no
+`practice` has no Practice. Answers keep the rule of their schema, so ids stay as your `choices` field has them.
+
+With `"default": true` beside `reveal`, a document holding a block of that view opens in [Read](blocks.md#read-and-edit), so that answers do not show until asked for. Authors reach editing through the switch in the status bar.
 
 ### Icons
 

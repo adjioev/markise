@@ -1423,11 +1423,13 @@ fn virtual_rows(
 pub fn outline(
     ui: &mut Ui,
     entries: &[OutlineEntry],
+    // the entries to list, when not all of them
+    only: Option<&[usize]>,
     current: Option<usize>,
     look: &SideLook,
     partial: bool,
 ) -> Option<usize> {
-    if entries.is_empty() {
+    if entries.is_empty() || only.is_some_and(<[usize]>::is_empty) {
         let note = if partial {
             "No headings in the loaded part"
         } else {
@@ -1438,9 +1440,12 @@ pub fn outline(
     }
     let min_level = entries.iter().map(|e| e.level).min().unwrap_or(1);
     let mut clicked = None;
-    let rows = entries.len() + usize::from(partial);
+    let rows = only.map_or(entries.len(), <[usize]>::len) + usize::from(partial);
     virtual_rows(ui, "markise-outline", look.row_h, rows, None, |ui, range| {
-        for i in range {
+        for row in range {
+            let i = only
+                .map_or(Some(row), |only| only.get(row).copied())
+                .unwrap_or(entries.len());
             let Some(e) = entries.get(i) else {
                 ui.label(
                     RichText::new("More headings when the file has loaded…")

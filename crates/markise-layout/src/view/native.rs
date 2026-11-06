@@ -12,7 +12,9 @@ use markise_doc::NamedContainer;
 
 use super::View;
 use crate::model::{Container, Item, ItemKind};
-use crate::native::{BlockLook, BlockViews, MAX_NATIVE_BLOCK_BYTES, NativeBlock, NativeParams, NativeRole};
+use crate::native::{
+    BlockLook, BlockViews, MAX_NATIVE_BLOCK_BYTES, NativeBlock, NativeParams, NativeRole, PracticeItem,
+};
 
 /// More distinct block versions than this are not remembered.
 const LOOKS_MAX: usize = 4096;
@@ -24,6 +26,9 @@ pub enum BlockViewMode {
     /// A block's own view, or its site's picture if it has none.
     #[default]
     Native,
+    /// Answers to give, with what tells them hidden: a block that can be practised, in a document in
+    /// Read (ADR 0024). No state a block can be switched to.
+    Practice,
     /// As its site draws it (ADR 0023).
     Site,
     Markdown,
@@ -34,31 +39,42 @@ impl BlockViewMode {
     pub fn next(self) -> BlockViewMode {
         match self {
             BlockViewMode::Native => BlockViewMode::Site,
+            // no switch goes through it: it comes with Read (ADR 0024)
+            BlockViewMode::Practice => BlockViewMode::Native,
             BlockViewMode::Site => BlockViewMode::Markdown,
             BlockViewMode::Markdown => BlockViewMode::Native,
         }
     }
 
     /// What a block shows in this state, as far as what it can show goes.
-    pub fn shown(self, has_view: bool, site: bool) -> BlockViewMode {
+    pub fn shown(self, can: BlockCan) -> BlockViewMode {
         match self {
-            BlockViewMode::Native if has_view => BlockViewMode::Native,
-            BlockViewMode::Site if site => BlockViewMode::Site,
-            BlockViewMode::Native if site => BlockViewMode::Site,
+            BlockViewMode::Native | BlockViewMode::Practice if can.view => BlockViewMode::Native,
+            BlockViewMode::Site if can.site => BlockViewMode::Site,
+            BlockViewMode::Native | BlockViewMode::Practice if can.site => BlockViewMode::Site,
             _ => BlockViewMode::Markdown,
         }
     }
 
-    /// The next state that shows something else, for a block that has a view or not, with something
-    /// to draw it or not. A block with neither has only one state, and this is it.
-    pub fn next_for(self, has_view: bool, site: bool) -> BlockViewMode {
-        let now = self.shown(has_view, site);
+    /// The next state that shows something else, for a block that can show what `can` says. A block
+    /// that can show nothing else has only one state, and this is it.
+    pub fn next_for(self, can: BlockCan) -> BlockViewMode {
+        let now = self.shown(can);
         let mut next = now.next();
-        while next != now && next.shown(has_view, site) != next {
+        while next != now && next.shown(can) != next {
             next = next.next();
         }
         next
     }
+}
+
+/// What a block can show, besides its Markdown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BlockCan {
+    /// It has a view of its own.
+    pub view: bool,
+    /// Something can draw it.
+    pub site: bool,
 }
 
 /// What an item's layout gets of its block.
@@ -95,9 +111,10 @@ pub(super) enum Looked {
 }
 
 #[derive(Clone)]
-struct OfItem {
+pub(super) struct OfItem {
     at: NativeAt,
     role: Option<NativeRole>,
+    practice: Option<PracticeItem>,
     /// What of this reaches the item's layout, for its cache key.
     key: u64,
 }
@@ -110,12 +127,14 @@ pub(super) struct NativeState {
     /// … and the blocks that differ from it, by opener, ascending.
     own_modes: Vec<(usize, BlockViewMode)>,
     /// By item start, for the document as it stands (see [`NativeState::forget`]).
-    items: RefCell<HashMap<usize, Option<OfItem>>>,
+    pub(super) items: RefCell<HashMap<usize, Option<OfItem>>>,
     /// By name, arguments and source of a block: the same text looks the same anywhere.
     looks: RefCell<HashMap<u64, Looked>>,
     /// The opener of a block that stays native while it is edited, whatever it looks like now. Two
     /// blocks with the same text can look alike and only this one is it: not in [`Self::looks`].
     sticky: Option<usize>,
+    /// Which blocks are in Practice and what they show ([`super::practice`]).
+    pub(super) practice: super::practice::PracticeState,
 }
 
 impl NativeState {
@@ -123,21 +142,33 @@ impl NativeState {
     pub(super) fn forget(&self) {
         if self.source.is_some() {
             self.items.borrow_mut().clear();
+            self.practice.forget();
         }
     }
 
     /// What shows blocks natively, as far as the document's state can tell: for what is estimated
     /// by name, with no block read.
     fn active(&self) -> Option<&Arc<dyn BlockViews>> {
-        self.source.as_ref().filter(|_| self.mode == BlockViewMode::Native)
+        self.source
+            .as_ref()
+            .filter(|_| self.mode == BlockViewMode::Native || self.practice.read())
     }
 
-    /// The state of the block with this opener.
-    pub(super) fn mode_of(&self, opener: usize) -> BlockViewMode {
+    /// The state of a block with this opener and name. In Read, one that can be practised is, whatever
+    /// else it is in Edit (ADR 0024).
+    pub(super) fn mode_of(&self, opener: usize, name: &str) -> BlockViewMode {
+        if self.practice.read() && self.source.as_ref().is_some_and(|s| s.has_practice(name)) {
+            return BlockViewMode::Practice;
+        }
         match self.own_modes.binary_search_by_key(&opener, |m| m.0) {
             Ok(i) => self.own_modes[i].1,
             Err(_) => self.mode,
         }
+    }
+
+    fn practice_source_changed(&mut self) {
+        let any = self.source.as_ref().is_some_and(|s| s.any_practice());
+        self.practice.package_changed(any);
     }
 }
 
@@ -156,6 +187,7 @@ impl View {
         self.native.source = views;
         self.native.items.borrow_mut().clear();
         self.native.looks.borrow_mut().clear();
+        self.native.practice_source_changed();
         self.site.forget();
         self.sections.forget();
         self.reset_heights();
@@ -194,11 +226,27 @@ impl View {
 
     /// The state the block with this opener is in.
     pub fn block_mode_of(&self, opener: usize) -> BlockViewMode {
-        self.native.mode_of(opener)
+        let around = self.doc.named_containers_at(opener);
+        let name = around
+            .iter()
+            .rfind(|c| c.opener.start == opener)
+            .map_or("", |c| &*c.name);
+        self.native.mode_of(opener, name)
     }
 
     pub fn block_view_mode(&self) -> BlockViewMode {
         self.native.mode
+    }
+
+    /// The state the block `c` is in, as far as it can be: Practice is for blocks that can be practised,
+    /// and any other block in a document in Practice is as it is outside it.
+    pub(super) fn mode_shown(&self, c: &NamedContainer) -> BlockViewMode {
+        match self.native.mode_of(c.opener.start, &c.name) {
+            BlockViewMode::Practice if !self.native.source.as_ref().is_some_and(|s| s.has_practice(&c.name)) => {
+                BlockViewMode::Native
+            }
+            mode => mode,
+        }
     }
 
     /// The block with this opener stays native while it is being edited, also when it does not fit
@@ -212,16 +260,25 @@ impl View {
 
     /// Part of what a measured page height holds for.
     pub(super) fn native_key(&self) -> u64 {
-        self.native.active().map_or(0, |s| s.id() | 1) ^ (self.native.own_modes.len() as u64).rotate_left(53)
+        self.native.active().map_or(0, |s| s.id() | 1)
+            ^ (self.native.own_modes.len() as u64).rotate_left(53)
+            ^ self.native.practice.key()
     }
 
     /// The block shown natively around `at`, the innermost one if any.
     pub fn native_block(&self, at: usize) -> Option<NativeAt> {
         self.native.source.as_ref()?;
         let c = self.doc.named_containers_at(at).pop()?;
-        let mode = self.native.mode_of(c.opener.start);
+        let mode = self.mode_shown(&c);
         let block = match (mode, self.look_of(&c)) {
             (BlockViewMode::Markdown, _) => return None,
+            // in Practice a block that is not ready to be practised shows nothing of itself
+            (BlockViewMode::Practice, Looked::Native(block))
+                if block.practice.as_ref().is_some_and(|p| p.is_ready()) =>
+            {
+                block
+            }
+            (BlockViewMode::Practice, _) => return None,
             // not filled in yet has no look on any site (ADR 0021)
             (_, Looked::Unfilled(_, block)) => block,
             // being edited natively in the Site state, and it has come to fit: it stays what it was
@@ -280,6 +337,9 @@ impl View {
             return None;
         }
         let c = self.doc.named_containers_at(self.model.item_start(i)).pop()?;
+        if self.practice_of(&c).is_some() {
+            return self.practice_warning(&c);
+        }
         match self.look_of(&c) {
             Looked::Outside(why, _) | Looked::Unfilled(why, _) => Some(why),
             _ => None,
@@ -292,7 +352,7 @@ impl View {
         (self.native.source.is_some() && self.model.items.get(i).is_some())
             && self.model.items[i].kind == (ItemKind::ContainerMarker { close: false })
             && (self.doc.named_containers_at(self.model.item_start(i)).pop())
-                .is_some_and(|c| matches!(self.look_of(&c), Looked::Outside(..)))
+                .is_some_and(|c| self.practice_of(&c).is_none() && matches!(self.look_of(&c), Looked::Outside(..)))
     }
 
     fn of_item(&self, start: usize, it: &Item) -> Option<OfItem> {
@@ -305,10 +365,12 @@ impl View {
         }
         let found = self.native_block(start).map(|at| {
             let role = at.role_at(start);
+            let practice = self.practice_item(&at, start, it);
             let mut h = crate::model::hasher();
-            (&*at.block.view, role).hash(&mut h);
+            (&*at.block.view, role, practice).hash(&mut h);
             OfItem {
                 role,
+                practice,
                 key: h.finish().rotate_left(23),
                 at,
             }
@@ -356,6 +418,7 @@ impl View {
             view: &o.at.block.view,
             role: o.role,
             icon_ready: self.icon_ready(o),
+            practice: o.practice,
         });
         let (site, note) = it.map_or((None, None), |it| self.site_params(i, it));
         let section = it.map(|it| self.section_role(i, it));
@@ -379,6 +442,44 @@ impl View {
         };
         it.containers.iter().any(|c| matches!(c, Container::Card))
             && (self.doc.named_containers_at(self.model.item_start(i)).pop()).is_some_and(|c| source.has_view(&c.name))
+    }
+
+    /// The opener just above the first item on screen, when it has no label row and its block's
+    /// controls are still in view. Such an opener has next to no height, and the controls stand on it
+    /// over the next row, so it has scrolled away long before they have. A host finds them by the opener.
+    pub(super) fn quiet_opener_above(
+        &mut self,
+        first: &super::Visible,
+        shaper: &mut dyn crate::text::TextShaper,
+        images: &dyn crate::block::Images,
+    ) -> Option<super::Visible> {
+        let i = first.idx.checked_sub(1)?;
+        let it = self.model.items.get(i)?;
+        if it.kind != (ItemKind::ContainerMarker { close: false }) || self.disclosure_hidden(i) || self.site_hidden(i) {
+            return None;
+        }
+        if self.native_item(i)?.block.view.label_row {
+            return None;
+        }
+        let layout = self.layout(i, shaper, images);
+        let (pad, _) = self.item_pad(i);
+        let y = first.y - self.height(i) + pad;
+        let (edge, _) = layout.card_top?;
+        (layout.warning.is_none() && y + edge.y + crate::block::card_controls_reach(&self.theme) > 0.0)
+            .then_some(super::Visible { idx: i, y, layout })
+    }
+
+    /// The opener of item `i` has no label row, as far as its block's name can tell: a block with a
+    /// warning has one after all, and corrects this when it is laid out.
+    pub(super) fn native_quiet_opener(&self, i: usize) -> bool {
+        (self.doc.named_containers_at(self.model.item_start(i)).pop()).is_some_and(|c| self.native_quiet_name(&c.name))
+    }
+
+    /// Blocks of this name show natively with no label row, as far as the name can tell.
+    pub(super) fn native_quiet_name(&self, name: &str) -> bool {
+        self.native
+            .active()
+            .is_some_and(|s| s.has_view(name) && !s.label_row(name))
     }
 
     /// Whether blocks of this name show natively, as far as the name can tell.

@@ -1,0 +1,378 @@
+//! Blocks in Practice, in a document in Read (ADR 0024): what hides, by what a block's parts say. Nothing is known here of
+//! who answered what but what the host hands over ([`View::set_block_practice`]); the file is never
+//! read for it but through a block's parts. A document with no block in Practice pays one comparison.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
+
+use markise_doc::NamedContainer;
+
+use super::View;
+use super::native::{BlockViewMode, Looked, NativeAt};
+use crate::model::{Container, Item, ItemKind, PageStats};
+use crate::native::{NativeBlock, PracticeItem};
+
+/// The one thing a block in Practice says about itself when it cannot be practised. The reasons it
+/// would give anywhere else can tell an answer, so none of them shows.
+const NOT_READY: &str = "Not ready to practice";
+
+static NOT_READY_REASONS: LazyLock<Arc<[String]>> = LazyLock::new(|| vec![NOT_READY.to_string()].into());
+
+/// What someone has done in a block in Practice, as the view shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PracticeShow {
+    /// The answers selected, by their place among the block's answers, ascending.
+    pub selected: Vec<u32>,
+    pub checked: bool,
+}
+
+#[derive(Default)]
+pub(super) struct PracticeState {
+    /// Some block is in Practice, or may be: all the rest of this is only asked about then.
+    on: bool,
+    /// The document is in Read.
+    read: bool,
+    /// The package has blocks that can be practised.
+    any_practice: bool,
+    /// What was done, by a block's opener, ascending. A block with nothing done is not here.
+    shows: Vec<(usize, PracticeShow)>,
+    /// Whether an item hides, by its start, for the document and states as they stand.
+    hidden: RefCell<HashMap<usize, bool>>,
+    /// Goes up when measured page heights stop holding for what they hid.
+    epoch: u64,
+    /// What a package might hide is not known yet: blocks show their first rows only, until it is.
+    veiled: bool,
+    /// Goes up when what hides changes: who searched has to look again.
+    generation: u64,
+}
+
+impl PracticeState {
+    pub(super) fn forget(&self) {
+        if self.on {
+            self.hidden.borrow_mut().clear();
+        }
+    }
+
+    fn settle(&mut self) {
+        self.on = (self.read && self.any_practice) || self.veiled;
+        self.hidden.borrow_mut().clear();
+        self.generation += 1;
+    }
+
+    pub(super) fn read(&self) -> bool {
+        self.read
+    }
+
+    pub(super) fn package_changed(&mut self, any_practice: bool) {
+        self.any_practice = any_practice;
+        self.settle();
+    }
+
+    pub(super) fn key(&self) -> u64 {
+        if self.on {
+            1 ^ u64::from(self.veiled).rotate_left(3) ^ self.epoch.rotate_left(7)
+        } else {
+            self.epoch.rotate_left(7)
+        }
+    }
+
+    fn show_of(&self, opener: usize) -> Option<&PracticeShow> {
+        (self.shows.binary_search_by_key(&opener, |s| s.0).ok()).map(|i| &self.shows[i].1)
+    }
+}
+
+/// What a block in Practice is.
+pub(super) enum Practiced {
+    Ready(Arc<NativeBlock>),
+    /// It cannot be practised as it stands: its first row and nothing of what it holds.
+    NotReady,
+}
+
+impl View {
+    /// Whether any block is in Practice.
+    pub fn practice_on(&self) -> bool {
+        self.native.practice.on
+    }
+
+    /// Changes when what Practice hides may have.
+    pub fn practice_generation(&self) -> u64 {
+        self.native.practice.generation
+    }
+
+    /// The document in Read or in Edit (ADR 0024). In Read a block that can be practised is, whatever
+    /// state it has in Edit, and has it again after.
+    pub fn set_read_mode(&mut self, read: bool) {
+        if self.native.practice.read != read {
+            self.native.practice.read = read;
+            self.native.practice.settle();
+            self.native.items.borrow_mut().clear();
+            self.site.forget();
+            self.sections.forget();
+            self.reset_heights();
+        }
+    }
+
+    /// Until it is known what a package would hide, nothing in a block shows, as it may be what should not:
+    /// the first frames of a document, while its package is looked up.
+    pub fn set_blocks_veiled(&mut self, veiled: bool) {
+        if self.native.practice.veiled != veiled {
+            self.native.practice.veiled = veiled;
+            self.native.practice.settle();
+            self.reset_heights();
+        }
+    }
+
+    pub fn blocks_veiled(&self) -> bool {
+        self.native.practice.veiled
+    }
+
+    /// Whether Practice takes this heading out of what lists headings: any heading in a block, while
+    /// any block is in Practice. Which of them hides is not known without reading the block, and a list of
+    /// headings is no place to do so.
+    pub fn practice_hides_heading(&self, entry: &crate::model::OutlineEntry) -> bool {
+        self.native.practice.on && entry.in_block
+    }
+
+    /// What `c` is, when it is in Practice.
+    pub(super) fn practice_of(&self, c: &NamedContainer) -> Option<Practiced> {
+        if !self.native.practice.on || self.mode_shown(c) != BlockViewMode::Practice {
+            return None;
+        }
+        Some(match self.look_of(c) {
+            Looked::Native(b) if b.practice.as_ref().is_some_and(|p| p.is_ready()) => Practiced::Ready(b),
+            _ => Practiced::NotReady,
+        })
+    }
+
+    /// The innermost block in Practice around `at`, with its opener: whatever else it is, its
+    /// text does not change and it has no commands.
+    pub fn practised_around(&self, at: usize) -> Option<NamedContainer> {
+        if !self.native.practice.on {
+            return None;
+        }
+        (self.doc.named_containers_at(at).into_iter()).rfind(|c| self.mode_shown(c) == BlockViewMode::Practice)
+    }
+
+    /// Whether what stands at `at` hides from the reader now: Find and the caret do not go there.
+    pub fn practice_conceals(&self, at: usize) -> bool {
+        if !self.native.practice.on {
+            return false;
+        }
+        // not yet known what a package hides: anything in a block may be it
+        if self.native.practice.veiled {
+            return !self.doc.named_containers_at(at).is_empty();
+        }
+        self.doc
+            .named_containers_at(at)
+            .iter()
+            .any(|c| match self.practice_of(c) {
+                None => false,
+                // its first row is no place for anything
+                Some(Practiced::NotReady) => true,
+                Some(Practiced::Ready(b)) => {
+                    let rel = (at - c.opener.start) as u32;
+                    let checked = self.native.practice.show_of(c.opener.start).is_some_and(|s| s.checked);
+                    !checked && b.practice.as_ref().is_some_and(|p| p.reveals(rel))
+                }
+            })
+    }
+
+    /// The warning of a block in Practice that cannot be practised. No reason in it can tell an answer.
+    pub(super) fn practice_warning(&self, c: &NamedContainer) -> Option<Arc<[String]>> {
+        match self.practice_of(c)? {
+            Practiced::NotReady => Some(NOT_READY_REASONS.clone()),
+            Practiced::Ready(_) => None,
+        }
+    }
+
+    /// What an item of a block in Practice lays out by.
+    pub(super) fn practice_item(&self, at: &NativeAt, start: usize, it: &Item) -> Option<PracticeItem> {
+        if !self.native.practice.on || self.block_mode_of(at.range.start) != BlockViewMode::Practice {
+            return None;
+        }
+        let parts = at.block.practice.as_ref()?;
+        if it.kind == (ItemKind::ContainerMarker { close: true }) {
+            return Some(PracticeItem::Row);
+        }
+        let rel = start.checked_sub(at.range.start)? as u32;
+        let show = self.native.practice.show_of(at.range.start);
+        Some(match parts.answer_at(rel) {
+            Some(n) => PracticeItem::Answer {
+                selected: show.is_some_and(|s| s.selected.contains(&(n as u32))),
+                // the only place where a mark gets out, and only once checked
+                correct: show.filter(|s| s.checked).map(|_| parts.answers[n].correct),
+            },
+            None => PracticeItem::Other,
+        })
+    }
+
+    /// What item `i` is in a block being practised.
+    pub fn practice_item_of(&self, i: usize) -> Option<PracticeItem> {
+        if !self.native.practice.on {
+            return None;
+        }
+        let at = self.native_item(i)?;
+        self.practice_item(&at, self.model.item_start(i), self.model.items.get(i)?)
+    }
+
+    /// Whether the closer item `i` holds a row of buttons (height estimates).
+    pub(super) fn practice_row_estimate(&self, i: usize, it: &Item) -> f32 {
+        let has_row = self.native.practice.on
+            && (self.native_item(i))
+                .is_some_and(|at| self.practice_item(&at, self.model.item_start(i), it) == Some(PracticeItem::Row));
+        if has_row {
+            self.theme.block_spacing + crate::native::practice_row_height(&self.theme)
+        } else {
+            0.0
+        }
+    }
+
+    /// Whether Practice hides item `i`. Cheap: a comparison with no block in Practice, a lookup after that.
+    pub(super) fn practice_hidden(&self, i: usize) -> bool {
+        if !self.native.practice.on {
+            return false;
+        }
+        let Some(it) = self.model.items.get(i) else {
+            return false;
+        };
+        if !it.containers.iter().any(|c| matches!(c, Container::Card)) {
+            return false;
+        }
+        let start = self.model.item_start(i);
+        if let Some(&found) = self.native.practice.hidden.borrow().get(&start) {
+            return found;
+        }
+        let found = self.read_practice_hidden(start, it);
+        self.native.practice.hidden.borrow_mut().insert(start, found);
+        found
+    }
+
+    fn read_practice_hidden(&self, start: usize, it: &Item) -> bool {
+        if self.native.practice.veiled {
+            let first_level = self.doc.named_containers_at(start).len() <= 1;
+            return !(first_level && matches!(it.kind, ItemKind::ContainerMarker { .. }));
+        }
+        self.doc
+            .named_containers_at(start)
+            .iter()
+            .any(|c| match self.practice_of(c) {
+                None => false,
+                Some(Practiced::NotReady) => match it.kind {
+                    ItemKind::ContainerMarker { close: false } => start != c.opener.start,
+                    ItemKind::ContainerMarker { close: true } => start != c.closer.start,
+                    _ => true,
+                },
+                Some(Practiced::Ready(b)) => {
+                    let checked = self.native.practice.show_of(c.opener.start).is_some_and(|s| s.checked);
+                    !checked && (b.practice.as_ref()).is_some_and(|p| p.reveals((start - c.opener.start) as u32))
+                }
+            })
+    }
+
+    /// What Practice adds to a page's estimate, while the document is in Read: a row of buttons per
+    /// block, less the quotes of blocks that reveal them. Other fields are corrected when they are laid
+    /// out, like any estimate.
+    pub(super) fn practice_page_estimate(&self, s: &PageStats, per_line: f32) -> f32 {
+        let Some(source) = self.native.source.as_ref().filter(|_| self.native.practice.read) else {
+            return 0.0;
+        };
+        let t = &self.theme;
+        let row = t.block_spacing + crate::native::practice_row_height(t);
+        let mut h = 0.0;
+        for (name, tally) in s.card_tallies.iter().filter(|(name, _)| source.has_practice(name)) {
+            h += tally.closers as f32 * row;
+            if source.practice_hides_quotes(name) {
+                h -= tally.paras as f32 * t.block_spacing + tally.lines_at(per_line) * t.line_px();
+            }
+        }
+        h
+    }
+
+    /// What copying from a block in Practice leaves out or changes: `(source range, what stands there
+    /// instead)`, ascending. Hidden fields go, a mark reads as no mark, and of a block that cannot be
+    /// practised only the lines around it stay.
+    pub fn practice_copy_cuts(&self, c: &NamedContainer) -> Vec<(std::ops::Range<usize>, &'static str)> {
+        let base = c.opener.start;
+        let parts = match self.practice_of(c) {
+            None => return Vec::new(),
+            Some(Practiced::NotReady) => return vec![(c.opener.end..c.closer.start, "\n\n")],
+            Some(Practiced::Ready(b)) => b,
+        };
+        if self.native.practice.show_of(base).is_some_and(|s| s.checked) {
+            return Vec::new();
+        }
+        let Some(parts) = parts.practice.as_ref() else {
+            return Vec::new();
+        };
+        let text = self.doc.text();
+        let mut cuts: Vec<(std::ops::Range<usize>, &'static str)> = (parts.reveal.iter())
+            .map(|r| (base + r.start as usize..base + r.end as usize, ""))
+            .collect();
+        for a in &parts.answers {
+            let at = base + a.range.start as usize;
+            let line = text[..at].rfind('\n').map_or(0, |n| n + 1);
+            if let Some(mark) = text[line..at].find("[x]").or_else(|| text[line..at].find("[X]")) {
+                cuts.push((line + mark..line + mark + 3, "[ ]"));
+            }
+        }
+        cuts.sort_by_key(|c| c.0.start);
+        cuts
+    }
+
+    /// What was done in the blocks in Practice, by opener. Only the items of blocks that changed are
+    /// laid out again; a block checked or reset has its height read again here, and the viewport stays
+    /// on what it shows.
+    pub fn set_block_practice(&mut self, mut shows: Vec<(usize, PracticeShow)>) {
+        shows.sort_unstable_by_key(|s| s.0);
+        if shows == self.native.practice.shows {
+            return;
+        }
+        let old = std::mem::take(&mut self.native.practice.shows);
+        let revealed: Vec<usize> = (old.iter().filter(|o| o.1.checked).map(|o| o.0))
+            .filter(|o| !shows.iter().any(|s| s.0 == *o && s.1.checked))
+            .chain(
+                (shows.iter().filter(|s| s.1.checked).map(|s| s.0))
+                    .filter(|s| !old.iter().any(|o| o.0 == *s && o.1.checked)),
+            )
+            .collect();
+        // (the same blocks moved by an edit are the same blocks: their heights did not change)
+        let moved = old.len() == shows.len() && old.iter().zip(&shows).all(|(a, b)| a.1 == b.1);
+        self.native.practice.shows = shows;
+        self.native.practice.generation += 1;
+        self.native.items.borrow_mut().clear();
+        self.native.practice.hidden.borrow_mut().clear();
+        if !moved {
+            for opener in revealed {
+                self.heights_of_block(opener);
+            }
+        }
+    }
+
+    /// Everything that was done is gone, on blocks anywhere in the document: what a page measured
+    /// with some of them revealed no longer holds.
+    pub fn practice_forgotten(&mut self) {
+        self.native.practice.epoch += 1;
+        self.reset_heights();
+    }
+
+    /// Reads again the heights of what the block with this opener has here, its pages excepted.
+    fn heights_of_block(&mut self, opener: usize) {
+        let Some(c) = (self.doc.named_containers_at(opener).into_iter()).rfind(|c| c.opener.start == opener) else {
+            return;
+        };
+        let (a, b) = (
+            self.model.items.partition_point_start(c.opener.start),
+            self.model.items.partition_point_start(c.closer.end),
+        );
+        for i in a..b.min(self.exact.len()) {
+            if !self.model.is_page(i) {
+                let (v, e) = self.initial_height(i);
+                self.heights.set(i, v);
+                self.exact[i] = e;
+            }
+        }
+        // a viewport that started in what has just hidden goes on from what comes after it
+        self.scroll_by(0.0);
+    }
+}

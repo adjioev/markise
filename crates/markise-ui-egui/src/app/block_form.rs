@@ -10,7 +10,7 @@ use egui_schema_form::Thumbnail;
 use markise_layout::BlockViewMode;
 use markise_layout::block::color;
 
-use super::{MarkiseApp, Then};
+use super::{MarkiseApp, Then, ViewMode};
 use crate::block_form::{
     FormAssets, OpenForm, PanelAction, PanelHost, block_at, package_language, panel_widths, style_for,
 };
@@ -25,6 +25,8 @@ pub(super) enum DraftNext {
     StopPackage,
     /// Delete the block with this opener.
     DeleteBlock(usize),
+    /// Read Mode, which has no form.
+    EnterRead,
 }
 
 /// The form of the session.
@@ -42,7 +44,9 @@ pub(super) struct BlockFormState {
     view_states: HashMap<PathBuf, ViewState>,
 }
 
-type ViewState = (BlockViewMode, Vec<(usize, BlockViewMode)>);
+/// How a document shows its blocks: the document's state, the blocks with their own, and Read or Edit
+/// if someone chose, so that the package's word on what it opens in is over.
+type ViewState = (BlockViewMode, Vec<(usize, BlockViewMode)>, Option<bool>);
 
 impl BlockFormState {
     pub(super) fn new(picker: Option<ImagePicker>) -> BlockFormState {
@@ -142,20 +146,90 @@ impl MarkiseApp {
         true
     }
 
+    /// Whether the document is in Read (ADR 0024).
+    pub fn read_mode_on(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| d.viewer.ed.read_mode())
+    }
+
+    /// Read Mode: the document to Read, or back to Edit. Read has no source pane.
+    pub fn toggle_read_mode(&mut self) -> bool {
+        let Some(read) = self.doc.as_ref().map(|d| !d.viewer.ed.read_mode()) else {
+            return false;
+        };
+        if read && (self.source_visible || self.side_by_side) {
+            self.set_view_mode(ViewMode::Rendered);
+            if self.source_visible || self.side_by_side {
+                return false; // a draft in the way stays as it is
+            }
+        }
+        // what a comment's card holds goes to the document first, or stays and says so
+        if !self.card_edit_saved() {
+            return false;
+        }
+        // a form shows the answers: a changed draft is asked about first and never lost silently
+        if read && self.block_draft_changed() {
+            self.set_ask(super::Ask::BlockDraft(DraftNext::EnterRead));
+            return true;
+        }
+        if read {
+            self.block_form_close();
+        }
+        let Some(d) = &mut self.doc else { return false };
+        d.viewer.ed.set_read_mode(read);
+        self.remember_block_views();
+        self.apply_review_read_only();
+        true
+    }
+
+    /// The status bar's switch between Read and Edit, for any document.
+    pub(super) fn read_mode_status_item(&mut self, ui: &mut egui::Ui) {
+        if self.doc.is_none() {
+            return;
+        }
+        let read = self.read_mode_on();
+        let (says, tip) = if read {
+            ("Read · Switch to Edit", "The document cannot be changed here")
+        } else {
+            ("Edit · Switch to Read", "Read the document, with its answers hidden")
+        };
+        if ui.small_button(says).on_hover_text(tip).clicked() {
+            self.toggle_read_mode();
+        }
+    }
+
+    /// The status bar's item: how the blocks checked so far went, and Reset All (ADR 0024).
+    pub(super) fn practice_status_item(&mut self, ui: &mut egui::Ui) {
+        let Some(d) = &mut self.doc else { return };
+        if !d.viewer.ed.practice_started() {
+            return;
+        }
+        let (right, all) = d.viewer.ed.practice_score();
+        if all > 0 {
+            let words = format!("{right} of {all}");
+            ui.weak(words).on_hover_text(format!("{right} right of {all} checked"));
+        }
+        if ui.small_button("Reset All").clicked() {
+            d.viewer.ed.practice_reset_all();
+            ui.ctx().request_repaint();
+        }
+    }
+
     /// Keeps how this document shows its blocks, for the session (ADR 0021).
     pub(super) fn remember_block_views(&mut self) {
         if let Some(d) = &self.doc
             && !d.untitled
         {
-            let state = d.viewer.ed.block_view_state();
-            self.block_form.view_states.insert(d.path.clone(), state);
+            let (mode, own) = d.viewer.ed.block_view_state();
+            let read = d.viewer.ed.read_choice();
+            self.block_form.view_states.insert(d.path.clone(), (mode, own, read));
         }
     }
 
     /// What was kept for this document, in its new viewer.
     pub(super) fn bring_back_block_views(&mut self) {
         let Some(d) = &mut self.doc else { return };
-        if let Some((mode, own)) = self.block_form.view_states.get(&d.path) {
+        if let Some((mode, own, read)) = self.block_form.view_states.get(&d.path) {
+            d.viewer.ed.restore_read_choice(*read);
             d.viewer.ed.restore_block_view_state(*mode, own);
         }
     }
@@ -177,6 +251,10 @@ impl MarkiseApp {
             return false;
         };
         let Some(d) = &mut self.doc else { return false };
+        // Read has no block commands (ADR 0024)
+        if d.viewer.ed.read_mode() {
+            return false;
+        }
         let Some(c) = block_at(d.viewer.ed.session.doc(), at, &package.index) else {
             return false;
         };
@@ -281,10 +359,27 @@ impl MarkiseApp {
     pub(super) fn block_form_panel(&mut self, ui: &mut egui::Ui) {
         let index = self.block_package().map(|p| p.index.clone());
         let package = self.block_package().cloned();
+        let looked_up = self.block_package_looked_up();
         if let Some(d) = self.doc.as_mut() {
             d.viewer.set_block_index(index.clone());
             d.viewer
                 .set_block_site(package.as_ref(), self.web_helpers.as_ref(), ui.ctx());
+            // now that a package has said what it hides, if there is one (ADR 0024)
+            if looked_up && d.viewer.ed.view.blocks_veiled() {
+                d.viewer.ed.view.set_blocks_veiled(false);
+                ui.ctx().request_repaint();
+            }
+        }
+        // however a document came to be in Read: no source pane, and nothing changes it
+        if self.read_mode_on() {
+            if self.source_visible || self.side_by_side {
+                self.set_view_mode(ViewMode::Rendered);
+            }
+            self.apply_review_read_only();
+            // (a draft with changes cannot get here: it is asked about before Read)
+            if !self.block_draft_changed() {
+                self.block_form_close();
+            }
         }
         self.block_form.assets.poll(ui.ctx());
         self.block_icons_update(ui.ctx());
