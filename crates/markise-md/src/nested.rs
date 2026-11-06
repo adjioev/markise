@@ -256,6 +256,7 @@ impl Document {
                 self.top.shift_after(t, delta);
                 // the re-parse stayed inside this container: no marker line among its lines
                 self.directives.shift_from(old_edit_end, delta);
+                self.sections.shift_from(old_edit_end, delta);
                 // failed openers: before the restart, new ones, old ones after the sibling
                 let old_sib = (sibling as isize - delta) as usize;
                 let mut fo: Vec<usize> = self.failed_openers.iter().copied().filter(|&f| f < restart).collect();
@@ -301,6 +302,7 @@ impl Document {
                     definition_labels(text, b, 0, &mut labels);
                 }
                 let markers = out.markers;
+                let rules = crate::section::exact_rules(text, &out.blocks);
                 let mut blocks_new = out.blocks;
                 if blocks_new.is_empty() {
                     // cannot happen: the reconstructed container is always emitted
@@ -357,7 +359,7 @@ impl Document {
                 } else {
                     usize::MAX
                 };
-                self.splice_directives(o..old_end, markers, delta, &mut r);
+                self.splice_directives(o..old_end, markers, rules, delta, &mut r);
                 Some(r)
             }
         }

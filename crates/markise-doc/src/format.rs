@@ -16,7 +16,8 @@ use crate::pos::{Affinity, DocPos, VirtualSlot};
 use crate::source::SourceToken;
 use crate::text::{LineEnding, Span};
 use crate::view::{
-    CodeFenceView, FlatEvent, HeadingInfo, InlineSource, LeafView, NamedContainer, RichInline, TableView,
+    CodeFenceView, FlatEvent, HeadingInfo, InlineSource, LeafView, NamedContainer, RichInline, SectionAt,
+    SectionMetadata, TableView,
 };
 
 /// Format-neutral options for opening a document. Format-specific settings (e.g. Markdown's
@@ -446,6 +447,61 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
     /// The language the document says it is in (Markdown: front matter `lang`), as written.
     fn language(&self) -> Option<String> {
         None
+    }
+    /// The authoring dialect the document names itself (Markdown: front matter `authoring`), as
+    /// written. Which dialects have sections is not the format's to say (ADR 0026).
+    fn authoring(&self) -> Option<String> {
+        None
+    }
+    /// Number of sections ([`SectionAt`]), at least 1, whatever the dialect. Formats without
+    /// boundaries keep the defaults: one section, the whole document. Must be cheap: no
+    /// walk over the document.
+    fn section_count(&self) -> usize {
+        1
+    }
+    /// Section `index` from 0.
+    fn section(&self, index: usize) -> Option<SectionAt> {
+        (index == 0).then(|| SectionAt {
+            index: 0,
+            boundary: None,
+            start: 0,
+            end: self.text().len(),
+        })
+    }
+    /// The section around `at`; a boundary belongs to the section it opens.
+    fn section_at(&self, at: usize) -> SectionAt {
+        let _ = at;
+        SectionAt {
+            index: 0,
+            boundary: None,
+            start: 0,
+            end: self.text().len(),
+        }
+    }
+    /// What section `index` says about itself, if it does.
+    fn section_metadata(&self, index: usize) -> Option<SectionMetadata> {
+        let _ = index;
+        None
+    }
+    /// A block that says it is metadata opens at `opener`, and it is not first in its section.
+    fn section_metadata_misplaced(&self, opener: usize) -> bool {
+        let _ = opener;
+        false
+    }
+    /// The first block of section `index` tries to be its metadata and does not pair: where.
+    fn section_metadata_unclosed(&self, index: usize) -> Option<Span> {
+        let _ = index;
+        None
+    }
+    /// Where the first heading of section `index` starts, as far as a cheap look goes.
+    fn section_first_heading(&self, index: usize) -> Option<usize> {
+        let _ = index;
+        None
+    }
+    /// A rule at `at` looks like a boundary and is none.
+    fn section_near_boundary(&self, at: usize) -> bool {
+        let _ = at;
+        false
     }
     /// Resolves an image source against the document folder and [`FormatDoc::resource_root`].
     fn resolve_resource(&self, doc_dir: &Path, src: &str) -> PathBuf {

@@ -27,6 +27,7 @@ mod owner;
 mod parser;
 mod prefix;
 mod scan;
+mod section;
 pub mod slug;
 mod source_tokens;
 pub mod table;
@@ -49,6 +50,7 @@ pub use markise_doc::{DepChange, HintOrigin, HintSet, LiteralHint, Patch, PatchS
 pub use options::{HeadingStyle, IndentSize, OrderedStyle, ParseOptions, WriteOptions};
 pub use parser::{MAX_NESTING, MAX_QUOTE_DEPTH, bom_len};
 pub use prefix::progressive_prefix;
+pub use section::{MALFORMED_BODY, MALFORMED_TIGHT, MAX_METADATA_BYTES, SECTION_METADATA};
 pub use text::{LineEnding, Span};
 pub use tops::Top;
 
@@ -71,6 +73,8 @@ pub struct Document {
     ctx: OnceLock<Arc<RefContext>>,
     /// The front matter's `lang`, read on first use and kept until an edit reaches the first block.
     language: OnceLock<Option<String>>,
+    /// The front matter's `authoring`, kept the same way.
+    authoring: OnceLock<Option<String>>,
     failed_openers: Vec<usize>,
     eol: LineEnding,
     opts: ParseOptions,
@@ -78,6 +82,8 @@ pub struct Document {
     hints: HintSet,
     /// The marker lines of fenced directives, paired document-wide (ADR 0018).
     directives: directive::DirectiveIndex,
+    /// The rules that may divide the document into sections (ADR 0026).
+    sections: section::SectionIndex,
 }
 
 /// What an [`Document::edit`] changed in the top-level block list.
@@ -238,19 +244,23 @@ impl Document {
         let eol = LineEnding::detect(&text).unwrap_or(default_eol);
         let hints = HintSet::new();
         let out = parser::parse_blocks(&text, &opts, parser::bom_len(&text), None, &hints);
+        let rules = section::exact_rules(&text, &out.blocks);
         let mut doc = Document {
             text,
             top: TopBlocks::from_abs(out.blocks),
             abs: OnceLock::new(),
             ctx: OnceLock::new(),
             language: OnceLock::new(),
+            authoring: OnceLock::new(),
             failed_openers: out.failed_openers,
             eol,
             opts,
             hints,
             directives: directive::DirectiveIndex::from_raw(out.markers),
+            sections: Default::default(),
         };
         doc.label_all_markers();
+        doc.build_sections(rules);
         doc
     }
 
@@ -377,14 +387,17 @@ impl Document {
             self.hints = HintSet::from_hints(keep);
         }
         let out = parser::parse_blocks(&t, &self.opts, parser::bom_len(&t), None, &self.hints);
+        let rules = section::exact_rules(&t, &out.blocks);
         self.text = t;
         self.top = TopBlocks::from_abs(out.blocks);
         self.abs = OnceLock::new();
         self.ctx = OnceLock::new();
         self.language = OnceLock::new();
+        self.authoring = OnceLock::new();
         self.failed_openers = out.failed_openers;
         self.directives = directive::DirectiveIndex::from_raw(out.markers);
         self.label_all_markers();
+        self.build_sections(rules);
     }
 
     /// Re-parses everything with new options (e.g. a syntax preference changed).
@@ -567,6 +580,7 @@ impl Document {
         from = from.max(old_bom);
         if start_idx == 0 {
             self.language = OnceLock::new();
+            self.authoring = OnceLock::new();
         }
 
         // 1b. Nested restart inside a large top-level container (ADR 0006 §7.2.3).
@@ -707,6 +721,7 @@ impl Document {
         let new_count = out.blocks.len();
         let replaced = resume_idx - start_idx;
         let markers = out.markers;
+        let rules = section::exact_rules(text, &out.blocks);
         // Dependencies (ADR 0006 §7.4): a definition among the replaced or the new blocks
         // may change reference resolution; a new first block may change the resource root.
         // (a superset of the labels whose definition changed: every definition among the
@@ -759,7 +774,7 @@ impl Document {
         } else {
             usize::MAX
         };
-        self.splice_directives(from..old_end, markers, delta, &mut r);
+        self.splice_directives(from..old_end, markers, rules, delta, &mut r);
         r
     }
 
@@ -895,6 +910,7 @@ impl Document {
         self.top.shift_after(top, delta);
         // nothing here is a marker: the rule keeps every marker line out of the fast path
         self.directives.shift_from(range.end, delta);
+        self.sections.shift_from(range.end, delta);
         for f in &mut self.failed_openers {
             if *f > range.start {
                 *f = (*f as isize + delta) as usize;

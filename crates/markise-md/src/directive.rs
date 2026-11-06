@@ -393,6 +393,30 @@ impl Document {
         markise_doc::PatchSet::new(patches).ok()
     }
 
+    /// Bytes from the opener at `at` to the end of its closer's line, from the index alone: no line
+    /// is read, however long. `None` when no paired opener stands at `at`.
+    pub(crate) fn paired_extent(&self, at: usize) -> Option<usize> {
+        let x = &self.directives;
+        let i = x.markers.partition_point(|m| m.origin < at);
+        let m = x
+            .markers
+            .get(i)
+            .filter(|m| m.origin == at && !m.item.close && m.item.partner != NONE)?;
+        let closer = x.markers.get(m.item.partner as usize)?;
+        Some(closer.origin + closer.item.line_len - at)
+    }
+
+    /// The closer's first colon of the paired opener at `at`.
+    pub(crate) fn directive_closer_at(&self, at: usize) -> Option<usize> {
+        let x = &self.directives;
+        let i = x.markers.partition_point(|m| m.origin < at);
+        let m = x
+            .markers
+            .get(i)
+            .filter(|m| m.origin == at && !m.item.close && m.item.partner != NONE)?;
+        x.markers.origin(m.item.partner as usize)
+    }
+
     /// `true` when the document holds at least one paired directive.
     pub fn has_directives(&self) -> bool {
         self.directives.paired > 0
@@ -501,13 +525,15 @@ impl Document {
         &mut self,
         old: Range<usize>,
         new: Vec<RawMarker>,
+        rules: Vec<usize>,
         delta: isize,
         r: &mut EditResult,
     ) {
-        let (label, region) = self.directives.splice(old, new, delta);
+        let (label, region) = self.directives.splice(old.clone(), new, delta);
         for i in label {
             self.label_marker(i);
         }
+        self.splice_sections(old, rules, delta, region.clone());
         let Some(region) = region else { return };
         let first = self.top.partition_point(|t| t.end() < region.start);
         let last = self.top.partition_point(|t| t.start() <= region.end);
