@@ -129,19 +129,45 @@ impl View {
     }
 
     /// What an item of a block in Practice lays out by.
-    pub(super) fn practice_item(&self, at: &NativeAt, start: usize) -> Option<PracticeItem> {
+    pub(super) fn practice_item(&self, at: &NativeAt, start: usize, it: &Item) -> Option<PracticeItem> {
         if !self.native.practice.on || self.native.mode_of(at.range.start) != BlockViewMode::Practice {
             return None;
         }
         let parts = at.block.practice.as_ref()?;
+        if it.kind == (ItemKind::ContainerMarker { close: true }) {
+            return Some(PracticeItem::Row);
+        }
         let rel = start.checked_sub(at.range.start)? as u32;
         let show = self.native.practice.show_of(at.range.start);
         Some(match parts.answer_at(rel) {
             Some(n) => PracticeItem::Answer {
                 selected: show.is_some_and(|s| s.selected.contains(&(n as u32))),
+                // the only place where a mark gets out, and only once checked
+                correct: show.filter(|s| s.checked).map(|_| parts.answers[n].correct),
             },
             None => PracticeItem::Other,
         })
+    }
+
+    /// What item `i` is in a block being practised.
+    pub fn practice_item_of(&self, i: usize) -> Option<PracticeItem> {
+        if !self.native.practice.on {
+            return None;
+        }
+        let at = self.native_item(i)?;
+        self.practice_item(&at, self.model.item_start(i), self.model.items.get(i)?)
+    }
+
+    /// Whether the closer item `i` holds a row of buttons (height estimates).
+    pub(super) fn practice_row_estimate(&self, i: usize, it: &Item) -> f32 {
+        let has_row = self.native.practice.on
+            && (self.native_item(i))
+                .is_some_and(|at| self.practice_item(&at, self.model.item_start(i), it) == Some(PracticeItem::Row));
+        if has_row {
+            crate::native::practice_row_height(&self.theme)
+        } else {
+            0.0
+        }
     }
 
     /// Whether Practice hides item `i`. Cheap: a comparison with no block in Practice, a lookup after that.
@@ -182,18 +208,23 @@ impl View {
             })
     }
 
-    /// How much of a page's estimate Practice hides: the quotes of blocks that reveal them, while the
-    /// document is in Practice. Other fields are corrected when they are laid out, like any estimate.
-    pub(super) fn practice_quotes_estimate(&self, s: &PageStats, per_line: f32) -> f32 {
+    /// What Practice adds to a page's estimate, while the document is in Practice: a row of buttons per
+    /// block, less the quotes of blocks that reveal them. Other fields are corrected when they are laid
+    /// out, like any estimate.
+    pub(super) fn practice_page_estimate(&self, s: &PageStats, per_line: f32) -> f32 {
         let Some(source) = self.native.source.as_ref().filter(|_| self.native.practice.whole) else {
             return 0.0;
         };
         let t = &self.theme;
-        (s.card_quotes
-            .iter()
-            .filter(|(name, _)| source.practice_hides_quotes(name)))
-        .map(|(_, q)| q.paras as f32 * t.block_spacing + q.lines_at(per_line) * t.line_px())
-        .sum()
+        let row = crate::native::practice_row_height(t);
+        let mut h = 0.0;
+        for (name, tally) in s.card_tallies.iter().filter(|(name, _)| source.has_practice(name)) {
+            h += tally.closers as f32 * row;
+            if source.practice_hides_quotes(name) {
+                h -= tally.paras as f32 * t.block_spacing + tally.lines_at(per_line) * t.line_px();
+            }
+        }
+        h
     }
 
     /// What was done in the blocks in Practice, by opener. Only the items of blocks that changed are

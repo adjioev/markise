@@ -273,6 +273,8 @@ pub struct BlockLayout {
     pub warning: Option<Rect>,
     /// The quiet reason this card shows no picture (item-local).
     pub note: Option<Rect>,
+    /// Where the buttons of a practised block go (item-local, on its closer).
+    pub practice_row: Option<Rect>,
 }
 
 impl BlockLayout {
@@ -2123,7 +2125,13 @@ pub fn layout_item(
             }
         }
     }
-    let width = (p.width - x - card_right).max(40.0);
+    let mut width = (p.width - x - card_right).max(40.0);
+    if p.native
+        .is_some_and(|n| matches!(n.practice, Some(crate::native::PracticeItem::Answer { .. })))
+    {
+        // the same before and after a check, so that a check moves no line of text
+        width = (width - crate::native::practice_verdict_room(t)).max(40.0);
+    }
     let line_px = t.line_px();
     let mut diagram_controls = None;
     let mut out = Out {
@@ -2138,6 +2146,7 @@ pub fn layout_item(
     let mut empty_anchor = None;
     let mut warning = None;
     let mut note = None;
+    let mut practice_row = None;
 
     if let Some((ai, title)) = &alert_title {
         let mut st = Style::base(t.font_size, line_px, color(t.alert[*ai]));
@@ -2578,7 +2587,16 @@ pub fn layout_item(
         }
         // no height of its own: the picture above it is the block
         ItemKind::ContainerMarker { close: true } if p.site.is_some() => {}
-        ItemKind::ContainerMarker { close: true } => y += card_inset,
+        ItemKind::ContainerMarker { close: true } => {
+            if p.native
+                .is_some_and(|n| n.practice == Some(crate::native::PracticeItem::Row))
+            {
+                let h = crate::native::practice_row_height(t);
+                practice_row = Some(Rect::from_min_size(pos2(x, y), vec2(width, h)));
+                y += h;
+            }
+            y += card_inset;
+        }
         ItemKind::ContainerMarker { close: false } if p.site.is_some() => {
             if let (Some(crate::view::SiteLook::Picture(picture)), Some(&(left, right))) = (p.site, cards.last()) {
                 let w = (p.width - left - right).max(40.0);
@@ -2828,10 +2846,10 @@ pub fn layout_item(
                 tasks.push((rect, li));
                 if let Some(n) = p.native.filter(|n| n.role == Some(crate::native::NativeRole::Answer)) {
                     // in Practice what the file says stays unsaid, and the mark is the reader's
-                    let checked = match n.practice {
-                        Some(crate::native::PracticeItem::Answer { selected }) => selected,
-                        Some(crate::native::PracticeItem::Other) => false,
-                        None => checked,
+                    let (checked, verdict) = match n.practice {
+                        Some(crate::native::PracticeItem::Answer { selected, correct }) => (selected, correct),
+                        Some(_) => (false, None),
+                        None => (checked, None),
                     };
                     answer_mark(
                         &mut deco,
@@ -2839,9 +2857,21 @@ pub fn layout_item(
                         t,
                         rect,
                         checked,
+                        verdict.is_none(),
                         (x - mw, content_bottom, gap),
                         p.width - card_right,
                     );
+                    if let Some(correct) = verdict {
+                        verdict_mark(
+                            &mut deco,
+                            t,
+                            correct,
+                            checked,
+                            cy,
+                            (x - mw, content_bottom, gap),
+                            p.width - card_right,
+                        );
+                    }
                     continue;
                 }
                 deco.push(Prim::Checkbox {
@@ -3017,6 +3047,7 @@ pub fn layout_item(
         card_top,
         warning,
         note,
+        practice_row,
     }
 }
 
@@ -3104,20 +3135,65 @@ fn native_chrome(deco: &mut Vec<Prim>, v: &crate::native::NativeView, t: &Theme,
     }
 }
 
-/// An answer's mark, a radio button or a check box in the view's accent, and a tint on the row of
-/// one that is marked. `row`: the row's left edge, its bottom and its top; `right`: its right edge.
+/// What a checked answer says: a tint on the row of a right answer and a wrong one chosen, and at the
+/// row's end a tick or a cross, so that colour is not all there is. A wrong answer not chosen is quiet.
+fn verdict_mark(
+    deco: &mut Vec<Prim>,
+    t: &Theme,
+    correct: bool,
+    chosen: bool,
+    cy: f32,
+    row: (f32, f32, f32),
+    right: f32,
+) {
+    use crate::native::{accent_color, tint};
+    let hue = accent_color(Some(if correct { "green" } else { "red" }), t);
+    let (left, bottom, top) = row;
+    if correct || chosen {
+        deco.insert(
+            0,
+            Prim::Rect {
+                rect: Rect::from_min_max(pos2(left.max(0.0), top), pos2(right, bottom)),
+                fill: tint(hue, t),
+                stroke: Stroke::NONE,
+                radius: 3.0,
+            },
+        );
+    }
+    let ink = if correct || chosen {
+        hue
+    } else {
+        color(t.meta_block.text)
+    };
+    let s = t.font_size * 0.3;
+    let c = pos2(right - crate::native::practice_verdict_room(t) * 0.5, cy);
+    let stroke = Stroke::new(2.0, ink);
+    let line = |a: Pos2, b: Pos2| Prim::Line { a, b, stroke };
+    if correct {
+        deco.push(line(c + vec2(-s, 0.0), c + vec2(-s * 0.25, s * 0.8)));
+        deco.push(line(c + vec2(-s * 0.25, s * 0.8), c + vec2(s, -s * 0.8)));
+    } else {
+        deco.push(line(c + vec2(-s * 0.8, -s * 0.8), c + vec2(s * 0.8, s * 0.8)));
+        deco.push(line(c + vec2(-s * 0.8, s * 0.8), c + vec2(s * 0.8, -s * 0.8)));
+    }
+}
+
+/// An answer's mark, a radio button or a check box in the view's accent, and if `tinted` a tint on the
+/// row of one that is marked. `row`: the row's left edge, its bottom and its top; `right`: its right edge.
+#[allow(clippy::too_many_arguments)]
 fn answer_mark(
     deco: &mut Vec<Prim>,
     v: &crate::native::NativeView,
     t: &Theme,
     rect: Rect,
     checked: bool,
+    tinted: bool,
     row: (f32, f32, f32),
     right: f32,
 ) {
     use crate::native::{accent_color, tint};
     let accent = accent_color(v.accent.as_deref(), t);
-    if checked {
+    if checked && tinted {
         let (left, bottom, top) = row;
         deco.insert(
             0,

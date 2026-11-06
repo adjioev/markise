@@ -51,6 +51,8 @@ pub(super) struct InPlace {
     own_modes: Vec<OwnMode>,
     /// States brought back for openers not in the document yet (the first part of a large file).
     pending_modes: Vec<(usize, BlockViewMode)>,
+    /// What was done in blocks in Practice: never in the document ([`super::practice`]).
+    pub(super) practice: Vec<super::practice::Practised>,
 }
 
 fn plain_value_is_empty(slot: &Slot) -> bool {
@@ -343,8 +345,8 @@ impl EditorView {
         images: &dyn Images,
     ) -> Option<Result<(), CommandError>> {
         self.place.fields.as_ref()?;
-        if let Some(refused) = self.practice_refuses(id) {
-            return Some(refused);
+        if let Some(done) = self.practice_command(id, params) {
+            return Some(done);
         }
         let p = self.session.selection().primary();
         let r = p.range();
@@ -645,7 +647,7 @@ impl EditorView {
 
     /// Nothing to keep up with: the cost of a document without any of this.
     pub(super) fn place_is_idle(&self) -> bool {
-        self.place.sticky.is_none() && self.place.own_modes.is_empty()
+        self.place.sticky.is_none() && self.place.own_modes.is_empty() && self.place.practice.is_empty()
     }
 
     /// Keeps the block being edited native while the selection is in it. Called on every change

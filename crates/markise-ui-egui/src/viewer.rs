@@ -33,6 +33,7 @@ mod card_edit;
 mod code_tools;
 mod comment_place;
 mod comment_presence;
+mod practice_tools;
 mod scrollbar;
 mod site_board;
 pub use block_move::BlockDragShown;
@@ -1080,6 +1081,7 @@ impl DocViewer {
             self.block_tools_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_delete_ui(ui, &visible, rect, left, theme, &mut out);
             self.block_move_ui(ui, &visible, rect, left, theme, &mut out);
+            self.practice_ui(ui, &visible, rect, left);
         }
 
         // ---- review comments: margin cards or bubble popovers (visible items only)

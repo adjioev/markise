@@ -348,7 +348,7 @@ impl View {
         }
         let found = self.native_block(start).map(|at| {
             let role = at.role_at(start);
-            let practice = self.practice_item(&at, start);
+            let practice = self.practice_item(&at, start, it);
             let mut h = crate::model::hasher();
             (&*at.block.view, role, practice).hash(&mut h);
             OfItem {

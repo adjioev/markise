@@ -974,7 +974,9 @@ impl View {
             },
             ItemKind::Rule | ItemKind::Empty => t.block_spacing + line,
             ItemKind::ContainerMarker { close: false } => t.block_spacing + crate::block::card_opener_height(t),
-            ItemKind::ContainerMarker { close: true } => crate::block::card_padding(t),
+            ItemKind::ContainerMarker { close: true } => {
+                crate::block::card_padding(t) + self.practice_row_estimate(i, it)
+            }
             ItemKind::Paragraph => t.block_spacing + wrapped(it.est_chars, it.est_lines) * line,
         };
         h + pa + pb

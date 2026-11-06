@@ -209,9 +209,11 @@ impl EditorView {
         if !self.place_is_idle() {
             if let Some(edits) = mode_edits {
                 self.prune_block_modes(&edits);
+                self.prune_practice(&edits);
             }
             self.follow_sticky();
             self.follow_block_modes();
+            self.follow_practice();
         }
         self.pin_caret();
     }
