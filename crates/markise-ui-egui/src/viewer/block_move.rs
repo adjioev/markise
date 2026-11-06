@@ -308,10 +308,7 @@ impl DocViewer {
         };
         let entry = self.block_index.as_ref().and_then(|i| i.block(&c.name));
         let label = entry.and_then(|e| e.schema.label.as_ref());
-        label.map_or_else(
-            || c.name.to_string(),
-            |l| l.get(crate::block_form::LANGUAGE).to_string(),
-        )
+        label.map_or_else(|| c.name.to_string(), |l| l.get(&self.block_language).to_string())
     }
 
     /// The part of the block on screen.

@@ -263,6 +263,9 @@ pub struct DocViewer {
     block_fields: Option<std::sync::Arc<markise_engine::block_view::PackageViews>>,
     /// The document's change count its language was last read at.
     site_read_at: u64,
+    /// What package text is shown in, and the change of the document it was read at.
+    block_language: String,
+    block_language_read_at: u64,
     /// The pointer is on a block's control or its first row, this frame: not text.
     pointer_on_block_control: bool,
     /// A press on the scrollbar (issue #123).
@@ -316,6 +319,8 @@ impl DocViewer {
             block_site: Default::default(),
             block_fields: None,
             site_read_at: u64::MAX,
+            block_language: String::new(),
+            block_language_read_at: u64::MAX,
             pointer_on_block_control: false,
             view_press: None,
             caret_screen: None,

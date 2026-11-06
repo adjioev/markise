@@ -13,6 +13,7 @@ mod directive;
 mod edit_format;
 mod fastpath;
 mod hints;
+mod language;
 mod nested;
 mod regressions;
 mod roundtrip;

@@ -11,7 +11,9 @@ use markise_layout::BlockViewMode;
 use markise_layout::block::color;
 
 use super::{MarkiseApp, Then};
-use crate::block_form::{FormAssets, OpenForm, PanelAction, PanelHost, block_at, panel_widths, style_for};
+use crate::block_form::{
+    FormAssets, OpenForm, PanelAction, PanelHost, block_at, package_language, panel_widths, style_for,
+};
 
 /// Chooses a file, starting in the given folder.
 pub type ImagePicker = Arc<dyn Fn(&Path) -> Option<PathBuf> + Send + Sync>;
@@ -201,7 +203,8 @@ impl MarkiseApp {
         let index = package.index.clone();
         self.block_form.assets.use_package(package);
         self.block_form.assets.forget_paths();
-        self.block_form.open = OpenForm::open(d.id, &c, &mut d.viewer.ed.session, &index);
+        let language = package_language(d.viewer.ed.session.doc());
+        self.block_form.open = OpenForm::open(d.id, &c, &mut d.viewer.ed.session, &index, &language);
         self.block_form.opened += 1;
         self.block_form.open.is_some()
     }
@@ -300,7 +303,7 @@ impl MarkiseApp {
         // Anything that can be cancelled asked before getting here. What is left cannot be: a
         // lookup that lost the package (Save As into a folder without it) keeps the draft and its
         // Save, a document replaced without a question keeps the draft to read and copy.
-        let keep = match (self.doc.as_mut(), self.block_form.open.as_mut(), index) {
+        let keep = match (self.doc.as_mut(), self.block_form.open.as_mut(), &index) {
             (Some(d), Some(open), index) if open.doc() == d.id => {
                 (index.is_some() || open.is_dirty()) && open.follow(&d.viewer.ed.session)
             }
@@ -313,6 +316,11 @@ impl MarkiseApp {
         }
         if self.block_form.open.as_ref().is_some_and(OpenForm::needs_reopen) {
             self.block_form_reload();
+        }
+        if let (Some(index), Some(d), Some(open)) = (&index, &self.doc, &mut self.block_form.open)
+            && open.doc() == d.id
+        {
+            open.set_language(index, d.viewer.block_language());
         }
         let t = self.theme.clone();
         let (min, default, max) = panel_widths(ui.available_width());

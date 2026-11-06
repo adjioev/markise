@@ -170,7 +170,10 @@ fn every_block_of_the_sample_document_fits_and_shows_as_the_readme_says() {
             _ => panic!("{}: {look:?}", block.0),
         }
     }
-    assert_eq!(document_language(&site.text()), "en");
+    assert_eq!(
+        document_language(&Document::parse(site.text(), ParseOptions::default())),
+        "en"
+    );
 }
 
 #[test]

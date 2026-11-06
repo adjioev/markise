@@ -64,8 +64,12 @@ fn archive(palette: &str) -> Vec<u8> {
         ("editor/views.json", VIEWS),
         ("assets/bulb.svg", ICON),
     ];
+    packed(&files)
+}
+
+fn packed(files: &[(&str, &str)]) -> Vec<u8> {
     let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
-    for (path, content) in files {
+    for &(path, content) in files {
         let mut header = tar::Header::new_gnu();
         header.set_size(content.len() as u64);
         header.set_mode(0o644);
@@ -81,6 +85,15 @@ impl Fixture {
     }
 
     pub(crate) fn with_palette(text: &str, palette: &str) -> Fixture {
+        Self::with_bytes(text, archive(palette))
+    }
+
+    /// A package of these files, its manifest saying library `sample`, version `1.0.0`.
+    pub(crate) fn with_package(text: &str, files: &[(&str, &str)]) -> Fixture {
+        Self::with_bytes(text, packed(files))
+    }
+
+    fn with_bytes(text: &str, bytes: Vec<u8>) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(dir.path()).unwrap();
         let folder = root.join("site");
@@ -89,7 +102,6 @@ impl Fixture {
         fs::create_dir_all(&config).unwrap();
         let doc = folder.join("doc.md");
         fs::write(&doc, text).unwrap();
-        let bytes = archive(palette);
         let sha = Sha256Hex::of(&bytes);
         fs::write(folder.join("p.tar.gz"), &bytes).unwrap();
         fs::write(

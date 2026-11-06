@@ -443,6 +443,10 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
     fn resource_root(&self) -> Option<String> {
         None
     }
+    /// The language the document says it is in (Markdown: front matter `lang`), as written.
+    fn language(&self) -> Option<String> {
+        None
+    }
     /// Resolves an image source against the document folder and [`FormatDoc::resource_root`].
     fn resolve_resource(&self, doc_dir: &Path, src: &str) -> PathBuf {
         crate::resource::resolve(doc_dir, self.resource_root().as_deref(), src)
