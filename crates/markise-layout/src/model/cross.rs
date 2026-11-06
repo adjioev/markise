@@ -31,7 +31,7 @@
 use std::sync::Arc;
 
 use markise_doc::chunked::{RelChunks, Relative};
-use markise_doc::{FormatDoc, RawPresentation};
+use markise_doc::{EditSummary, FormatDoc, RawPresentation};
 
 use super::Item;
 use super::PageStats;
@@ -332,51 +332,40 @@ impl CrossBlockIndex {
         self.folds.extend_abs(folds_of(doc, items));
     }
 
-    /// An edit replaced the items starting at `removed` (pre-edit starts, ascending; `at`: the
-    /// pre-edit position of the replacement when nothing was removed) by `new_items` (absolute
-    /// origins after the edit) and shifted everything after them by `delta`. The markers
-    /// follow in O(chunks); when markers went or came, the reader's choices of markers found
-    /// again at their (mapped) positions carry over and the markers are paired again. Returns
-    /// whether markers changed.
+    /// The edit `e` replaced the items starting at `removed` (pre-edit starts, ascending) by
+    /// `new_items` (absolute origins after the edit) and shifted everything after them. The
+    /// markers follow in O(chunks); when markers went or came, the reader's choices of markers
+    /// found again at their (mapped) positions carry over and the markers are paired again.
+    /// Returns whether markers changed or a fold's end moved.
     pub(super) fn replace(
         &mut self,
         doc: &dyn FormatDoc,
         removed: &[usize],
-        at: usize,
         new_items: &[Item],
-        changed: std::ops::Range<usize>,
-        delta: isize,
+        e: &EditSummary,
     ) -> bool {
         let old = match (removed.first(), removed.last()) {
             (Some(&a), Some(&b)) => a..b + 1,
-            _ => at..at,
+            _ => e.reparsed.start..e.reparsed.start,
         };
-        self.replace_range(
-            doc,
-            old,
-            markers_of(new_items),
-            folds_of(doc, new_items),
-            changed,
-            delta,
-        )
+        self.replace_range(doc, old, markers_of(new_items), folds_of(doc, new_items), e)
     }
 
-    /// The folds starting in `old` (pre-edit offsets) are replaced by `fresh`, and those around
-    /// the edit get their new extents. `true` when any was replaced.
+    /// The folds starting in `old` (pre-edit offsets) are replaced by `fresh`, and those before
+    /// the edit get their new extents. `true` when any was replaced or a kept one's end moved.
     fn replace_folds(
         &mut self,
         doc: &dyn FormatDoc,
         old: &std::ops::Range<usize>,
         fresh: Vec<FoldMarker>,
-        changed: &std::ops::Range<usize>,
-        delta: isize,
+        e: &EditSummary,
     ) -> bool {
+        let (changed, delta) = (&e.changed, e.delta);
         let lo = self.folds.partition_point(|r| r.origin < old.start);
         let hi = self.folds.partition_point(|r| r.origin < old.end).max(lo);
         if lo == hi && fresh.is_empty() {
             self.folds.splice(lo..lo, Vec::new(), delta);
-            self.refresh_folds_around(doc, changed.start);
-            return false;
+            return self.refresh_folds_before(doc, e);
         }
         let toggles: Vec<(usize, bool)> = self
             .folds
@@ -401,29 +390,33 @@ impl CrossBlockIndex {
         if before != after {
             self.gens.disclosures += 1;
         }
-        self.refresh_folds_around(doc, changed.start);
+        self.refresh_folds_before(doc, e);
         true
     }
 
-    /// An edit inside a callout's body keeps its first leaf and so its marker: the extents of
-    /// the folds around `at` (after the edit) are read again. Bounded by the top-level block.
-    fn refresh_folds_around(&mut self, doc: &dyn FormatDoc, at: usize) {
-        if self.folds.is_empty() {
-            return;
-        }
-        let outer = |p: usize| doc.containers_at(p).first().map(|c| c.span.start);
-        let Some(top) = outer(at).into_iter().chain(outer(at.saturating_sub(1))).min() else {
-            return;
-        };
-        let lo = self.folds.partition_point(|r| r.origin < top);
-        let hi = self.folds.partition_point(|r| r.origin <= at).max(lo);
+    /// An edit in a callout's body keeps its first leaf and so its marker: the extents of the
+    /// folds starting before the edit in the re-parsed top-level blocks are read again. The edit
+    /// need not be in them any more, since it can end the quote above itself, turning a lazy
+    /// line into a block of its own. Other blocks are unchanged, so no fold there is looked at.
+    ///
+    /// `true` when a fold's end moved other than with the text typed in it: what it hides changed
+    /// and the view must derive that again.
+    fn refresh_folds_before(&mut self, doc: &dyn FormatDoc, e: &EditSummary) -> bool {
+        let lo = self.folds.partition_point(|r| r.origin < e.reparsed.start);
+        let hi = self.folds.partition_point(|r| r.origin <= e.changed.start).max(lo);
+        let mut moved = false;
         for k in lo..hi {
             let Some(start) = self.folds.origin(k) else { continue };
             let len = fold_len(doc, start);
             if let Some(f) = self.folds.get_mut(k) {
+                moved |= len != f.len && len as isize != f.len as isize + e.delta;
                 f.len = len;
             }
         }
+        if moved {
+            self.gens.disclosures += 1;
+        }
+        moved
     }
 
     /// [`CrossBlockIndex::replace`] by byte range: the markers starting in `old` (pre-edit
@@ -435,11 +428,10 @@ impl CrossBlockIndex {
         old: std::ops::Range<usize>,
         fresh: Vec<DisclosureMarker>,
         fresh_folds: Vec<FoldMarker>,
-        changed: std::ops::Range<usize>,
-        delta: isize,
+        e: &EditSummary,
     ) -> bool {
-        let folds = self.replace_folds(doc, &old, fresh_folds, &changed, delta);
-        self.replace_markers(doc, old, fresh, changed, delta) | folds
+        let folds = self.replace_folds(doc, &old, fresh_folds, e);
+        self.replace_markers(doc, old, fresh, e.changed.clone(), e.delta) | folds
     }
 
     fn replace_markers(
