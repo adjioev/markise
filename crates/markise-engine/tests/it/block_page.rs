@@ -22,6 +22,11 @@ struct Rig {
 }
 
 fn rig() -> Rig {
+    rig_with("")
+}
+
+/// With more keys in the manifest.
+fn rig_with(manifest_keys: &str) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let base = fs::canonicalize(dir.path()).unwrap();
     let root = base.join("package");
@@ -43,8 +48,10 @@ fn rig() -> Rig {
         {"name": "pictures", "type": "image", "min": 0, "max": null},
     ]});
     let mut files = BTreeMap::new();
-    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1","blocks":["poll","shot"]}"#;
-    files.insert("manifest.json".to_string(), manifest.as_bytes().to_vec());
+    let manifest = format!(
+        r#"{{"format":"markise-block-package/2","library":"sample","version":"1","blocks":["poll","shot"]{manifest_keys}}}"#
+    );
+    files.insert("manifest.json".to_string(), manifest.into_bytes());
     files.insert("components/poll/poll.json".to_string(), poll.to_string().into_bytes());
     files.insert("components/shot/shot.json".to_string(), shot.to_string().into_bytes());
     files.insert("editor/palette.json".to_string(), br#"{"format": 1}"#.to_vec());
@@ -87,6 +94,22 @@ impl Rig {
         let path = self.package.root.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
+    }
+}
+
+#[test]
+fn the_package_contract_says_what_a_block_stands_in() {
+    for (keys, open, close) in [
+        ("", "<section data-component", "</section>"),
+        (r#","htmlContract":1"#, "<section data-component", "</section>"),
+        (r#","htmlContract":2"#, "<div data-component", "</div>"),
+        // a contract not known here, or a value that is none, is read as the first
+        (r#","htmlContract":3"#, "<section data-component", "</section>"),
+        (r#","htmlContract":"2""#, "<section data-component", "</section>"),
+    ] {
+        let r = rig_with(keys);
+        let h = r.page("poll", "many", POLL).prepare().unwrap().html;
+        assert!(h.starts_with(open) && h.ends_with(close), "{keys}: {h}");
     }
 }
 

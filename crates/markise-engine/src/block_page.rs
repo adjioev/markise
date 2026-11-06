@@ -80,7 +80,8 @@ impl JobSource for BlockPage {
             .ok_or("The package has no such block.")?;
         let variant = schema.schema.variants().any(|v| v == self.args);
         let argument = schema.schema.raw.get("argument").is_some();
-        let html = markup(&fields, &spec, variant, argument);
+        let root = BlockRoot::of_contract(self.package.index.html_contract());
+        let html = markup(&fields, &spec, variant, argument, root);
         let images = images_in(&html);
         // a page's address would lose the dots and could name another file: such a path never gets there
         // (these are decoded already)
@@ -276,9 +277,36 @@ fn inline(text: &str) -> String {
     html
 }
 
+/// The element a block's markup stands in: the package's HTML contract says (ADR 0023).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockRoot {
+    /// Contract 1, and a package that names none.
+    Section,
+    /// Contract 2.
+    Div,
+}
+
+impl BlockRoot {
+    /// A contract this Markise does not know is read as the first: what it would ask is not known.
+    pub fn of_contract(contract: u64) -> BlockRoot {
+        if contract == 2 {
+            BlockRoot::Div
+        } else {
+            BlockRoot::Section
+        }
+    }
+
+    fn tag(self) -> &'static str {
+        match self {
+            BlockRoot::Section => "section",
+            BlockRoot::Div => "div",
+        }
+    }
+}
+
 /// The generic markup of ADR 0023, by field type alone.
-pub fn markup(fields: &BlockFields, spec: &FormSpec, variant: bool, argument: bool) -> String {
-    let mut out = String::from("<section");
+pub fn markup(fields: &BlockFields, spec: &FormSpec, variant: bool, argument: bool, root: BlockRoot) -> String {
+    let mut out = format!("<{}", root.tag());
     attr(&mut out, "data-component", fields.name());
     attr(&mut out, "class", fields.name());
     if !fields.args().is_empty() {
@@ -360,7 +388,7 @@ pub fn markup(fields: &BlockFields, spec: &FormSpec, variant: bool, argument: bo
             }
         }
     }
-    out.push_str("</section>");
+    out.push_str(&format!("</{}>", root.tag()));
     out
 }
 

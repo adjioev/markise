@@ -19,6 +19,26 @@ fn refusal(files: &BTreeMap<String, Vec<u8>>) -> String {
 }
 
 #[test]
+fn the_keys_of_a_site_are_read_and_its_other_files_are_nothing_to_a_package() {
+    let manifest = |keys: &str| {
+        format!(
+            r#"{{"format":"markise-block-package/2","library":"sample","version":"1.2.0","blocks":["gallery","poll","tip"]{keys}}}"#
+        )
+    };
+    let index = |keys: &str| PackageIndex::from_files(&with("manifest.json", &manifest(keys))).unwrap();
+    assert_eq!(index("").html_contract(), 1);
+    assert_eq!(index(r#","htmlContract":2"#).html_contract(), 2);
+    assert_eq!(index(r#","htmlContract":"x""#).html_contract(), 1, "read, not checked");
+    assert_eq!(index(r#","authoring":"any""#).authoring(), Some("any"));
+    let mut f = with("templates/page/page.json", r#"{"label":"Page","paths":["/**"]}"#);
+    f.insert("templates/broken/broken.json".to_string(), b"not json".to_vec());
+    assert!(
+        PackageIndex::from_files(&f).is_ok(),
+        "a template is nothing to this format yet"
+    );
+}
+
+#[test]
 fn indexes_blocks_with_schema_view_and_palette() {
     let index = PackageIndex::from_files(&files()).unwrap();
     assert_eq!(index.id().library, "sample");

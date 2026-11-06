@@ -136,6 +136,13 @@ another block stays inside it.
 The bin on a block's top edge, or **Delete Block** (<kbd>Alt+Cmd+⌫</kbd>), removes the block with
 no question. Undo brings it back exactly. Each move and each deletion is one undo step.
 
+## Sections
+
+Some sites divide a page into sections, each a run of text and blocks. A package whose manifest says
+so, or a document with `authoring: blocks-v3` in its front matter, has them on: a line that is exactly
+`---`, at the document's level, starts a section. Markise shows it as a quiet divider with the
+section's name, and the outline and status bar follow. What a section means is the site's business.
+
 ## Images
 
 A picture in a block's native view belongs to the form: **Choose file** opens the image picker. A

@@ -137,8 +137,10 @@ author then sees `Block package problem` and blocks stay cards.
 | `library` | ASCII letters, digits, `-`, `_`, `.`, starting with a letter or digit |
 | `version` | the same, with `+` allowed. Only compared for equality |
 | `blocks` | every block, once. A `components/<x>/<x>.json` for a name not listed is an error |
+| `authoring` | optional. The dialect your site writes in, as a document's front matter would say it. `blocks-v3` turns on [sections](blocks.md#sections) |
+| `htmlContract` | optional, a whole number. Which markup your code expects of a block: `2` has a `<div>` as a block's root, and `1`, or none, or a number Markise does not know, a `<section>`. See [The element](#how-your-code-draws-a-block) |
 
-Other keys are ignored.
+Other keys are ignored, and so are files Markise does not read, such as `templates/<name>/<name>.json`.
 
 ### The schema of a block
 
@@ -277,7 +279,8 @@ it. A block with no view shows it from the start. Where nothing can draw, the bl
 and may return a promise. The picture is taken when that resolves. Without a script the block draws
 from its styles.
 
-**The element** comes from the fields, by type alone:
+**The element** comes from the fields, by type alone. With `"htmlContract": 2` in the manifest its root is a
+`<div>` rather than this `<section>`, and nothing else changes. Select a block by `[data-component]`, never by its tag:
 
 ```html
 <section data-component="name" class="name" data-variant="word" data-argument="word">
@@ -293,7 +296,8 @@ from its styles.
 ```
 
 `data-variant` is there when the arguments name a declared variant, and `data-argument` when the
-schema declares an `argument`. A field with nothing in it has no element. Text goes through the HTML
+schema declares an `argument`. A field with nothing in it has no element. A block is drawn alone: no section of the
+page stands around it, so your styles for a block cannot ask for one. Text goes through the HTML
 export's sanitizer. Ids are not text.
 
 **The page around it:** `<html lang data-theme="light|dark">`, with the block as the first element of

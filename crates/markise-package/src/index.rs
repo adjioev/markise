@@ -8,6 +8,7 @@ use crate::error::{Issue, Issues, PackageError};
 use crate::limits::{MAX_BLOCKS, MAX_NAME_BYTES};
 use crate::palette::{self, Palette, PaletteBlock, PaletteGroup, Preset};
 use crate::schema::{self, BlockSchema};
+use crate::sections::{self, SectionConfig};
 use crate::value::{is_block_name, is_token, parse_object};
 use crate::views::{self, ViewConfig};
 use crate::{FORMAT, FORMAT_STEM, PackageId};
@@ -15,6 +16,7 @@ use crate::{FORMAT, FORMAT_STEM, PackageId};
 pub(crate) const MANIFEST: &str = "manifest.json";
 const PALETTE: &str = "editor/palette.json";
 const VIEWS: &str = "editor/views.json";
+const SECTIONS: &str = "editor/sections.json";
 
 /// A valid package: name to schema, view and palette entry.
 #[derive(Clone, Debug, PartialEq)]
@@ -22,9 +24,13 @@ pub struct PackageIndex {
     id: PackageId,
     /// The manifest's `authoring`, as written (ADR 0026).
     authoring: Option<String>,
+    /// The manifest's `htmlContract`, or 1 without a whole number there (ADR 0023).
+    html_contract: u64,
     blocks: BTreeMap<String, BlockSchema>,
     palette: Palette,
     views: BTreeMap<String, ViewConfig>,
+    /// `editor/sections.json`, if it is there.
+    sections: Option<SectionConfig>,
 }
 
 /// Everything the package says about one block.
@@ -72,6 +78,7 @@ impl PackageIndex {
         let authoring = (manifest.get("authoring").and_then(Value::as_str))
             .filter(|v| !v.is_empty() && v.len() <= MAX_NAME_BYTES)
             .map(str::to_string);
+        let html_contract = manifest.get("htmlContract").and_then(Value::as_u64).unwrap_or(1);
         let known: BTreeSet<String> = names.iter().cloned().collect();
 
         let mut blocks = BTreeMap::new();
@@ -112,13 +119,18 @@ impl PackageIndex {
                 }
             }
         }
+        let section_config = (files.get(SECTIONS))
+            .and_then(|bytes| parse_object(SECTIONS, bytes, &mut issues))
+            .map(|map| sections::parse(SECTIONS, map, &mut issues));
 
         issues.into_result(|| PackageIndex {
             id: PackageId { library, version },
             authoring,
+            html_contract,
             blocks,
             palette,
             views: view_map,
+            sections: section_config,
         })
     }
 
@@ -130,9 +142,11 @@ impl PackageIndex {
                 version: String::new(),
             },
             authoring: None,
+            html_contract: 1,
             blocks: BTreeMap::new(),
             palette: Palette::default(),
             views: BTreeMap::new(),
+            sections: None,
         }
     }
 
@@ -143,6 +157,17 @@ impl PackageIndex {
     /// The authoring dialect the package's site writes in, as its manifest says.
     pub fn authoring(&self) -> Option<&str> {
         self.authoring.as_deref()
+    }
+
+    /// Which markup the package's code expects of a block: the manifest's `htmlContract`, 1 without
+    /// one (ADR 0023). Read, not checked, as `authoring` is.
+    pub fn html_contract(&self) -> u64 {
+        self.html_contract
+    }
+
+    /// What the package says about sections, if it says anything (ADR 0026).
+    pub fn sections(&self) -> Option<&SectionConfig> {
+        self.sections.as_ref()
     }
 
     /// The block's entry; `None` for a name the package does not define.

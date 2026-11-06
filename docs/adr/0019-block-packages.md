@@ -42,6 +42,9 @@ one: `/1` was a pre-release layout that never shipped. Unknown keys inside a kno
 ignored or kept (below), so a package can add data for later Markise versions without a new
 format. A change that an older Markise would misread needs a new format name.
 
+Two optional keys of the manifest are read and not checked, as they are a site's own values: `authoring` (ADR 0026) and `htmlContract` (ADR 0023).
+Other files, such as `templates/<name>/<name>.json`, are opaque like anything else the format does not name.
+
 **`library`** is an ASCII name (letters, digits, `-`, `_`, `.`, starting with a letter or digit).
 **`version`** is the same with SemVer's `+` allowed; Markise compares versions only for equality.
 **`blocks`** lists every block exactly once. A block name follows the `:::name` rule of ADR 0018.
