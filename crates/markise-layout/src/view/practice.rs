@@ -168,6 +168,10 @@ impl View {
         if !self.native.practice.on {
             return false;
         }
+        // not yet known what a package hides: anything in a block may be it
+        if self.native.practice.veiled {
+            return !self.doc.named_containers_at(at).is_empty();
+        }
         self.doc
             .named_containers_at(at)
             .iter()

@@ -1187,3 +1187,31 @@ fn the_comments_panel_lists_nothing_on_what_is_hidden() {
     assert!(labels.contains("a plain note"), "{labels}");
     assert!(!labels.contains("a secret note"), "{labels}");
 }
+
+#[test]
+fn a_document_bound_to_no_package_is_unveiled_with_no_other_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(dir.path()).unwrap().join("plain.md");
+    std::fs::write(&path, ":::note\n\nHeld.\n\n:::\n").unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let opts = markise_ui_egui::AppOptions {
+        config: markise_ui_egui::ConfigDir::Dir(config),
+        ..common::no_watch()
+    };
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 700.0))
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), MarkiseApp::new(opts));
+    h.state_mut().open(path);
+    common::wait_until(&mut h, "load", |a| a.document_text().is_some());
+    // from here on a frame only when one is asked for, as in a window with nobody at it
+    let start = std::time::Instant::now();
+    while h.state_mut().viewer().unwrap().ed.view.blocks_veiled() {
+        assert!(start.elapsed() < common::HANG_GUARD, "never unveiled");
+        if h.ctx.has_requested_repaint() {
+            h.step();
+        } else {
+            std::thread::yield_now();
+        }
+    }
+}
