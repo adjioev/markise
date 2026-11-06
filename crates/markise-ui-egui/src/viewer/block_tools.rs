@@ -126,6 +126,15 @@ impl BlockViews for ViewsWithIcons {
     fn label_row(&self, name: &str) -> bool {
         self.views.label_row(name)
     }
+    fn has_practice(&self, name: &str) -> bool {
+        self.views.has_practice(name)
+    }
+    fn any_practice(&self) -> bool {
+        BlockViews::any_practice(&*self.views)
+    }
+    fn practice_hides_quotes(&self, name: &str) -> bool {
+        self.views.practice_hides_quotes(name)
+    }
     fn icon_ready(&self, icon: &str) -> bool {
         self.icons.ready(icon)
     }
@@ -255,7 +264,11 @@ impl DocViewer {
         let all = why.join("\n");
         let id = ui.scope_id().with(("markise-block-warning", v.idx));
         let resp = ui.interact(r, id, Sense::hover()).on_hover_text(&all);
-        let what = if self.ed.view.block_outside(v.idx) {
+        // (what a block in Practice says is all it says: nothing here can tell an answer)
+        let at = self.ed.view.model().item_start(v.idx);
+        let what = if self.ed.in_practice(at) {
+            "Practice"
+        } else if self.ed.view.block_outside(v.idx) {
             "Outside its schema"
         } else {
             "Not filled in yet"
@@ -293,6 +306,7 @@ impl DocViewer {
     ) {
         let says = match next {
             BlockViewMode::Native => "Show Native View",
+            BlockViewMode::Practice => "Show Native View",
             BlockViewMode::Site => "Show as on the Site",
             BlockViewMode::Markdown => "Show Markdown",
         };
@@ -338,7 +352,7 @@ impl DocViewer {
                 painter.add(egui::Shape::ellipse_stroke(c, waist.size() * 0.5, stroke));
             }
             // a card
-            BlockViewMode::Native => {
+            BlockViewMode::Native | BlockViewMode::Practice => {
                 let rect = Rect::from_center_size(c, vec2(2.0 * s, 1.6 * s));
                 painter.rect_stroke(rect, 1.0, stroke, egui::StrokeKind::Middle);
                 painter.line_segment(
@@ -466,7 +480,8 @@ impl DocViewer {
             let has_view = index.block(&c.name).is_some_and(|e| e.view.is_some());
             let outside = self.ed.view.block_outside(v.idx);
             let all = r.union(r.translate(vec2(-(side + 4.0), 0.0)));
-            if pointer.is_some_and(|p| row.contains(p) || all.contains(p)) {
+            let read = self.ed.read_mode();
+            if pointer.is_some_and(|p| row.contains(p) || (!read && all.contains(p))) {
                 self.pointer_on_block_control = true;
             }
             let show = self.block_controls_show(ui, start, hovered);
@@ -478,6 +493,10 @@ impl DocViewer {
                 let id = ui.scope_id().with(("markise-block-name", start));
                 let named = ui.interact(Rect::from_min_max(at, top_right + vec2(0.0, side)), id, Sense::hover());
                 named.widget_info(|| WidgetInfo::labeled(Role::Label, true, &**name));
+            }
+            // Read has no block controls (ADR 0024)
+            if read {
+                continue;
             }
             if show && (v.layout.has_picture() || quiet.is_some()) {
                 let ground = ui.visuals().window_fill().gamma_multiply(0.85);

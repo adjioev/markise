@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use markise_doc::{DocPos, Params, Patch, PatchSet, Selection};
 use markise_layout::caret::Geometry;
-use markise_layout::{BlockViewMode, BlockViews, Images, NativeAt, TextShaper};
+use markise_layout::{BlockCan, BlockViewMode, BlockViews, Images, NativeAt, TextShaper};
 
 use super::command::CommandError;
 use super::{EditorView, MarkId, StateId, TypingDir};
@@ -51,6 +51,13 @@ pub(super) struct InPlace {
     own_modes: Vec<OwnMode>,
     /// States brought back for openers not in the document yet (the first part of a large file).
     pending_modes: Vec<(usize, BlockViewMode)>,
+    /// What was done in blocks in Practice: never in the document ([`super::practice`]).
+    pub(super) practice: Vec<super::practice::Practised>,
+    /// The document is in Read, and whether that was someone's choice: a package has no say then.
+    pub(super) read: bool,
+    pub(super) read_chosen: bool,
+    /// How many of those were right, of how many checked: read per frame, so not worked out per frame.
+    pub(super) practice_score: (usize, usize),
 }
 
 fn plain_value_is_empty(slot: &Slot) -> bool {
@@ -68,6 +75,7 @@ impl EditorView {
     pub fn set_block_fields(&mut self, fields: Option<Arc<PackageViews>>) {
         self.place.fields = fields;
         self.place.model = None;
+        self.open_as_the_package_says();
         self.end_sticky();
     }
 
@@ -125,6 +133,7 @@ impl EditorView {
             self.add_own_mode(opener.saturating_add_signed(moved), m);
         }
         self.follow_block_modes();
+        self.open_as_the_package_says();
     }
 
     fn clear_own_modes(&mut self) {
@@ -136,7 +145,11 @@ impl EditorView {
 
     /// The next state for the whole document. Blocks that differed follow it.
     pub fn switch_all_block_views(&mut self) {
-        self.place.mode = self.place.mode.next_for(true, self.view.can_draw_site());
+        let can = BlockCan {
+            view: true,
+            site: self.view.can_draw_site(),
+        };
+        self.place.mode = self.place.mode.next_for(can);
         self.clear_own_modes();
         self.follow_block_modes();
         self.leave_block_for_picture(None);
@@ -147,10 +160,20 @@ impl EditorView {
         self.place.fields.as_ref().is_none_or(|f| f.has_view(name))
     }
 
+    /// What a block of this name can show here.
+    fn can_of(&self, name: &str) -> BlockCan {
+        BlockCan {
+            view: self.name_has_view(name),
+            site: self.view.can_draw_site(),
+        }
+    }
+
     /// What comes after this block's state. Asked of the switch before it is pressed, to say so.
     pub fn next_block_view(&self, opener: usize) -> BlockViewMode {
-        let has_view = self.opener_name(opener).is_some_and(|n| self.name_has_view(&n));
-        (self.view.block_mode_of(opener)).next_for(has_view, self.view.can_draw_site())
+        let can = self
+            .opener_name(opener)
+            .map_or_else(BlockCan::default, |n| self.can_of(&n));
+        (self.view.block_mode_of(opener)).next_for(can)
     }
 
     /// A picture shows what no caret can stand in, and a block holding a selection's end shows what it
@@ -167,10 +190,10 @@ impl EditorView {
             return;
         };
         let inside = c.opener.start < at && at < c.closer.end;
-        let site = self
-            .view
-            .block_mode_of(c.opener.start)
-            .shown(self.name_has_view(&c.name), true);
+        let site = self.view.block_mode_of(c.opener.start).shown(BlockCan {
+            site: true,
+            ..self.can_of(&c.name)
+        });
         if !inside || site != BlockViewMode::Site {
             return;
         }
@@ -183,19 +206,21 @@ impl EditorView {
 
     /// The next state for the block with this opener.
     pub fn switch_block_view(&mut self, opener: usize) {
-        let has_view = self.opener_name(opener).is_some_and(|n| self.name_has_view(&n));
-        let site = self.view.can_draw_site();
+        let can = self
+            .opener_name(opener)
+            .map_or_else(BlockCan::default, |n| self.can_of(&n));
         let next = self.next_block_view(opener);
+        let document = self.place.mode;
         let own =
             (self.place.own_modes.iter()).position(|o| self.session.mark(o.mark).is_some_and(|p| p.offset == opener));
         // what shows the same as the document's state needs no state of its own
         match own {
-            Some(i) if next.shown(has_view, site) == self.place.mode.shown(has_view, site) => {
+            Some(i) if next.shown(can) == document.shown(can) => {
                 let o = self.place.own_modes.remove(i);
                 self.session.remove_mark(o.mark);
             }
             Some(i) => self.place.own_modes[i].mode = next,
-            None if next.shown(has_view, site) == self.place.mode.shown(has_view, site) => {}
+            None if next.shown(can) == document.shown(can) => {}
             None => {
                 self.add_own_mode(opener, next);
             }
@@ -371,7 +396,7 @@ impl EditorView {
         }
     }
 
-    fn is_mutating(&self, id: &str) -> bool {
+    pub(super) fn is_mutating(&self, id: &str) -> bool {
         (self.registry.get(id)).is_some_and(|c| matches!(c.desc.effect, markise_doc::Effect::Mutates { .. }))
     }
 
@@ -617,7 +642,7 @@ impl EditorView {
 
     /// Nothing to keep up with: the cost of a document without any of this.
     pub(super) fn place_is_idle(&self) -> bool {
-        self.place.sticky.is_none() && self.place.own_modes.is_empty()
+        self.place.sticky.is_none() && self.place.own_modes.is_empty() && self.place.practice.is_empty()
     }
 
     /// Keeps the block being edited native while the selection is in it. Called on every change
@@ -645,6 +670,7 @@ impl EditorView {
         if self.place.fields.is_none() {
             return sel;
         }
+        let sel = self.practice_selection(sel);
         let p = sel.primary();
         if p.is_caret() {
             let virt_inside = p.focus.virt > 0

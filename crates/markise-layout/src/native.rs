@@ -72,6 +72,66 @@ pub struct NativeBlock {
     pub view: Arc<NativeView>,
     /// The parts by source range relative to the block's start, ascending and disjoint.
     pub parts: Vec<(Range<u32>, NativeRole)>,
+    /// What Practice needs of it, when its view can be practised (ADR 0024).
+    pub practice: Option<PracticeParts>,
+}
+
+/// One answer of a block that can be practised.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PracticeAnswer {
+    /// Its text's source range, relative to the block's start.
+    pub range: Range<u32>,
+    pub correct: bool,
+    /// Its text, for a screen reader. Not its mark.
+    pub text: Box<str>,
+}
+
+/// What Practice shows and hides of a block. Only ever read by what draws Practice.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PracticeParts {
+    /// The block has answers to check, by its schema. If not, Practice only hides and reveals.
+    pub has_choices: bool,
+    pub answers: Vec<PracticeAnswer>,
+    /// What stays hidden until the answers are checked, relative to the block's start.
+    pub reveal: Vec<Range<u32>>,
+}
+
+impl PracticeParts {
+    /// There is something to practise: answers with a mark to check them against, or with no answers
+    /// to give, something to reveal.
+    pub fn is_ready(&self) -> bool {
+        if self.has_choices {
+            self.answers.iter().any(|a| a.correct)
+        } else {
+            !self.reveal.is_empty()
+        }
+    }
+
+    pub fn answer_at(&self, rel: u32) -> Option<usize> {
+        (self.answers.iter()).position(|a| a.range.contains(&rel) || a.range.end == rel)
+    }
+
+    pub fn reveals(&self, rel: u32) -> bool {
+        self.reveal.iter().any(|r| r.contains(&rel))
+    }
+}
+
+/// What the layout of an item of a practised block needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PracticeItem {
+    /// An answer's mark shows `selected` and not what the file says. `correct` is known once checked.
+    Answer {
+        selected: bool,
+        correct: Option<bool>,
+    },
+    /// The block's closer, which holds the row of its buttons.
+    Row,
+    Other,
+}
+
+/// The height of the row of a practised block's buttons: one line, as a paragraph's.
+pub(crate) fn practice_row_height(t: &Theme) -> f32 {
+    t.line_px()
 }
 
 impl NativeBlock {
@@ -144,6 +204,18 @@ pub trait BlockViews: Send + Sync {
     fn id(&self) -> u64;
     /// Whether blocks of this name have a view at all (height estimates: no source is read).
     fn has_view(&self, name: &str) -> bool;
+    /// Whether blocks of this name can be practised (ADR 0024), from the name alone. Implies a view.
+    fn has_practice(&self, _name: &str) -> bool {
+        false
+    }
+    /// Whether blocks of any name can be practised. `false` costs a comparison per item in Read.
+    fn any_practice(&self) -> bool {
+        false
+    }
+    /// Whether Practice hides the quotes of blocks of this name (page estimates: no source is read).
+    fn practice_hides_quotes(&self, _name: &str) -> bool {
+        false
+    }
     /// Whether blocks of this name can be judged at all; the others are not read.
     fn has_schema(&self, name: &str) -> bool {
         self.has_view(name)
@@ -183,6 +255,8 @@ pub struct NativeParams<'a> {
     pub role: Option<NativeRole>,
     /// The view's icon can be drawn (the block's opener only).
     pub icon_ready: bool,
+    /// The block is being practised.
+    pub practice: Option<PracticeItem>,
 }
 
 /// The generic colour names a package can use, light then dark: a name means the same hue in every

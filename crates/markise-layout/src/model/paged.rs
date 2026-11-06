@@ -99,6 +99,10 @@ pub struct PageStats {
     pub card_heads: Vec<(Box<str>, [u32; 6])>,
     /// Openers per name of their block (ADR 0021: a view can have no label row).
     pub card_names: Vec<(Box<str>, u32)>,
+    /// Closers and quote paragraphs per name of the block they are directly in (ADR 0024: Practice
+    /// adds a row to one and can hide the other, and the estimate of a page has to know without
+    /// reading its blocks).
+    pub card_tallies: Vec<(Box<str>, CardTally)>,
     /// `[toc]` blocks (each lists the whole outline).
     pub tocs: u32,
     /// Headings whose text may use a reference definition (their outline entries are
@@ -124,11 +128,26 @@ pub struct PageStats {
     pub measured_gens: DepGens,
 }
 
-impl PageStats {
-    /// Estimated paragraph lines at `per_line` characters per line (interpolated).
-    pub fn para_lines_at(&self, per_line: f32) -> f32 {
+/// What one block name has in a page, for Practice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CardTally {
+    pub closers: u32,
+    /// Quote paragraphs.
+    pub paras: u32,
+    pub wrapped: [u32; PARA_LINE_CHARS.len()],
+}
+
+impl CardTally {
+    /// Their estimated lines at `per_line` characters per line.
+    pub fn lines_at(&self, per_line: f32) -> f32 {
+        lines_at(&self.wrapped, per_line)
+    }
+}
+
+/// Estimated lines at `per_line` characters per line (interpolated), from the sums for [`PARA_LINE_CHARS`].
+fn lines_at(w: &[u32; PARA_LINE_CHARS.len()], per_line: f32) -> f32 {
+    {
         let t = &PARA_LINE_CHARS;
-        let w = &self.para_wrapped;
         let k = t.partition_point(|&n| (n as f32) < per_line);
         if k == 0 {
             return w[0] as f32;
@@ -139,6 +158,13 @@ impl PageStats {
         let (a, b) = (t[k - 1] as f32, t[k] as f32);
         let f = (per_line - a) / (b - a);
         w[k - 1] as f32 + f * (w[k] as f32 - w[k - 1] as f32)
+    }
+}
+
+impl PageStats {
+    /// Estimated paragraph lines at `per_line` characters per line (interpolated).
+    pub fn para_lines_at(&self, per_line: f32) -> f32 {
+        lines_at(&self.para_wrapped, per_line)
     }
 
     /// Headings in the page.
@@ -172,6 +198,32 @@ impl PageStats {
                     None => s.card_names.push((c.name, 1)),
                 }
             }
+            let closes = it.kind == (ItemKind::ContainerMarker { close: true });
+            let quote = it.kind == ItemKind::Paragraph
+                && it.containers.iter().any(|c| matches!(c, super::Container::Card))
+                && it
+                    .containers
+                    .iter()
+                    .any(|c| matches!(c, super::Container::Quote { .. }));
+            if (closes || quote)
+                && let Some(c) = doc.named_containers_at(it.origin).pop()
+            {
+                let at = match s.card_tallies.iter().position(|(n, _)| *n == c.name) {
+                    Some(at) => at,
+                    None => {
+                        s.card_tallies.push((c.name, CardTally::default()));
+                        s.card_tallies.len() - 1
+                    }
+                };
+                let tally = &mut s.card_tallies[at].1;
+                tally.closers += u32::from(closes);
+                if quote {
+                    tally.paras += 1;
+                    for (w, &n) in tally.wrapped.iter_mut().zip(&PARA_LINE_CHARS) {
+                        *w += it.est_lines.max(it.est_chars.div_ceil(n));
+                    }
+                }
+            }
             s.images += it.has_image as u32;
             let prose = matches!(
                 it.kind,
@@ -198,7 +250,16 @@ impl PageStats {
             && (!self.in_disclosure || m.disclosures == now.disclosures)
     }
 
-    fn add(&mut self, it: &Item) {
+    /// A callout's body counted with its first leaf: that leaf stays, one line, as the header.
+    pub(super) fn keep_header(&mut self) {
+        self.items = self.items.saturating_sub(1);
+        self.paras = self.paras.saturating_sub(1);
+        for w in &mut self.para_wrapped {
+            *w = w.saturating_sub(1);
+        }
+    }
+
+    pub(super) fn add(&mut self, it: &Item) {
         self.items += 1;
         match &it.kind {
             ItemKind::Hidden => self.hidden += 1,
@@ -342,7 +403,7 @@ impl DocModel {
             if items.is_empty() {
                 continue;
             }
-            cross.add_from(&items);
+            cross.add_from(doc, &items);
             for it in &items {
                 if let ItemKind::Heading { level } = it.kind {
                     let info = doc.heading(it.origin).unwrap_or_default();
@@ -356,6 +417,7 @@ impl DocModel {
                         anchor,
                         item: pages.len(),
                         key,
+                        in_block: it.containers.iter().any(|c| matches!(c, super::Container::Card)),
                     });
                 }
             }
@@ -482,6 +544,7 @@ impl DocModel {
         let lo = items[0].origin;
         let hi = items.iter().map(|it| it.origin + it.len).max().unwrap_or(lo);
         stats.in_disclosure = self.cross.disclosure_meets(lo, hi);
+        self.cross.refresh_fold_bodies(doc, &items);
         let page = page_item(&items, stats);
         let removed = r.len() - 1;
         let ka = self.outline.partition_point(|o| o.item < r.start);
@@ -641,6 +704,7 @@ impl DocModel {
         let mut pages: Vec<Item> = Vec::new();
         let mut heads: Vec<(usize, u8, usize)> = Vec::new(); // (page, level, heading start)
         let mut markers = Vec::new();
+        let mut folds = Vec::new();
         let mut k = t0;
         while k < t1 {
             let end = (k + tops).min(t1);
@@ -655,6 +719,7 @@ impl DocModel {
                 }
             }
             markers.extend(super::cross::markers_of(&items));
+            folds.extend(super::cross::folds_of(doc, &items));
             pages.push(page_item(&items, PageStats::of(&items, doc)));
         }
         if lo == 0 && pages.is_empty() && hi < n_before && !self.is_page(hi) {
@@ -680,6 +745,7 @@ impl DocModel {
                     anchor: String::new(), // numbered below (its key is affected)
                     item: lo + p,
                     key,
+                    in_block: !doc.named_containers_at(start).is_empty(),
                 }
             })
             .collect();
@@ -699,7 +765,8 @@ impl DocModel {
             }
         }
         // disclosure markers of the region
-        self.cross.replace_range(doc, a..b, markers, e.changed.clone(), e.delta);
+        self.cross
+            .replace_range(doc, a..b, markers, folds, e.changed.clone(), e.delta);
         // document-level inputs
         let mut full = false;
         if e.deps.resources {

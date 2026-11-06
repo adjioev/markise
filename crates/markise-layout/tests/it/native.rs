@@ -68,6 +68,7 @@ impl BlockViews for Stand {
                 label_row: true,
             }),
             parts: role_ranges(source),
+            practice: None,
         })
     }
 }
@@ -415,6 +416,7 @@ fn a_label_is_one_row_whatever_the_package_wrote() {
                     label_row: true,
                 }),
                 parts: role_ranges(source),
+                practice: None,
             })
         }
     }
@@ -473,6 +475,7 @@ fn a_long_name_leaves_room_for_the_warning_and_an_icon_for_the_label() {
                     label_row: true,
                 }),
                 parts: role_ranges(source),
+                practice: None,
             })
         }
     }
@@ -533,6 +536,7 @@ impl BlockViews for Options {
                 label_row: self.label_row,
             }),
             parts: role_ranges(source),
+            practice: None,
         };
         if args == "unfilled" {
             BlockLook::Unfilled {

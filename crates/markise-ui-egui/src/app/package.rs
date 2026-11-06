@@ -63,6 +63,17 @@ impl MarkiseApp {
         &self.package.status
     }
 
+    /// Whether packages can be in use at all here.
+    pub(super) fn block_package_store_in_use(&self) -> bool {
+        self.package.store.is_some()
+    }
+
+    /// The current document's package is known: there is one in use, or a question about it, or none.
+    pub(super) fn block_package_looked_up(&self) -> bool {
+        self.package.store.is_none()
+            || (self.package.running.is_none() && self.package.file.as_deref() == self.document_path())
+    }
+
     /// Starts a job for the current document. A job of an earlier document is dropped with its
     /// receiver.
     fn package_job(&mut self, job: impl FnOnce(&Store) -> Option<Done> + Send + 'static) {
@@ -81,14 +92,14 @@ impl MarkiseApp {
                 if let Some(earlier) = earlier {
                     let _ = earlier.join();
                 }
-                // `None`: nothing to report, so no frame is spent on the common unbound case
+                // `None`: nothing to report, but a frame has to see that: a document stays veiled until then
                 match job(&store) {
                     Some(done) => {
                         let _ = tx.send(done);
-                        wake();
                     }
                     None => drop(tx),
                 }
+                wake();
             });
         match spawned {
             Ok(handle) => {

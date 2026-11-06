@@ -1,0 +1,8 @@
+{
+  "label": "Question",
+  "fields": [
+    { "name": "prompt", "type": "text", "label": "Question" },
+    { "name": "answers", "type": "choices", "label": "Answers", "minItems": 2, "correct": "exactly-one" },
+    { "name": "explanation", "type": "quote", "label": "Explanation", "min": 0 }
+  ]
+}

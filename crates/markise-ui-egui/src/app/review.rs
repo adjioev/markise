@@ -226,7 +226,11 @@ impl MarkiseApp {
     pub(super) fn apply_review_read_only(&mut self) {
         let rendered = !self.source_visible && !self.side_by_side;
         if let Some(d) = self.doc.as_mut() {
-            let want = (rendered && d.viewer.review_preview()).then_some(PREVIEW_READ_ONLY);
+            let want = if d.viewer.ed.read_mode() {
+                Some(markise_engine::editor::READ_ONLY_REASON)
+            } else {
+                (rendered && d.viewer.review_preview()).then_some(PREVIEW_READ_ONLY)
+            };
             if d.viewer.ed.session.read_only() != want {
                 d.viewer.ed.session.set_read_only(want);
             }
@@ -429,6 +433,7 @@ impl MarkiseApp {
             return;
         };
         let (comments, suggestions) = (list.comments, list.suggestions);
+        let read = self.doc.as_ref().is_some_and(|d| d.viewer.ed.read_mode());
         // how comments are shown in the document: the same setting as Preferences
         let display = self.themes.comment_display();
         let picked = display_toggle(ui, look, display);
@@ -444,13 +449,13 @@ impl MarkiseApp {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(suggestions > 0, egui::Button::new("Accept All"))
+                .add_enabled(suggestions > 0 && !read, egui::Button::new("Accept All"))
                 .clicked()
             {
                 act = Some(PanelAction::Run("review.acceptAll", None));
             }
             if ui
-                .add_enabled(suggestions > 0, egui::Button::new("Reject All"))
+                .add_enabled(suggestions > 0 && !read, egui::Button::new("Reject All"))
                 .clicked()
             {
                 act = Some(PanelAction::Run("review.rejectAll", None));
@@ -469,11 +474,19 @@ impl MarkiseApp {
             .doc
             .as_ref()
             .is_some_and(|d| d.viewer.ed.session.revision().counter != counter);
+        // what Practice hides, a comment on it included, is listed nowhere (ADR 0024)
+        let kept: Option<Vec<usize>> = self.doc.as_ref().filter(|d| d.viewer.ed.view.practice_on()).map(|d| {
+            (0..list.rows.len())
+                .filter(|&k| !d.viewer.ed.view.practice_conceals(list.rows[k].start))
+                .collect()
+        });
+        let rows = kept.as_ref().map_or(list.rows.len(), Vec::len);
         egui::ScrollArea::vertical()
             .id_salt("markise-comments-list")
             .auto_shrink([false, true])
-            .show_rows(ui, row_h, list.rows.len(), |ui, range| {
-                for r in &list.rows[range] {
+            .show_rows(ui, row_h, rows, |ui, range| {
+                for k in range {
+                    let r = &list.rows[kept.as_ref().map_or(k, |kept| kept[k])];
                     ui.push_id(("markise-review-row", r.start), |ui| {
                         if let Some(a) = row(ui, look, &rc, r, counter, row_h, stale) {
                             act = Some(a);

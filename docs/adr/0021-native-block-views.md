@@ -140,7 +140,8 @@ block, or none, ends a band: a nested block keeps its own look, and an outer gro
 innermost block around the caret, or when one of them has the keyboard, like the drag grip. They are registered for
 every block on screen in any case and only their painting depends on this, so nothing moves and the keyboard and a
 screen reader have them. The surface keeps Tab for its fields, so from the text the way to them is Esc and then
-Shift+Tab; the commands (Edit Block, Switch This Block's View, Delete Block) do the same for the caret's block. On a
+Shift+Tab; the commands (Edit Block, Switch This Block's View, Delete Block) do the same for the caret's block. In Read
+there are none of them, and neither is their ground (ADR 0024). On a
 block with no label row they lie over the end of its first row, on a ground of their own.
 
 **Accents** are generic colour names with a light and a dark value (`native::accent_color`): slate, gray,

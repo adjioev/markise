@@ -173,7 +173,11 @@ impl EditorView {
                 if self.recent.as_ref().is_some_and(|r| r.len() > RECENT_MAX) {
                     self.recent = None;
                 }
-                let mut ch = self.view.model_mut().apply(self.session.doc(), &e);
+                // (the choices of closed and open blocks between patches stay)
+                let mut ch = match steps.as_deref() {
+                    Some(steps) if steps.len() > 1 => self.view.model_mut().apply_steps(self.session.doc(), &e, steps),
+                    _ => self.view.model_mut().apply(self.session.doc(), &e),
+                };
                 // the edits one by one, not their covering range (a position between two of
                 // them only moved)
                 if ch.moved.is_some()
@@ -182,6 +186,9 @@ impl EditorView {
                     ch.moved = Some(markise_layout::Moved::from_steps(steps));
                 }
                 self.view.apply_change(self.session.doc_arc().clone(), &ch);
+                // typing never goes on out of sight: a closed disclosure or callout around the
+                // caret opens
+                self.view.reveal_offset(self.session.selection().primary().focus.offset);
                 if let Some(p) = self.source.as_mut() {
                     p.view.apply(self.session.doc().text(), &e);
                 }
@@ -209,9 +216,11 @@ impl EditorView {
         if !self.place_is_idle() {
             if let Some(edits) = mode_edits {
                 self.prune_block_modes(&edits);
+                self.prune_practice(&edits);
             }
             self.follow_sticky();
             self.follow_block_modes();
+            self.follow_practice();
         }
         self.pin_caret();
     }
@@ -431,7 +440,19 @@ impl EditorView {
         self.pin_caret();
         let focus = self.session.selection().primary().focus;
         let f = markise_layout::caret::focus_for(&self.view, focus, self.reveal);
+        self.view.set_caret_source(focus.offset);
         self.view.set_focus(f)
+    }
+
+    /// Toggles the collapsible block at item `idx`. Closing a callout around the caret moves the
+    /// caret out, so what is typed next is not out of sight. No edit, no undo entry.
+    pub fn toggle_collapsible(&mut self, idx: usize) {
+        self.view.toggle_expanded(idx);
+        let at = self.session.selection().primary().focus.offset;
+        if let Some(to) = self.view.caret_out_of_closed_fold(idx, at) {
+            self.set_selection(Selection::caret(to));
+            self.refresh_focus();
+        }
     }
 
     /// Geometry over the view (hit testing, caret rectangles) for the UI.

@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use markise_md::callout::Fold;
 use markise_md::{AlertKind, Align};
 use serde_json::{Value, json};
 
@@ -284,6 +285,26 @@ impl AstWriter<'_> {
                 )];
                 inner.extend(self.blocks(blocks));
                 out.push(node("Div", json!([attr("", &[k]), inner])));
+            }
+            ExBlock::Callout {
+                ty,
+                fold,
+                name,
+                title,
+                blocks,
+            } => {
+                let mut inner = vec![node(
+                    "Div",
+                    json!([attr("", &["title"]), [node("Para", json!(self.inlines(title)))]]),
+                )];
+                inner.extend(self.blocks(blocks));
+                let mut attrs: Vec<(&str, &str)> = vec![("callout", name)];
+                match fold {
+                    Fold::Open => attrs.push(("fold", "open")),
+                    Fold::Closed => attrs.push(("fold", "closed")),
+                    Fold::None => {}
+                }
+                out.push(node("Div", json!([["", ["callout", ty.as_str()], attrs], inner])));
             }
             ExBlock::List {
                 ordered,

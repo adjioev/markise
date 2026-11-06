@@ -68,7 +68,7 @@ impl View {
 
     /// Height estimate of a page placeholder with statistics `s` (its measured height while
     /// the view parameters are those it was measured with).
-    pub(super) fn page_estimate(&self, s: &PageStats) -> f32 {
+    pub(super) fn page_estimate(&self, s: &PageStats, source: std::ops::Range<usize>) -> f32 {
         if let Some((w, k, h)) = s.measured
             && w == (self.width * 4.0) as u32
             && k == self.paging_key()
@@ -76,6 +76,16 @@ impl View {
         {
             return f32::from_bits(h);
         }
+        // what closed callouts in the page hide: their bodies, counted as they are when shown
+        let mut h = self.stats_height(s);
+        self.model
+            .cross
+            .closed_fold_bodies(source.start, source.end, |body| h -= self.stats_height(body));
+        h.max(self.theme.line_px())
+    }
+
+    /// The height of the items counted in `s`, shown. Linear in the statistics.
+    fn stats_height(&self, s: &PageStats) -> f32 {
         let t = &self.theme;
         let line = t.line_px();
         let avg_char = t.font_size * 0.5;
@@ -111,6 +121,7 @@ impl View {
         for (_, n) in s.card_names.iter().filter(|(name, _)| self.native_quiet_name(name)) {
             h -= *n as f32 * (crate::block::card_opener_height(t) - crate::block::quiet_opener_height(t));
         }
+        h += self.practice_page_estimate(s, per_line);
         // a TOC lists the whole outline, one line per entry
         h += s.tocs as f32 * self.model.outline.len().max(1) as f32 * line;
         h += s.para_lines_at(per_line) * line;

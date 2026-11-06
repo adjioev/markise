@@ -255,3 +255,149 @@ fn the_controls_of_a_block_with_no_label_row_last_as_long_as_they_are_in_view() 
     common::run(&mut h);
     assert!(h.query_by_label("Edit Block: quiet").is_none());
 }
+
+mod in_read {
+    use markise_layout::BlockViewMode;
+    use markise_ui_egui::menu::MenuAction;
+
+    use super::*;
+
+    const ASK: &str = r#"{"label": "Ask label", "fields": [
+        {"name": "title", "type": "heading", "level": 3, "min": 0},
+        {"name": "prompt", "type": "text"},
+        {"name": "answers", "type": "choices", "minItems": 2, "correct": "exactly-one"},
+        {"name": "why", "type": "quote", "min": 0}
+    ]}"#;
+    const TASK: &str = r#"{"label": "Task label", "fields": [
+        {"name": "title", "type": "heading", "level": 3, "min": 0},
+        {"name": "body", "type": "text"},
+        {"name": "solution", "type": "quote", "min": 0}
+    ]}"#;
+    const VIEWS: &str = r#"{
+        "ask": {"kind": "choices", "accent": "blue", "fill": false, "label": false, "practice": {"reveal": ["why"]}},
+        "task": {"kind": "card", "accent": "none", "fill": false, "label": false, "practice": {"reveal": ["solution"]}}
+    }"#;
+    const MANIFEST: &str =
+        r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["ask","task"]}"#;
+    const DOC: &str = "Before.\n\n:::ask\n\n### Ask heading\n\nA prompt?\n\n- [ ] One {#a1}\n- [x] Two {#a2}\n\n> Explained here.\n\n:::\n\nBetween.\n\n:::task\n\n### Task heading\n\nDo this.\n\n> Solved here.\n\n:::\n\nAfter.\n";
+
+    fn fixture() -> Fixture {
+        Fixture::with_package(
+            DOC,
+            &[
+                ("manifest.json", MANIFEST),
+                ("components/ask/ask.json", ASK),
+                ("components/task/task.json", TASK),
+                ("editor/palette.json", PALETTE),
+                ("editor/views.json", VIEWS),
+            ],
+        )
+    }
+
+    fn read(h: &mut H) {
+        let ctx = h.ctx.clone();
+        assert!(h.state_mut().menu_action(&ctx, &MenuAction::Command("view.readMode")));
+        common::run(h);
+    }
+
+    fn no_controls(h: &H, when: &str) {
+        for block in ["ask", "task"] {
+            for control in ["Edit Block", "Show Markdown", "Show Native View", "Delete Block"] {
+                let label = format!("{control}: {block}");
+                assert!(h.query_by_label(&label).is_none(), "{label}, {when}");
+            }
+        }
+        assert!(h.query_by_label("Drag to move the block").is_none(), "{when}");
+    }
+
+    #[test]
+    fn read_keeps_a_quiet_blocks_controls_hidden_and_its_practice_works() {
+        let f = fixture();
+        let mut h = f.ready();
+        read(&mut h);
+        let all = shown(&mut h);
+        assert!(all.contains("Ask heading") && all.contains("Task heading"), "{all}");
+        assert!(
+            !all.contains("Ask label") && !all.contains("Task label"),
+            "no label row: {all}"
+        );
+        assert!(
+            !all.contains("Explained here") && !all.contains("Solved here"),
+            "hidden: {all}"
+        );
+        assert!(
+            h.query_by_label("Ask label").is_some(),
+            "the name is for a screen reader"
+        );
+        no_controls(&h, "at rest");
+        assert_eq!(
+            h.get_all_by_label("Check").count(),
+            1,
+            "the block with answers has its own"
+        );
+        assert_eq!(h.get_all_by_label("Show answer").count(), 1);
+
+        // the pointer on the block and the caret in it bring none of them, nor their ground
+        let heading = item_rect(&h, "Ask heading");
+        h.hover_at(heading.center());
+        common::run(&mut h);
+        no_controls(&h, "under the pointer");
+        assert_eq!(
+            grounds_over(&h, heading),
+            Vec::<Rect>::new(),
+            "nothing over the heading"
+        );
+        caret(&mut h, DOC.find("A prompt").unwrap());
+        no_controls(&h, "with the caret");
+        assert_eq!(
+            grounds_over(&h, heading),
+            Vec::<Rect>::new(),
+            "nothing over the heading"
+        );
+
+        // a practised block works as any: answer, check, reset, show
+        h.get_by_label("One").click();
+        common::run(&mut h);
+        h.get_by_label("Check").click();
+        common::run(&mut h);
+        assert!(shown(&mut h).contains("Explained here"));
+        assert!(h.query_by_label("Reset").is_some());
+        h.get_by_label("Reset").click();
+        common::run(&mut h);
+        assert!(!shown(&mut h).contains("Explained here"));
+        h.get_by_label("Show answer").click();
+        common::run(&mut h);
+        assert!(shown(&mut h).contains("Solved here"));
+        assert_eq!(text(&h), DOC, "nothing in the file");
+        no_controls(&h, "after practice");
+
+        // back in Edit they are there, and show on hover
+        read(&mut h);
+        let at = DOC.find(":::ask").unwrap();
+        assert_ne!(
+            h.state_mut().viewer().unwrap().ed.view.block_mode_of(at),
+            BlockViewMode::Practice
+        );
+        h.hover_at(item_rect(&h, "Ask heading").center());
+        common::run(&mut h);
+        assert!(drawn(&mut h, "Edit Block: ask"));
+    }
+
+    #[test]
+    fn a_practised_block_with_no_label_row_or_fill_lays_out_as_estimated() {
+        let f = fixture();
+        let mut h = f.ready();
+        read(&mut h);
+        let v = h.state_mut().viewer().unwrap();
+        let view = &mut v.ed.view;
+        let opener = view.model().item_at_offset(DOC.find(":::ask").unwrap());
+        let layout = view.cache_peek(opener).expect("laid out");
+        assert!(layout.bands.iter().all(|b| b.rect.width() == 2.0), "a bar only");
+        assert!(
+            (view.estimate(opener) - layout.height).abs() < 0.01,
+            "{} {}",
+            view.estimate(opener),
+            layout.height
+        );
+    }
+}

@@ -233,6 +233,23 @@ is off by default, and a value of the wrong type refuses the package.
 A block's buttons show when the pointer is on the block, when it holds the caret, or when one of them
 has the keyboard, and they take up no room otherwise.
 
+A `callout`, `card` or `choices` view can be practised in [Read](blocks.md#practice):
+
+```json
+{
+  "question": { "kind": "choices", "practice": { "reveal": ["explanation"] } },
+  "exercise": { "kind": "card", "practice": { "reveal": ["solution"] } }
+}
+```
+
+`reveal` names the fields hidden until the reader asks for them. A block whose schema has a `choices`
+field is checked against its marks, and counts in the score. One with none needs something in `reveal`, shows it behind Show
+answer, and does not count. `reveal` cannot name the answers themselves, or a heading, as the outline
+shows every heading. A package that breaks any of this is refused, with a message naming the block and the field. A block with no
+`practice` has no Practice. Answers keep the rule of their schema, so ids stay as your `choices` field has them.
+
+With `"default": true` beside `reveal`, a document holding a block of that view opens in [Read](blocks.md#read-and-edit), so that answers do not show until asked for. Authors reach editing through the switch in the status bar.
+
 ### Icons
 
 An icon is a name such as `pin`, which means the file `assets/pin.svg`. Without that file nothing
