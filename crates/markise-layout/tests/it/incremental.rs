@@ -56,14 +56,16 @@ fn flattens_containers_into_leaf_items() {
         m.items[4].containers[0],
         Container::Quote {
             callout: None,
-            first: true
+            first: true,
+            ..
         }
     ));
     assert!(matches!(
         m.items[5].containers[0],
         Container::Quote {
             callout: None,
-            first: false
+            first: false,
+            ..
         }
     ));
     assert_eq!(m.items[0].gap, Gap::None);

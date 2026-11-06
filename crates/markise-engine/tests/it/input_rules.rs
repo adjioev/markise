@@ -81,6 +81,15 @@ fn spec02_2_1_rules_one_per_row() {
             ("type:x", "> [!NOTE]\n>\n> x‸", "alert-note"),
         ],
     );
+    // any valid name opens a callout the same way; the tag is complete when `]` is typed
+    script(
+        "> ‸",
+        &[
+            ("type:[!info]", "> [!info](v)‸", "callout-info"),
+            ("type:x", "> [!info]\n>\n> x‸", "callout-info"),
+        ],
+    );
+    script("> ‸", &[("type:[!mine]", "> [!mine](v)‸", "callout-note")]);
     // remaining text is kept
     script("‸milk\n", &[("type:- ", "- ‸milk\n", "ul")]);
 }

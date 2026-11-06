@@ -3,6 +3,7 @@
 //! plus a `mod` line below), not as a new `tests/*.rs` file: each of those builds and
 //! links its own executable.
 
+mod callouts;
 mod common_html;
 mod diagram;
 mod font_fallback;

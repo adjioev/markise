@@ -47,8 +47,8 @@ pub use pos::{Affinity, DocPos, SelRange, Selection, VirtualSlot};
 pub use source::{SourceTok, SourceToken};
 pub use text::{LineEnding, Span};
 pub use view::{
-    CalloutKind, CodeFenceView, ColumnAlign, ContainerKind, CriticKind, FlaggedLine, FlatContainer, FlatEvent,
-    FlatLeaf, HeadingInfo, InlineKind, InlineNode, InlineSource, LeafKind, LeafView, ListMarker, MapPiece,
-    NamedContainer, PieceKind, RawPresentation, RichInline, SectionAt, SectionMetadata, SectionPair, SourceMap,
-    TableView,
+    CalloutAccent, CalloutIcon, CalloutKind, CalloutView, CodeFenceView, ColumnAlign, ContainerKind, CriticKind,
+    FlaggedLine, FlatContainer, FlatEvent, FlatLeaf, HeadingInfo, InlineKind, InlineNode, InlineSource, LeafKind,
+    LeafView, ListMarker, MapPiece, NamedContainer, PieceKind, RawPresentation, RichInline, SectionAt,
+    SectionMetadata, SectionPair, SourceMap, TableView,
 };

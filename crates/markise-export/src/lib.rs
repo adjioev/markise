@@ -299,6 +299,18 @@ fn comment_line(s: &str) -> String {
         .join(" ")
 }
 
+/// The class of the theme's alert colour for a callout type (a quote has none of its own there).
+fn accent_class(ty: markise_md::callout::CalloutType) -> &'static str {
+    use markise_doc::CalloutAccent as A;
+    match ty.accent() {
+        A::Note | A::Quote => "note",
+        A::Tip => "tip",
+        A::Important => "important",
+        A::Warning => "warning",
+        A::Caution => "caution",
+    }
+}
+
 /// A directive's name as a CSS class suffix: ASCII letters, digits, `-`, `_`; anything else
 /// (names may use any script) becomes `-`. The name itself is in `data-name`, escaped.
 pub(crate) fn directive_class(name: &str) -> String {
@@ -764,6 +776,56 @@ impl<'a> Ctx<'a> {
         s
     }
 
+    /// An extended callout (ADR 0025): `<details>` when foldable, else a `<div>`. Colours come from
+    /// the theme's alert classes, so a page without such a callout has the bytes it always had.
+    fn callout(&mut self, b: &Block, head: &markise_md::callout::ExportHead<'_>, out: &mut String) {
+        use markise_md::callout::Fold;
+        let text = self.doc.text();
+        let ty = head.ty.as_str();
+        let accent = accent_class(head.ty);
+        let classes = format!("md-alert md-alert-{accent} md-callout md-callout-{ty} {ty}");
+        let data = if head.ty == markise_md::callout::CalloutType::Unknown {
+            format!(" data-callout='{}'", esc(head.name))
+        } else {
+            String::new()
+        };
+        let title = match head.title {
+            Some(t) => self.inline_html(t),
+            None => esc(&head.label),
+        };
+        let title_class = format!("md-callout-title md-alert-text md-alert-text-{accent}");
+        let tag = match head.fold {
+            Fold::None => {
+                let _ = writeln!(
+                    out,
+                    "<div class='{classes}'{data}>\n<p class='{title_class}'>{title}</p>"
+                );
+                "div"
+            }
+            fold => {
+                let open = if fold == Fold::Open { " open" } else { "" };
+                let _ = writeln!(
+                    out,
+                    "<details class='{classes}'{data}{open}>\n<summary class='{title_class}'>{title}</summary>"
+                );
+                "details"
+            }
+        };
+        for (i, c) in b.children.iter().enumerate() {
+            if i == 0 {
+                // the tag line goes
+                if c.lines.len() > 1 {
+                    let rest: Vec<&str> = c.lines[1..].iter().map(|l| l.slice(text)).collect();
+                    let html = self.inline_html(&rest.join("\n"));
+                    let _ = writeln!(out, "<p>{html}</p>");
+                }
+                continue;
+            }
+            self.block(c, out, false);
+        }
+        let _ = writeln!(out, "</{tag}>");
+    }
+
     fn block(&mut self, b: &Block, out: &mut String, tight: bool) {
         let text = self.text;
         match &b.kind {
@@ -826,7 +888,16 @@ impl<'a> Ctx<'a> {
                 out.push('\n');
             }
             BlockKind::Table { aligns } => self.table(b, aligns, out),
-            BlockKind::BlockQuote { alert } => match alert {
+            BlockKind::BlockQuote { callout }
+                if let Some(head) = b
+                    .children
+                    .first()
+                    .and_then(|c| c.lines.first())
+                    .and_then(|l| markise_md::callout::export_head(*callout, l.slice(text))) =>
+            {
+                self.callout(b, &head, out);
+            }
+            BlockKind::BlockQuote { callout } => match callout.and_then(|c| c.alert) {
                 Some(kind) => {
                     let k = kind.as_str();
                     let _ = writeln!(out, "<div class='md-alert md-alert-{k} {k}'>");

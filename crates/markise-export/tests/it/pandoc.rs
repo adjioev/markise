@@ -173,4 +173,32 @@ fn a_directive_is_a_div() {
     assert_eq!(div["c"][0][2][0][1], "note");
     assert_eq!(div["c"][0][2][1][1], "x \"y\"");
     assert_eq!(div["c"][1][1]["t"], "Para");
+    // and Pandoc takes it as it is, when it is installed
+    let Some(info) = info() else { return };
+    let ours = pandoc::to_pandoc_json(&model("> [!warning]- T\n> body\n"), &info.api);
+    let back = run(&info, &["-f", "json", "-t", "json"], &ours.to_string());
+    let back: Value = serde_json::from_str(&back).unwrap();
+    assert_eq!(back["blocks"], ours["blocks"]);
+}
+
+/// Extended callouts (ADR 0025): a `Div` with classes and the title's `Div`, whatever Pandoc is
+/// installed (the JSON is ours).
+#[test]
+fn callouts_are_divs_with_classes() {
+    let ours = pandoc::to_pandoc_json(&model("> [!warning]- T\n> body\n"), &[1, 23]);
+    let div = &ours["blocks"][0];
+    assert_eq!(div["t"], "Div");
+    assert_eq!(div["c"][0][1], serde_json::json!(["callout", "warning"]));
+    assert_eq!(
+        div["c"][0][2],
+        serde_json::json!([["callout", "warning"], ["fold", "closed"]])
+    );
+    assert_eq!(div["c"][1][0]["c"][0][1], serde_json::json!(["title"]));
+    assert_eq!(div["c"][1][1]["t"], "Para");
+    // and Pandoc takes it as it is, when it is installed
+    let Some(info) = info() else { return };
+    let ours = pandoc::to_pandoc_json(&model("> [!warning]- T\n> body\n"), &info.api);
+    let back = run(&info, &["-f", "json", "-t", "json"], &ours.to_string());
+    let back: Value = serde_json::from_str(&back).unwrap();
+    assert_eq!(back["blocks"], ours["blocks"]);
 }
