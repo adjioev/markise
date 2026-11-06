@@ -69,6 +69,7 @@ fn kind_of(f: &FieldSpec) -> Option<FieldKind> {
         Some("list") => Some(FieldKind::List),
         Some("choices") => Some(FieldKind::Choices),
         Some("image") => Some(FieldKind::Image),
+        Some("argument") => Some(FieldKind::Argument),
         Some(_) => None,
         None => match f.control {
             Control::Text { .. } => Some(FieldKind::Text),

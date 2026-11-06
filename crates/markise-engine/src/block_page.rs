@@ -291,6 +291,8 @@ pub fn markup(fields: &BlockFields, spec: &FormSpec, variant: bool, argument: bo
     out.push('>');
     for field in fields.fields() {
         match (&field.kind, &field.value) {
+            // it is `data-argument` above
+            (FieldKind::Argument, _) => {}
             (_, FieldValue::Text(text)) if text.trim().is_empty() => {}
             (_, FieldValue::Items(items)) if items.is_empty() => {}
             (FieldKind::Heading { level }, FieldValue::Text(text)) => {

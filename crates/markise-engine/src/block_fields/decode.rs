@@ -139,6 +139,7 @@ fn takes(kind: FieldKind, sh: Shape) -> bool {
         FieldKind::List => sh == Shape::PlainList,
         FieldKind::Choices => sh == Shape::TaskList,
         FieldKind::Image => sh == Shape::Images,
+        FieldKind::Argument => false,
     }
 }
 
@@ -388,6 +389,7 @@ fn read_field(s: &str, f: &mut Field, group: &[Block], whole: R, next_item: &mut
         }
     };
     match f.kind {
+        FieldKind::Argument => {}
         FieldKind::Heading { .. } => {
             f.src = heading_src(s, &group[0], whole);
             f.value = FieldValue::Text(f.src.lines[0].value.clone());
@@ -485,6 +487,9 @@ pub(super) fn decode(
         }
     };
     let mut fields: Vec<Field> = decls.iter().map(new_field).collect();
+    for f in fields.iter_mut().filter(|f| f.kind == FieldKind::Argument) {
+        f.value = FieldValue::Text(s[args.start..args.end].to_string());
+    }
     let (mut chunks, mut next_item, mut i) = (Vec::new(), 0, 0);
     while i < kids.len() {
         let mut j = i + 1;

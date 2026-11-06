@@ -135,7 +135,13 @@ impl OpenForm {
         let variant = Some(args.as_str()).filter(|a| !a.is_empty() && schema.variants().any(|v| v == *a));
         let variant_label = schema.variant_label(variant.unwrap_or(""), LANGUAGE);
         let title = label.to_string();
-        let note = variant_label.map_or_else(|| args.clone(), str::to_string);
+        // with a field of their own the arguments need no note
+        let args_note = if schema.raw.get("argument").is_some() {
+            String::new()
+        } else {
+            args.clone()
+        };
+        let note = variant_label.map_or(args_note, str::to_string);
         // a name; a package gives it meaning with a file of that name, or leaves it a name
         let icon_name =
             (entry.view.and_then(|v| v.icon.as_deref())).or_else(|| entry.palette.and_then(|p| p.icon.as_deref()));

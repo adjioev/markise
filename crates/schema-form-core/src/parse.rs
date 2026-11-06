@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use serde_json::{Map, Value};
 
 use crate::{
-    ChoiceOption, ChoiceShape, Control, CorrectRule, FieldSpec, FormSpec, JsonType, Limits, OptionsRule, PropRule,
-    SPEC_VERSION, Selection, SpecError, ValueRule,
+    ChoiceOption, ChoiceShape, Control, CorrectRule, FieldSpec, FormSpec, JsonType, Limits, OptionsRule, Pattern,
+    PropRule, SPEC_VERSION, Selection, SpecError, ValueRule,
 };
 
 /// Keys of a schema that describe and never constrain; ignored.
@@ -65,9 +65,10 @@ fn limits(path: &str, o: &Map<String, Value>) -> Result<Limits, SpecError> {
     })
 }
 
-const SCHEMA_KEYS: [&str; 10] = [
+const SCHEMA_KEYS: [&str; 11] = [
     "type",
     "enum",
+    "pattern",
     "properties",
     "required",
     "items",
@@ -97,6 +98,7 @@ const STRING_HINTS: [&str; 7] = ["label", "help", "widget", "custom", "add_label
 fn check_applies(path: &str, s: &Map<String, Value>, ty: &str) -> Result<(), SpecError> {
     let all = [
         "enum",
+        "pattern",
         "properties",
         "required",
         "additionalProperties",
@@ -107,7 +109,7 @@ fn check_applies(path: &str, s: &Map<String, Value>, ty: &str) -> Result<(), Spe
         "maxItems",
     ];
     let allowed: &[&str] = match ty {
-        "string" => &["enum", "minLength", "maxLength"],
+        "string" => &["enum", "pattern", "minLength", "maxLength"],
         "array" => &["items", "minItems", "maxItems"],
         "object" => &["properties", "required", "additionalProperties"],
         _ => &[],
@@ -224,6 +226,18 @@ fn enum_of(path: &str, s: &Map<String, Value>) -> Result<Option<Vec<String>>, Sp
     Ok(Some(names.into_iter().map(str::to_string).collect()))
 }
 
+/// `pattern`: a string the engine can run within its bounds.
+fn pattern_of(path: &str, s: &Map<String, Value>) -> Result<Option<Pattern>, SpecError> {
+    let Some(p) = s.get("pattern") else {
+        return Ok(None);
+    };
+    let here = join(path, "pattern");
+    let Some(text) = p.as_str() else {
+        return err(&here, "must be a string");
+    };
+    Pattern::new(text).map(Some).or_else(|why| err(&here, why))
+}
+
 /// The options of choice buttons: the hints' `options`, then what else `allowed` holds. With
 /// `allowed` (an `enum`) an option must be one of those; without it there must be options.
 fn options_of(path: &str, h: &Map<String, Value>, allowed: Option<&[String]>) -> Result<Vec<ChoiceOption>, SpecError> {
@@ -307,6 +321,7 @@ fn rule_of(
         closed: false,
         choices: None,
         one_of: enum_of(path, s)?,
+        pattern: pattern_of(path, s)?,
         options: None,
     };
     if json_type == JsonType::Array {
@@ -541,6 +556,10 @@ fn uses_choice_rules(r: &ValueRule) -> bool {
         || r.props.iter().any(|p| uses_choice_rules(&p.rule))
 }
 
+fn uses_pattern(r: &ValueRule) -> bool {
+    r.pattern.is_some() || r.items.as_deref().is_some_and(uses_pattern) || r.props.iter().any(|p| uses_pattern(&p.rule))
+}
+
 /// Replaces in `base` what `over` says, object by object.
 fn overlay(base: &mut Value, over: &Value) {
     match (base, over) {
@@ -585,6 +604,9 @@ impl FormSpec {
         let rule = rule_of("", s, m, false)?;
         if version < 2 && uses_choice_rules(&rule) {
             return err("hints/version", "`enum` and choice buttons need version 2");
+        }
+        if version < 3 && uses_pattern(&rule) {
+            return err("hints/version", "`pattern` needs version 3");
         }
         Ok(FormSpec { fields, rule })
     }

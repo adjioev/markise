@@ -141,3 +141,39 @@ fn a_new_row_of_a_form_stores_with_a_fresh_id() {
         json!({"id": "a3", "text": "Blue", "correct": true})
     );
 }
+
+fn with_argument(argument: Value, fields: Value) -> (PackageIndex, FormSpec) {
+    let block = json!({"label": "Plate", "argument": argument, "fields": fields});
+    let mut files = BTreeMap::new();
+    files.insert(
+        "manifest.json".to_string(),
+        br#"{"format":"markise-block-package/2","library":"sample","version":"1","blocks":["plate"]}"#.to_vec(),
+    );
+    files.insert(
+        "components/plate/plate.json".to_string(),
+        block.to_string().into_bytes(),
+    );
+    files.insert("editor/palette.json".to_string(), br#"{"format": 1}"#.to_vec());
+    let index = PackageIndex::from_files(&files).expect("a valid package");
+    let i = index.form_input("plate", "en").expect("a schema").expect("converted");
+    let spec = FormSpec::parse(&i.schema, &i.hints, None).expect("in the subset");
+    (index, spec)
+}
+
+#[test]
+fn an_argument_has_the_shape_the_spec_declares_and_no_markup_of_its_own() {
+    let fields = json!([{"name": "title", "type": "heading", "min": 0}, {"name": "body", "type": "text", "min": 0}]);
+    let (_, spec) = with_argument(json!({"name": "set"}), fields);
+    let decls = decls_from_spec(&spec).expect("every field has a place");
+    for source in [":::plate a/b\n\n## T\n\nText\n\n:::", ":::plate\n:::"] {
+        let model = BlockFields::decode(source, 0, &decls, &ParseOptions::default()).expect("a block");
+        assert_shape(&spec.rule, &model.values(), source);
+        assert!(model.edits_from_values(&model.values()).expect("its own").is_empty());
+    }
+    let model = BlockFields::decode(":::plate a/b\n\nText\n\n:::", 0, &decls, &ParseOptions::default()).unwrap();
+    assert_eq!(model.values()[markise_package::ARGUMENT_KEY], "a/b");
+    let html = markise_engine::block_page::markup(&model, &spec, false, true);
+    assert_eq!(html.matches("a/b").count(), 1, "only in its attribute: {html}");
+    assert!(html.contains(r#"data-argument="a/b""#), "{html}");
+    assert!(!html.contains(markise_package::ARGUMENT_KEY), "{html}");
+}

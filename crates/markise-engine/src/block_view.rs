@@ -49,6 +49,8 @@ fn role_of(k: FieldKind) -> NativeRole {
         FieldKind::List => NativeRole::ListItem,
         FieldKind::Choices => NativeRole::Answer,
         FieldKind::Image => NativeRole::Image,
+        // has no region of the block, so nothing asks
+        FieldKind::Argument => NativeRole::Text,
     }
 }
 

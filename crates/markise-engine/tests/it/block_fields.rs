@@ -1185,3 +1185,140 @@ fn the_largest_number_in_an_id_does_not_overflow_the_next_one() {
         next.source()
     );
 }
+
+fn plate_decls() -> Vec<FieldDecl> {
+    vec![
+        FieldDecl::new("which", FieldKind::Argument),
+        FieldDecl::new("title", FieldKind::Heading { level: None }),
+        FieldDecl::new("body", FieldKind::Text),
+    ]
+}
+
+fn set_argument(text: &str) -> FieldEdit {
+    FieldEdit::SetText {
+        field: "which".to_string(),
+        text: text.to_string(),
+    }
+}
+
+#[test]
+fn an_edit_of_the_argument_changes_only_its_bytes() {
+    for (src, new, want) in [
+        (":::plate a/b\n\nText\n\n:::", "c/d", ":::plate c/d\n\nText\n\n:::"),
+        // the fence, what stands around the arguments and the line endings stay
+        ("::::plate a/b\n\nText\n\n::::", "c", "::::plate c\n\nText\n\n::::"),
+        (
+            ":::plate\t  a b  \t\n\nText\n\n:::",
+            "c",
+            ":::plate\t  c  \t\n\nText\n\n:::",
+        ),
+        (
+            ":::plate a\r\n\r\nText\r\n\r\n:::",
+            "bc",
+            ":::plate bc\r\n\r\nText\r\n\r\n:::",
+        ),
+        (":::plate a\n:::", "ю/я", ":::plate ю/я\n:::"),
+        // none yet: one blank before it
+        (":::plate\n\nText\n\n:::", "c", ":::plate c\n\nText\n\n:::"),
+        (":::plate  \n\nText\n\n:::", "c", ":::plate c  \n\nText\n\n:::"),
+        // none any more: what stood before it goes with it
+        (":::plate a/b\n\nText\n\n:::", "", ":::plate\n\nText\n\n:::"),
+        (":::plate\t a/b  \n\nText\n\n:::", "", ":::plate  \n\nText\n\n:::"),
+        // the ends of a typed value are not part of an argument
+        (":::plate a\n\nText\n\n:::", "  c d\t", ":::plate c d\n\nText\n\n:::"),
+        // what could read as markup anywhere else is plain text here
+        (":::plate a\n:::", ":::x {#y} # *z*", ":::plate :::x {#y} # *z*\n:::"),
+    ] {
+        let next = run(&dec(src, &plate_decls()), &[set_argument(new)]);
+        assert_eq!(next.source(), want, "{src:?}");
+        assert_eq!(next.args(), new.trim_matches([' ', '\t']));
+        assert_eq!(next.values()["which"], next.args());
+    }
+}
+
+#[test]
+fn the_patch_of_an_argument_is_inside_the_opener() {
+    let b = dec(":::plate old/name\n\n## T\n\nText\n\n:::", &plate_decls());
+    let out = b.apply(&[set_argument("old/other")]).expect("applies");
+    let [p] = out.patches.patches() else {
+        panic!("{:?}", out.patches)
+    };
+    assert_eq!(&b.source()[p.range.clone()], "name");
+    assert_eq!(p.insert.as_str(), "other");
+    // with a field in the same change, each stays where it is
+    let both = [
+        set_argument("x"),
+        FieldEdit::SetText {
+            field: "body".to_string(),
+            text: "Other".to_string(),
+        },
+    ];
+    assert_eq!(run(&b, &both).source(), ":::plate x\n\n## T\n\nOther\n\n:::");
+}
+
+#[test]
+fn an_argument_is_one_line_and_reads_back_or_nothing_happens() {
+    let b = dec(":::plate a\n\nText\n\n:::", &plate_decls());
+    for bad in ["two\nlines", "two\r\nlines", "end\r"] {
+        assert!(matches!(
+            b.apply(&[set_argument(bad)]),
+            Err(markise_engine::block_fields::FieldsError::WrongKind { .. })
+        ));
+    }
+    // not what the parser calls a blank: as it stands in the file, it stays
+    let nbsp = dec(":::plate \u{a0}a\u{a0}\n:::", &plate_decls());
+    assert_eq!(nbsp.args(), "\u{a0}a\u{a0}");
+    assert!(nbsp.edits_from_values(&nbsp.values()).unwrap().is_empty());
+}
+
+#[test]
+fn an_argument_is_a_value_of_the_form_and_no_place_to_type() {
+    let b = dec(":::plate a/b\n\n## T\n\nText\n\n:::", &plate_decls());
+    assert_eq!(b.values(), json!({"which": "a/b", "title": "T", "body": "Text"}));
+    assert!(b.edits_from_values(&b.values()).unwrap().is_empty());
+    assert_eq!(
+        b.edits_from_values(&json!({"which": "  a/b "})).unwrap(),
+        [],
+        "only blanks around it: no change"
+    );
+    assert_eq!(
+        b.edits_from_values(&json!({"which": "c"})).unwrap(),
+        [set_argument("c")]
+    );
+    assert_eq!(b.edits_from_values(&json!({"which": ""})).unwrap(), [set_argument("")]);
+    // no slot, no region: the keyboard gets nowhere near it, and an empty one neither
+    assert!(b.slots().iter().all(|s| s.kind != FieldKind::Argument));
+    assert!(b.field_regions().iter().all(|(_, k)| *k != FieldKind::Argument));
+    let empty = dec(":::plate\n:::", &plate_decls());
+    assert!(empty.slots().is_empty());
+    // the body goes to the fields as it did, whatever the argument
+    assert_eq!(b.field("title").unwrap().value, FieldValue::Text("T".into()));
+    assert!(b.extras().is_empty());
+}
+
+#[test]
+fn a_slot_edit_keeps_the_argument_and_an_argument_is_one_undo_step() {
+    let src = "Before.\n\n:::plate a\n\nText\n\n:::\n";
+    let mut s = session(src);
+    let r = block_range_at(s.doc(), src.find(":::plate").unwrap()).expect("a block");
+    let b = BlockFields::decode(&src[r.clone()], r.start, &plate_decls(), &ParseOptions::default()).expect("a block");
+    let undo = s.history().undo_len();
+    let edits = [
+        set_argument("c/d"),
+        FieldEdit::SetText {
+            field: "body".to_string(),
+            text: "Other".to_string(),
+        },
+    ];
+    b.apply_to_session(&mut s, &edits, "Edit Block").expect("applies");
+    assert_eq!(s.text(), "Before.\n\n:::plate c/d\n\nOther\n\n:::\n");
+    assert_eq!(s.history().undo_len(), undo + 1);
+    assert!(s.undo());
+    assert_eq!(s.text(), src);
+    // and a block that changed refuses, as any edit of it
+    let mut changed = session(&src.replace(":::plate a", ":::plate z"));
+    assert!(matches!(
+        b.apply_to_session(&mut changed, &[set_argument("c")], "Edit Block"),
+        Err(markise_engine::block_fields::FieldsError::Stale)
+    ));
+}
