@@ -94,23 +94,28 @@ pub struct PracticeParts {
     pub answers: Vec<PracticeAnswer>,
     /// What stays hidden until the answers are checked, relative to the block's start.
     pub reveal: Vec<Range<u32>>,
+    /// A line reads `[x]` or `[ ]` in a list, and no answer holds it: a text field took it in, as it does a
+    /// list only some of whose lines have one. It says what it says as text, so nothing here hides it.
+    pub stray_marks: bool,
 }
 
 impl PracticeParts {
     /// There is something to practise: answers with a mark to check them against, or with no answers
     /// to give, something to reveal.
     pub fn is_ready(&self) -> bool {
-        if self.has_choices {
+        if self.stray_marks {
+            false
+        } else if self.has_choices {
             self.answers.iter().any(|a| a.correct)
         } else {
             !self.reveal.is_empty()
         }
     }
 
-    /// Nothing here for anyone to work out: no answers and nothing to reveal, as when what would be revealed
-    /// is an optional field left empty. Such a block is not practised: it shows as it is (ADR 0024).
+    /// Nothing here for anyone to work out: no answers, nothing to reveal and no mark that looks like an answer,
+    /// as when what would be revealed is an optional field left empty. Such a block is not practised: it shows as it is (ADR 0024).
     pub fn nothing_to_practise(&self) -> bool {
-        self.answers.is_empty() && self.reveal.is_empty()
+        self.answers.is_empty() && self.reveal.is_empty() && !self.stray_marks
     }
 
     pub fn answer_at(&self, rel: u32) -> Option<usize> {

@@ -306,6 +306,18 @@ fn the_check_and_practice_agree() {
         assert!(says(source).is_empty(), "{source}");
         assert!(parts(source, name).is_ready(), "{source}");
     }
+    // a mark no field reads as an answer: not ready in the view, and so in the check
+    for (name, source) in [
+        ("task", ":::task\n\nDo.\n\n- [x] One {#a1}\n- Two {#a2}\n\n:::"),
+        ("pick", ":::pick\n\nDo.\n\n- [x] One {#a1}\n- Two {#a2}\n\n:::"),
+        ("task", ":::task\n\nDo.\n\n- [ ] One\n\n:::"),
+    ] {
+        let p = parts(source, name);
+        assert!(!p.is_ready() && !p.nothing_to_practise(), "{source}");
+        let problems = says(source);
+        assert_eq!(problems.len(), 1, "{source}: {problems:?}");
+        assert!(problems[0].reason.contains("not read as answers"), "{problems:?}");
+    }
     // answers and no mark: the view says not ready, and so does the check
     let source = ":::pick\n\nDo.\n\n- [ ] One {#a1}\n- [ ] Two {#a2}\n\n> Why.\n\n:::";
     assert!(!parts(source, "pick").is_ready() && !parts(source, "pick").nothing_to_practise());
