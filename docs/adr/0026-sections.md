@@ -158,8 +158,9 @@ values to choose from if any. A site may call a section what it likes, and Marki
 Choosing the item opens a modal form. Nothing is written before Save. An edit, another document or Read closes it with nothing written. `EditorView::insert_section` writes, at root level by the rule that places a
 block (`line_for_block`), with a blank line each side by `separated`, one undo step named Insert Section, the caret at the end of the title, before its hidden id:
 
-- **A boundary above it**, if the section it lands in has anything before that place. A boundary with nothing above it would be an empty section, which a site refuses, and on the first line of a
+- **A boundary above it**, if the section it lands in has anything before that place but its metadata. A boundary with nothing above it would be an empty section, and with only metadata above it a section a site refuses all the same, and on the first line of a
   file it can be front matter. Then the heading goes with no boundary, and if something other than a boundary follows, a boundary after it keeps that a section of its own.
+- **Refused, for what it would leave**: new metadata in a section that has its metadata and nothing else, where a second block has no place and a boundary would leave that section as it is; and a boundary with only metadata below it. A message says so.
 - **Refused**, nothing changed: the heading has to stand as a heading with its id, the number of sections has to be what was meant and every block has to pair as before. An unclosed fence that takes what is put after it is the case, and
   a lone first-line `---` that a second one would turn into front matter.
 - A title is one line. It is Markdown as any heading's text is. A trailing `{#x}` typed in it stays text, since the id written after it is the last.

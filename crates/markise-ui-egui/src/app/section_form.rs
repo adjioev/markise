@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use egui::{Context, Id, Key, RichText, TextEdit};
 use markise_engine::editor::NewSection;
 use markise_engine::section_id::{is_section_id, section_id};
-use markise_package::{DEFAULT_SECTION_LABEL, SectionConfig};
+use markise_package::{DEFAULT_SECTION_LABEL, SectionConfig, is_section_value};
 
 use super::MarkiseApp;
 use crate::block_form::package_language;
@@ -68,16 +68,29 @@ impl SectionForm {
         self.taken.contains(&id).then_some("This id is taken on this page.")
     }
 
-    /// Save can go on: a heading needs some text, and the id has to be one.
+    /// Save can go on: a heading needs some text, the id has to be one, and what is filled in has to be a
+    /// metadata value.
     pub fn can_save(&self) -> bool {
-        !self.title.trim().is_empty() && self.id_problem().is_none()
+        !self.title.trim().is_empty() && self.id_problem().is_none() && self.fields.iter().all(FormField::fits)
     }
 
     fn metadata(&self) -> Vec<(String, String)> {
         (self.fields.iter())
-            .map(|f| (f.key.clone(), f.value.split_whitespace().collect::<Vec<_>>().join(" ")))
+            .map(|f| (f.key.clone(), f.written().to_string()))
             .filter(|(_, v)| !v.is_empty())
             .collect()
+    }
+}
+
+impl FormField {
+    /// What goes in the file: a value is literal, and only what is around it goes, as a reader takes that off.
+    fn written(&self) -> &str {
+        self.value.trim()
+    }
+
+    /// Empty, which is not written, or a value by the grammar of ADR 0026.
+    fn fits(&self) -> bool {
+        self.written().is_empty() || is_section_value(self.written())
     }
 }
 
@@ -232,30 +245,44 @@ impl MarkiseApp {
             {
                 ui.label(RichText::new(problem).color(look.danger).small());
             }
-            for field in &mut form.fields {
-                ui.add_space(8.0);
-                let named = ui.label(RichText::new(&field.label).color(look.weak));
-                if field.choices.is_empty() {
-                    let edit = TextEdit::singleline(&mut field.value).desired_width(f32::INFINITY);
-                    let label = field.label.clone();
-                    ui.add(edit)
-                        .widget_info(|| egui::WidgetInfo::labeled(Role::TextInput, true, &label));
-                } else {
-                    let chosen = (field.choices.iter())
-                        .find(|(v, _)| *v == field.value)
-                        .map_or(String::new(), |(_, l)| l.clone());
-                    egui::ComboBox::from_id_salt(("markise-section-field", &field.key))
-                        .selected_text(chosen)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut field.value, String::new(), "");
-                            for (value, label) in &field.choices {
-                                ui.selectable_value(&mut field.value, value.clone(), label);
-                            }
-                        })
-                        .response
-                        .labelled_by(named.id);
-                }
-            }
+            // a site can declare many: the fields scroll, and the buttons stay
+            let height = (ui.ctx().content_rect().height() - 200.0).max(80.0);
+            egui::ScrollArea::vertical()
+                .max_height(height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for field in &mut form.fields {
+                        ui.add_space(8.0);
+                        let named = ui.label(RichText::new(&field.label).color(look.weak));
+                        if field.choices.is_empty() {
+                            let edit = TextEdit::singleline(&mut field.value).desired_width(f32::INFINITY);
+                            let label = field.label.clone();
+                            ui.add(edit)
+                                .widget_info(|| egui::WidgetInfo::labeled(Role::TextInput, true, &label));
+                        } else {
+                            let chosen = (field.choices.iter())
+                                .find(|(v, _)| *v == field.value)
+                                .map_or(String::new(), |(_, l)| l.clone());
+                            egui::ComboBox::from_id_salt(("markise-section-field", &field.key))
+                                .selected_text(chosen)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut field.value, String::new(), "");
+                                    for (value, label) in &field.choices {
+                                        ui.selectable_value(&mut field.value, value.clone(), label);
+                                    }
+                                })
+                                .response
+                                .labelled_by(named.id);
+                        }
+                        if !field.fits() {
+                            ui.label(
+                                RichText::new("One line, up to 200 characters.")
+                                    .color(look.danger)
+                                    .small(),
+                            );
+                        }
+                    }
+                });
             let can_save = form.can_save();
             let mut act = None;
             footer(ui, |ui| {
