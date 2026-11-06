@@ -6,7 +6,7 @@ use std::sync::Arc;
 use egui::accesskit::Role;
 use egui::{Rect, Sense, Ui, WidgetInfo, pos2, vec2};
 use markise_engine::sections::{Dialect, section_dialect};
-use markise_layout::{ItemKind, Visible};
+use markise_layout::{ItemKind, Prim, Visible};
 use markise_theme::Theme;
 
 use super::{DocViewer, ViewerOutput};
@@ -178,7 +178,12 @@ impl DocViewer {
         }
         let k = section.index;
         let side = (theme.line_px() * 0.85).min(20.0);
-        let y = surface.top() + v.y + (v.layout.height - side) * 0.5;
+        // on the divider's line, which is not the middle of an item with a gap above it
+        let line = (v.layout.prims.iter()).find_map(|p| match p {
+            Prim::Line { a, .. } => Some(a.y),
+            _ => None,
+        });
+        let y = surface.top() + v.y + line.unwrap_or(v.layout.height * 0.5) - side * 0.5;
         let right = left + self.ed.view.width();
         let row = Rect::from_min_max(
             pos2(surface.left(), surface.top() + v.y),
