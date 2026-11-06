@@ -354,3 +354,22 @@ fn a_rule_in_a_block_closing_after_the_cut_is_corrected_with_the_whole_document(
         text.rfind("---").unwrap()
     );
 }
+
+#[test]
+fn the_example_document_reads_as_it_says() {
+    let s = include_str!("../../../../examples/sections/sample.md");
+    let d = parse(s);
+    assert_eq!(d.authoring(), Some("blocks-v3"));
+    assert_eq!(d.serialize(), s);
+    assert_eq!(d.section_count(), 5);
+    assert_eq!(d.section_metadata(0).unwrap().get("id"), Some("welcome"));
+    assert_eq!(
+        d.section_metadata(1).unwrap().get("note"),
+        Some("time: 12:30, values are literal **as written**")
+    );
+    assert_eq!(d.section_metadata(2), None);
+    let flagged = d.section_metadata(3).unwrap();
+    assert_eq!(flagged.get("kind"), Some("practice"));
+    assert_eq!(flagged.flagged.len(), 3);
+    assert_eq!(d.section_metadata(4).unwrap().get("style"), Some("closing"));
+}

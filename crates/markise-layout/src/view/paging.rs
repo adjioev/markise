@@ -121,6 +121,7 @@ impl View {
             ^ ((self.ppp * 100.0) as u64) << 48
             ^ (self.review as u64).wrapping_mul(0x2545_f491_4f6c_dd1d)
             ^ self.native_key().rotate_left(11)
+            ^ self.sections_key().rotate_left(3)
     }
 
     /// Sets the source offset of the caret (`None`: no caret): its page and the items right

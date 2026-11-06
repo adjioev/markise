@@ -262,7 +262,7 @@ impl DocViewer {
 
     /// The button that switches a block's view: it says what comes next.
     #[allow(clippy::too_many_arguments)]
-    fn block_view_button(
+    pub(super) fn block_view_button(
         &self,
         ui: &mut Ui,
         r: Rect,
@@ -520,6 +520,9 @@ impl DocViewer {
         // after the buttons the block has
         let entry = self.block_index.as_ref().and_then(|i| i.block(&c.name));
         let mut before = 0.0;
+        if self.ed.view.is_section_metadata(hovered) {
+            before += 1.0;
+        }
         if let Some(e) = entry {
             before += 1.0;
             if (e.view.is_some() || self.ed.view.can_draw_site()) && !self.ed.view.block_outside(v.idx) {

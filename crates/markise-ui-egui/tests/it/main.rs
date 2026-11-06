@@ -35,6 +35,7 @@ mod progressive_open;
 mod qa_sweep;
 mod review;
 mod safety;
+mod sections;
 mod select_all;
 mod side_by_side;
 mod sidebar;

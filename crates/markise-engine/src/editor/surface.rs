@@ -333,6 +333,7 @@ impl EditorView {
                 .flat_map(|r| [r.anchor.offset, r.focus.offset])
                 .collect();
             self.view.set_selection_for_site(&ends);
+            self.view.set_selection_for_sections(&ends);
         }
         if self.view.model().is_paged() && Arc::ptr_eq(self.view.doc(), self.session.doc_arc()) {
             let sel = self.session.selection();

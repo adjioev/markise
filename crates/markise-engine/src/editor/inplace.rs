@@ -149,8 +149,37 @@ impl EditorView {
 
     /// What comes after this block's state. Asked of the switch before it is pressed, to say so.
     pub fn next_block_view(&self, opener: usize) -> BlockViewMode {
+        let (has_view, site) = self.block_can_show(opener);
+        (self.view.block_mode_of(opener)).next_for(has_view, site)
+    }
+
+    /// Whether this block has a view of its own, and whether it can show as a picture. A section's
+    /// metadata block has its plaque and nothing else (ADR 0026).
+    fn block_can_show(&self, opener: usize) -> (bool, bool) {
+        if self.view.is_section_metadata(opener) {
+            return (true, false);
+        }
         let has_view = self.opener_name(opener).is_some_and(|n| self.name_has_view(&n));
-        (self.view.block_mode_of(opener)).next_for(has_view, self.view.can_draw_site())
+        (has_view, self.view.can_draw_site())
+    }
+
+    /// A plaque shows what no caret can stand in, as a picture does: whoever asks for one gets it.
+    fn leave_block_for_plaque(&mut self, opener: usize) {
+        let p = self.session.selection().primary();
+        let at = p.focus.offset;
+        if !p.is_caret() || self.view.block_mode_of(opener) == BlockViewMode::Markdown {
+            return;
+        }
+        let Some(c) = self.session.doc().named_containers_at(at).into_iter().next() else {
+            return;
+        };
+        if c.opener.start == opener && at < c.closer.end {
+            let after = match self.session.doc().gap_virt(c.closer.end) {
+                Some(virt) => DocPos::with_virt(c.closer.end, virt),
+                None => DocPos::new(c.closer.end),
+            };
+            self.set_selection(Selection::caret_at(after));
+        }
     }
 
     /// A picture shows what no caret can stand in, and a block holding a selection's end shows what it
@@ -183,8 +212,8 @@ impl EditorView {
 
     /// The next state for the block with this opener.
     pub fn switch_block_view(&mut self, opener: usize) {
-        let has_view = self.opener_name(opener).is_some_and(|n| self.name_has_view(&n));
-        let site = self.view.can_draw_site();
+        let (has_view, site) = self.block_can_show(opener);
+        let metadata = self.view.is_section_metadata(opener);
         let next = self.next_block_view(opener);
         let own =
             (self.place.own_modes.iter()).position(|o| self.session.mark(o.mark).is_some_and(|p| p.offset == opener));
@@ -201,7 +230,11 @@ impl EditorView {
             }
         }
         self.follow_block_modes();
-        self.leave_block_for_picture(Some(opener));
+        if metadata {
+            self.leave_block_for_plaque(opener);
+        } else {
+            self.leave_block_for_picture(Some(opener));
+        }
     }
 
     /// Hands the view where the blocks with a state of their own stand now.

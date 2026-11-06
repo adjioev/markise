@@ -23,9 +23,11 @@ use crate::text::TextShaper;
 
 mod native;
 mod paging;
+mod sections;
 mod site;
 pub use native::{BlockViewMode, NativeAt};
 pub use paging::PagingStats;
+pub use sections::{Plaque, SectionLook};
 pub use site::SiteLook;
 
 /// An item to paint this frame.
@@ -93,6 +95,8 @@ pub struct View {
     native: native::NativeState,
     /// Which blocks show as pictures ([`site`], ADR 0023).
     site: site::SiteState,
+    /// What shows as a section's divider or plaque ([`sections`], ADR 0026).
+    sections: sections::SectionsState,
 }
 
 impl View {
@@ -131,6 +135,7 @@ impl View {
             pre_edit_anchor: None,
             native: Default::default(),
             site: Default::default(),
+            sections: Default::default(),
         };
         v.reset_heights();
         v
@@ -237,6 +242,7 @@ impl View {
     fn set_model_at(&mut self, doc: Arc<dyn FormatDoc>, model: Arc<DocModel>, anchor: (usize, usize, f32)) {
         self.native.forget();
         self.site.forget();
+        self.sections.forget();
         self.focus = None;
         self.caret_item = None;
         self.doc = doc;
@@ -318,6 +324,7 @@ impl View {
     pub fn replace_doc(&mut self, doc: Arc<dyn FormatDoc>) -> Arc<dyn FormatDoc> {
         self.native.forget();
         self.site.forget();
+        self.sections.forget();
         std::mem::replace(&mut self.doc, doc)
     }
 
@@ -327,6 +334,7 @@ impl View {
         self.doc = doc;
         self.native.forget();
         self.site.forget();
+        self.sections.forget();
         let old_focus = self.focus.take().map(|f| f.0);
         self.caret_item = None;
         let pre = self.pre_edit_anchor.take();
@@ -553,6 +561,7 @@ impl View {
                 .get(i)
                 .is_some_and(|it| it.raw.as_deref() == Some(&markise_doc::RawPresentation::Comment))
             || self.site_hidden(i)
+            || self.section_hidden(i)
     }
 
     /// Height before this frame: cached layout or estimate.
@@ -587,6 +596,7 @@ impl View {
         self.theme_fp = fp;
         self.ppp = ppp;
         self.site.forget();
+        self.sections.forget();
         self.reset_heights();
         self.anchor_off = frac * self.height(self.anchor);
     }
@@ -931,7 +941,7 @@ impl View {
         }
         let t = &self.theme;
         let (pa, pb) = self.item_pad(i);
-        if let Some(h) = self.site_estimate(i, it) {
+        if let Some(h) = self.site_estimate(i, it).or_else(|| self.section_estimate(i, it)) {
             return h + pa + pb;
         }
         let line = t.line_px();
@@ -1047,7 +1057,7 @@ impl View {
             std::hash::Hash::hash(&(self.diagrams.generation(), tag, block, 0xd1a6_u32), &mut h);
             std::hash::Hasher::finish(&h)
         });
-        extra ^= self.native_item_key(i, it);
+        extra ^= self.native_item_key(i, it) ^ self.section_item_key(i, it);
         CacheKey {
             item_hash: it.hash,
             ctx_hash: images ^ code_ident ^ diagram ^ self.references_fingerprint(i, it),
@@ -1196,6 +1206,7 @@ impl View {
                         warnings: look.warnings,
                         site: look.site,
                         note: look.note,
+                        section: look.section,
                     };
                     layout_item(&*self.doc, &self.model, i, &params, shaper, &rec)
                 });
@@ -1253,7 +1264,10 @@ impl View {
                 self.reset_heights();
             }
             // what a picture stands for: the picture
-            let i = self.site_opener_of(i).unwrap_or(i);
+            let i = self
+                .site_opener_of(i)
+                .or_else(|| self.section_opener_of(i))
+                .unwrap_or(i);
             self.anchor = i;
             self.anchor_off = 0.0;
         }
@@ -1338,7 +1352,7 @@ impl View {
                 }
                 let l = self.layout(i, shaper, images);
                 let h = self.height(i);
-                if y + h > 0.0 && y < viewport_h && !self.site_hidden(i) {
+                if y + h > 0.0 && y < viewport_h && !self.site_hidden(i) && !self.section_hidden(i) {
                     let (pad, _) = self.item_pad(i);
                     out.push(Visible {
                         idx: i,
