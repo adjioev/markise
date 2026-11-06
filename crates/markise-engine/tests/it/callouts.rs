@@ -65,3 +65,49 @@ fn enter_in_a_title_splits_it_into_the_body() {
     assert!(t.selection_on_stops());
     t.check_model();
 }
+
+/// With the option off the line is plain text: Backspace removes one space, not the tag.
+#[test]
+fn backspace_leaves_a_tag_alone_when_it_is_not_a_callout() {
+    use markise_doc::{DocumentFormat, Selection};
+    use markise_engine::editor::{EditorSession, EditorView, HistoryLimits, ManualClock};
+    use markise_layout::{DocModel, Paging, View, testing};
+    use markise_md::{MarkdownFormat, ParseOptions};
+    use std::sync::Arc;
+
+    let plain = |text: &str, at: usize| {
+        let clock = ManualClock::default();
+        let format: Arc<dyn DocumentFormat> = Arc::new(MarkdownFormat {
+            opts: ParseOptions {
+                alerts: false,
+                callouts: false,
+                ..Default::default()
+            },
+        });
+        let session = EditorSession::with(format, text, HistoryLimits::default(), Box::new(clock.clone()));
+        let model = Arc::new(DocModel::build_with(session.doc(), None, Paging::Full));
+        let view = View::new(
+            session.doc_arc().clone(),
+            model,
+            markise_theme::Theme::light(),
+            600.0,
+            1.0,
+        );
+        let mut t = T {
+            ed: EditorView::new(session, view, None),
+            fonts: testing::fonts(),
+            clock,
+            fix_selection: false,
+        };
+        t.ed.set_selection(Selection::caret(at));
+        t.frame();
+        t.run("edit.deleteBackward");
+        t.text().to_string()
+    };
+    let src = "> [!info] Title\n";
+    assert_eq!(plain(src, src.find("Title").unwrap()), "> [!info]Title\n");
+    // on the second line: the lines join, the tag stays
+    let src = "> [!info]\n> Body\n";
+    let got = plain(src, src.find("Body").unwrap());
+    assert!(got.contains("[!info]"), "{got:?}");
+}
