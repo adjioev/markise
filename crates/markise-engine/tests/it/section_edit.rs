@@ -36,6 +36,8 @@ fn it_goes_at_the_document_level_with_blank_lines_around_it() {
         ("One.\n\n‸\nTwo.\n", "One.\n\n---\n\n## T {#s9}\n\nTwo.\n"),
         // a file ending with no line ending stays so
         ("One‸.", "One.\n\n---\n\n## T {#s9}"),
+        // right above a boundary with no blank line: a boundary of its own still
+        ("# H‸\n---\n\nB\n", "# H\n\n---\n\n## T {#s9}\n\n---\n\nB\n"),
         // never inside a block or a list: after the outermost
         (
             "::::a\n\n:::b\n\nIn‸.\n\n:::\n\n::::\n\nNext.\n",

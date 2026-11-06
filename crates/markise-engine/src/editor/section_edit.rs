@@ -31,7 +31,8 @@ pub fn one_line(title: &str) -> String {
 /// Whether the section holding `line` has anything before it: what a boundary there would end. A section
 /// with nothing in it is what a site refuses, so that one takes the heading with no boundary.
 fn has_content_before(doc: &dyn FormatDoc, line: usize) -> bool {
-    let s = doc.section_at(line);
+    // what `line` ends: on a boundary's own line that is the section before it
+    let s = doc.section_at(line.saturating_sub(1));
     let blank = |t: &str| t.chars().all(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
     s.start < line && !blank(&doc.text()[s.start..line])
 }
