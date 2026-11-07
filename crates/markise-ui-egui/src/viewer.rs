@@ -39,6 +39,7 @@ mod sections;
 mod site_board;
 pub use block_move::BlockDragShown;
 pub use code_tools::{LangEdit, LangItem, ShownTools, lang_matches};
+pub use sections::SectionAct;
 pub use site_board::{HelperSource, SiteBoard, system_web_helpers};
 
 const SCROLLBAR_W: f32 = 10.0;
@@ -80,6 +81,8 @@ pub struct ViewerOutput {
     pub move_block: Option<(usize, usize)>,
     /// A block's delete button was pressed: its opener.
     pub delete_block: Option<usize>,
+    /// A control on a section's divider was pressed (ADR 0026).
+    pub section_act: Option<SectionAct>,
     /// An image's Replace… button was pressed: its source in the document.
     pub replace_image: Option<std::ops::Range<usize>>,
     /// An image's Edit… button was pressed: its source in the document.

@@ -20,6 +20,9 @@ pub enum MoveRefused {
     WouldNotStand,
     /// Something other than blank lines would go with it.
     WouldLoseText,
+    /// It is, or stands next to, a section with nothing in it or only metadata, which a site refuses and
+    /// a move would leave as it is (ADR 0026).
+    WouldLeaveEmpty,
     Edit(EditError),
 }
 
@@ -28,6 +31,12 @@ impl fmt::Display for MoveRefused {
         match self {
             MoveRefused::WouldNotStand => write!(f, "it would change how the blocks around it pair"),
             MoveRefused::WouldLoseText => write!(f, "text next to it would be lost"),
+            MoveRefused::WouldLeaveEmpty => {
+                write!(
+                    f,
+                    "it or the one next to it has nothing in it but metadata: fill it in or delete it first"
+                )
+            }
             MoveRefused::Edit(e) => write!(f, "{e}"),
         }
     }
@@ -136,7 +145,7 @@ fn surroundings(text: &str, b: &Range<usize>) -> (usize, usize) {
 }
 
 /// What taking `b` from its place replaces, and with what: it, and the blank lines it leaves behind.
-fn lift<'a>(text: &str, b: &Range<usize>, eol: &'a str) -> Result<(Range<usize>, &'a str), MoveRefused> {
+pub(super) fn lift<'a>(text: &str, b: &Range<usize>, eol: &'a str) -> Result<(Range<usize>, &'a str), MoveRefused> {
     let (prev, next) = surroundings(text, b);
     let (remove, keep) = if next >= text.len() {
         // what stood before it is now the end of the text, and ends as the text did
@@ -389,6 +398,16 @@ impl EditorView {
     }
 
     fn delete_range(&mut self, b: Range<usize>) -> Result<(), MoveRefused> {
+        self.delete_range_as(b, DELETE_LABEL, None)
+    }
+
+    /// Takes these lines out, one undo step of this name. `sections`: how many there have to be afterwards.
+    pub(super) fn delete_range_as(
+        &mut self,
+        b: Range<usize>,
+        label: &'static str,
+        sections: Option<usize>,
+    ) -> Result<(), MoveRefused> {
         let doc = self.session.doc();
         let text = doc.text();
         let eol = doc.line_ending().as_str();
@@ -415,9 +434,9 @@ impl EditorView {
         let was_sticky = self.sticky_at().is_some_and(|s| b.contains(&s));
         // last before the edit: it leaves the view with no document until the sync after it
         self.release();
-        let done = self.session.transact(DELETE_LABEL, TxKind::Structural, |tx| {
+        let done = self.session.transact(label, TxKind::Structural, |tx| {
             tx.step(PlanStep { patches, hints_after })?;
-            if blocks_of(tx.doc()) != want {
+            if blocks_of(tx.doc()) != want || sections.is_some_and(|n| tx.doc().section_count() != n) {
                 return Err(EditError::Aborted(String::new()));
             }
             if caret_goes {

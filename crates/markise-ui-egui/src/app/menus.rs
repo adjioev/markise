@@ -383,6 +383,17 @@ impl MarkiseApp {
         paragraph
             .entries
             .push(self.app_item("block.delete", self.block_delete_available(), Check::None));
+        // only where a document has sections (ADR 0026)
+        if self.document_has_sections() {
+            paragraph.entries.push(Entry::Separator);
+            for (id, enabled) in [
+                ("section.moveUp", self.section_move_available(true)),
+                ("section.moveDown", self.section_move_available(false)),
+                ("section.delete", self.section_delete_available()),
+            ] {
+                paragraph.entries.push(self.app_item(id, enabled, Check::None));
+            }
+        }
         menus.push(paragraph);
         let format = self.registry_menu("Format", FORMAT_ORDER, text_field);
         if !format.entries.is_empty() {
@@ -741,6 +752,9 @@ impl MarkiseApp {
             "block.moveUp" => return self.move_block_at_caret(true),
             "block.moveDown" => return self.move_block_at_caret(false),
             "block.delete" => return self.delete_block_at_caret(),
+            "section.moveUp" => return self.move_section_at_caret(true),
+            "section.moveDown" => return self.move_section_at_caret(false),
+            "section.delete" => return self.delete_section_at_caret(),
             "view.switchBlockView" => return self.switch_block_view_at_caret(),
             "view.switchAllBlockViews" => return self.switch_all_block_views(),
             "view.readMode" => return self.toggle_read_mode(),

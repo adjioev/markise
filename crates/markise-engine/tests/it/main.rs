@@ -28,6 +28,7 @@ mod paging;
 mod practice;
 mod progressive;
 mod section_edit;
+mod section_move;
 mod source;
 mod structure;
 mod surface;

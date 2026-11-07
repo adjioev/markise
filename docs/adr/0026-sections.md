@@ -176,6 +176,23 @@ first free number after a hyphen, `-2` on, within the length. Taken is any `{#id
 | п p | р r | с s | т t | у u | ў u | ф f | х kh | ц ts | ч ch |
 | ш sh | щ shch | ъ – | ы y | ь – | э e | ю yu | я ya | | |
 
+### Moving and deleting one
+
+`EditorView::move_section` and `delete_section`, in `editor/section_move.rs`, by what a block's move does (ADR 0022): `lift` and `separated` around the bytes, a transaction of one deletion and one insertion, named Move Section or Delete Section, and the check that every block
+pairs as before. The commands Move Section Up, Move Section Down and Delete Section act on the section holding the caret, whichever pane it is in, also in Source mode, and are in the Paragraph menu while the dialect has sections, with or without a package. The chords (⇧⌥⌘↑, ⇧⌥⌘↓, ⇧⌥⌘⌫; Ctrl+Shift+Alt+↑, ↓, Backspace) are checked with the blocks' for clashes. There is no drag.
+
+**A section's bytes** are from its first line with anything on it to the end of its last, blanks at the end of that line included. Blank lines around it are not its own, and only those are written. A file's end, with or without a line ending, stays as it is.
+
+**A boundary is between sections** and belongs to neither: a section moves past one neighbour, and the two change places around it. So of two sections the upper one's bytes are left alone and the lower one goes above it, whichever the command was for: with the boundary it opens when the upper one has one, or, when the upper one is first and has none, with that boundary after it. The first section therefore never gets a boundary, and front matter stays first. What is in a section stays in it: metadata stays first in it, as bytes.
+
+**What it cannot do.** A first section with nothing in it has nothing to change places with, as a section in its place would need a boundary above it; so the commands are off for its neighbour going up. A document's only section cannot be deleted. **Refused**, nothing changed: every section's bytes have to stand at their new places, the number of sections has to stay and blocks have to pair as before, with a message saying so. A stray `:::` that comes to pair, or an unclosed fence that comes to hold what is put after it, are the cases.
+
+**A section with nothing or only metadata**, which a site refuses, is not moved, and nothing moves past it: the move is refused with a message that says to fill it in or delete it. That is the simple rule; a move cannot make such a section, as all bytes stay in their sections, and refusing keeps one from drifting around unnoticed. One elsewhere in the document stops nothing. A delete cannot make one either, for the same reason, and is how one goes away, so it is not refused.
+
+**Delete** takes a section's bytes and its boundary, with the first section's next boundary, so that the next section comes to be first. One undo step, with no question; a changed form's draft of a block in it is asked about first, as a block's delete does, and a move waits while one is open, also as a block's does.
+
+**On screen.** A divider has three quiet buttons at the right end of its row for the section it opens, under the pointer on that row or for the section with the caret, as a block's controls. A button is there only for what can be done. In Read no button or command does anything, and a part of a large file still loading has them off, as its last section is cut short.
+
 ## Consequences
 
 - The bytes of a file do not depend on any of this: the index only reads.

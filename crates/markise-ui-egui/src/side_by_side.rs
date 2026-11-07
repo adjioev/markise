@@ -269,6 +269,7 @@ pub struct SbsOutput {
     pub open_block_library: Option<String>,
     pub move_block: Option<(usize, usize)>,
     pub delete_block: Option<usize>,
+    pub section_act: Option<crate::viewer::SectionAct>,
     pub replace_image: Option<std::ops::Range<usize>>,
     pub edit_image: Option<std::ops::Range<usize>>,
 }
@@ -449,6 +450,7 @@ impl SideBySide {
             out.open_block_library = vo.open_block_library;
             out.move_block = vo.move_block;
             out.delete_block = vo.delete_block;
+            out.section_act = vo.section_act;
             out.replace_image = vo.replace_image;
             out.edit_image = vo.edit_image;
             out.right = Some(pane);

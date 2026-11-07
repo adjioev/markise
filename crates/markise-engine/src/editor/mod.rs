@@ -16,6 +16,7 @@ mod inplace;
 pub mod keymap;
 mod practice;
 mod section_edit;
+mod section_move;
 pub use practice::READ_ONLY_REASON;
 pub mod source;
 pub mod surface;

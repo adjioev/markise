@@ -106,6 +106,7 @@ Claims of `block-packages.md`.
 | What a picture is keyed on | ADR 0023 "The cache"; `crates/markise-ui-egui/src/viewer/site_board.rs` |
 | Binding and archive rules | ADR 0019 "Binding", "Archive"; `crates/markise-package/src/binding.rs`, `archive.rs` |
 | Sections: the library's item, `editor/sections.json`, the form, where a new section goes | ADR 0026 "Starting one"; `crates/markise-package/src/sections.rs`, `library.rs`; `crates/markise-engine/src/editor/section_edit.rs`; `crates/markise-ui-egui/src/app/section_form.rs` |
+| Sections: moving, deleting, bytes, chords, the divider's controls | ADR 0026 "Moving and deleting one"; `crates/markise-engine/src/editor/section_move.rs`, `crates/markise-engine/tests/it/section_move.rs`; `crates/markise-ui-egui/src/viewer/sections.rs`, `menu.rs` |
 | `blocks check`: resolves as the app, no consent, nothing written, the archive must be there | ADR 0019 "Looking without consent"; `crates/markise-package/src/resolve.rs` (`read_bound_package`); `apps/markise-cli/src/blocks.rs`; `apps/markise-cli/tests/blocks/mod.rs` (`check_writes_nothing_and_asks_nothing`) |
 | `blocks check`: kinds, words, lines, 64 KiB, what a marker problem is, blank lines not reported | `crates/markise-engine/src/block_check.rs`, `block_view.rs` (`verdict`); `crates/markise-md/src/directive.rs` (`bad_directive_markers`); `crates/markise-engine/tests/it/block_check.rs` |
 | `blocks check`: exit codes, the JSON's shape and what its keys mean | `apps/markise-cli/src/blocks.rs` (`check_json`); `apps/markise-cli/tests/blocks/mod.rs` |

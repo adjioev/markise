@@ -620,21 +620,25 @@ impl DocViewer {
             } else if v.layout.has_picture() || self.quiet_first_row(v).is_some() {
                 painter.rect_filled(r, 4.0, ui.visuals().window_fill().gamma_multiply(0.85));
             }
-            // a bin: a lid, and a body narrowing to its foot
-            let (c0, s) = (r.center(), side * 0.26);
-            let stroke = Stroke::new((side * 0.08).max(1.0), tone);
-            painter.line_segment(
-                [c0 + vec2(-s * 1.15, -s * 0.75), c0 + vec2(s * 1.15, -s * 0.75)],
-                stroke,
-            );
-            painter.line_segment([c0 + vec2(-s * 0.4, -s * 1.1), c0 + vec2(s * 0.4, -s * 1.1)], stroke);
-            let body = [
-                c0 + vec2(-s * 0.85, -s * 0.75),
-                c0 + vec2(-s * 0.6, s * 1.15),
-                c0 + vec2(s * 0.6, s * 1.15),
-                c0 + vec2(s * 0.85, -s * 0.75),
-            ];
-            painter.add(egui::Shape::line(body.to_vec(), stroke));
+            paint_bin(&painter, r, side, tone);
         }
     }
+}
+
+/// A bin: a lid, and a body narrowing to its foot.
+pub(super) fn paint_bin(painter: &egui::Painter, r: Rect, side: f32, tone: egui::Color32) {
+    let (c0, s) = (r.center(), side * 0.26);
+    let stroke = Stroke::new((side * 0.08).max(1.0), tone);
+    painter.line_segment(
+        [c0 + vec2(-s * 1.15, -s * 0.75), c0 + vec2(s * 1.15, -s * 0.75)],
+        stroke,
+    );
+    painter.line_segment([c0 + vec2(-s * 0.4, -s * 1.1), c0 + vec2(s * 0.4, -s * 1.1)], stroke);
+    let body = [
+        c0 + vec2(-s * 0.85, -s * 0.75),
+        c0 + vec2(-s * 0.6, s * 1.15),
+        c0 + vec2(s * 0.6, s * 1.15),
+        c0 + vec2(s * 0.85, -s * 0.75),
+    ];
+    painter.add(egui::Shape::line(body.to_vec(), stroke));
 }
