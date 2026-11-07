@@ -690,6 +690,24 @@ mod inserting {
     }
 
     #[test]
+    fn the_library_s_item_writes_the_level_the_package_says() {
+        let mut files = FILES_ON.to_vec();
+        files.push(("editor/sections.json", r#"{"title_level":1}"#));
+        let doc = "One.\n\nTwo.\n";
+        let f = Fixture::with_package(doc, &files);
+        let mut h = f.ready();
+        free_line(&mut h, doc.len() - 1);
+        type_text(&mut h, "/");
+        press(&mut h, Key::Enter);
+        h.state_mut().set_section_form_title("Title");
+        frames(&mut h);
+        let ctx = h.ctx.clone();
+        assert!(h.state_mut().save_section_form(&ctx));
+        frames(&mut h);
+        assert!(text(&h).ends_with("\n\n---\n\n# Title {#title}\n"), "{}", text(&h));
+    }
+
+    #[test]
     fn metadata_values_stay_literal_and_free_text_keeps_to_the_limits() {
         const SPACED: &str = r#"{"fields":[{"key":"style","values":[{"value":"a  b"}]},{"key":"kind"}]}"#;
         let mut files = FILES_ON.to_vec();

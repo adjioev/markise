@@ -332,28 +332,31 @@ fn a_section_s_row_is_not_a_heading_s_and_only_it_has_controls() {
 
 #[test]
 fn what_names_a_section_follows_the_text() {
-    let doc = format!("{HEAD}A\n\n---\n\nNo heading.\n\nAnd more.\n");
+    let doc = format!("{HEAD}A\n\n---\n\n## Named\n\n---\n\nNo heading.\n");
     let p = plain(&doc);
     let mut h = opened(&p);
-    assert_eq!(h.query_all_by_label("Section 2").count(), 1);
-    let at = doc.find("No heading").unwrap();
+    assert_eq!(h.query_all_by_label("Section 3").count(), 1);
+    // typing in the paragraph leaves it all as it is, and in the heading the row says the new name, once
     let v = h.state_mut().viewer().unwrap();
-    // typing in a paragraph changes nothing here, however often it is asked
-    v.ed.set_selection(markise_doc::Selection::caret_at(markise_doc::DocPos::new(doc.len())));
+    v.ed.set_selection(markise_doc::Selection::caret_at(markise_doc::DocPos::new(
+        doc.len() - 1,
+    )));
     let _ = v.ed.edit(|s| s.insert_text("x"));
-    frames(&mut h);
-    assert_eq!(h.query_all_by_label("Section 2").count(), 1);
-    // that paragraph becomes a heading: it names the section, once
-    let v = h.state_mut().viewer().unwrap();
+    let at = doc.find("Named").unwrap() + "Named".len();
     v.ed.set_selection(markise_doc::Selection::caret_at(markise_doc::DocPos::new(at)));
-    let _ = v.ed.edit(|s| s.insert_text("## "));
+    let _ = v.ed.edit(|s| s.insert_text("!"));
     frames(&mut h);
-    assert_eq!(h.query_all_by_label("Section 2").count(), 0);
-    assert_eq!(h.query_all_by_label("No heading.").count(), 1, "the row and no other");
-    // and undone, it does not
-    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    assert_eq!(h.query_all_by_label("Section 3").count(), 1);
+    assert_eq!(h.query_all_by_label("Named!").count(), 1, "the row and no other");
+    // the paragraph as a heading: it names its section; as no heading again, it does not
+    let two = format!("{HEAD}A\n\n---\n\n## Named\n\n---\n\n## Now one\n");
+    reload(&mut h, &two);
     frames(&mut h);
-    assert_eq!(h.query_all_by_label("Section 2").count(), 1);
+    assert_eq!(h.query_all_by_label("Section 3").count(), 0);
+    assert_eq!(h.query_all_by_label("Now one").count(), 1);
+    reload(&mut h, &doc);
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Section 3").count(), 1);
 }
 
 /// What a reload does: the document goes on with another text, with no edit of the surface's.
@@ -456,6 +459,27 @@ const FILES: &[(&str, &str)] = &[
         r#"{"format":1,"label":{"en":"Chapter","ru":"Глава"}}"#,
     ),
 ];
+
+#[test]
+fn a_new_section_s_heading_is_at_the_package_s_level() {
+    const THREE: &str = r#"{"format":1,"title_level":3}"#;
+    let mut files: Vec<(&str, &str)> = FILES
+        .iter()
+        .filter(|(n, _)| *n != "editor/sections.json")
+        .copied()
+        .collect();
+    files.push(("editor/sections.json", THREE));
+    let doc = "One.\n\n---\n\nTwo.\n";
+    let f = Fixture::with_package(doc, &files);
+    let mut h = f.ready();
+    menu_on(&mut h, "Section 1");
+    press_item(&mut h, "Insert After…");
+    h.state_mut().set_section_form_title("New");
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().save_section_form(&ctx));
+    frames(&mut h);
+    assert_eq!(text(&h), "One.\n\n---\n\n### New {#new}\n\n---\n\nTwo.\n");
+}
 
 #[test]
 fn the_word_is_the_package_s() {

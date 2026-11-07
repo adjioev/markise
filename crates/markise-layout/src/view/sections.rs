@@ -233,21 +233,30 @@ impl View {
             .all(|t| (self.doc.top_span(t)).is_some_and(|s| self.doc.named_containers_at(s.start).is_empty()))
     }
 
-    /// What [`Self::named_rows`] holds, when this edit cannot change it: text typed in one item that is no heading
-    /// and no part of a block, with as many sections and outline entries as there were. So typing goes on at no cost
-    /// for it, however many sections there are.
+    /// What [`Self::named_rows`] holds, when this edit does not change it: as many sections and outline entries as
+    /// there were, and the sections the edit is in say what they said. So typing goes on at no cost for it, however
+    /// many sections there are. An edit that pairs far away can change what a far section starts with, which then shows
+    /// until the next change that is not typing: a row too many or too few, and nothing in the wrong place.
     pub(super) fn sections_names_stand(&self, change: &crate::model::ModelChange) -> Option<NamedRows> {
         let named = self.sections.named.borrow().clone()?;
-        let one =
-            !change.full && change.splices().len() == 1 && change.replaced.len() == 1 && change.inserted.len() == 1;
-        let item = self.model.items.get(change.inserted.start).filter(|_| one)?;
-        let plain = !matches!(item.kind, ItemKind::Heading { .. })
-            && !self.model.is_page(change.inserted.start)
-            && (self
-                .doc
-                .named_containers_at(self.model.item_start(change.inserted.start)))
-            .is_empty();
-        (plain && named.1 == (self.doc.section_count(), self.model.outline.len())).then_some(named)
+        let count = self.doc.section_count();
+        if change.full || change.splices().len() != 1 || named.1 != (count, self.model.outline.len()) {
+            return None;
+        }
+        let last = self.doc.text().len();
+        let from = self
+            .model
+            .items
+            .get(change.inserted.start)
+            .map(|_| self.model.item_start(change.inserted.start))?;
+        let to =
+            (self.model.items.get(change.inserted.end)).map_or(last, |_| self.model.item_start(change.inserted.end));
+        let (a, b) = (self.doc.section_at(from).index, self.doc.section_at(to).index);
+        let same = (a..=b).all(|k| {
+            let was = named.0.get(k + 1).zip(named.0.get(k)).map(|(x, y)| x - y);
+            was == Some(u32::from(self.names_by_first_row(k)))
+        });
+        same.then_some(named)
     }
 
     /// The running count of [`Self::names_by_first_row`]. Goes over the sections once per state of the document,

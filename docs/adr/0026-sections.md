@@ -160,7 +160,7 @@ Backspace at the start of what follows takes it, as for any rule, with an undo s
 
 `---` is no block, so ADR 0019's rule that a preset opens the block it names stays, and a new section is no preset: the library has one item of another kind
 (`LibraryItem::Section`), first and in no group, while the document's dialect has sections. It needs no package, as sections do not. What it says comes from
-`editor/sections.json`, optional and validated like the package's other files: `label`, default `Section`, `description`, `keywords`, `icon`, and `fields`, the keys the form asks for, with
+`editor/sections.json`, optional and validated like the package's other files: `label`, default `Section`, `description`, `keywords`, `icon`, `title_level`, the level of the heading a new section starts with, 1 to 6, default 2, as a site's outline is the site's, and `fields`, the keys the form asks for, with
 values to choose from if any. A site may call a section what it likes, and Markise does not know what.
 
 Choosing the item opens a modal form. Nothing is written before Save. An edit, another document or Read closes it with nothing written. `EditorView::insert_section` writes, at root level by the rule that places a

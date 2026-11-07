@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use egui::{Context, Id, Key, RichText, TextEdit};
 use markise_engine::editor::NewSection;
 use markise_engine::section_id::{is_section_id, section_id};
-use markise_package::{DEFAULT_SECTION_LABEL, SectionConfig, is_section_value};
+use markise_package::{DEFAULT_SECTION_LABEL, DEFAULT_SECTION_TITLE_LEVEL, SectionConfig, is_section_value};
 
 use super::MarkiseApp;
 use crate::block_form::package_language;
@@ -29,6 +29,8 @@ pub struct SectionForm {
     /// The document and revision it was opened for: another one closes it, with nothing written.
     origin: (u64, u64),
     in_source: bool,
+    /// The level of the heading it writes, as the package says.
+    level: u8,
     /// The section it goes after, by its place, when one was named: an edit closes the form, so it stands.
     after: Option<usize>,
     heading: String,
@@ -172,6 +174,7 @@ impl MarkiseApp {
             origin: (d.id, d.viewer.ed.session.revision().counter),
             in_source,
             after: None,
+            level: config.map_or(DEFAULT_SECTION_TITLE_LEVEL, |c| c.title_level),
             heading: shown(config.and_then(|c| c.label.as_ref()), &language, DEFAULT_SECTION_LABEL),
             title: String::new(),
             taken: d.viewer.ed.ids_on_page(),
@@ -203,6 +206,7 @@ impl MarkiseApp {
         }
         let Some(d) = &mut self.doc else { return false };
         let new = NewSection {
+            level: form.level,
             title: form.title.clone(),
             id: form.id(),
             metadata: form.metadata(),
