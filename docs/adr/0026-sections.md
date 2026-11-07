@@ -1,6 +1,6 @@
 # ADR 0026: sections
 
-Status: prototype for issue #178, phase 9, of a draft syntax that may still move. Display only.
+Status: prototype for issue #178, phase 9, of a draft syntax that may still move. Showing sections, starting one, and moving and deleting one.
 
 ## Context
 

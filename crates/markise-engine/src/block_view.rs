@@ -247,11 +247,61 @@ impl PackageViews {
             Err(e) => return BlockVerdict::NoForm(e.to_string()),
         };
         match misfit(&variant, &fields, source) {
+            // what fits can still be what the view says is not ready, in Read
+            None if variant.view.is_some() => match self.practice_parts(name, &fields, source) {
+                Some(p) if p.stray_marks => {
+                    unfilled("A list here has `[x]` or `[ ]` not read as answers, so it cannot be practised.")
+                }
+                Some(p) if !p.is_ready() && !p.nothing_to_practise() => {
+                    unfilled("No answer is marked, so it cannot be practised.")
+                }
+                _ => BlockVerdict::Fits,
+            },
             None => BlockVerdict::Fits,
             Some((true, reasons)) => BlockVerdict::Unfilled(reasons),
             Some((false, reasons)) => BlockVerdict::Outside(reasons),
         }
     }
+}
+
+fn unfilled(reason: &str) -> BlockVerdict {
+    BlockVerdict::Unfilled(vec![BlockReason {
+        text: reason.to_string(),
+        range: None,
+    }])
+}
+
+/// A list line of `source` reads `[x]` or `[ ]`, and no answer's text is on that line. By the lines, also in code: a
+/// false positive costs a block being practised, and a miss shows what is meant to stay hidden.
+fn has_stray_marks(source: &str, answers: &[PracticeAnswer]) -> bool {
+    let mut at = 0;
+    source.split_inclusive(['\n', '\r']).any(|line| {
+        let range = at as u32..(at + line.len()) as u32;
+        at += line.len();
+        is_mark_line(line)
+            && !answers
+                .iter()
+                .any(|a| a.range.start < range.end && range.start < a.range.end)
+    })
+}
+
+fn is_mark_line(line: &str) -> bool {
+    let rest = line.trim_start_matches([' ', '\t', '>']);
+    let rest = match rest.strip_prefix(['-', '*', '+']) {
+        Some(r) => r,
+        None => {
+            let digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+            if digits.len() == rest.len() {
+                return false;
+            }
+            match digits.strip_prefix(['.', ')']) {
+                Some(r) => r,
+                None => return false,
+            }
+        }
+    };
+    let rest = rest.trim_start_matches([' ', '\t']);
+    ["[ ]", "[x]", "[X]"].iter().any(|m| rest.starts_with(m))
 }
 
 impl PackageViews {
@@ -289,7 +339,7 @@ impl PackageViews {
 
     /// What Practice needs of a block, when its view can be practised. Read for what the view holds and
     /// no further, so that a block with no practice pays nothing.
-    fn practice_parts(&self, name: &str, fields: &BlockFields) -> Option<PracticeParts> {
+    fn practice_parts(&self, name: &str, fields: &BlockFields, source: &str) -> Option<PracticeParts> {
         let practice = self.index.block(name)?.view?.practice.as_ref()?;
         let answers = (fields.slots().into_iter())
             .filter(|s| s.kind == FieldKind::Choices)
@@ -302,7 +352,8 @@ impl PackageViews {
                     text: s.value().into(),
                 }
             })
-            .collect();
+            .collect::<Vec<PracticeAnswer>>();
+        let stray_marks = has_stray_marks(source, &answers);
         let reveal = (practice.reveal.iter())
             .flat_map(|field| fields.regions_of(field))
             .map(|r| r.start as u32..r.end as u32)
@@ -311,6 +362,7 @@ impl PackageViews {
             has_choices: fields.fields().iter().any(|f| f.kind == FieldKind::Choices),
             answers,
             reveal,
+            stray_marks,
         })
     }
 }
@@ -369,7 +421,7 @@ impl BlockViews for PackageViews {
             parts: (fields.field_regions().into_iter())
                 .map(|(r, kind)| (r.start as u32..r.end as u32, role_of(kind)))
                 .collect(),
-            practice: self.practice_parts(name, &fields),
+            practice: self.practice_parts(name, &fields, source),
         });
         match (misfit(&variant, &fields, source), native) {
             (None, native) => native.map_or(BlockLook::Generic, BlockLook::Native),

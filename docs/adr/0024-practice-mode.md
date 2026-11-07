@@ -122,3 +122,10 @@ So an estimate for a page in a document in Practice takes off the quotes of bloc
 block read. Hidden fields of other kinds are corrected when they are laid out, like any estimate. A measured page height holds for what its blocks showed. Check and Reset happen on a
 block whose page is held by the caret or the screen, and its heights are read again there; Reset All can reach evicted pages, so it ends every measured
 height.
+
+## A block with nothing to practise
+
+A block whose view has `practice`, with no answers and with nothing to reveal, as when what would be revealed is an optional field left empty, has nothing for anyone to work out. It is not practised: it fits, and in Read it shows as it does anywhere, with
+no `Not ready to practice`. `markise-cli blocks check` and the view agree on what a block is: one with answers and none marked is what the view says is not ready, and the check says the same of it, as not filled in. The exemption is only for answers that are really absent. A list only some of whose lines have `[x]` or `[ ]` is no answers by the field model, so a text field takes it in. Its marks say what they say as text, and nothing hides them, so a line reading so that no answer holds makes a block not ready, whatever else it has, and the check reports it. It is by the lines of the block, in code too, as a false positive costs a block being practised and a miss shows what is meant to stay hidden.
+
+Everything else about what cannot be practised stays as above.

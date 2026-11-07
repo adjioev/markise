@@ -1479,3 +1479,46 @@ fn the_score_follows_what_was_done_through_changes_to_the_block() {
     v.ed.edit(|s| s.apply_external(&ps, "edit", false)).unwrap();
     assert_eq!(v.ed.practice_score(), (0, 0), "the block changed");
 }
+
+#[test]
+fn a_block_with_nothing_to_reveal_is_simply_not_practised() {
+    let doc = "Before.\n\n:::exercise\n\nDo this and that.\n\n:::\n\nAfter.\n";
+    let f = fixture(doc);
+    let mut h = f.ready();
+    command(&mut h, "view.readMode");
+    let s = shown(&mut h);
+    assert!(s.contains("Do this and that."), "its text shows: {s}");
+    assert!(!s.contains("Not ready"), "{s}");
+    assert!(!s.contains("Show answer"), "nothing to show: {s}");
+    assert_eq!(mode_of(&mut h, "Do this"), BlockViewMode::Native);
+    assert_eq!(text(&h), doc);
+    // with something to reveal, as ever
+    let doc = "Before.\n\n:::exercise\n\nDo this and that.\n\n> The solution.\n\n:::\n\nAfter.\n";
+    let f = fixture(doc);
+    let mut h = f.ready();
+    command(&mut h, "view.readMode");
+    let s = shown(&mut h);
+    assert!(!s.contains("The solution"), "{s}");
+    assert_eq!(mode_of(&mut h, "Do this"), BlockViewMode::Practice);
+}
+
+/// A mark that no field reads as an answer is still a mark: nothing about it may show in Read.
+#[test]
+fn a_mark_taken_in_by_a_text_field_is_not_ready_and_tells_nothing() {
+    for list in [
+        "- [x] Correct answer {#a1}\n- Other answer {#a2}",
+        "- Other answer {#a2}\n- [ ] Unmarked answer {#a1}",
+        "- [x] Only marks\n- [X] Only marks too",
+    ] {
+        let doc = format!("Before.\n\n:::exercise\n\nDo this.\n\n{list}\n\n:::\n\nAfter.\n");
+        let f = fixture(&doc);
+        let mut h = f.ready();
+        command(&mut h, "view.readMode");
+        let s = shown(&mut h);
+        for told in ["answer", "Only marks", "Do this"] {
+            assert!(!s.contains(told), "{list}: {told}: {s}");
+        }
+        assert!(s.contains("Not ready to practice"), "{list}: {s}");
+        assert_eq!(mode_of(&mut h, "Do this"), BlockViewMode::Practice, "{list}");
+    }
+}
