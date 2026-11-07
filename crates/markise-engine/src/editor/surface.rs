@@ -309,6 +309,12 @@ impl EditorView {
         self.changes
     }
 
+    /// The document was replaced from outside the surface's own edits (a reload): what was picked up in it is no
+    /// more what it was.
+    pub fn note_replaced(&mut self) {
+        self.changes += 1;
+    }
+
     /// Forgets the recent edits (the UI took a fresh look at the document: its last frame).
     pub fn clear_recent_edits(&mut self) {
         self.recent = Some(Vec::new());

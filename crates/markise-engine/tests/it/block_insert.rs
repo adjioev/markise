@@ -101,28 +101,40 @@ fn line_endings_follow_the_document() {
 }
 
 #[test]
-fn every_id_is_new_in_the_document_by_the_field_models_rule() {
+fn a_preset_keeps_its_ids_and_only_a_heading_s_is_the_page_s() {
     // nothing in the way: as the package wrote them
     assert_eq!(inserted("o‸ne\n", POLL, "poll"), format!("one\n\n{POLL}"));
-    // the same block again
+    // the same block again: answers are per field and stay; a heading's id is the page's and gets a new number
     let doc = format!("{POLL}\nz‸\n");
     let out = inserted(&doc, POLL, "poll");
     let tail = out.rsplit("z\n\n").next().unwrap();
     assert_eq!(
         tail,
-        ":::poll\n\n## Which? {#a3}\n\n- [ ] One {#a4}\n- [ ] Two {#a5}\n\n:::\n"
+        ":::poll\n\n## Which? {#q-2}\n\n- [ ] One {#a1}\n- [ ] Two {#a2}\n\n:::\n"
     );
-    // a free id stays while one in use goes, above every number in use, a heading's too
-    let out = inserted("## H {#a7}\n\nz‸\n", POLL, "poll");
+    // an id elsewhere on the page is no reason for an answer, and is for a heading
+    let out = inserted("## H {#a1}\n\n## I {#a9}\n\nz‸\n", POLL, "poll");
+    assert!(out.ends_with("- [ ] One {#a1}\n- [ ] Two {#a2}\n\n:::\n"), "{out}");
+    let heading = ":::poll\n\n## Q {#a1}\n\n- [ ] A {#a1}\n\n:::\n";
+    let out = inserted("x {#a1}\n\nz‸\n", heading, "poll");
     assert!(
-        out.ends_with(":::poll\n\n## Which? {#q}\n\n- [ ] One {#a1}\n- [ ] Two {#a2}\n\n:::\n"),
+        out.ends_with(":::poll\n\n## Q {#a1-2}\n\n- [ ] A {#a1}\n\n:::\n"),
         "{out}"
     );
-    let out = inserted("## H {#a1}\n\n## I {#a9}\n\nz‸\n", POLL, "poll");
-    assert!(out.ends_with("- [ ] One {#a10}\n- [ ] Two {#a2}\n\n:::\n"), "{out}");
-    // a package repeating an id in one preset
-    let twice = ":::poll\n\n## Q\n\n- [ ] A {#a1}\n- [ ] B {#a1}\n\n:::\n";
-    assert!(inserted("z‸\n", twice, "poll").contains("- [ ] A {#a1}\n- [ ] B {#a2}\n"));
+    // a name can mean something: it stays, whatever is on the page
+    let exclusive = ":::poll\n\n## Q\n\n- [ ] A {#a1}\n- [ ] None {#none}\n\n:::\n";
+    let doc = format!("{exclusive}\nz‸\n");
+    let out = inserted(&doc, exclusive, "poll");
+    assert_eq!(out.matches("- [ ] None {#none}\n").count(), 2, "{out}");
+    // a package repeating an id in one field: the next one in that field for the repeat only, never a name
+    let twice = ":::poll\n\n- [ ] C {#a2}\n- [ ] A {#a1}\n- [ ] B {#a1}\n\n:::\n";
+    let out = inserted("z‸\n", twice, "poll");
+    assert!(out.contains("- [ ] C {#a2}\n- [ ] A {#a1}\n- [ ] B {#a3}\n"), "{out}");
+    let repeated = ":::poll\n\n- [ ] A {#none}\n- [ ] B {#none}\n\n:::\n";
+    assert!(inserted("z‸\n", repeated, "poll").contains("- [ ] A {#none}\n- [ ] B {#a1}\n"));
+    // two fields may each have the same one
+    let two = ":::poll\n\n- [ ] A {#a1}\n\ntext\n\n- [ ] B {#a1}\n\n:::\n";
+    assert_eq!(inserted("z‸\n", two, "poll"), format!("z\n\n{two}"));
     // what only looks like an id in the preset is text
     let code = ":::tip\n\n```\nx {#a1}\n```\n\nand `y {#a1}`\n\n:::\n";
     assert_eq!(
@@ -325,7 +337,7 @@ fn read_only_refuses() {
 fn an_id_with_blanks_after_it_is_an_id() {
     let preset = ":::tip\n\n## New {#q}  \n\nBody\n\n:::\n";
     let out = inserted("## Existing {#q}\n\nz‸\n", preset, "tip");
-    assert!(out.contains("## New {#a1}  \n"), "{out}");
+    assert!(out.contains("## New {#q-2}  \n"), "{out}");
     // a free one keeps its bytes, blanks included
     let out = inserted("z‸\n", preset, "tip");
     assert!(out.contains("## New {#q}  \n"), "{out}");
@@ -366,9 +378,11 @@ fn only_what_the_parser_calls_blank_is_blank() {
     );
 }
 
-/// The trailing ids of a text, as a reader finds them.
+/// The trailing ids of the headings of a text, as a reader finds them: these are unique on a page. An answer's is
+/// its field's.
 fn ids(text: &str) -> Vec<&str> {
     (text.lines())
+        .filter(|l| l.starts_with('#'))
         .filter_map(|l| l.trim_end().strip_suffix('}')?.rsplit_once("{#").map(|x| x.1))
         .collect()
 }
@@ -403,7 +417,8 @@ proptest! {
         ..ProptestConfig::default()
     })]
 
-    /// Insertions add bytes and take none, every new id is free, and undo gives the exact source back.
+    /// Insertions add bytes and take none, a heading's id is free, an answer's as written, and undo gives the exact
+    /// source back.
     #[test]
     fn insertions_keep_the_rest_and_undo_restores_it(
         pieces in prop::collection::vec(0..PIECES.len(), 0..6),
@@ -430,13 +445,17 @@ proptest! {
             let head = before.bytes().zip(after.bytes()).take_while(|(a, b)| a == b).count();
             prop_assert!(head + (before.len() - tail) >= before.len(), "{:?} to {:?}", before, after);
             prop_assert!(s.ed.session.doc().named_containers_at(opener).last().is_some_and(|c| c.opener.start == opener));
-            // block ids never repeat what was there, nor each other
+            // a heading's id never repeats what was there, nor another
             let mut trailing = ids(&after);
             let n = trailing.len();
             trailing.sort_unstable();
             trailing.dedup();
             let repeats_before = { let mut b = ids(&before); let m = b.len(); b.sort_unstable(); b.dedup(); m - b.len() };
             prop_assert_eq!(n - trailing.len(), repeats_before, "{}", after);
+            // an answer's is as written
+            if preset == 1 {
+                prop_assert!(after.contains("- [ ] One {#a1}\n- [ ] Two {#a2}\n"), "{}", after);
+            }
         }
         while s.ed.session.history().undo_len() > start {
             s.undo();

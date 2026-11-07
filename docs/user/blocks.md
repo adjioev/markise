@@ -178,7 +178,7 @@ Delete takes the section's bytes and one divider, with no question: a short noti
 
 A section's row in the outline has a menu: right-click it, or use the small **⋯** at its end when the pointer is on the row. It has **Move Up**, **Move Down**, **Duplicate**, **Insert After…** and **Delete**, and works on that section wherever the caret is. With the keyboard, Tab to the row and press <kbd>Shift+F10</kbd>, or go on to the **⋯** and press <kbd>Return</kbd>; the arrows go through the items and <kbd>Esc</kbd> goes back. Read has no menu.
 
-**Duplicate** puts a copy right after the section, one undo step. The copy is the same text but for its ids: a heading's `{#id}` and the `id` in its metadata get a new number, `intro` becoming `intro-2`, and the answers in a block the next free ones. A first heading with no id gets one.
+**Duplicate** puts a copy right after the section, one undo step. The copy is the same text but for the ids that must be unique on a page: a heading's `{#id}` and the `id` in its metadata get a new number, `intro` becoming `intro-2`, and a first heading with no id gets one. What is inside a block stays as written, its answers' ids included.
 
 **Insert After…** opens the form of [a new section](#start-a-section), for after this one.
 

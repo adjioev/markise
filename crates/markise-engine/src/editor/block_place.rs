@@ -2,14 +2,16 @@
 //! caret's place, for a host offering blocks to insert, and the insertion itself. The Markdown comes
 //! from outside and is not trusted. No package and no block name is known here.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use markise_doc::{DocPos, FormatDoc, FormatOptions, HintSet, PatchSet, PlanStep, Selection};
+use markise_doc::{DocPos, FormatDoc, FormatOptions, HintSet, LeafKind, PatchSet, PlanStep, Selection};
 use markise_layout::BlockViewMode;
 use markise_md::Document;
 
 use super::{EditError, EditorView, TxKind};
 use crate::block_fields::{ids_in, new_anchor};
+use crate::section_id::next_section_id;
 
 /// What undo calls an inserted block.
 const INSERT_LABEL: &str = "Insert Block";
@@ -165,18 +167,37 @@ pub(super) fn trailing_ids_in(doc: &dyn FormatDoc, range: std::ops::Range<usize>
     out
 }
 
-/// `markdown` with every trailing id free in the document: an id still free stays, another gets the
-/// field model's next one (ADR 0020).
+/// A preset's `markdown` with its ids as the package wrote them. An answer's belongs to its field and can mean
+/// something, so only a repeat within one field, which a valid preset does not have, gets the field model's next
+/// one, past the others in that field (ADR 0020). A heading's id is unique on a page, so a heading's that is
+/// taken there gets a new number after its own words.
 fn with_free_ids(preset: &dyn FormatDoc, in_document: &str) -> String {
-    let mut taken = ids_in(in_document);
+    let mut page = ids_in(in_document);
+    let mut fields: BTreeMap<Option<usize>, BTreeSet<String>> = BTreeMap::new();
     let text = preset.text();
     let mut out = String::with_capacity(text.len());
     let mut from = 0;
     for (start, end) in trailing_ids(preset) {
-        let id = new_anchor(&taken, Some(&text[start..end]), &Default::default());
+        let written = &text[start..end];
+        let id = if matches!(preset.leaf(start).map(|l| l.kind), Some(LeafKind::Heading { .. })) {
+            if page.contains(written) {
+                next_section_id(written, &page)
+            } else {
+                written.to_string()
+            }
+        } else {
+            let field = fields.entry(preset.top_at(start)).or_default();
+            let id = if field.contains(written) {
+                new_anchor(field, None, &BTreeSet::new())
+            } else {
+                written.to_string()
+            };
+            field.insert(id.clone());
+            id
+        };
         out.push_str(&text[from..start]);
         out.push_str(&id);
-        taken.insert(id);
+        page.insert(id);
         from = end;
     }
     out.push_str(&text[from..]);

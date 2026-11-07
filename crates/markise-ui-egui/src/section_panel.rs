@@ -153,9 +153,11 @@ pub fn section_outline(ui: &mut Ui, doc: OutlineDoc<'_>, look: &SideLook, state:
                         if partial && k + 1 == sections {
                             name.push('…');
                         }
-                        // by its section, so that a menu stays with its row however the list scrolls
+                        // A menu names its section by its place, which means something only in this very state
+                        // of this document: it stays with its row however the list scrolls, and any change at
+                        // all, a reload too, ends it with nothing done.
                         let r = ui
-                            .push_id(("markise-section-row", k), |ui| {
+                            .push_id(("markise-section-row", id, ed.changes(), k), |ui| {
                                 look.row(ui, 0, RowKind::Heading { level: 1 }, &name, current == i)
                             })
                             .inner;

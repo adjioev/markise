@@ -115,6 +115,8 @@ pub struct SectionAt {
 pub struct SectionPair {
     pub key: String,
     pub value: String,
+    /// Where the value stands in the text, without the blanks around it.
+    pub value_span: Span,
 }
 
 /// A line of a section's metadata that does not fit its grammar.

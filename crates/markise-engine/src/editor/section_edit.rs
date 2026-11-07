@@ -83,7 +83,8 @@ impl EditorView {
         self.section_end(index).is_some()
     }
 
-    /// [`Self::insert_section`] at the end of section `index`, wherever the caret is. Refused, the caret stays.
+    /// [`Self::insert_section`] at the end of section `index`, wherever the caret is, and undo brings the caret back
+    /// to where it was. Refused, the caret stays.
     pub fn insert_section_after(
         &mut self,
         index: usize,
@@ -93,15 +94,10 @@ impl EditorView {
         if in_source {
             self.source_selection_to_session();
         }
-        let Some(end) = self.section_end(index) else {
-            return Err(InsertRefused::WouldNotStand);
+        let done = match self.section_end(index) {
+            Some(end) => self.insert_section_at(DocPos::new(end), new),
+            None => Err(InsertRefused::WouldNotStand),
         };
-        let before = self.session.selection().clone();
-        self.set_selection(Selection::caret_at(DocPos::new(end)));
-        let done = self.insert_section(new, false);
-        if done.is_err() {
-            self.set_selection(before);
-        }
         if in_source {
             self.source_selection_from_session();
         }
@@ -117,15 +113,23 @@ impl EditorView {
         if in_source {
             self.source_selection_to_session();
         }
-        self.release();
-        let doc = self.session.doc();
-        let eol = doc.line_ending().as_str();
         let p = self.session.selection().primary();
         let at = if p.is_caret() {
             p.focus
         } else {
             DocPos::new(p.range().end)
         };
+        let done = self.insert_section_at(at, new);
+        if in_source {
+            self.source_selection_from_session();
+        }
+        done
+    }
+
+    fn insert_section_at(&mut self, at: DocPos, new: &NewSection) -> Result<usize, InsertRefused> {
+        self.release();
+        let doc = self.session.doc();
+        let eol = doc.line_ending().as_str();
         let line = line_for_block(doc, at);
         let title = one_line(&new.title);
         let leading = has_content_before(doc, line);
@@ -140,9 +144,6 @@ impl EditorView {
             && (doc.section_metadata(holding.index))
                 .is_some_and(|m| m.opener.start >= line && blank(&doc.text()[m.closer.end..holding.end]));
         if second_metadata || hollow_below {
-            if in_source {
-                self.source_selection_from_session();
-            }
             return Err(InsertRefused::WouldLeaveEmpty);
         }
 
@@ -210,9 +211,6 @@ impl EditorView {
         self.sync();
         self.follow_block_modes();
         self.pin_caret();
-        if in_source {
-            self.source_selection_from_session();
-        }
         match done {
             Ok(()) => Ok(heading),
             Err(EditError::Aborted(_)) => Err(InsertRefused::WouldNotStand),
