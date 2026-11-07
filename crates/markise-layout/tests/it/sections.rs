@@ -778,6 +778,9 @@ fn a_section_named_by_its_first_heading_has_no_row_for_it_and_the_title_keeps_it
     // a heading in a block before it is listed first, and the one that names it keeps its row
     let (rows, _) = rows_of("A\n\n---\n\n:::q\n\n## In\n\n:::\n\n## B\n", true);
     assert_eq!(rows, [Section(0), Section(1), Heading(0), Heading(1)]);
+    // nor a heading in what tries to be metadata: it is listed first
+    let (rows, _) = rows_of("A\n\n---\n:::section-metadata\n# In\n:::\nB\n---\n", true);
+    assert_eq!(rows.iter().filter(|r| matches!(r, Heading(_))).count(), 2, "{rows:?}");
     // metadata before it is no block for this
     let (rows, _) = rows_of("A\n\n---\n\n:::section-metadata\n\nkind: x\n\n:::\n\n## B\n", true);
     assert_eq!(rows, [Section(0), Section(1)]);
