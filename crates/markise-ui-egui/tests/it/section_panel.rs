@@ -288,6 +288,62 @@ fn the_title_going_along_is_said_in_one_line_and_not_refused() {
     assert!(h.state().banner_text().is_none());
 }
 
+/// What a reload does: the document goes on with another text, with no edit of the surface's.
+pub(crate) fn reload(h: &mut H, text: &str) {
+    let doc = std::sync::Arc::new(markise_md::parse(text));
+    let model = markise_layout::DocModel::build(doc.as_ref(), None);
+    let v = h.state_mut().viewer().unwrap();
+    v.install(doc, model, "Reload from Disk", false).unwrap();
+}
+
+#[test]
+fn a_reload_ends_an_open_menu_and_nothing_is_done_with_what_was_at_its_place() {
+    const ABC: &str = "---\nauthoring: blocks-v3\n---\n\n## A\n\n---\n\n## B\n\n---\n\n## C\n";
+    const XBC: &str = "---\nauthoring: blocks-v3\n---\n\n## A\n\n---\n\n## X\n\n---\n\n## B\n\n---\n\n## C\n";
+    let p = plain(ABC);
+    let mut h = opened(&p);
+    menu_on(&mut h, "B");
+    let delete = h.get_by_label("Delete").rect().center();
+    reload(&mut h, XBC);
+    h.step();
+    h.step();
+    assert_eq!(h.query_all_by_label("Delete").count(), 0, "the menu closed");
+    // a press where it stood: on the row or the document that lies there, not on Delete
+    h.hover_at(delete);
+    h.step();
+    for pressed in [true, false] {
+        h.event(Event::PointerButton {
+            pos: delete,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    frames(&mut h);
+    assert_eq!(text(&h), XBC, "X is still there");
+    // and a new menu is for what is there now
+    menu_on(&mut h, "X");
+    press_item(&mut h, "Delete");
+    assert_eq!(
+        text(&h),
+        "---\nauthoring: blocks-v3\n---\n\n## A\n\n---\n\n## B\n\n---\n\n## C\n"
+    );
+}
+
+#[test]
+fn a_duplicate_keeps_what_a_block_means_by_its_ids() {
+    let doc = format!("{HEAD}A\n\n---\n\n## B {{#b}}\n\n:::q\n\n- [ ] One {{#a1}}\n- [ ] None {{#none}}\n\n:::\n");
+    let p = plain(&doc);
+    let mut h = opened(&p);
+    menu_on(&mut h, "B");
+    press_item(&mut h, "Duplicate");
+    let t = text(&h);
+    assert_eq!(t.matches("- [ ] None {#none}\n").count(), 2, "{t}");
+    assert_eq!(t.matches("- [ ] One {#a1}\n").count(), 2, "{t}");
+    assert!(t.contains("## B {#b-2}\n"), "{t}");
+}
+
 #[test]
 fn read_has_none_of_it_and_neither_has_a_document_without_sections() {
     let p = plain(DOC);

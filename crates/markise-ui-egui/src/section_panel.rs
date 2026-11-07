@@ -19,11 +19,13 @@ pub struct OutlineOut {
     pub act: Option<SectionAct>,
 }
 
-/// The outline. `only`: the headings to list, when not all of them. `word`: what a section is called here, while
-/// sections can be changed; `None` offers nothing, as in Read.
+/// The outline. `id`: which document. `only`: the headings to list, when not all of them. `word`: what a section is
+/// called here, while sections can be changed; `None` offers nothing, as in Read.
+#[allow(clippy::too_many_arguments)]
 pub fn section_outline(
     ui: &mut Ui,
     ed: &EditorView,
+    id: u64,
     only: Option<&[usize]>,
     current: usize,
     look: &SideLook,
@@ -55,9 +57,11 @@ pub fn section_outline(
                     if partial && k + 1 == sections {
                         name.push('…');
                     }
-                    // by its section, so that a menu stays with its row however the list scrolls
+                    // A menu names its section by its place, which means something only in this very state of
+                    // this document: it stays with its row however the list scrolls, and any change at all,
+                    // a reload too, ends it with nothing done.
                     let r = ui
-                        .push_id(("markise-section-row", k), |ui| {
+                        .push_id(("markise-section-row", id, ed.changes(), k), |ui| {
                             look.row(ui, 0, RowKind::Heading { level: 1 }, &name, current == i)
                         })
                         .inner;

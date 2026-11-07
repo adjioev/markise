@@ -360,13 +360,31 @@ fn a_copy_comes_after_it_with_its_bytes_and_new_ids() {
         (
             "x {#b-2}\n\n```\n{#b-3}\n```\n\n---\n\n## B {#b}\n\n:::y\n\n- [ ] One {#a1}\n\n:::\n",
             1,
-            "x {#b-2}\n\n```\n{#b-3}\n```\n\n---\n\n## B {#b}\n\n:::y\n\n- [ ] One {#a1}\n\n:::\n\n---\n\n## B {#b-4}\n\n:::y\n\n- [ ] One {#a2}\n\n:::\n",
+            "x {#b-2}\n\n```\n{#b-3}\n```\n\n---\n\n## B {#b}\n\n:::y\n\n- [ ] One {#a1}\n\n:::\n\n---\n\n## B {#b-4}\n\n:::y\n\n- [ ] One {#a1}\n\n:::\n",
         ),
-        // a block's answers are numbered as its fields number them, past every number on the page
+        // what is inside a block is its own, a heading there too: `none` may mean something to a site
         (
-            ":::y\n\n- [ ] One {#a7}\n- [ ] Two {#none}\n\n:::\n",
+            ":::y\n\n## Q {#q}\n\n- [ ] One {#a7}\n- [ ] Two {#none}\n\n:::\n",
             0,
-            ":::y\n\n- [ ] One {#a7}\n- [ ] Two {#none}\n\n:::\n\n---\n\n:::y\n\n- [ ] One {#a8}\n- [ ] Two {#a9}\n\n:::\n",
+            ":::y\n\n## Q {#q}\n\n- [ ] One {#a7}\n- [ ] Two {#none}\n\n:::\n\n---\n\n:::y\n\n## Q {#q}\n\n- [ ] One {#a7}\n- [ ] Two {#none}\n\n:::\n",
+        ),
+        // a new page id goes past those in blocks as well: both namespaces count, which costs a number at most
+        (
+            ":::y\n\n- [ ] One {#b-2}\n\n:::\n\n---\n\n## B {#b}\n",
+            1,
+            ":::y\n\n- [ ] One {#b-2}\n\n:::\n\n---\n\n## B {#b}\n\n---\n\n## B {#b-3}\n",
+        ),
+        // an `id:` with no value is rejected by the reader, so it stays, and the one it reads gets the new number
+        (
+            "A\n\n---\n\n:::section-metadata\n\nid:\nkind: x\nid:  actual  \n\n:::\n\nB\n",
+            1,
+            "A\n\n---\n\n:::section-metadata\n\nid:\nkind: x\nid:  actual  \n\n:::\n\nB\n\n---\n\n:::section-metadata\n\nid:\nkind: x\nid:  actual-2  \n\n:::\n\nB\n",
+        ),
+        // only that one: nothing is written into any line
+        (
+            "A\n\n---\n\n:::section-metadata\n\nid:\nkind: x\n\n:::\n\nB\n",
+            1,
+            "A\n\n---\n\n:::section-metadata\n\nid:\nkind: x\n\n:::\n\nB\n\n---\n\n:::section-metadata\n\nid:\nkind: x\n\n:::\n\nB\n",
         ),
         // in code it is no id: the bytes stay
         (
@@ -488,4 +506,13 @@ fn a_new_section_goes_at_the_end_of_the_one_named_and_the_caret_stays_if_refused
     assert!(s.ed.insert_section_after(1, &with, false).is_err());
     assert_eq!(s.text(), hollow);
     assert_eq!(s.ed.session.selection().primary().focus.offset, 0);
+    // undo: the caret where it was before, not at the end of the section named
+    let mut s = surface(doc);
+    s.caret(1);
+    assert!(s.ed.insert_section_after(1, &new, false).is_ok());
+    s.undo();
+    assert_eq!(s.text(), doc);
+    let p = s.ed.session.selection().primary();
+    assert!(p.is_caret());
+    assert_eq!(p.focus.offset, 1);
 }

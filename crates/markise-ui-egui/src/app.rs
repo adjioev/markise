@@ -3156,6 +3156,7 @@ impl MarkiseApp {
                                 let out = section_outline(
                                     ui,
                                     &d.viewer.ed,
+                                    d.id,
                                     rows.as_deref(),
                                     cur,
                                     &look,

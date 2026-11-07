@@ -382,6 +382,7 @@ fn read_metadata(text: &str, range: Range<usize>) -> SectionMetadata {
             flag("No colon: a line here is key: value");
             continue;
         };
+        let value_start = at + key.len() + 1 + (value.len() - value.trim_start().len());
         let (key, value) = (key.trim(), value.trim());
         if !is_key(key) {
             flag("A key is a lowercase letter, then lowercase letters, digits and dashes");
@@ -400,6 +401,7 @@ fn read_metadata(text: &str, range: Range<usize>) -> SectionMetadata {
             out.pairs.push(SectionPair {
                 key: key.to_string(),
                 value: value.to_string(),
+                value_span: Span::new(value_start, value_start + value.len()),
             });
         }
     }

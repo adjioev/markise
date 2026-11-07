@@ -12,7 +12,6 @@ use super::block_move::{MoveRefused, lift};
 use super::block_place::{after_line, blank_line_at, blocks_in, blocks_of, line_end, separated, trailing_ids_in};
 use super::section_edit::holds_more_than_metadata;
 use super::{EditError, EditorView, TxKind};
-use crate::block_fields::new_anchor;
 use crate::section_id::{next_section_id, section_id};
 
 const MOVE_LABEL: &str = "Move Section";
@@ -96,42 +95,11 @@ fn plan_past(text: &str, upper: &Part, lower: &Part, eol: &str) -> Option<Result
     }))
 }
 
-/// Where in `doc` the value of the `id` a section's metadata counts stands: the first line with that key, as
-/// a reader takes it.
-fn metadata_id(doc: &dyn FormatDoc, index: usize) -> Option<Range<usize>> {
-    let m = doc.section_metadata(index)?;
-    m.get("id")?;
-    let text = doc.text();
-    let mut at = m.opener.end;
-    while at < m.closer.start {
-        let next = after_line(text, at);
-        let line = &text[at..next.min(m.closer.start)];
-        if let Some((key, value)) = line.split_once(':')
-            && key.trim() == "id"
-        {
-            let start = at + key.len() + 1;
-            let lead = value.len() - value.trim_start().len();
-            return Some(start + lead..start + lead + value.trim().len());
-        }
-        at = next;
-    }
-    None
-}
-
-/// What is at a place in a copied section that takes an id.
-#[derive(Clone, Copy, PartialEq)]
-enum IdPlace {
-    /// A section's or a heading's, by the words it has.
-    Own,
-    /// One a block's fields hold, numbered as they number them (ADR 0020).
-    InBlock,
-    /// A first heading with none: one goes here.
-    Added,
-}
-
-/// The section's bytes, ready to go after it: every id it has a new one that nothing on the page has, and its
-/// first heading one if it has none, for what a site makes of a heading. Every other byte is as it was. Also:
-/// where the id given to a heading ends, within those bytes.
+/// The section's bytes, ready to go after it: a heading's id outside a block and its metadata's `id`, which are
+/// unique on a page, get new ones that nothing on the page has, and its first heading one if it has none, for what
+/// a site makes of a heading. What is inside a block keeps its ids as written: they are its fields', per field, and
+/// a name there can mean something (ADR 0022). Every other byte is as it was. Also: where the id given to a
+/// heading ends, within those bytes.
 fn with_new_ids(
     doc: &dyn FormatDoc,
     index: usize,
@@ -139,38 +107,37 @@ fn with_new_ids(
     mut taken: BTreeSet<String>,
 ) -> (String, Option<usize>) {
     let text = doc.text();
-    let mut places: Vec<(Range<usize>, IdPlace)> = trailing_ids_in(doc, body.clone())
+    // where an id goes, and whether it comes as a new one with none there before
+    let mut places: Vec<(Range<usize>, bool)> = trailing_ids_in(doc, body.clone())
         .into_iter()
-        .map(|(a, b)| {
-            let in_block = !doc.named_containers_at(a).is_empty();
-            (a..b, if in_block { IdPlace::InBlock } else { IdPlace::Own })
-        })
+        .filter(|(a, _)| doc.named_containers_at(*a).is_empty())
+        .map(|(a, b)| (a..b, false))
         .collect();
-    places.extend(metadata_id(doc, index).map(|r| (r, IdPlace::Own)));
+    let metadata = doc.section_metadata(index);
+    let id_value = metadata.and_then(|m| m.pairs.iter().find(|p| p.key == "id").map(|p| p.value_span));
+    places.extend(id_value.map(|v| (v.start..v.end, false)));
     let heading = (doc.section_first_heading(index)).filter(|at| body.contains(at));
     if let Some(at) = heading
-        && let Some(end) = atx_line_end(doc, at, &places)
+        && let Some(end) = atx_line_end(doc, at)
     {
-        places.push((end..end, IdPlace::Added));
+        places.push((end..end, true));
     }
     places.sort_by_key(|(r, _)| r.start);
     let mut out = String::with_capacity(body.len() + 16 * places.len());
     let mut from = body.start;
     let mut added_end = None;
-    for (r, place) in places {
+    for (r, added) in places {
         out.push_str(&text[from..r.start]);
-        let id = match place {
-            IdPlace::Own => next_section_id(&text[r.clone()], &taken),
-            IdPlace::InBlock => new_anchor(&taken, None, &BTreeSet::new()),
-            IdPlace::Added => {
-                // what its text makes is what the original goes by on a site: past that one
-                let title = heading.and_then(|at| doc.heading(at)).map_or(String::new(), |h| h.text);
-                let own = section_id(&title, &taken);
-                let also: BTreeSet<String> = taken.iter().cloned().chain([own]).collect();
-                section_id(&title, &also)
-            }
+        let id = if added {
+            // what its text makes is what the original goes by on a site: past that one
+            let title = heading.and_then(|at| doc.heading(at)).map_or(String::new(), |h| h.text);
+            let own = section_id(&title, &taken);
+            let also: BTreeSet<String> = taken.iter().cloned().chain([own]).collect();
+            section_id(&title, &also)
+        } else {
+            next_section_id(&text[r.clone()], &taken)
         };
-        if place == IdPlace::Added {
+        if added {
             out.push_str(&format!(" {{#{id}}}"));
             added_end = Some(out.len());
         } else {
@@ -185,12 +152,12 @@ fn with_new_ids(
 
 /// Where a `{#id}` can be added to the heading at `at`: its one line's end, when it is written with `#`, has
 /// some text and no id or closing `#` of its own.
-fn atx_line_end(doc: &dyn FormatDoc, at: usize, ids: &[(Range<usize>, IdPlace)]) -> Option<usize> {
+fn atx_line_end(doc: &dyn FormatDoc, at: usize) -> Option<usize> {
     let text = doc.text();
     let line = at..line_end(text, at);
     let end = line.start + text[line.clone()].trim_end_matches([' ', '\t']).len();
     let written = &text[line.start..end];
-    let has_id = ids.iter().any(|(r, _)| line.contains(&r.start));
+    let has_id = doc.hidden_note(at).is_some();
     let is_atx = written.trim_start_matches(' ').starts_with('#');
     let has_text = doc.heading(at).is_some_and(|h| !h.text.trim().is_empty());
     (is_atx && has_text && !has_id && !written.ends_with('#')).then_some(end)

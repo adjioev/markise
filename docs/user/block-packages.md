@@ -195,8 +195,8 @@ card. A key Markise does not know is ignored.
   inserted from the library.
 
 A preset's `markdown` must parse as exactly one block of the name it says. Markise refuses it
-otherwise, at the moment of inserting. Its `{#id}`s stay if they are free in the document and are
-renumbered if not.
+otherwise, at the moment of inserting. The `{#id}`s of its answers stay as you wrote them, as they belong to their
+field and not to the page, so `{#none}` stays `{#none}`. A heading's id is unique on a page and gets a number if the page has it already.
 
 A preset can also say how answers are chosen, with buttons: `widget: "icon-choices"`, `variant`,
 `field`, `answers` (each with `label`, `icon`, `exclusive`), `columns` and `field_label`. An `icon`
