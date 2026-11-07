@@ -6,7 +6,7 @@ use std::sync::Arc;
 use egui::accesskit::Role;
 use egui::{Rect, Sense, Ui, WidgetInfo, pos2, vec2};
 use markise_engine::sections::{Dialect, section_dialect};
-use markise_layout::{ItemKind, Prim, Visible};
+use markise_layout::{ItemKind, SectionStyle, Visible};
 use markise_theme::Theme;
 
 use super::{DocViewer, ViewerOutput};
@@ -36,6 +36,14 @@ impl DocViewer {
         let on = dialect.as_ref().is_some_and(Dialect::has_sections);
         self.section_dialect = dialect;
         self.ed.view.set_sections(on);
+        let view = self.block_index.as_ref().and_then(|p| p.sections()).map(|c| &c.view);
+        self.ed
+            .view
+            .set_section_style(view.map_or_else(SectionStyle::default, |v| SectionStyle {
+                frame: v.frame,
+                accent: v.accent.as_deref().map(Into::into),
+                numbered: v.numbered,
+            }));
     }
 
     /// The document's dialect, when anything names one.
@@ -178,12 +186,8 @@ impl DocViewer {
         }
         let k = section.index;
         let side = (theme.line_px() * 0.85).min(20.0);
-        // on the divider's line, which is not the middle of an item with a gap above it
-        let line = (v.layout.prims.iter()).find_map(|p| match p {
-            Prim::Line { a, .. } => Some(a.y),
-            _ => None,
-        });
-        let y = surface.top() + v.y + line.unwrap_or(v.layout.height * 0.5) - side * 0.5;
+        let Some(mid) = v.layout.divider_mid else { return };
+        let y = surface.top() + v.y + mid - side * 0.5;
         let right = left + self.ed.view.width();
         let row = Rect::from_min_max(
             pos2(surface.left(), surface.top() + v.y),
@@ -218,6 +222,10 @@ impl DocViewer {
                 continue;
             }
             let id = ui.scope_id().with(("markise-section-control", label, start));
+            // what does not show is not there to press
+            if !(over_row || in_it || ui.memory(|m| m.has_focus(id))) {
+                continue;
+            }
             let resp = ui.interact(r, id, Sense::click()).on_hover_text(label);
             resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
             self.section_buttons.push(r);
@@ -225,12 +233,8 @@ impl DocViewer {
                 out.section_act = Some(act);
                 ui.ctx().request_repaint();
             }
-            let on_it = pointer.is_some_and(|p| r.contains(p));
-            if on_it {
+            if pointer.is_some_and(|p| r.contains(p)) {
                 self.pointer_on_block_control = true;
-            }
-            if !(over_row || in_it || resp.has_focus()) {
-                continue;
             }
             let tone = if resp.hovered() {
                 ui.visuals().text_color()

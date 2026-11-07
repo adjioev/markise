@@ -83,11 +83,9 @@ nothing yet. It is corrected with everything else, since the whole document has 
 Nothing here is new layout state in the model: as with a picture (ADR 0023), the same items show otherwise.
 A document without sections pays one comparison per item.
 
-- **A boundary** is a quiet divider on the line's own row, so it has the line's height and estimates
-  stand: the section's name, then the line to the right edge. The name is its `id`, else its first heading
-  among the section's own top-level blocks (a bounded look, as this is asked on the UI thread), else
-  `Section N`. Only `id` and `style` are engine keys, and no other key is ranked. No caret stands in it, as in
-  any rule.
+- **A boundary** reads as a division, stronger than a rule and in every document with the dialect on, with no option needed: a generous gap above and below, the section's number from 1 in a small badge at its start, then the line to the right edge, 2 pt in a colour between the text's and the page's. Between them stands its name only when that says more than what stands below: its `id` unless the first heading says the same. A heading says itself, and `Section N` would say the number twice. The section's own heading keeps its style. No caret stands in it, as in
+  any rule. It is taller than the line it stands for, so an item's estimate and a page's (`section_page_estimate`: boundaries in its range, O(log rules)) count that, and they come from the one function that lays it out (`divider_metrics`). The name for the outline and the status bar is as it was: its `id`, else its first heading among the section's own top-level blocks (a bounded look, as this is asked on the UI thread), else `Section N`. Only `id` and `style` are engine keys, and no other key is ranked.
+- **The first section** has no boundary, and gets no number or line. It has no item to hold them, as nothing may be written for it, and looked at on a real page it needs none: the page's start says it. A first section with nothing in it does not count in the numbers.
 - **A rule nearly a boundary** (`----`, `- - -`, ` ---`, `--- `) at the root says so on its own row, quietly.
 - **A metadata block** is a compact plaque: `key: value` as written, and `⚠` with the first reason for what
   does not fit, all of them on hover. Its opener item holds it, the content items are hidden as a closed
@@ -101,6 +99,12 @@ A document without sections pays one comparison per item.
 - **Source mode** shows the text; Side by Side's rendered pane is the rendered view.
 - Everything is in points from the theme, so theme and zoom apply and the layout cache keys on them, the
   name and the plaque's contents included.
+
+### A package's say in how sections look
+
+`"view"` in `editor/sections.json`, optional and validated with the file: `frame` and `numbered`, true or false, and `accent`, a colour's name as a view's (ADR 0021). The defaults are as above; `numbered: false` leaves the badge out, and `accent` colours the line and the badge.
+
+**With `frame`** each section is a card: a rounded border, a faint ground, room inside, and a clear gap between sections, in place of the line. It is one even shape across items and pages since it is what a native block's ground is (ADR 0021): every item of the section has a band, and `merged_bands` makes one rectangle of them, with `stroke` and `radius` now part of a band. A boundary's item holds two: the end of the frame above, which `closes` so that nothing goes on from it, and the start of the one below. A host is given only the items on screen, so a run that does not begin at a band that `opens`, or does not end at one that `closes`, goes straight off the view by more than a corner and its edge: edges and corners are for a section's true ends, also across pages. What stands in it draws above it: a block's frame and ground stay as they are, and read well on it. So heights are only the boundary's, and an item's layout is the same but for its bands. The column stands in by the frame's padding (`section_frame_inset`), so the frame takes no room from the page's margins and text wraps for the width it has. Selection, the caret and the hover controls go by the same items. Front matter stays outside: the first frame starts under it, and with none just above the first item.
 
 ### Finding one's way
 
@@ -130,7 +134,7 @@ are upper bounds and the small differences are noise:
 
 ### Read mode
 
-In Read (ADR 0024) dividers and plaques read as they do in Edit, with their warnings. No control shows, and a
+In Read (ADR 0024) dividers, frames and plaques read as they do in Edit, with their warnings. No control shows, and a
 block opened as a card in Edit is a plaque there and a card again after. In Edit a plaque's switch follows the
 rule for a block's controls: it shows under the pointer or the caret. While a block is in Practice the outline keeps
 every section and leaves out the headings that ADR 0024 does, and a name never comes from a heading in a block.
@@ -191,7 +195,7 @@ pairs as before. The commands Move Section Up, Move Section Down and Delete Sect
 
 **Delete** takes a section's bytes and its boundary, with the first section's next boundary, so that the next section comes to be first. One undo step, with no question; a changed form's draft of a block in it is asked about first, as a block's delete does, and a move waits while one is open, also as a block's does.
 
-**On screen.** A divider has three quiet buttons at the right end of its row for the section it opens, under the pointer on that row or for the section with the caret, as a block's controls. A button is there only for what can be done. In Read no button or command does anything, and a part of a large file still loading has them off, as its last section is cut short.
+**On screen.** A divider has three quiet buttons at the right end of its row for the section it opens, under the pointer on that row or for the section with the caret, as a block's controls. A button is there only for what can be done, and only while it shows: what does not show is not there to press. The row stands whether or not it says a number or a name, as the buttons stand on it. In Read no button or command does anything, and a part of a large file still loading has them off, as its last section is cut short.
 
 ## Consequences
 

@@ -229,7 +229,18 @@ with sections still offers a new one in the block library, called `Section`.
 | `label` | text, what the library and the form call a section. Default `Section` |
 | `description`, `keywords` | as for a block in the palette |
 | `icon` | a name, as a block's |
+| `view` | how sections look on screen, below |
 | `fields` | the metadata the form for a new section asks for, in this order, at most 19. None: it asks for none |
+
+`"view"` says how sections look: `{"frame": true, "accent": "blue", "numbered": true}`, each optional.
+
+| Key | Value |
+|---|---|
+| `frame` | `true`: each section is a card, with a rounded border, a faint ground, room inside and a gap between sections, around whatever is in it. Default `false`: sections are divided by a strong line |
+| `accent` | a colour's name, as in [Views](#views), for the line or border and the number. Default: a colour from the text's |
+| `numbered` | `false`: a boundary says no number. Default `true` |
+
+Anything else in these keys refuses the package. This says nothing about what a site draws, and changes no byte of a document.
 
 A field has a `key` (`[a-z][a-z0-9-]*`, not `id`, as the form has its own field for that), an optional `label`, and optional `values`,
 each with a `value` of one line up to 200 characters and an optional `label`. With `values` the form offers those; without, any one line.

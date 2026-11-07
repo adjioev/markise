@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use markise_doc::{FormatDoc, PatchSet};
-use markise_layout::block::{NoImages, Prim};
+use markise_layout::block::{NoImages, Prim, merged_bands};
 use markise_layout::caret::Geometry;
 use markise_layout::{BlockViewMode, DocModel, ItemKind, OutlineRow, Paging, View, testing};
 use markise_theme::Theme;
@@ -230,16 +230,15 @@ fn a_boundary_is_a_labelled_divider_and_other_rules_stay_lines() {
     let mut v = view_of(DOC, true);
     frame(&mut v);
     let (a, b) = (rule_item(&v, 1), rule_item(&v, 2));
-    assert_eq!(texts(&lay_out(&mut v, a)), ["Section 2"], "no metadata: its number");
-    assert_eq!(texts(&lay_out(&mut v, b)), ["Section 3"], "style is no name");
+    assert_eq!(texts(&lay_out(&mut v, a)), ["2"], "no metadata: its number");
+    assert_eq!(texts(&lay_out(&mut v, b)), ["3"], "style is no name");
     let line = item_of(&v, "***");
     assert!(texts(&lay_out(&mut v, line)).is_empty());
     assert!(
         !markise_layout::caret::has_stops(&lay_out(&mut v, a)),
         "no caret stands in it"
     );
-    // the same height as the line it stands for, so nothing else moves
-    assert_eq!(v.height(a), v.height(line));
+    assert!(v.height(a) > 2.0 * v.height(line), "clearly more than a rule");
 }
 
 #[test]
@@ -458,5 +457,263 @@ fn editing_metadata_renames_the_divider_above_it_without_a_rebuild() {
     v.set_sections(true);
     frame(&mut v);
     let i = rule_item(&v, 1);
-    assert_eq!(texts(&lay_out(&mut v, i)), ["new"]);
+    assert_eq!(texts(&lay_out(&mut v, i)), ["2", "new"]);
+}
+
+const FRAMED: SectionStyleFor = SectionStyleFor {
+    frame: true,
+    numbered: true,
+};
+struct SectionStyleFor {
+    frame: bool,
+    numbered: bool,
+}
+
+fn styled(text: &str, how: &SectionStyleFor, paging: Paging) -> View {
+    let d: Arc<dyn FormatDoc> = Arc::new(markise_md::parse(text));
+    let model = Arc::new(DocModel::build_with(&*d, None, paging));
+    let mut v = View::new(d, model, Theme::light(), 700.0, 1.0);
+    v.set_sections(true);
+    v.set_section_style(markise_layout::SectionStyle {
+        frame: how.frame,
+        accent: None,
+        numbered: how.numbered,
+    });
+    v
+}
+
+const THREE: &str =
+    "---\nlang: en\n---\n\n# First\n\nOne.\n\n---\n\n## Second\n\nTwo.\n\n- a\n- b\n\n---\n\n## Third\n\nThree.\n";
+
+#[test]
+fn a_boundary_is_as_tall_as_it_is_estimated_however_it_looks() {
+    for how in [
+        SectionStyleFor {
+            frame: false,
+            numbered: true,
+        },
+        SectionStyleFor {
+            frame: false,
+            numbered: false,
+        },
+        FRAMED,
+        SectionStyleFor {
+            frame: true,
+            numbered: false,
+        },
+    ] {
+        let mut v = styled(THREE, &how, Paging::Full);
+        for k in [1, 2] {
+            let i = rule_item(&v, k);
+            let estimate = v.estimate(i);
+            assert_eq!(
+                lay_out(&mut v, i).height,
+                estimate,
+                "frame {} numbered {}",
+                how.frame,
+                how.numbered
+            );
+        }
+    }
+}
+
+#[test]
+fn a_frame_is_one_shape_per_section_with_a_gap_between() {
+    let mut v = styled(THREE, &FRAMED, Paging::Full);
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let shown = v.frame(4000.0, 0.0, &mut f, &NoImages);
+    let runs = merged_bands(
+        shown
+            .iter()
+            .map(|s| (epaint::pos2(0.0, s.y), s.layout.bands.as_slice())),
+    );
+    assert_eq!(runs.len(), 3, "{runs:?}");
+    for pair in runs.windows(2) {
+        assert!(
+            pair[1].rect.top() > pair[0].rect.bottom() + 8.0,
+            "a clear gap: {runs:?}"
+        );
+        assert_eq!(pair[0].rect.width(), pair[1].rect.width());
+    }
+    assert!(runs.iter().all(|r| r.stroke.width > 0.0 && r.radius > 0.0));
+    // it stands out over the inset on both sides, and front matter is outside it
+    assert!(runs[0].rect.left() < 0.0 && runs[0].rect.right() > 700.0);
+    let front = shown.first().unwrap();
+    assert!(front.layout.bands.is_empty());
+    assert!(runs[0].rect.top() >= front.y + front.layout.height);
+    // the last item holds the end of the last frame
+    let last = shown.last().unwrap();
+    assert!(runs[2].rect.bottom() > last.y + last.layout.height);
+}
+
+#[test]
+fn with_no_frame_there_are_no_bands_and_a_first_section_with_nothing_has_no_frame() {
+    let mut v = styled(
+        THREE,
+        &SectionStyleFor {
+            frame: false,
+            numbered: true,
+        },
+        Paging::Full,
+    );
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    assert!(
+        v.frame(4000.0, 0.0, &mut f, &NoImages)
+            .iter()
+            .all(|s| s.layout.bands.is_empty())
+    );
+    let mut v = styled(
+        "---\nlang: en\n---\n\n---\n\nOne.\n\n---\n\nTwo.\n",
+        &FRAMED,
+        Paging::Full,
+    );
+    let shown = v.frame(4000.0, 0.0, &mut f, &NoImages);
+    let runs = merged_bands(
+        shown
+            .iter()
+            .map(|s| (epaint::pos2(0.0, s.y), s.layout.bands.as_slice())),
+    );
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    // its numbers go from what shows
+    let i = rule_item(&v, 1);
+    assert_eq!(texts(&lay_out(&mut v, i)), ["1"]);
+}
+
+/// A placeholder's height is what its items come to, near enough for a scroll bar: every boundary counted.
+#[test]
+fn a_page_estimate_counts_what_boundaries_add() {
+    let mut text = String::from("---\nlang: en\n---\n\n");
+    for k in 0..40 {
+        text.push_str(&format!("One line of text number {k}.\n\n---\n\n"));
+    }
+    text.push_str("End.\n");
+    for how in [
+        SectionStyleFor {
+            frame: false,
+            numbered: true,
+        },
+        FRAMED,
+    ] {
+        let paged = styled(&text, &how, Paging::Paged { tops: 8 });
+        let mut full = styled(&text, &how, Paging::Full);
+        let mut fonts = testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        full.frame(100.0, 0.0, &mut f, &NoImages);
+        let whole: f32 = (0..full.len()).map(|i| lay_out(&mut full, i).height).sum();
+        let estimated: f32 = (0..paged.len()).map(|i| paged.estimate(i)).sum();
+        assert!(
+            (whole - estimated).abs() / whole < 0.03,
+            "frame {}: {whole} {estimated}",
+            how.frame
+        );
+    }
+}
+
+#[test]
+fn how_a_section_looks_changes_no_byte() {
+    for how in [
+        SectionStyleFor {
+            frame: false,
+            numbered: true,
+        },
+        FRAMED,
+    ] {
+        let mut v = styled(THREE, &how, Paging::Full);
+        frame(&mut v);
+        assert_eq!(v.doc().text(), THREE);
+    }
+}
+
+fn framed_band(top: f32, bottom: f32, opens: bool, closes: bool) -> markise_layout::block::Band {
+    markise_layout::block::Band {
+        rect: epaint::Rect::from_min_max(epaint::pos2(0.0, top), epaint::pos2(100.0, bottom)),
+        fill: epaint::Color32::from_rgba_unmultiplied(0, 0, 200, 10),
+        opens,
+        closes,
+        stroke: epaint::Stroke::new(1.5, epaint::Color32::BLUE),
+        radius: 10.0,
+    }
+}
+
+/// What is on screen of a section that goes on past it has no edge and no corner to show.
+#[test]
+fn a_frame_has_edges_and_corners_only_at_its_true_ends() {
+    let at = |y: f32| epaint::pos2(0.0, y);
+    let (middle, start, end) = (
+        [framed_band(0.0, 50.0, false, false)],
+        [framed_band(0.0, 50.0, true, false)],
+        [framed_band(0.0, 50.0, false, true)],
+    );
+    // the middle of a section only: straight off both ways, by more than a corner and its edge
+    let runs = merged_bands([(at(100.0), &middle[..]), (at(150.0), &middle[..])]);
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].rect.top() < 100.0 - 11.5, "{runs:?}");
+    assert!(runs[0].rect.bottom() > 200.0 + 11.5, "{runs:?}");
+    // its start is where it says, its bottom goes on
+    let runs = merged_bands([(at(100.0), &start[..]), (at(150.0), &middle[..])]);
+    assert_eq!(runs[0].rect.top(), 100.0);
+    assert!(runs[0].rect.bottom() > 200.0 + 11.5, "{runs:?}");
+    // its end is where it says, its top goes on
+    let runs = merged_bands([(at(100.0), &middle[..]), (at(150.0), &end[..])]);
+    assert!(runs[0].rect.top() < 100.0 - 11.5, "{runs:?}");
+    assert_eq!(runs[0].rect.bottom(), 200.0);
+    // a block's ground has neither, and stays what it was
+    let plain = [markise_layout::block::Band {
+        stroke: epaint::Stroke::NONE,
+        radius: 0.0,
+        ..middle[0]
+    }];
+    let runs = merged_bands([(at(100.0), &plain[..]), (at(150.0), &plain[..])]);
+    assert_eq!((runs[0].rect.top(), runs[0].rect.bottom()), (100.0, 200.0));
+}
+
+/// Scrolled into a long section, on a paged view too, and across what a page cuts.
+#[test]
+fn scrolled_into_a_long_section_nothing_shows_of_its_ends() {
+    let mut text = String::from("One.\n\n---\n\n## Long\n\n");
+    for k in 0..200 {
+        text.push_str(&format!("Paragraph number {k} of a long section.\n\n"));
+    }
+    text.push_str("---\n\nLast.\n");
+    for paging in [Paging::Full, Paging::Paged { tops: 8 }] {
+        let mut v = styled(&text, &FRAMED, paging);
+        let mut fonts = testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        v.frame(600.0, 0.0, &mut f, &NoImages);
+        let middle = text.find("Paragraph number 100 ").unwrap();
+        v.ensure_offset(middle);
+        let i = v.model().item_at_offset(middle);
+        v.scroll_to_item(i);
+        let shown = v.frame(600.0, 0.0, &mut f, &NoImages);
+        let runs = merged_bands(
+            shown
+                .iter()
+                .map(|s| (epaint::pos2(0.0, s.y), s.layout.bands.as_slice())),
+        );
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let (r, reach) = (runs[0].rect, runs[0].radius + runs[0].stroke.width);
+        assert!(r.top() <= -reach && r.bottom() >= 600.0 + reach, "{r:?}");
+    }
+}
+
+/// What stands on a boundary's row stands inside its item, however it looks.
+#[test]
+fn a_boundary_s_row_is_inside_its_item() {
+    for frame in [false, true] {
+        for numbered in [false, true] {
+            let how = SectionStyleFor { frame, numbered };
+            let mut v = styled("One.\n\n---\n\nTwo.\n", &how, Paging::Full);
+            let i = rule_item(&v, 1);
+            let l = lay_out(&mut v, i);
+            let mid = l.divider_mid.unwrap();
+            let line = Theme::light().line_px();
+            assert!(
+                mid - line * 0.5 >= 0.0 && mid + line * 0.5 <= l.height + 0.01,
+                "frame {frame} numbered {numbered}: {mid} {}",
+                l.height
+            );
+        }
+    }
 }

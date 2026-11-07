@@ -49,7 +49,8 @@ pub use text::{
     TextBlock, TextShaper, TextStyle,
 };
 pub use view::{
-    BlockCan, BlockViewMode, NativeAt, OutlineRow, Plaque, PracticeShow, SectionLook, SiteLook, View, Visible,
+    BlockCan, BlockViewMode, NativeAt, OutlineRow, Plaque, PracticeShow, SectionLook, SectionStyle, SiteLook, View,
+    Visible,
 };
 
 /// Font family names the layout uses; the UI must register all of them

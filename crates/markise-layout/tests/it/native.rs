@@ -747,10 +747,10 @@ fn a_blocks_bands_are_whole_wherever_its_items_are_moved_to_a_pixel() {
     let bottom = parts.last().unwrap().0.y + 17.3;
     let runs = merged_bands(parts.iter().map(|(o, b)| (*o, b.as_slice())));
     assert_eq!(runs.len(), 2, "a ground and a bar: {runs:?}");
-    for (r, _) in &runs {
-        assert_eq!((r.min.y, r.max.y), (0.0, bottom));
+    for r in &runs {
+        assert_eq!((r.rect.min.y, r.rect.max.y), (0.0, bottom));
     }
-    assert!(runs[0].1.a() < 255, "the ground first, below the bar");
+    assert!(runs[0].fill.a() < 255, "the ground first, below the bar");
 }
 
 fn egui_rect(l: f32, r: f32, t: f32, b: f32) -> epaint::Rect {
@@ -763,13 +763,16 @@ fn another_block_is_another_band_and_so_is_what_a_gap_of_items_lets_through() {
         rect: egui_rect(0.0, 100.0, 0.0, 10.0),
         fill: epaint::Color32::from_rgba_unmultiplied(0, 128, 0, 26),
         opens,
+        closes: false,
+        stroke: epaint::Stroke::NONE,
+        radius: 0.0,
     };
     let at = |y| epaint::pos2(0.0, y);
     // two blocks one after the other: an opener starts anew
     let (a, b, c) = ([band(true)], [band(false)], [band(true)]);
     let runs = merged_bands([(at(0.0), &a[..]), (at(10.0), &b[..]), (at(20.0), &c[..])]);
     assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0].0.max.y, 20.0);
+    assert_eq!(runs[0].rect.max.y, 20.0);
     // a nested block's items hold none of the outer one's: it does not paint over them
     let none: [Band; 0] = [];
     let runs = merged_bands([(at(0.0), &a[..]), (at(10.0), &none[..]), (at(20.0), &b[..])]);
