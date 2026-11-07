@@ -197,6 +197,18 @@ pairs as before. The commands Move Section Up, Move Section Down and Delete Sect
 
 **On screen.** A divider has three quiet buttons at the right end of its row for the section it opens, under the pointer on that row or for the section with the caret, as a block's controls. A button is there only for what can be done, and only while it shows: what does not show is not there to press. The row stands whether or not it says a number or a name, as the buttons stand on it. In Read no button or command does anything, and a part of a large file still loading has them off, as its last section is cut short.
 
+### From the outline
+
+A section's row in the outline panel has a menu, by a right click on it and from a quiet `⋯` at its end that shows under the pointer: Move Up, Move Down, Duplicate, Insert After, Delete. It says what is there to do by the same checks as the rest (`can_move_section`, `can_delete_section` and so on) and goes by the moves and refusals above, with their messages; the words in those come from the package's section label. By the keyboard: Tab comes to a row and on to its `⋯`, Return or Shift+F10 opens the menu on its first item, the arrows go through it, and Esc goes back to where it was opened from. Read, a read-only file, a part of a large file still loading and an open card have no menu and no `⋯`.
+
+**Delete** by any way there is, these two as well, is followed by a notice in the banner above the document, with Undo: one line, for eight seconds and for as long as nothing else has changed the document. It is not put over a question about a file changed on disk. Undo is the ordinary undo of that step.
+
+**Duplicate** (`duplicate_section`) puts a copy right after the section, its own boundary above it, as one undo step. Only the ids in the copy differ from its bytes. Whatever a reader takes for an id (`hidden_note`, so not what stands in code) gets a new one that is free on the page by the rule of a section's id above, and a metadata `id`'s value too, the blanks around it staying; what a block's fields hold is numbered as they number it (`new_anchor`, ADR 0020). A first heading with no `{#id}`, when it is written with `#`, gets one, as two headings saying the same would give a site one anchor; it is past what the original's text makes, so `## Two` becomes `## Two {#two-2}`. A setext heading or one with a closing `#` has no place for one and stays as it is. A section with nothing or only metadata has nothing to copy, and what would pair or divide otherwise is refused as for a move.
+
+**Insert After** opens the section form, whose Save goes as Starting one says, at the end of that section wherever the caret is (`insert_section_after`). A first section with nothing in it has no end to go after, so it is off there.
+
+**The title.** The first section may hold the document's `#` heading and intro, and that is no reason to refuse anything: a site's rules for what a section holds are the site's. When a document has exactly one `#` heading outside a block (`only_title_section`, a walk over the top-level blocks once per move, not per frame), a move that takes it along, or that brings another section above the first one holding it, says so in that notice, in one line.
+
 ## Consequences
 
 - The bytes of a file do not depend on any of this: the index only reads.

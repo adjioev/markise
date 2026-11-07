@@ -11,12 +11,15 @@ use markise_theme::Theme;
 
 use super::{DocViewer, ViewerOutput};
 
-/// What a control on a section's divider asks for, by the section's place.
+/// What a control on a section's divider or its row in the outline asks for, by the section's place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SectionAct {
     MoveUp(usize),
     MoveDown(usize),
     Delete(usize),
+    Duplicate(usize),
+    /// Opens the section form, for a new one after this one.
+    InsertAfter(usize),
 }
 
 /// The status bar's words, and the state they are for: the document, the section, whether it is whole.

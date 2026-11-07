@@ -77,6 +77,37 @@ impl EditorView {
         ids
     }
 
+    /// There is a place after section `index` to start one in: a first section with nothing in it has no line
+    /// of its own to go after.
+    pub fn can_insert_after_section(&self, index: usize) -> bool {
+        self.section_end(index).is_some()
+    }
+
+    /// [`Self::insert_section`] at the end of section `index`, wherever the caret is. Refused, the caret stays.
+    pub fn insert_section_after(
+        &mut self,
+        index: usize,
+        new: &NewSection,
+        in_source: bool,
+    ) -> Result<usize, InsertRefused> {
+        if in_source {
+            self.source_selection_to_session();
+        }
+        let Some(end) = self.section_end(index) else {
+            return Err(InsertRefused::WouldNotStand);
+        };
+        let before = self.session.selection().clone();
+        self.set_selection(Selection::caret_at(DocPos::new(end)));
+        let done = self.insert_section(new, false);
+        if done.is_err() {
+            self.set_selection(before);
+        }
+        if in_source {
+            self.source_selection_from_session();
+        }
+        done
+    }
+
     /// Starts a section after what the caret is in, or on the blank line it is on: never inside a block or a
     /// list. Its boundary stands before it when there is something to end; with nothing before it a boundary
     /// would make an empty section, or front matter of the first line, so it goes after it instead, if

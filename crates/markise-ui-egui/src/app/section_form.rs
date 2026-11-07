@@ -29,6 +29,8 @@ pub struct SectionForm {
     /// The document and revision it was opened for: another one closes it, with nothing written.
     origin: (u64, u64),
     in_source: bool,
+    /// The section it goes after, by its place, when one was named: an edit closes the form, so it stands.
+    after: Option<usize>,
     heading: String,
     title: String,
     /// The ids on the page when it opened; an edit closes it, so they stand.
@@ -140,6 +142,24 @@ impl MarkiseApp {
         }
     }
 
+    /// What a section is called here: the package's word, or the default.
+    pub(super) fn section_word(&self) -> String {
+        let language = (self.doc.as_ref()).map_or_else(String::new, |d| package_language(d.viewer.ed.session.doc()));
+        let config = self.block_package().and_then(|p| p.index.sections());
+        shown(config.and_then(|c| c.label.as_ref()), &language, DEFAULT_SECTION_LABEL)
+    }
+
+    /// Insert After on a section's row in the outline.
+    pub(super) fn open_section_form_after(&mut self, ctx: &Context, index: usize, in_source: bool) -> bool {
+        if !self.open_section_form(ctx, in_source) {
+            return false;
+        }
+        if let Some(f) = &mut self.section_form {
+            f.after = Some(index);
+        }
+        true
+    }
+
     /// The library's section item was chosen.
     pub(super) fn open_section_form(&mut self, ctx: &Context, in_source: bool) -> bool {
         let Some(d) = &self.doc else { return false };
@@ -151,6 +171,7 @@ impl MarkiseApp {
         self.section_form = Some(SectionForm {
             origin: (d.id, d.viewer.ed.session.revision().counter),
             in_source,
+            after: None,
             heading: shown(config.and_then(|c| c.label.as_ref()), &language, DEFAULT_SECTION_LABEL),
             title: String::new(),
             taken: d.viewer.ed.ids_on_page(),
@@ -186,7 +207,10 @@ impl MarkiseApp {
             id: form.id(),
             metadata: form.metadata(),
         };
-        let result = d.viewer.ed.insert_section(&new, form.in_source);
+        let result = match form.after {
+            Some(index) => d.viewer.ed.insert_section_after(index, &new, form.in_source),
+            None => d.viewer.ed.insert_section(&new, form.in_source),
+        };
         ctx.request_repaint();
         match result {
             Ok(_) => {

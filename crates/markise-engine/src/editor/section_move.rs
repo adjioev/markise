@@ -3,17 +3,21 @@
 //! list of sections and not to what follows it: the first section has none and stays with none, whoever
 //! comes to be first. Metadata is in a section's bytes, so it stays first in it.
 
+use std::collections::BTreeSet;
 use std::ops::Range;
 
-use markise_doc::{DocPos, FormatDoc, HintSet, Patch, PatchSet, PlanStep, Selection};
+use markise_doc::{DocPos, FormatDoc, HintSet, LeafKind, Patch, PatchSet, PlanStep, Selection, Span};
 
 use super::block_move::{MoveRefused, lift};
-use super::block_place::{after_line, blank_line_at, blocks_of, line_end, separated};
+use super::block_place::{after_line, blank_line_at, blocks_in, blocks_of, line_end, separated, trailing_ids_in};
 use super::section_edit::holds_more_than_metadata;
 use super::{EditError, EditorView, TxKind};
+use crate::block_fields::new_anchor;
+use crate::section_id::{next_section_id, section_id};
 
 const MOVE_LABEL: &str = "Move Section";
 const DELETE_LABEL: &str = "Delete Section";
+const DUPLICATE_LABEL: &str = "Duplicate Section";
 
 /// A section's bytes.
 struct Part {
@@ -90,6 +94,106 @@ fn plan_past(text: &str, upper: &Part, lower: &Part, eol: &str) -> Option<Result
         lower_at: to + skip + body_in_moved,
         upper_shift,
     }))
+}
+
+/// Where in `doc` the value of the `id` a section's metadata counts stands: the first line with that key, as
+/// a reader takes it.
+fn metadata_id(doc: &dyn FormatDoc, index: usize) -> Option<Range<usize>> {
+    let m = doc.section_metadata(index)?;
+    m.get("id")?;
+    let text = doc.text();
+    let mut at = m.opener.end;
+    while at < m.closer.start {
+        let next = after_line(text, at);
+        let line = &text[at..next.min(m.closer.start)];
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim() == "id"
+        {
+            let start = at + key.len() + 1;
+            let lead = value.len() - value.trim_start().len();
+            return Some(start + lead..start + lead + value.trim().len());
+        }
+        at = next;
+    }
+    None
+}
+
+/// What is at a place in a copied section that takes an id.
+#[derive(Clone, Copy, PartialEq)]
+enum IdPlace {
+    /// A section's or a heading's, by the words it has.
+    Own,
+    /// One a block's fields hold, numbered as they number them (ADR 0020).
+    InBlock,
+    /// A first heading with none: one goes here.
+    Added,
+}
+
+/// The section's bytes, ready to go after it: every id it has a new one that nothing on the page has, and its
+/// first heading one if it has none, for what a site makes of a heading. Every other byte is as it was. Also:
+/// where the id given to a heading ends, within those bytes.
+fn with_new_ids(
+    doc: &dyn FormatDoc,
+    index: usize,
+    body: Range<usize>,
+    mut taken: BTreeSet<String>,
+) -> (String, Option<usize>) {
+    let text = doc.text();
+    let mut places: Vec<(Range<usize>, IdPlace)> = trailing_ids_in(doc, body.clone())
+        .into_iter()
+        .map(|(a, b)| {
+            let in_block = !doc.named_containers_at(a).is_empty();
+            (a..b, if in_block { IdPlace::InBlock } else { IdPlace::Own })
+        })
+        .collect();
+    places.extend(metadata_id(doc, index).map(|r| (r, IdPlace::Own)));
+    let heading = (doc.section_first_heading(index)).filter(|at| body.contains(at));
+    if let Some(at) = heading
+        && let Some(end) = atx_line_end(doc, at, &places)
+    {
+        places.push((end..end, IdPlace::Added));
+    }
+    places.sort_by_key(|(r, _)| r.start);
+    let mut out = String::with_capacity(body.len() + 16 * places.len());
+    let mut from = body.start;
+    let mut added_end = None;
+    for (r, place) in places {
+        out.push_str(&text[from..r.start]);
+        let id = match place {
+            IdPlace::Own => next_section_id(&text[r.clone()], &taken),
+            IdPlace::InBlock => new_anchor(&taken, None, &BTreeSet::new()),
+            IdPlace::Added => {
+                // what its text makes is what the original goes by on a site: past that one
+                let title = heading.and_then(|at| doc.heading(at)).map_or(String::new(), |h| h.text);
+                let own = section_id(&title, &taken);
+                let also: BTreeSet<String> = taken.iter().cloned().chain([own]).collect();
+                section_id(&title, &also)
+            }
+        };
+        if place == IdPlace::Added {
+            out.push_str(&format!(" {{#{id}}}"));
+            added_end = Some(out.len());
+        } else {
+            out.push_str(&id);
+        }
+        taken.insert(id);
+        from = r.end;
+    }
+    out.push_str(&text[from..body.end]);
+    (out, added_end)
+}
+
+/// Where a `{#id}` can be added to the heading at `at`: its one line's end, when it is written with `#`, has
+/// some text and no id or closing `#` of its own.
+fn atx_line_end(doc: &dyn FormatDoc, at: usize, ids: &[(Range<usize>, IdPlace)]) -> Option<usize> {
+    let text = doc.text();
+    let line = at..line_end(text, at);
+    let end = line.start + text[line.clone()].trim_end_matches([' ', '\t']).len();
+    let written = &text[line.start..end];
+    let has_id = ids.iter().any(|(r, _)| line.contains(&r.start));
+    let is_atx = written.trim_start_matches(' ').starts_with('#');
+    let has_text = doc.heading(at).is_some_and(|h| !h.text.trim().is_empty());
+    (is_atx && has_text && !has_id && !written.ends_with('#')).then_some(end)
 }
 
 /// The section has nothing in it, or only metadata.
@@ -277,5 +381,108 @@ impl EditorView {
             self.source_selection_from_session();
         }
         Ok(true)
+    }
+
+    /// Section `index` has something to copy: not nothing, and not only metadata, which a site refuses.
+    pub fn can_duplicate_section(&self, index: usize) -> bool {
+        index < self.session.doc().section_count() && !is_hollow(self.session.doc(), index)
+    }
+
+    /// Puts a copy of section `index` right after it, as a section of its own: its bytes as they are but for its
+    /// ids (see [`with_new_ids`]). `Ok(false)`: there is nothing to copy. One undo step, the caret in the copy.
+    /// Refused if anything would pair or divide differently afterwards.
+    pub fn duplicate_section(&mut self, index: usize, in_source: bool) -> Result<bool, MoveRefused> {
+        if in_source {
+            self.source_selection_to_session();
+        }
+        if !self.can_duplicate_section(index) {
+            return Ok(false);
+        }
+        let taken = self.ids_on_page();
+        let doc = self.session.doc();
+        let text = doc.text();
+        let Some(p) = part(doc, index) else {
+            return Ok(false);
+        };
+        let eol = doc.line_ending().as_str();
+        let (copy, added_id_end) = with_new_ids(doc, index, p.body.clone(), taken);
+        let line = after_line(text, p.body.end);
+        let lead = 3 + 2 * eol.len();
+        let moved = format!("---{eol}{eol}{copy}");
+        let (insert, skip) = separated(text, line, &moved, eol);
+        let at = line + skip;
+        let sections = doc.section_count() + 1;
+        let mut want = blocks_of(doc);
+        want.extend(blocks_in(doc, &p.body));
+        want.sort();
+        let hints_after = (!doc.hints().is_empty()).then(HintSet::new);
+        self.release();
+        let done = self.session.transact(DUPLICATE_LABEL, TxKind::Structural, |tx| {
+            tx.step(PlanStep {
+                patches: PatchSet::single_verbatim(line..line, &insert),
+                hints_after,
+            })?;
+            let doc = tx.doc();
+            let stands = doc.text().get(at + lead..at + lead + copy.len()) == Some(copy.as_str())
+                && doc.section_count() == sections
+                && doc.section_at(at + lead).index == index + 1
+                && doc.section_at(at + lead).boundary == Some(Span::new(at, at + 3))
+                && added_id_end.is_none_or(|e| {
+                    let end = at + lead + e;
+                    doc.hidden_note(end).is_some_and(|n| n.end == end)
+                });
+            if !stands || blocks_of(doc) != want {
+                return Err(EditError::Aborted(String::new()));
+            }
+            // past its metadata, which shows as a plaque while the caret is elsewhere
+            let start = (doc.section_metadata(index + 1)).map_or(at + lead, |m| m.closer.end);
+            let text = doc.text();
+            let mut caret = if start > at + lead {
+                after_line(text, start)
+            } else {
+                start
+            };
+            while caret < text.len() && blank_line_at(text, caret) {
+                caret = after_line(text, caret);
+            }
+            tx.set_selection(Selection::caret_at(DocPos::new(caret.min(text.len()))));
+            Ok(())
+        });
+        self.sync();
+        self.follow_block_modes();
+        self.pin_caret();
+        if in_source {
+            self.source_selection_from_session();
+        }
+        match done {
+            Ok(()) => Ok(true),
+            Err(EditError::Aborted(_)) => Err(MoveRefused::WouldNotStand),
+            Err(e) => Err(MoveRefused::Edit(e)),
+        }
+    }
+
+    /// The section holding the document's `#` title when it has exactly one: a level 1 heading outside any block.
+    /// Walks the top-level blocks until a second one: for what happens once, on a command or a drop.
+    pub fn only_title_section(&self) -> Option<usize> {
+        let doc = self.session.doc();
+        let mut found = None;
+        for t in 0..doc.top_count() {
+            let Some(s) = doc.top_span(t) else { continue };
+            let is_title = matches!(doc.leaf(s.start).map(|l| l.kind), Some(LeafKind::Heading { level: 1 }))
+                && doc.named_containers_at(s.start).is_empty();
+            if is_title {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(s.start);
+            }
+        }
+        found.map(|at| doc.section_at(at).index)
+    }
+
+    /// Where the end of section `index` is, for what is to go after it: none for a first section with nothing in it.
+    pub(super) fn section_end(&self, index: usize) -> Option<usize> {
+        let p = part(self.session.doc(), index)?;
+        (p.boundary.is_some() || !p.body.is_empty()).then_some(p.body.end)
     }
 }

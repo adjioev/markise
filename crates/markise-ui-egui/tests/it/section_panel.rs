@@ -1,0 +1,406 @@
+//! A section's row in the outline, on the real app (ADR 0026): its menu, by the pointer and the keyboard, what the
+//! engine refuses, the notice with Undo, and that Read has none of it. No window.
+
+use egui::{Event, Key, Modifiers, PointerButton, Pos2};
+use egui_kittest::Harness;
+use egui_kittest::kittest::{NodeT, Queryable};
+use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp};
+
+use crate::block_library::frames;
+use crate::block_views::{Fixture, text};
+use crate::common;
+
+type H = Harness<'static, MarkiseApp>;
+
+const HEAD: &str = "---\nauthoring: blocks-v3\n---\n\n";
+const DOC: &str =
+    "---\nauthoring: blocks-v3\n---\n\nOne.\n\n---\n\n## Two {#two}\n\nText.\n\n---\n\n## Three\n\nMore.\n";
+
+pub(crate) struct Plain {
+    _dir: tempfile::TempDir,
+    config: std::path::PathBuf,
+    doc: std::path::PathBuf,
+}
+
+pub(crate) fn plain(text: &str) -> Plain {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (config, doc) = (root.join("config"), root.join("doc.md"));
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(&doc, text).unwrap();
+    Plain { _dir: dir, config, doc }
+}
+
+pub(crate) fn opened(p: &Plain) -> H {
+    let opts = AppOptions {
+        config: ConfigDir::Dir(p.config.clone()),
+        ..common::no_watch()
+    };
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, app: &mut MarkiseApp| app.ui(ui), MarkiseApp::new(opts));
+    h.state_mut().open(p.doc.clone());
+    let want = p.doc.clone();
+    common::wait_until(&mut h, "document load", move |a| {
+        a.document_path() == Some(want.as_path()) && !a.is_loading()
+    });
+    common::run(&mut h);
+    h
+}
+
+pub(crate) fn row(h: &H, name: &str) -> Pos2 {
+    // at the left, a heading of the same name standing in the document too; the first, its heading's row
+    // standing under it
+    h.query_all_by_label(name)
+        .map(|n| n.rect())
+        .min_by(|a, b| (a.left(), a.top()).partial_cmp(&(b.left(), b.top())).unwrap())
+        .unwrap_or_else(|| panic!("no row {name}"))
+        .center()
+}
+
+fn secondary_click(h: &mut H, p: Pos2) {
+    h.hover_at(p);
+    frames(h);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton {
+            pos: p,
+            button: PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    frames(h);
+}
+
+/// A few frames only: every frame here counts as a quarter of a second, and a notice goes after a while.
+fn press_item(h: &mut H, label: &str) {
+    h.get_by_label(label).click();
+    for _ in 0..4 {
+        h.step();
+    }
+}
+
+fn menu_on(h: &mut H, name: &str) {
+    let p = row(h, name);
+    secondary_click(h, p);
+}
+
+#[test]
+fn a_right_click_has_the_menu_and_its_moves_are_one_undo_step() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    menu_on(&mut h, "Two");
+    press_item(&mut h, "Move Down");
+    assert_eq!(
+        text(&h),
+        format!("{HEAD}One.\n\n---\n\n## Three\n\nMore.\n\n---\n\n## Two {{#two}}\n\nText.\n")
+    );
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    frames(&mut h);
+    assert_eq!(text(&h), DOC);
+    assert!(h.state().banner_text().is_none(), "no title here, so nothing to say");
+}
+
+#[test]
+fn the_dots_show_on_hover_and_have_the_same_menu() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    assert_eq!(h.query_all_by_label("Section actions").count(), 0, "quiet");
+    let at = row(&h, "Two");
+    h.hover_at(at);
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Section actions").count(), 1);
+    let dots = h.get_by_label("Section actions").rect().center();
+    h.hover_at(dots);
+    frames(&mut h);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton {
+            pos: dots,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    frames(&mut h);
+    press_item(&mut h, "Move Up");
+    assert_eq!(
+        text(&h),
+        format!("{HEAD}## Two {{#two}}\n\nText.\n\n---\n\nOne.\n\n---\n\n## Three\n\nMore.\n")
+    );
+}
+
+#[test]
+fn only_what_can_be_done_is_offered() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    menu_on(&mut h, "Section 1");
+    let enabled = |h: &H, l: &str| !h.get_by_label(l).accesskit_node().is_disabled();
+    assert!(!enabled(&h, "Move Up"));
+    assert!(enabled(&h, "Move Down"));
+    h.key_press(Key::Escape);
+    frames(&mut h);
+    menu_on(&mut h, "Three");
+    assert!(!enabled(&h, "Move Down"));
+    assert!(enabled(&h, "Move Up"));
+    assert!(enabled(&h, "Delete"));
+}
+
+#[test]
+fn a_refusal_says_the_engine_s_message_and_changes_nothing() {
+    let doc = format!("{HEAD}One.\n\n---\n\n:::section-metadata\n\nid: m\n\n:::\n\n---\n\nThree.\n");
+    let p = plain(&doc);
+    let mut h = opened(&p);
+    menu_on(&mut h, "m");
+    press_item(&mut h, "Move Down");
+    assert_eq!(text(&h), doc);
+    let said = h.state().banner_text().unwrap();
+    assert!(said.contains("Section not moved"), "{said}");
+    assert!(said.contains("fill it in or delete it first"), "{said}");
+}
+
+#[test]
+fn delete_asks_nothing_and_the_notice_takes_it_back_exactly() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    menu_on(&mut h, "Two");
+    press_item(&mut h, "Delete");
+    let gone = format!("{HEAD}One.\n\n---\n\n## Three\n\nMore.\n");
+    assert_eq!(text(&h), gone);
+    assert!(!h.state().is_asking());
+    assert_eq!(h.state().banner_text().unwrap(), "Section deleted: Two");
+    h.get_by_label("Undo").click();
+    frames(&mut h);
+    frames(&mut h);
+    assert_eq!(text(&h), DOC);
+    assert!(h.state().banner_text().is_none());
+}
+
+#[test]
+fn the_notice_goes_with_the_next_edit_and_after_a_while() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    menu_on(&mut h, "Two");
+    press_item(&mut h, "Delete");
+    assert!(h.state().banner_text().is_some());
+    // a key the document takes: its Undo would no longer be this delete's
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.set_selection(markise_doc::Selection::caret_at(markise_doc::DocPos::new(HEAD.len())));
+    let _ = v.ed.edit(|s| s.insert_text("x"));
+    frames(&mut h);
+    assert!(h.state().banner_text().is_none());
+
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    menu_on(&mut h, "Two");
+    press_item(&mut h, "Delete");
+    let from = h.ctx.input(|i| i.time);
+    while h.ctx.input(|i| i.time) < from + 10.0 {
+        h.step();
+    }
+    h.step();
+    assert!(h.state().banner_text().is_none(), "short");
+}
+
+#[test]
+fn duplicate_gives_new_ids_and_is_one_undo_step() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    menu_on(&mut h, "Two");
+    press_item(&mut h, "Duplicate");
+    assert_eq!(
+        text(&h),
+        format!(
+            "{HEAD}One.\n\n---\n\n## Two {{#two}}\n\nText.\n\n---\n\n## Two {{#two-2}}\n\nText.\n\n---\n\n## Three\n\nMore.\n"
+        )
+    );
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    frames(&mut h);
+    assert_eq!(text(&h), DOC);
+}
+
+#[test]
+fn insert_after_opens_the_form_and_goes_after_that_one_wherever_the_caret_is() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    menu_on(&mut h, "Two");
+    press_item(&mut h, "Insert After…");
+    assert_eq!(text(&h), DOC, "nothing before Save");
+    assert_eq!(h.state().section_form().unwrap().heading(), "Section");
+    h.state_mut().set_section_form_title("New");
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().save_section_form(&ctx));
+    frames(&mut h);
+    assert_eq!(
+        text(&h),
+        format!(
+            "{HEAD}One.\n\n---\n\n## Two {{#two}}\n\nText.\n\n---\n\n## New {{#new}}\n\n---\n\n## Three\n\nMore.\n"
+        )
+    );
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    frames(&mut h);
+    assert_eq!(text(&h), DOC);
+}
+
+#[test]
+fn the_title_going_along_is_said_in_one_line_and_not_refused() {
+    let title = format!("{HEAD}# Title\n\nIntro.\n\n---\n\nTwo.\n\n---\n\nThree.\n");
+    // with its section
+    let p = plain(&title);
+    let mut h = opened(&p);
+    menu_on(&mut h, "Title");
+    press_item(&mut h, "Move Down");
+    assert_eq!(
+        text(&h),
+        format!("{HEAD}Two.\n\n---\n\n# Title\n\nIntro.\n\n---\n\nThree.\n")
+    );
+    let said = h.state().banner_text().unwrap();
+    assert!(said.contains("title with it"), "{said}");
+    assert!(!said.contains('\n'));
+    // Undo takes it back
+    h.get_by_label("Undo").click();
+    frames(&mut h);
+    frames(&mut h);
+    assert_eq!(text(&h), title);
+    // another one going above it
+    menu_on(&mut h, "Section 2");
+    press_item(&mut h, "Move Up");
+    assert_eq!(
+        text(&h),
+        format!("{HEAD}Two.\n\n---\n\n# Title\n\nIntro.\n\n---\n\nThree.\n")
+    );
+    assert!(h.state().banner_text().unwrap().contains("title moves too"));
+    // far from it: nothing to say
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    frames(&mut h);
+    assert_eq!(text(&h), title);
+    menu_on(&mut h, "Section 3");
+    press_item(&mut h, "Move Up");
+    assert!(h.state().banner_text().is_none());
+    // a second `#`: no one title to speak of
+    let two = format!("{HEAD}# Title\n\nIntro.\n\n---\n\n# Other\n\nTwo.\n");
+    let p = plain(&two);
+    let mut h = opened(&p);
+    menu_on(&mut h, "Title");
+    press_item(&mut h, "Move Down");
+    assert_ne!(text(&h), two);
+    assert!(h.state().banner_text().is_none());
+}
+
+#[test]
+fn read_has_none_of_it_and_neither_has_a_document_without_sections() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    h.state_mut().viewer().unwrap().ed.set_read_mode(true);
+    frames(&mut h);
+    let at = row(&h, "Two");
+    h.hover_at(at);
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Section actions").count(), 0);
+    secondary_click(&mut h, at);
+    assert_eq!(h.query_all_by_label("Delete").count(), 0);
+    assert_eq!(text(&h), DOC);
+    // back in Edit it is there
+    h.state_mut().viewer().unwrap().ed.set_read_mode(false);
+    frames(&mut h);
+    h.hover_at(at);
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Section actions").count(), 1);
+
+    let p = plain("# One\n\n---\n\nTwo.\n");
+    let mut h = opened(&p);
+    let at = row(&h, "One");
+    h.hover_at(at);
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Section actions").count(), 0);
+}
+
+const FILES: &[(&str, &str)] = &[
+    (
+        "manifest.json",
+        r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip"],"authoring":"blocks-v3"}"#,
+    ),
+    (
+        "components/tip/tip.json",
+        r#"{"label":"Tip","fields":[{"name":"body","type":"text"}]}"#,
+    ),
+    ("editor/palette.json", r#"{"format":1}"#),
+    (
+        "editor/sections.json",
+        r#"{"format":1,"label":{"en":"Chapter","ru":"Глава"}}"#,
+    ),
+];
+
+#[test]
+fn the_word_is_the_package_s() {
+    let doc = "One.\n\n---\n\nTwo.\n\n---\n\nThree.\n";
+    let f = Fixture::with_package(doc, FILES);
+    let mut h = f.ready();
+    let at = row(&h, "Section 2");
+    h.hover_at(at);
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Chapter actions").count(), 1);
+    menu_on(&mut h, "Section 2");
+    press_item(&mut h, "Delete");
+    assert_eq!(h.state().banner_text().unwrap(), "Chapter deleted: Section 2");
+}
+
+/// From the keyboard alone: off the document, Tab along the panel to a row, Shift+F10, the arrows and Return.
+#[test]
+fn the_menu_can_be_reached_and_used_by_the_keyboard() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    let mut guard = 0;
+    let want = row(&h, "Two");
+    // Esc lets go of the document
+    h.key_press(Key::Escape);
+    frames(&mut h);
+    loop {
+        h.key_press(Key::Tab);
+        frames(&mut h);
+        let on = h.ctx.memory(|m| m.focused());
+        let r = on.and_then(|id| h.ctx.read_response(id)).map(|r| r.rect);
+        if r.is_some_and(|r| r.center() == want) {
+            break;
+        }
+        guard += 1;
+        assert!(guard < 60, "no way to the row by Tab: {r:?}");
+    }
+    // its dots show now, and the next Tab is on them
+    assert_eq!(h.query_all_by_label("Section actions").count(), 1);
+    h.key_press_modifiers(Modifiers::SHIFT, Key::F10);
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Move Up").count(), 1);
+    // on the first item: down to the next and Return
+    h.key_press(Key::ArrowDown);
+    frames(&mut h);
+    h.key_press(Key::Enter);
+    frames(&mut h);
+    frames(&mut h);
+    assert_eq!(
+        text(&h),
+        format!("{HEAD}One.\n\n---\n\n## Three\n\nMore.\n\n---\n\n## Two {{#two}}\n\nText.\n")
+    );
+}
+
+#[test]
+fn esc_closes_the_keyboard_s_menu_and_the_keyboard_goes_back_to_the_dots() {
+    let p = plain(DOC);
+    let mut h = opened(&p);
+    // the keyboard on the dots
+    h.hover_at(row(&h, "Two"));
+    frames(&mut h);
+    h.get_by_label("Section actions").focus();
+    frames(&mut h);
+    h.key_press(Key::Enter);
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Duplicate").count(), 1);
+    h.key_press(Key::Escape);
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Duplicate").count(), 0);
+    assert_eq!(text(&h), DOC);
+    let dots = h.get_by_label("Section actions").rect();
+    let on = h.ctx.memory(|m| m.focused()).and_then(|id| h.ctx.read_response(id));
+    assert_eq!(on.map(|r| r.rect), Some(dots));
+}

@@ -141,10 +141,15 @@ pub(super) fn separated(text: &str, line: usize, body: &str, eol: &str) -> (Stri
 
 /// The trailing ids of a parsed text, as what `{#id}` reads there: by the one check every reader uses.
 fn trailing_ids(doc: &dyn FormatDoc) -> Vec<(usize, usize)> {
+    trailing_ids_in(doc, 0..doc.text().len())
+}
+
+/// [`trailing_ids`] on the lines from `range.start`, which starts one, to `range.end`.
+pub(super) fn trailing_ids_in(doc: &dyn FormatDoc, range: std::ops::Range<usize>) -> Vec<(usize, usize)> {
     let text = doc.text();
     let mut out = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
+    let mut start = range.start;
+    while start < range.end {
         let next = after_line(text, start);
         // blanks after an id are no text of the line
         let end = start + text[start..next].trim_end_matches([' ', '\t', '\r', '\n']).len();

@@ -172,7 +172,17 @@ A first section with nothing in it stays first, as a section cannot take its pla
 
 A section with nothing in it or only metadata, which a site refuses, does not move and nothing moves past it: a message says to fill it in or delete it.
 
-Delete takes the section's bytes and one divider, with no question. The only section of a document cannot be deleted this way. Each move and each deletion is one undo step that brings back the exact file.
+Delete takes the section's bytes and one divider, with no question: a short notice says so and has **Undo** for a few seconds. The only section of a document cannot be deleted this way. Each move and each deletion is one undo step that brings back the exact file.
+
+### In the outline
+
+A section's row in the outline has a menu: right-click it, or use the small **⋯** at its end when the pointer is on the row. It has **Move Up**, **Move Down**, **Duplicate**, **Insert After…** and **Delete**, and works on that section wherever the caret is. With the keyboard, Tab to the row and press <kbd>Shift+F10</kbd>, or go on to the **⋯** and press <kbd>Return</kbd>; the arrows go through the items and <kbd>Esc</kbd> goes back. Read has no menu.
+
+**Duplicate** puts a copy right after the section, one undo step. The copy is the same text but for its ids: a heading's `{#id}` and the `id` in its metadata get a new number, `intro` becoming `intro-2`, and the answers in a block the next free ones. A first heading with no id gets one.
+
+**Insert After…** opens the form of [a new section](#start-a-section), for after this one.
+
+The first section may hold the document's `#` title and intro. If a move takes the only `#` heading along, or brings another section above the first one holding it, the notice says that the title moves too. Nothing is refused for it.
 
 ## Images
 

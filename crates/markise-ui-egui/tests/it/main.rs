@@ -38,6 +38,7 @@ mod qa_sweep;
 mod quiet_views;
 mod review;
 mod safety;
+mod section_panel;
 mod sections;
 mod select_all;
 mod side_by_side;

@@ -496,6 +496,13 @@ fn a_first_part_says_more_is_to_come_and_the_whole_document_completes_it() {
     h.step();
     let (_, about) = h.state_mut().viewer().unwrap().section_status(true).unwrap();
     assert!(about.contains(&format!("of {part}+")), "{about}");
+    // what is cut short offers no section menu
+    let name = h.state_mut().viewer().unwrap().ed.view.section_name(0);
+    let row = crate::section_panel::row(&h, &name);
+    h.hover_at(row);
+    h.step();
+    h.step();
+    assert_eq!(h.query_all_by_label("Section actions").count(), 0);
     {
         let (m, cv) = &*gate;
         *m.lock().unwrap() = false;

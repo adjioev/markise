@@ -118,9 +118,43 @@ pub fn section_id(title: &str, taken: &BTreeSet<String>) -> String {
         .expect("finitely many ids are taken")
 }
 
+/// An id for a copy of what has `id`, not in `taken`: the same words with the first free number after a hyphen,
+/// `-2` on, a number it ended in making way for that one. What is no id as a section's is read as a title.
+pub fn next_section_id(id: &str, taken: &BTreeSet<String>) -> String {
+    let base = match id.rsplit_once('-') {
+        Some((words, n)) if !words.is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => words,
+        _ => id,
+    };
+    if !is_section_id(base) {
+        return section_id(id, taken);
+    }
+    (2u64..)
+        .map(|n| {
+            let tail = format!("-{n}");
+            format!("{}{tail}", cut_to(base, MAX_ID - tail.len()))
+        })
+        .find(|id| !taken.contains(id))
+        .expect("finitely many ids are taken")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_s_id_takes_the_first_free_number() {
+        let taken = |ids: &[&str]| ids.iter().map(ToString::to_string).collect::<BTreeSet<_>>();
+        assert_eq!(next_section_id("intro", &taken(&["intro"])), "intro-2");
+        assert_eq!(next_section_id("intro-2", &taken(&["intro", "intro-2"])), "intro-3");
+        assert_eq!(next_section_id("a-1", &taken(&["a-1", "a-2"])), "a-3");
+        assert_eq!(next_section_id("step-", &taken(&["step-"])), "step-2");
+        // no id as a section's: as from a title
+        assert_eq!(next_section_id("1a", &taken(&["1a"])), "a");
+        let long = "x".repeat(64);
+        let next = next_section_id(&long, &taken(&[&long]));
+        assert_eq!(next.len(), 64);
+        assert!(is_section_id(&next) && next.ends_with("-2"));
+    }
 
     fn free(title: &str) -> String {
         section_id(title, &BTreeSet::new())
