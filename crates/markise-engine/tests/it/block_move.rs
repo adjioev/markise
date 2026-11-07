@@ -346,9 +346,11 @@ fn lines(text: &str) -> Vec<String> {
     out
 }
 
-/// How many of the trailing ids repeat another.
+/// How many of the headings' trailing ids repeat another. These are unique on a page; an answer's is its field's,
+/// and another block may have the same.
 fn repeats(text: &str) -> usize {
     let mut ids: Vec<&str> = split_lines(text)
+        .filter(|l| l.starts_with('#'))
         .filter_map(|l| l.trim_end().strip_suffix('}')?.rsplit_once("{#").map(|x| x.1))
         .collect();
     let n = ids.len();
@@ -521,7 +523,7 @@ proptest! {
     })]
 
     /// Sequences of insertions and moves keep every other line of the document and the bytes of the
-    /// block moved, never repeat an id that was not repeated, and undo gives back the exact source.
+    /// block moved, never repeat a heading's id that was not repeated, and undo gives back the exact source.
     #[test]
     fn inserts_and_moves_keep_every_other_block_and_undo_restores_the_source(
         pieces in prop::collection::vec(0..PIECES.len(), 1..7),
