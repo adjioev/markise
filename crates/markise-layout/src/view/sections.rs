@@ -228,13 +228,21 @@ impl View {
         let Some(section) = self.doc.section(k) else {
             return false;
         };
-        let from = metadata.as_ref().map_or(section.start, |m| m.closer.end);
-        let Some(first) = self.doc.top_at(from) else {
-            return false;
-        };
         let Some(last) = self.doc.top_at(at) else { return false };
-        (first + usize::from(metadata.is_some())..last)
-            .all(|t| (self.doc.top_span(t)).is_some_and(|s| self.doc.named_containers_at(s.start).is_empty()))
+        // what stands before it in the section: a block's headings are listed, its metadata's if it holds any
+        (0..last)
+            .rev()
+            .map_while(|t| self.doc.top_span(t).filter(|s| s.start >= section.start))
+            .all(|s| {
+                let in_metadata = metadata
+                    .as_ref()
+                    .is_some_and(|m| m.opener.start <= s.start && s.start < m.closer.end);
+                let heading = matches!(
+                    self.doc.leaf(s.start).map(|l| l.kind),
+                    Some(markise_doc::LeafKind::Heading { .. })
+                );
+                self.doc.named_containers_at(s.start).is_empty() || (in_metadata && !heading)
+            })
     }
 
     /// What [`Self::named_rows`] holds, when this edit does not change it: as many sections and outline entries as
