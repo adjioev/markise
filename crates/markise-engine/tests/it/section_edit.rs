@@ -10,7 +10,7 @@ fn new(title: &str) -> NewSection {
     NewSection {
         title: title.to_string(),
         id: "s9".to_string(),
-        metadata: Vec::new(),
+        ..NewSection::default()
     }
 }
 
@@ -183,4 +183,17 @@ fn nothing_is_written_that_leaves_a_section_with_only_metadata() {
         Err(InsertRefused::WouldLeaveEmpty)
     );
     assert_eq!(s.text(), doc);
+}
+
+#[test]
+fn its_heading_is_at_the_level_asked_for_and_the_caret_at_the_end_of_its_title() {
+    for (level, want) in [(1, "# T {#s9}"), (2, "## T {#s9}"), (6, "###### T {#s9}")] {
+        let section = NewSection { level, ..new("T") };
+        assert_eq!(inserted("A‸\n", &section), format!("A\n\n---\n\n{want}\n"), "{level}");
+        let mut s = surface("A\n");
+        s.caret(1);
+        s.ed.insert_section(&section, false).unwrap();
+        let at = s.ed.session.selection().primary().focus.offset;
+        assert_eq!(&s.text()[at - 1..at], "T", "{level}");
+    }
 }

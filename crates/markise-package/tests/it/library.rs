@@ -177,6 +177,28 @@ fn what_a_section_declaration_cannot_say_refuses_the_package() {
 }
 
 #[test]
+fn a_new_section_s_heading_level_is_the_package_s_from_1_to_6() {
+    let with = |sections: serde_json::Value| {
+        let mut f = common::files();
+        f.insert("editor/sections.json".to_string(), sections.to_string().into_bytes());
+        PackageIndex::from_files(&f)
+    };
+    let level = |s: serde_json::Value| with(s).unwrap().sections().unwrap().title_level;
+    assert_eq!(level(json!({})), 2);
+    assert_eq!(level(json!({"title_level": 1})), 1);
+    assert_eq!(level(json!({"title_level": 6})), 6);
+    for bad in [json!(0), json!(7), json!("2"), json!(2.5), json!(-1), json!(null)] {
+        let Err(why) = with(json!({"title_level": bad.clone()})) else {
+            panic!("{bad}");
+        };
+        assert!(
+            format!("{why:?}").contains("title_level must be a whole number from 1 to 6"),
+            "{bad}: {why:?}"
+        );
+    }
+}
+
+#[test]
 fn a_section_view_is_validated_and_has_defaults() {
     let with = |view: serde_json::Value| {
         let mut f = common::files();

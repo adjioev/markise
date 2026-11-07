@@ -471,7 +471,7 @@ fn a_new_section_goes_at_the_end_of_the_one_named_and_the_caret_stays_if_refused
     let new = NewSection {
         title: "N".into(),
         id: "n".into(),
-        metadata: vec![],
+        ..NewSection::default()
     };
     let doc = "A\n\n---\n\nB\n\n- list\n\n---\n\nC\n";
     let mut s = surface(doc);

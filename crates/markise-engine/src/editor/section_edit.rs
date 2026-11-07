@@ -13,14 +13,27 @@ use crate::block_fields::ids_in;
 const INSERT_LABEL: &str = "Insert Section";
 
 /// What a new section starts with.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewSection {
+    /// Its heading's level, 1 to 6: what a site's outline wants is the site's.
+    pub level: u8,
     /// Its heading's text, one line.
     pub title: String,
     /// Its heading's id.
     pub id: String,
     /// Its metadata, in this order. None: it has no metadata block.
     pub metadata: Vec<(String, String)>,
+}
+
+impl Default for NewSection {
+    fn default() -> NewSection {
+        NewSection {
+            level: 2,
+            title: String::new(),
+            id: String::new(),
+            metadata: Vec::new(),
+        }
+    }
 }
 
 /// One line, its runs of blanks as one: a title takes no line ending.
@@ -167,8 +180,9 @@ impl EditorView {
             body.push_str(eol);
         }
         let heading_in_body = body.len();
-        body.push_str(&format!("## {title} {{#{}}}", new.id));
-        let (title_in_body, heading_end_in_body) = (heading_in_body + 3, body.len());
+        let marks = usize::from(new.level.clamp(1, 6));
+        body.push_str(&format!("{} {title} {{#{}}}", "#".repeat(marks), new.id));
+        let (title_in_body, heading_end_in_body) = (heading_in_body + marks + 1, body.len());
         if trailing {
             body.push_str(eol);
             body.push_str(eol);

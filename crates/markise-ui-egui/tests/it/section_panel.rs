@@ -461,6 +461,27 @@ const FILES: &[(&str, &str)] = &[
 ];
 
 #[test]
+fn a_new_section_s_heading_is_at_the_package_s_level() {
+    const THREE: &str = r#"{"format":1,"title_level":3}"#;
+    let mut files: Vec<(&str, &str)> = FILES
+        .iter()
+        .filter(|(n, _)| *n != "editor/sections.json")
+        .copied()
+        .collect();
+    files.push(("editor/sections.json", THREE));
+    let doc = "One.\n\n---\n\nTwo.\n";
+    let f = Fixture::with_package(doc, &files);
+    let mut h = f.ready();
+    menu_on(&mut h, "Section 1");
+    press_item(&mut h, "Insert After…");
+    h.state_mut().set_section_form_title("New");
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().save_section_form(&ctx));
+    frames(&mut h);
+    assert_eq!(text(&h), "One.\n\n---\n\n### New {#new}\n\n---\n\nTwo.\n");
+}
+
+#[test]
 fn the_word_is_the_package_s() {
     let doc = "One.\n\n---\n\nTwo.\n\n---\n\nThree.\n";
     let f = Fixture::with_package(doc, FILES);

@@ -215,6 +215,7 @@ with sections still offers a new one in the block library, called `Section`.
   "description": { "en": "A new part of the page" },
   "keywords": "chapter",
   "icon": "flag",
+  "title_level": 2,
   "fields": [
     { "key": "style", "label": "Look",
       "values": [ { "value": "wide", "label": "Wide" }, { "value": "plain" } ] },
@@ -241,6 +242,8 @@ with sections still offers a new one in the block library, called `Section`.
 | `numbered` | `false`: a boundary says no number. Default `true` |
 
 Anything else in these keys refuses the package. This says nothing about what a site draws, and changes no byte of a document.
+
+`title_level` is the level of the heading a new section starts with, a whole number from 1 to 6, default 2, for both the library's item and **Insert After…**. Anything else refuses the package.
 
 A field has a `key` (`[a-z][a-z0-9-]*`, not `id`, as the form has its own field for that), an optional `label`, and optional `values`,
 each with a `value` of one line up to 200 characters and an optional `label`. With `values` the form offers those; without, any one line.
