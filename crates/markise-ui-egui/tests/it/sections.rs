@@ -643,6 +643,41 @@ mod inserting {
     }
 
     #[test]
+    fn the_id_follows_the_title_is_free_on_the_page_and_can_be_edited() {
+        let doc =
+            "---\nauthoring: blocks-v3\n---\n\n:::section-metadata\n\nid: taken-too\n\n:::\n\n## Taken {#taken}\n";
+        let p = plain(doc);
+        let mut h = opened(&p);
+        free_line(&mut h, doc.len() - 1);
+        type_text(&mut h, "/");
+        press(&mut h, Key::Enter);
+        assert!(!h.state().section_form().unwrap().can_save());
+        // Latin, by the table, and free
+        h.state_mut().set_section_form_title("Как действовать?");
+        assert_eq!(h.state().section_form().unwrap().id(), "kak-deystvovat");
+        h.state_mut().set_section_form_title("Taken");
+        assert_eq!(h.state().section_form().unwrap().id(), "taken-2");
+        h.state_mut().set_section_form_title("Taken too");
+        assert_eq!(h.state().section_form().unwrap().id(), "taken-too-2");
+        h.state_mut().set_section_form_title("123");
+        assert_eq!(h.state().section_form().unwrap().id(), "section-1");
+        frames(&mut h);
+        // edited, it stops following; what is no id or is taken cannot be saved
+        for bad in ["1a", "a b", "я", "taken", "taken-too"] {
+            h.state_mut().set_section_form_id(bad);
+            assert!(!h.state().section_form().unwrap().can_save(), "{bad}");
+            frames(&mut h);
+        }
+        h.state_mut().set_section_form_id("my_Id-1");
+        h.state_mut().set_section_form_title("Later");
+        assert_eq!(h.state().section_form().unwrap().id(), "my_Id-1");
+        let ctx = h.ctx.clone();
+        assert!(h.state_mut().save_section_form(&ctx));
+        frames(&mut h);
+        assert!(text(&h).ends_with("\n\n---\n\n## Later {#my_Id-1}\n"), "{}", text(&h));
+    }
+
+    #[test]
     fn metadata_values_stay_literal_and_free_text_keeps_to_the_limits() {
         const SPACED: &str = r#"{"fields":[{"key":"style","values":[{"value":"a  b"}]},{"key":"kind"}]}"#;
         let mut files = FILES_ON.to_vec();

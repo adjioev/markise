@@ -1,12 +1,14 @@
 //! Starting a section where the caret says (ADR 0026): as one undo step, at the document's level, with
 //! every byte around it as it was. Only sections are known here; what one means is its site's.
 
+use std::collections::BTreeSet;
+
 use markise_doc::{DocPos, FormatDoc, HintSet, PatchSet, PlanStep, SectionAt, Selection, Span};
 use markise_md::SECTION_METADATA;
 
 use super::block_place::{InsertRefused, after_line, blank_line_at, blocks_of, line_for_block, separated};
 use super::{EditError, EditorView, TxKind};
-use crate::block_fields::{ids_in, new_anchor};
+use crate::block_fields::ids_in;
 
 const INSERT_LABEL: &str = "Insert Section";
 
@@ -62,9 +64,17 @@ fn after_it(doc: &dyn FormatDoc, line: usize) -> (bool, bool) {
 }
 
 impl EditorView {
-    /// An id for a new section that is free on the page.
-    pub fn free_section_id(&self) -> String {
-        new_anchor(&ids_in(self.session.text()), None, &Default::default())
+    /// Every id on the page, which a new section's must not repeat: any `{#id}` written anywhere, in a heading
+    /// or a block's field, and any section's `id`. Reads every section's metadata: for a form that opens.
+    pub fn ids_on_page(&self) -> BTreeSet<String> {
+        let doc = self.session.doc();
+        let mut ids = ids_in(doc.text());
+        for k in 0..doc.section_count() {
+            if let Some(id) = doc.section_metadata(k).as_ref().and_then(|m| m.get("id")) {
+                ids.insert(id.to_string());
+            }
+        }
+        ids
     }
 
     /// Starts a section after what the caret is in, or on the blank line it is on: never inside a block or a

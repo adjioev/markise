@@ -157,6 +157,8 @@ document's level, never inside a block or a list, as one undo step, and puts the
 ## Title {#id}
 ```
 
+The form makes the `id` from the title as you type: lower case, in Latin letters, Cyrillic written out by a fixed table (`щ` is `shch`, `ю` is `yu`), with a hyphen between words and a number added if the page has it already. A title with no usable letters gets `section-1`. You can edit it: a letter, then up to 63 letters, digits, `_` and `-`, not used elsewhere on the page.
+
 With nothing before it, at the top of the document or in a section that is still empty or has only its metadata, no `---` is written above it, as that would make a section with nothing in
 it. If something follows, the `---` goes after the title instead, and what follows stays a section of its own. What would leave a section with only metadata is refused with a message, as a site refuses such a section.
 

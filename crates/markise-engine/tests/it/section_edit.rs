@@ -137,6 +137,14 @@ fn what_would_change_around_it_is_refused_and_nothing_changes() {
     assert_eq!(s.text(), doc);
 }
 
+#[test]
+fn the_ids_on_the_page_are_those_of_headings_fields_and_sections() {
+    let doc = "# Top {#top}\n\n:::poll\n\n- [x] One {#a1}\n- [ ] Two {#a2}\n\n:::\n\n---\n\n:::section-metadata\n\nid: from-meta\nstyle: id\n\n:::\n\nText.\n";
+    let s = surface(doc);
+    let ids: Vec<_> = s.ed.ids_on_page().into_iter().collect();
+    assert_eq!(ids, ["a1", "a2", "from-meta", "top"]);
+}
+
 const META: &str = ":::section-metadata\n\nstyle: wide\n\n:::";
 
 #[test]
