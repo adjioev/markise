@@ -40,6 +40,11 @@ pub struct PanelState {
 }
 
 impl PanelState {
+    /// A section's row is being dragged.
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
     /// What the drag going on shows.
     pub fn drag_shown(&self) -> Option<&SectionDragShown> {
         self.drag.as_ref()?.shown.as_ref()
@@ -309,6 +314,13 @@ fn dragging_list(ui: &mut Ui, ed: &EditorView, look: &SideLook, state: &mut Pane
     let moves = drag.has_moved && ed.can_move_section_to(section, to);
     let top = area.top() - offset + pad as f32 * row_h;
     let line_y = (top + to as f32 * row_h).clamp(area.top() + 1.0, area.bottom() - 1.0);
+    // first: Esc and the release in one frame is a cancelled drag
+    if cancelled {
+        state.settle = Some((section, y - area.top() - drag.grab_y));
+        state.drag = None;
+        ui.ctx().request_repaint();
+        return out;
+    }
     if !down {
         if moves {
             out.act = Some(SectionAct::MoveTo { index: section, to });
@@ -321,12 +333,6 @@ fn dragging_list(ui: &mut Ui, ed: &EditorView, look: &SideLook, state: &mut Pane
             to
         };
         state.settle = Some((ends_at, y - area.top() - drag.grab_y));
-        state.drag = None;
-        ui.ctx().request_repaint();
-        return out;
-    }
-    if cancelled {
-        state.settle = Some((section, y - area.top() - drag.grab_y));
         state.drag = None;
         ui.ctx().request_repaint();
         return out;

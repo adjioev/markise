@@ -1089,6 +1089,26 @@ impl MarkiseApp {
         self.side.recent()
     }
 
+    /// While a block or a section is being dragged keys edit nothing behind it, whoever holds the focus; Esc is
+    /// what the drag itself goes by.
+    fn drag_holds_the_keyboard(&self, ctx: &egui::Context) {
+        let block = self.doc.as_ref().is_some_and(|d| d.viewer.is_dragging_block());
+        if !(block || self.section_panel.is_dragging()) {
+            return;
+        }
+        ctx.input_mut(|i| {
+            i.events.retain(|e| match e {
+                egui::Event::Key { key, .. } => *key == egui::Key::Escape,
+                egui::Event::Text(_)
+                | egui::Event::Paste(_)
+                | egui::Event::Copy
+                | egui::Event::Cut
+                | egui::Event::Ime(_) => false,
+                _ => true,
+            })
+        });
+    }
+
     /// What dragging a section's row in the outline shows.
     pub fn section_drag_shown(&self) -> Option<&crate::section_panel::SectionDragShown> {
         self.section_panel.drag_shown()
@@ -2541,6 +2561,7 @@ impl MarkiseApp {
         self.full_view_keys(ctx);
 
         self.find_update(ctx);
+        self.drag_holds_the_keyboard(ctx);
         self.menus_ui(ui);
         self.find_ui(ui);
         self.status_bar(ui);

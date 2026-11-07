@@ -581,6 +581,51 @@ pub(crate) mod moves {
     }
 
     #[test]
+    fn a_reload_during_a_drag_ends_it_and_the_drop_does_nothing() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        let top = opener_rect(&h, "Before.").center();
+        let at = pick_up(&mut h, "Hello");
+        walk(&mut h, at, top, 6);
+        assert!(shown_drag(&mut h).moves);
+        let longer = format!(
+            "New.
+
+{d}"
+        );
+        crate::section_panel::reload(&mut h, &longer);
+        h.step();
+        h.step();
+        assert!(!h.state_mut().viewer().unwrap().is_dragging_block(), "it is over");
+        release(&mut h, top);
+        assert_eq!(text(&h), longer);
+    }
+
+    #[test]
+    fn keys_edit_nothing_during_a_drag_and_esc_still_ends_it() {
+        let d = doc();
+        let f = Fixture::with_palette(&d, PALETTE);
+        let mut h = f.ready();
+        let at_end = d.find("Before.").unwrap() + 3;
+        crate::block_views::caret(&mut h, at_end);
+        let at = pick_up(&mut h, "Hello");
+        h.key_press(egui::Key::Backspace);
+        h.step();
+        h.event(egui::Event::Text("x".to_string()));
+        h.step();
+        h.step();
+        assert_eq!(text(&h), d);
+        assert!(h.state_mut().viewer().unwrap().is_dragging_block(), "it goes on");
+        h.key_press(egui::Key::Escape);
+        h.step();
+        h.step();
+        assert!(!h.state_mut().viewer().unwrap().is_dragging_block());
+        release(&mut h, at);
+        assert_eq!(text(&h), d);
+    }
+
+    #[test]
     fn going_back_shows_it_stays_and_a_release_or_esc_leaves_no_undo_step() {
         let d = doc();
         let f = Fixture::with_palette(&d, PALETTE);

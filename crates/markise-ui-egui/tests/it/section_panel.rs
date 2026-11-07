@@ -637,6 +637,77 @@ mod dragging {
     }
 
     #[test]
+    fn a_reload_during_it_ends_it_and_the_drop_does_nothing() {
+        const FIVE: &str = "---\nauthoring: blocks-v3\n---\n\n## One\n\n---\n\n## New\n\n---\n\n## Two\n\n---\n\n## Three\n\n---\n\n## Four\n";
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Four");
+        let to = grip - vec2(0.0, 80.0);
+        walk(&mut h, to);
+        assert!(shown(&h).moves);
+        reload(&mut h, FIVE);
+        h.step();
+        h.step();
+        assert!(h.state().section_drag_shown().is_none(), "it is over");
+        button(&mut h, to, false);
+        frames(&mut h);
+        assert_eq!(text(&h), FIVE);
+    }
+
+    #[test]
+    fn keys_edit_nothing_while_it_lasts_and_go_on_after_it() {
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        // the caret in the document, which keeps the focus
+        let at = FOUR.find("Three").unwrap() + 2;
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.set_selection(markise_doc::Selection::caret_at(markise_doc::DocPos::new(at)));
+        v.ed.refresh_focus();
+        v.request_refocus();
+        frames(&mut h);
+        let grip = pick_up(&mut h, "Two");
+        h.key_press(Key::Backspace);
+        h.step();
+        h.event(Event::Text("x".to_string()));
+        h.step();
+        h.step();
+        assert_eq!(text(&h), FOUR);
+        assert!(h.state().section_drag_shown().is_some(), "it goes on");
+        button(&mut h, grip, false);
+        frames(&mut h);
+        assert_eq!(text(&h), FOUR);
+    }
+
+    #[test]
+    fn esc_and_the_release_in_one_frame_is_a_cancelled_drag() {
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Four");
+        let to = grip - vec2(0.0, 80.0);
+        walk(&mut h, to);
+        assert!(shown(&h).moves);
+        // in one frame: a queued event has a frame of its own
+        h.input_mut().events.extend([
+            Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            },
+            Event::PointerButton {
+                pos: to,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        h.step();
+        frames(&mut h);
+        assert_eq!(text(&h), FOUR);
+    }
+
+    #[test]
     fn the_list_scrolls_at_its_edges_and_a_section_gets_past_what_was_off_screen() {
         let mut doc = String::from(HEAD);
         for i in 0..80 {
