@@ -4,14 +4,26 @@
 use std::collections::BTreeMap;
 
 use crate::index::PackageIndex;
+use crate::sections::SectionConfig;
 use crate::value::Localized;
 
-/// One row: a preset of the package.
+/// What the library's item for a section says, when the package does not (ADR 0026).
+pub const DEFAULT_SECTION_LABEL: &str = "Section";
+
+/// What a row stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibraryItem {
+    /// A preset, by its place in [`PackageIndex::presets`].
+    Preset(usize),
+    /// A new section of a document that has sections, which is no block and no preset (ADR 0026).
+    Section,
+}
+
+/// One row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LibraryEntry {
-    /// The preset's place in [`PackageIndex::presets`].
-    pub preset: usize,
-    /// The block's name.
+    pub item: LibraryItem,
+    /// The block's name, empty for a section.
     pub block: String,
     pub title: String,
     pub detail: Option<String>,
@@ -106,7 +118,7 @@ impl PackageIndex {
         search.push('\n');
         search.push_str(preset.keywords.as_deref().unwrap_or(""));
         library.entries.push(LibraryEntry {
-            preset: at,
+            item: LibraryItem::Preset(at),
             block: block.to_string(),
             title,
             detail,
@@ -120,6 +132,32 @@ impl PackageIndex {
 }
 
 impl Library {
+    /// Adds the item for a new section, first and in no group: it is no block of any group, and a list
+    /// that scrolls does not hide it. A document whose dialect has sections wants it; none other does.
+    pub fn add_section(&mut self, config: Option<&SectionConfig>, language: &str) {
+        let shown = |l: Option<&'_ Localized>| l.map(|l| l.get(language).to_string()).filter(|s| !s.is_empty());
+        let label = config.and_then(|c| c.label.as_ref());
+        let description = config.and_then(|c| c.description.as_ref());
+        let mut search = String::new();
+        push_all(&mut search, label);
+        push_all(&mut search, description);
+        search.push_str(DEFAULT_SECTION_LABEL);
+        search.push('\n');
+        search.push_str(config.and_then(|c| c.keywords.as_deref()).unwrap_or(""));
+        self.entries.insert(
+            0,
+            LibraryEntry {
+                item: LibraryItem::Section,
+                block: String::new(),
+                title: shown(label).unwrap_or_else(|| DEFAULT_SECTION_LABEL.to_string()),
+                detail: shown(description),
+                icon: config.and_then(|c| c.icon.as_ref()).map(|n| format!("assets/{n}.svg")),
+                group: None,
+                search: fold(&search),
+            },
+        );
+    }
+
     /// The groups' labels; [`LibraryEntry::group`] points here.
     pub fn groups(&self) -> &[String] {
         &self.groups

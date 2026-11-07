@@ -3,6 +3,7 @@
 
 use egui::Context;
 use markise_layout::block::color;
+use markise_package::LibraryItem;
 
 use super::block_form::DraftNext;
 use super::{Ask, MarkiseApp};
@@ -49,12 +50,17 @@ impl MarkiseApp {
 
     /// There is something to offer and the document can take it: the Insert Block command.
     pub(super) fn block_library_available(&self) -> bool {
-        self.block_package().is_some_and(|p| !p.index.presets().is_empty())
+        (self.block_package().is_some_and(|p| !p.index.presets().is_empty()) || self.document_has_sections())
             && self.progressive.is_none()
             && self
                 .doc
                 .as_ref()
                 .is_some_and(|d| d.viewer.ed.session.read_only().is_none() && d.viewer.card_edit().is_none())
+    }
+
+    /// The document's dialect has sections (ADR 0026): it needs no package for that.
+    pub(super) fn document_has_sections(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| d.viewer.ed.view.sections_on())
     }
 
     /// Insert Block…: the same library, for the caret wherever it is.
@@ -269,11 +275,15 @@ impl MarkiseApp {
     }
 
     fn open_block_library(&mut self, ctx: &Context, opened: Opened, query: String) -> bool {
-        let Some(package) = self.block_package().cloned() else {
-            return false;
-        };
+        let package = self.block_package().cloned();
         let Some(d) = &self.doc else { return false };
-        let library = package.index.library(&package_language(d.viewer.ed.session.doc()));
+        let language = package_language(d.viewer.ed.session.doc());
+        let mut library = package
+            .as_ref()
+            .map_or_else(Default::default, |p| p.index.library(&language));
+        if d.viewer.ed.view.sections_on() {
+            library.add_section(package.as_ref().and_then(|p| p.index.sections()), &language);
+        }
         if library.is_empty() {
             return false;
         }
@@ -283,7 +293,9 @@ impl MarkiseApp {
         } else {
             d.viewer.caret_screen
         };
-        self.block_form.assets.use_package(package);
+        if let Some(package) = package {
+            self.block_form.assets.use_package(package);
+        }
         self.block_library.open = Some(OpenLibrary::new(
             origin,
             library,
@@ -316,7 +328,9 @@ impl MarkiseApp {
             .doc
             .as_ref()
             .map(|d| (d.id, d.viewer.ed.session.revision().counter));
-        if current != Some(open.origin) || !matches!(self.package.status, crate::package_ui::PackageStatus::Ready(_)) {
+        let offers = matches!(self.package.status, crate::package_ui::PackageStatus::Ready(_))
+            || self.doc.as_ref().is_some_and(|d| d.viewer.ed.view.sections_on());
+        if current != Some(open.origin) || !offers {
             self.block_library.open = None;
             return;
         }
@@ -342,8 +356,13 @@ impl MarkiseApp {
             ctx.memory_mut(|m| m.request_focus(id));
         }
         match act {
-            LibraryAct::Choose(preset) => {
+            LibraryAct::Choose(LibraryItem::Preset(preset)) => {
                 self.insert_block_preset(preset);
+                ctx.request_repaint();
+            }
+            LibraryAct::Choose(LibraryItem::Section) => {
+                let in_source = self.source_focused();
+                self.open_section_form(ctx, in_source);
                 ctx.request_repaint();
             }
             LibraryAct::Type(text) => {

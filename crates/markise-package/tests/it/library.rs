@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use markise_package::LibraryItem::Preset;
 use markise_package::PackageIndex;
 use serde_json::json;
 
@@ -53,9 +54,16 @@ fn a_preset_of_a_block_in_no_group_comes_last_and_rows_of_one_block_say_whose_th
     }));
     let library = index.library("en");
     let rows: Vec<_> = (library.entries().iter())
-        .map(|e| (e.title.as_str(), e.group, e.preset))
+        .map(|e| (e.title.as_str(), e.group, e.item))
         .collect();
-    assert_eq!(rows, [("Three", Some(0), 2), ("One", None, 0), ("Two", None, 1)]);
+    assert_eq!(
+        rows,
+        [
+            ("Three", Some(0), Preset(2)),
+            ("One", None, Preset(0)),
+            ("Two", None, Preset(1))
+        ]
+    );
     assert!(library.entries()[1].detail.as_deref().unwrap().ends_with(" · A hint"));
 }
 
@@ -99,5 +107,71 @@ fn a_block_listed_twice_in_the_groups_refuses_the_package() {
         files.insert("editor/palette.json".into(), palette);
         let err = PackageIndex::from_files(&files).unwrap_err().to_string();
         assert!(err.contains("more than once"), "{err}");
+    }
+}
+
+#[test]
+fn a_section_item_comes_first_in_the_package_s_word_or_the_default() {
+    use markise_package::{DEFAULT_SECTION_LABEL, LibraryItem};
+
+    let mut f = common::files();
+    let plain = PackageIndex::from_files(&f).unwrap();
+    assert!(plain.sections().is_none());
+    let mut library = plain.library("en");
+    let presets = library.entries().len();
+    library.add_section(plain.sections(), "en");
+    assert_eq!(library.entries().len(), presets + 1);
+    let first = &library.entries()[0];
+    assert_eq!(
+        (first.item, first.title.as_str()),
+        (LibraryItem::Section, DEFAULT_SECTION_LABEL)
+    );
+    assert_eq!(first.group, None);
+    assert_eq!(library.filter("section"), [0]);
+
+    f.insert(
+        "editor/sections.json".to_string(),
+        json!({"format": 1, "label": {"en": "Part", "fr": "Partie"}, "description": {"en": "Of a page"},
+               "keywords": "chapter", "icon": "bulb",
+               "fields": [{"key": "style", "label": "Style", "values": [{"value": "wide", "label": "Wide"}]}]})
+        .to_string()
+        .into_bytes(),
+    );
+    let index = PackageIndex::from_files(&f).unwrap();
+    let mut library = index.library("fr");
+    library.add_section(index.sections(), "fr");
+    let first = &library.entries()[0];
+    assert_eq!(first.title, "Partie");
+    assert_eq!(first.icon.as_deref(), Some("assets/bulb.svg"));
+    for query in ["part", "chapter", "section", "page"] {
+        assert!(library.filter(query).contains(&0), "{query}");
+    }
+    let field = &index.sections().unwrap().fields[0];
+    assert_eq!((field.key.as_str(), field.values[0].value.as_str()), ("style", "wide"));
+}
+
+#[test]
+fn what_a_section_declaration_cannot_say_refuses_the_package() {
+    for (sections, says) in [
+        (json!({"format": 2}), "unsupported sections format"),
+        (json!({"fields": [{"label": "No key"}]}), "has no key"),
+        (json!({"fields": [{"key": "Bad"}]}), "is not a metadata key"),
+        (json!({"fields": [{"key": "id"}]}), "`id` cannot be a field"),
+        (json!({"fields": [{"key": "a"}, {"key": "a"}]}), "appears twice"),
+        (
+            json!({"fields": [{"key": "a", "values": [{"value": "two\nlines"}]}]}),
+            "not one line",
+        ),
+        (
+            json!({"fields": [{"key": "a", "values": [{"value": "x"}, {"value": "x"}]}]}),
+            "appears twice",
+        ),
+    ] {
+        let mut f = common::files();
+        f.insert("editor/sections.json".to_string(), sections.to_string().into_bytes());
+        let Err(why) = PackageIndex::from_files(&f) else {
+            panic!("{sections}");
+        };
+        assert!(format!("{why:?}").contains(says), "{sections}: {why:?}");
     }
 }

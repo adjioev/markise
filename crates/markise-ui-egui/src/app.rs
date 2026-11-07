@@ -66,6 +66,7 @@ mod prefs;
 mod progressive;
 mod quick_open;
 mod review;
+mod section_form;
 mod updates;
 mod vault;
 mod workflow;
@@ -519,6 +520,7 @@ pub struct MarkiseApp {
     font_window: bool,
     /// The Insert Table dialog is open, with its size (issue #164).
     insert_table: Option<insert_table::InsertTable>,
+    section_form: Option<section_form::SectionForm>,
     /// The full-window view, while it is open.
     full_view: Option<full_view::FullView>,
     /// Decodes whole images for the full-window view.
@@ -671,6 +673,7 @@ impl MarkiseApp {
             theme_report: false,
             font_window: false,
             insert_table: None,
+            section_form: None,
             full_view: None,
             whole_images: Default::default(),
             full_view_request: None,
@@ -2545,6 +2548,7 @@ impl MarkiseApp {
             self.menu_command(ctx, id, crate::menu::Trigger::Shortcut);
         }
         self.insert_table_window(ctx);
+        self.section_form_window(ctx);
         self.full_view_window(ctx);
         self.preferences_window(ctx);
         self.recovery_window(ctx);

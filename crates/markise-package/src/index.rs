@@ -8,6 +8,7 @@ use crate::error::{Issue, Issues, PackageError};
 use crate::limits::{MAX_BLOCKS, MAX_NAME_BYTES};
 use crate::palette::{self, Palette, PaletteBlock, PaletteGroup, Preset};
 use crate::schema::{self, BlockSchema};
+use crate::sections::{self, SectionConfig};
 use crate::value::{is_block_name, is_token, parse_object};
 use crate::views::{self, ViewConfig};
 use crate::{FORMAT, FORMAT_STEM, PackageId};
@@ -15,6 +16,7 @@ use crate::{FORMAT, FORMAT_STEM, PackageId};
 pub(crate) const MANIFEST: &str = "manifest.json";
 const PALETTE: &str = "editor/palette.json";
 const VIEWS: &str = "editor/views.json";
+const SECTIONS: &str = "editor/sections.json";
 
 /// A valid package: name to schema, view and palette entry.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +29,8 @@ pub struct PackageIndex {
     blocks: BTreeMap<String, BlockSchema>,
     palette: Palette,
     views: BTreeMap<String, ViewConfig>,
+    /// `editor/sections.json`, if it is there.
+    sections: Option<SectionConfig>,
 }
 
 /// Everything the package says about one block.
@@ -115,6 +119,9 @@ impl PackageIndex {
                 }
             }
         }
+        let section_config = (files.get(SECTIONS))
+            .and_then(|bytes| parse_object(SECTIONS, bytes, &mut issues))
+            .map(|map| sections::parse(SECTIONS, map, &mut issues));
 
         issues.into_result(|| PackageIndex {
             id: PackageId { library, version },
@@ -123,6 +130,7 @@ impl PackageIndex {
             blocks,
             palette,
             views: view_map,
+            sections: section_config,
         })
     }
 
@@ -138,6 +146,7 @@ impl PackageIndex {
             blocks: BTreeMap::new(),
             palette: Palette::default(),
             views: BTreeMap::new(),
+            sections: None,
         }
     }
 
@@ -154,6 +163,11 @@ impl PackageIndex {
     /// one (ADR 0023). Read, not checked, as `authoring` is.
     pub fn html_contract(&self) -> u64 {
         self.html_contract
+    }
+
+    /// What the package says about sections, if it says anything (ADR 0026).
+    pub fn sections(&self) -> Option<&SectionConfig> {
+        self.sections.as_ref()
     }
 
     /// The block's entry; `None` for a name the package does not define.

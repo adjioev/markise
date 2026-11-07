@@ -1995,10 +1995,11 @@ impl DocViewer {
     }
 
     /// One input event; returns `true` when it ran a command.
-    /// `/` on a free line with a package that has something to offer (ADR 0022).
+    /// `/` on a free line with a package that has something to offer (ADR 0022), or a document with
+    /// sections, which needs no package for a new one (ADR 0026).
     fn opens_block_library(&self, e: &Event) -> bool {
         matches!(e, Event::Text(t) if t == "/")
-            && self.block_index.as_ref().is_some_and(|i| !i.presets().is_empty())
+            && (self.block_index.as_ref().is_some_and(|i| !i.presets().is_empty()) || self.ed.view.sections_on())
             && self.ed.on_free_line()
     }
 

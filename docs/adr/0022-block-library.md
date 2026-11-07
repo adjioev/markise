@@ -202,6 +202,10 @@ A form's request is numbered by that form, so a result carries which form it was
 
 **The mark.** `destinations_in` reads the `](…)` of the text once, on opening, for "in this document". It is a cheap look and counts code too; it decides nothing.
 
+### Sections
+
+A document whose dialect has sections has one more row, with or without a package: a new section is no preset (ADR 0026, "Starting one").
+
 ## Consequences
 
 - A package's texts in other languages help find a block before they are shown.

@@ -109,8 +109,8 @@ impl MarkiseApp {
         if text_field && TEXT_FIELD_KEYS.iter().any(|(k, ..)| *k == id) {
             return true;
         }
-        // the keyboard is in the block library: document commands wait
-        if self.block_library().is_some() {
+        // the keyboard is in the block library or a new section's form: document commands wait
+        if self.block_library().is_some() || self.section_form.is_some() {
             return false;
         }
         // the keyboard is in the block form: document commands wait
@@ -362,22 +362,22 @@ impl MarkiseApp {
             "Table",
             self.command_entries(crate::menu::TABLE_COMMANDS, text_field),
         )));
-        // only where a package can offer blocks (ADR 0022)
-        if self.block_package().is_some() {
-            paragraph.entries.push(Entry::Separator);
+        // only where a package can offer blocks (ADR 0022), or a document can take a section (ADR 0026)
+        paragraph.entries.push(Entry::Separator);
+        if self.block_package().is_some() || self.document_has_sections() {
             paragraph.entries.push(self.app_item(
                 "block.insertFromLibrary",
                 self.block_library_available(),
                 Check::None,
             ));
+        }
+        if self.block_package().is_some() {
             paragraph
                 .entries
                 .push(self.app_item("block.moveUp", self.block_move_available(true), Check::None));
             paragraph
                 .entries
                 .push(self.app_item("block.moveDown", self.block_move_available(false), Check::None));
-        } else {
-            paragraph.entries.push(Entry::Separator);
         }
         // any paired block can go, with no package as well
         paragraph
@@ -684,6 +684,13 @@ impl MarkiseApp {
             // Close / Quit still work: the dialog goes first (PR #165 review 2)
             self.cancel_insert_table();
         }
+        // so is a new section's form
+        if self.section_form.is_some() {
+            if !matches!(id, "file.close" | "app.quit" | "app.exit") {
+                return false;
+            }
+            self.cancel_section_form(ctx);
+        }
         // so is the full-window view: it goes first, then Close / Quit proceed
         if self.full_view.is_some() {
             if !matches!(id, "file.close" | "app.quit" | "app.exit") {
@@ -861,7 +868,7 @@ impl MarkiseApp {
                     });
                     return true;
                 }
-                if self.block_form_focused(ctx) || self.block_library().is_some() {
+                if self.block_form_focused(ctx) || self.block_library().is_some() || self.section_form.is_some() {
                     return false;
                 }
                 return self.run_command(ctx, id);

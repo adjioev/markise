@@ -9,7 +9,7 @@ use egui::{
     WidgetInfo, pos2, vec2,
 };
 use egui_schema_form::{Style, Thumbnail};
-use markise_package::Library;
+use markise_package::{Library, LibraryItem};
 
 use crate::block_form::FormAssets;
 
@@ -33,8 +33,8 @@ pub enum Opened {
 /// What came of a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LibraryAct {
-    /// A row: the preset's place in the package.
-    Choose(usize),
+    /// A row: what it stands for.
+    Choose(LibraryItem),
     /// Esc, or Backspace with nothing typed: the keyboard goes back.
     Close,
     /// A press outside: it goes on to what is there.
@@ -254,7 +254,7 @@ impl OpenLibrary {
             return None;
         }
         match self.rows.get(self.selected) {
-            Some(&i) => Some(LibraryAct::Choose(self.library.entries()[i].preset)),
+            Some(&i) => Some(LibraryAct::Choose(self.library.entries()[i].item)),
             None if self.opened == Opened::Typed => Some(LibraryAct::Type(format!("/{}", self.query))),
             None => None,
         }
@@ -326,7 +326,7 @@ impl OpenLibrary {
                         self.selected = row;
                     }
                     if resp.clicked() {
-                        chosen = Some(LibraryAct::Choose(self.library.entries()[i].preset));
+                        chosen = Some(LibraryAct::Choose(self.library.entries()[i].item));
                     }
                 }
             });
