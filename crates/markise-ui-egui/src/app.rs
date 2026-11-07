@@ -3140,8 +3140,7 @@ impl MarkiseApp {
                         if self.files.rename.is_some() {
                             self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
                         }
-                        // while sections can be changed: what the package calls one
-                        let word = self.section_edit_allowed().then(|| self.section_word());
+                        let (word, editable) = (self.section_word(), self.section_edit_allowed());
                         if let Some(d) = &mut self.doc {
                             let jump = if d.viewer.ed.view.sections_on() {
                                 let rows = d.viewer.outline_rows();
@@ -3161,7 +3160,8 @@ impl MarkiseApp {
                                     cur,
                                     &look,
                                     d.partial,
-                                    word.as_deref(),
+                                    &word,
+                                    editable,
                                 );
                                 let origin = (d.id, d.viewer.ed.session.revision().counter);
                                 self.block_library.request_section(out.act, Some(origin));

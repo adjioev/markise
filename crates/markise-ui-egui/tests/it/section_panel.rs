@@ -249,7 +249,7 @@ fn the_title_going_along_is_said_in_one_line_and_not_refused() {
     // with its section
     let p = plain(&title);
     let mut h = opened(&p);
-    menu_on(&mut h, "Title");
+    menu_on(&mut h, "Section 1");
     press_item(&mut h, "Move Down");
     assert_eq!(
         text(&h),
@@ -282,10 +282,52 @@ fn the_title_going_along_is_said_in_one_line_and_not_refused() {
     let two = format!("{HEAD}# Title\n\nIntro.\n\n---\n\n# Other\n\nTwo.\n");
     let p = plain(&two);
     let mut h = opened(&p);
-    menu_on(&mut h, "Title");
+    menu_on(&mut h, "Section 1");
     press_item(&mut h, "Move Down");
     assert_ne!(text(&h), two);
     assert!(h.state().banner_text().is_none());
+}
+
+#[test]
+fn a_section_s_row_is_not_a_heading_s_and_only_it_has_controls() {
+    let doc = format!("{HEAD}# Title\n\n## Under\n\n---\n\n## Named\n\n### Below\n\n---\n\nNo heading.\n");
+    let p = plain(&doc);
+    let mut h = opened(&p);
+    // the title is a heading under a section; a heading that names its section has no row of its own
+    for name in ["Section 1", "Title", "Under", "Named", "Below", "Section 3"] {
+        assert_eq!(h.query_all_by_label(name).count(), 1, "{name}");
+    }
+    let (section, title, under) = (row(&h, "Section 1"), row(&h, "Title"), row(&h, "Under"));
+    assert!(section.y < title.y && title.y < under.y);
+    for heading in ["Title", "Under", "Below"] {
+        h.hover_at(row(&h, heading));
+        frames(&mut h);
+        assert_eq!(h.query_all_by_label("Section actions").count(), 0, "{heading}");
+        let at = row(&h, heading);
+        secondary_click(&mut h, at);
+        assert_eq!(h.query_all_by_label("Delete").count(), 0, "{heading}");
+        h.key_press(Key::Escape);
+        frames(&mut h);
+    }
+    // its controls are at the row's start, on it
+    for name in ["Section 1", "Named", "Section 3"] {
+        let at = row(&h, name);
+        h.hover_at(at);
+        frames(&mut h);
+        let dots = h.get_by_label("Section actions").rect();
+        assert!((dots.center().y - at.y).abs() < 2.0, "{name}");
+        assert!(dots.right() < at.x, "at its start: {name}");
+    }
+    // in Read it reads the same and has none
+    h.state_mut().viewer().unwrap().ed.set_read_mode(true);
+    frames(&mut h);
+    for name in ["Section 1", "Title", "Named"] {
+        assert_eq!(h.query_all_by_label(name).count(), 1, "{name}");
+        h.hover_at(row(&h, name));
+        frames(&mut h);
+        assert_eq!(h.query_all_by_label("Section actions").count(), 0, "{name}");
+    }
+    assert_eq!(text(&h), doc);
 }
 
 /// What a reload does: the document goes on with another text, with no edit of the surface's.
@@ -366,6 +408,7 @@ fn read_has_none_of_it_and_neither_has_a_document_without_sections() {
 
     let p = plain("# One\n\n---\n\nTwo.\n");
     let mut h = opened(&p);
+    assert_eq!(h.query_all_by_label("Section 1").count(), 0, "a plain outline");
     let at = row(&h, "One");
     h.hover_at(at);
     frames(&mut h);
@@ -393,13 +436,13 @@ fn the_word_is_the_package_s() {
     let doc = "One.\n\n---\n\nTwo.\n\n---\n\nThree.\n";
     let f = Fixture::with_package(doc, FILES);
     let mut h = f.ready();
-    let at = row(&h, "Section 2");
+    let at = row(&h, "Chapter 2");
     h.hover_at(at);
     frames(&mut h);
     assert_eq!(h.query_all_by_label("Chapter actions").count(), 1);
-    menu_on(&mut h, "Section 2");
+    menu_on(&mut h, "Chapter 2");
     press_item(&mut h, "Delete");
-    assert_eq!(h.state().banner_text().unwrap(), "Chapter deleted: Section 2");
+    assert_eq!(h.state().banner_text().unwrap(), "Chapter deleted: Chapter 2");
 }
 
 /// From the keyboard alone: off the document, Tab along the panel to a row, Shift+F10, the arrows and Return.

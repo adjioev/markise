@@ -119,9 +119,16 @@ proptest! {
         let sections: Vec<usize> = a.iter().filter_map(|r| match r { OutlineRow::Section(k) => Some(*k), _ => None }).collect();
         let heads: Vec<usize> = a.iter().filter_map(|r| match r { OutlineRow::Heading(k) => Some(*k), _ => None }).collect();
         prop_assert_eq!(sections, (0..d.section_count()).collect::<Vec<_>>());
-        prop_assert_eq!(heads, (0..views[1].model().outline.len()).collect::<Vec<_>>());
-        // a heading comes after its section's row, by the full model's positions
+        // every heading in order, but for one that says what its section's row says
+        prop_assert!(heads.windows(2).all(|w| w[0] < w[1]));
         let m = views[1].model().clone();
+        for h in (0..m.outline.len()).filter(|h| !heads.contains(h)) {
+            let at = m.item_start(m.outline[h].item);
+            let section = d.section_at(at).index;
+            let own = views[1].section_own_name(section);
+            prop_assert_eq!(own.as_deref(), Some(m.outline[h].text.trim()));
+        }
+        // a heading comes after its section's row, by the full model's positions
         let mut current = 0;
         for r in &b {
             match r {
@@ -152,17 +159,23 @@ fn outline_rows_list_what_they_are_told_and_a_current_heading_not_listed_goes_to
     let rows: Vec<_> = (0..v.outline_row_count(Some(&only)))
         .map(|r| v.outline_row(r, Some(&only)))
         .collect();
-    assert_eq!(rows, [Section(0), Heading(0), Section(1), Heading(2), Heading(4)]);
-    // the heading in a block is not listed: the one before it stands for it
+    // a first section's `#` is the title, with a row of its own; `## B` is what its section goes by, and has none
+    assert_eq!(rows, [Section(0), Heading(0), Section(1), Heading(4)]);
+    // the heading in a block is not listed: the one before it stands for it, here its section's row
     assert_eq!(v.outline_row_of(0, Some(1), Some(&only)), 1);
-    assert_eq!(v.outline_row_of(1, Some(3), Some(&only)), 3);
+    assert_eq!(v.outline_row_of(1, Some(3), Some(&only)), 2);
+    assert_eq!(
+        v.outline_row_of(1, Some(2), Some(&only)),
+        2,
+        "the heading that names it: its row"
+    );
     assert_eq!(
         v.outline_row_of(1, Some(1), Some(&only)),
         2,
         "before the section: the section"
     );
-    assert_eq!(v.outline_row_of(1, Some(4), Some(&only)), 4);
-    assert_eq!(v.outline_row_of(1, Some(4), None), 6);
+    assert_eq!(v.outline_row_of(1, Some(4), Some(&only)), 3);
+    assert_eq!(v.outline_row_of(1, Some(4), None), 5);
     // no heading in a block names a section
     assert_eq!(v.section_name(1), "B");
 }
@@ -716,4 +729,56 @@ fn a_boundary_s_row_is_inside_its_item() {
             );
         }
     }
+}
+
+/// What a section's row says, and which heading rows stand under it.
+#[test]
+fn a_section_named_by_its_first_heading_has_no_row_for_it_and_the_title_keeps_its_own() {
+    use OutlineRow::*;
+    let rows_of = |s: &str, numbered: bool| {
+        let d: Arc<dyn FormatDoc> = Arc::new(markise_md::parse(s));
+        let model = Arc::new(DocModel::build_with(&*d, None, Paging::Full));
+        let mut v = View::new(d, model, Theme::light(), 700.0, 1.0);
+        v.set_sections(true);
+        v.set_section_style(markise_layout::SectionStyle {
+            numbered,
+            ..Default::default()
+        });
+        let rows: Vec<_> = (0..v.outline_row_count(None)).map(|r| v.outline_row(r, None)).collect();
+        for (r, row) in rows.iter().enumerate() {
+            // each row is where the way back says
+            match row {
+                Section(k) => assert_eq!(v.outline_row_of(*k, None, None), r, "{s:?}"),
+                Heading(h) => {
+                    let m = v.model().clone();
+                    let k = v.doc().section_at(m.item_start(m.outline[*h].item)).index;
+                    assert_eq!(v.outline_row_of(k, Some(*h), None), r, "{s:?}");
+                }
+            }
+        }
+        (rows, v)
+    };
+    // the title stays a heading under a section with no name; others go by their heading, and the next stays
+    let (rows, v) = rows_of("# T\n\n## Under\n\n---\n\n## B\n\n### C\n\n## D\n", true);
+    assert_eq!(
+        rows,
+        [Section(0), Heading(0), Heading(1), Section(1), Heading(3), Heading(4)]
+    );
+    assert_eq!(v.section_own_name(0), None);
+    assert_eq!(v.section_own_name(1).as_deref(), Some("B"));
+    assert_eq!(v.section_shown_number(1), Some(2));
+    // no `#`: the first goes by its heading as any
+    let (rows, _) = rows_of("## A\n\n---\n\nText.\n", true);
+    assert_eq!(rows, [Section(0), Section(1)]);
+    // an id is what it goes by, and its heading says something else
+    let (rows, v) = rows_of("A\n\n---\n\n:::section-metadata\n\nid: x\n\n:::\n\n## B\n", false);
+    assert_eq!(rows, [Section(0), Section(1), Heading(0)]);
+    assert_eq!(v.section_own_name(1).as_deref(), Some("x"));
+    assert_eq!(v.section_shown_number(1), None, "with no number");
+    // a heading in a block before it is listed first, and the one that names it keeps its row
+    let (rows, _) = rows_of("A\n\n---\n\n:::q\n\n## In\n\n:::\n\n## B\n", true);
+    assert_eq!(rows, [Section(0), Section(1), Heading(0), Heading(1)]);
+    // metadata before it is no block for this
+    let (rows, _) = rows_of("A\n\n---\n\n:::section-metadata\n\nkind: x\n\n:::\n\n## B\n", true);
+    assert_eq!(rows, [Section(0), Section(1)]);
 }

@@ -19,8 +19,26 @@ pub struct OutlineOut {
     pub act: Option<SectionAct>,
 }
 
+/// What a section's row says, and what it is known by: what it goes by, or what sections are called here, with its
+/// number for those who do not see the number beside it.
+pub fn section_row_name(view: &markise_layout::View, k: usize, word: &str) -> (String, String) {
+    match view.section_own_name(k) {
+        Some(name) => (name.clone(), name),
+        None => {
+            let number = view.section_shown_number(k).unwrap_or(k + 1);
+            (word.to_string(), format!("{word} {number}"))
+        }
+    }
+}
+
+/// How wide the slot of a section's number is: the same on every row, so that names stand in a line.
+pub(crate) fn number_slot(sections: usize) -> f32 {
+    let digits = sections.max(1).ilog10() as f32 + 1.0;
+    (digits * 7.5).max(18.0)
+}
+
 /// The outline. `id`: which document. `only`: the headings to list, when not all of them. `word`: what a section is
-/// called here, while sections can be changed; `None` offers nothing, as in Read.
+/// called here. `editable`: sections can be changed; otherwise a row offers nothing, as in Read.
 #[allow(clippy::too_many_arguments)]
 pub fn section_outline(
     ui: &mut Ui,
@@ -30,7 +48,8 @@ pub fn section_outline(
     current: usize,
     look: &SideLook,
     partial: bool,
-    word: Option<&str>,
+    word: &str,
+    editable: bool,
 ) -> OutlineOut {
     let view = &ed.view;
     let model = view.model();
@@ -38,6 +57,7 @@ pub fn section_outline(
     let sections = view.doc().section_count();
     let mut out = OutlineOut::default();
     let listed = view.outline_row_count(only);
+    let slot = number_slot(sections);
     let rows = listed + usize::from(partial);
     virtual_rows(ui, "markise-section-outline", look.row_h, rows, None, |ui, range| {
         for i in range {
@@ -52,21 +72,31 @@ pub fn section_outline(
             let row = view.outline_row(i, only);
             let r = match row {
                 OutlineRow::Section(k) => {
-                    let mut name = view.section_name(k);
+                    let (mut shown, mut name) = section_row_name(view, k, word);
                     // the last section of a part goes on in what has yet to load
                     if partial && k + 1 == sections {
+                        shown.push('…');
                         name.push('…');
                     }
+                    let number = view.section_shown_number(k);
+                    let kind = RowKind::Section {
+                        number,
+                        slot: slot as u16,
+                    };
+                    // where the ground of the row goes while what is on it holds the pointer
+                    let ground = ui.painter().add(egui::Shape::Noop);
                     // A menu names its section by its place, which means something only in this very state of
                     // this document: it stays with its row however the list scrolls, and any change at all,
                     // a reload too, ends it with nothing done.
                     let r = ui
                         .push_id(("markise-section-row", id, ed.changes(), k), |ui| {
-                            look.row(ui, 0, RowKind::Heading { level: 1 }, &name, current == i)
+                            look.row_named(ui, 0, kind, &shown, &name, current == i)
                         })
                         .inner;
-                    if let Some(word) = word {
-                        row_menu(ui, ed, k, &r, word, look, &mut out.act);
+                    if editable && row_menu(ui, ed, k, &r, word, slot, look, &mut out.act) {
+                        let shape =
+                            egui::Shape::rect_filled(r.rect.shrink2(vec2(1.0, 1.0)), look.radius, look.hover_bg);
+                        ui.painter().set(ground, shape);
                     }
                     r
                 }
@@ -94,18 +124,21 @@ pub fn section_outline(
     out
 }
 
-/// A section row's menu: by a right click anywhere on it, and from a quiet `⋯` at its end, which shows under the
-/// pointer, while the keyboard is on the row or on it, and while its menu is open. By the keyboard: Tab to the
-/// `⋯`, or Shift+F10 on the row; the arrows go through the items, Esc goes back to the `⋯`.
+/// A section row's menu: by a right click anywhere on it, and from a quiet `⋯` at its start, in the place of its
+/// number, which shows under the pointer, while the keyboard is on the row or on it, and while its menu is open. By
+/// the keyboard: Tab to the `⋯`, or Shift+F10 on the row; the arrows go through the items, Esc goes back to the
+/// `⋯`. Returns whether it shows.
+#[allow(clippy::too_many_arguments)]
 fn row_menu(
     ui: &mut Ui,
     ed: &EditorView,
     k: usize,
     row: &Response,
     word: &str,
+    slot: f32,
     look: &SideLook,
     act: &mut Option<SectionAct>,
-) {
+) -> bool {
     let ctx = ui.ctx().clone();
     let more = row.id.with("more");
     // the id of a popup of a button with the id `more`
@@ -117,11 +150,11 @@ fn row_menu(
         row.rect.contains(p) && ui.clip_rect().contains(p) && ctx.layer_id_at(p) == Some(ui.layer_id())
     });
     let focused = row.has_focus() || ctx.memory(|m| m.has_focus(more));
-    if over || open || focused || shift_f10 {
-        let side = (look.row_h - 6.0).max(12.0);
+    let shows = over || open || focused || shift_f10;
+    if shows {
         let rect = Rect::from_center_size(
-            pos2(row.rect.right() - side * 0.5 - 4.0, row.rect.center().y),
-            vec2(side, side),
+            pos2(row.rect.left() + look.pad_x + slot * 0.5, row.rect.center().y),
+            vec2(slot + 2.0, (look.row_h - 6.0).max(12.0)),
         );
         let label = format!("{word} actions");
         let dots = ui.interact(rect, more, Sense::click());
@@ -146,6 +179,7 @@ fn row_menu(
         }
     }
     row.context_menu(|ui| menu_items(ui, ed, k, menu, act));
+    shows
 }
 
 fn paint_dots(ui: &Ui, dots: &Response, rect: Rect, focused: bool, look: &SideLook) {
