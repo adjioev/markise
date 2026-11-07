@@ -223,13 +223,13 @@ No frame of it walks the document. The rows on screen each ask for a name, O(log
 
 | | p50 | p99 |
 |---|---|---|
-| A key, the outline hidden / shown | 1.7 ms / 3.2 ms | 3.5 ms / 6.1 ms |
-| A frame, the panel at rest | 0.52 ms | 1.9 ms |
-| A frame of a drag, the pointer moving | 0.55 ms | 3.0 ms |
-| A frame of a drag, the list scrolling | 0.50 ms | 2.1 ms |
-| A drop past 36 sections | 8.1 ms | |
-| A move past all of them, once / its undo | 152 ms / 140 ms | |
-| The title's walk, once | 62 ms | |
+| A key, the outline hidden / shown | 1.1 ms / 1.7 ms | 2.4 ms / 2.8 ms |
+| A frame, the panel at rest | 0.39 ms | 1.9 ms |
+| A frame of a drag, the pointer moving | 0.39 ms | 1.8 ms |
+| A frame of a drag, the list scrolling | 0.39 ms | 1.2 ms |
+| A drop past 36 sections | 6.7 ms | |
+| A move past all of them, once / its undo | 160 ms / 109 ms | |
+| The title's walk, once | 63 ms | |
 
 ## Consequences
 
