@@ -20,6 +20,10 @@ fn dots(h: &H) -> usize {
     h.query_all(by().label_contains("Actions: ")).count()
 }
 
+fn grips(h: &H) -> usize {
+    h.query_all(by().label_contains("Drag to move: ")).count()
+}
+
 pub(crate) struct Plain {
     _dir: tempfile::TempDir,
     config: std::path::PathBuf,
@@ -571,4 +575,353 @@ fn esc_closes_the_keyboard_s_menu_and_the_keyboard_goes_back_to_the_dots() {
     let dots = h.get(by().label_contains("Actions: ")).rect();
     let on = h.ctx.memory(|m| m.focused()).and_then(|id| h.ctx.read_response(id));
     assert_eq!(on.map(|r| r.rect), Some(dots));
+}
+
+/// Dragging a row (ADR 0026).
+mod dragging {
+    use egui::vec2;
+    use markise_ui_egui::section_panel::SectionDragShown;
+
+    use super::*;
+
+    const FOUR: &str = "---\nauthoring: blocks-v3\n---\n\n## One\n\n### Under one\n\n---\n\n## Two\n\n### Under two\n\n---\n\n## Three\n\n---\n\n## Four\n";
+    const LAST_FIRST: &str = "---\nauthoring: blocks-v3\n---\n\n## Four\n\n---\n\n## One\n\n### Under one\n\n---\n\n## Two\n\n### Under two\n\n---\n\n## Three\n";
+
+    fn button(h: &mut H, p: Pos2, pressed: bool) {
+        h.event(Event::PointerButton {
+            pos: p,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+        h.step();
+    }
+
+    /// The pointer to the row, then to its grip, and a press.
+    fn pick_up(h: &mut H, name: &str) -> Pos2 {
+        let at = row(h, name);
+        h.hover_at(at);
+        frames(h);
+        let grip = h.get(by().label_contains("Drag to move: ")).rect().center();
+        h.hover_at(grip);
+        h.step();
+        h.step();
+        button(h, grip, true);
+        grip
+    }
+
+    fn walk(h: &mut H, to: Pos2) {
+        h.hover_at(to);
+        h.step();
+        h.step();
+    }
+
+    fn shown(h: &H) -> SectionDragShown {
+        h.state().section_drag_shown().expect("a drag shows").clone()
+    }
+
+    fn cursor(h: &mut H) -> egui::CursorIcon {
+        h.step();
+        h.output().platform_output.cursor_icon
+    }
+
+    #[test]
+    fn a_grip_shows_on_hover_with_grab_and_read_has_none() {
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        assert_eq!(grips(&h), 0, "quiet");
+        h.hover_at(row(&h, "Two"));
+        frames(&mut h);
+        let grip = h.get(by().label_contains("Drag to move: ")).rect().center();
+        h.hover_at(grip);
+        frames(&mut h);
+        assert_eq!(cursor(&mut h), egui::CursorIcon::Grab);
+        h.state_mut().viewer().unwrap().ed.set_read_mode(true);
+        frames(&mut h);
+        assert_eq!(grips(&h), 0);
+    }
+
+    #[test]
+    fn only_a_section_s_row_has_a_grip_at_its_start_and_read_keeps_it_out() {
+        let doc = format!("{HEAD}# Title\n\n## Under\n\n### Deeper\n\n---\n\n## Named\n\n### Below\n\n---\n\nText.\n");
+        let p = plain(&doc);
+        let mut h = opened(&p);
+        for heading in ["Title", "Deeper", "Below"] {
+            h.hover_at(row(&h, heading));
+            frames(&mut h);
+            assert_eq!(grips(&h), 0, "{heading}");
+        }
+        for name in ["Under", "Named", "Section 3"] {
+            let at = row(&h, name);
+            h.hover_at(at);
+            frames(&mut h);
+            let grip = h.get(by().label_contains("Drag to move: ")).rect();
+            assert!((grip.center().y - at.y).abs() < 2.0, "{name}");
+            let dots = h.get(by().label_contains("Actions: ")).rect();
+            assert!(grip.right() <= dots.left() + 1.0 && dots.right() < at.x, "{name}");
+        }
+        // on the title's section: what goes is the section, with the warning
+        let grip = pick_up(&mut h, "Under");
+        let to = grip + vec2(0.0, 26.0 * 5.0);
+        walk(&mut h, to);
+        walk(&mut h, to);
+        assert!(shown(&h).moves);
+        button(&mut h, to, false);
+        h.step();
+        assert!(h.state().banner_text().unwrap().contains("title with it"));
+        h.state_mut().viewer().unwrap().ed.set_read_mode(true);
+        frames(&mut h);
+        h.hover_at(row(&h, "Named"));
+        frames(&mut h);
+        assert_eq!(grips(&h), 0);
+    }
+
+    #[test]
+    fn from_the_press_a_line_shows_headings_collapse_and_the_cursor_is_grabbing() {
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Two");
+        let s = shown(&h);
+        assert_eq!(s.section, 1);
+        assert_eq!(s.rows, 4, "only sections while it lasts");
+        assert!(!s.moves, "it stays until it goes somewhere");
+        assert!((s.line_y - grip.y).abs() < 20.0, "by the row: {} {}", s.line_y, grip.y);
+        assert_eq!(cursor(&mut h), egui::CursorIcon::Grabbing);
+        assert_eq!(h.query_all_by_label("Under two").count(), 0, "its row is folded away");
+        // and back
+        button(&mut h, grip, false);
+        frames(&mut h);
+        assert!(h.state().section_drag_shown().is_none());
+        assert_eq!(h.query_all_by_label("Under two").count(), 1, "the headings are back");
+    }
+
+    #[test]
+    fn a_drop_on_its_own_place_does_nothing_and_makes_no_undo_step() {
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        let steps = h.state_mut().viewer().unwrap().ed.session.history().undo_len();
+        let grip = pick_up(&mut h, "Two");
+        // a little either way is still its own place
+        walk(&mut h, grip + vec2(0.0, 6.0));
+        assert!(!shown(&h).moves);
+        button(&mut h, grip + vec2(0.0, 6.0), false);
+        frames(&mut h);
+        assert_eq!(text(&h), FOUR);
+        assert_eq!(h.state_mut().viewer().unwrap().ed.session.history().undo_len(), steps);
+    }
+
+    #[test]
+    fn a_drop_elsewhere_moves_it_exactly_as_one_undo_step() {
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Four");
+        let row_h = 26.0;
+        let to = grip - vec2(0.0, row_h * 3.2);
+        walk(&mut h, to);
+        walk(&mut h, to);
+        let s = shown(&h);
+        assert!(s.moves);
+        assert_eq!(s.to, 0);
+        button(&mut h, to, false);
+        frames(&mut h);
+        assert_eq!(text(&h), LAST_FIRST);
+        h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+        frames(&mut h);
+        assert_eq!(text(&h), FOUR);
+    }
+
+    #[test]
+    fn esc_cancels_and_the_release_does_nothing() {
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Four");
+        let to = grip - vec2(0.0, 80.0);
+        walk(&mut h, to);
+        assert!(shown(&h).moves);
+        h.key_press(Key::Escape);
+        h.step();
+        h.step();
+        assert!(h.state().section_drag_shown().is_none());
+        button(&mut h, to, false);
+        frames(&mut h);
+        assert_eq!(text(&h), FOUR);
+    }
+
+    #[test]
+    fn an_edit_or_another_document_during_it_makes_the_drop_do_nothing() {
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Four");
+        let to = grip - vec2(0.0, 80.0);
+        walk(&mut h, to);
+        assert!(shown(&h).moves);
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.set_selection(markise_doc::Selection::caret_at(markise_doc::DocPos::new(FOUR.len())));
+        let _ = v.ed.edit(|s| s.insert_text("x"));
+        h.step();
+        h.step();
+        assert!(h.state().section_drag_shown().is_none());
+        let edited = text(&h);
+        button(&mut h, to, false);
+        frames(&mut h);
+        assert_eq!(text(&h), edited);
+
+        let p = plain(FOUR);
+        let other = plain("---\nauthoring: blocks-v3\n---\n\nA\n\n---\n\nB\n\n---\n\nC\n\n---\n\nD\n");
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Four");
+        let to = grip - vec2(0.0, 80.0);
+        walk(&mut h, to);
+        h.state_mut().open(other.doc.clone());
+        let want = other.doc.clone();
+        common::wait_until(&mut h, "the other document", move |a| {
+            a.document_path() == Some(want.as_path()) && !a.is_loading()
+        });
+        h.step();
+        h.step();
+        assert!(h.state().section_drag_shown().is_none());
+        let before = text(&h);
+        button(&mut h, to, false);
+        frames(&mut h);
+        assert_eq!(text(&h), before);
+    }
+
+    #[test]
+    fn a_reload_during_it_ends_it_and_the_drop_does_nothing() {
+        const FIVE: &str = "---\nauthoring: blocks-v3\n---\n\n## One\n\n---\n\n## New\n\n---\n\n## Two\n\n---\n\n## Three\n\n---\n\n## Four\n";
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Four");
+        let to = grip - vec2(0.0, 80.0);
+        walk(&mut h, to);
+        assert!(shown(&h).moves);
+        reload(&mut h, FIVE);
+        h.step();
+        h.step();
+        assert!(h.state().section_drag_shown().is_none(), "it is over");
+        button(&mut h, to, false);
+        frames(&mut h);
+        assert_eq!(text(&h), FIVE);
+    }
+
+    #[test]
+    fn keys_edit_nothing_while_it_lasts_and_go_on_after_it() {
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        // the caret in the document, which keeps the focus
+        let at = FOUR.find("Three").unwrap() + 2;
+        let v = h.state_mut().viewer().unwrap();
+        v.ed.set_selection(markise_doc::Selection::caret_at(markise_doc::DocPos::new(at)));
+        v.ed.refresh_focus();
+        v.request_refocus();
+        frames(&mut h);
+        let grip = pick_up(&mut h, "Two");
+        h.key_press(Key::Backspace);
+        h.step();
+        h.event(Event::Text("x".to_string()));
+        h.step();
+        h.step();
+        assert_eq!(text(&h), FOUR);
+        assert!(h.state().section_drag_shown().is_some(), "it goes on");
+        button(&mut h, grip, false);
+        frames(&mut h);
+        assert_eq!(text(&h), FOUR);
+    }
+
+    #[test]
+    fn esc_and_the_release_in_one_frame_is_a_cancelled_drag() {
+        let p = plain(FOUR);
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Four");
+        let to = grip - vec2(0.0, 80.0);
+        walk(&mut h, to);
+        assert!(shown(&h).moves);
+        // in one frame: a queued event has a frame of its own
+        h.input_mut().events.extend([
+            Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            },
+            Event::PointerButton {
+                pos: to,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        h.step();
+        frames(&mut h);
+        assert_eq!(text(&h), FOUR);
+    }
+
+    #[test]
+    fn the_list_scrolls_at_its_edges_and_a_section_gets_past_what_was_off_screen() {
+        let mut doc = String::from(HEAD);
+        for i in 0..80 {
+            doc.push_str(&format!("## Part {i}\n\n---\n\n"));
+        }
+        doc.push_str("## End\n");
+        let p = plain(&doc);
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Part 1");
+        let start = shown(&h).offset;
+        // to the panel's bottom edge, and held there
+        let bottom = Pos2::new(grip.x, 800.0 - 40.0);
+        let mut at_edge = bottom;
+        for _ in 0..8 {
+            walk(&mut h, at_edge);
+            at_edge.y -= 0.0;
+        }
+        let s = shown(&h);
+        assert!(s.offset > start + 50.0, "{start} {}", s.offset);
+        assert!(s.to > 20, "{}", s.to);
+        let to = s.to;
+        button(&mut h, at_edge, false);
+        frames(&mut h);
+        let after = h.state_mut().viewer().unwrap().ed.session.doc().section_count();
+        assert_eq!(after, 81);
+        // the row went where the line was
+        let t = text(&h);
+        let at = t.find("## Part 1\n").unwrap();
+        let v = h.state_mut().viewer().unwrap();
+        let index = v.ed.session.doc().section_at(at).index;
+        assert!(index + 2 >= to && index < to + 8, "{index} {to}");
+    }
+
+    #[test]
+    fn a_refusal_on_the_way_says_so_and_a_title_going_along_is_said() {
+        let doc = format!("{HEAD}One.\n\n---\n\n:::section-metadata\n\nid: m\n\n:::\n\n---\n\nThree.\n");
+        let p = plain(&doc);
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Section 3");
+        let to = grip - vec2(0.0, 26.0 * 2.2);
+        walk(&mut h, to);
+        walk(&mut h, to);
+        button(&mut h, to, false);
+        h.step();
+        assert_eq!(text(&h), doc);
+        assert!(
+            h.state()
+                .banner_text()
+                .unwrap()
+                .contains("fill it in or delete it first")
+        );
+
+        let doc = format!("{HEAD}# Title\n\n---\n\nTwo.\n\n---\n\nThree.\n");
+        let p = plain(&doc);
+        let mut h = opened(&p);
+        let grip = pick_up(&mut h, "Section 3");
+        let to = grip - vec2(0.0, 26.0 * 2.2);
+        walk(&mut h, to);
+        walk(&mut h, to);
+        assert_eq!(shown(&h).to, 0);
+        button(&mut h, to, false);
+        h.step();
+        assert_eq!(text(&h), format!("{HEAD}Three.\n\n---\n\n# Title\n\n---\n\nTwo.\n"));
+        assert!(h.state().banner_text().unwrap().contains("title moves too"));
+    }
 }

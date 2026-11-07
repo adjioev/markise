@@ -21,6 +21,11 @@ pub enum SectionAct {
     Duplicate(usize),
     /// Opens the section form, for a new one after this one.
     InsertAfter(usize),
+    /// Goes before section `to`, the section count for the end.
+    MoveTo {
+        index: usize,
+        to: usize,
+    },
 }
 
 /// The status bar's words, and the state they are for: the document, the section, whether it is whole.

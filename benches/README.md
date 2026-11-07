@@ -16,6 +16,7 @@ Existing entry points cover the work moved out of default tests (#98):
 | `:::` blocks on large documents | `cargo bench -p markise-engine --bench directives` |
 | Native block views on large documents | `cargo bench -p markise-engine --bench native_blocks` |
 | Large-document open/layout | `cargo bench -p markise-layout --bench layout` |
+| Dragging a section in the outline | `cargo bench -p markise-ui-egui --bench section_panel` |
 | 100 MiB scaling | `cargo bench -p markise-ui-egui --bench huge` (see its environment options) |
 
 `cargo xtask heavy` retains stress/correctness checks; benchmarks characterize speed. A warm

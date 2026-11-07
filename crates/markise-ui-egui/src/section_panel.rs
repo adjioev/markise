@@ -1,9 +1,13 @@
-//! The outline with sections as a level above headings, and what a section's row offers (ADR 0026). Rows are
-//! asked for by what is on screen, so a large document costs what a small one does. All of it goes by the
-//! engine's moves and refusals, which the app runs; here only what can be done is offered.
+//! The outline with sections as a level above headings, and what a section's row offers (ADR 0026): a menu, and
+//! a grip to drag it by. Rows are asked for by what is on screen, so a large document costs what a small one does,
+//! also while one is dragged. All of it goes by the engine's moves and refusals, which the app runs; here only
+//! what can be done is offered.
 
 use egui::accesskit::Role;
-use egui::{Button, Color32, Key, Modifiers, Popup, Rect, Response, RichText, Sense, Ui, WidgetInfo, pos2, vec2};
+use egui::{
+    Button, Color32, CursorIcon, Key, Modifiers, Popup, Pos2, Rect, Response, RichText, Sense, Stroke, Ui, WidgetInfo,
+    pos2, vec2,
+};
 use markise_engine::editor::EditorView;
 use markise_layout::OutlineRow;
 
@@ -17,6 +21,83 @@ pub struct OutlineOut {
     pub clicked: Option<OutlineRow>,
     /// What a section's menu asked for.
     pub act: Option<SectionAct>,
+}
+
+/// Room beside the rows for a grip, there whether or not it shows, so that no row moves when one does.
+const GUTTER: f32 = 14.0;
+/// How near an edge of the list the pointer has to be for it to scroll, and how fast at the very edge.
+const SCROLL_EDGE: f32 = 28.0;
+const SCROLL_SPEED: f32 = 700.0;
+/// How far from the press the pointer has to go for the edges to count.
+const MOVED: f32 = 6.0;
+
+/// What the panel keeps between frames.
+#[derive(Default)]
+pub struct PanelState {
+    drag: Option<SectionDrag>,
+    /// A drag ended: the section to keep where it was on screen, with its headings back in the list.
+    settle: Option<(usize, f32)>,
+}
+
+impl PanelState {
+    /// A section's row is being dragged.
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// What the drag going on shows.
+    pub fn drag_shown(&self) -> Option<&SectionDragShown> {
+        self.drag.as_ref()?.shown.as_ref()
+    }
+}
+
+/// A section being dragged.
+struct SectionDrag {
+    section: usize,
+    /// The document and its state when the drag started: anything else ends it, with nothing done.
+    origin: (u64, u64),
+    /// How far below its row's top the pointer took it, and where on screen.
+    grab_y: f32,
+    pressed_at: f32,
+    has_moved: bool,
+    /// Empty rows above the sections, so that the one picked up can stay under the pointer: with only sections
+    /// in it the list is shorter than it was.
+    pad: usize,
+    /// What to set the list's scroll offset to in the next frame.
+    scroll_to: Option<f32>,
+    /// The frame it was last shown in: not shown means it is over.
+    pass: u64,
+    shown: Option<SectionDragShown>,
+}
+
+/// What a drag shows on screen in this frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SectionDragShown {
+    pub section: usize,
+    /// It would go before this section; the section count for the end.
+    pub to: usize,
+    /// Where the line is.
+    pub line_y: f32,
+    /// The line is a place to land; otherwise it stays where it is.
+    pub moves: bool,
+    /// The rows the list has while it lasts: only its sections.
+    pub rows: usize,
+    /// The list's offset.
+    pub offset: f32,
+}
+
+/// The document in the outline.
+pub struct OutlineDoc<'a> {
+    pub ed: &'a EditorView,
+    /// Which document, for what a drag is for.
+    pub id: u64,
+    /// The headings to list, when not all of them.
+    pub only: Option<&'a [usize]>,
+    pub current: usize,
+    /// It holds the first part of its file.
+    pub partial: bool,
+    /// Sections can be changed; otherwise a row offers nothing, as in Read.
+    pub editable: bool,
 }
 
 /// What a section's row says, and what it is known by. Beside its number, with no name, the word says the rest.
@@ -34,24 +115,35 @@ pub fn section_row_name(view: &markise_layout::View, k: usize) -> (String, Strin
 }
 
 /// How wide the slot of a section's number is: the same on every row, so that names stand in a line.
-pub(crate) fn number_slot(sections: usize) -> f32 {
+fn number_slot(sections: usize) -> f32 {
     let digits = sections.max(1).ilog10() as f32 + 1.0;
     (digits * 7.5).max(18.0)
 }
 
-/// The outline. `id`: which document. `only`: the headings to list, when not all of them. `editable`: sections can be changed; otherwise a row offers nothing, as in Read.
-#[allow(clippy::too_many_arguments)]
-pub fn section_outline(
-    ui: &mut Ui,
-    ed: &EditorView,
-    id: u64,
-    only: Option<&[usize]>,
-    current: usize,
-    look: &SideLook,
-    partial: bool,
-    editable: bool,
-) -> OutlineOut {
+/// The outline.
+pub fn section_outline(ui: &mut Ui, doc: OutlineDoc<'_>, look: &SideLook, state: &mut PanelState) -> OutlineOut {
+    let OutlineDoc {
+        ed,
+        id,
+        only,
+        current,
+        partial,
+        editable,
+    } = doc;
+    let origin = (id, ed.changes());
+    let pass = ui.ctx().cumulative_pass_nr();
+    // sections no more to be changed, an edit, another document, the panel not shown in between: it is over
+    state.drag = state.drag.take().filter(|d| {
+        editable && !partial && d.origin == origin && d.pass + 1 >= pass && d.section < ed.view.doc().section_count()
+    });
+    if state.drag.is_some() {
+        return dragging_list(ui, ed, look, state, pass);
+    }
     let view = &ed.view;
+    let settled = state.settle.take().map(|(section, y)| {
+        let row = view.outline_row_of(section, None, only) as f32 * look.row_h;
+        (row - y).max(0.0)
+    });
     let model = view.model();
     // under a title that stands apart the rest go by what is left
     let titled = matches!(view.outline_row(0, only), OutlineRow::Title(_));
@@ -61,74 +153,289 @@ pub fn section_outline(
     let listed = view.outline_row_count(only);
     let slot = number_slot(sections);
     let rows = listed + usize::from(partial);
-    virtual_rows(ui, "markise-section-outline", look.row_h, rows, None, |ui, range| {
-        for i in range {
-            if i >= listed {
-                ui.label(
-                    RichText::new("More when the file has loaded…")
-                        .font(look.font.clone())
-                        .color(look.icon),
-                );
-                continue;
-            }
-            let row = view.outline_row(i, only);
-            let r = match row {
-                OutlineRow::Section(k) => {
-                    let (mut shown, mut name) = section_row_name(view, k);
-                    // the last section of a part goes on in what has yet to load
-                    if partial && k + 1 == sections {
-                        shown.push('…');
-                        name.push('…');
-                    }
-                    let number = view.section_shown_number(k);
-                    let kind = RowKind::Section {
-                        number,
-                        slot: slot as u16,
-                    };
-                    // where the ground of the row goes while what is on it holds the pointer
-                    let ground = ui.painter().add(egui::Shape::Noop);
-                    // A menu names its section by its place, which means something only in this very state of
-                    // this document: it stays with its row however the list scrolls, and any change at all,
-                    // a reload too, ends it with nothing done.
-                    let r = ui
-                        .push_id(("markise-section-row", id, ed.changes(), k), |ui| {
-                            look.row_named(ui, 0, kind, &shown, &name, current == i)
-                        })
-                        .inner;
-                    if editable && row_menu(ui, ed, k, &r, &name, slot, look, &mut out.act) {
-                        let shape =
-                            egui::Shape::rect_filled(r.rect.shrink2(vec2(1.0, 1.0)), look.radius, look.hover_bg);
-                        ui.painter().set(ground, shape);
-                    }
-                    r
-                }
-                // plain: it is no section's, and offers nothing
-                OutlineRow::Title(h) => {
-                    let Some(e) = model.outline.get(h) else { continue };
-                    look.row(ui, 0, RowKind::Heading { level: 1 }, &e.text, current == i)
-                }
-                OutlineRow::Heading(h) => {
-                    let Some(e) = model.outline.get(h) else { continue };
-                    let level = e.level.saturating_sub(min_level) + 1;
-                    let text = if e.text.is_empty() { "(empty heading)" } else { &e.text };
-                    look.row(
-                        ui,
-                        level as usize,
-                        RowKind::Heading { level: level + 1 },
-                        text,
-                        current == i,
-                    )
-                }
-            };
-            if r.clicked() {
-                out.clicked = Some(row);
-            }
-        }
+    let mut started = None;
+    let frame = egui::Frame::new().inner_margin(egui::Margin {
+        left: GUTTER as i8,
+        ..Default::default()
     });
+    let list = virtual_rows(ui, "markise-section-outline", look.row_h, rows, settled, |ui, range| {
+        frame.show(ui, |ui| {
+            for i in range {
+                if i >= listed {
+                    ui.label(
+                        RichText::new("More when the file has loaded…")
+                            .font(look.font.clone())
+                            .color(look.icon),
+                    );
+                    continue;
+                }
+                let row = view.outline_row(i, only);
+                let r = match row {
+                    OutlineRow::Section(k) => {
+                        let (mut shown, mut name) = section_row_name(view, k);
+                        // the last section of a part goes on in what has yet to load
+                        if partial && k + 1 == sections {
+                            shown.push('…');
+                            name.push('…');
+                        }
+                        let number = view.section_shown_number(k);
+                        let kind = RowKind::Section {
+                            number,
+                            slot: slot as u16,
+                        };
+                        // where the ground of the row goes while what is on it holds the pointer
+                        let ground = ui.painter().add(egui::Shape::Noop);
+                        // A menu names its section by its place, which means something only in this very state
+                        // of this document: it stays with its row however the list scrolls, and any change at
+                        // all, a reload too, ends it with nothing done.
+                        let r = ui
+                            .push_id(("markise-section-row", id, ed.changes(), k), |ui| {
+                                look.row_named(ui, 0, kind, &shown, &name, current == i)
+                            })
+                            .inner;
+                        if editable {
+                            let menu = row_menu(ui, ed, k, &r, &name, slot, look, &mut out.act);
+                            let (grip, over) = row_grip(ui, ed, k, &r, &name, look);
+                            started = grip.or(started);
+                            if menu || over {
+                                // the gutter too: what the grip is for is what is lit
+                                let lit = r.rect.with_min_x(r.rect.left() - GUTTER).shrink2(vec2(1.0, 1.0));
+                                ui.painter()
+                                    .set(ground, egui::Shape::rect_filled(lit, look.radius, look.hover_bg));
+                            }
+                        }
+                        r
+                    }
+                    // plain: it is no section's, and offers nothing
+                    OutlineRow::Title(h) => {
+                        let Some(e) = model.outline.get(h) else { continue };
+                        look.row(ui, 0, RowKind::Heading { level: 1 }, &e.text, current == i)
+                    }
+                    OutlineRow::Heading(h) => {
+                        let Some(e) = model.outline.get(h) else { continue };
+                        let level = e.level.saturating_sub(min_level) + 1;
+                        let text = if e.text.is_empty() { "(empty heading)" } else { &e.text };
+                        look.row(
+                            ui,
+                            level as usize,
+                            RowKind::Heading { level: level + 1 },
+                            text,
+                            current == i,
+                        )
+                    }
+                };
+                if r.clicked() {
+                    out.clicked = Some(row);
+                }
+            }
+        });
+    });
+    if let Some((section, pointer_y, row_top)) = started {
+        // with only its sections in the list, its row where it was
+        let on_screen = row_top - list.inner_rect.top();
+        let pad = ((on_screen / look.row_h).ceil() as isize - section as isize).max(0) as usize;
+        state.drag = Some(SectionDrag {
+            section,
+            origin,
+            grab_y: pointer_y - row_top,
+            pressed_at: pointer_y,
+            has_moved: false,
+            pad,
+            scroll_to: Some((pad + section) as f32 * look.row_h - on_screen),
+            pass,
+            shown: None,
+        });
+        ui.ctx().request_repaint();
+    }
     if out.act.is_some() {
         ui.ctx().request_repaint();
     }
     out
+}
+
+/// The grip of a section's row: beside it while the pointer is on it. What it starts: the section, and where the
+/// pointer and the row's top are on screen; and whether the pointer is on the row.
+fn row_grip(
+    ui: &mut Ui,
+    ed: &EditorView,
+    k: usize,
+    row: &Response,
+    name: &str,
+    look: &SideLook,
+) -> (Option<(usize, f32, f32)>, bool) {
+    let id = row.id.with("grip");
+    let rect = Rect::from_min_max(
+        pos2(row.rect.left() - GUTTER, row.rect.top()),
+        pos2(row.rect.left(), row.rect.bottom()),
+    );
+    let ctx = ui.ctx().clone();
+    let pointer = ui.input(|i| i.pointer.hover_pos());
+    let over = pointer.is_some_and(|p| {
+        row.rect.union(rect).contains(p) && ui.clip_rect().contains(p) && ctx.layer_id_at(p) == Some(ui.layer_id())
+    });
+    // only what could go anywhere; a first section with nothing in it stays
+    let goes = ed.can_move_section(k, true) || ed.can_move_section(k, false);
+    if !over || !goes {
+        return (None, over);
+    }
+    let label = format!("Drag to move: {name}");
+    let resp = ui
+        .interact(rect, id, Sense::drag())
+        .on_hover_cursor(CursorIcon::Grab)
+        .on_hover_text("Drag to move");
+    resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+    paint_grip(ui, rect, resp.hovered() || resp.dragged(), look);
+    let y = resp.interact_pointer_pos().map(|p| p.y);
+    let started = resp
+        .drag_started()
+        .then(|| (k, y.unwrap_or(rect.center().y), row.rect.top()));
+    (started, true)
+}
+
+fn paint_grip(ui: &Ui, rect: Rect, hot: bool, look: &SideLook) {
+    let p = ui.painter_at(ui.clip_rect());
+    let tone = if hot { look.active_text } else { look.icon };
+    for (dx, dy) in [-1.0f32, 1.0]
+        .into_iter()
+        .flat_map(|x| [-1.0f32, 0.0, 1.0].map(|y| (x, y)))
+    {
+        p.circle_filled(rect.center() + vec2(dx * 2.2, dy * 4.0), 1.0, tone);
+    }
+}
+
+/// While one is dragged the list has only its sections, which makes it short and easy to go along. Nothing here
+/// walks the document: the rows are those on screen and the place to land is by the pointer alone.
+fn dragging_list(ui: &mut Ui, ed: &EditorView, look: &SideLook, state: &mut PanelState, pass: u64) -> OutlineOut {
+    let mut out = OutlineOut::default();
+    let Some(drag) = state.drag.as_mut() else { return out };
+    let view = &ed.view;
+    let rows = view.doc().section_count();
+    let row_h = look.row_h;
+    let section = drag.section;
+    let cancelled = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    let (pointer, down, dt) = ui.input(|i| (i.pointer.latest_pos(), i.pointer.primary_down(), i.stable_dt));
+    let scroll_to = drag.scroll_to.take();
+    let frame = egui::Frame::new().inner_margin(egui::Margin {
+        left: GUTTER as i8,
+        ..Default::default()
+    });
+    let pad = drag.pad;
+    // room below as well as above, so that the offset that keeps the row in its place can always be had
+    let tail = (ui.available_height() / row_h).ceil() as usize + 1;
+    let list = virtual_rows(
+        ui,
+        "markise-section-outline",
+        row_h,
+        pad + rows + tail,
+        scroll_to,
+        |ui, range| {
+            frame.show(ui, |ui| {
+                for i in range {
+                    let Some(k) = i.checked_sub(pad).filter(|k| *k < rows) else {
+                        ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
+                        continue;
+                    };
+                    let (shown, name) = section_row_name(view, k);
+                    let kind = RowKind::Section {
+                        number: view.section_shown_number(k),
+                        slot: number_slot(rows) as u16,
+                    };
+                    ui.push_id(("markise-section-row", k), |ui| {
+                        look.row_named(ui, 0, kind, &shown, &name, k == section)
+                    });
+                }
+            });
+        },
+    );
+    let area = list.inner_rect;
+    let offset = list.state.clamped_offset().y;
+    drag.pass = pass;
+    let y = pointer.map_or(drag.pressed_at, |p| p.y);
+    drag.has_moved |= (y - drag.pressed_at).abs() > MOVED;
+    // the place nearest the pointer: between two rows
+    let place = ((y - area.top() + offset) / row_h).round().max(0.0) as usize;
+    let to = place.saturating_sub(pad).min(rows);
+    // a press and a release move nothing
+    let moves = drag.has_moved && ed.can_move_section_to(section, to);
+    let top = area.top() - offset + pad as f32 * row_h;
+    let line_y = (top + to as f32 * row_h).clamp(area.top() + 1.0, area.bottom() - 1.0);
+    // first: Esc and the release in one frame is a cancelled drag
+    if cancelled {
+        state.settle = Some((section, y - area.top() - drag.grab_y));
+        state.drag = None;
+        ui.ctx().request_repaint();
+        return out;
+    }
+    if !down {
+        if moves {
+            out.act = Some(SectionAct::MoveTo { index: section, to });
+        }
+        let ends_at = if !moves {
+            section
+        } else if to > section {
+            to - 1
+        } else {
+            to
+        };
+        state.settle = Some((ends_at, y - area.top() - drag.grab_y));
+        state.drag = None;
+        ui.ctx().request_repaint();
+        return out;
+    }
+    if drag.has_moved {
+        let up = SCROLL_EDGE - (y - area.top());
+        let below = SCROLL_EDGE - (area.bottom() - y);
+        let speed = SCROLL_SPEED / SCROLL_EDGE;
+        let dy = if up > 0.0 {
+            -up.min(SCROLL_EDGE) * speed * dt
+        } else if below > 0.0 {
+            below.min(SCROLL_EDGE) * speed * dt
+        } else {
+            0.0
+        };
+        if dy != 0.0 {
+            // no further than brings the first or the last section in, and never away from them
+            let least = (pad as f32 * row_h).min(offset);
+            let most = ((pad + rows) as f32 * row_h - area.height()).max(offset);
+            drag.scroll_to = Some((offset + dy).clamp(least, most));
+        }
+    }
+    paint_drag(ui, area, section, top, line_y, moves, look);
+    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+    drag.shown = Some(SectionDragShown {
+        section,
+        to,
+        line_y,
+        moves,
+        rows,
+        offset,
+    });
+    // the pointer may stand still at an edge, and the list has to go on
+    ui.ctx().request_repaint();
+    out
+}
+
+/// The row as picked up, and the line: strong where it would land, quiet where it stays.
+fn paint_drag(ui: &Ui, area: Rect, section: usize, top: f32, line_y: f32, moves: bool, look: &SideLook) {
+    let painter = ui.painter_at(area);
+    let x0 = area.left() + GUTTER;
+    let x1 = area.right() - 8.0;
+    let row_top = top + section as f32 * look.row_h;
+    let row = Rect::from_min_max(pos2(x0, row_top), pos2(x1, row_top + look.row_h));
+    painter.rect_filled(row, look.radius, look.accent.gamma_multiply(0.14));
+    if moves {
+        painter.hline(x0..=x1, line_y, Stroke::new(2.0, look.accent));
+        let end: Pos2 = pos2(x0, line_y);
+        painter.circle_filled(end, 3.0, look.accent);
+    } else {
+        let weak = look.icon;
+        painter.extend(egui::Shape::dashed_line(
+            &[pos2(x0, line_y), pos2(x1, line_y)],
+            Stroke::new(1.5, weak),
+            5.0,
+            4.0,
+        ));
+    }
 }
 
 /// A section row's menu: by a right click anywhere on it, and from a quiet `⋯` at its start, in the place of its
@@ -154,7 +461,8 @@ fn row_menu(
     let shift_f10 = row.has_focus() && ui.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F10));
     let open = Popup::is_id_open(&ctx, menu);
     let over = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
-        row.rect.contains(p) && ui.clip_rect().contains(p) && ctx.layer_id_at(p) == Some(ui.layer_id())
+        let whole = row.rect.with_min_x(row.rect.left() - GUTTER);
+        whole.contains(p) && ui.clip_rect().contains(p) && ctx.layer_id_at(p) == Some(ui.layer_id())
     });
     let focused = row.has_focus() || ctx.memory(|m| m.has_focus(more));
     let shows = over || open || focused || shift_f10;

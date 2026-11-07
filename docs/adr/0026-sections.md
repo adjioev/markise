@@ -1,6 +1,6 @@
 # ADR 0026: sections
 
-Status: prototype for issue #178, phase 9, of a draft syntax that may still move. Showing sections, starting one, and moving and deleting one.
+Status: prototype for issue #178, phase 9, of a draft syntax that may still move. Showing sections, starting one, and moving and deleting one, also from the outline.
 
 ## Context
 
@@ -189,7 +189,7 @@ first free number after a hyphen, `-2` on, within the length. Taken is any `{#id
 ### Moving and deleting one
 
 `EditorView::move_section` and `delete_section`, in `editor/section_move.rs`, by what a block's move does (ADR 0022): `lift` and `separated` around the bytes, a transaction of one deletion and one insertion, named Move Section or Delete Section, and the check that every block
-pairs as before. The commands Move Section Up, Move Section Down and Delete Section act on the section holding the caret, whichever pane it is in, also in Source mode, and are in the Paragraph menu while the dialect has sections, with or without a package. The chords (⇧⌥⌘↑, ⇧⌥⌘↓, ⇧⌥⌘⌫; Ctrl+Shift+Alt+↑, ↓, Backspace) are checked with the blocks' for clashes. There is no drag.
+pairs as before. The commands Move Section Up, Move Section Down and Delete Section act on the section holding the caret, whichever pane it is in, also in Source mode, and are in the Paragraph menu while the dialect has sections, with or without a package. The chords (⇧⌥⌘↑, ⇧⌥⌘↓, ⇧⌥⌘⌫; Ctrl+Shift+Alt+↑, ↓, Backspace) are checked with the blocks' for clashes.
 
 **A section's bytes** are from its first line with anything on it to the end of its last, blanks at the end of that line included. Blank lines around it are not its own, and only those are written. A file's end, with or without a line ending, stays as it is.
 
@@ -213,7 +213,23 @@ A section's row in the outline panel has a menu, by a right click on it and from
 
 **Insert After** opens the section form, whose Save goes as Starting one says, at the end of that section wherever the caret is (`insert_section_after`). A first section with nothing in it has no end to go after, so it is off there.
 
-**The title.** The first section may hold the document's `#` heading and intro, and that is no reason to refuse anything: a site's rules for what a section holds are the site's. When a document has exactly one `#` heading outside a block (`only_title_section`, a walk over the top-level blocks once per move, not per frame), a move that takes it along, or that brings another section above the first one holding it, says so in that notice, in one line.
+**The title.** The first section may hold the document's `#` heading and intro, and that is no reason to refuse anything: a site's rules for what a section holds are the site's. When a document has exactly one `#` heading outside a block (`only_title_section`), a move that takes it along, or that brings another section above the first one holding it, says so in that notice, in one line.
+
+**A drag.** A section's row has a grip beside it under the pointer, in a gutter the list keeps so that no row moves when it shows, with the Grab cursor, and Grabbing from the press. From the press a line stands between rows at the place nearest the pointer: strong where the section would land, quiet and dashed on its own place or where it cannot go. While it lasts the list has only its sections, so that it is short, with the row picked up under the pointer; the headings come back after it. The list scrolls at its edges once the pointer has left where it was pressed, as a block's drag does (ADR 0022). Esc ends it. Read and a part still loading have no grip, and neither has a section with nowhere to go. While a section or a block is being dragged the keys edit nothing (Esc is the one the drag reads), whoever holds the keyboard, and Esc comes before the release, in one frame too.
+
+A drop is `move_section_to`, what a step is too: the section and the run it goes past change places by `plan_past`, as one undo step, with the same checks of every byte, of the number of sections and of what pairs, and the same refusals with their messages. A section with nothing or only metadata anywhere in that run stops it, and one elsewhere stops nothing. On its own place, or where a first section with nothing in it holds the place, it does nothing and makes no undo step. An edit, a reload or another document during the drag ends it, and what was dropped after that does nothing; the app checks again that the drop is for the document and the revision it was made for.
+
+No frame of it walks the document. The rows on screen each ask for a name, O(log sections) and a bounded look, and the place to land is by the pointer and two ends of runs. `only_title_section` is a walk over the top-level blocks, and goes once, at a drop that concerns a section holding a `#`. Measured with `cargo bench -p markise-ui-egui --bench section_panel`, through the real app with no GPU: 10 MiB, 4,961 sections, each with metadata, macOS, release, 2026-11-07, with other builds running on the machine, so upper bounds:
+
+| | p50 | p99 |
+|---|---|---|
+| A key, the outline hidden / shown | 1.1 ms / 1.7 ms | 2.4 ms / 2.8 ms |
+| A frame, the panel at rest | 0.39 ms | 1.9 ms |
+| A frame of a drag, the pointer moving | 0.39 ms | 1.8 ms |
+| A frame of a drag, the list scrolling | 0.39 ms | 1.2 ms |
+| A drop past 36 sections | 6.7 ms | |
+| A move past all of them, once / its undo | 160 ms / 109 ms | |
+| The title's walk, once | 63 ms | |
 
 ## Consequences
 

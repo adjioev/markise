@@ -56,6 +56,21 @@ fn part(doc: &dyn FormatDoc, index: usize) -> Option<Part> {
     })
 }
 
+/// Sections next to each other as one: from the first one's boundary and start to the last one's end.
+fn run(doc: &dyn FormatDoc, sections: &Range<usize>) -> Option<Part> {
+    let first = part(doc, sections.start)?;
+    let last = part(doc, sections.end.checked_sub(1)?)?;
+    Some(Part {
+        boundary: first.boundary,
+        body: first.body.start..last.body.end,
+    })
+}
+
+/// Where a step that way goes: before which section. None: there is nothing that way.
+fn step_to(index: usize, up: bool) -> Option<usize> {
+    if up { index.checked_sub(1) } else { Some(index + 2) }
+}
+
 /// What moving a section comes to.
 struct Planned {
     patches: Vec<Patch>,
@@ -65,8 +80,8 @@ struct Planned {
     upper_shift: usize,
 }
 
-/// `lower` goes above `upper`, which it follows: whichever of them was asked for, the other one's bytes are
-/// not touched. `None`: one of them holds nothing and is first, so there is no way to change places without
+/// `lower` goes above `upper`, which it follows, each one section or a run of them: whichever of them was asked
+/// for, the other one's bytes are not touched. `None`: one of them holds nothing and is first, so there is no way to change places without
 /// a boundary where no section ends.
 fn plan_past(text: &str, upper: &Part, lower: &Part, eol: &str) -> Option<Result<Planned, MoveRefused>> {
     let body = &text[lower.body.clone()];
@@ -163,6 +178,14 @@ fn atx_line_end(doc: &dyn FormatDoc, at: usize) -> Option<usize> {
     (is_atx && has_text && !has_id && !written.ends_with('#')).then_some(end)
 }
 
+/// Where top-level block `t` is a level 1 heading outside any block.
+fn title_at(doc: &dyn FormatDoc, t: usize) -> Option<usize> {
+    let s = doc.top_span(t)?;
+    let is_title = matches!(doc.leaf(s.start).map(|l| l.kind), Some(LeafKind::Heading { level: 1 }))
+        && doc.named_containers_at(s.start).is_empty();
+    is_title.then_some(s.start)
+}
+
 /// The section has nothing in it, or only metadata.
 fn is_hollow(doc: &dyn FormatDoc, index: usize) -> bool {
     doc.section(index)
@@ -184,41 +207,68 @@ impl EditorView {
         self.section_at_caret()
     }
 
-    /// The two sections a move of `index` swaps: the upper one first.
-    fn section_pair(&self, index: usize, up: bool) -> Option<(usize, usize)> {
-        let upper = if up { index.checked_sub(1)? } else { index };
-        (upper + 1 < self.session.doc().section_count()).then_some((upper, upper + 1))
+    /// The sections a move of `index` to before section `to` changes places between: the run that goes down and
+    /// the run that goes above it, each of one or more sections. `to` is the section count for the end. None:
+    /// that is where it stands, or there is no such place.
+    fn section_runs(&self, index: usize, to: usize) -> Option<(Range<usize>, Range<usize>)> {
+        let count = self.session.doc().section_count();
+        if index >= count || to > count {
+            return None;
+        }
+        if to < index {
+            Some((to..index, index..index + 1))
+        } else if to > index + 1 {
+            Some((index..index + 1, index + 1..to))
+        } else {
+            None
+        }
     }
 
     /// Section `index` has a neighbour to go past that way.
     pub fn can_move_section(&self, index: usize, up: bool) -> bool {
+        step_to(index, up).is_some_and(|to| self.can_move_section_to(index, to))
+    }
+
+    /// Section `index` can go before section `to`, the count for the end. Cheap enough for a frame: only the ends
+    /// of the runs are looked at, and not whether a section they hold has nothing in it, which is for
+    /// [`Self::move_section_to`] to refuse with its message.
+    pub fn can_move_section_to(&self, index: usize, to: usize) -> bool {
         let doc = self.session.doc();
-        self.section_pair(index, up).is_some_and(|(upper, lower)| {
-            let parts = part(doc, upper).zip(part(doc, lower));
+        self.section_runs(index, to).is_some_and(|(upper, lower)| {
+            let parts = part(doc, upper.start).zip(run(doc, &lower));
             parts.is_some_and(|(a, b)| a.boundary.is_some() || !(a.body.is_empty() || b.body.is_empty()))
         })
     }
 
-    /// Moves section `index` past the neighbouring section. `Ok(false)`: there is nothing to go past. Refused
-    /// if anything would pair or divide differently afterwards. One undo step; the caret stays in what it was
-    /// in, or goes to the start of the section it asked for.
+    /// Moves section `index` past the neighbouring section. `Ok(false)`: there is nothing to go past. See
+    /// [`Self::move_section_to`].
     pub fn move_section(&mut self, index: usize, up: bool, in_source: bool) -> Result<bool, MoveRefused> {
+        match step_to(index, up) {
+            Some(to) => self.move_section_to(index, to, in_source),
+            None => Ok(false),
+        }
+    }
+
+    /// Moves section `index` to before section `to`, the count for the end. `Ok(false)`: it stands there, or
+    /// there is no way to get there. Refused if anything would pair or divide differently afterwards. One undo
+    /// step; the caret stays in what it was in, or goes to the start of the section asked for.
+    pub fn move_section_to(&mut self, index: usize, to: usize, in_source: bool) -> Result<bool, MoveRefused> {
         if in_source {
             self.source_selection_to_session();
         }
-        if !self.can_move_section(index, up) {
+        if !self.can_move_section_to(index, to) {
             return Ok(false);
         }
-        let Some((upper, lower)) = self.section_pair(index, up) else {
+        let Some((upper, lower)) = self.section_runs(index, to) else {
             return Ok(false);
         };
         let doc = self.session.doc();
         let text = doc.text();
-        let (Some(a), Some(b)) = (part(doc, upper), part(doc, lower)) else {
+        let (Some(a), Some(b)) = (run(doc, &upper), run(doc, &lower)) else {
             return Ok(false);
         };
         // a site refuses such a section: it is for filling in or deleting, not for moving around
-        if is_hollow(doc, upper) || is_hollow(doc, lower) {
+        if (upper.start..lower.end).any(|k| is_hollow(doc, k)) {
             return Err(MoveRefused::WouldLeaveEmpty);
         }
         let eol = doc.line_ending().as_str();
@@ -253,7 +303,7 @@ impl EditorView {
             }
         };
         let sel = self.session.selection().primary();
-        let own_start = if index == lower { lower_at } else { upper_at };
+        let own_start = if lower.contains(&index) { lower_at } else { upper_at };
         let sel_after = match (place(sel.anchor), place(sel.focus)) {
             (Some(x), Some(y)) => Selection::single(x, y),
             _ => Selection::caret_at(DocPos::new(own_start)),
@@ -275,8 +325,8 @@ impl EditorView {
             let stands = text.get(lower_at..lower_at + body_b.len()) == Some(body_b.as_str())
                 && text.get(upper_at..upper_at + body_a.len()) == Some(body_a.as_str())
                 && doc.section_count() == sections
-                && doc.section_at(lower_at).index == upper
-                && doc.section_at(upper_at).index == lower;
+                && doc.section_at(lower_at).index == upper.start
+                && doc.section_at(upper_at).index == upper.start + lower.len();
             if !stands || blocks_of(doc) != want {
                 return Err(EditError::Aborted(String::new()));
             }
@@ -434,17 +484,24 @@ impl EditorView {
         let doc = self.session.doc();
         let mut found = None;
         for t in 0..doc.top_count() {
-            let Some(s) = doc.top_span(t) else { continue };
-            let is_title = matches!(doc.leaf(s.start).map(|l| l.kind), Some(LeafKind::Heading { level: 1 }))
-                && doc.named_containers_at(s.start).is_empty();
-            if is_title {
+            if let Some(at) = title_at(doc, t) {
                 if found.is_some() {
                     return None;
                 }
-                found = Some(s.start);
+                found = Some(at);
             }
         }
         found.map(|at| doc.section_at(at).index)
+    }
+
+    /// Section `index` holds a level 1 heading outside any block. What it costs is what is in that section.
+    pub fn section_has_title(&self, index: usize) -> bool {
+        let doc = self.session.doc();
+        let Some(s) = doc.section(index) else { return false };
+        let Some(first) = doc.top_at(s.start) else { return false };
+        (first..doc.top_count())
+            .take_while(|t| doc.top_span(*t).is_some_and(|b| b.start < s.end))
+            .any(|t| title_at(doc, t).is_some())
     }
 
     /// Where the end of section `index` is, for what is to go after it: none for a first section with nothing in it.

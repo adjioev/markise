@@ -52,11 +52,11 @@ impl BlockLibraryState {
 }
 
 /// What a move says of the document's `#` title, standing in section `title`, when section `index` goes before
-/// the section at `to` (`None`: nowhere): it moves with its section, or from the top when another one comes first.
-fn title_warning(index: usize, to: Option<usize>, title: usize) -> Option<String> {
+/// the section at `to`: it moves with its section, or from the top when another one comes first.
+fn title_warning(index: usize, to: usize, title: usize) -> Option<String> {
     if title == index {
         Some("Moved, and the document's # title with it.".to_string())
-    } else if to == Some(0) && title == 0 {
+    } else if to == 0 && title == 0 {
         Some("Moved above the document's # title, so the title moves too.".to_string())
     } else {
         None
@@ -295,6 +295,12 @@ impl MarkiseApp {
     }
 
     fn move_section(&mut self, index: usize, up: bool) -> bool {
+        let to = if up { index.checked_sub(1) } else { Some(index + 2) };
+        to.is_some_and(|to| self.move_section_to(index, to))
+    }
+
+    /// Before section `to`: a step or a drop.
+    fn move_section_to(&mut self, index: usize, to: usize) -> bool {
         if !self.section_edit_allowed() {
             return false;
         }
@@ -305,14 +311,12 @@ impl MarkiseApp {
         let in_source = self.source_focused();
         let Some(d) = &mut self.doc else { return false };
         // the title goes with the section holding it, or from the top when another one comes first
-        let to = if up { index.checked_sub(1) } else { Some(index + 2) };
-        let title = d
-            .viewer
-            .ed
-            .can_move_section(index, up)
-            .then(|| d.viewer.ed.only_title_section());
+        let ed = &d.viewer.ed;
+        // the walk over the document only if the sections it concerns hold a `#` at all
+        let concerned = ed.section_has_title(index) || (to == 0 && ed.section_has_title(0));
+        let title = (concerned && ed.can_move_section_to(index, to)).then(|| ed.only_title_section());
         let warning = title.flatten().and_then(|t| title_warning(index, to, t));
-        let result = d.viewer.ed.move_section(index, up, in_source);
+        let result = d.viewer.ed.move_section_to(index, to, in_source);
         if in_source {
             d.source_ui.find_reveal = true;
         } else {
@@ -441,6 +445,7 @@ impl MarkiseApp {
             SectionAct::MoveUp(index) => self.move_section(index, true),
             SectionAct::MoveDown(index) => self.move_section(index, false),
             SectionAct::Delete(index) => self.delete_section_asking(index),
+            SectionAct::MoveTo { index, to } => self.move_section_to(index, to),
             SectionAct::Duplicate(index) => self.duplicate_section(index),
             SectionAct::InsertAfter(index) => {
                 let in_source = self.source_focused();
