@@ -144,13 +144,6 @@ impl MarkiseApp {
         }
     }
 
-    /// What a section is called here: the package's word, or the default.
-    pub(super) fn section_word(&self) -> String {
-        let language = (self.doc.as_ref()).map_or_else(String::new, |d| package_language(d.viewer.ed.session.doc()));
-        let config = self.block_package().and_then(|p| p.index.sections());
-        shown(config.and_then(|c| c.label.as_ref()), &language, DEFAULT_SECTION_LABEL)
-    }
-
     /// Insert After on a section's row in the outline.
     pub(super) fn open_section_form_after(&mut self, ctx: &Context, index: usize, in_source: bool) -> bool {
         if !self.open_section_form(ctx, in_source) {

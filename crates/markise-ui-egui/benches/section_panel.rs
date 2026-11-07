@@ -144,7 +144,9 @@ fn main() {
     r.hover(Pos2::new(row.x, H - 300.0));
     report("panel at rest", (0..60).map(|_| r.frame()).collect());
     r.hover(row);
-    let grip = r.at("Drag Section to move").expect("a grip").center();
+    let grip = (r.labels.iter().find(|(l, _)| l.starts_with("Drag to move")))
+        .map(|(_, at)| at.center())
+        .expect("a grip");
     r.hover(grip);
     let pressed = r.button(grip, true);
     report("the press", vec![pressed]);

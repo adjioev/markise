@@ -3,7 +3,7 @@
 
 use egui::{Event, Key, Modifiers, PointerButton, Pos2};
 use egui_kittest::Harness;
-use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::kittest::{NodeT, Queryable, by};
 use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp};
 
 use crate::block_library::frames;
@@ -15,6 +15,14 @@ type H = Harness<'static, MarkiseApp>;
 const HEAD: &str = "---\nauthoring: blocks-v3\n---\n\n";
 const DOC: &str =
     "---\nauthoring: blocks-v3\n---\n\nOne.\n\n---\n\n## Two {#two}\n\nText.\n\n---\n\n## Three\n\nMore.\n";
+
+fn dots(h: &H) -> usize {
+    h.query_all(by().label_contains("Actions: ")).count()
+}
+
+fn grips(h: &H) -> usize {
+    h.query_all(by().label_contains("Drag to move: ")).count()
+}
 
 pub(crate) struct Plain {
     _dir: tempfile::TempDir,
@@ -106,12 +114,12 @@ fn a_right_click_has_the_menu_and_its_moves_are_one_undo_step() {
 fn the_dots_show_on_hover_and_have_the_same_menu() {
     let p = plain(DOC);
     let mut h = opened(&p);
-    assert_eq!(h.query_all_by_label("Section actions").count(), 0, "quiet");
+    assert_eq!(dots(&h), 0, "quiet");
     let at = row(&h, "Two");
     h.hover_at(at);
     frames(&mut h);
-    assert_eq!(h.query_all_by_label("Section actions").count(), 1);
-    let dots = h.get_by_label("Section actions").rect().center();
+    assert_eq!(dots(&h), 1);
+    let dots = h.get(by().label_contains("Actions: ")).rect().center();
     h.hover_at(dots);
     frames(&mut h);
     for pressed in [true, false] {
@@ -156,7 +164,7 @@ fn a_refusal_says_the_engine_s_message_and_changes_nothing() {
     press_item(&mut h, "Move Down");
     assert_eq!(text(&h), doc);
     let said = h.state().banner_text().unwrap();
-    assert!(said.contains("Section not moved"), "{said}");
+    assert!(said.contains("Not moved"), "{said}");
     assert!(said.contains("fill it in or delete it first"), "{said}");
 }
 
@@ -169,7 +177,7 @@ fn delete_asks_nothing_and_the_notice_takes_it_back_exactly() {
     let gone = format!("{HEAD}One.\n\n---\n\n## Three\n\nMore.\n");
     assert_eq!(text(&h), gone);
     assert!(!h.state().is_asking());
-    assert_eq!(h.state().banner_text().unwrap(), "Section deleted: Two");
+    assert_eq!(h.state().banner_text().unwrap(), "Deleted: Two");
     h.get_by_label("Undo").click();
     frames(&mut h);
     frames(&mut h);
@@ -290,42 +298,53 @@ fn the_title_going_along_is_said_in_one_line_and_not_refused() {
 
 #[test]
 fn a_section_s_row_is_not_a_heading_s_and_only_it_has_controls() {
-    let doc = format!("{HEAD}# Title\n\n## Under\n\n---\n\n## Named\n\n### Below\n\n---\n\nNo heading.\n");
+    let doc =
+        format!("{HEAD}# Title\n\n## Under\n\n### Deeper\n\n---\n\n## Named\n\n### Below\n\n---\n\nNo heading.\n");
     let p = plain(&doc);
     let mut h = opened(&p);
-    // the title is a heading under a section; a heading that names its section has no row of its own
-    for name in ["Section 1", "Title", "Under", "Named", "Below", "Section 3"] {
+    // the title stands above the sections, and a heading that names its section has no row of its own
+    for name in ["Title", "Under", "Deeper", "Named", "Below", "Section 3"] {
         assert_eq!(h.query_all_by_label(name).count(), 1, "{name}");
     }
-    let (section, title, under) = (row(&h, "Section 1"), row(&h, "Title"), row(&h, "Under"));
-    assert!(section.y < title.y && title.y < under.y);
-    for heading in ["Title", "Under", "Below"] {
+    let (title, section, deeper) = (row(&h, "Title"), row(&h, "Under"), row(&h, "Deeper"));
+    assert!(title.y < section.y && section.y < deeper.y);
+    for heading in ["Title", "Deeper", "Below"] {
         h.hover_at(row(&h, heading));
         frames(&mut h);
-        assert_eq!(h.query_all_by_label("Section actions").count(), 0, "{heading}");
+        assert_eq!(dots(&h), 0, "{heading}");
         let at = row(&h, heading);
         secondary_click(&mut h, at);
         assert_eq!(h.query_all_by_label("Delete").count(), 0, "{heading}");
         h.key_press(Key::Escape);
         frames(&mut h);
     }
+    // a click on the title goes there
+    let v = h.state_mut().viewer().unwrap();
+    let last = v.ed.view.len().saturating_sub(1);
+    v.ed.view.scroll_to_item(last);
+    frames(&mut h);
+    h.get_by_label("Title").click();
+    frames(&mut h);
+    let v = h.state_mut().viewer().unwrap();
+    assert!(v.ed.view.anchor().0 <= 1, "{:?}", v.ed.view.anchor());
+    assert_eq!(text(&h), doc);
     // its controls are at the row's start, on it
-    for name in ["Section 1", "Named", "Section 3"] {
+    for name in ["Under", "Named", "Section 3"] {
         let at = row(&h, name);
         h.hover_at(at);
         frames(&mut h);
-        let dots = h.get_by_label("Section actions").rect();
+        let dots = h.get(by().label_contains("Actions: ")).rect();
         assert!((dots.center().y - at.y).abs() < 2.0, "{name}");
         assert!(dots.right() < at.x, "at its start: {name}");
     }
     // in Read it reads the same and has none
     h.state_mut().viewer().unwrap().ed.set_read_mode(true);
     frames(&mut h);
-    for name in ["Section 1", "Title", "Named"] {
+    for name in ["Under", "Title", "Named"] {
         assert_eq!(h.query_all_by_label(name).count(), 1, "{name}");
         h.hover_at(row(&h, name));
         frames(&mut h);
-        assert_eq!(h.query_all_by_label("Section actions").count(), 0, "{name}");
+        assert_eq!(dots(&h), 0, "{name}");
     }
     assert_eq!(text(&h), doc);
 }
@@ -424,7 +443,7 @@ fn read_has_none_of_it_and_neither_has_a_document_without_sections() {
     let at = row(&h, "Two");
     h.hover_at(at);
     frames(&mut h);
-    assert_eq!(h.query_all_by_label("Section actions").count(), 0);
+    assert_eq!(dots(&h), 0);
     secondary_click(&mut h, at);
     assert_eq!(h.query_all_by_label("Delete").count(), 0);
     assert_eq!(text(&h), DOC);
@@ -433,15 +452,19 @@ fn read_has_none_of_it_and_neither_has_a_document_without_sections() {
     frames(&mut h);
     h.hover_at(at);
     frames(&mut h);
-    assert_eq!(h.query_all_by_label("Section actions").count(), 1);
+    assert_eq!(dots(&h), 1);
 
     let p = plain("# One\n\n---\n\nTwo.\n");
     let mut h = opened(&p);
-    assert_eq!(h.query_all_by_label("Section 1").count(), 0, "a plain outline");
+    assert_eq!(
+        h.query_all(by().label_contains("Actions")).count(),
+        0,
+        "a plain outline"
+    );
     let at = row(&h, "One");
     h.hover_at(at);
     frames(&mut h);
-    assert_eq!(h.query_all_by_label("Section actions").count(), 0);
+    assert_eq!(dots(&h), 0);
 }
 
 const FILES: &[(&str, &str)] = &[
@@ -489,10 +512,10 @@ fn the_word_is_the_package_s() {
     let at = row(&h, "Chapter 2");
     h.hover_at(at);
     frames(&mut h);
-    assert_eq!(h.query_all_by_label("Chapter actions").count(), 1);
+    assert_eq!(dots(&h), 1);
     menu_on(&mut h, "Chapter 2");
     press_item(&mut h, "Delete");
-    assert_eq!(h.state().banner_text().unwrap(), "Chapter deleted: Chapter 2");
+    assert_eq!(h.state().banner_text().unwrap(), "Deleted: Chapter 2");
 }
 
 /// From the keyboard alone: off the document, Tab along the panel to a row, Shift+F10, the arrows and Return.
@@ -517,7 +540,7 @@ fn the_menu_can_be_reached_and_used_by_the_keyboard() {
         assert!(guard < 60, "no way to the row by Tab: {r:?}");
     }
     // its dots show now, and the next Tab is on them
-    assert_eq!(h.query_all_by_label("Section actions").count(), 1);
+    assert_eq!(dots(&h), 1);
     h.key_press_modifiers(Modifiers::SHIFT, Key::F10);
     frames(&mut h);
     assert_eq!(h.query_all_by_label("Move Up").count(), 1);
@@ -540,7 +563,7 @@ fn esc_closes_the_keyboard_s_menu_and_the_keyboard_goes_back_to_the_dots() {
     // the keyboard on the dots
     h.hover_at(row(&h, "Two"));
     frames(&mut h);
-    h.get_by_label("Section actions").focus();
+    h.get(by().label_contains("Actions: ")).focus();
     frames(&mut h);
     h.key_press(Key::Enter);
     frames(&mut h);
@@ -549,7 +572,7 @@ fn esc_closes_the_keyboard_s_menu_and_the_keyboard_goes_back_to_the_dots() {
     frames(&mut h);
     assert_eq!(h.query_all_by_label("Duplicate").count(), 0);
     assert_eq!(text(&h), DOC);
-    let dots = h.get_by_label("Section actions").rect();
+    let dots = h.get(by().label_contains("Actions: ")).rect();
     let on = h.ctx.memory(|m| m.focused()).and_then(|id| h.ctx.read_response(id));
     assert_eq!(on.map(|r| r.rect), Some(dots));
 }
@@ -580,7 +603,7 @@ mod dragging {
         let at = row(h, name);
         h.hover_at(at);
         frames(h);
-        let grip = h.get_by_label("Drag Section to move").rect().center();
+        let grip = h.get(by().label_contains("Drag to move: ")).rect().center();
         h.hover_at(grip);
         h.step();
         h.step();
@@ -607,39 +630,39 @@ mod dragging {
     fn a_grip_shows_on_hover_with_grab_and_read_has_none() {
         let p = plain(FOUR);
         let mut h = opened(&p);
-        assert_eq!(h.query_all_by_label("Drag Section to move").count(), 0, "quiet");
+        assert_eq!(grips(&h), 0, "quiet");
         h.hover_at(row(&h, "Two"));
         frames(&mut h);
-        let grip = h.get_by_label("Drag Section to move").rect().center();
+        let grip = h.get(by().label_contains("Drag to move: ")).rect().center();
         h.hover_at(grip);
         frames(&mut h);
         assert_eq!(cursor(&mut h), egui::CursorIcon::Grab);
         h.state_mut().viewer().unwrap().ed.set_read_mode(true);
         frames(&mut h);
-        assert_eq!(h.query_all_by_label("Drag Section to move").count(), 0);
+        assert_eq!(grips(&h), 0);
     }
 
     #[test]
     fn only_a_section_s_row_has_a_grip_at_its_start_and_read_keeps_it_out() {
-        let doc = format!("{HEAD}# Title\n\n## Under\n\n---\n\n## Named\n\n### Below\n\n---\n\nText.\n");
+        let doc = format!("{HEAD}# Title\n\n## Under\n\n### Deeper\n\n---\n\n## Named\n\n### Below\n\n---\n\nText.\n");
         let p = plain(&doc);
         let mut h = opened(&p);
-        for heading in ["Title", "Under", "Below"] {
+        for heading in ["Title", "Deeper", "Below"] {
             h.hover_at(row(&h, heading));
             frames(&mut h);
-            assert_eq!(h.query_all_by_label("Drag Section to move").count(), 0, "{heading}");
+            assert_eq!(grips(&h), 0, "{heading}");
         }
-        for name in ["Section 1", "Named", "Section 3"] {
+        for name in ["Under", "Named", "Section 3"] {
             let at = row(&h, name);
             h.hover_at(at);
             frames(&mut h);
-            let grip = h.get_by_label("Drag Section to move").rect();
+            let grip = h.get(by().label_contains("Drag to move: ")).rect();
             assert!((grip.center().y - at.y).abs() < 2.0, "{name}");
-            let dots = h.get_by_label("Section actions").rect();
+            let dots = h.get(by().label_contains("Actions: ")).rect();
             assert!(grip.right() <= dots.left() + 1.0 && dots.right() < at.x, "{name}");
         }
         // on the title's section: what goes is the section, with the warning
-        let grip = pick_up(&mut h, "Section 1");
+        let grip = pick_up(&mut h, "Under");
         let to = grip + vec2(0.0, 26.0 * 5.0);
         walk(&mut h, to);
         walk(&mut h, to);
@@ -651,7 +674,7 @@ mod dragging {
         frames(&mut h);
         h.hover_at(row(&h, "Named"));
         frames(&mut h);
-        assert_eq!(h.query_all_by_label("Drag Section to move").count(), 0);
+        assert_eq!(grips(&h), 0);
     }
 
     #[test]

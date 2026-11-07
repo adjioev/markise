@@ -744,6 +744,9 @@ impl FormatDoc for Document {
     fn section_first_heading(&self, index: usize) -> Option<usize> {
         Document::section_first_heading(self, index)
     }
+    fn section_heading_from(&self, index: usize, from: usize, level: Option<u8>) -> Option<usize> {
+        Document::section_heading_from(self, index, from, level)
+    }
     fn section_near_boundary(&self, at: usize) -> bool {
         Document::section_near_boundary(self, at)
     }

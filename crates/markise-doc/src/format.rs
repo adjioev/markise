@@ -498,6 +498,12 @@ pub trait FormatDoc: EditBehavior + Send + Sync {
         let _ = index;
         None
     }
+    /// Where the first heading of section `index` of this level starts, or of any level with `None`, at or after
+    /// `from`, as far as a cheap look goes. Only the section's own top-level blocks count.
+    fn section_heading_from(&self, index: usize, from: usize, level: Option<u8>) -> Option<usize> {
+        let _ = (index, from, level);
+        None
+    }
     /// A rule at `at` looks like a boundary and is none.
     fn section_near_boundary(&self, at: usize) -> bool {
         let _ = at;
