@@ -172,7 +172,13 @@ fn an_argument_has_the_shape_the_spec_declares_and_no_markup_of_its_own() {
     }
     let model = BlockFields::decode(":::plate a/b\n\nText\n\n:::", 0, &decls, &ParseOptions::default()).unwrap();
     assert_eq!(model.values()[markise_package::ARGUMENT_KEY], "a/b");
-    let html = markise_engine::block_page::markup(&model, &spec, false, true);
+    let html = markise_engine::block_page::markup(
+        &model,
+        &spec,
+        false,
+        true,
+        markise_engine::block_page::BlockRoot::Section,
+    );
     assert_eq!(html.matches("a/b").count(), 1, "only in its attribute: {html}");
     assert!(html.contains(r#"data-argument="a/b""#), "{html}");
     assert!(!html.contains(markise_package::ARGUMENT_KEY), "{html}");

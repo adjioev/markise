@@ -22,6 +22,8 @@ pub struct PackageIndex {
     id: PackageId,
     /// The manifest's `authoring`, as written (ADR 0026).
     authoring: Option<String>,
+    /// The manifest's `htmlContract`, or 1 without a whole number there (ADR 0023).
+    html_contract: u64,
     blocks: BTreeMap<String, BlockSchema>,
     palette: Palette,
     views: BTreeMap<String, ViewConfig>,
@@ -72,6 +74,7 @@ impl PackageIndex {
         let authoring = (manifest.get("authoring").and_then(Value::as_str))
             .filter(|v| !v.is_empty() && v.len() <= MAX_NAME_BYTES)
             .map(str::to_string);
+        let html_contract = manifest.get("htmlContract").and_then(Value::as_u64).unwrap_or(1);
         let known: BTreeSet<String> = names.iter().cloned().collect();
 
         let mut blocks = BTreeMap::new();
@@ -116,6 +119,7 @@ impl PackageIndex {
         issues.into_result(|| PackageIndex {
             id: PackageId { library, version },
             authoring,
+            html_contract,
             blocks,
             palette,
             views: view_map,
@@ -130,6 +134,7 @@ impl PackageIndex {
                 version: String::new(),
             },
             authoring: None,
+            html_contract: 1,
             blocks: BTreeMap::new(),
             palette: Palette::default(),
             views: BTreeMap::new(),
@@ -143,6 +148,12 @@ impl PackageIndex {
     /// The authoring dialect the package's site writes in, as its manifest says.
     pub fn authoring(&self) -> Option<&str> {
         self.authoring.as_deref()
+    }
+
+    /// Which markup the package's code expects of a block: the manifest's `htmlContract`, 1 without
+    /// one (ADR 0023). Read, not checked, as `authoring` is.
+    pub fn html_contract(&self) -> u64 {
+        self.html_contract
     }
 
     /// The block's entry; `None` for a name the package does not define.

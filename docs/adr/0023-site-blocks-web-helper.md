@@ -73,6 +73,10 @@ needs no new format name: these are files that format calls opaque, and nothing 
   </section>
   ```
 
+  **The root follows the package's contract.** The manifest's `htmlContract`, read and not checked as `authoring` is (ADR 0026): `2` has
+  `<div data-component>`, and `1`, none or a number not known here `<section data-component>`, as above. Nothing else differs. On a site with contract 2 a page's
+  sections are `<section data-section>` around blocks, and they are left out here: a block is drawn alone, the page holds no section of its own, and a package's code that asks
+  for one draws nothing, as for anything else this contract does not offer. A site's sections have no picture.
   `data-variant` is there when the arguments name a variant the schema declares, `data-argument` when the schema declares an
   `argument`. A field with nothing in it has no element. Text inside goes through the HTML export with its sanitizer.
   Trailing ids (ADR 0018) are not text.
