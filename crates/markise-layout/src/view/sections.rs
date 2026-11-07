@@ -114,11 +114,21 @@ pub(super) struct SectionsState {
     /// Outline entries before each section asked about, for the document as it stands.
     heads: RefCell<HashMap<usize, usize>>,
     /// For each section, how many sections before it are named by a heading whose row is left out, and at the
-    /// end the number of all of them. For the document as it stands.
-    named: RefCell<Option<Arc<[u32]>>>,
+    /// end the number of all of them. For the document as it stands, with how many sections and outline entries.
+    named: RefCell<Option<NamedRows>>,
 }
 
+/// See [`SectionsState::named`].
+pub(super) type NamedRows = (Arc<[u32]>, (usize, usize));
+
 impl SectionsState {
+    /// What was forgotten comes back, for an edit that cannot change it.
+    pub(super) fn keep_named(&self, named: Option<NamedRows>) {
+        if self.on && named.is_some() {
+            *self.named.borrow_mut() = named;
+        }
+    }
+
     pub(super) fn forget(&self) {
         if self.on {
             self.roles.borrow_mut().clear();
@@ -170,15 +180,10 @@ impl View {
         only.map_or(n, |o| o.partition_point(|&e| e < n))
     }
 
-    /// The first heading of section `k`, when that is what it goes by: no `id`, and it says something. A first
-    /// section's `#` is the document's title and no name of its section.
-    fn naming_heading(&self, k: usize) -> Option<(usize, String)> {
-        if self
-            .doc
-            .section_metadata(k)
-            .as_ref()
-            .is_some_and(|m| m.get("id").is_some())
-        {
+    /// The first heading of section `k`, when that is what it goes by, with its metadata as read: no `id`, and it
+    /// says something. A first section's `#` is the document's title and no name of its section.
+    fn naming_heading(&self, k: usize, metadata: Option<&markise_doc::SectionMetadata>) -> Option<(usize, String)> {
+        if metadata.is_some_and(|m| m.get("id").is_some()) {
             return None;
         }
         let at = self.doc.section_first_heading(k)?;
@@ -196,7 +201,7 @@ impl View {
     pub fn section_own_name(&self, k: usize) -> Option<String> {
         let metadata = self.doc.section_metadata(k);
         (metadata.as_ref().and_then(|m| m.get("id")).map(str::to_string))
-            .or_else(|| self.naming_heading(k).map(|n| n.1))
+            .or_else(|| self.naming_heading(k, metadata.as_ref()).map(|n| n.1))
     }
 
     /// What section `k` shows for a number in the outline, as a boundary does; `None` where a boundary says none.
@@ -212,26 +217,43 @@ impl View {
     /// when that heading is the first thing under it: a heading in a block before it is listed first and stays
     /// where it is, and so does this one.
     fn names_by_first_row(&self, k: usize) -> bool {
-        let Some((at, _)) = self.naming_heading(k) else {
+        let metadata = self.doc.section_metadata(k);
+        let Some((at, _)) = self.naming_heading(k, metadata.as_ref()) else {
             return false;
         };
         let Some(section) = self.doc.section(k) else {
             return false;
         };
-        let from = self.doc.section_metadata(k).map_or(section.start, |m| m.closer.end);
+        let from = metadata.as_ref().map_or(section.start, |m| m.closer.end);
         let Some(first) = self.doc.top_at(from) else {
             return false;
         };
         let Some(last) = self.doc.top_at(at) else { return false };
-        let skip = usize::from(self.doc.section_metadata(k).is_some());
-        (first + skip..last)
+        (first + usize::from(metadata.is_some())..last)
             .all(|t| (self.doc.top_span(t)).is_some_and(|s| self.doc.named_containers_at(s.start).is_empty()))
+    }
+
+    /// What [`Self::named_rows`] holds, when this edit cannot change it: text typed in one item that is no heading
+    /// and no part of a block, with as many sections and outline entries as there were. So typing goes on at no cost
+    /// for it, however many sections there are.
+    pub(super) fn sections_names_stand(&self, change: &crate::model::ModelChange) -> Option<NamedRows> {
+        let named = self.sections.named.borrow().clone()?;
+        let one =
+            !change.full && change.splices().len() == 1 && change.replaced.len() == 1 && change.inserted.len() == 1;
+        let item = self.model.items.get(change.inserted.start).filter(|_| one)?;
+        let plain = !matches!(item.kind, ItemKind::Heading { .. })
+            && !self.model.is_page(change.inserted.start)
+            && (self
+                .doc
+                .named_containers_at(self.model.item_start(change.inserted.start)))
+            .is_empty();
+        (plain && named.1 == (self.doc.section_count(), self.model.outline.len())).then_some(named)
     }
 
     /// The running count of [`Self::names_by_first_row`]. Goes over the sections once per state of the document,
     /// reading only what each starts with, and only while the outline is asked for.
     fn named_rows(&self) -> Arc<[u32]> {
-        if let Some(n) = &*self.sections.named.borrow() {
+        if let Some((n, _)) = &*self.sections.named.borrow() {
             return n.clone();
         }
         let count = self.doc.section_count();
@@ -243,7 +265,7 @@ impl View {
         }
         out.push(n);
         let out: Arc<[u32]> = out.into();
-        *self.sections.named.borrow_mut() = Some(out.clone());
+        *self.sections.named.borrow_mut() = Some((out.clone(), (count, self.model.outline.len())));
         out
     }
 

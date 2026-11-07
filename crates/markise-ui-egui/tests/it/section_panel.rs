@@ -330,6 +330,32 @@ fn a_section_s_row_is_not_a_heading_s_and_only_it_has_controls() {
     assert_eq!(text(&h), doc);
 }
 
+#[test]
+fn what_names_a_section_follows_the_text() {
+    let doc = format!("{HEAD}A\n\n---\n\nNo heading.\n\nAnd more.\n");
+    let p = plain(&doc);
+    let mut h = opened(&p);
+    assert_eq!(h.query_all_by_label("Section 2").count(), 1);
+    let at = doc.find("No heading").unwrap();
+    let v = h.state_mut().viewer().unwrap();
+    // typing in a paragraph changes nothing here, however often it is asked
+    v.ed.set_selection(markise_doc::Selection::caret_at(markise_doc::DocPos::new(doc.len())));
+    let _ = v.ed.edit(|s| s.insert_text("x"));
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Section 2").count(), 1);
+    // that paragraph becomes a heading: it names the section, once
+    let v = h.state_mut().viewer().unwrap();
+    v.ed.set_selection(markise_doc::Selection::caret_at(markise_doc::DocPos::new(at)));
+    let _ = v.ed.edit(|s| s.insert_text("## "));
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Section 2").count(), 0);
+    assert_eq!(h.query_all_by_label("No heading.").count(), 1, "the row and no other");
+    // and undone, it does not
+    h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
+    frames(&mut h);
+    assert_eq!(h.query_all_by_label("Section 2").count(), 1);
+}
+
 /// What a reload does: the document goes on with another text, with no edit of the surface's.
 pub(crate) fn reload(h: &mut H, text: &str) {
     let doc = std::sync::Arc::new(markise_md::parse(text));
