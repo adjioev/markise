@@ -761,7 +761,7 @@ impl SideLook {
         let hovered = resp.hovered() && kind != RowKind::Note;
         let bg_rect = rect.shrink2(egui::vec2(1.0, 1.0));
         // a section reads as one before a word of it is read
-        if matches!(kind, RowKind::Section { .. }) && !active && !hovered {
+        if matches!(kind, RowKind::Section { .. }) && !hovered {
             p.rect_filled(bg_rect, self.radius, self.bar_bg);
         }
         let bg = match (active, outline, hovered) {
