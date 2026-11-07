@@ -122,6 +122,10 @@ pub(super) struct SectionsState {
 pub(super) type NamedRows = (Arc<[u32]>, (usize, usize));
 
 impl SectionsState {
+    pub(super) fn named_now(&self) -> Option<NamedRows> {
+        self.named.borrow().clone()
+    }
+
     /// What was forgotten comes back, for an edit that cannot change it.
     pub(super) fn keep_named(&self, named: Option<NamedRows>) {
         if self.on && named.is_some() {
@@ -238,7 +242,7 @@ impl View {
     /// many sections there are. An edit that pairs far away can change what a far section starts with, which then shows
     /// until the next change that is not typing: a row too many or too few, and nothing in the wrong place.
     pub(super) fn sections_names_stand(&self, change: &crate::model::ModelChange) -> Option<NamedRows> {
-        let named = self.sections.named.borrow().clone()?;
+        let named = self.sections.named_now()?;
         let count = self.doc.section_count();
         if change.full || change.splices().len() != 1 || named.1 != (count, self.model.outline.len()) {
             return None;

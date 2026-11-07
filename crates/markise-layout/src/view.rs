@@ -329,7 +329,10 @@ impl View {
     pub fn replace_doc(&mut self, doc: Arc<dyn FormatDoc>) -> Arc<dyn FormatDoc> {
         self.native.forget();
         self.site.forget();
+        // [`View::apply_change`] says what becomes of it, as this is the same document so far
+        let named = self.sections.named_now();
         self.sections.forget();
+        self.sections.keep_named(named);
         std::mem::replace(&mut self.doc, doc)
     }
 
