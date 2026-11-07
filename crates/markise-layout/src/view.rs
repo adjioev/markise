@@ -339,7 +339,9 @@ impl View {
         self.doc = doc;
         self.native.forget();
         self.site.forget();
+        let named = self.sections_names_stand(change);
         self.sections.forget();
+        self.sections.keep_named(named);
         let old_focus = self.focus.take().map(|f| f.0);
         self.caret_item = None;
         let pre = self.pre_edit_anchor.take();

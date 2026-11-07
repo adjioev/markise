@@ -114,7 +114,7 @@ What a row is called: its `id`, or the first heading when that is what it goes b
 
 Its rows are not built: the row of section
 `k` is `k` plus the headings before it less the headings left out before it, so the rows on screen are found by bisection over sections, and a
-list of any size costs what is shown. The count of those left out is the one thing that goes over all sections, reading only what each starts with, once per state of the document and only while the outline is shown. The model's outline names a heading in a placeholder by the
+list of any size costs what is shown. The count of those left out is the one thing that goes over all sections, reading only what each starts with, and only while the outline is shown: about 7 ms at 4,961 sections with metadata. Typing in an item that is no heading and in no block keeps it, as nothing else about it changes, so typing does not pay for it; a structural edit does, once. The model's outline names a heading in a placeholder by the
 placeholder, so a boundary in one reads that page's items, without materializing it, and remembers the count
 until the document changes. A click materializes the target's page and goes there as a heading's does.
 
