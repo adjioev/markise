@@ -222,6 +222,10 @@ impl DocViewer {
                 continue;
             }
             let id = ui.scope_id().with(("markise-section-control", label, start));
+            // what does not show is not there to press
+            if !(over_row || in_it || ui.memory(|m| m.has_focus(id))) {
+                continue;
+            }
             let resp = ui.interact(r, id, Sense::click()).on_hover_text(label);
             resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
             self.section_buttons.push(r);
@@ -229,12 +233,8 @@ impl DocViewer {
                 out.section_act = Some(act);
                 ui.ctx().request_repaint();
             }
-            let on_it = pointer.is_some_and(|p| r.contains(p));
-            if on_it {
+            if pointer.is_some_and(|p| r.contains(p)) {
                 self.pointer_on_block_control = true;
-            }
-            if !(over_row || in_it || resp.has_focus()) {
-                continue;
             }
             let tone = if resp.hovered() {
                 ui.visuals().text_color()

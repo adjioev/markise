@@ -305,8 +305,8 @@ impl View {
                 .is_some_and(|p| p.kind == ItemKind::FrontMatter);
         let first = i == 0 || after_front;
         let last = i + 1 == self.model.items.len();
-        if let Role::Divider { number, name, .. } = self.section_role(i, it) {
-            let m = crate::block::divider_metrics(t, true, number.is_some() || name.is_some());
+        if let Role::Divider { .. } = self.section_role(i, it) {
+            let m = crate::block::divider_metrics(t, true);
             let below = band(gap + m.opens, if last { height + pad } else { height }, true, last);
             // a first section with nothing in it has no frame to end
             return if first {
@@ -479,8 +479,8 @@ impl View {
     pub(super) fn section_estimate(&self, i: usize, it: &Item) -> Option<f32> {
         match self.section_role(i, it) {
             Role::Opener(_) => Some(self.theme.block_spacing + crate::block::plaque_row_height(&self.theme)),
-            Role::Divider { number, name, style } => {
-                let m = crate::block::divider_metrics(&self.theme, style.frame, number.is_some() || name.is_some());
+            Role::Divider { style, .. } => {
+                let m = crate::block::divider_metrics(&self.theme, style.frame);
                 Some(self.theme.block_spacing + m.end)
             }
             Role::Closer => Some(0.0),
@@ -500,7 +500,7 @@ impl View {
             boundaries += 1;
         }
         let style = &self.sections.style;
-        let m = crate::block::divider_metrics(&self.theme, style.frame, style.numbered);
+        let m = crate::block::divider_metrics(&self.theme, style.frame);
         boundaries as f32 * (m.end - self.theme.line_px())
     }
 

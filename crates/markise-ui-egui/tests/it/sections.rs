@@ -912,10 +912,10 @@ mod moving {
         // the second divider opens the last section: it cannot go down
         let p2 = row_of_divider(&mut h, 1);
         pointer_to(&mut h, p2);
-        let up = h.query_all_by_label("Move Section Up").count();
-        assert_eq!(up, 2, "one on each divider");
-        assert_eq!(h.query_all_by_label("Move Section Down").count(), 1);
-        assert_eq!(h.query_all_by_label("Delete Section").count(), 2);
+        // only the divider under the pointer has them; it opens the last section, which cannot go down
+        assert_eq!(h.query_all_by_label("Move Section Up").count(), 1);
+        assert_eq!(h.query_all_by_label("Move Section Down").count(), 0);
+        assert_eq!(h.query_all_by_label("Delete Section").count(), 1);
         h.state_mut().viewer().unwrap().ed.set_read_mode(true);
         frames(&mut h);
         assert_eq!(h.query_all_by_label("Move Section Up").count(), 0);
@@ -975,12 +975,51 @@ mod looks {
         let row = h.state().viewer_item_rect(at).unwrap().center();
         h.hover_at(row);
         common::run(&mut h);
-        assert_eq!(h.query_all_by_label("Delete Section").count(), 2);
+        assert_eq!(h.query_all_by_label("Delete Section").count(), 1);
         h.state_mut().viewer().unwrap().ed.set_read_mode(true);
         common::run(&mut h);
         assert_eq!(h.query_all_by_label("Delete Section").count(), 0);
         assert!(badge(&shown(&mut h), "2"), "the same look");
         assert_eq!(text(&h), doc);
+    }
+
+    /// A control is there to press only while it shows, and the pointer on it keeps it showing.
+    #[test]
+    fn with_no_number_a_frame_s_controls_stay_under_the_pointer() {
+        let doc = "One.\n\n---\n\nTwo.\n\n---\n\nThree.\n";
+        let f = with_view(doc, r#"{"frame":true,"numbered":false}"#);
+        let mut h = f.ready();
+        common::run(&mut h);
+        // the caret is in the first section, whose controls no divider holds
+        assert_eq!(
+            h.query_all_by_label("Delete Section").count(),
+            0,
+            "none to press unseen"
+        );
+        let row = h.state().viewer_item_rect(doc.find("---").unwrap()).unwrap().center();
+        h.hover_at(row);
+        common::run(&mut h);
+        let bins: Vec<_> = h.query_all_by_label("Delete Section").map(|n| n.rect()).collect();
+        assert_eq!(bins.len(), 1, "on the row under the pointer");
+        let bin = bins[0].center();
+        h.hover_at(bin);
+        common::run(&mut h);
+        // its tooltip says the same, so by where it stands
+        assert!(
+            h.query_all_by_label("Delete Section").any(|n| n.rect().center() == bin),
+            "still there with the pointer on it"
+        );
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: bin,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        common::run(&mut h);
+        assert_eq!(text(&h), "One.\n\n---\n\nThree.\n");
     }
 
     #[test]

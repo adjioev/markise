@@ -625,3 +625,95 @@ fn how_a_section_looks_changes_no_byte() {
         assert_eq!(v.doc().text(), THREE);
     }
 }
+
+fn framed_band(top: f32, bottom: f32, opens: bool, closes: bool) -> markise_layout::block::Band {
+    markise_layout::block::Band {
+        rect: epaint::Rect::from_min_max(epaint::pos2(0.0, top), epaint::pos2(100.0, bottom)),
+        fill: epaint::Color32::from_rgba_unmultiplied(0, 0, 200, 10),
+        opens,
+        closes,
+        stroke: epaint::Stroke::new(1.5, epaint::Color32::BLUE),
+        radius: 10.0,
+    }
+}
+
+/// What is on screen of a section that goes on past it has no edge and no corner to show.
+#[test]
+fn a_frame_has_edges_and_corners_only_at_its_true_ends() {
+    let at = |y: f32| epaint::pos2(0.0, y);
+    let (middle, start, end) = (
+        [framed_band(0.0, 50.0, false, false)],
+        [framed_band(0.0, 50.0, true, false)],
+        [framed_band(0.0, 50.0, false, true)],
+    );
+    // the middle of a section only: straight off both ways, by more than a corner and its edge
+    let runs = merged_bands([(at(100.0), &middle[..]), (at(150.0), &middle[..])]);
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].rect.top() < 100.0 - 11.5, "{runs:?}");
+    assert!(runs[0].rect.bottom() > 200.0 + 11.5, "{runs:?}");
+    // its start is where it says, its bottom goes on
+    let runs = merged_bands([(at(100.0), &start[..]), (at(150.0), &middle[..])]);
+    assert_eq!(runs[0].rect.top(), 100.0);
+    assert!(runs[0].rect.bottom() > 200.0 + 11.5, "{runs:?}");
+    // its end is where it says, its top goes on
+    let runs = merged_bands([(at(100.0), &middle[..]), (at(150.0), &end[..])]);
+    assert!(runs[0].rect.top() < 100.0 - 11.5, "{runs:?}");
+    assert_eq!(runs[0].rect.bottom(), 200.0);
+    // a block's ground has neither, and stays what it was
+    let plain = [markise_layout::block::Band {
+        stroke: epaint::Stroke::NONE,
+        radius: 0.0,
+        ..middle[0]
+    }];
+    let runs = merged_bands([(at(100.0), &plain[..]), (at(150.0), &plain[..])]);
+    assert_eq!((runs[0].rect.top(), runs[0].rect.bottom()), (100.0, 200.0));
+}
+
+/// Scrolled into a long section, on a paged view too, and across what a page cuts.
+#[test]
+fn scrolled_into_a_long_section_nothing_shows_of_its_ends() {
+    let mut text = String::from("One.\n\n---\n\n## Long\n\n");
+    for k in 0..200 {
+        text.push_str(&format!("Paragraph number {k} of a long section.\n\n"));
+    }
+    text.push_str("---\n\nLast.\n");
+    for paging in [Paging::Full, Paging::Paged { tops: 8 }] {
+        let mut v = styled(&text, &FRAMED, paging);
+        let mut fonts = testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        v.frame(600.0, 0.0, &mut f, &NoImages);
+        let middle = text.find("Paragraph number 100 ").unwrap();
+        v.ensure_offset(middle);
+        let i = v.model().item_at_offset(middle);
+        v.scroll_to_item(i);
+        let shown = v.frame(600.0, 0.0, &mut f, &NoImages);
+        let runs = merged_bands(
+            shown
+                .iter()
+                .map(|s| (epaint::pos2(0.0, s.y), s.layout.bands.as_slice())),
+        );
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let (r, reach) = (runs[0].rect, runs[0].radius + runs[0].stroke.width);
+        assert!(r.top() <= -reach && r.bottom() >= 600.0 + reach, "{r:?}");
+    }
+}
+
+/// What stands on a boundary's row stands inside its item, however it looks.
+#[test]
+fn a_boundary_s_row_is_inside_its_item() {
+    for frame in [false, true] {
+        for numbered in [false, true] {
+            let how = SectionStyleFor { frame, numbered };
+            let mut v = styled("One.\n\n---\n\nTwo.\n", &how, Paging::Full);
+            let i = rule_item(&v, 1);
+            let l = lay_out(&mut v, i);
+            let mid = l.divider_mid.unwrap();
+            let line = Theme::light().line_px();
+            assert!(
+                mid - line * 0.5 >= 0.0 && mid + line * 0.5 <= l.height + 0.01,
+                "frame {frame} numbered {numbered}: {mid} {}",
+                l.height
+            );
+        }
+    }
+}

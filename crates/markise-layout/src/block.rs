@@ -1972,6 +1972,8 @@ pub struct BandRun {
 /// the tint there. Here a band goes on from where the one before it in the same block went.
 pub fn merged_bands<'a>(items: impl IntoIterator<Item = (Pos2, &'a [Band])>) -> Vec<BandRun> {
     let mut runs: Vec<BandRun> = Vec::new();
+    // of each run: it comes from above what is here, and it has ended
+    let mut ends: Vec<(bool, bool)> = Vec::new();
     let mut open: Vec<usize> = Vec::new();
     for (origin, bands) in items {
         let mut going = Vec::with_capacity(bands.len());
@@ -2000,14 +2002,32 @@ pub fn merged_bands<'a>(items: impl IntoIterator<Item = (Pos2, &'a [Band])>) -> 
                         stroke: b.stroke,
                         radius: b.radius,
                     });
+                    ends.push((!b.opens, false));
                     runs.len() - 1
                 }
             };
-            if !b.closes {
+            if b.closes {
+                ends[at].1 = true;
+            } else {
                 going.push(at);
             }
         }
         open = going;
+    }
+    // what goes on past what is here goes straight off it: an edge or a corner is for a true end only.
+    // A host is given the items on screen, so that much past them is off it.
+    for (run, (from_above, ended)) in runs.iter_mut().zip(ends) {
+        let reach = if run.stroke.width > 0.0 || run.radius > 0.0 {
+            run.radius + run.stroke.width + 1.0
+        } else {
+            0.0
+        };
+        if from_above {
+            run.rect.min.y -= reach;
+        }
+        if !ended {
+            run.rect.max.y += reach;
+        }
     }
     runs
 }
@@ -2825,7 +2845,7 @@ pub fn layout_item(
         }
         ItemKind::Rule if matches!(p.section, Some(crate::view::SectionLook::Divider { .. })) => {
             if let Some(crate::view::SectionLook::Divider { number, name, style }) = p.section {
-                let m = divider_metrics(t, style.frame, number.is_some() || name.is_some());
+                let m = divider_metrics(t, style.frame);
                 let mid = y + m.row + line_px * 0.5;
                 layout_divider(&mut out, shaper, t, number, name, style, x, width, mid);
                 divider_mid = Some(mid);
@@ -3376,9 +3396,10 @@ pub(crate) fn section_frame_padding(t: &Theme) -> f32 {
     (t.font_size * 1.4).round()
 }
 
-pub(crate) fn divider_metrics(t: &Theme, frame: bool, has_row: bool) -> DividerMetrics {
+/// The row is there whatever it says, as a boundary's controls stand on it.
+pub(crate) fn divider_metrics(t: &Theme, frame: bool) -> DividerMetrics {
     let line = t.line_px();
-    let row_h = if has_row { line } else { 0.0 };
+    let row_h = line;
     if frame {
         let pad = section_frame_padding(t);
         let opens = pad + line * 1.4;
