@@ -132,6 +132,17 @@ fn a_preset_keeps_its_ids_and_only_a_heading_s_is_the_page_s() {
     assert!(out.contains("- [ ] C {#a2}\n- [ ] A {#a1}\n- [ ] B {#a3}\n"), "{out}");
     let repeated = ":::poll\n\n- [ ] A {#none}\n- [ ] B {#none}\n\n:::\n";
     assert!(inserted("z‸\n", repeated, "poll").contains("- [ ] A {#none}\n- [ ] B {#a1}\n"));
+    // an id later in the field that is no repeat stays: the replacement goes past it
+    let later = ":::poll\n\n- [ ] A {#none}\n- [ ] B {#none}\n- [ ] C {#a1}\n\n:::\n";
+    let out = inserted("z‸\n", later, "poll");
+    assert!(out.contains("- [ ] A {#none}\n- [ ] B {#a2}\n- [ ] C {#a1}\n"), "{out}");
+    // and two replacements do not meet
+    let two_repeats = ":::poll\n\n- [ ] A {#x}\n- [ ] B {#x}\n- [ ] C {#x}\n- [ ] D {#a1}\n\n:::\n";
+    let out = inserted("z‸\n", two_repeats, "poll");
+    assert!(
+        out.contains("- [ ] A {#x}\n- [ ] B {#a2}\n- [ ] C {#a3}\n- [ ] D {#a1}\n"),
+        "{out}"
+    );
     // two fields may each have the same one
     let two = ":::poll\n\n- [ ] A {#a1}\n\ntext\n\n- [ ] B {#a1}\n\n:::\n";
     assert_eq!(inserted("z‸\n", two, "poll"), format!("z\n\n{two}"));
