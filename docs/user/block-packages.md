@@ -243,7 +243,7 @@ with sections still offers a new one in the block library, called `Section`.
 
 Anything else in these keys refuses the package. This says nothing about what a site draws, and changes no byte of a document.
 
-`title_level` is the level of the heading a new section starts with, a whole number from 1 to 6, default 2, for both the library's item and **Insert After…**. Anything else refuses the package.
+`title_level` is the level of the heading a new section starts with, a whole number from 1 to 6, default 2, for both the library's item and **Insert After…**, and the level a section's name comes from first. With `1` sections go by `#`, and a document's first `#` is no title apart. Anything else refuses the package.
 
 A field has a `key` (`[a-z][a-z0-9-]*`, not `id`, as the form has its own field for that), an optional `label`, and optional `values`,
 each with a `value` of one line up to 200 characters and an optional `label`. With `values` the form offers those; without, any one line.

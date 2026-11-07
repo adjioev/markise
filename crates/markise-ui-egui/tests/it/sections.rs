@@ -356,8 +356,15 @@ fn a_section_goes_by_its_first_heading_in_the_outline_and_status() {
     let mut h = opened(&p);
     assert!(h.query_all_by_label("Second part").count() >= 1);
     assert!(h.query_by_label("Section 3").is_some());
+    // the `#` is the document's title and names no section: the word with its number says which
     let (name, _) = h.state_mut().viewer().unwrap().section_status(false).unwrap();
-    assert_eq!(name, "§ Top");
+    assert_eq!(name, "§ Section 1");
+    assert!(h.query_by_label("Top").is_some(), "the title's own row");
+    let doc = "---\nauthoring: blocks-v3\n---\n\n# Top\n\n## First part\n\nOne.\n\n---\n\nTwo.\n";
+    let p = plain(doc);
+    let mut h = opened(&p);
+    let (name, _) = h.state_mut().viewer().unwrap().section_status(false).unwrap();
+    assert_eq!(name, "§ First part");
 }
 
 const READ_DOC: &str = "---\nauthoring: blocks-v3\n---\n\n:::section-metadata\n\nid: top\nnot a pair\n\n:::\n\n# First\n\nOne.\n\n---\n\n:::question\n\n## Hidden prompt\n\n- [x] Yes\n- [ ] No\n\n:::\n\nTwo.\n\n---\n\n## Third\n\nThree.\n";

@@ -19,16 +19,18 @@ pub struct OutlineOut {
     pub act: Option<SectionAct>,
 }
 
-/// What a section's row says, and what it is known by: what it goes by, or what sections are called here, with its
-/// number for those who do not see the number beside it.
-pub fn section_row_name(view: &markise_layout::View, k: usize, word: &str) -> (String, String) {
-    match view.section_own_name(k) {
-        Some(name) => (name.clone(), name),
-        None => {
-            let number = view.section_shown_number(k).unwrap_or(k + 1);
-            (word.to_string(), format!("{word} {number}"))
-        }
-    }
+/// What a section's row says, and what it is known by. Beside its number, with no name, the word says the rest.
+pub fn section_row_name(view: &markise_layout::View, k: usize) -> (String, String) {
+    let name = view.section_name(k);
+    let by_word = view.section_own_name(k).is_none() && view.section_shown_number(k).is_some();
+    (
+        if by_word {
+            view.section_word().to_string()
+        } else {
+            name.clone()
+        },
+        name,
+    )
 }
 
 /// How wide the slot of a section's number is: the same on every row, so that names stand in a line.
@@ -37,8 +39,7 @@ pub(crate) fn number_slot(sections: usize) -> f32 {
     (digits * 7.5).max(18.0)
 }
 
-/// The outline. `id`: which document. `only`: the headings to list, when not all of them. `word`: what a section is
-/// called here. `editable`: sections can be changed; otherwise a row offers nothing, as in Read.
+/// The outline. `id`: which document. `only`: the headings to list, when not all of them. `editable`: sections can be changed; otherwise a row offers nothing, as in Read.
 #[allow(clippy::too_many_arguments)]
 pub fn section_outline(
     ui: &mut Ui,
@@ -48,12 +49,13 @@ pub fn section_outline(
     current: usize,
     look: &SideLook,
     partial: bool,
-    word: &str,
     editable: bool,
 ) -> OutlineOut {
     let view = &ed.view;
     let model = view.model();
-    let min_level = model.outline_min_level();
+    // under a title that stands apart the rest go by what is left
+    let titled = matches!(view.outline_row(0, only), OutlineRow::Title(_));
+    let min_level = if titled { 2 } else { model.outline_min_level() };
     let sections = view.doc().section_count();
     let mut out = OutlineOut::default();
     let listed = view.outline_row_count(only);
@@ -72,7 +74,7 @@ pub fn section_outline(
             let row = view.outline_row(i, only);
             let r = match row {
                 OutlineRow::Section(k) => {
-                    let (mut shown, mut name) = section_row_name(view, k, word);
+                    let (mut shown, mut name) = section_row_name(view, k);
                     // the last section of a part goes on in what has yet to load
                     if partial && k + 1 == sections {
                         shown.push('…');
@@ -93,16 +95,21 @@ pub fn section_outline(
                             look.row_named(ui, 0, kind, &shown, &name, current == i)
                         })
                         .inner;
-                    if editable && row_menu(ui, ed, k, &r, word, slot, look, &mut out.act) {
+                    if editable && row_menu(ui, ed, k, &r, &name, slot, look, &mut out.act) {
                         let shape =
                             egui::Shape::rect_filled(r.rect.shrink2(vec2(1.0, 1.0)), look.radius, look.hover_bg);
                         ui.painter().set(ground, shape);
                     }
                     r
                 }
+                // plain: it is no section's, and offers nothing
+                OutlineRow::Title(h) => {
+                    let Some(e) = model.outline.get(h) else { continue };
+                    look.row(ui, 0, RowKind::Heading { level: 1 }, &e.text, current == i)
+                }
                 OutlineRow::Heading(h) => {
                     let Some(e) = model.outline.get(h) else { continue };
-                    let level = e.level - min_level + 1;
+                    let level = e.level.saturating_sub(min_level) + 1;
                     let text = if e.text.is_empty() { "(empty heading)" } else { &e.text };
                     look.row(
                         ui,
@@ -134,7 +141,7 @@ fn row_menu(
     ed: &EditorView,
     k: usize,
     row: &Response,
-    word: &str,
+    name: &str,
     slot: f32,
     look: &SideLook,
     act: &mut Option<SectionAct>,
@@ -156,14 +163,15 @@ fn row_menu(
             pos2(row.rect.left() + look.pad_x + slot * 0.5, row.rect.center().y),
             vec2(slot + 2.0, (look.row_h - 6.0).max(12.0)),
         );
-        let label = format!("{word} actions");
+        // the name goes to those who hear it, as a tooltip stands by the row and has to read in any language
+        let label = format!("Actions: {name}");
         let dots = ui.interact(rect, more, Sense::click());
         dots.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
         let keyed = dots.clicked() && ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Space));
         if shift_f10 {
             Popup::open_id(&ctx, menu);
         }
-        let dots = dots.on_hover_text(&label);
+        let dots = dots.on_hover_text("Actions");
         paint_dots(ui, &dots, rect, focused, look);
         if keyed || shift_f10 {
             ctx.data_mut(|d| d.insert_temp(by_key, true));

@@ -53,13 +53,11 @@ impl BlockLibraryState {
 
 /// What a move says of the document's `#` title, standing in section `title`, when section `index` goes before
 /// the section at `to` (`None`: nowhere): it moves with its section, or from the top when another one comes first.
-fn title_warning(word: &str, index: usize, to: Option<usize>, title: usize) -> Option<String> {
+fn title_warning(index: usize, to: Option<usize>, title: usize) -> Option<String> {
     if title == index {
-        Some(format!("{word} moved, and the document's # title with it."))
+        Some("Moved, and the document's # title with it.".to_string())
     } else if to == Some(0) && title == 0 {
-        Some(format!(
-            "{word} moved above the document's # title, so the title moves too."
-        ))
+        Some("Moved above the document's # title, so the title moves too.".to_string())
     } else {
         None
     }
@@ -304,7 +302,6 @@ impl MarkiseApp {
             self.block_form_message("Save or cancel this draft before moving a section.");
             return false;
         }
-        let word = self.section_word();
         let in_source = self.source_focused();
         let Some(d) = &mut self.doc else { return false };
         // the title goes with the section holding it, or from the top when another one comes first
@@ -314,7 +311,7 @@ impl MarkiseApp {
             .ed
             .can_move_section(index, up)
             .then(|| d.viewer.ed.only_title_section());
-        let warning = title.flatten().and_then(|t| title_warning(&word, index, to, t));
+        let warning = title.flatten().and_then(|t| title_warning(index, to, t));
         let result = d.viewer.ed.move_section(index, up, in_source);
         if in_source {
             d.source_ui.find_reveal = true;
@@ -330,7 +327,7 @@ impl MarkiseApp {
                 moved
             }
             Err(why) => {
-                self.banner = Some(super::Banner::Error(format!("{word} not moved: {why}.")));
+                self.banner = Some(super::Banner::Error(format!("Not moved: {why}.")));
                 false
             }
         }
@@ -354,7 +351,6 @@ impl MarkiseApp {
         if !self.section_edit_allowed() {
             return false;
         }
-        let word = self.section_word();
         let in_source = self.source_focused();
         let Some(d) = &mut self.doc else { return false };
         let result = d.viewer.ed.duplicate_section(index, in_source);
@@ -369,7 +365,7 @@ impl MarkiseApp {
                 done
             }
             Err(why) => {
-                self.banner = Some(super::Banner::Error(format!("{word} not duplicated: {why}.")));
+                self.banner = Some(super::Banner::Error(format!("Not duplicated: {why}.")));
                 false
             }
         }
@@ -408,10 +404,9 @@ impl MarkiseApp {
         if !self.section_edit_allowed() {
             return false;
         }
-        let word = self.section_word();
         let in_source = self.source_focused();
         let Some(d) = &mut self.doc else { return false };
-        let (_, name) = crate::section_panel::section_row_name(&d.viewer.ed.view, index, &word);
+        let name = d.viewer.ed.view.section_name(index);
         let result = d.viewer.ed.delete_section(index, in_source);
         if in_source {
             d.source_ui.find_reveal = true;
@@ -422,12 +417,12 @@ impl MarkiseApp {
             Ok(done) => {
                 if done {
                     self.remember_block_views();
-                    self.undo_notice(format!("{word} deleted: {name}"));
+                    self.undo_notice(format!("Deleted: {name}"));
                 }
                 done
             }
             Err(why) => {
-                self.banner = Some(super::Banner::Error(format!("{word} not deleted: {why}.")));
+                self.banner = Some(super::Banner::Error(format!("Not deleted: {why}.")));
                 false
             }
         }

@@ -297,12 +297,20 @@ impl Document {
     /// block. Looks through a bounded number of them, as this is asked on the UI thread: a section
     /// whose first heading lies further on has none as far as this goes.
     pub fn section_first_heading(&self, index: usize) -> Option<usize> {
+        self.section_heading_from(index, 0, None)
+    }
+
+    /// The first of the section's own headings of this level, or of any with `None`, at or after `from`, within
+    /// the same look as [`Self::section_first_heading`].
+    pub fn section_heading_from(&self, index: usize, from: usize, level: Option<u8>) -> Option<usize> {
         let section = self.section(index)?;
         let mut i = self.section_first_top(&section)?;
         for _ in 0..HEADING_SCAN_BLOCKS {
             let t = self.top.get(i).filter(|t| t.start() < section.end)?;
             match t.block.kind {
-                BlockKind::Heading { .. } => return Some(t.start()),
+                BlockKind::Heading { level: l, .. } if t.start() >= from && level.is_none_or(|w| w == l) => {
+                    return Some(t.start());
+                }
                 BlockKind::DirectiveOpen { .. } => {
                     let closer = self.directive_closer_at(t.start())?;
                     i = self.top.partition_point(|b| b.start() <= closer);

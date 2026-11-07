@@ -3140,7 +3140,7 @@ impl MarkiseApp {
                         if self.files.rename.is_some() {
                             self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
                         }
-                        let (word, editable) = (self.section_word(), self.section_edit_allowed());
+                        let editable = self.section_edit_allowed();
                         if let Some(d) = &mut self.doc {
                             let jump = if d.viewer.ed.view.sections_on() {
                                 let rows = d.viewer.outline_rows();
@@ -3160,14 +3160,15 @@ impl MarkiseApp {
                                     cur,
                                     &look,
                                     d.partial,
-                                    &word,
                                     editable,
                                 );
                                 let origin = (d.id, d.viewer.ed.session.revision().counter);
                                 self.block_library.request_section(out.act, Some(origin));
                                 match out.clicked {
                                     Some(markise_layout::OutlineRow::Section(k)) => d.viewer.ed.view.ensure_section(k),
-                                    Some(markise_layout::OutlineRow::Heading(k)) => d.viewer.ed.view.ensure_heading(k),
+                                    Some(
+                                        markise_layout::OutlineRow::Title(k) | markise_layout::OutlineRow::Heading(k),
+                                    ) => d.viewer.ed.view.ensure_heading(k),
                                     None => None,
                                 }
                             } else {
