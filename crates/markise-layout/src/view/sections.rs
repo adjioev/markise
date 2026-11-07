@@ -113,6 +113,9 @@ pub(super) struct SectionsState {
     held: Vec<usize>,
     /// Outline entries before each section asked about, for the document as it stands.
     heads: RefCell<HashMap<usize, usize>>,
+    /// For each section, how many sections before it are named by a heading whose row is left out, and at the
+    /// end the number of all of them. For the document as it stands.
+    named: RefCell<Option<Arc<[u32]>>>,
 }
 
 impl SectionsState {
@@ -120,6 +123,7 @@ impl SectionsState {
         if self.on {
             self.roles.borrow_mut().clear();
             self.heads.borrow_mut().clear();
+            *self.named.borrow_mut() = None;
         }
     }
 }
@@ -166,28 +170,110 @@ impl View {
         only.map_or(n, |o| o.partition_point(|&e| e < n))
     }
 
-    /// Rows of the outline with sections: every section, each followed by its listed headings.
+    /// The first heading of section `k`, when that is what it goes by: no `id`, and it says something. A first
+    /// section's `#` is the document's title and no name of its section.
+    fn naming_heading(&self, k: usize) -> Option<(usize, String)> {
+        if self
+            .doc
+            .section_metadata(k)
+            .as_ref()
+            .is_some_and(|m| m.get("id").is_some())
+        {
+            return None;
+        }
+        let at = self.doc.section_first_heading(k)?;
+        let title = k == 0
+            && matches!(
+                self.doc.leaf(at).map(|l| l.kind),
+                Some(markise_doc::LeafKind::Heading { level: 1 })
+            );
+        let text = self.doc.heading(at)?.text.trim().to_string();
+        (!title && !text.is_empty()).then_some((at, text))
+    }
+
+    /// What section `k` itself goes by, if anything does: its `id`, or a heading that names it. What it does not
+    /// have a name of its own for is called after what sections are called on the page, by the one who asks.
+    pub fn section_own_name(&self, k: usize) -> Option<String> {
+        let metadata = self.doc.section_metadata(k);
+        (metadata.as_ref().and_then(|m| m.get("id")).map(str::to_string))
+            .or_else(|| self.naming_heading(k).map(|n| n.1))
+    }
+
+    /// What section `k` shows for a number in the outline, as a boundary does; `None` where a boundary says none.
+    pub fn section_shown_number(&self, k: usize) -> Option<usize> {
+        self.sections
+            .style
+            .numbered
+            .then(|| self.section_number(k))
+            .filter(|n| *n > 0)
+    }
+
+    /// The row of the heading that names section `k` says what the section's row says, so it is left out. Only
+    /// when that heading is the first thing under it: a heading in a block before it is listed first and stays
+    /// where it is, and so does this one.
+    fn names_by_first_row(&self, k: usize) -> bool {
+        let Some((at, _)) = self.naming_heading(k) else {
+            return false;
+        };
+        let Some(section) = self.doc.section(k) else {
+            return false;
+        };
+        let from = self.doc.section_metadata(k).map_or(section.start, |m| m.closer.end);
+        let Some(first) = self.doc.top_at(from) else {
+            return false;
+        };
+        let Some(last) = self.doc.top_at(at) else { return false };
+        let skip = usize::from(self.doc.section_metadata(k).is_some());
+        (first + skip..last)
+            .all(|t| (self.doc.top_span(t)).is_some_and(|s| self.doc.named_containers_at(s.start).is_empty()))
+    }
+
+    /// The running count of [`Self::names_by_first_row`]. Goes over the sections once per state of the document,
+    /// reading only what each starts with, and only while the outline is asked for.
+    fn named_rows(&self) -> Arc<[u32]> {
+        if let Some(n) = &*self.sections.named.borrow() {
+            return n.clone();
+        }
+        let count = self.doc.section_count();
+        let mut out = Vec::with_capacity(count + 1);
+        let mut n = 0u32;
+        for k in 0..count {
+            out.push(n);
+            n += u32::from(self.names_by_first_row(k));
+        }
+        out.push(n);
+        let out: Arc<[u32]> = out.into();
+        *self.sections.named.borrow_mut() = Some(out.clone());
+        out
+    }
+
+    /// Rows of the outline with sections: every section, each followed by its listed headings, but for one that
+    /// says what its section's row says.
     pub fn outline_row_count(&self, only: Option<&[usize]>) -> usize {
-        self.doc.section_count() + only.map_or(self.model.outline.len(), <[usize]>::len)
+        let listed = only.map_or(self.model.outline.len(), <[usize]>::len);
+        let named = self.named_rows();
+        self.doc.section_count() + listed - named.last().map_or(0, |n| *n as usize)
     }
 
     /// Row `row` of that outline. O(log sections) lookups: the rows are not built, so a list of
     /// any size costs what is on screen.
     pub fn outline_row(&self, row: usize, only: Option<&[usize]>) -> OutlineRow {
+        let named = self.named_rows();
+        let left_out = |k: usize| named.get(k).map_or(0, |n| *n as usize);
         let (mut lo, mut hi) = (0, self.doc.section_count());
         // the last section whose row is at or before this one
         while lo + 1 < hi {
             let mid = (lo + hi) / 2;
-            if mid + self.listed_before(mid, only) <= row {
+            if mid + self.listed_before(mid, only) - left_out(mid) <= row {
                 lo = mid;
             } else {
                 hi = mid;
             }
         }
-        if lo + self.listed_before(lo, only) == row {
+        if lo + self.listed_before(lo, only) - left_out(lo) == row {
             OutlineRow::Section(lo)
         } else {
-            let i = row - lo - 1;
+            let i = row - lo - 1 + left_out(lo + 1);
             OutlineRow::Heading(only.map_or(i, |o| o.get(i).copied().unwrap_or(i)))
         }
     }
@@ -200,9 +286,13 @@ impl View {
             Some(o) => o.partition_point(|&e| e <= k).checked_sub(1),
             None => Some(k),
         });
+        let named = self.named_rows();
+        let left_out = |k: usize| named.get(k).map_or(0, |n| *n as usize);
+        // the heading that names it is its row
+        let named_here = left_out(section + 1) - left_out(section);
         match place {
-            Some(p) if p >= before => p + section + 1,
-            _ => section + before,
+            Some(p) if p >= before + named_here => p + section + 1 - left_out(section + 1),
+            _ => section + before - left_out(section),
         }
     }
 

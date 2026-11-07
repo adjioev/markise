@@ -176,7 +176,9 @@ Delete takes the section's bytes and one divider, with no question: a short noti
 
 ### In the outline
 
-A section's row in the outline has a menu: right-click it, or use the small **⋯** at its end when the pointer is on the row. It has **Move Up**, **Move Down**, **Duplicate**, **Insert After…** and **Delete**, and works on that section wherever the caret is. With the keyboard, Tab to the row and press <kbd>Shift+F10</kbd>, or go on to the **⋯** and press <kbd>Return</kbd>; the arrows go through the items and <kbd>Esc</kbd> goes back. Read has no menu.
+In the outline a section's row reads differently from a heading's: it has its number, or `§`, in bold on a ground of its own, with the headings indented under it. It is named by its `id` or its first heading, and that heading then has no row of its own. The first section's `#` is the document's title and no name for the section, so that row says `Section`, or what the package calls one, with the title under it.
+
+A section's row has a menu: right-click it, or use the small **⋯** at its start, in place of the number, when the pointer is on the row. Heading rows have none. It has **Move Up**, **Move Down**, **Duplicate**, **Insert After…** and **Delete**, and works on that section wherever the caret is. With the keyboard, Tab to the row and press <kbd>Shift+F10</kbd>, or go on to the **⋯** and press <kbd>Return</kbd>; the arrows go through the items and <kbd>Esc</kbd> goes back. Read has no menu.
 
 **Duplicate** puts a copy right after the section, one undo step. The copy is the same text but for the ids that must be unique on a page: a heading's `{#id}` and the `id` in its metadata get a new number, `intro` becoming `intro-2`, and a first heading with no id gets one. What is inside a block stays as written, its answers' ids included.
 

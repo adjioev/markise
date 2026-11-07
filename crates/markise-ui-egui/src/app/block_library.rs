@@ -415,7 +415,7 @@ impl MarkiseApp {
         let word = self.section_word();
         let in_source = self.source_focused();
         let Some(d) = &mut self.doc else { return false };
-        let name = d.viewer.ed.view.section_name(index);
+        let (_, name) = crate::section_panel::section_row_name(&d.viewer.ed.view, index, &word);
         let result = d.viewer.ed.delete_section(index, in_source);
         if in_source {
             d.source_ui.find_reveal = true;

@@ -108,9 +108,13 @@ A document without sections pays one comparison per item.
 
 ### Finding one's way
 
-The outline panel has every section as a level above headings. Its rows are not built: the row of section
-`k` is `k` plus the headings before it, so the rows on screen are found by bisection over sections, and a
-list of any size costs what is shown. The model's outline names a heading in a placeholder by the
+The outline panel has every section as a level above headings, and a section's row reads as one: its number (or `§` where a package says no numbers, and for a first section with nothing in it) in a slot of its own, its name in the bold face on a ground of its own, with the headings indented under it. A heading's row has no control of any kind.
+
+What a row is called: its `id`, or the first heading when that is what it goes by, and that heading then has no row of its own under it, as it would say the same; other headings stay. With a heading in a block before it the outline lists that first, so the naming heading keeps its row. **The first section's `#`** is the document's title and no name of its section, since looked at on a page it reads as the page's heading and a row called that reads as the heading too, which made a grip beside it seem to belong to the title. So that row says what sections are called (`Section`, or the package's word), with its number, and `#` stands under it as a heading row. A section with no heading at all reads the same way. The status bar goes on saying `section_name`, as it has room for only one word about where one is.
+
+Its rows are not built: the row of section
+`k` is `k` plus the headings before it less the headings left out before it, so the rows on screen are found by bisection over sections, and a
+list of any size costs what is shown. The count of those left out is the one thing that goes over all sections, reading only what each starts with, once per state of the document and only while the outline is shown. The model's outline names a heading in a placeholder by the
 placeholder, so a boundary in one reads that page's items, without materializing it, and remembers the count
 until the document changes. A click materializes the target's page and goes there as a heading's does.
 
@@ -199,7 +203,7 @@ pairs as before. The commands Move Section Up, Move Section Down and Delete Sect
 
 ### From the outline
 
-A section's row in the outline panel has a menu, by a right click on it and from a quiet `⋯` at its end that shows under the pointer: Move Up, Move Down, Duplicate, Insert After, Delete. It says what is there to do by the same checks as the rest (`can_move_section`, `can_delete_section` and so on) and goes by the moves and refusals above, with their messages; the words in those come from the package's section label. By the keyboard: Tab comes to a row and on to its `⋯`, Return or Shift+F10 opens the menu on its first item, the arrows go through it, and Esc goes back to where it was opened from. Read, a read-only file, a part of a large file still loading and an open card have no menu and no `⋯`.
+A section's row in the outline panel has a menu, by a right click on it and from a quiet `⋯` at its start, in the place of its number, that shows under the pointer with the whole row lit: Move Up, Move Down, Duplicate, Insert After, Delete. It says what is there to do by the same checks as the rest (`can_move_section`, `can_delete_section` and so on) and goes by the moves and refusals above, with their messages; the words in those come from the package's section label. By the keyboard: Tab comes to a row and on to its `⋯`, Return or Shift+F10 opens the menu on its first item, the arrows go through it, and Esc goes back to where it was opened from. Read, a read-only file, a part of a large file still loading and an open card have no menu and no `⋯`.
 
 **Delete** by any way there is, these two as well, is followed by a notice in the banner above the document, with Undo: one line, for eight seconds and for as long as nothing else has changed the document. It is not put over a question about a file changed on disk. Undo is the ordinary undo of that step.
 

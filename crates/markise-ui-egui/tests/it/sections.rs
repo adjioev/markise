@@ -391,8 +391,8 @@ fn in_read_dividers_and_plaques_stay_and_no_control_does() {
     );
     assert_eq!(
         h.query_all_by_label("Third").count(),
-        2,
-        "a section's name and its heading"
+        1,
+        "a section's name, and no row for the heading that gives it"
     );
     assert!(h.query_by_label("Hidden prompt").is_none());
     let v = h.state_mut().viewer().unwrap();
