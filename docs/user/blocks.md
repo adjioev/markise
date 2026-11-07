@@ -182,6 +182,8 @@ A section's row in the outline has a menu: right-click it, or use the small **â‹
 
 **Insert Afterâ€¦** opens the form of [a new section](#start-a-section), for after this one.
 
+To drag a section, take the grip that shows beside its row. The cursor says so from the press, and a line shows where it would land; the headings under sections fold away while you drag, and the list scrolls at its edges. Dropping it on its own place does nothing and <kbd>Esc</kbd> cancels. It is one undo step, and what a move refuses a drop refuses, with the same message. An edit made meanwhile, or another document, ends the drag.
+
 The first section may hold the document's `#` title and intro. If a move takes the only `#` heading along, or brings another section above the first one holding it, the notice says that the title moves too. Nothing is refused for it.
 
 ## Images

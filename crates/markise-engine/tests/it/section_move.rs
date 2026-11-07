@@ -443,7 +443,12 @@ fn the_only_title_is_a_level_one_heading_outside_a_block() {
         (":::y\n\n# T\n\n:::\n\n---\n\nB\n", None),
         (":::y\n\n# T\n\n:::\n\n---\n\n# U\n", Some(1)),
     ] {
-        assert_eq!(surface(doc).ed.only_title_section(), want, "{doc:?}");
+        let s = surface(doc);
+        assert_eq!(s.ed.only_title_section(), want, "{doc:?}");
+        if let Some(k) = want {
+            assert!(s.ed.section_has_title(k), "{doc:?}");
+            assert!(!s.ed.section_has_title(1 - k), "{doc:?}");
+        }
     }
 }
 
@@ -488,4 +493,115 @@ fn a_new_section_goes_at_the_end_of_the_one_named_and_the_caret_stays_if_refused
     assert!(s.ed.insert_section_after(1, &with, false).is_err());
     assert_eq!(s.text(), hollow);
     assert_eq!(s.ed.session.selection().primary().focus.offset, 0);
+}
+
+#[test]
+fn a_section_goes_to_any_place_among_them_past_all_on_the_way() {
+    let doc = "A\n\n---\n\nB\n\n---\n\nC\n\n---\n\nD\n";
+    for (k, to, want) in [
+        (3, 0, "D\n\n---\n\nA\n\n---\n\nB\n\n---\n\nC\n"),
+        (3, 1, "A\n\n---\n\nD\n\n---\n\nB\n\n---\n\nC\n"),
+        (0, 4, "B\n\n---\n\nC\n\n---\n\nD\n\n---\n\nA\n"),
+        (0, 2, "B\n\n---\n\nA\n\n---\n\nC\n\n---\n\nD\n"),
+        (1, 3, "A\n\n---\n\nC\n\n---\n\nB\n\n---\n\nD\n"),
+        // a step is one of these
+        (2, 1, "A\n\n---\n\nC\n\n---\n\nB\n\n---\n\nD\n"),
+    ] {
+        let mut s = surface(doc);
+        assert!(s.ed.can_move_section_to(k, to));
+        assert_eq!(s.ed.move_section_to(k, to, false), Ok(true), "{k} {to}");
+        assert_eq!(s.text(), want, "{k} {to}");
+        s.undo();
+        assert_eq!(s.text(), doc, "one undo step");
+    }
+}
+
+#[test]
+fn its_own_place_and_no_place_are_nothing_and_make_no_undo_step() {
+    let doc = "A\n\n---\n\nB\n\n---\n\nC\n";
+    for (k, to) in [(1, 1), (1, 2), (0, 0), (0, 1), (2, 3), (2, 2), (1, 9), (9, 0)] {
+        let mut s = surface(doc);
+        let steps = s.ed.session.history().undo_len();
+        assert!(!s.ed.can_move_section_to(k, to), "{k} {to}");
+        assert_eq!(s.ed.move_section_to(k, to, false), Ok(false), "{k} {to}");
+        assert_eq!(s.text(), doc);
+        assert_eq!(s.ed.session.history().undo_len(), steps);
+    }
+}
+
+#[test]
+fn what_is_on_the_way_is_refused_as_for_a_step() {
+    // a section with only metadata on the way: nothing moves past it
+    let doc = format!("A\n\n---\n\nB\n\n---\n\n{META}\n\n---\n\nD\n");
+    let mut s = surface(&doc);
+    assert_eq!(s.ed.move_section_to(3, 0, false), Err(MoveRefused::WouldLeaveEmpty));
+    assert_eq!(s.text(), doc);
+    assert_eq!(s.ed.move_section_to(1, 0, false), Ok(true), "not on the way");
+    // a first section with nothing in it stays first
+    let doc = "---\nlang: en\n---\n\n---\n\nB\n\n---\n\nC\n";
+    let mut s = surface(doc);
+    if s.ed.session.doc().section_count() == 3 {
+        assert!(!s.ed.can_move_section_to(2, 0));
+        assert_eq!(s.ed.move_section_to(2, 0, false), Ok(false));
+        assert_eq!(s.ed.move_section_to(2, 1, false), Ok(true));
+    }
+    // what would pair otherwise
+    let doc = ":::\n\nA\n\n---\n\nB\n\n---\n\nC\n\n:::y\n";
+    let mut s = surface(doc);
+    assert_eq!(s.ed.move_section_to(2, 0, false), Err(MoveRefused::WouldNotStand));
+    assert_eq!(s.text(), doc);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            "tests/proptest-regressions/section_move.txt",
+        ))),
+        ..ProptestConfig::default()
+    })]
+
+    /// Anywhere to anywhere: every section's bytes in the order asked for, the count the same, undo exact.
+    #[test]
+    fn a_far_move_keeps_every_section_s_bytes(
+        bodies in prop::collection::vec(body(), 2..7),
+        pick in 0usize..32,
+        place in 0usize..32,
+        eol in prop_oneof![Just("\n"), Just("\r\n"), Just("\r")],
+        front in any::<bool>(),
+        tail in prop_oneof![Just(""), Just("\n"), Just("\n\n")],
+    ) {
+        let bodies: Vec<String> = bodies.iter().map(|b| b.replace('\n', eol)).collect();
+        let sep = format!("{eol}{eol}---{eol}{eol}");
+        let head = if front { format!("---{eol}lang: en{eol}---{eol}{eol}") } else { String::new() };
+        let text = format!("{head}{}{}", bodies.join(&sep), tail.replace('\n', eol));
+        let mut s = surface(&text);
+        prop_assert_eq!(s.ed.session.doc().section_count(), bodies.len());
+        let (k, to) = (pick % bodies.len(), place % (bodies.len() + 1));
+        let steps = s.ed.session.history().undo_len();
+        match s.ed.move_section_to(k, to, false) {
+            Ok(true) => {
+                prop_assert!(to != k && to != k + 1);
+                let mut want = bodies.clone();
+                let moved = want.remove(k);
+                want.insert(if to > k { to - 1 } else { to }, moved);
+                let after = s.text();
+                prop_assert_eq!(s.ed.session.doc().section_count(), bodies.len());
+                let mut from = head.len();
+                for b in &want {
+                    let at = after[from..].find(b.as_str());
+                    prop_assert!(at.is_some(), "{:?} in {:?}", b, after);
+                    from += at.unwrap() + b.len();
+                }
+                prop_assert!(after.starts_with(&head));
+                prop_assert_eq!(s.ed.session.history().undo_len(), steps + 1);
+                s.undo();
+                prop_assert_eq!(s.text(), text);
+            }
+            Ok(false) => {
+                prop_assert_eq!(s.ed.session.history().undo_len(), steps);
+                prop_assert_eq!(s.text(), text);
+            }
+            Err(_) => prop_assert_eq!(s.text(), text),
+        }
+    }
 }

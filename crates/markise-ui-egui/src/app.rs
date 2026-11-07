@@ -45,7 +45,7 @@ use markise_theme::Theme;
 use markise_theme::catalog::{StyleId, ThemeId};
 
 use crate::images::TextureStore;
-use crate::section_panel::section_outline;
+use crate::section_panel::{OutlineDoc, section_outline};
 use crate::side_by_side::{DEFAULT_SPLIT, SideBySide};
 use crate::sidebar::{EditEnd, FileTree, Tab, TreeAction, outline};
 use crate::source::SourceEditor;
@@ -531,6 +531,8 @@ pub struct MarkiseApp {
     /// The Insert Table dialog is open, with its size (issue #164).
     insert_table: Option<insert_table::InsertTable>,
     section_form: Option<section_form::SectionForm>,
+    /// A section's row in the outline being dragged, and what follows it.
+    section_panel: crate::section_panel::PanelState,
     /// The full-window view, while it is open.
     full_view: Option<full_view::FullView>,
     /// Decodes whole images for the full-window view.
@@ -684,6 +686,7 @@ impl MarkiseApp {
             font_window: false,
             insert_table: None,
             section_form: None,
+            section_panel: Default::default(),
             full_view: None,
             whole_images: Default::default(),
             full_view_request: None,
@@ -1084,6 +1087,11 @@ impl MarkiseApp {
     /// The sidebar's Recent files, the most recent first (tests).
     pub fn recent_files(&self) -> &[PathBuf] {
         self.side.recent()
+    }
+
+    /// What dragging a section's row in the outline shows.
+    pub fn section_drag_shown(&self) -> Option<&crate::section_panel::SectionDragShown> {
+        self.section_panel.drag_shown()
     }
 
     /// Shows the Files (`true`) or Outline tab of the sidebar.
@@ -3155,12 +3163,16 @@ impl MarkiseApp {
                                 );
                                 let out = section_outline(
                                     ui,
-                                    &d.viewer.ed,
-                                    rows.as_deref(),
-                                    cur,
+                                    OutlineDoc {
+                                        ed: &d.viewer.ed,
+                                        id: d.id,
+                                        only: rows.as_deref(),
+                                        current: cur,
+                                        partial: d.partial,
+                                        word: word.as_deref(),
+                                    },
                                     &look,
-                                    d.partial,
-                                    word.as_deref(),
+                                    &mut self.section_panel,
                                 );
                                 let origin = (d.id, d.viewer.ed.session.revision().counter);
                                 self.block_library.request_section(out.act, Some(origin));
