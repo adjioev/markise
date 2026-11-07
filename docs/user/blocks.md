@@ -172,7 +172,21 @@ A first section with nothing in it stays first, as a section cannot take its pla
 
 A section with nothing in it or only metadata, which a site refuses, does not move and nothing moves past it: a message says to fill it in or delete it.
 
-Delete takes the section's bytes and one divider, with no question. The only section of a document cannot be deleted this way. Each move and each deletion is one undo step that brings back the exact file.
+Delete takes the section's bytes and one divider, with no question: a short notice says so and has **Undo** for a few seconds. The only section of a document cannot be deleted this way. Each move and each deletion is one undo step that brings back the exact file.
+
+### In the outline
+
+In the outline a section's row reads differently from a heading's: it has its number, or `§`, on a ground of its own, with the headings indented under it. A section goes by its `id`, else its first heading at the package's `title_level` (normally `##`), else its first heading of any level, else what the package calls a section with its number, `Section 3`. The heading that names it has no row of its own.
+
+The document's `#`, when it is the first thing in the first section, is its title and no section's name: it has a plain row above the sections, with nothing to press but itself, which goes there.
+
+A section's row has a menu: right-click it, or use the small **⋯** at its start, in place of the number, when the pointer is on the row. Heading rows have none. It has **Move Up**, **Move Down**, **Duplicate**, **Insert After…** and **Delete**, and works on that section wherever the caret is. With the keyboard, Tab to the row and press <kbd>Shift+F10</kbd>, or go on to the **⋯** and press <kbd>Return</kbd>; the arrows go through the items and <kbd>Esc</kbd> goes back. Read has no menu.
+
+**Duplicate** puts a copy right after the section, one undo step. The copy is the same text but for the ids that must be unique on a page: a heading's `{#id}` and the `id` in its metadata get a new number, `intro` becoming `intro-2`, and a first heading with no id gets one. What is inside a block stays as written, its answers' ids included.
+
+**Insert After…** opens the form of [a new section](#start-a-section), for after this one.
+
+The first section may hold the document's `#` title and intro. If a move takes the only `#` heading along, or brings another section above the first one holding it, the notice says that the title moves too. Nothing is refused for it.
 
 ## Images
 

@@ -51,6 +51,18 @@ impl BlockLibraryState {
     }
 }
 
+/// What a move says of the document's `#` title, standing in section `title`, when section `index` goes before
+/// the section at `to` (`None`: nowhere): it moves with its section, or from the top when another one comes first.
+fn title_warning(index: usize, to: Option<usize>, title: usize) -> Option<String> {
+    if title == index {
+        Some("Moved, and the document's # title with it.".to_string())
+    } else if to == Some(0) && title == 0 {
+        Some("Moved above the document's # title, so the title moves too.".to_string())
+    } else {
+        None
+    }
+}
+
 impl MarkiseApp {
     /// The open library.
     pub fn block_library(&self) -> Option<&OpenLibrary> {
@@ -248,7 +260,7 @@ impl MarkiseApp {
 
     /// A section can be changed now: the document has them and is whole, as the last section of a part is cut
     /// short (ADR 0026), and nothing is being edited in a field of its own.
-    fn section_edit_allowed(&self) -> bool {
+    pub(super) fn section_edit_allowed(&self) -> bool {
         self.progressive.is_none()
             && self.doc.as_ref().is_some_and(|d| {
                 d.viewer.ed.view.sections_on()
@@ -292,6 +304,14 @@ impl MarkiseApp {
         }
         let in_source = self.source_focused();
         let Some(d) = &mut self.doc else { return false };
+        // the title goes with the section holding it, or from the top when another one comes first
+        let to = if up { index.checked_sub(1) } else { Some(index + 2) };
+        let title = d
+            .viewer
+            .ed
+            .can_move_section(index, up)
+            .then(|| d.viewer.ed.only_title_section());
+        let warning = title.flatten().and_then(|t| title_warning(index, to, t));
         let result = d.viewer.ed.move_section(index, up, in_source);
         if in_source {
             d.source_ui.find_reveal = true;
@@ -301,10 +321,51 @@ impl MarkiseApp {
         match result {
             Ok(moved) => {
                 self.remember_block_views();
+                if let (true, Some(text)) = (moved, warning) {
+                    self.undo_notice(text);
+                }
                 moved
             }
             Err(why) => {
-                self.banner = Some(super::Banner::Error(format!("The section was not moved: {why}.")));
+                self.banner = Some(super::Banner::Error(format!("Not moved: {why}.")));
+                false
+            }
+        }
+    }
+
+    /// Says what was just done, with Undo, unless something that asks for an answer is showing.
+    fn undo_notice(&mut self, text: String) {
+        use super::Banner;
+        if matches!(self.banner, Some(Banner::Conflict(_) | Banner::SaveConflict { .. })) {
+            return;
+        }
+        let (Some(origin), Some(ctx)) = (self.block_edit_origin(), &self.ctx) else {
+            return;
+        };
+        let until = ctx.input(|i| i.time) + super::UNDO_NOTICE_SECONDS;
+        self.banner = Some(Banner::Undo { text, origin, until });
+    }
+
+    /// Duplicate on a section's row: right after it, one undo step.
+    fn duplicate_section(&mut self, index: usize) -> bool {
+        if !self.section_edit_allowed() {
+            return false;
+        }
+        let in_source = self.source_focused();
+        let Some(d) = &mut self.doc else { return false };
+        let result = d.viewer.ed.duplicate_section(index, in_source);
+        if in_source {
+            d.source_ui.find_reveal = true;
+        } else {
+            d.viewer.find_reveal = true;
+        }
+        match result {
+            Ok(done) => {
+                self.remember_block_views();
+                done
+            }
+            Err(why) => {
+                self.banner = Some(super::Banner::Error(format!("Not duplicated: {why}.")));
                 false
             }
         }
@@ -345,6 +406,7 @@ impl MarkiseApp {
         }
         let in_source = self.source_focused();
         let Some(d) = &mut self.doc else { return false };
+        let name = d.viewer.ed.view.section_name(index);
         let result = d.viewer.ed.delete_section(index, in_source);
         if in_source {
             d.source_ui.find_reveal = true;
@@ -355,11 +417,12 @@ impl MarkiseApp {
             Ok(done) => {
                 if done {
                     self.remember_block_views();
+                    self.undo_notice(format!("Deleted: {name}"));
                 }
                 done
             }
             Err(why) => {
-                self.banner = Some(super::Banner::Error(format!("The section was not deleted: {why}.")));
+                self.banner = Some(super::Banner::Error(format!("Not deleted: {why}.")));
                 false
             }
         }
@@ -378,6 +441,12 @@ impl MarkiseApp {
             SectionAct::MoveUp(index) => self.move_section(index, true),
             SectionAct::MoveDown(index) => self.move_section(index, false),
             SectionAct::Delete(index) => self.delete_section_asking(index),
+            SectionAct::Duplicate(index) => self.duplicate_section(index),
+            SectionAct::InsertAfter(index) => {
+                let in_source = self.source_focused();
+                let ctx = self.ctx.clone();
+                ctx.is_some_and(|ctx| self.open_section_form_after(&ctx, index, in_source))
+            }
         };
     }
 

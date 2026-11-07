@@ -195,8 +195,8 @@ card. A key Markise does not know is ignored.
   inserted from the library.
 
 A preset's `markdown` must parse as exactly one block of the name it says. Markise refuses it
-otherwise, at the moment of inserting. Its `{#id}`s stay if they are free in the document and are
-renumbered if not.
+otherwise, at the moment of inserting. The `{#id}`s of its answers stay as you wrote them, as they belong to their
+field and not to the page, so `{#none}` stays `{#none}`. A heading's id is unique on a page and gets a number if the page has it already.
 
 A preset can also say how answers are chosen, with buttons: `widget: "icon-choices"`, `variant`,
 `field`, `answers` (each with `label`, `icon`, `exclusive`), `columns` and `field_label`. An `icon`
@@ -215,6 +215,7 @@ with sections still offers a new one in the block library, called `Section`.
   "description": { "en": "A new part of the page" },
   "keywords": "chapter",
   "icon": "flag",
+  "title_level": 2,
   "fields": [
     { "key": "style", "label": "Look",
       "values": [ { "value": "wide", "label": "Wide" }, { "value": "plain" } ] },
@@ -241,6 +242,8 @@ with sections still offers a new one in the block library, called `Section`.
 | `numbered` | `false`: a boundary says no number. Default `true` |
 
 Anything else in these keys refuses the package. This says nothing about what a site draws, and changes no byte of a document.
+
+`title_level` is the level of the heading a new section starts with, a whole number from 1 to 6, default 2, for both the library's item and **Insert After…**, and the level a section's name comes from first. With `1` sections go by `#`, and a document's first `#` is no title apart. Anything else refuses the package.
 
 A field has a `key` (`[a-z][a-z0-9-]*`, not `id`, as the form has its own field for that), an optional `label`, and optional `values`,
 each with a `value` of one line up to 200 characters and an optional `label`. With `values` the form offers those; without, any one line.

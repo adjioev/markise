@@ -356,8 +356,15 @@ fn a_section_goes_by_its_first_heading_in_the_outline_and_status() {
     let mut h = opened(&p);
     assert!(h.query_all_by_label("Second part").count() >= 1);
     assert!(h.query_by_label("Section 3").is_some());
+    // the `#` is the document's title and names no section: the word with its number says which
     let (name, _) = h.state_mut().viewer().unwrap().section_status(false).unwrap();
-    assert_eq!(name, "§ Top");
+    assert_eq!(name, "§ Section 1");
+    assert!(h.query_by_label("Top").is_some(), "the title's own row");
+    let doc = "---\nauthoring: blocks-v3\n---\n\n# Top\n\n## First part\n\nOne.\n\n---\n\nTwo.\n";
+    let p = plain(doc);
+    let mut h = opened(&p);
+    let (name, _) = h.state_mut().viewer().unwrap().section_status(false).unwrap();
+    assert_eq!(name, "§ First part");
 }
 
 const READ_DOC: &str = "---\nauthoring: blocks-v3\n---\n\n:::section-metadata\n\nid: top\nnot a pair\n\n:::\n\n# First\n\nOne.\n\n---\n\n:::question\n\n## Hidden prompt\n\n- [x] Yes\n- [ ] No\n\n:::\n\nTwo.\n\n---\n\n## Third\n\nThree.\n";
@@ -391,8 +398,8 @@ fn in_read_dividers_and_plaques_stay_and_no_control_does() {
     );
     assert_eq!(
         h.query_all_by_label("Third").count(),
-        2,
-        "a section's name and its heading"
+        1,
+        "a section's name, and no row for the heading that gives it"
     );
     assert!(h.query_by_label("Hidden prompt").is_none());
     let v = h.state_mut().viewer().unwrap();
@@ -496,6 +503,13 @@ fn a_first_part_says_more_is_to_come_and_the_whole_document_completes_it() {
     h.step();
     let (_, about) = h.state_mut().viewer().unwrap().section_status(true).unwrap();
     assert!(about.contains(&format!("of {part}+")), "{about}");
+    // what is cut short offers no section menu
+    let name = h.state_mut().viewer().unwrap().ed.view.section_name(0);
+    let row = crate::section_panel::row(&h, &name);
+    h.hover_at(row);
+    h.step();
+    h.step();
+    assert_eq!(h.query_all_by_label("Section actions").count(), 0);
     {
         let (m, cv) = &*gate;
         *m.lock().unwrap() = false;
@@ -680,6 +694,24 @@ mod inserting {
         assert!(h.state_mut().save_section_form(&ctx));
         frames(&mut h);
         assert!(text(&h).ends_with("\n\n---\n\n## Later {#my_Id-1}\n"), "{}", text(&h));
+    }
+
+    #[test]
+    fn the_library_s_item_writes_the_level_the_package_says() {
+        let mut files = FILES_ON.to_vec();
+        files.push(("editor/sections.json", r#"{"title_level":1}"#));
+        let doc = "One.\n\nTwo.\n";
+        let f = Fixture::with_package(doc, &files);
+        let mut h = f.ready();
+        free_line(&mut h, doc.len() - 1);
+        type_text(&mut h, "/");
+        press(&mut h, Key::Enter);
+        h.state_mut().set_section_form_title("Title");
+        frames(&mut h);
+        let ctx = h.ctx.clone();
+        assert!(h.state_mut().save_section_form(&ctx));
+        frames(&mut h);
+        assert!(text(&h).ends_with("\n\n---\n\n# Title {#title}\n"), "{}", text(&h));
     }
 
     #[test]

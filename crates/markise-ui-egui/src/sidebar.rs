@@ -611,6 +611,11 @@ pub enum RowKind {
     Heading {
         level: u8,
     },
+    /// A section in the outline, above its headings: its number, or a mark with none, in a slot this wide.
+    Section {
+        number: Option<usize>,
+        slot: u16,
+    },
     /// A placeholder line ("…", errors).
     Note,
 }
@@ -752,9 +757,13 @@ impl SideLook {
         // accessibility (and UI tests): the row is a button named with the full name
         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), active, full));
         let p = ui.painter_at(rect);
-        let outline = matches!(kind, RowKind::Heading { .. });
+        let outline = matches!(kind, RowKind::Heading { .. } | RowKind::Section { .. });
         let hovered = resp.hovered() && kind != RowKind::Note;
         let bg_rect = rect.shrink2(egui::vec2(1.0, 1.0));
+        // a section reads as one before a word of it is read
+        if matches!(kind, RowKind::Section { .. }) && !hovered {
+            p.rect_filled(bg_rect, self.radius, self.bar_bg);
+        }
         let bg = match (active, outline, hovered) {
             (true, true, _) => self.outline_active_bg,
             (true, false, _) => self.selected_bg,
@@ -786,13 +795,15 @@ impl SideLook {
             RowKind::Note => self.icon,
             // top-level headings stand out by color (the UI font may have no bold face)
             RowKind::Heading { level: 1 } if !active && !hovered => self.active_text,
+            RowKind::Section { .. } if !active => self.active_text,
             _ => color,
         };
+        let font = match kind {
+            RowKind::Section { .. } => self.bold_font.clone(),
+            _ => self.font.clone(),
+        };
         let max_w = (rect.right() - 6.0 - x).max(1.0);
-        let mut job = egui::text::LayoutJob::single_section(
-            shown.to_string(),
-            egui::TextFormat::simple(self.font.clone(), color),
-        );
+        let mut job = egui::text::LayoutJob::single_section(shown.to_string(), egui::TextFormat::simple(font, color));
         job.wrap = egui::text::TextWrapping {
             max_width: max_w,
             max_rows: 1,
@@ -882,6 +893,14 @@ impl SideLook {
                     );
                     x += len + 5.0;
                 }
+            }
+            RowKind::Section { number, slot } => {
+                let tone = if active { self.outline_active_text } else { self.icon };
+                let said = number.map_or_else(|| "§".to_string(), |n| n.to_string());
+                let slot = f32::from(slot);
+                let at = egui::pos2(x + slot * 0.5, cy);
+                p.text(at, egui::Align2::CENTER_CENTER, said, self.small_font.clone(), tone);
+                x += slot + 4.0;
             }
             RowKind::Note => {
                 x += CHEVRON_W + icon_s + 5.0;
@@ -1395,7 +1414,7 @@ impl SideLook {
 /// A virtualised list of `n` rows of exactly `row_h` points. `show_rows` computes offsets
 /// with the item spacing current when it is called, so the zero spacing the rows are painted
 /// with is set in a scope *around* it.
-fn virtual_rows(
+pub(crate) fn virtual_rows(
     ui: &mut Ui,
     id: &str,
     row_h: f32,
@@ -1465,66 +1484,6 @@ pub fn outline(
             );
             if r.clicked() {
                 clicked = Some(i);
-            }
-        }
-    });
-    clicked
-}
-
-/// The outline with sections as a level above headings. Rows are asked for by what is on screen,
-/// so a large document costs what a small one does. `name`: what to call a section. Returns the
-/// clicked row's meaning.
-pub fn section_outline(
-    ui: &mut Ui,
-    view: &markise_layout::View,
-    // the headings to list, when not all of them
-    only: Option<&[usize]>,
-    current: usize,
-    look: &SideLook,
-    partial: bool,
-) -> Option<markise_layout::OutlineRow> {
-    use markise_layout::OutlineRow;
-    let model = view.model();
-    let min_level = model.outline_min_level();
-    let sections = view.doc().section_count();
-    let mut clicked = None;
-    let listed = view.outline_row_count(only);
-    let rows = listed + usize::from(partial);
-    virtual_rows(ui, "markise-section-outline", look.row_h, rows, None, |ui, range| {
-        for i in range {
-            if i >= listed {
-                ui.label(
-                    RichText::new("More when the file has loaded…")
-                        .font(look.font.clone())
-                        .color(look.icon),
-                );
-                continue;
-            }
-            let row = view.outline_row(i, only);
-            let r = match row {
-                OutlineRow::Section(k) => {
-                    let mut name = view.section_name(k);
-                    // the last section of a part goes on in what has yet to load
-                    if partial && k + 1 == sections {
-                        name.push('…');
-                    }
-                    look.row(ui, 0, RowKind::Heading { level: 1 }, &name, current == i)
-                }
-                OutlineRow::Heading(h) => {
-                    let Some(e) = model.outline.get(h) else { continue };
-                    let level = e.level - min_level + 1;
-                    let text = if e.text.is_empty() { "(empty heading)" } else { &e.text };
-                    look.row(
-                        ui,
-                        level as usize,
-                        RowKind::Heading { level: level + 1 },
-                        text,
-                        current == i,
-                    )
-                }
-            };
-            if r.clicked() {
-                clicked = Some(row);
             }
         }
     });

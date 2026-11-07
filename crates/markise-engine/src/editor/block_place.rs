@@ -2,14 +2,16 @@
 //! caret's place, for a host offering blocks to insert, and the insertion itself. The Markdown comes
 //! from outside and is not trusted. No package and no block name is known here.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use markise_doc::{DocPos, FormatDoc, FormatOptions, HintSet, PatchSet, PlanStep, Selection};
+use markise_doc::{DocPos, FormatDoc, FormatOptions, HintSet, LeafKind, PatchSet, PlanStep, Selection};
 use markise_layout::BlockViewMode;
 use markise_md::Document;
 
 use super::{EditError, EditorView, TxKind};
 use crate::block_fields::{ids_in, new_anchor};
+use crate::section_id::next_section_id;
 
 /// What undo calls an inserted block.
 const INSERT_LABEL: &str = "Insert Block";
@@ -141,10 +143,15 @@ pub(super) fn separated(text: &str, line: usize, body: &str, eol: &str) -> (Stri
 
 /// The trailing ids of a parsed text, as what `{#id}` reads there: by the one check every reader uses.
 fn trailing_ids(doc: &dyn FormatDoc) -> Vec<(usize, usize)> {
+    trailing_ids_in(doc, 0..doc.text().len())
+}
+
+/// [`trailing_ids`] on the lines from `range.start`, which starts one, to `range.end`.
+pub(super) fn trailing_ids_in(doc: &dyn FormatDoc, range: std::ops::Range<usize>) -> Vec<(usize, usize)> {
     let text = doc.text();
     let mut out = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
+    let mut start = range.start;
+    while start < range.end {
         let next = after_line(text, start);
         // blanks after an id are no text of the line
         let end = start + text[start..next].trim_end_matches([' ', '\t', '\r', '\n']).len();
@@ -160,18 +167,48 @@ fn trailing_ids(doc: &dyn FormatDoc) -> Vec<(usize, usize)> {
     out
 }
 
-/// `markdown` with every trailing id free in the document: an id still free stays, another gets the
-/// field model's next one (ADR 0020).
+/// A preset's `markdown` with its ids as the package wrote them. An answer's belongs to its field and can mean
+/// something, so only a repeat within one field, which a valid preset does not have, gets the field model's next
+/// one, past the others in that field (ADR 0020). A heading's id is unique on a page, so a heading's that is
+/// taken there gets a new number after its own words.
 fn with_free_ids(preset: &dyn FormatDoc, in_document: &str) -> String {
-    let mut taken = ids_in(in_document);
+    let mut page = ids_in(in_document);
     let text = preset.text();
+    let ids = trailing_ids(preset);
+    let is_heading = |at: usize| matches!(preset.leaf(at).map(|l| l.kind), Some(LeafKind::Heading { .. }));
+    // every id as written in each field first: a replacement takes none that stays
+    let mut reserved: BTreeMap<Option<usize>, BTreeSet<String>> = BTreeMap::new();
+    for (start, end) in ids.iter().filter(|(start, _)| !is_heading(*start)) {
+        reserved
+            .entry(preset.top_at(*start))
+            .or_default()
+            .insert(text[*start..*end].to_string());
+    }
+    let mut seen: BTreeSet<(Option<usize>, &str)> = BTreeSet::new();
     let mut out = String::with_capacity(text.len());
     let mut from = 0;
-    for (start, end) in trailing_ids(preset) {
-        let id = new_anchor(&taken, Some(&text[start..end]), &Default::default());
+    for (start, end) in ids {
+        let written = &text[start..end];
+        let id = if is_heading(start) {
+            if page.contains(written) {
+                next_section_id(written, &page)
+            } else {
+                written.to_string()
+            }
+        } else {
+            let field = preset.top_at(start);
+            if seen.insert((field, written)) {
+                written.to_string()
+            } else {
+                let taken = reserved.entry(field).or_default();
+                let id = new_anchor(taken, None, &BTreeSet::new());
+                taken.insert(id.clone());
+                id
+            }
+        };
         out.push_str(&text[from..start]);
         out.push_str(&id);
-        taken.insert(id);
+        page.insert(id);
         from = end;
     }
     out.push_str(&text[from..]);

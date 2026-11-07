@@ -84,7 +84,7 @@ Nothing here is new layout state in the model: as with a picture (ADR 0023), the
 A document without sections pays one comparison per item.
 
 - **A boundary** reads as a division, stronger than a rule and in every document with the dialect on, with no option needed: a generous gap above and below, the section's number from 1 in a small badge at its start, then the line to the right edge, 2 pt in a colour between the text's and the page's. Between them stands its name only when that says more than what stands below: its `id` unless the first heading says the same. A heading says itself, and `Section N` would say the number twice. The section's own heading keeps its style. No caret stands in it, as in
-  any rule. It is taller than the line it stands for, so an item's estimate and a page's (`section_page_estimate`: boundaries in its range, O(log rules)) count that, and they come from the one function that lays it out (`divider_metrics`). The name for the outline and the status bar is as it was: its `id`, else its first heading among the section's own top-level blocks (a bounded look, as this is asked on the UI thread), else `Section N`. Only `id` and `style` are engine keys, and no other key is ranked.
+  any rule. It is taller than the line it stands for, so an item's estimate and a page's (`section_page_estimate`: boundaries in its range, O(log rules)) count that, and they come from the one function that lays it out (`divider_metrics`). The name for the outline and the status bar is under Finding one's way, its headings among the section's own top-level blocks by a bounded look, as this is asked on the UI thread. Only `id` and `style` are engine keys, and no other key is ranked.
 - **The first section** has no boundary, and gets no number or line. It has no item to hold them, as nothing may be written for it, and looked at on a real page it needs none: the page's start says it. A first section with nothing in it does not count in the numbers.
 - **A rule nearly a boundary** (`----`, `- - -`, ` ---`, `--- `) at the root says so on its own row, quietly.
 - **A metadata block** is a compact plaque: `key: value` as written, and `⚠` with the first reason for what
@@ -108,9 +108,15 @@ A document without sections pays one comparison per item.
 
 ### Finding one's way
 
-The outline panel has every section as a level above headings. Its rows are not built: the row of section
-`k` is `k` plus the headings before it, so the rows on screen are found by bisection over sections, and a
-list of any size costs what is shown. The model's outline names a heading in a placeholder by the
+The outline panel has every section as a level above headings, and a section's row reads as one: its number (or `§` where a package says no numbers, and for a first section with nothing in it) in a slot of its own, its name in the bold face on a ground of its own, with the headings indented under it. A heading's row has no control of any kind.
+
+**A section's name** is its `id`, else its first direct heading at the package's `title_level` (default 2), else its first direct heading of any level, else what sections are called on the page, the package's word, with its number: `Slide 3`, where a row shows its number beside the word. The outline, the status bar, the delete notice and accessible names all say this, by `section_name`. A divider or a frame's label says only an `id` that no heading below says, as a heading says itself. The heading that names a section has no row of its own under it, as it would say the same, when nothing is listed before it; other headings stay. **The document's title** is a `#` that is the first thing in the first section, metadata apart. It names no section, since the row would read as the heading, and a grip beside it seemed to belong to the title: it has a row of its own above all the sections, plain, with no number or control, and a click goes to it. So a first section with `#` and `##` goes by its `##`, and one with only `#` is `Slide 1`. A page with `title_level` 1 goes by `#`, so it has no title apart. Moving the first section says that the title goes with it.
+
+Tooltips say what they do with no word of the package's, as they would mix languages (`Drag to move`, `Actions`), and the section's name goes in the accessibility label. Refusals and the delete notice the same (`Not moved: …`, `Deleted: …`).
+
+Its rows are not built: the row of section
+`k` is `k` plus the headings before it less the headings left out before it, so the rows on screen are found by bisection over sections, and a
+list of any size costs what is shown. The count of those left out is the one thing that goes over all sections, reading only what each starts with, and only while the outline is shown: about 7 ms at 4,961 sections with metadata. Typing in an item that is no heading and in no block keeps it, as nothing else about it changes, so typing does not pay for it; a structural edit does, once. The model's outline names a heading in a placeholder by the
 placeholder, so a boundary in one reads that page's items, without materializing it, and remembers the count
 until the document changes. A click materializes the target's page and goes there as a heading's does.
 
@@ -156,7 +162,7 @@ Backspace at the start of what follows takes it, as for any rule, with an undo s
 
 `---` is no block, so ADR 0019's rule that a preset opens the block it names stays, and a new section is no preset: the library has one item of another kind
 (`LibraryItem::Section`), first and in no group, while the document's dialect has sections. It needs no package, as sections do not. What it says comes from
-`editor/sections.json`, optional and validated like the package's other files: `label`, default `Section`, `description`, `keywords`, `icon`, and `fields`, the keys the form asks for, with
+`editor/sections.json`, optional and validated like the package's other files: `label`, default `Section`, `description`, `keywords`, `icon`, `title_level`, the level of the heading a new section starts with, 1 to 6, default 2, as a site's outline is the site's, and `fields`, the keys the form asks for, with
 values to choose from if any. A site may call a section what it likes, and Markise does not know what.
 
 Choosing the item opens a modal form. Nothing is written before Save. An edit, another document or Read closes it with nothing written. `EditorView::insert_section` writes, at root level by the rule that places a
@@ -196,6 +202,18 @@ pairs as before. The commands Move Section Up, Move Section Down and Delete Sect
 **Delete** takes a section's bytes and its boundary, with the first section's next boundary, so that the next section comes to be first. One undo step, with no question; a changed form's draft of a block in it is asked about first, as a block's delete does, and a move waits while one is open, also as a block's does.
 
 **On screen.** A divider has three quiet buttons at the right end of its row for the section it opens, under the pointer on that row or for the section with the caret, as a block's controls. A button is there only for what can be done, and only while it shows: what does not show is not there to press. The row stands whether or not it says a number or a name, as the buttons stand on it. In Read no button or command does anything, and a part of a large file still loading has them off, as its last section is cut short.
+
+### From the outline
+
+A section's row in the outline panel has a menu, by a right click on it and from a quiet `⋯` at its start, in the place of its number, that shows under the pointer with the whole row lit: Move Up, Move Down, Duplicate, Insert After, Delete. It says what is there to do by the same checks as the rest (`can_move_section`, `can_delete_section` and so on) and goes by the moves and refusals above, with their messages; the words in rows come from the package's section label. By the keyboard: Tab comes to a row and on to its `⋯`, Return or Shift+F10 opens the menu on its first item, the arrows go through it, and Esc goes back to where it was opened from. Read, a read-only file, a part of a large file still loading and an open card have no menu and no `⋯`.
+
+**Delete** by any way there is, these two as well, is followed by a notice in the banner above the document, with Undo: one line, for eight seconds and for as long as nothing else has changed the document. It is not put over a question about a file changed on disk. Undo is the ordinary undo of that step.
+
+**Duplicate** (`duplicate_section`) puts a copy right after the section, its own boundary above it, as one undo step. Only the ids in the copy differ from its bytes, and only those unique on a page: a heading's outside a block, by what a reader takes for an id (`hidden_note`, so not what stands in code), and the value of the metadata's accepted `id`, by the position the reader found it at and with the blanks around it staying. Each gets one that is free on the page by the rule of a section's id above. Everything inside a `:::` block stays as written, as its ids belong to its fields and can mean something (ADR 0022): `{#none}` stays `{#none}`. A first heading with no `{#id}`, when it is written with `#`, gets one, as two headings saying the same would give a site one anchor; it is past what the original's text makes, so `## Two` becomes `## Two {#two-2}`. A setext heading or one with a closing `#` has no place for one and stays as it is. A section with nothing or only metadata has nothing to copy, and what would pair or divide otherwise is refused as for a move.
+
+**Insert After** opens the section form, whose Save goes as Starting one says, at the end of that section wherever the caret is (`insert_section_after`). A first section with nothing in it has no end to go after, so it is off there.
+
+**The title.** The first section may hold the document's `#` heading and intro, and that is no reason to refuse anything: a site's rules for what a section holds are the site's. When a document has exactly one `#` heading outside a block (`only_title_section`, a walk over the top-level blocks once per move, not per frame), a move that takes it along, or that brings another section above the first one holding it, says so in that notice, in one line.
 
 ## Consequences
 

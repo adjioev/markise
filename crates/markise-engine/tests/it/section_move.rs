@@ -313,3 +313,206 @@ fn a_delete_creates_no_section_with_only_metadata_and_can_take_one_away() {
     assert_eq!(s.ed.delete_section(0, false), Ok(true));
     assert_eq!(s.text(), "B\n");
 }
+
+/// The document with section `k` duplicated, and undone to the same bytes.
+fn duplicated(text: &str, k: usize) -> String {
+    let mut s = surface(text);
+    assert!(s.ed.can_duplicate_section(k), "{text:?}");
+    assert_eq!(s.ed.duplicate_section(k, false), Ok(true), "{text:?}");
+    let after = s.text();
+    assert_eq!(s.ed.session.doc().section_count(), section_count(text) + 1, "{after:?}");
+    s.undo();
+    assert_eq!(s.text(), text, "one undo step: {text:?}");
+    after
+}
+
+fn section_count(text: &str) -> usize {
+    surface(text).ed.session.doc().section_count()
+}
+
+#[test]
+fn a_copy_comes_after_it_with_its_bytes_and_new_ids() {
+    for (doc, k, want) in [
+        // ids get a new number, with the words they had
+        (
+            "A\n\n---\n\n## B {#b}\n\nText  \n\n---\n\nC\n",
+            1,
+            "A\n\n---\n\n## B {#b}\n\nText  \n\n---\n\n## B {#b-2}\n\nText  \n\n---\n\nC\n",
+        ),
+        // a first section has no boundary and keeps none, the copy has one; the last one's end stays the file's
+        (
+            "# T\n\nA\n\n---\n\nB",
+            0,
+            "# T\n\nA\n\n---\n\n# T {#t-2}\n\nA\n\n---\n\nB",
+        ),
+        ("A\n\n---\n\nB", 1, "A\n\n---\n\nB\n\n---\n\nB"),
+        ("A\n\n---\n\nB\n\n\n", 1, "A\n\n---\n\nB\n\n---\n\nB\n\n\n"),
+        // a heading with no id gets one that is not what its original goes by; only the first heading
+        (
+            "## Two words\n\n## More\n\n---\n\nB\n",
+            0,
+            "## Two words\n\n## More\n\n---\n\n## Two words {#two-words-2}\n\n## More\n\n---\n\nB\n",
+        ),
+        // no id for what cannot take one: a setext heading, a closing `#`
+        ("B\n===\n\n---\n\nC\n", 0, "B\n===\n\n---\n\nB\n===\n\n---\n\nC\n"),
+        ("## B ##\n\n---\n\nC\n", 0, "## B ##\n\n---\n\n## B ##\n\n---\n\nC\n"),
+        // taken anywhere on the page, also in code, and every id in it gets its own
+        (
+            "x {#b-2}\n\n```\n{#b-3}\n```\n\n---\n\n## B {#b}\n\n:::y\n\n- [ ] One {#a1}\n\n:::\n",
+            1,
+            "x {#b-2}\n\n```\n{#b-3}\n```\n\n---\n\n## B {#b}\n\n:::y\n\n- [ ] One {#a1}\n\n:::\n\n---\n\n## B {#b-4}\n\n:::y\n\n- [ ] One {#a1}\n\n:::\n",
+        ),
+        // what is inside a block is its own, a heading there too: `none` may mean something to a site
+        (
+            ":::y\n\n## Q {#q}\n\n- [ ] One {#a7}\n- [ ] Two {#none}\n\n:::\n",
+            0,
+            ":::y\n\n## Q {#q}\n\n- [ ] One {#a7}\n- [ ] Two {#none}\n\n:::\n\n---\n\n:::y\n\n## Q {#q}\n\n- [ ] One {#a7}\n- [ ] Two {#none}\n\n:::\n",
+        ),
+        // a new page id goes past those in blocks as well: both namespaces count, which costs a number at most
+        (
+            ":::y\n\n- [ ] One {#b-2}\n\n:::\n\n---\n\n## B {#b}\n",
+            1,
+            ":::y\n\n- [ ] One {#b-2}\n\n:::\n\n---\n\n## B {#b}\n\n---\n\n## B {#b-3}\n",
+        ),
+        // an `id:` with no value is rejected by the reader, so it stays, and the one it reads gets the new number
+        (
+            "A\n\n---\n\n:::section-metadata\n\nid:\nkind: x\nid:  actual  \n\n:::\n\nB\n",
+            1,
+            "A\n\n---\n\n:::section-metadata\n\nid:\nkind: x\nid:  actual  \n\n:::\n\nB\n\n---\n\n:::section-metadata\n\nid:\nkind: x\nid:  actual-2  \n\n:::\n\nB\n",
+        ),
+        // only that one: nothing is written into any line
+        (
+            "A\n\n---\n\n:::section-metadata\n\nid:\nkind: x\n\n:::\n\nB\n",
+            1,
+            "A\n\n---\n\n:::section-metadata\n\nid:\nkind: x\n\n:::\n\nB\n\n---\n\n:::section-metadata\n\nid:\nkind: x\n\n:::\n\nB\n",
+        ),
+        // in code it is no id: the bytes stay
+        (
+            "A\n\n---\n\n## B {#b}\n\n```\ntext {#b}\n```\n",
+            1,
+            "A\n\n---\n\n## B {#b}\n\n```\ntext {#b}\n```\n\n---\n\n## B {#b-2}\n\n```\ntext {#b}\n```\n",
+        ),
+        // metadata's id: only its value
+        (
+            "A\n\n---\n\n:::section-metadata\n\nkind: x\nid:   top  \nid: second\n\n:::\n\n## B {#top}\n",
+            1,
+            "A\n\n---\n\n:::section-metadata\n\nkind: x\nid:   top  \nid: second\n\n:::\n\n## B {#top}\n\n---\n\n:::section-metadata\n\nkind: x\nid:   top-2  \nid: second\n\n:::\n\n## B {#top-3}\n",
+        ),
+        // what is in it pairs in the copy too, its rule included
+        (
+            "A\n\n---\n\n:::y\n\n---\n\n:::\n",
+            1,
+            "A\n\n---\n\n:::y\n\n---\n\n:::\n\n---\n\n:::y\n\n---\n\n:::\n",
+        ),
+    ] {
+        assert_eq!(duplicated(doc, k), want, "{doc:?}");
+    }
+}
+
+#[test]
+fn a_copy_keeps_the_line_endings_and_the_caret_is_in_it() {
+    let doc = "A\r\n\r\n---\r\n\r\n## B {#b}\r\n";
+    assert_eq!(
+        duplicated(doc, 1),
+        "A\r\n\r\n---\r\n\r\n## B {#b}\r\n\r\n---\r\n\r\n## B {#b-2}\r\n"
+    );
+    let meta = "A\n\n---\n\n:::section-metadata\n\nid: m\n\n:::\n\nB\n";
+    let mut s = surface(meta);
+    s.caret(0);
+    assert_eq!(s.ed.duplicate_section(1, false), Ok(true));
+    let p = s.ed.session.selection().primary();
+    assert!(p.is_caret());
+    assert_eq!(s.ed.section_at_caret(), 2);
+    let after = s.text();
+    assert_eq!(&after[p.focus.offset..], "B\n", "past the plaque, in {after:?}");
+}
+
+#[test]
+fn nothing_to_copy_or_what_would_pair_differently_is_no_copy() {
+    for (doc, k) in [
+        (format!("A\n\n---\n\n{META}\n\n---\n\nC\n"), 1),
+        ("A\n\n---\n\n---\n\nC\n".to_string(), 1),
+        ("---\n\nA\n\n---\n\nC\n".to_string(), 5),
+    ] {
+        let mut s = surface(&doc);
+        assert!(!s.ed.can_duplicate_section(k));
+        assert_eq!(s.ed.duplicate_section(k, false), Ok(false));
+        assert_eq!(s.text(), doc);
+    }
+    // a stray closer in the copy pairs with the stray opener before it and takes the boundary in
+    let doc = ":::\n\nA\n\n:::y\n\n---\n\nC\n";
+    let mut s = surface(doc);
+    assert_eq!(s.ed.duplicate_section(0, false), Err(MoveRefused::WouldNotStand));
+    assert_eq!(s.text(), doc);
+    // an unclosed fence would hold what is put after it
+    let doc = "A\n\n---\n\nB\n\n```\ncode\n";
+    let mut s = surface(doc);
+    assert_eq!(s.ed.duplicate_section(1, false), Err(MoveRefused::WouldNotStand));
+    assert_eq!(s.text(), doc);
+}
+
+#[test]
+fn the_only_title_is_a_level_one_heading_outside_a_block() {
+    for (doc, want) in [
+        ("# T\n\nA\n\n---\n\nB\n", Some(0)),
+        ("A\n\n---\n\nT\n===\n", Some(1)),
+        ("# T\n\n---\n\n# U\n", None),
+        ("## T\n\n---\n\nB\n", None),
+        (":::y\n\n# T\n\n:::\n\n---\n\nB\n", None),
+        (":::y\n\n# T\n\n:::\n\n---\n\n# U\n", Some(1)),
+    ] {
+        assert_eq!(surface(doc).ed.only_title_section(), want, "{doc:?}");
+    }
+}
+
+#[test]
+fn a_new_section_goes_at_the_end_of_the_one_named_and_the_caret_stays_if_refused() {
+    use markise_engine::editor::NewSection;
+    let new = NewSection {
+        title: "N".into(),
+        id: "n".into(),
+        ..NewSection::default()
+    };
+    let doc = "A\n\n---\n\nB\n\n- list\n\n---\n\nC\n";
+    let mut s = surface(doc);
+    s.caret(0);
+    assert!(s.ed.insert_section_after(1, &new, false).is_ok());
+    assert_eq!(s.text(), "A\n\n---\n\nB\n\n- list\n\n---\n\n## N {#n}\n\n---\n\nC\n");
+    s.undo();
+    assert_eq!(s.text(), doc);
+    // the last one, with no line ending
+    let mut s = surface("A\n\n---\n\nB");
+    assert!(s.ed.insert_section_after(1, &new, false).is_ok());
+    assert_eq!(s.text(), "A\n\n---\n\nB\n\n---\n\n## N {#n}");
+    // into one with nothing in it: no boundary, it is filled in
+    let mut s = surface("A\n\n---\n\n---\n\nC\n");
+    assert!(s.ed.insert_section_after(1, &new, false).is_ok());
+    assert_eq!(s.text(), "A\n\n---\n\n## N {#n}\n\n---\n\nC\n");
+    // a first section with nothing in it has no place
+    let first_empty = "---\nlang: en\n---\n\n---\n\nB\n";
+    let mut s = surface(first_empty);
+    if s.ed.session.doc().section_count() == 2 && !s.ed.can_insert_after_section(0) {
+        assert!(s.ed.insert_section_after(0, &new, false).is_err());
+        assert_eq!(s.text(), first_empty);
+    }
+    // refused: the caret stays where it was
+    let hollow = format!("A\n\n---\n\n{META}\n\n---\n\nC\n");
+    let mut s = surface(&hollow);
+    s.caret(0);
+    let with = NewSection {
+        metadata: vec![("kind".into(), "x".into())],
+        ..new.clone()
+    };
+    assert!(s.ed.insert_section_after(1, &with, false).is_err());
+    assert_eq!(s.text(), hollow);
+    assert_eq!(s.ed.session.selection().primary().focus.offset, 0);
+    // undo: the caret where it was before, not at the end of the section named
+    let mut s = surface(doc);
+    s.caret(1);
+    assert!(s.ed.insert_section_after(1, &new, false).is_ok());
+    s.undo();
+    assert_eq!(s.text(), doc);
+    let p = s.ed.session.selection().primary();
+    assert!(p.is_caret());
+    assert_eq!(p.focus.offset, 1);
+}

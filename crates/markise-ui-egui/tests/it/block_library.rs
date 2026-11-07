@@ -319,7 +319,7 @@ mod insert {
     }
 
     #[test]
-    fn the_command_inserts_after_the_block_holding_the_caret_and_new_ids_come_with_it() {
+    fn the_command_inserts_after_the_block_holding_the_caret_and_answers_keep_their_ids() {
         let doc = "Before.\n\n:::poll\n\n## Q\n\n- [x] Yes {#a1}\n- [ ] No {#a2}\n\n:::\n\nAfter.\n";
         let f = Fixture::with_palette(doc, PALETTE);
         let mut h = f.ready();
@@ -336,7 +336,7 @@ mod insert {
         assert_eq!(
             text(&h),
             "Before.\n\n:::poll\n\n## Q\n\n- [x] Yes {#a1}\n- [ ] No {#a2}\n\n:::\n\n\
-             :::poll\n\n## A question\n\n- [x] Yes {#a3}\n- [ ] No {#a4}\n\n:::\n\nAfter.\n"
+             :::poll\n\n## A question\n\n- [x] Yes {#a1}\n- [ ] No {#a2}\n\n:::\n\nAfter.\n"
         );
     }
 

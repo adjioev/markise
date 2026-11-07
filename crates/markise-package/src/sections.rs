@@ -24,9 +24,14 @@ pub struct SectionConfig {
     pub icon: Option<String>,
     /// The metadata a new section's form asks for, in this order. None: the form asks for none.
     pub fields: Vec<SectionField>,
+    /// The level of the heading a new section starts with, 1 to 6. What a site's outline wants is the site's.
+    pub title_level: u8,
     /// How a section looks on screen.
     pub view: SectionView,
 }
+
+/// A new section's heading level with no say from a package.
+pub const DEFAULT_SECTION_TITLE_LEVEL: u8 = 2;
 
 /// `"view"` of `editor/sections.json`: how sections look on screen, in generic terms. Nothing about the file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,7 +95,21 @@ pub(crate) fn parse(file: &str, map: serde_json::Map<String, Value>, issues: &mu
         keywords: opt_text(file, "keywords", map.get("keywords"), MAX_TEXT_BYTES, issues),
         icon: opt_token(file, "icon", map.get("icon"), issues),
         fields: parse_fields(file, map.get("fields"), issues),
+        title_level: parse_title_level(file, map.get("title_level"), issues),
         view: parse_view(file, map.get("view"), issues),
+    }
+}
+
+fn parse_title_level(file: &str, v: Option<&Value>, issues: &mut Issues) -> u8 {
+    match v {
+        None => DEFAULT_SECTION_TITLE_LEVEL,
+        Some(v) => match v.as_u64().filter(|n| (1..=6).contains(n)) {
+            Some(n) => n as u8,
+            None => {
+                issues.push(file, format!("title_level must be a whole number from 1 to 6, not {v}"));
+                DEFAULT_SECTION_TITLE_LEVEL
+            }
+        },
     }
 }
 

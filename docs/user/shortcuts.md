@@ -89,6 +89,7 @@ Delete Block works on any block. The other block commands need a block package i
 | Move Block Up / Down | Alt+Cmd+↑ / ↓ | Ctrl+Shift+↑ / ↓ |
 | Delete Block | Alt+Cmd+⌫ | Ctrl+Shift+Delete |
 | Move Section Up / Down | Shift+Alt+Cmd+↑ / ↓ | Ctrl+Shift+Alt+↑ / ↓ |
+| A section's menu, on its row in the outline | Shift+F10 | Shift+F10 |
 | Delete Section | Shift+Alt+Cmd+⌫ | Ctrl+Shift+Alt+Backspace |
 | Switch This Block's View | Shift+Cmd+M | Ctrl+Shift+M |
 | Switch All Blocks' Views | Shift+Alt+Cmd+M | Ctrl+Shift+Alt+M |

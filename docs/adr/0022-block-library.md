@@ -85,9 +85,13 @@ is rewritten. New lines take the document's line ending, whatever the package wr
 line ending stays so.
 
 **Ids.** Every trailing `{#id}` of the preset, by the one check readers use (ADR 0018), so that text only looking
-like an id stays text. An id free in the document stays as the package wrote it; another gets `a<N>`
-above every number in use, the rule of ADR 0020, now over the whole document. What counts as in use is any `{#id}`
-written anywhere in it, in code too: a false positive costs a new number, and the alternative is a repeat. An
+like an id stays text. An answer's id belongs to its field in that block, not to the page: another block's `a1` is no
+clash, and a name like `none` or one from a site's code can mean something, so it stays as the package wrote it, whatever
+else is on the page. Only a repeat within one field, which a valid preset does not have, gets `a<N>` past the others
+in that field, the rule of ADR 0020; `a<N>` is for that and for a newly added answer, and is never put in place of
+one that is there on its own. A heading's id is unique on a page, so one that is taken there gets the first free number after its
+words (`q` to `q-2`). What counts as taken for that is any `{#id}` written anywhere, in code and in other blocks too:
+a false positive costs a number, and the alternative is a repeat. An
 answer the preset gives no id is not given one here: the block then reports it (ADR 0020).
 
 **One undo step.** The insertion is one transaction named Insert Block; undo brings back the source, byte for byte,

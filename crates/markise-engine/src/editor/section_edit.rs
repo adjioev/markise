@@ -13,14 +13,27 @@ use crate::block_fields::ids_in;
 const INSERT_LABEL: &str = "Insert Section";
 
 /// What a new section starts with.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewSection {
+    /// Its heading's level, 1 to 6: what a site's outline wants is the site's.
+    pub level: u8,
     /// Its heading's text, one line.
     pub title: String,
     /// Its heading's id.
     pub id: String,
     /// Its metadata, in this order. None: it has no metadata block.
     pub metadata: Vec<(String, String)>,
+}
+
+impl Default for NewSection {
+    fn default() -> NewSection {
+        NewSection {
+            level: 2,
+            title: String::new(),
+            id: String::new(),
+            metadata: Vec::new(),
+        }
+    }
 }
 
 /// One line, its runs of blanks as one: a title takes no line ending.
@@ -77,6 +90,33 @@ impl EditorView {
         ids
     }
 
+    /// There is a place after section `index` to start one in: a first section with nothing in it has no line
+    /// of its own to go after.
+    pub fn can_insert_after_section(&self, index: usize) -> bool {
+        self.section_end(index).is_some()
+    }
+
+    /// [`Self::insert_section`] at the end of section `index`, wherever the caret is, and undo brings the caret back
+    /// to where it was. Refused, the caret stays.
+    pub fn insert_section_after(
+        &mut self,
+        index: usize,
+        new: &NewSection,
+        in_source: bool,
+    ) -> Result<usize, InsertRefused> {
+        if in_source {
+            self.source_selection_to_session();
+        }
+        let done = match self.section_end(index) {
+            Some(end) => self.insert_section_at(DocPos::new(end), new),
+            None => Err(InsertRefused::WouldNotStand),
+        };
+        if in_source {
+            self.source_selection_from_session();
+        }
+        done
+    }
+
     /// Starts a section after what the caret is in, or on the blank line it is on: never inside a block or a
     /// list. Its boundary stands before it when there is something to end; with nothing before it a boundary
     /// would make an empty section, or front matter of the first line, so it goes after it instead, if
@@ -86,15 +126,23 @@ impl EditorView {
         if in_source {
             self.source_selection_to_session();
         }
-        self.release();
-        let doc = self.session.doc();
-        let eol = doc.line_ending().as_str();
         let p = self.session.selection().primary();
         let at = if p.is_caret() {
             p.focus
         } else {
             DocPos::new(p.range().end)
         };
+        let done = self.insert_section_at(at, new);
+        if in_source {
+            self.source_selection_from_session();
+        }
+        done
+    }
+
+    fn insert_section_at(&mut self, at: DocPos, new: &NewSection) -> Result<usize, InsertRefused> {
+        self.release();
+        let doc = self.session.doc();
+        let eol = doc.line_ending().as_str();
         let line = line_for_block(doc, at);
         let title = one_line(&new.title);
         let leading = has_content_before(doc, line);
@@ -109,9 +157,6 @@ impl EditorView {
             && (doc.section_metadata(holding.index))
                 .is_some_and(|m| m.opener.start >= line && blank(&doc.text()[m.closer.end..holding.end]));
         if second_metadata || hollow_below {
-            if in_source {
-                self.source_selection_from_session();
-            }
             return Err(InsertRefused::WouldLeaveEmpty);
         }
 
@@ -135,8 +180,9 @@ impl EditorView {
             body.push_str(eol);
         }
         let heading_in_body = body.len();
-        body.push_str(&format!("## {title} {{#{}}}", new.id));
-        let (title_in_body, heading_end_in_body) = (heading_in_body + 3, body.len());
+        let marks = usize::from(new.level.clamp(1, 6));
+        body.push_str(&format!("{} {title} {{#{}}}", "#".repeat(marks), new.id));
+        let (title_in_body, heading_end_in_body) = (heading_in_body + marks + 1, body.len());
         if trailing {
             body.push_str(eol);
             body.push_str(eol);
@@ -179,9 +225,6 @@ impl EditorView {
         self.sync();
         self.follow_block_modes();
         self.pin_caret();
-        if in_source {
-            self.source_selection_from_session();
-        }
         match done {
             Ok(()) => Ok(heading),
             Err(EditError::Aborted(_)) => Err(InsertRefused::WouldNotStand),

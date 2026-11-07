@@ -5,18 +5,22 @@ use std::sync::Arc;
 
 use egui::accesskit::Role;
 use egui::{Rect, Sense, Ui, WidgetInfo, pos2, vec2};
+use markise_engine::block_page::package_language;
 use markise_engine::sections::{Dialect, section_dialect};
 use markise_layout::{ItemKind, SectionStyle, Visible};
 use markise_theme::Theme;
 
 use super::{DocViewer, ViewerOutput};
 
-/// What a control on a section's divider asks for, by the section's place.
+/// What a control on a section's divider or its row in the outline asks for, by the section's place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SectionAct {
     MoveUp(usize),
     MoveDown(usize),
     Delete(usize),
+    Duplicate(usize),
+    /// Opens the section form, for a new one after this one.
+    InsertAfter(usize),
 }
 
 /// The status bar's words, and the state they are for: the document, the section, whether it is whole.
@@ -36,14 +40,19 @@ impl DocViewer {
         let on = dialect.as_ref().is_some_and(Dialect::has_sections);
         self.section_dialect = dialect;
         self.ed.view.set_sections(on);
-        let view = self.block_index.as_ref().and_then(|p| p.sections()).map(|c| &c.view);
-        self.ed
-            .view
-            .set_section_style(view.map_or_else(SectionStyle::default, |v| SectionStyle {
-                frame: v.frame,
-                accent: v.accent.as_deref().map(Into::into),
-                numbered: v.numbered,
-            }));
+        let config = self.block_index.as_ref().and_then(|p| p.sections());
+        let language = package_language(self.ed.session.doc());
+        let style = config.map_or_else(SectionStyle::default, |c| {
+            let word = (c.label.as_ref()).map(|l| l.get(&language)).filter(|w| !w.is_empty());
+            SectionStyle {
+                frame: c.view.frame,
+                accent: c.view.accent.as_deref().map(Into::into),
+                numbered: c.view.numbered,
+                word: word.unwrap_or(markise_package::DEFAULT_SECTION_LABEL).into(),
+                title_level: c.title_level,
+            }
+        });
+        self.ed.view.set_section_style(style);
     }
 
     /// The document's dialect, when anything names one.

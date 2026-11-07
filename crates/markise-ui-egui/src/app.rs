@@ -45,8 +45,9 @@ use markise_theme::Theme;
 use markise_theme::catalog::{StyleId, ThemeId};
 
 use crate::images::TextureStore;
+use crate::section_panel::section_outline;
 use crate::side_by_side::{DEFAULT_SPLIT, SideBySide};
-use crate::sidebar::{EditEnd, FileTree, Tab, TreeAction, outline, section_outline};
+use crate::sidebar::{EditEnd, FileTree, Tab, TreeAction, outline};
 use crate::source::SourceEditor;
 use crate::themes::{ConfigDir, InstallDone, ThemeEvent, ThemeManager};
 use crate::viewer::DocViewer;
@@ -434,7 +435,16 @@ enum Banner {
         found: Option<DiskVersion>,
         target: Option<PathBuf>,
     },
+    /// What was just done, which one press takes back: for that document and revision, and for a while.
+    Undo {
+        text: String,
+        origin: (u64, u64),
+        until: f64,
+    },
 }
+
+/// How long a notice with Undo stays, in seconds.
+const UNDO_NOTICE_SECONDS: f64 = 8.0;
 
 /// Notice shown while the open file is missing on disk (C18).
 const DELETED_NOTICE: &str = "The file was deleted or moved on disk. Save to write it again.";
@@ -1016,7 +1026,7 @@ impl MarkiseApp {
     pub fn banner_text(&self) -> Option<String> {
         self.banner.as_ref().map(|b| match b {
             Banner::Error(e) => format!("error: {e}"),
-            Banner::Info(m) => m.clone(),
+            Banner::Info(m) | Banner::Undo { text: m, .. } => m.clone(),
             Banner::Conflict(_) => "conflict: changed on disk".into(),
             Banner::SaveConflict { .. } => "save-conflict".into(),
         })
@@ -3130,6 +3140,7 @@ impl MarkiseApp {
                         if self.files.rename.is_some() {
                             self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
                         }
+                        let editable = self.section_edit_allowed();
                         if let Some(d) = &mut self.doc {
                             let jump = if d.viewer.ed.view.sections_on() {
                                 let rows = d.viewer.outline_rows();
@@ -3141,9 +3152,23 @@ impl MarkiseApp {
                                     view.model().current_heading(anchor),
                                     rows.as_deref(),
                                 );
-                                match section_outline(ui, view, rows.as_deref(), cur, &look, d.partial) {
+                                let out = section_outline(
+                                    ui,
+                                    &d.viewer.ed,
+                                    d.id,
+                                    rows.as_deref(),
+                                    cur,
+                                    &look,
+                                    d.partial,
+                                    editable,
+                                );
+                                let origin = (d.id, d.viewer.ed.session.revision().counter);
+                                self.block_library.request_section(out.act, Some(origin));
+                                match out.clicked {
                                     Some(markise_layout::OutlineRow::Section(k)) => d.viewer.ed.view.ensure_section(k),
-                                    Some(markise_layout::OutlineRow::Heading(k)) => d.viewer.ed.view.ensure_heading(k),
+                                    Some(
+                                        markise_layout::OutlineRow::Title(k) | markise_layout::OutlineRow::Heading(k),
+                                    ) => d.viewer.ed.view.ensure_heading(k),
                                     None => None,
                                 }
                             } else {
@@ -3401,8 +3426,18 @@ impl MarkiseApp {
     }
 
     fn banner_ui(&mut self, ui: &mut egui::Ui, t: &Theme) {
+        // a notice with Undo is for what was just done: anything after that ends it
+        if let Some(Banner::Undo { origin, until, .. }) = &self.banner {
+            let left = until - ui.input(|i| i.time);
+            if self.block_edit_origin() != Some(*origin) || left <= 0.0 {
+                self.banner = None;
+            } else {
+                ui.ctx().request_repaint_after_secs(left as f32);
+            }
+        }
         let Some(b) = &self.banner else { return };
         enum Act {
+            Undo,
             Dismiss,
             Reload,
             Keep,
@@ -3423,6 +3458,15 @@ impl MarkiseApp {
                     }
                     Banner::Info(m) => {
                         ui.label(m);
+                        if ui.button("Dismiss").clicked() {
+                            act = Some(Act::Dismiss);
+                        }
+                    }
+                    Banner::Undo { text, .. } => {
+                        ui.label(text);
+                        if ui.button("Undo").clicked() {
+                            act = Some(Act::Undo);
+                        }
                         if ui.button("Dismiss").clicked() {
                             act = Some(Act::Dismiss);
                         }
@@ -3451,6 +3495,12 @@ impl MarkiseApp {
                 });
             });
         match act {
+            Some(Act::Undo) => {
+                self.banner = None;
+                let ctx = ui.ctx().clone();
+                self.run_command(&ctx, "edit.undo");
+                self.remember_block_views();
+            }
             Some(Act::Dismiss) | Some(Act::Keep) => self.banner = None,
             Some(Act::Reload) => {
                 if let Some(Banner::Conflict(loaded)) = self.banner.take() {

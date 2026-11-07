@@ -38,7 +38,9 @@ pub use paths::clean_relative;
 pub use reference::ReferenceHeader;
 pub use resolve::{BoundPackage, InstalledPackage, Pending, Problem, Resolution, accept, read_bound_package, resolve};
 pub use schema::{BlockSchema, FieldKind, FieldSchema};
-pub use sections::{SectionConfig, SectionField, SectionValue, SectionView, is_section_value};
+pub use sections::{
+    DEFAULT_SECTION_TITLE_LEVEL, SectionConfig, SectionField, SectionValue, SectionView, is_section_value,
+};
 pub use store::{Accepted, Sha256Hex, Store, files_digest};
 pub use value::{Localized, is_hidden_char, printable};
 pub use views::{PracticeConfig, ViewConfig, ViewKind};

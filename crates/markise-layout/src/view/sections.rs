@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use markise_doc::SectionPair;
+use markise_doc::{LeafKind, SectionPair};
 
 use super::View;
 use super::native::BlockViewMode;
@@ -34,6 +34,10 @@ pub struct SectionStyle {
     pub accent: Option<Arc<str>>,
     /// A boundary says the section's number.
     pub numbered: bool,
+    /// What sections are called on the page, for one with no name of its own.
+    pub word: Arc<str>,
+    /// The level a section's name comes from first, 1 to 6.
+    pub title_level: u8,
 }
 
 impl Default for SectionStyle {
@@ -42,6 +46,8 @@ impl Default for SectionStyle {
             frame: false,
             accent: None,
             numbered: true,
+            word: "Section".into(),
+            title_level: 2,
         }
     }
 }
@@ -113,13 +119,46 @@ pub(super) struct SectionsState {
     held: Vec<usize>,
     /// Outline entries before each section asked about, for the document as it stands.
     heads: RefCell<HashMap<usize, usize>>,
+    /// For each section, how many sections before it are named by a heading whose row is left out, and at the
+    /// end the number of all of them. For the document as it stands, with how many sections and outline entries.
+    named: RefCell<Option<NamedRows>>,
+}
+
+/// See [`SectionsState::named`].
+pub(super) type NamedRows = (Arc<LeftOut>, (usize, usize));
+
+/// What the outline leaves out of the rows under sections.
+#[derive(Debug)]
+pub(super) struct LeftOut {
+    /// For each section, how many headings are left out under those before it, and at the end all of them.
+    counts: Vec<u32>,
+    /// The document's title has a row above the sections.
+    title: bool,
+}
+
+impl LeftOut {
+    fn before(&self, k: usize) -> usize {
+        self.counts.get(k).or(self.counts.last()).map_or(0, |n| *n as usize)
+    }
 }
 
 impl SectionsState {
+    pub(super) fn named_now(&self) -> Option<NamedRows> {
+        self.named.borrow().clone()
+    }
+
+    /// What was forgotten comes back, for an edit that cannot change it.
+    pub(super) fn keep_named(&self, named: Option<NamedRows>) {
+        if self.on && named.is_some() {
+            *self.named.borrow_mut() = named;
+        }
+    }
+
     pub(super) fn forget(&self) {
         if self.on {
             self.roles.borrow_mut().clear();
             self.heads.borrow_mut().clear();
+            *self.named.borrow_mut() = None;
         }
     }
 }
@@ -127,6 +166,8 @@ impl SectionsState {
 /// A row of the outline with sections above its headings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutlineRow {
+    /// The document's title, above the sections: entry `k` of the model's outline.
+    Title(usize),
     /// Section `index`.
     Section(usize),
     /// Entry `k` of the model's outline.
@@ -166,29 +207,193 @@ impl View {
         only.map_or(n, |o| o.partition_point(|&e| e < n))
     }
 
-    /// Rows of the outline with sections: every section, each followed by its listed headings.
+    /// Where the document's title is: a `#` that is the first thing in the first section, which stands above the
+    /// sections in the outline and names none of them. On a page whose sections go by `#` it is the first one's name.
+    fn document_title(&self) -> Option<usize> {
+        if self.sections.style.title_level < 2 {
+            return None;
+        }
+        let at = self.doc.section_heading_from(0, 0, None)?;
+        if !matches!(self.leaf_kind(at), Some(LeafKind::Heading { level: 1 })) {
+            return None;
+        }
+        let section = self.doc.section(0)?;
+        let metadata = self.doc.section_metadata(0);
+        let last = self.doc.top_at(at)?;
+        let nothing_before = (0..last)
+            .rev()
+            .map_while(|t| self.doc.top_span(t).filter(|s| s.start >= section.start))
+            .all(|s| {
+                let in_metadata = metadata
+                    .as_ref()
+                    .is_some_and(|m| m.opener.start <= s.start && s.start < m.closer.end);
+                let kind = self.leaf_kind(s.start);
+                matches!(kind, Some(LeafKind::Metadata))
+                    || (in_metadata && !matches!(kind, Some(LeafKind::Heading { .. })))
+            });
+        nothing_before.then_some(at)
+    }
+
+    fn leaf_kind(&self, at: usize) -> Option<LeafKind> {
+        self.doc.leaf(at).map(|l| l.kind)
+    }
+
+    /// The direct heading section `k` goes by, with what it says: the first at the level the page's names are at,
+    /// else the first at any level, the document's title being neither. None when it has an `id`, or no such
+    /// heading says anything.
+    fn naming_heading(&self, k: usize, metadata: Option<&markise_doc::SectionMetadata>) -> Option<(usize, String)> {
+        if metadata.is_some_and(|m| m.get("id").is_some()) {
+            return None;
+        }
+        let from = if k == 0 {
+            self.document_title().map_or(0, |at| at + 1)
+        } else {
+            0
+        };
+        let level = self.sections.style.title_level;
+        let said = |at: usize| {
+            let text = self.doc.heading(at)?.text.trim().to_string();
+            (!text.is_empty()).then_some((at, text))
+        };
+        (self.doc.section_heading_from(k, from, Some(level)))
+            .and_then(said)
+            .or_else(|| self.doc.section_heading_from(k, from, None).and_then(said))
+    }
+
+    /// What section `k` itself goes by, if anything does: its `id`, or a heading that names it.
+    pub fn section_own_name(&self, k: usize) -> Option<String> {
+        let metadata = self.doc.section_metadata(k);
+        (metadata.as_ref().and_then(|m| m.get("id")).map(str::to_string))
+            .or_else(|| self.naming_heading(k, metadata.as_ref()).map(|n| n.1))
+    }
+
+    /// What sections are called on this page.
+    pub fn section_word(&self) -> &str {
+        &self.sections.style.word
+    }
+
+    /// What section `k` shows for a number in the outline, as a boundary does; `None` where a boundary says none.
+    pub fn section_shown_number(&self, k: usize) -> Option<usize> {
+        self.sections
+            .style
+            .numbered
+            .then(|| self.section_number(k))
+            .filter(|n| *n > 0)
+    }
+
+    /// How many of the headings at the head of section `k` have no row under it: the document's title, which has
+    /// one above all the sections, and the heading that names it, which says what its row says. That one only when
+    /// nothing is listed before it: a heading in a block, its metadata's if any, or another of its own.
+    fn left_out_in(&self, k: usize) -> u32 {
+        let title = if k == 0 { self.document_title() } else { None };
+        let metadata = self.doc.section_metadata(k);
+        let Some((at, _)) = self.naming_heading(k, metadata.as_ref()) else {
+            return u32::from(title.is_some());
+        };
+        let named = self.nothing_listed_before(k, at, title, metadata.as_ref());
+        u32::from(title.is_some()) + u32::from(named)
+    }
+
+    fn nothing_listed_before(
+        &self,
+        k: usize,
+        at: usize,
+        title: Option<usize>,
+        metadata: Option<&markise_doc::SectionMetadata>,
+    ) -> bool {
+        let Some(section) = self.doc.section(k) else {
+            return false;
+        };
+        let Some(last) = self.doc.top_at(at) else { return false };
+        (0..last)
+            .rev()
+            .map_while(|t| self.doc.top_span(t).filter(|s| s.start >= section.start))
+            .all(|s| {
+                let in_metadata = metadata.is_some_and(|m| m.opener.start <= s.start && s.start < m.closer.end);
+                let heading = matches!(self.leaf_kind(s.start), Some(LeafKind::Heading { .. }));
+                let boxed = !self.doc.named_containers_at(s.start).is_empty();
+                Some(s.start) == title || (!heading && (!boxed || in_metadata))
+            })
+    }
+
+    /// What [`Self::named_rows`] holds, when this edit does not change it: as many sections and outline entries as
+    /// there were, and the sections the edit is in say what they said. So typing goes on at no cost for it, however
+    /// many sections there are. An edit that pairs far away can change what a far section starts with, which then shows
+    /// until the next change that is not typing: a row too many or too few, and nothing in the wrong place.
+    pub(super) fn sections_names_stand(&self, change: &crate::model::ModelChange) -> Option<NamedRows> {
+        let named = self.sections.named_now()?;
+        let count = self.doc.section_count();
+        if change.full || change.splices().len() != 1 || named.1 != (count, self.model.outline.len()) {
+            return None;
+        }
+        let last = self.doc.text().len();
+        let from =
+            (self.model.items.get(change.inserted.start)).map(|_| self.model.item_start(change.inserted.start))?;
+        let to =
+            (self.model.items.get(change.inserted.end)).map_or(last, |_| self.model.item_start(change.inserted.end));
+        let (a, b) = (self.doc.section_at(from).index, self.doc.section_at(to).index);
+        let same = (a..=b).all(|k| {
+            let was = named.0.counts.get(k + 1).zip(named.0.counts.get(k)).map(|(x, y)| x - y);
+            was == Some(self.left_out_in(k)) && (k > 0 || named.0.title == self.document_title().is_some())
+        });
+        same.then_some(named)
+    }
+
+    /// The running count of [`Self::left_out_in`]. Goes over the sections once per state of the document,
+    /// reading only what each starts with, and only while the outline is asked for.
+    fn named_rows(&self) -> Arc<LeftOut> {
+        if let Some((n, _)) = &*self.sections.named.borrow() {
+            return n.clone();
+        }
+        let count = self.doc.section_count();
+        let mut counts = Vec::with_capacity(count + 1);
+        let mut n = 0u32;
+        for k in 0..count {
+            counts.push(n);
+            n += self.left_out_in(k);
+        }
+        counts.push(n);
+        let out = Arc::new(LeftOut {
+            counts,
+            title: self.document_title().is_some(),
+        });
+        *self.sections.named.borrow_mut() = Some((out.clone(), (count, self.model.outline.len())));
+        out
+    }
+
+    /// Rows of the outline with sections: the document's title if it has one, then every section, each followed by
+    /// its listed headings, but for one that says what its section's row says.
     pub fn outline_row_count(&self, only: Option<&[usize]>) -> usize {
-        self.doc.section_count() + only.map_or(self.model.outline.len(), <[usize]>::len)
+        let listed = only.map_or(self.model.outline.len(), <[usize]>::len);
+        let left = self.named_rows();
+        let title = usize::from(left.title);
+        title + self.doc.section_count() + listed.saturating_sub(left.before(self.doc.section_count()))
     }
 
     /// Row `row` of that outline. O(log sections) lookups: the rows are not built, so a list of
     /// any size costs what is on screen.
     pub fn outline_row(&self, row: usize, only: Option<&[usize]>) -> OutlineRow {
+        let left = self.named_rows();
+        let first = |i: usize| only.map_or(i, |o| o.get(i).copied().unwrap_or(i));
+        let title = usize::from(left.title);
+        if row < title {
+            return OutlineRow::Title(first(0));
+        }
+        let row = row - title;
         let (mut lo, mut hi) = (0, self.doc.section_count());
         // the last section whose row is at or before this one
         while lo + 1 < hi {
             let mid = (lo + hi) / 2;
-            if mid + self.listed_before(mid, only) <= row {
+            if (mid + self.listed_before(mid, only)).saturating_sub(left.before(mid)) <= row {
                 lo = mid;
             } else {
                 hi = mid;
             }
         }
-        if lo + self.listed_before(lo, only) == row {
+        if (lo + self.listed_before(lo, only)).saturating_sub(left.before(lo)) == row {
             OutlineRow::Section(lo)
         } else {
-            let i = row - lo - 1;
-            OutlineRow::Heading(only.map_or(i, |o| o.get(i).copied().unwrap_or(i)))
+            OutlineRow::Heading(first(row - lo - 1 + left.before(lo + 1)))
         }
     }
 
@@ -200,9 +405,16 @@ impl View {
             Some(o) => o.partition_point(|&e| e <= k).checked_sub(1),
             None => Some(k),
         });
+        let left = self.named_rows();
+        let title = usize::from(left.title);
+        // at the title, its row; at what is left out under a section, that section's
+        if title == 1 && section == 0 && place == Some(0) {
+            return 0;
+        }
+        let under = left.before(section + 1) - left.before(section);
         match place {
-            Some(p) if p >= before => p + section + 1,
-            _ => section + before,
+            Some(p) if p >= before + under => title + p + section + 1 - left.before(section + 1),
+            _ => title + (section + before).saturating_sub(left.before(section)),
         }
     }
 
@@ -328,16 +540,16 @@ impl View {
         )]
     }
 
-    /// What to call section `index`: its `id`, else its first heading, else its number from 1.
+    /// What to call section `index`: what it goes by, else what sections are called here with its number. The
+    /// outline, the status bar and whatever speaks of it say this.
     pub fn section_name(&self, index: usize) -> String {
-        if let Some(id) = (self.doc.section_metadata(index)).and_then(|m| m.get("id").map(str::to_string)) {
-            return id;
-        }
-        let heading = (self.doc.section_first_heading(index)).and_then(|at| self.doc.heading(at));
-        match heading.map(|h| h.text.trim().to_string()).filter(|t| !t.is_empty()) {
-            Some(text) => text,
-            None => format!("Section {}", index + 1),
-        }
+        self.section_own_name(index).unwrap_or_else(|| {
+            let word = self.section_word();
+            match self.section_number(index) {
+                0 => word.to_string(),
+                n => format!("{word} {n}"),
+            }
+        })
     }
 
     /// Part of what a measured page height holds for.
