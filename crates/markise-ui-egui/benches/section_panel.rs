@@ -119,6 +119,27 @@ fn main() {
     let sections = r.app.viewer().unwrap().ed.session.doc().section_count();
     println!("{} KiB, {sections} sections", text.len() >> 10);
 
+    // typing: the frame after each key, with the outline shown and without
+    for (name, files) in [("a key, the outline hidden", true), ("a key, the outline shown", false)] {
+        r.app.show_files_tab(files);
+        r.frame();
+        let mut typing = Vec::new();
+        for _ in 0..40 {
+            let v = r.app.viewer().unwrap();
+            let at = v.ed.session.text().find("Intro").unwrap();
+            v.ed.set_selection(markise_doc::Selection::caret_at(markise_doc::DocPos::new(at)));
+            let t = Instant::now();
+            let _ = v.ed.edit(|s| s.insert_text("x"));
+            let spent = t.elapsed();
+            typing.push(spent + r.frame());
+        }
+        report(name, typing);
+        for _ in 0..40 {
+            let _ = r.app.viewer().unwrap().ed.edit(|s| s.undo());
+        }
+        r.frame();
+    }
+
     let row = r.at("part-0").expect("a row").center();
     r.hover(Pos2::new(row.x, H - 300.0));
     report("panel at rest", (0..60).map(|_| r.frame()).collect());
