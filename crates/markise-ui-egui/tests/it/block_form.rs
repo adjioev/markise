@@ -1400,3 +1400,29 @@ fn the_form_says_when_a_picture_of_the_block_cannot_reach_a_file_it_shows() {
     }
     assert!(!has(&h, NOTE), "with nothing to draw a picture, nothing to say");
 }
+
+/// Issue #231: a text field holding a code block is shown, not edited: typing in it changes nothing,
+/// and Save writes nothing. A field next to it stays editable.
+#[test]
+fn a_text_field_holding_code_is_read_only() {
+    let doc = "# Doc\n\n:::tip\n\n### A title\n\nBefore\n\n```rust info\n  let x = 1;\n\\# kept\n```\n\n    indented\n\n:::\n";
+    let f = Fixture::new(doc);
+    let mut h = f.ready();
+    open_form(&mut h, "tip");
+    let body = draft(&h)["body"].as_str().unwrap().to_string();
+    assert!(body.contains("```rust info\n  let x = 1;\n\\# kept\n```"), "{body}");
+    assert!(has(&h, "holds a code block"));
+    h.get_by_label("Body").click();
+    common::run(&mut h);
+    h.get_by_label("Body").type_text("typed");
+    common::run(&mut h);
+    assert_eq!(draft(&h)["body"].as_str(), Some(body.as_str()), "nothing goes in");
+    h.get_by_label("Title").click();
+    common::run(&mut h);
+    h.get_by_label("Title").type_text("!");
+    common::run(&mut h);
+    h.get_by_label("Save").click();
+    common::run(&mut h);
+    assert!(h.state().block_form().is_none(), "Save closes");
+    assert_eq!(text(&h), doc.replace("A title", "A title!"), "the code keeps its bytes");
+}

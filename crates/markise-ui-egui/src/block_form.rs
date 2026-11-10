@@ -89,6 +89,17 @@ fn row_items(model: &BlockFields, form: &mut SchemaForm) -> RowItems {
     out
 }
 
+/// A text field holding a code block shows read-only: a value line written anew would be escaped and
+/// lose its indent, so the code is edited in the Markdown (issue #231). The engine refuses such an edit
+/// in any case; this is so nobody types what cannot be saved.
+fn keep_code(model: &BlockFields, form: &mut SchemaForm) {
+    for f in model.fields() {
+        if let FieldValue::Text(_) = f.value {
+            form.set_read_only(&f.name, model.holds_code(&f.name).then(|| CODE_KEPT.to_string()));
+        }
+    }
+}
+
 /// What each row of the form is now: its item, or none for a new row.
 fn rows_now(rows: &RowItems, form: &mut SchemaForm) -> HashMap<String, Vec<Option<ItemId>>> {
     (rows.iter())
@@ -244,6 +255,7 @@ impl OpenForm {
                     .with_texts(form_texts());
                 form.request_focus();
                 let rows = row_items(&model, &mut form);
+                keep_code(&model, &mut form);
                 Content::Form(Box::new(Ready {
                     rows,
                     model,
@@ -406,6 +418,7 @@ impl OpenForm {
             add_extras(&r.model, &mut r.block_reasons);
             r.form.set_values(values.clone());
             r.rows = row_items(&r.model, &mut r.form);
+            keep_code(&r.model, &mut r.form);
             r.baseline = values;
         } else {
             // another variant has another form: the caller opens it anew
@@ -638,6 +651,9 @@ const IN_NO_FIELD: &str = "In no field, kept as it is";
 /// Markdown nested under an item is the item's: the form keeps it and the Markdown is where it is edited.
 pub(crate) const NESTED_KEPT: &str = "Markdown nested under an item is kept with it. Edit it in the block's \
                                       Markdown or in Source.";
+/// A text field with a code block in it is shown, not edited: the code keeps its bytes.
+pub(crate) const CODE_KEPT: &str = "This field holds a code block, which is kept as written. Edit it in the \
+                                    block's Markdown or in Source.";
 const STALE: &str = "The block changed in the document, so the draft was not saved. Read the block again \
                      to lose the draft, or Cancel.";
 const GONE: &str =

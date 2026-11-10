@@ -39,6 +39,8 @@ pub(super) struct ItemSrc {
     pub image: Option<(R, R)>,
     /// What in its own text is not plain text: a block that starts the item.
     pub protected: Vec<R>,
+    /// The code, math and HTML blocks among `protected`: kept byte for byte, never rewritten.
+    pub code: Vec<R>,
     /// Markdown nested under the item after its own text: from the end of that text (its line
     /// terminator included) to the end of the item. Part of the item, kept byte for byte, never
     /// read as a value.
@@ -65,6 +67,9 @@ pub(super) struct FieldSrc {
     pub numbering: Option<Numbering>,
     /// What in a text field or quote is not plain text: a code block or list it took as it stands.
     pub protected: Vec<R>,
+    /// The code, math and HTML blocks in it, at any depth: their lines are values as written, and
+    /// no edit may change their bytes.
+    pub code: Vec<R>,
 }
 
 /// A region of the body. Field regions and extras never overlap.
@@ -174,8 +179,28 @@ fn assign(shapes: &[Shape], decls: &[FieldDecl]) -> Vec<Option<usize>> {
     out
 }
 
-/// The lines of a text region, or of a quote with its markers as prefixes.
-fn plain_lines(s: &str, r: R, quote: bool, opts: &ParseOptions) -> Vec<Line> {
+/// A block whose lines are literal text: escaping, unescaping or trimming them changes what it says.
+fn is_verbatim(b: &Block) -> bool {
+    matches!(
+        b.kind,
+        BlockKind::FencedCode { .. } | BlockKind::IndentedCode | BlockKind::MathBlock { .. } | BlockKind::HtmlBlock
+    )
+}
+
+/// The verbatim blocks among `blocks` and below them, as whole lines.
+fn verbatim_ranges<'a>(s: &str, blocks: impl IntoIterator<Item = &'a Block>, out: &mut Vec<R>) {
+    for b in blocks {
+        if is_verbatim(b) {
+            out.push(extended(s, b));
+        } else {
+            verbatim_ranges(s, &b.children, out);
+        }
+    }
+}
+
+/// The lines of a text region, or of a quote with its markers as prefixes. A line of a code block
+/// in it is its value as written: no escape is taken from it.
+fn plain_lines(s: &str, r: R, quote: bool, code: &[R], opts: &ParseOptions) -> Vec<Line> {
     let line = |(l, term): (R, R)| {
         let text = &s[l.clone()];
         let indent = text.len() - text.trim_start_matches(' ').len();
@@ -183,7 +208,12 @@ fn plain_lines(s: &str, r: R, quote: bool, opts: &ParseOptions) -> Vec<Line> {
         if quote && indent <= 3 && text[indent..].starts_with('>') {
             p += indent + 1 + usize::from(text[indent + 1..].starts_with(' '));
         }
-        let value = unescape_line(&s[p..l.end], opts);
+        let verbatim = code.iter().any(|c| c.start <= l.start && l.end <= c.end);
+        let value = if verbatim {
+            s[p..l.end].to_string()
+        } else {
+            unescape_line(&s[p..l.end], opts)
+        };
         Line {
             prefix: l.start..p,
             content: p..l.end,
@@ -309,10 +339,11 @@ fn list_item(s: &str, b: &Block, opts: &ParseOptions, choice: bool) -> Option<(I
     });
     src.task_box = task.map(|(_, bx)| bx.start..bx.end);
     src.lines = lines;
-    src.protected = (b.children.iter())
+    let own: Vec<&Block> = (b.children.iter())
         .filter(|c| !matches!(c.kind, BlockKind::Paragraph) && c.span.start < own_end)
-        .map(|c| extended(s, c))
         .collect();
+    src.protected = own.iter().map(|c| extended(s, c)).collect();
+    verbatim_ranges(s, own, &mut src.code);
     src.under = own_end..whole.end;
     Some((src, data))
 }
@@ -406,14 +437,15 @@ fn read_field(s: &str, f: &mut Field, group: &[Block], whole: R, next_item: &mut
             f.value = FieldValue::Text(f.src.lines[0].value.clone());
         }
         FieldKind::Text | FieldKind::Quote => {
-            f.src.lines = plain_lines(s, whole.clone(), f.kind == FieldKind::Quote, opts);
-            f.value = FieldValue::Text(join_values(&f.src.lines));
             // a quote holding more than paragraphs, a text field with what it took as it stands
             let held: Vec<&Block> = if f.kind == FieldKind::Quote {
                 group.iter().flat_map(|b| &b.children).collect()
             } else {
                 group.iter().collect()
             };
+            verbatim_ranges(s, held.iter().copied(), &mut f.src.code);
+            f.src.lines = plain_lines(s, whole.clone(), f.kind == FieldKind::Quote, &f.src.code, opts);
+            f.value = FieldValue::Text(join_values(&f.src.lines));
             f.src.protected = (held.into_iter())
                 .filter(|b| !matches!(b.kind, BlockKind::Paragraph))
                 .map(|b| extended(s, b))

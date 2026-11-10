@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use markise_doc::DocumentFormat;
 use markise_engine::block_fields::{
-    BlockFields, FieldDecl, FieldEdit, FieldKind, FieldValue, ItemData, ItemId, block_range_at, decls_from_spec,
+    BlockFields, FieldDecl, FieldEdit, FieldKind, FieldValue, FieldsError, ItemData, ItemId, block_range_at,
+    decls_from_spec,
 };
 use markise_engine::editor::{EditorSession, HistoryLimits, ManualClock};
 use markise_md::{MarkdownFormat, ParseOptions};
@@ -1586,4 +1587,150 @@ fn a_slot_edit_keeps_the_argument_and_an_argument_is_one_undo_step() {
         b.apply_to_session(&mut changed, &[set_argument("c")], "Edit Block"),
         Err(markise_engine::block_fields::FieldsError::Stale)
     ));
+}
+
+/// Issue #231: a code line edited through a text field lost its indent, and a fence line got a `\`.
+/// A text field holding a code block keeps it byte for byte: an edit that would change it is refused.
+#[test]
+fn a_code_block_in_a_text_field_is_never_rewritten() {
+    let src = ":::f\n\n# T\n\nBefore\n\n```rust title\n  let x = 1;\n\\# not an escape\n```\n\n    indented code\n\nAfter\n\n:::";
+    let b = dec(src, &figure_decls());
+    let caption = b.values()["caption"].as_str().unwrap().to_string();
+    // the value shows the code as written, escapes and indents included
+    assert!(
+        caption.contains("```rust title\n  let x = 1;\n\\# not an escape\n```"),
+        "{caption}"
+    );
+    assert!(caption.contains("\n    indented code\n"), "{caption}");
+    assert!(b.holds_code("caption"));
+    assert!(!b.holds_code("title"));
+    // editing a code line, the info string or the indent is refused, and nothing is written
+    for (from, to) in [
+        ("  let x = 1;", "  let x = 2;"),
+        ("```rust title", "```python"),
+        ("    indented code", "    indented code!"),
+        ("\\# not an escape\n", "\\# not an escape\nmore\n"),
+    ] {
+        let text = caption.replacen(from, to, 1);
+        let e = b.apply(&[FieldEdit::SetText {
+            field: "caption".into(),
+            text: text.clone(),
+        }]);
+        assert!(
+            matches!(e, Err(FieldsError::Code { ref field }) if field == "caption"),
+            "{from:?} -> {to:?}: {:?}",
+            e.map(|a| a.fields.source().to_string())
+        );
+        let e = b.edits_from_values(&json!({"title": "T", "caption": text, "pictures": []}));
+        if let Ok(edits) = e {
+            assert!(b.apply(&edits).is_err(), "{from:?}");
+        }
+    }
+    // emptying the field would take the code away: refused too
+    assert!(
+        b.apply(&[FieldEdit::SetText {
+            field: "caption".into(),
+            text: String::new()
+        }])
+        .is_err()
+    );
+    // the prose around it is text, and the code keeps its bytes
+    let next = run(
+        &b,
+        &[FieldEdit::SetText {
+            field: "caption".into(),
+            text: caption.replace("Before", "# Before").replace("After", "After!"),
+        }],
+    );
+    assert_eq!(
+        next.source(),
+        src.replace("Before", "\\# Before").replace("After", "After!")
+    );
+}
+
+/// The code, math and HTML blocks of a block's source, as written.
+fn code_blocks(src: &str) -> Vec<String> {
+    fn walk(s: &str, blocks: &[markise_md::Block], out: &mut Vec<String>) {
+        for b in blocks {
+            match b.kind {
+                markise_md::BlockKind::FencedCode { .. } | markise_md::BlockKind::IndentedCode => {
+                    out.push(s[b.span.start..b.span.end].to_string())
+                }
+                _ => walk(s, &b.children, out),
+            }
+        }
+    }
+    let doc = markise_md::Document::parse(src, ParseOptions::default());
+    let mut out = Vec::new();
+    walk(src, &doc.tree(), &mut out);
+    out
+}
+
+fn code_source() -> impl Strategy<Value = String> {
+    let part = prop_oneof![
+        "[a-z]{1,6}( [a-z]{1,4})?".prop_map(|w| w),
+        ("[a-z]{0,4}", proptest::collection::vec(code_line(), 1..4))
+            .prop_map(|(info, lines)| format!("```{info}\n{}\n```", lines.join("\n"))),
+        proptest::collection::vec(code_line(), 1..3).prop_map(|lines| lines
+            .iter()
+            .map(|l| format!("    {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")),
+    ];
+    (
+        prop_oneof![Just("\n"), Just("\r\n")],
+        proptest::collection::vec(part, 1..5),
+    )
+        .prop_map(|(eol, parts)| {
+            // two indented code blocks in a row would be one
+            let body = parts.join("\n\nx\n\n");
+            format!(":::f\n\n# T\n\n{body}\n\n:::").replace('\n', eol)
+        })
+}
+
+fn code_line() -> impl Strategy<Value = String> {
+    prop_oneof![
+        "[a-z]{1,5}".prop_map(|w| w),
+        Just("  indented".to_string()),
+        Just("\\# escaped".to_string()),
+        Just("# hash".to_string()),
+        Just("- dash".to_string()),
+        Just("\tTab".to_string()),
+    ]
+}
+
+proptest! {
+    /// Issue #231: whatever a text field's value becomes, a code block in it keeps its bytes, or
+    /// the edit is refused as touching code. An edit that goes through reads back as typed.
+    #[test]
+    fn code_in_a_text_field_round_trips(
+        src in code_source(),
+        at in 0usize..40,
+        line in prop_oneof![code_line(), word(), Just(String::new())],
+        how in 0usize..3,
+    ) {
+        let b = dec(&src, &figure_decls());
+        prop_assert!(b.apply(&[]).expect("applies").patches.is_empty());
+        prop_assert!(b.edits_from_values(&b.values()).expect("fits").is_empty());
+        let caption = b.values()["caption"].as_str().expect("text").to_string();
+        let mut lines: Vec<String> = caption.split('\n').map(str::to_string).collect();
+        let i = at % (lines.len() + 1);
+        match how {
+            0 if i < lines.len() => lines[i] = line,
+            1 if i < lines.len() => {
+                lines.remove(i);
+            }
+            _ => lines.insert(i, line),
+        }
+        let text = lines.join("\n");
+        match b.apply(&[FieldEdit::SetText { field: "caption".into(), text }]) {
+            Ok(out) => {
+                prop_assert_eq!(out.patches.apply_to(b.source()), out.fields.source());
+                prop_assert_eq!(code_blocks(out.fields.source()), code_blocks(b.source()), "{:?}", out.fields.source());
+                let fresh = dec(out.fields.source(), &figure_decls());
+                prop_assert_eq!(fresh.values(), out.fields.values());
+            }
+            Err(e) => prop_assert!(matches!(e, FieldsError::Code { .. }), "{:?}", e),
+        }
+    }
 }

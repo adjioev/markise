@@ -124,6 +124,8 @@ pub struct SchemaForm {
     file_requests: HashMap<u64, Id>,
     /// Files delivered and not yet put into their row.
     delivered: HashMap<Id, String>,
+    /// Text fields shown and not edited, by path, with the host's note on why.
+    read_only: HashMap<String, String>,
 }
 
 impl SchemaForm {
@@ -148,10 +150,26 @@ impl SchemaForm {
             next_request: 0,
             file_requests: HashMap::new(),
             delivered: HashMap::new(),
+            read_only: HashMap::new(),
             editors: HashSet::new(),
             focus_row: None,
             focus_first: false,
         }
+    }
+
+    /// Shows the text field at `path` (a top-level key) as it is: its text can be read, selected and
+    /// copied, and not changed, with `note` under its label to say why and where it is edited. The
+    /// host decides which: the form does not know what a value means. `None` makes it editable again.
+    pub fn set_read_only(&mut self, path: &str, note: Option<String>) {
+        match note {
+            Some(n) => self.read_only.insert(path.to_string(), n),
+            None => self.read_only.remove(path),
+        };
+    }
+
+    /// The note of a read-only text field, `None` when it is editable.
+    pub fn read_only(&self, path: &str) -> Option<&str> {
+        self.read_only.get(path).map(String::as_str)
     }
 
     pub fn with_texts(mut self, texts: Texts) -> Self {
