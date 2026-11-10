@@ -31,6 +31,7 @@ const POLL: &str = r#"{"label": "Poll",
         {"name": "answers", "type": "choices", "ids": "required", "minItems": 2,
          "correct": {"": "exactly-one", "many": "at-least-one", "ways": "at-least-one"}}
     ]}"#;
+const STEPS: &str = r#"{"label": "Steps", "fields": [{"name": "items", "type": "list", "min": 0}]}"#;
 const GALLERY: &str = r#"{"label": "Gallery", "fields": [{"name": "pictures", "type": "image", "min": 0}]}"#;
 const LIMITED: &str = r#"{"label": "Limited", "fields": [{"name": "body", "type": "text", "max": 3}]}"#;
 const PALETTE: &str = r#"{"format": 1, "presets": [{
@@ -54,13 +55,14 @@ struct Fixture {
 }
 
 fn archive() -> Vec<u8> {
-    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip","poll","gallery","limited"]}"#;
+    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip","poll","gallery","limited","steps"]}"#;
     let files = [
         ("manifest.json", manifest),
         ("components/tip/tip.json", TIP),
         ("components/poll/poll.json", POLL),
         ("components/gallery/gallery.json", GALLERY),
         ("components/limited/limited.json", LIMITED),
+        ("components/steps/steps.json", STEPS),
         ("editor/palette.json", PALETTE),
         ("assets/left.svg", ICON),
         ("assets/right.svg", ICON),
@@ -1066,6 +1068,34 @@ fn markdown_nested_under_an_answer_is_kept_through_the_form() {
     h.get_by_label("Save").click();
     common::run(&mut h);
     assert_eq!(text(&h), doc.replace("One {#a1}", "One! {#a1}"));
+}
+
+/// Two rows that read the same, each with its own nested Markdown: what goes with a row is its own,
+/// as the form knows its rows by identity and not by what they say.
+#[test]
+fn nested_markdown_follows_its_own_row_among_rows_that_read_the_same() {
+    let doc = ":::steps\n\n- Same\n  > first\n- Same\n  > second\n- Other\n\n:::\n";
+    let f = Fixture::new(doc);
+    let mut h = f.ready();
+    open_form(&mut h, "steps");
+    h.get_by_label("Remove: Items 1").click();
+    common::run(&mut h);
+    h.get_by_label("Save").click();
+    common::run(&mut h);
+    assert_eq!(text(&h), ":::steps\n\n- Same\n  > second\n- Other\n\n:::\n");
+
+    // a move takes it along too
+    let f = Fixture::new(doc);
+    let mut h = f.ready();
+    open_form(&mut h, "steps");
+    h.get_by_label("Move down: Items 1").click();
+    common::run(&mut h);
+    h.get_by_label("Save").click();
+    common::run(&mut h);
+    assert_eq!(
+        text(&h),
+        ":::steps\n\n- Same\n  > second\n- Same\n  > first\n- Other\n\n:::\n"
+    );
 }
 
 /// Browse… in the picker, until the path has come back from its worker and the form has drawn it: its

@@ -2,11 +2,13 @@
 //! an array of strings, choices are `{id, text, correct}`, images `{alt, path}`. Arrays hold no
 //! [`super::ItemId`]s; [`super::identity`] tells which entry is which item.
 
+use std::collections::HashMap;
+
 use serde_json::{Map, Value, json};
 
 use super::encode::trim_argument;
 use super::identity::matched;
-use super::{BlockFields, FieldEdit, FieldKind, FieldValue, FieldsError, Item, ItemData};
+use super::{BlockFields, FieldEdit, FieldKind, FieldValue, FieldsError, Item, ItemData, ItemId};
 
 fn item_json(d: &ItemData) -> Value {
     match d {
@@ -50,8 +52,23 @@ impl BlockFields {
     }
 
     /// The edits that make the model hold `values`. Unknown keys are ignored, a missing key means
-    /// no change, equal values give no edits.
+    /// no change, equal values give no edits. Entries are matched to items by answer id, then equal
+    /// content, then in order: a caller that knows which row is which says so with
+    /// [`BlockFields::edits_from_rows`].
     pub fn edits_from_values(&self, values: &Value) -> Result<Vec<FieldEdit>, FieldsError> {
+        self.edits_from_rows(values, &HashMap::new())
+    }
+
+    /// [`BlockFields::edits_from_values`], with the identity of each entry of an items field given by
+    /// its caller, such as a form that keeps a key per row: `rows[field][k]` is the item entry `k` is,
+    /// `None` for a new one. So two entries that read the same stay apart, and what is nested under an
+    /// item goes with its own row. A list that does not fit the field (another length, an item that is
+    /// not in it, one item twice) is not used, and the field goes by matching.
+    pub fn edits_from_rows(
+        &self,
+        values: &Value,
+        rows: &HashMap<String, Vec<Option<ItemId>>>,
+    ) -> Result<Vec<FieldEdit>, FieldsError> {
         let mut out = Vec::new();
         for f in &self.fields {
             let Some(v) = values.get(&f.name) else { continue };
@@ -74,7 +91,11 @@ impl BlockFields {
                 FieldValue::Items(old) => {
                     let arr = v.as_array().ok_or_else(wrong)?;
                     let new: Option<Vec<ItemData>> = arr.iter().map(|e| parse_entry(f.kind, e)).collect();
-                    items_edits(&f.name, old, &new.ok_or_else(wrong)?, &mut out);
+                    let new = new.ok_or_else(wrong)?;
+                    let to = (rows.get(&f.name))
+                        .and_then(|r| given(old, r, new.len()))
+                        .unwrap_or_else(|| matched(old, &new));
+                    items_edits(&f.name, old, &new, to, &mut out);
                 }
             }
         }
@@ -82,8 +103,30 @@ impl BlockFields {
     }
 }
 
-fn items_edits(name: &str, old: &[Item], new: &[ItemData], out: &mut Vec<FieldEdit>) {
-    let to = matched(old, new);
+/// The old index of each entry from the identities a caller gave, if they fit.
+fn given(old: &[Item], rows: &[Option<ItemId>], len: usize) -> Option<Vec<Option<usize>>> {
+    if rows.len() != len {
+        return None;
+    }
+    let mut seen = vec![false; old.len()];
+    let mut to = Vec::with_capacity(len);
+    for r in rows {
+        let i = match r {
+            None => None,
+            Some(id) => {
+                let i = old.iter().position(|o| o.id == *id)?;
+                if std::mem::replace(&mut seen[i], true) {
+                    return None;
+                }
+                Some(i)
+            }
+        };
+        to.push(i);
+    }
+    Some(to)
+}
+
+fn items_edits(name: &str, old: &[Item], new: &[ItemData], to: Vec<Option<usize>>, out: &mut Vec<FieldEdit>) {
     let field = || name.to_string();
     for (i, o) in old.iter().enumerate() {
         if !to.contains(&Some(i)) {

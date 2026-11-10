@@ -47,7 +47,14 @@ by it).
   is not content in no field. `BlockFields::nested_under` gives it as it stands.
 - **Writing.** It goes with its item: moved with it, removed with it, kept when the item's text, mark
   or number changes. Only a marker of another width (`9.` becoming `10.`) shifts its lines by as many
-  columns, so that it stays nested.
+  columns, so that it stays nested: the leading blanks of a shifted line are counted in columns, a tab
+  to its stop, and written as spaces, since a tab does not move by a space put before it.
+- **Rows by identity.** Two items can read the same and hold different nested Markdown, so the form's
+  rows are never matched to items by what they say. The form keeps a key per row
+  (`SchemaForm::row_keys`, kept through moves, removals and the presses of choice buttons), the panel
+  notes which item each row was when it read the model, and Save gives that to
+  `BlockFields::edits_from_rows`. Rows that read the same and changed places are a change of the draft.
+  `edits_from_values`, matching by id, content and order, stays for callers with no rows of their own.
 - **Editing.** The simplest honest way: in Markdown. The block's own Markdown view, Source and Side by
   Side edit it as any text. In the native view it shows rendered under the item; the keyboard there
   edits the item's own text as before and does not reach into it. The form keeps it, row by row, and

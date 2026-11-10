@@ -33,6 +33,10 @@ impl Rows {
         v
     }
 
+    pub fn peek(&self, array: Id) -> Option<&[u64]> {
+        self.keys.get(&array).map(Vec::as_slice)
+    }
+
     pub fn store(&mut self, array: Id, keys: Vec<u64>) {
         self.keys.insert(array, keys);
     }
