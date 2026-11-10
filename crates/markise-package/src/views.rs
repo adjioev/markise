@@ -87,6 +87,7 @@ fn parse_practice(
         issues.push(file, format!("`practice` of \"{name}\" must be an object"));
         return None;
     };
+    issues.unknown_keys(file, &format!("`practice` of \"{name}\""), def, &["reveal", "default"]);
     let mut reveal = Vec::new();
     match def.get("reveal") {
         None => {}
@@ -180,6 +181,12 @@ pub(crate) fn parse(
             );
             continue;
         };
+        issues.unknown_keys(
+            file,
+            &format!("the view of \"{name}\""),
+            def,
+            &["kind", "accent", "icon", "fill", "label", "practice"],
+        );
         let accent = opt_token(file, &format!("\"{name}\" accent"), def.get("accent"), issues);
         let icon = opt_token(file, &format!("\"{name}\" icon"), def.get("icon"), issues);
         let fill = opt_switch(file, &name, "fill", def, issues);

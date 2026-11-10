@@ -59,6 +59,7 @@ pub(crate) fn parse(
         Some(v) if v.as_u64() == Some(PALETTE_FORMAT) => {}
         Some(v) => issues.push(file, format!("unsupported palette format {v}")),
     }
+    issues.unknown_keys(file, "the palette", &map, &["format", "groups", "blocks", "presets"]);
     Palette {
         groups: parse_groups(file, map.get("groups"), known, issues),
         blocks: parse_blocks(file, map.get("blocks"), known, issues),
@@ -95,6 +96,9 @@ fn parse_groups(file: &str, v: Option<&Value>, known: &BTreeSet<String>, issues:
         };
         if out.iter().any(|g| g.id == id) {
             issues.push(file, format!("group id \"{id}\" appears twice"));
+        }
+        if let Some(map) = item.as_object() {
+            issues.unknown_keys(file, &format!("group \"{id}\""), map, &["id", "label", "blocks"]);
         }
         let label = opt_localized(file, &format!("group \"{id}\" label"), item.get("label"), issues);
         let mut blocks = Vec::new();
@@ -146,10 +150,11 @@ fn parse_blocks(
             continue;
         }
         let what = format!("block \"{name}\"");
-        if !def.is_object() {
+        let Some(map) = def.as_object() else {
             issues.push(file, format!("{what} must be an object"));
             continue;
-        }
+        };
+        issues.unknown_keys(file, &what, map, &["description", "when", "icon"]);
         out.insert(
             name.clone(),
             PaletteBlock {
@@ -161,6 +166,21 @@ fn parse_blocks(
     }
     out
 }
+
+/// What a preset may say: its own keys and those the form reads for icon choices (ADR 0020).
+const PRESET_KEYS: &[&str] = &[
+    "id",
+    "block",
+    "label",
+    "keywords",
+    "markdown",
+    "widget",
+    "variant",
+    "field",
+    "answers",
+    "columns",
+    "field_label",
+];
 
 fn parse_presets(file: &str, v: Option<&Value>, known: &BTreeSet<String>, issues: &mut Issues) -> Vec<Preset> {
     let items = match v {
@@ -196,6 +216,7 @@ fn parse_presets(file: &str, v: Option<&Value>, known: &BTreeSet<String>, issues
             continue;
         };
         check_block(file, &what, block, known, issues);
+        issues.unknown_keys(file, &what, map, PRESET_KEYS);
         let markdown = opt_text(
             file,
             &format!("{what} markdown"),

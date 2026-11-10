@@ -28,12 +28,15 @@ struct Fixture {
 fn archive(version: &str) -> Vec<u8> {
     let manifest =
         format!(r#"{{"format":"markise-block-package/2","library":"sample","version":"{version}","blocks":["tip"]}}"#);
+    // a newer package may say what this build does not read
+    let tip = if version.ends_with("-newer") {
+        r#"{"label":"Tip","fields":[{"name":"body","type":"text","laterKey":true}]}"#
+    } else {
+        r#"{"label":"Tip","fields":[{"name":"body","type":"text"}]}"#
+    };
     let files = [
         ("manifest.json", manifest.as_str()),
-        (
-            "components/tip/tip.json",
-            r#"{"label":"Tip","fields":[{"name":"body","type":"text"}]}"#,
-        ),
+        ("components/tip/tip.json", tip),
         ("components/tip/tip.js", "not run"),
         ("editor/palette.json", r#"{"format":1}"#),
     ];
@@ -386,4 +389,24 @@ fn stop_using_is_ordered_before_the_next_documents_lookup() {
         h.state().block_package_status()
     );
     assert!(matches!(h.state().block_package_status(), PackageStatus::NotInUse(_)));
+}
+
+#[test]
+fn keys_a_newer_package_has_are_noted_in_its_status_and_refuse_nothing() {
+    let f = Fixture::new();
+    f.bind("2.0.0-newer");
+    let mut h = f.harness();
+    f.open(&mut h);
+    h.get_by_label(USE).click();
+    h.step();
+    wait_until(&mut h, "the install", |a| a.block_package().is_some());
+    settle(&mut h);
+    common::run(&mut h);
+    assert!(has(&h, "Blocks: sample 2.0.0-newer · 1 note"));
+    let package = h.state().block_package().unwrap();
+    assert_eq!(package.index.notes().len(), 1);
+    h.get_by_label("Blocks: sample 2.0.0-newer · 1 note").click();
+    common::run(&mut h);
+    assert!(has(&h, "does not read these and ignores them"));
+    assert!(has(&h, "field \"body\" has the key \"laterKey\""));
 }

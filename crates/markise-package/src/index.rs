@@ -31,6 +31,8 @@ pub struct PackageIndex {
     views: BTreeMap<String, ViewConfig>,
     /// `editor/sections.json`, if it is there.
     sections: Option<SectionConfig>,
+    /// What this build does not read and ignores (ADR 0019): said, not refused.
+    notes: Vec<Issue>,
 }
 
 /// Everything the package says about one block.
@@ -57,7 +59,7 @@ impl PackageIndex {
             .get(MANIFEST)
             .ok_or_else(|| refuse("the package has no manifest".to_string()))?;
         let Some(manifest) = parse_object(MANIFEST, manifest, &mut issues) else {
-            return issues.into_result(PackageIndex::empty);
+            return issues.into_result(|_| PackageIndex::empty());
         };
         // The format decides how to read everything else, so it is checked before anything else.
         match manifest.get("format").and_then(Value::as_str) {
@@ -71,6 +73,12 @@ impl PackageIndex {
             None => return Err(refuse("the manifest does not name a format".to_string())),
         }
 
+        issues.unknown_keys(
+            MANIFEST,
+            "the manifest",
+            &manifest,
+            &["format", "library", "version", "blocks", "authoring", "htmlContract"],
+        );
         let library = manifest_token(&manifest, "library", &mut issues);
         let version = manifest_token(&manifest, "version", &mut issues);
         let names = manifest_blocks(&manifest, &mut issues);
@@ -123,7 +131,8 @@ impl PackageIndex {
             .and_then(|bytes| parse_object(SECTIONS, bytes, &mut issues))
             .map(|map| sections::parse(SECTIONS, map, &mut issues));
 
-        issues.into_result(|| PackageIndex {
+        issues.into_result(|notes| PackageIndex {
+            notes,
             id: PackageId { library, version },
             authoring,
             html_contract,
@@ -147,7 +156,14 @@ impl PackageIndex {
             palette: Palette::default(),
             views: BTreeMap::new(),
             sections: None,
+            notes: Vec::new(),
         }
+    }
+
+    /// What the package says that this build does not read: keys of a newer package, ignored. Nothing
+    /// here refuses the package; the app's package status and `blocks check` list them.
+    pub fn notes(&self) -> &[Issue] {
+        &self.notes
     }
 
     pub fn id(&self) -> &PackageId {

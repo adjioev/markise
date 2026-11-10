@@ -563,3 +563,78 @@ fn a_practice_can_be_what_a_block_opens_in() {
     ));
     assert!(text.contains("`practice.default`") && text.contains("poll"), "{text}");
 }
+
+fn notes(files: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
+    let index = PackageIndex::from_files(files).expect("a newer package's keys refuse nothing");
+    index.notes().iter().map(ToString::to_string).collect()
+}
+
+#[test]
+fn keys_this_version_does_not_read_are_said_and_refuse_nothing() {
+    let schema = r#"{"label": "Tip", "someday": 1, "argument": {"name": "a", "later": true},
+        "fields": [{"name": "body", "type": "text", "min": 1, "newKey": {"x": 1}}]}"#;
+    let found = notes(&with("components/tip/tip.json", schema));
+    for want in [
+        "components/tip/tip.json: the schema has the key \"someday\", which this version of Markise does not read",
+        "components/tip/tip.json: the argument has the key \"later\"",
+        "components/tip/tip.json: field \"body\" has the key \"newKey\"",
+    ] {
+        assert!(found.iter().any(|n| n.starts_with(want)), "{want}: {found:?}");
+    }
+    let in_schema = found
+        .iter()
+        .filter(|n| n.starts_with("components/tip/tip.json"))
+        .count();
+    assert_eq!(in_schema, 3, "{found:?}");
+    // the shared fixture's keys for later are said too, wherever they stand
+    assert!(
+        found
+            .iter()
+            .any(|n| n.contains("preset \"poll-two\" has the key \"site_hint\"")),
+        "{found:?}"
+    );
+    let views = r#"{"tip": {"kind": "callout", "later": 1}, "poll": {"kind": "choices", "practice": {"soon": 2}}}"#;
+    let found = notes(&with("editor/views.json", views));
+    assert!(
+        found
+            .iter()
+            .any(|n| n.contains("the view of \"tip\" has the key \"later\"")),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|n| n.contains("`practice` of \"poll\" has the key \"soon\"")),
+        "{found:?}"
+    );
+    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1.2.0","blocks":["gallery","poll","tip"],"created":"today"}"#;
+    let found = notes(&with("manifest.json", manifest));
+    assert!(
+        found.iter().any(|n| n.contains("the manifest has the key \"created\"")),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn a_package_with_only_known_keys_has_no_notes_and_an_unknown_type_still_refuses() {
+    let mut f = files();
+    let known_only = PackageIndex::from_files(&with(
+        "components/tip/tip.json",
+        r#"{"label": "Tip", "fields": [{"name": "body", "type": "text", "min": 1, "label": "Body"}]}"#,
+    ))
+    .unwrap();
+    assert!(
+        known_only.notes().iter().all(|n| n.file != "components/tip/tip.json"),
+        "{:?}",
+        known_only.notes()
+    );
+    f.insert(
+        "components/tip/tip.json".to_string(),
+        br#"{"fields": [{"name": "body", "type": "explanation", "newKey": 1}]}"#.to_vec(),
+    );
+    let text = refusal(&f);
+    assert!(
+        text.contains("field \"body\" has the unknown type \"explanation\""),
+        "{text}"
+    );
+}

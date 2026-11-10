@@ -122,6 +122,17 @@ fn details(pending: &Pending) -> String {
     )
 }
 
+/// Above a package's notes: what they are and that they change nothing.
+pub const NOTES_HEAD: &str = "This version of Markise does not read these and ignores them:";
+
+fn notes_count(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => " · 1 note".to_string(),
+        n => format!(" · {n} notes"),
+    }
+}
+
 /// The status bar's item: which package the document uses, or why not.
 pub fn status_item(ui: &mut Ui, status: &PackageStatus, out: &mut Vec<PackageAction>) {
     match status {
@@ -144,7 +155,13 @@ pub fn status_item(ui: &mut Ui, status: &PackageStatus, out: &mut Vec<PackageAct
         }
         PackageStatus::Ready(p) => {
             let id = p.index.id();
-            let label = RichText::new(format!("Blocks: {}", name_of(&id.library, &id.version))).weak();
+            let notes = p.index.notes();
+            let label = RichText::new(format!(
+                "Blocks: {}{}",
+                name_of(&id.library, &id.version),
+                notes_count(notes.len())
+            ))
+            .weak();
             ui.menu_button(label, |ui| {
                 ui.set_max_width(360.0);
                 small(
@@ -156,6 +173,10 @@ pub fn status_item(ui: &mut Ui, status: &PackageStatus, out: &mut Vec<PackageAct
                         p.binding.file.display()
                     ),
                 );
+                if !notes.is_empty() {
+                    let text: Vec<String> = notes.iter().map(ToString::to_string).collect();
+                    small(ui, clip(&format!("{NOTES_HEAD}\n{}", text.join("\n"))));
+                }
                 if ui.button("Stop Using This Package").clicked() {
                     out.push(PackageAction::Forget);
                     ui.close();
