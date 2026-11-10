@@ -682,6 +682,40 @@ fn render_list_item(
         }
         out.push_str(&written);
     }
+    if let Some(x) = item.src.as_ref().filter(|x| !x.under.is_empty()) {
+        // what is nested under it goes with it; only a marker of another width moves its indent
+        let old_head = &s[x.head.clone()];
+        let old_hang = old_head
+            .find('[')
+            .filter(|_| correct.is_some())
+            .unwrap_or(old_head.len());
+        let shift = width as isize - columns(&old_head[..old_hang]) as isize;
+        out.push_str(&reindent(&s[x.under.clone()], shift));
+    }
+}
+
+/// `text`, lines after its first line terminator shifted by `shift` columns: spaces added, or
+/// leading spaces taken away as far as there are. A blank line stays as it is.
+fn reindent(text: &str, shift: isize) -> String {
+    if shift == 0 {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.split_inclusive('\n').enumerate() {
+        let body = line.trim_end_matches(['\r', '\n']);
+        if i == 0 && !text.starts_with(['\r', '\n']) || body.trim().is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        if shift > 0 {
+            out.push_str(&" ".repeat(shift as usize));
+            out.push_str(line);
+        } else {
+            let spaces = body.len() - body.trim_start_matches(' ').len();
+            out.push_str(&line[spaces.min(shift.unsigned_abs())..]);
+        }
+    }
+    out
 }
 
 fn alt_source(alt: &str) -> String {

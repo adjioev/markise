@@ -201,3 +201,54 @@ fn while_a_package_is_not_known_all_a_block_holds_is_concealed() {
     ed.view.set_blocks_veiled(false);
     assert!(!ed.view.practice_conceals(inside));
 }
+
+#[test]
+fn markdown_nested_under_an_answer_shows_and_is_no_answer() {
+    let text = ":::question\n\nWhich?\n\n- [ ] One {#a1}\n  > Said of one.\n- [x] Two {#a2}\n\n  ![two](two.png)\n\n> Why.\n\n:::";
+    let views = views();
+    assert_eq!(
+        views.verdict("question", "", text),
+        markise_engine::block_view::BlockVerdict::Fits
+    );
+    let markise_layout::BlockLook::Native(block) = views.look("question", "", text) else {
+        panic!("native")
+    };
+    let parts = block.practice.as_ref().expect("practised");
+    assert!(parts.is_ready() && !parts.stray_marks);
+    assert_eq!(parts.answers.len(), 2);
+    let rel = |needle: &str| text.find(needle).unwrap() as u32;
+    assert_eq!(parts.answer_at(rel("One")), Some(0));
+    for nested in ["Said of one", "![two]"] {
+        assert_eq!(parts.answer_at(rel(nested)), None, "{nested} is no answer");
+        assert!(!parts.reveals(rel(nested)), "{nested} is not hidden");
+    }
+    assert!(parts.reveals(rel("Why")));
+
+    // shown natively, and in Practice it shows as it is; pressing it selects nothing
+    let shown = |ed: &mut EditorView| {
+        let mut fonts = testing::fonts();
+        let mut f = fonts.with_pixels_per_point(2.0);
+        let mut out = String::new();
+        for s in ed.view.frame(VH, 0.0, &mut f, &NoImages) {
+            for p in &s.layout.prims {
+                if let markise_layout::block::Prim::Text { text, .. } = p {
+                    out.push_str(text.text());
+                    out.push('|');
+                }
+            }
+        }
+        out
+    };
+    let mut ed = editor(text.to_string());
+    let native = shown(&mut ed);
+    assert!(ed.view.native_block(rel("Said of one") as usize).is_some(), "native");
+    assert!(native.contains("Said of one.") && !native.contains("{#a1}"), "{native}");
+    ed.set_read_mode(true);
+    let practised = shown(&mut ed);
+    assert!(practised.contains("Said of one."), "{practised}");
+    assert!(ed.view.practice_conceals(rel("Why") as usize));
+    assert!(!ed.view.practice_conceals(rel("Said of one") as usize));
+    assert!(!ed.practice_press(rel("Said of one") as usize));
+    assert!(ed.practice_press(rel("Two") as usize));
+    assert_eq!(ed.session.text(), text);
+}

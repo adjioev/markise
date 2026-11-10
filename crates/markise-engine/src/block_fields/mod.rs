@@ -273,6 +273,34 @@ impl BlockFields {
             .collect()
     }
 
+    /// The Markdown nested under a list item or an answer, after its own text, as it stands in the
+    /// source: indented, from the first line after that text. `None` when there is none. It is part
+    /// of the item, moves and goes with it and keeps its bytes, and is no part of any value.
+    pub fn nested_under(&self, item: ItemId) -> Option<&str> {
+        let src = (self.fields.iter())
+            .filter_map(|f| match &f.value {
+                FieldValue::Items(items) => Some(items),
+                FieldValue::Text(_) => None,
+            })
+            .flatten()
+            .find(|i| i.id == item)?
+            .src
+            .as_ref()?;
+        let text = self.source[src.under.clone()].trim_start_matches(['\r', '\n']);
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Whether any item has Markdown nested under it ([`BlockFields::nested_under`]).
+    pub fn has_nested(&self) -> bool {
+        (self.fields.iter())
+            .filter_map(|f| match &f.value {
+                FieldValue::Items(items) => Some(items),
+                FieldValue::Text(_) => None,
+            })
+            .flatten()
+            .any(|i| self.nested_under(i.id).is_some())
+    }
+
     /// The regions the fields took, in source order, with the kind of field each is.
     pub fn field_regions(&self) -> Vec<(Range<usize>, FieldKind)> {
         (self.chunks.iter())

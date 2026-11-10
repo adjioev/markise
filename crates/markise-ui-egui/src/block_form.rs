@@ -493,6 +493,9 @@ impl OpenForm {
                         body_ui.label(RichText::new(reason).size(11.5).color(st.muted));
                     }
                 }
+                if r.model.has_nested() {
+                    body_ui.label(RichText::new(NESTED_KEPT).size(11.5).color(st.muted));
+                }
                 body_ui.add_space(spacing);
                 r.form.set_style(st);
                 let mut host = FrameHost {
@@ -549,6 +552,9 @@ impl OpenForm {
 }
 
 const IN_NO_FIELD: &str = "In no field, kept as it is";
+/// Markdown nested under an item is the item's: the form keeps it and the Markdown is where it is edited.
+pub(crate) const NESTED_KEPT: &str = "Markdown nested under an item is kept with it. Edit it in the block's \
+                                      Markdown or in Source.";
 const STALE: &str = "The block changed in the document, so the draft was not saved. Read the block again \
                      to lose the draft, or Cancel.";
 const GONE: &str =

@@ -1046,6 +1046,28 @@ fn a_new_answer_gets_its_id_on_save() {
     assert!(text(&h).contains("- [ ] Three {#a3}"), "{}", text(&h));
 }
 
+#[test]
+fn markdown_nested_under_an_answer_is_kept_through_the_form() {
+    let doc = ":::poll\n\n## Which?\n\n- [ ] One {#a1}\n  > Said of one.\n- [x] Two {#a2}\n\n:::\n";
+    let f = Fixture::new(doc);
+    let mut h = f.ready();
+    assert!(!has(&h, "Has no id"), "the block fits");
+    open_form(&mut h, "poll");
+    assert!(!has(&h, "does not fit its schema"));
+    assert!(has(&h, "Markdown nested under an item is kept with it"));
+    assert_eq!(
+        draft(&h)["answers"][0],
+        json!({"id": "a1", "text": "One", "correct": false})
+    );
+    h.get_by_label("Answers 1").click();
+    common::run(&mut h);
+    h.get_by_label("Answers 1").type_text("!");
+    common::run(&mut h);
+    h.get_by_label("Save").click();
+    common::run(&mut h);
+    assert_eq!(text(&h), doc.replace("One {#a1}", "One! {#a1}"));
+}
+
 /// Browse… in the picker, until the path has come back from its worker and the form has drawn it: its
 /// thumbnail is asked for only then, so settling before that says nothing.
 fn browse_to(h: &mut H, path: &str) {
