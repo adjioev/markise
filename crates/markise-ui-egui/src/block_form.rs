@@ -19,8 +19,8 @@ use markise_engine::block_view::read_form;
 use markise_engine::editor::{EditorSession, MarkId};
 use markise_layout::block::{ImageState, Images};
 use markise_md::ParseOptions;
-use markise_package::{BlockEntry, InstalledPackage, PackageIndex};
-use schema_form_core::FormSpec;
+use markise_package::{BlockEntry, InstalledPackage, PackageIndex, printable};
+use schema_form_core::{Control, FieldSpec, FormSpec};
 use serde_json::Value;
 
 use crate::images::TextureStore;
@@ -146,15 +146,49 @@ pub fn block_at(doc: &dyn FormatDoc, at: usize, index: &PackageIndex) -> Option<
 }
 
 /// The form's title and note in `language`: the block's label, and its variant in words or the
-/// arguments as they stand.
+/// arguments as they stand. A package or the document wrote them: each stays one line, and nothing in
+/// it hides or turns the text around.
 fn heading(entry: &BlockEntry<'_>, name: &str, args: &str, language: &str) -> (String, String) {
     let schema = entry.schema;
-    let title = schema.label.as_ref().map_or(name, |l| l.get(language)).to_string();
+    let title = printable(schema.label.as_ref().map_or(name, |l| l.get(language)));
     let named = !args.is_empty() && schema.variants().any(|v| v == args);
     let variant_label = schema.variant_label(if named { args } else { "" }, language);
     // with a field of their own the arguments need no note
     let args_note = if schema.raw.get("argument").is_some() { "" } else { args };
-    (title, variant_label.unwrap_or(args_note).to_string())
+    (title, printable(variant_label.unwrap_or(args_note)))
+}
+
+/// The form as the panel shows it: every word a package wrote for a field (its label, help, the add
+/// button's label and the options' labels) stays one line, with nothing in it that hides or turns the text
+/// around. Keys and values are the package's data and stay as they are.
+fn shown_spec(mut spec: FormSpec) -> FormSpec {
+    fn escape(fields: &mut [FieldSpec]) {
+        for f in fields {
+            f.label = printable(&f.label);
+            f.help = f.help.as_deref().map(printable);
+            f.add_label = f.add_label.as_deref().map(printable);
+            match &mut f.control {
+                Control::Array { fields: inner } | Control::Group { fields: inner } => escape(inner),
+                Control::ChoiceButtons { options, .. } => {
+                    for o in options {
+                        o.label = printable(&o.label);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    escape(&mut spec.fields);
+    spec
+}
+
+/// The form's words for what is wrong with a value: some quote the package (a pattern, an option's value)
+/// or the document (an id), and those stay one line, with nothing hidden.
+fn form_texts() -> egui_schema_form::Texts {
+    egui_schema_form::Texts {
+        message: std::sync::Arc::new(|kind| printable(&kind.to_string())),
+        ..Default::default()
+    }
 }
 
 fn clip(text: &str) -> String {
@@ -193,6 +227,7 @@ impl OpenForm {
         let range = block_range_at_container(c);
         let read = || -> Result<(BlockFields, FormSpec), String> {
             let (spec, decls) = read_form(index, &c.name, language, variant)?;
+            let spec = shown_spec(spec);
             let source = session
                 .text()
                 .get(range.clone())
@@ -205,7 +240,8 @@ impl OpenForm {
             Ok((model, spec)) => {
                 let baseline = model.values();
                 add_extras(&model, &mut block_reasons);
-                let mut form = SchemaForm::new(spec, baseline.clone(), ("block-form", doc_id, range.start));
+                let mut form = SchemaForm::new(spec, baseline.clone(), ("block-form", doc_id, range.start))
+                    .with_texts(form_texts());
                 form.request_focus();
                 let rows = row_items(&model, &mut form);
                 Content::Form(Box::new(Ready {
@@ -403,7 +439,7 @@ impl OpenForm {
         if let Some(Ok(input)) = index.form_input(&self.name, language)
             && let Ok(spec) = FormSpec::parse(&input.schema, &input.hints, variant)
         {
-            r.form.set_spec(spec);
+            r.form.set_spec(shown_spec(spec));
         }
     }
 
@@ -611,7 +647,10 @@ fn paint_title_icon(ui: &mut Ui, texture: egui::TextureId, tint: egui::Color32) 
     ui.painter().image(texture, r, uv, tint);
 }
 
+/// What a block or its package says went wrong can quote them: it stays on its lines, with nothing in
+/// it that hides or turns the text around.
 fn warn(ui: &mut Ui, text: &str, st: Style) {
+    let text = &printable(text);
     let r = ui.add(egui::Label::new(RichText::new(text).size(12.5).color(st.danger)).wrap());
     ui.ctx().accesskit_node_builder(r.id, |n| {
         n.clear_value();
@@ -700,7 +739,7 @@ impl FormHost for FrameHost<'_, '_> {
             Some(None) => Thumbnail::None,
             Some(Some(file)) => match self.host.picture(&file) {
                 // a path as the author wrote it: where it resolves to is the same to them
-                Thumbnail::Failed(why) => Thumbnail::Failed(format!("{why}: {path}")),
+                Thumbnail::Failed(why) => Thumbnail::Failed(printable(&format!("{why}: {path}"))),
                 other => other,
             },
         }
@@ -715,12 +754,18 @@ impl FormHost for FrameHost<'_, '_> {
     }
 
     fn icon(&mut self, name: &str) -> Thumbnail {
-        if name.ends_with(".svg") {
-            return self.host.assets.svg(self.host.ctx, name);
-        }
-        match self.host.assets.asset_path(name) {
-            Ok(path) => self.host.picture(&path.to_string_lossy()),
-            Err(why) => Thumbnail::Failed(why),
+        let icon = if name.ends_with(".svg") {
+            self.host.assets.svg(self.host.ctx, name)
+        } else {
+            match self.host.assets.asset_path(name) {
+                Ok(path) => self.host.picture(&path.to_string_lossy()),
+                Err(why) => Thumbnail::Failed(why),
+            }
+        };
+        // the package names the icon, and why it failed can quote that name: on hover it stays one line
+        match icon {
+            Thumbnail::Failed(why) => Thumbnail::Failed(printable(&why)),
+            other => other,
         }
     }
 }

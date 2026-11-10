@@ -9,7 +9,7 @@ use egui::{
     WidgetInfo, pos2, vec2,
 };
 use egui_schema_form::{Style, Thumbnail};
-use markise_package::{Library, LibraryItem};
+use markise_package::{Library, LibraryItem, printable};
 
 use crate::block_form::FormAssets;
 
@@ -350,7 +350,10 @@ impl OpenLibrary {
         };
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
         let resp = resp.on_hover_cursor(CursorIcon::Default);
-        resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, &entry.title));
+        // a package wrote the title, the detail and the group: each stays one line, and nothing in it hides or
+        // turns the text around, on screen or for a screen reader
+        let title = printable(&entry.title);
+        resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, &title));
         if !ui.is_rect_visible(rect) {
             return resp;
         }
@@ -384,10 +387,10 @@ impl OpenLibrary {
             job.wrap.break_anywhere = true;
             ui.ctx().fonts_mut(|f| f.layout_job(job))
         };
-        let title = line(&entry.title, 14.0, style.fg);
+        let title = line(&title, 14.0, style.fg);
         match &entry.detail {
             Some(detail) => {
-                let detail = line(detail, 11.5, style.muted);
+                let detail = line(&printable(detail), 11.5, style.muted);
                 let top = rect.center().y - (title.size().y + detail.size().y + 1.0) / 2.0;
                 painter.galley(pos2(left, top + title.size().y + 1.0), detail, style.muted);
                 painter.galley(pos2(left, top), title, style.fg);
@@ -405,7 +408,7 @@ fn group_head(ui: &mut Ui, label: Option<&str>, style: &Style, first: bool) {
     let Some(label) = label else { return };
     ui.horizontal(|ui| {
         ui.add_space(8.0);
-        ui.label(RichText::new(label).color(style.muted).size(11.5).strong());
+        ui.label(RichText::new(printable(label)).color(style.muted).size(11.5).strong());
     });
     ui.add_space(3.0);
 }

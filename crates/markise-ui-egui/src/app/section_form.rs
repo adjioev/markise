@@ -98,10 +98,13 @@ impl FormField {
     }
 }
 
+/// A package's word for something, else `default`, which may be a package's key. Either way a package wrote
+/// it: it stays one line, and nothing in it hides or turns the text around.
 fn shown(text: Option<&markise_package::Localized>, language: &str, default: &str) -> String {
-    text.map(|l| l.get(language).to_string())
+    let text = (text.map(|l| l.get(language)))
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default.to_string())
+        .unwrap_or(default);
+    markise_package::printable(text)
 }
 
 fn form_fields(config: Option<&SectionConfig>, language: &str) -> Vec<FormField> {

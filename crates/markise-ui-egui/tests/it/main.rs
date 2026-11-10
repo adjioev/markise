@@ -31,6 +31,7 @@ mod lists_e2e;
 mod menus;
 mod open_latency;
 mod package_language;
+mod package_text;
 mod practice;
 mod preferences;
 mod progressive_open;

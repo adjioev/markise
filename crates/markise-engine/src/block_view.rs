@@ -10,7 +10,7 @@ use markise_layout::{
     BlockLook, BlockViews, NativeBlock, NativeKind, NativeRole, NativeView, PracticeAnswer, PracticeParts,
 };
 use markise_md::{BlockKind, ParseOptions};
-use markise_package::{BlockSchema, PackageIndex, ViewKind};
+use markise_package::{BlockSchema, PackageIndex, ViewKind, printable};
 use schema_form_core::{Control, FormSpec, Selection};
 
 use crate::block_fields::{BlockFields, BlockFit, FieldDecl, FieldKind, decls_from_spec};
@@ -145,9 +145,11 @@ impl PackageViews {
             )
         });
         let block = (entry.schema.label.as_ref()).map_or(name, |l| l.get(&self.language));
+        // the package wrote the label: on the block's first row and for a screen reader it stays one line,
+        // and nothing in it hides or turns the text around
         let label = match variant.and_then(|v| entry.schema.variant_label(v, &self.language)) {
-            Some(v) if !v.is_empty() => format!("{block} · {v}"),
-            _ => block.to_string(),
+            Some(v) if !v.is_empty() => format!("{} · {}", printable(block), printable(v)),
+            _ => printable(block),
         };
         // a name; a package gives it meaning with a file of that name, or leaves it a name
         let icon =
@@ -223,8 +225,11 @@ fn misfit(variant: &Variant, fields: &BlockFields, source: &str) -> Option<(bool
     })
 }
 
+/// The reasons as the view shows them, each its own line: they quote the package's labels and patterns and the
+/// document's text, so each stays one line, with nothing in it that hides or turns the text around.
+/// (`blocks check` reports the reasons as data and escapes them its own way.)
 fn texts(reasons: Vec<BlockReason>) -> Vec<String> {
-    reasons.into_iter().map(|r| r.text).collect()
+    reasons.into_iter().map(|r| printable(&r.text)).collect()
 }
 
 impl PackageViews {

@@ -850,3 +850,18 @@ fn switching_one_block_leaves_a_caret_in_another_where_it_is() {
         inside
     );
 }
+
+#[test]
+fn a_failure_the_site_s_code_words_shows_as_data() {
+    let f = Fixture::new(DOC);
+    let p = played(120);
+    // what the package's code says when it throws: a forged line, a direction control, and Russian
+    *p.fail.lock().unwrap() = Some("Ошибка\u{200d}: x\nBlocks: other 9.9.9 \u{202e}".to_string());
+    let mut h = f.ready_with(Some(p.source()));
+    let label = "Not drawn by its site's code: Ошибка\u{200d}: x\\u{a}Blocks: other 9.9.9 \\u{202e}";
+    wait_for(&mut h, "its reason, on one line", |h| h.query_by_label(label).is_some());
+    let v = h.state_mut().viewer().unwrap();
+    let i = v.ed.view.model().item_at_offset(at(":::plain"));
+    let note = v.ed.view.block_note(i).unwrap();
+    assert!(!note.contains('\u{202e}') && !note.contains('\n'), "{note:?}");
+}

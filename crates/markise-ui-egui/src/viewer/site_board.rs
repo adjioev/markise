@@ -236,7 +236,8 @@ impl SiteBoard {
                         asked.failed.clear();
                         asked.missing.clear();
                     }
-                    asked.failed.insert(key, why.into());
+                    // the package's code can say why: it stays one line, and nothing in it hides or turns the text around
+                    asked.failed.insert(key, markise_package::printable(&why).into());
                     changed = true;
                 }
                 Outcome::MissingImage(why) => {
@@ -244,7 +245,7 @@ impl SiteBoard {
                         asked.failed.clear();
                         asked.missing.clear();
                     }
-                    asked.failed.insert(key, why.into());
+                    asked.failed.insert(key, markise_package::printable(&why).into());
                     asked.missing.insert(key);
                     changed = true;
                 }

@@ -440,3 +440,134 @@ fn a_note_shows_a_key_as_data_on_its_own_line() {
     assert!(lines[1].contains("x\\u{a}Blocks: other 9.9.9 \\u{202e}"), "{notes:?}");
     assert!(!notes[0].contains('\u{202e}'));
 }
+
+/// Every label and value a screen reader gets.
+fn said(h: &H) -> Vec<String> {
+    (h.query_all(egui_kittest::kittest::by()))
+        .flat_map(|n| {
+            let a = n.accesskit_node();
+            [a.label(), a.value()]
+        })
+        .flatten()
+        .collect()
+}
+
+fn nothing_raw(h: &H) {
+    for s in said(h) {
+        assert!(!s.contains('\u{202e}') && !s.contains("\nBlocks: other"), "{s:?}");
+    }
+}
+
+#[test]
+fn the_card_and_the_status_bar_show_a_binding_s_source_as_data() {
+    let f = Fixture::new();
+    f.bind("1.0.0");
+    // the binding names the package's file, and the question shows it
+    let bytes = archive("1.0.0");
+    let source = "p\u{202e}пакет\u{200d}.tar.gz";
+    fs::write(f.folder.join(source), &bytes).unwrap();
+    fs::write(
+        f.folder.join(markise_package::BINDING_FILE),
+        format!(
+            r#"{{"library":"sample","version":"1.0.0","source":"{source}","sha256":"{}"}}"#,
+            Sha256Hex::of(&bytes)
+        ),
+    )
+    .unwrap();
+    let mut h = f.harness();
+    f.open(&mut h);
+    assert!(has(&h, "Use the block package sample 1.0.0?"), "{:?}", said(&h));
+    // the zero-width joiner stays: some scripts need it
+    const SOURCE_SHOWN: &str = "p\\u{202e}пакет\u{200d}.tar.gz";
+    assert!(said(&h).iter().any(|s| s.contains(SOURCE_SHOWN)), "{:?}", said(&h));
+    nothing_raw(&h);
+    h.get_by_label("Blocks: sample 1.0.0 · not in use").click();
+    common::run(&mut h);
+    assert!(said(&h).iter().any(|s| s.contains(SOURCE_SHOWN)), "{:?}", said(&h));
+    nothing_raw(&h);
+}
+
+#[test]
+fn a_problem_shows_a_binding_s_version_as_data() {
+    let f = Fixture::new();
+    f.bind("1.0.0");
+    let sha = Sha256Hex::of(&archive("1.0.0"));
+    // a version the package does not have: the problem names both
+    fs::write(
+        f.folder.join(markise_package::BINDING_FILE),
+        format!(
+            r#"{{"library":"sample","version":"1.0\nBlocks: other 9.9.9 \u202e","source":"p.tar.gz","sha256":"{sha}"}}"#
+        ),
+    )
+    .unwrap();
+    let mut h = f.harness();
+    f.open(&mut h);
+    h.get_by_label("Block package problem").click();
+    common::run(&mut h);
+    let want = "The binding names sample 1.0\\u{a}Blocks: other 9.9.9 \\u{202e}, the package says it is sample 1.0.0.";
+    assert!(has(&h, want), "{:?}", said(&h));
+    nothing_raw(&h);
+}
+
+#[test]
+fn a_problem_shows_a_package_s_names_as_data_and_one_issue_per_line() {
+    let f = Fixture::new();
+    let manifest = r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["tip"]}"#;
+    // two names that are not names: one forges a status line, one turns the text around
+    let tip = r#"{"label":"Tip","fields":[{"name":"x\nBlocks: other 9.9.9","type":"text"},{"name":"Поле\u200d\u202e","type":"text"}]}"#;
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+    for (path, content) in [
+        ("manifest.json", manifest),
+        ("components/tip/tip.json", tip),
+        ("editor/palette.json", r#"{"format":1}"#),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, path, content.as_bytes()).unwrap();
+    }
+    let bytes = tar.into_inner().unwrap().finish().unwrap();
+    fs::write(f.folder.join("p.tar.gz"), &bytes).unwrap();
+    fs::write(
+        f.folder.join(markise_package::BINDING_FILE),
+        format!(
+            r#"{{"library":"sample","version":"1.0.0","source":"p.tar.gz","sha256":"{}"}}"#,
+            Sha256Hex::of(&bytes)
+        ),
+    )
+    .unwrap();
+    let mut h = f.harness();
+    f.open(&mut h);
+    if has(&h, USE) {
+        h.get_by_label(USE).click();
+        h.step();
+    }
+    wait_until(&mut h, "the install", |a| {
+        matches!(a.block_package_status(), PackageStatus::Failed(_))
+    });
+    settle(&mut h);
+    common::run(&mut h);
+    h.get_by_label("Block package problem").click();
+    common::run(&mut h);
+    let shown: Vec<String> = said(&h)
+        .into_iter()
+        .filter(|s| s.contains("The package is not valid"))
+        .collect();
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    let lines: Vec<&str> = shown[0].lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "one line per issue, the application's line break kept: {shown:?}"
+    );
+    assert!(
+        lines[0].contains(r#""x\u{a}Blocks: other 9.9.9" is not a valid name"#),
+        "{shown:?}"
+    );
+    assert!(
+        lines[1].contains("\"Поле\u{200d}\\u{202e}\" is not a valid name"),
+        "{shown:?}"
+    );
+    assert!(!shown[0].contains('\u{202e}'));
+}

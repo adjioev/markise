@@ -489,6 +489,8 @@ impl MarkiseApp {
             Err(why) => {
                 let language = package_language(d.viewer.ed.session.doc());
                 let label = preset.label.as_ref().map_or(preset.id.as_str(), |l| l.get(&language));
+                // a package wrote the label: it stays one line, and nothing in it hides or turns the text around
+                let label = markise_package::printable(label);
                 self.banner = Some(super::Banner::Error(format!("“{label}” was not inserted: {why}.")));
                 false
             }
