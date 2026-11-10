@@ -37,8 +37,12 @@ pub(super) struct ItemSrc {
     pub number: Option<R>,
     /// Alt and destination of an image.
     pub image: Option<(R, R)>,
-    /// What in it is not plain text: anything but paragraphs below the item.
+    /// What in its own text is not plain text: a block that starts the item.
     pub protected: Vec<R>,
+    /// Markdown nested under the item after its own text: from the end of that text (its line
+    /// terminator included) to the end of the item. Part of the item, kept byte for byte, never
+    /// read as a value.
+    pub under: R,
 }
 
 /// How ordered list markers go on.
@@ -249,12 +253,18 @@ fn list_item(s: &str, b: &Block, opts: &ParseOptions, choice: bool) -> Option<(I
     // the parser's offset is in columns, and a tab is several of them
     let indent = columns(&s[whole.start..marker.start]) + content_offset;
     let first_end = line_end(s, marker.start);
+    // the item's own text is its first paragraph, or its first line; what follows is nested under it
+    let own_end = match b.children.first() {
+        Some(c) if matches!(c.kind, BlockKind::Paragraph) => line_end(s, c.span.end).max(first_end),
+        _ => first_end,
+    }
+    .min(whole.end);
     let content_start = match task {
         Some((_, bx)) => bx.end + usize::from(s[bx.end..first_end].starts_with(' ')),
         None => whole.start + bytes_to_column(&s[whole.start..first_end], indent, false),
     };
     let mut lines = Vec::new();
-    for (i, (l, term)) in split_lines(s, content_start..whole.end).into_iter().enumerate() {
+    for (i, (l, term)) in split_lines(s, content_start..own_end).into_iter().enumerate() {
         let text = &s[l.clone()];
         let p = if i == 0 { 0 } else { bytes_to_column(text, indent, true) };
         let value = unescape_line(&text[p..], opts);
@@ -300,9 +310,10 @@ fn list_item(s: &str, b: &Block, opts: &ParseOptions, choice: bool) -> Option<(I
     src.task_box = task.map(|(_, bx)| bx.start..bx.end);
     src.lines = lines;
     src.protected = (b.children.iter())
-        .filter(|c| !matches!(c.kind, BlockKind::Paragraph))
+        .filter(|c| !matches!(c.kind, BlockKind::Paragraph) && c.span.start < own_end)
         .map(|c| extended(s, c))
         .collect();
+    src.under = own_end..whole.end;
     Some((src, data))
 }
 

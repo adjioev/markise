@@ -682,6 +682,39 @@ fn render_list_item(
         }
         out.push_str(&written);
     }
+    if let Some(x) = item.src.as_ref().filter(|x| !x.under.is_empty()) {
+        // what is nested under it goes with it; only a marker of another width moves its indent
+        let old_head = &s[x.head.clone()];
+        let old_hang = old_head
+            .find('[')
+            .filter(|_| correct.is_some())
+            .unwrap_or(old_head.len());
+        let shift = width as isize - columns(&old_head[..old_hang]) as isize;
+        out.push_str(&reindent(&s[x.under.clone()], shift));
+    }
+}
+
+/// `text`, lines after its first line terminator shifted by `shift` columns. The leading blanks of a
+/// shifted line are counted in columns, tabs to their stops, and written as spaces, as a tab would not move
+/// by a column added before it; a shift left takes away as many columns as there are. A blank line stays
+/// as it is.
+fn reindent(text: &str, shift: isize) -> String {
+    if shift == 0 {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.split_inclusive('\n').enumerate() {
+        let body = line.trim_end_matches(['\r', '\n']);
+        if i == 0 && !text.starts_with(['\r', '\n']) || body.trim().is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        let lead = body.len() - body.trim_start_matches([' ', '\t']).len();
+        let width = columns(&body[..lead]) as isize;
+        out.push_str(&" ".repeat((width + shift).max(0) as usize));
+        out.push_str(&line[lead..]);
+    }
+    out
 }
 
 fn alt_source(alt: &str) -> String {

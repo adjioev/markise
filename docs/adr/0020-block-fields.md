@@ -26,10 +26,43 @@ package format. Its input is a block's source and a list of declared fields.
 | choices | one task list | `{id, text, correct}` per answer, `id` from `{#id}` |
 | image | paragraphs holding only images, one per line | `{alt, path}` per image |
 
-A trailing `{#id}` of a heading or an answer is kept out of the value and is never lost. Each
+An item's value is its own text: its first paragraph, or its first line when the item starts
+with something else. Whatever is nested under it after that (an indented quote, another paragraph,
+an image, a list, code) is **Markdown nested under the item** (below). A trailing `{#id}` of a
+heading or an answer is kept out of the value and is never lost; an answer's goes at the end of its
+own text. Each
 body block goes to the first field at or after the cursor that takes it. An exact kind goes first,
 then text takes the rest. A field fills once; text and images go on over neighbouring blocks. What
 nothing takes, a nested `:::` block for instance, is reported as an **extra** and never touched.
+
+### Markdown nested under an item
+
+What is nested under a list item or an answer belongs to that item and to nothing else. It is no
+part of any value and has no meaning given to it: the model keeps it byte for byte and reads none
+of it. Owner's decision for issue #178: an editor knows generic primitives, so nested Markdown is
+plain Markdown, not a field of its own (no explanation, no quote of the answer, nothing a site means
+by it).
+
+- **Reading.** It does not make an answer lose its `{#id}` or a block fall outside its schema, and it
+  is not content in no field. `BlockFields::nested_under` gives it as it stands.
+- **Writing.** It goes with its item: moved with it, removed with it, kept when the item's text, mark
+  or number changes. Only a marker of another width (`9.` becoming `10.`) shifts its lines by as many
+  columns, so that it stays nested: the leading blanks of a shifted line are counted in columns, a tab
+  to its stop, and written as spaces, since a tab does not move by a space put before it.
+- **Rows by identity.** Two items can read the same and hold different nested Markdown, so the form's
+  rows are never matched to items by what they say. The form keeps a key per row
+  (`SchemaForm::row_keys`, kept through moves, removals and the presses of choice buttons), the panel
+  notes which item each row was when it read the model, and Save gives that to
+  `BlockFields::edits_from_rows`. Rows that read the same and changed places are a change of the draft.
+  `edits_from_values`, matching by id, content and order, stays for callers with no rows of their own.
+- **Editing.** The simplest honest way: in Markdown. The block's own Markdown view, Source and Side by
+  Side edit it as any text. In the native view it shows rendered under the item; the keyboard there
+  edits the item's own text as before and does not reach into it. The form keeps it, row by row, and
+  says so in one line; it is not a value of the row, so the form gains no type and no key.
+- **Practice** (frozen, ADR 0024) gives it no part: it is not an answer, it is not hidden, it shows.
+- A paragraph after a blank line under an item is nested too. So a value typed with a blank line in
+  it (only possible from code; the form and the keyboard give one line) reads back as its first
+  paragraph, with the rest nested under it.
 
 ### Identity
 

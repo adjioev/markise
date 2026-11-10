@@ -180,6 +180,11 @@ Every field has a `name` and a `type`, and may have `label`, `help` and, for a r
 required unless `min` is 0. The `correct` of `choices` is `exactly-one` or `at-least-one`, or an object with a rule per variant.
 `exactly-one` gives radio buttons, others check boxes. `ids` can only be `required`.
 
+An item of a `list` or `choices` field is its first line (its first paragraph). Markdown indented under
+it, such as a quote, another paragraph or an image, belongs to that item: it shows under it, moves
+and goes with it and is kept as written. Markise gives it no meaning. You edit it in the block's
+Markdown, Source or Side by Side; the form keeps it.
+
 Each body block goes to the first field at or after the last one filled that takes it. What fits
 nothing is listed for the author and never touched. A key with a value a form cannot honour, such
 as a `level` of 7, leaves the block with no form and a reason in the panel, and the block stays a

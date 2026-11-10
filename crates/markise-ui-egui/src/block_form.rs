@@ -13,7 +13,7 @@ use egui::{ColorImage, Context, Key, KeyboardShortcut, Modifiers, RichText, Text
 use egui_schema_form::{FileRequest, FormHost, SchemaForm, Style, Thumbnail};
 use markise_doc::{Affinity, DocPos};
 use markise_doc::{FormatDoc, NamedContainer};
-use markise_engine::block_fields::{BlockFields, FieldsError};
+use markise_engine::block_fields::{BlockFields, FieldValue, FieldsError, ItemId};
 pub use markise_engine::block_page::package_language;
 use markise_engine::block_view::read_form;
 use markise_engine::editor::{EditorSession, MarkId};
@@ -65,6 +65,39 @@ struct Ready {
     track: Track,
     /// What does not fit the schema and is not by a field.
     block_reasons: Vec<String>,
+    /// Which item of the model each row of the form was when the form last read the model, by the
+    /// form's row keys: a row is its item, whatever it says (ADR 0020).
+    rows: RowItems,
+}
+
+/// By field: the row keys in the order of the model's items, and the item each is.
+type RowItems = HashMap<String, Vec<(u64, ItemId)>>;
+
+/// The form's rows as the model's items, row for item in order, right after the form took its values.
+fn row_items(model: &BlockFields, form: &mut SchemaForm) -> RowItems {
+    let mut out = HashMap::new();
+    for f in model.fields() {
+        let FieldValue::Items(items) = &f.value else { continue };
+        let Some(keys) = form.row_keys(&f.name).filter(|k| k.len() == items.len()) else {
+            continue;
+        };
+        out.insert(
+            f.name.clone(),
+            keys.into_iter().zip(items.iter().map(|i| i.id)).collect(),
+        );
+    }
+    out
+}
+
+/// What each row of the form is now: its item, or none for a new row.
+fn rows_now(rows: &RowItems, form: &mut SchemaForm) -> HashMap<String, Vec<Option<ItemId>>> {
+    (rows.iter())
+        .filter_map(|(name, items)| {
+            let keys = form.row_keys(name)?;
+            let item = |k: &u64| items.iter().find(|(x, _)| x == k).map(|(_, id)| *id);
+            Some((name.clone(), keys.iter().map(item).collect()))
+        })
+        .collect()
 }
 
 enum Content {
@@ -174,7 +207,9 @@ impl OpenForm {
                 add_extras(&model, &mut block_reasons);
                 let mut form = SchemaForm::new(spec, baseline.clone(), ("block-form", doc_id, range.start));
                 form.request_focus();
+                let rows = row_items(&model, &mut form);
                 Content::Form(Box::new(Ready {
+                    rows,
                     model,
                     form,
                     baseline,
@@ -234,7 +269,15 @@ impl OpenForm {
     /// The draft holds something the document does not.
     pub fn is_dirty(&self) -> bool {
         match &self.content {
-            Content::Form(r) => r.form.values() != &r.baseline,
+            // rows that read the same and changed places are a change too: what is nested under them goes along
+            Content::Form(r) => {
+                r.form.values() != &r.baseline
+                    || r.rows.iter().any(|(name, items)| {
+                        r.form
+                            .row_keys_now(name)
+                            .is_some_and(|keys| !keys.iter().eq(items.iter().map(|(k, _)| k)))
+                    })
+            }
             Content::Refused(_) => false,
         }
     }
@@ -326,6 +369,7 @@ impl OpenForm {
             r.block_reasons.retain(|x| !x.starts_with(IN_NO_FIELD));
             add_extras(&r.model, &mut r.block_reasons);
             r.form.set_values(values.clone());
+            r.rows = row_items(&r.model, &mut r.form);
             r.baseline = values;
         } else {
             // another variant has another form: the caller opens it anew
@@ -390,7 +434,8 @@ impl OpenForm {
             Track::Stale => return Err(STALE.to_string()),
             Track::Gone => return Err(GONE.to_string()),
         }
-        let edits = r.model.edits_from_values(r.form.values()).map_err(|e| e.to_string())?;
+        let rows = rows_now(&r.rows, &mut r.form);
+        let edits = (r.model.edits_from_rows(r.form.values(), &rows)).map_err(|e| e.to_string())?;
         if edits.is_empty() {
             return Ok(());
         }
@@ -493,6 +538,9 @@ impl OpenForm {
                         body_ui.label(RichText::new(reason).size(11.5).color(st.muted));
                     }
                 }
+                if r.model.has_nested() {
+                    body_ui.label(RichText::new(NESTED_KEPT).size(11.5).color(st.muted));
+                }
                 body_ui.add_space(spacing);
                 r.form.set_style(st);
                 let mut host = FrameHost {
@@ -549,6 +597,9 @@ impl OpenForm {
 }
 
 const IN_NO_FIELD: &str = "In no field, kept as it is";
+/// Markdown nested under an item is the item's: the form keeps it and the Markdown is where it is edited.
+pub(crate) const NESTED_KEPT: &str = "Markdown nested under an item is kept with it. Edit it in the block's \
+                                      Markdown or in Source.";
 const STALE: &str = "The block changed in the document, so the draft was not saved. Read the block again \
                      to lose the draft, or Cancel.";
 const GONE: &str =

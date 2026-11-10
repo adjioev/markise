@@ -273,3 +273,43 @@ fn a_narrow_panel_holds_fewer_buttons_per_row() {
     let right = h.get_by_label("Right").accesskit_node().bounding_box().expect("box");
     assert!(right.y0 >= left.y1, "one per row: {left:?} {right:?}");
 }
+
+/// A row keeps its key through presses that add or take away other rows and through the removal of a row
+/// of no option, so a host can tell which row is which whatever they say.
+#[test]
+fn rows_keep_their_keys_through_presses_and_removals() {
+    let mut v = values();
+    let rows = v["where"].as_array_mut().expect("array");
+    rows.remove(2);
+    rows.insert(0, json!({"id": "", "text": "Same", "correct": false}));
+    rows.insert(1, json!({"id": "", "text": "Same", "correct": false}));
+    let mut h = harness(spec("multiple"), v);
+    h.run();
+    let before = h.state_mut().form.row_keys("where").expect("an array");
+    assert_eq!(before.len(), 4);
+    // a press adds the option's row before the rows of later options, and marks another
+    h.get_by_label("Nowhere").click();
+    h.run();
+    let texts: Vec<Value> = (h.state().form.values()["where"].as_array().expect("array").iter())
+        .map(|r| r["text"].clone())
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            json!("Same"),
+            json!("Same"),
+            json!("Left"),
+            json!("Right"),
+            json!("Nowhere")
+        ]
+    );
+    let after = h.state_mut().form.row_keys("where").expect("an array");
+    assert_eq!(after[..4], before[..], "the rows read before keep their keys");
+    assert!(!before.contains(&after[4]), "a new row has a new key");
+    // the first of two rows that read the same goes, and the second keeps its own key
+    h.get_all_by_label("Remove: Same").next().expect("a button").click();
+    h.run();
+    let left = h.state_mut().form.row_keys("where").expect("an array");
+    assert_eq!(left[0], before[1], "{left:?} {before:?}");
+    assert_eq!(left.len(), 4);
+}

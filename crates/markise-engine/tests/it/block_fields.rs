@@ -691,6 +691,187 @@ fn a_stale_model_does_not_touch_the_document() {
     assert!(b.apply_to_session(&mut s, &edit, "Edit Block").is_ok());
 }
 
+// ---------------------------------------------------------------- Markdown nested under an item
+
+const NESTED: &str = ":::poll\n\n## Which?\n\n- [ ] One {#a1}\n  > Said of one.\n- [x] Two {#a2}\n\n  More on two.\n\n  ![two](two.png)\n- [ ] Three {#a3}\n\n:::";
+
+#[test]
+fn markdown_nested_under_an_answer_is_the_answers_and_no_value() {
+    let b = dec(NESTED, &poll_decls());
+    assert_eq!(
+        b.values()["answers"],
+        json!([
+            {"id": "a1", "text": "One", "correct": false},
+            {"id": "a2", "text": "Two", "correct": true},
+            {"id": "a3", "text": "Three", "correct": false},
+        ])
+    );
+    assert!(b.extras().is_empty());
+    let v = ids(&b, "answers");
+    assert_eq!(b.nested_under(v[0]), Some("  > Said of one."));
+    assert_eq!(b.nested_under(v[1]), Some("  More on two.\n\n  ![two](two.png)"));
+    assert_eq!(b.nested_under(v[2]), None);
+    assert!(
+        b.check(&poll_spec()).errors.is_empty(),
+        "{:?}",
+        b.check(&poll_spec()).errors
+    );
+    assert!(b.apply(&[]).expect("applies").patches.is_empty());
+    assert!(b.edits_from_values(&b.values()).expect("fits").is_empty());
+    // in place, an answer's slot is its own text
+    let slot = b.slot_at(NESTED.find("One").unwrap()).expect("a slot");
+    assert_eq!(slot.value(), "One");
+    assert!(b.slot_at(NESTED.find("Said").unwrap()).is_none());
+}
+
+#[test]
+fn nested_markdown_moves_and_goes_with_its_item() {
+    let b = dec(NESTED, &poll_decls());
+    let v = ids(&b, "answers");
+    let edit = |e: FieldEdit| run(&b, &[e]);
+    let text = edit(FieldEdit::SetItemText {
+        field: "answers".into(),
+        item: v[0],
+        text: "Uno".into(),
+    });
+    assert_eq!(text.source(), NESTED.replace("One {#a1}", "Uno {#a1}"));
+    let moved = edit(FieldEdit::MoveItem {
+        field: "answers".into(),
+        item: v[0],
+        to: 2,
+    });
+    assert!(
+        moved
+            .source()
+            .contains("- [ ] Three {#a3}\n- [ ] One {#a1}\n  > Said of one.\n\n:::"),
+        "{}",
+        moved.source()
+    );
+    assert_eq!(moved.nested_under(v[0]), Some("  > Said of one."));
+    let removed = edit(FieldEdit::RemoveItem {
+        field: "answers".into(),
+        item: v[1],
+    });
+    assert!(!removed.source().contains("two"), "{}", removed.source());
+    assert_eq!(removed.nested_under(v[0]), Some("  > Said of one."));
+    let emptied = edit(FieldEdit::SetItemText {
+        field: "answers".into(),
+        item: v[0],
+        text: String::new(),
+    });
+    assert!(
+        emptied.source().contains("- [ ] {#a1}\n  > Said of one.\n"),
+        "{}",
+        emptied.source()
+    );
+    assert_eq!(emptied.nested_under(v[0]), Some("  > Said of one."));
+}
+
+#[test]
+fn rows_given_by_identity_keep_nested_markdown_on_their_own_item() {
+    let src = ":::l\n\n- Same\n  > first\n- Same\n  > second\n\n:::";
+    let b = dec(src, &list_decls());
+    let v = ids(&b, "items");
+    let rows = |r: Vec<Option<ItemId>>| std::collections::HashMap::from([("items".to_string(), r)]);
+    // matched by value, the first of two that read the same is the one that stays
+    let by_value = run(&b, &b.edits_from_values(&json!({"items": ["Same"]})).expect("fits"));
+    assert_eq!(by_value.source(), ":::l\n\n- Same\n  > first\n\n:::");
+    // by identity, the one the caller kept stays
+    let edits = b
+        .edits_from_rows(&json!({"items": ["Same"]}), &rows(vec![Some(v[1])]))
+        .expect("fits");
+    assert_eq!(run(&b, &edits).source(), ":::l\n\n- Same\n  > second\n\n:::");
+    // two that read the same change places: a move, though the values are as they were
+    let edits =
+        (b.edits_from_rows(&json!({"items": ["Same", "Same"]}), &rows(vec![Some(v[1]), Some(v[0])]))).expect("fits");
+    assert_eq!(
+        run(&b, &edits).source(),
+        ":::l\n\n- Same\n  > second\n- Same\n  > first\n\n:::"
+    );
+    // a new row among them, and rows that do not fit the field fall back to matching
+    let edits = (b.edits_from_rows(&json!({"items": ["New", "Same"]}), &rows(vec![None, Some(v[1])]))).expect("fits");
+    assert_eq!(run(&b, &edits).source(), ":::l\n\n- New\n- Same\n  > second\n\n:::");
+    for bad in [vec![Some(v[1])], vec![Some(v[0]), Some(v[0])]] {
+        let edits = b
+            .edits_from_rows(&json!({"items": ["Same", "Same"]}), &rows(bad))
+            .expect("fits");
+        assert!(edits.is_empty(), "{edits:?}");
+    }
+}
+
+#[test]
+fn nested_markdown_follows_a_marker_of_another_width() {
+    let src = ":::l\n\n8. eight\n9. nine\n   > of nine\n\n:::";
+    let b = dec(src, &list_decls());
+    let v = ids(&b, "items");
+    assert_eq!(b.values()["items"], json!(["eight", "nine"]));
+    // a new first item makes the second `10.`: what is under it moves one column on
+    let next = run(
+        &b,
+        &[FieldEdit::InsertItem {
+            field: "items".into(),
+            at: 0,
+            item: ItemData::Text("seven".into()),
+        }],
+    );
+    assert_eq!(
+        next.source(),
+        ":::l\n\n8. seven\n9. eight\n10. nine\n    > of nine\n\n:::"
+    );
+    assert_eq!(next.nested_under(v[1]), Some("    > of nine"));
+    let back = run(
+        &next,
+        &[FieldEdit::RemoveItem {
+            field: "items".into(),
+            item: ids(&next, "items")[0],
+        }],
+    );
+    assert_eq!(back.source(), src);
+}
+
+#[test]
+fn a_list_item_keeps_a_nested_list_and_paragraph_out_of_its_text() {
+    let src = ":::l\n\n1. one\n2. two\n\n   more of two\n3. three\n   - nested\n\n:::";
+    let b = dec(src, &list_decls());
+    assert_eq!(b.values()["items"], json!(["one", "two", "three"]));
+    let v = ids(&b, "items");
+    assert_eq!(b.nested_under(v[1]), Some("   more of two"));
+    assert_eq!(b.nested_under(v[2]), Some("   - nested"));
+    let next = run(
+        &b,
+        &[FieldEdit::SetItemText {
+            field: "items".into(),
+            item: v[2],
+            text: "THREE".into(),
+        }],
+    );
+    assert_eq!(next.source(), src.replace("three", "THREE"));
+}
+
+#[test]
+fn nested_markdown_indented_by_a_tab_follows_a_wider_marker() {
+    let src = ":::l\n\n98. first\n99. second\n\t> attachment\n\n:::";
+    let b = dec(src, &list_decls());
+    let v = ids(&b, "items");
+    assert_eq!(b.nested_under(v[1]), Some("\t> attachment"));
+    let next = run(
+        &b,
+        &[FieldEdit::InsertItem {
+            field: "items".into(),
+            at: 0,
+            item: ItemData::Text("zero".into()),
+        }],
+    );
+    assert!(next.extras().is_empty(), "{}", next.source());
+    assert_eq!(
+        next.values()["items"],
+        json!(["zero", "first", "second"]),
+        "{}",
+        next.source()
+    );
+    assert_eq!(next.nested_under(v[1]), Some("     > attachment"), "{}", next.source());
+}
+
 // ---------------------------------------------------------------- properties
 
 fn word() -> impl Strategy<Value = String> {
@@ -719,7 +900,7 @@ fn source() -> impl Strategy<Value = String> {
         sep,
         proptest::option::of("[a-z]{1,6}"),
         proptest::option::of("[a-z]{1,6}"),
-        proptest::collection::vec(("[a-z]{1,6}", any::<bool>()), 0..5),
+        proptest::collection::vec(("[a-z]{1,6}", any::<bool>(), proptest::option::of(0usize..4)), 0..5),
         proptest::option::of("[a-z]{1,6}"),
     )
         .prop_map(|(eol, sep, head, text, answers, quote)| {
@@ -732,7 +913,10 @@ fn source() -> impl Strategy<Value = String> {
             }
             if !answers.is_empty() {
                 let lines: Vec<String> = (answers.iter().enumerate())
-                    .map(|(i, (t, c))| format!("- [{}] {t} {{#a{i}}}", if *c { "x" } else { " " }))
+                    .map(|(i, (t, c, under))| {
+                        let item = format!("- [{}] {t} {{#a{i}}}", if *c { "x" } else { " " });
+                        format!("{item}{}", under.map_or(String::new(), |k| nested(k, eol, t)))
+                    })
                     .collect();
                 parts.push(lines.join(eol));
             }
@@ -748,6 +932,16 @@ fn source() -> impl Strategy<Value = String> {
             out.push_str(":::");
             out
         })
+}
+
+/// Markdown nested under an answer, of kind `k`: a quote, a paragraph, an image, a list.
+fn nested(k: usize, eol: &str, t: &str) -> String {
+    match k {
+        0 => format!("{eol}  > under {t}"),
+        1 => format!("{eol}{eol}  more on {t}"),
+        2 => format!("{eol}{eol}  ![{t}](p.png)"),
+        _ => format!("{eol}  - sub {t}"),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -884,6 +1078,74 @@ proptest! {
                 _ => {}
             }
             b = next;
+        }
+    }
+
+    /// What is nested under an answer stays with that answer, byte for byte, through any edits,
+    /// until the answer itself goes.
+    #[test]
+    fn nested_markdown_goes_with_its_answer(src in source(), ops in proptest::collection::vec(op(), 1..6)) {
+        let mut b = dec(&src, &poll_decls());
+        prop_assert!(b.extras().is_empty(), "{:?}", b.source());
+        prop_assert!(b.check(&poll_spec()).errors.iter().all(|e| e.kind != ErrorKind::MissingId), "{:?}", b.source());
+        let under = |b: &BlockFields| -> Vec<(ItemId, Option<String>)> {
+            ids(b, "answers").into_iter().map(|i| (i, b.nested_under(i).map(str::to_string))).collect()
+        };
+        for o in &ops {
+            let Some(e) = to_edit(&b, o) else { continue };
+            let before = under(&b);
+            let next = run(&b, std::slice::from_ref(&e));
+            let after = under(&next);
+            for (id, n) in &before {
+                if let Some((_, m)) = after.iter().find(|(j, _)| j == id) {
+                    prop_assert_eq!(n, m, "{:?} -> {:?}", b.source(), next.source());
+                } else {
+                    let gone = matches!(&e, FieldEdit::RemoveItem { item, .. } if item == id);
+                    prop_assert!(gone, "{:?} lost an item", e);
+                }
+            }
+            b = next;
+        }
+    }
+
+    /// Nested Markdown indented by spaces or tabs stays nested when a numbered marker changes width
+    /// either way, and keeps its lines but for their leading blanks.
+    #[test]
+    fn nested_markdown_stays_nested_when_markers_change_width(
+        start in prop_oneof![Just(8u64), Just(9), Just(98), Just(99), Just(998)],
+        items in proptest::collection::vec(("[a-z]{1,5}", proptest::option::of((any::<bool>(), 0usize..3))), 1..5),
+        insert in any::<bool>(),
+    ) {
+        let mut src = ":::l\n\n".to_string();
+        for (i, (t, under)) in items.iter().enumerate() {
+            let marker = format!("{}. ", start + i as u64);
+            src.push_str(&format!("{marker}{t}\n"));
+            if let Some((tab, k)) = under {
+                // at the item's content column, by a tab where one reaches it, or by spaces
+                let width = marker.len();
+                let indent = if *tab && width <= 4 { "\t".to_string() } else { " ".repeat(width) };
+                let body = ["> under", "- sub", "```\ncode\n```"][*k].replace('\n', &format!("\n{indent}"));
+                src.push_str(&format!("{indent}{body}\n"));
+            }
+        }
+        src.push_str("\n:::");
+        let b = dec(&src, &list_decls());
+        prop_assert!(b.extras().is_empty(), "{:?}", src);
+        let v = ids(&b, "items");
+        prop_assert_eq!(v.len(), items.len(), "{:?}", src);
+        let edit = if insert {
+            FieldEdit::InsertItem { field: "items".into(), at: 0, item: ItemData::Text("new".into()) }
+        } else {
+            FieldEdit::RemoveItem { field: "items".into(), item: v[0] }
+        };
+        let next = run(&b, &[edit]);
+        let fresh = dec(next.source(), &list_decls());
+        prop_assert!(fresh.extras().is_empty(), "{:?}", next.source());
+        prop_assert_eq!(fresh.values(), next.values());
+        let trimmed = |t: &str| t.lines().map(str::trim_start).collect::<Vec<_>>().join("\n");
+        for id in v.iter().skip(usize::from(!insert)) {
+            let (a, z) = (b.nested_under(*id), next.nested_under(*id));
+            prop_assert_eq!(a.map(trimmed), z.map(trimmed), "{:?} -> {:?}", src, next.source());
         }
     }
 
@@ -1025,7 +1287,8 @@ fn a_tab_after_the_marker_is_columns_not_bytes() {
     let b = dec(src, &list_decls());
     assert_eq!(b.values()["items"], json!(["中"]));
     assert!(b.apply(&[]).expect("applies").patches.is_empty());
-    // a continuation line hangs at the tab's column, so it survives a blank line
+    // a continuation line hangs at the tab's column, so it survives a blank line: past one, it is
+    // Markdown nested under the item, which stays the item's and is not its text
     let id = ids(&b, "items")[0];
     let next = run(
         &b,
@@ -1035,7 +1298,9 @@ fn a_tab_after_the_marker_is_columns_not_bytes() {
             text: "中\n\nmore".into(),
         }],
     );
-    assert_eq!(next.values()["items"], json!(["中\n\nmore"]), "{}", next.source());
+    assert_eq!(next.values()["items"], json!(["中"]), "{}", next.source());
+    assert_eq!(next.source(), ":::x\n\n-\t中\n\n    more\n\n:::");
+    assert!(next.extras().is_empty());
     let b = dec(":::x\n\n1.\tab\n\tcd\n\n:::", &list_decls());
     assert_eq!(b.values()["items"], json!(["ab\ncd"]));
 }
