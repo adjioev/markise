@@ -49,11 +49,13 @@ impl DocViewer {
         let language = package_language(self.ed.session.doc());
         let style = config.map_or_else(SectionStyle::default, |c| {
             let word = (c.label.as_ref()).map(|l| l.get(&language)).filter(|w| !w.is_empty());
+            // the package's word heads every section and names it in the status bar: one line, nothing hidden
+            let word = word.map(markise_package::printable);
             SectionStyle {
                 frame: c.view.frame,
                 accent: c.view.accent.as_deref().map(Into::into),
                 numbered: c.view.numbered,
-                word: word.unwrap_or(markise_package::DEFAULT_SECTION_LABEL).into(),
+                word: word.as_deref().unwrap_or(markise_package::DEFAULT_SECTION_LABEL).into(),
                 title_level: c.title_level,
             }
         });
@@ -108,7 +110,9 @@ impl DocViewer {
         } else {
             count.to_string()
         };
-        let origin = self.section_dialect.as_ref().map_or_else(String::new, Dialect::origin);
+        // the dialect's origin can name a package's version, which its binding wrote
+        let origin =
+            (self.section_dialect.as_ref()).map_or_else(String::new, |d| markise_package::printable(&d.origin()));
         let about = format!("Section {} of {total}. Sections are on by {origin}.", index + 1);
         let said = (name, about);
         self.section_status = Some((key, said.clone()));

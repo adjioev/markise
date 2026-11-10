@@ -362,6 +362,18 @@ mod tests {
         let shown = frame(&ctx, &mut wc, &mut s, 0..0).0;
         let total = markise_engine::count::count_document(s.doc());
         assert_eq!(shown, Shown::Document(total));
+        // The result can be taken before the worker's wake-up has run: that wake then lands in a
+        // later frame and asks for one repaint. Wait for it to have returned (an event, not a time),
+        // and run the frame it asks for, before asking whether the window is idle.
+        let t = Instant::now();
+        while markise_engine::wake_track::unwoken() > 0 {
+            assert!(
+                t.elapsed() < Duration::from_secs(120),
+                "the worker's wake-up never returned"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        frame(&ctx, &mut wc, &mut s, 0..0);
         // the worker's wake-up and the frame egui runs for it
         assert!(
             wakes.load(std::sync::atomic::Ordering::SeqCst) <= 2,

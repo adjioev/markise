@@ -4,7 +4,7 @@
 //! app glue is `app/package.rs`.
 
 use egui::{Context, RichText, Ui};
-use markise_package::{InstalledPackage, Pending, Problem, Sha256Hex, printable};
+use markise_package::{InstalledPackage, Issue, PackageError, PackageId, Pending, Problem, Sha256Hex, printable};
 
 /// Error text from a package can be long, and the package chooses it.
 const MAX_SHOWN_CHARS: usize = 1200;
@@ -45,8 +45,43 @@ fn short_hash(sha256: &Sha256Hex) -> String {
     )
 }
 
+/// A binding or a package wrote both: each stays one line, and nothing in it hides or turns the text around.
 fn name_of(library: &str, version: &str) -> String {
-    format!("{library} {version}")
+    format!("{} {}", printable(library), printable(version))
+}
+
+/// What went wrong, in the application's words and lines, with every text a binding, a package or a path
+/// put in it written out by [`printable`]: a package cannot add a line or turn one around.
+fn problem_text(problem: &Problem) -> String {
+    let id = |i: &PackageId| PackageId {
+        library: printable(&i.library),
+        version: printable(&i.version),
+    };
+    let shown = match problem {
+        Problem::Binding(e) => Problem::Binding(printable(e)),
+        Problem::Source(e) => Problem::Source(printable(e)),
+        Problem::HashMismatch { .. } => problem.clone(),
+        Problem::Archive(e) => Problem::Archive(printable(e)),
+        Problem::Package(PackageError::UnsupportedFormat { found }) => {
+            Problem::Package(PackageError::UnsupportedFormat {
+                found: printable(found),
+            })
+        }
+        Problem::Package(PackageError::Invalid(issues)) => Problem::Package(PackageError::Invalid(
+            (issues.iter())
+                .map(|i| Issue {
+                    file: printable(&i.file),
+                    message: printable(&i.message),
+                })
+                .collect(),
+        )),
+        Problem::IdentityMismatch { binding, package } => Problem::IdentityMismatch {
+            binding: id(binding),
+            package: id(package),
+        },
+        Problem::Store(e) => Problem::Store(printable(e)),
+    };
+    shown.to_string()
 }
 
 fn clip(text: &str) -> String {
@@ -116,9 +151,9 @@ fn details(pending: &Pending) -> String {
     format!(
         "{} blocks · {} · sha256 {}\n{}",
         pending.block_count,
-        pending.binding.source,
+        printable(&pending.binding.source),
         short_hash(&pending.sha256),
-        pending.binding.file.display()
+        printable(&pending.binding.file.display().to_string())
     )
 }
 
@@ -170,7 +205,7 @@ pub fn status_item(ui: &mut Ui, status: &PackageStatus, out: &mut Vec<PackageAct
                         "{} blocks · sha256 {}\n{}",
                         p.index.block_count(),
                         short_hash(&p.sha256),
-                        p.binding.file.display()
+                        printable(&p.binding.file.display().to_string())
                     ),
                 );
                 if !notes.is_empty() {
@@ -188,7 +223,7 @@ pub fn status_item(ui: &mut Ui, status: &PackageStatus, out: &mut Vec<PackageAct
             let color = ui.visuals().warn_fg_color;
             ui.menu_button(RichText::new("Block package problem").color(color), |ui| {
                 ui.set_max_width(420.0);
-                ui.add(egui::Label::new(clip(&problem.to_string())).wrap());
+                ui.add(egui::Label::new(clip(&problem_text(problem))).wrap());
                 small(
                     ui,
                     "Blocks show as simple cards. The document is not affected.".to_string(),

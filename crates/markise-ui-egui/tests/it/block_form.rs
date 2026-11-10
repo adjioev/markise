@@ -1170,6 +1170,28 @@ fn a_copy_for_a_form_that_is_gone_lands_nowhere() {
     assert!(!h.state().block_form().unwrap().is_dirty());
 }
 
+/// Choose file on the first row of the gallery, then Browse… in the picker. Each click waits for what it
+/// needs, never for a number of frames: the picker on screen with its folder listed (a listing arriving
+/// moves the window's buttons), and then the picker gone, which says Browse… was taken.
+fn choose_by_browsing(h: &mut H) {
+    h.get_by_label("Choose file: Pictures 1").click();
+    let t = std::time::Instant::now();
+    while h.state().image_picker().is_none_or(|p| p.is_busy()) || h.query_by_label("Browse…").is_none() {
+        assert!(t.elapsed() < common::HANG_GUARD, "the picker, listed");
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    // one frame more: the button stands where the listed picker puts it
+    h.step();
+    h.get_by_label("Browse…").click();
+    let t = std::time::Instant::now();
+    while h.state().image_picker().is_some() {
+        assert!(t.elapsed() < common::HANG_GUARD, "Browse… taken");
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
 /// Two choices for one row, the older one slower: the row keeps the newer.
 #[test]
 fn an_older_choice_finishing_later_does_not_replace_a_newer_one() {
@@ -1191,20 +1213,12 @@ fn an_older_choice_finishing_later_does_not_replace_a_newer_one() {
             }
         }
     });
-    h.state_mut()
-        .set_attach_job_test(std::time::Duration::from_secs(30), Some(job));
-    let steps = |h: &mut H| {
-        for _ in 0..4 {
-            h.step();
-        }
-    };
+    // never given up while the test runs: what it checks cannot depend on how long a step takes
+    h.state_mut().set_attach_job_test(2 * common::HANG_GUARD, Some(job));
     h.get_by_label("Edit Block: gallery").click();
     wait(&mut h);
     *f.picks.lock().unwrap() = Some(older);
-    h.get_by_label("Choose file: Pictures 1").click();
-    wait(&mut h);
-    h.get_by_label("Browse…").click();
-    steps(&mut h);
+    choose_by_browsing(&mut h);
     // the older one's worker is the one waiting: the next must not get there first
     let t = std::time::Instant::now();
     while started.load(Ordering::SeqCst) == 0 {
@@ -1213,13 +1227,17 @@ fn an_older_choice_finishing_later_does_not_replace_a_newer_one() {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     *f.picks.lock().unwrap() = Some(newer);
-    h.get_by_label("Choose file: Pictures 1").click();
-    steps(&mut h);
-    h.get_by_label("Browse…").click();
+    choose_by_browsing(&mut h);
     // the newer one is there while the older one still copies
     let t = std::time::Instant::now();
     while draft(&h)["pictures"][0]["path"] != json!("images/two pics.png") {
-        assert!(t.elapsed() < common::HANG_GUARD, "the newer choice");
+        assert!(
+            t.elapsed() < common::HANG_GUARD,
+            "the newer choice: draft {}, message {:?}, jobs started {}",
+            draft(&h),
+            h.state().block_form().and_then(|f| f.message()),
+            started.load(Ordering::SeqCst)
+        );
         h.step();
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
