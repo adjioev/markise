@@ -570,8 +570,10 @@ impl OpenForm {
                             .size(12.0)
                             .color(st.danger),
                     );
+                    // they quote the document's arguments and text: each stays one line, nothing in it hides
+                    // or turns the text around
                     for reason in &r.block_reasons {
-                        body_ui.label(RichText::new(reason).size(11.5).color(st.muted));
+                        body_ui.label(RichText::new(printable(reason)).size(11.5).color(st.muted));
                     }
                 }
                 if r.model.has_nested() {

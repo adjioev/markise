@@ -185,3 +185,25 @@ fn a_section_s_word_and_fields_show_a_package_s_words_as_data() {
     let heading = h.state().section_form().unwrap().heading().to_string();
     nothing_raw(&h, &heading);
 }
+
+/// A block whose arguments name no variant: the form's reason quotes them as data.
+#[test]
+fn a_block_s_reasons_in_its_form_quote_the_document_as_data() {
+    const SIGN: &str = r#"{"label": "Sign", "variants": {"": "plain", "loud": "loud"},
+        "fields": [{"name": "body", "type": "text", "min": 0}]}"#;
+    let doc = "Before.\n\n:::tip x\u{202e}Знак\u{200d}\n\nHello\n\n:::\n";
+    let manifest = MANIFEST.replace(r#","authoring":"blocks-v3""#, "");
+    let files = [
+        ("manifest.json", manifest.as_str()),
+        ("components/tip/tip.json", SIGN),
+        ("editor/palette.json", r#"{"format": 1}"#),
+    ];
+    let f = Fixture::with_package(doc, &files);
+    let mut h = f.ready();
+    h.get_all_by_label("Edit Block: tip").next().unwrap().click();
+    common::run(&mut h);
+    assert!(h.state().block_form().is_some(), "the form opens");
+    let want = "The block has no variant `x\\u{202e}Знак\u{200d}`.";
+    assert!(says(&h, want), "the reason, readable and on one line: {:?}", said(&h));
+    nothing_raw(&h, "");
+}
