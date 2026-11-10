@@ -339,6 +339,8 @@ impl View {
     /// Installs `doc` after the view's own model was updated in place ([`View::model_mut`] +
     /// [`DocModel::apply`] returned `change`): heights are spliced as in [`View::apply`].
     pub fn apply_change(&mut self, doc: Arc<dyn FormatDoc>, change: &ModelChange) {
+        // the item the first section's number stood above: an edit anywhere can move it
+        let old_lead = self.sections.lead_seen.get();
         self.doc = doc;
         self.native.forget();
         self.site.forget();
@@ -475,6 +477,8 @@ impl View {
                 .filter(|&i| self.exact.get(i) == Some(&true)),
         );
         again.extend([0, n.saturating_sub(1), n.saturating_sub(2)]);
+        again.extend(old_lead.and_then(map));
+        again.extend(self.section_lead_item());
 
         for i in again {
             if i < n {
@@ -895,7 +899,8 @@ impl View {
     /// Extra space attached to item `i` (column padding above the first / below the last).
     fn item_pad(&self, i: usize) -> (f32, f32) {
         let n = self.model.items.len();
-        let top = if i == 0 { self.pad_top() } else { 0.0 };
+        // the first section's number stands above its first item, in room no byte stands for (ADR 0026)
+        let top = if i == 0 { self.pad_top() } else { 0.0 } + self.section_lead_room(i);
         let bottom = if i + 1 == n {
             self.theme.column_padding_y * 2.0
         } else {
@@ -1320,6 +1325,7 @@ impl View {
                     let frame = self.section_frame_bands(i, it, laid.height, laid.gap);
                     // below what the item's own blocks draw
                     laid.bands.splice(0..0, frame);
+                    laid.prims.extend(self.section_lead_prims(i, shaper));
                     laid.divider_mid = laid.divider_mid.filter(|_| self.sections_on());
                 }
                 let l = Arc::new(laid);

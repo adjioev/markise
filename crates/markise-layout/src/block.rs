@@ -2847,7 +2847,7 @@ pub fn layout_item(
             if let Some(crate::view::SectionLook::Divider { number, name, style }) = p.section {
                 let m = divider_metrics(t, style.frame);
                 let mid = y + m.row + line_px * 0.5;
-                layout_divider(&mut out, shaper, t, number, name, style, x, width, mid);
+                layout_divider(&mut out, shaper, t, number, name, style, x, width, mid, true);
                 divider_mid = Some(mid);
                 y += m.end;
             }
@@ -3442,6 +3442,7 @@ fn layout_divider(
     x: f32,
     width: f32,
     mid: f32,
+    line: bool,
 ) {
     let strong = section_color(style, t);
     let size = (t.font_size * 0.8).round();
@@ -3473,13 +3474,50 @@ fn layout_divider(
         out.text(pos2(at, mid - h * 0.5), g, Vec::new(), FragmentId::label());
         at += w + size * 0.6;
     }
-    if !style.frame {
+    if line && !style.frame {
         out.prims.push(Prim::Line {
             a: pos2(at, mid),
             b: pos2(x + width, mid),
             stroke: Stroke::new(2.0, strong),
         });
     }
+}
+
+/// The room the first section's number takes above its first item, where a boundary would stand: from
+/// where the frame above would end to the end of the row (ADR 0026). No byte stands for it.
+pub(crate) fn section_lead_height(t: &Theme, frame: bool) -> f32 {
+    let m = divider_metrics(t, frame);
+    m.end - m.tail
+}
+
+/// Where the first section's frame starts in its lead, from the lead's top.
+pub(crate) fn section_lead_frame_top(t: &Theme) -> f32 {
+    let m = divider_metrics(t, true);
+    m.opens - m.tail
+}
+
+/// The first section's number and name, as a boundary's row shows them but with no line, as nothing is
+/// divided from anything there: in the room above the item's top, which starts at `top` (negative).
+pub(crate) fn section_lead_prims(
+    shaper: &mut dyn TextShaper,
+    t: &Theme,
+    number: Option<usize>,
+    name: Option<&str>,
+    style: &crate::view::SectionStyle,
+    width: f32,
+    top: f32,
+) -> Vec<Prim> {
+    let m = divider_metrics(t, style.frame);
+    let mid = top + (m.row - m.tail) + t.line_px() * 0.5;
+    let mut out = Out {
+        prims: Vec::new(),
+        links: Vec::new(),
+        comments: Vec::new(),
+        underline: None,
+        col: (0.0, width),
+    };
+    layout_divider(&mut out, shaper, t, number, name, style, 0.0, width, mid, false);
+    out.prims
 }
 
 /// A native view's own edges around one item of its block (`r`: the item's part of the block).

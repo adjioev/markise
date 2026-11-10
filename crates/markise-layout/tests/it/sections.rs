@@ -616,7 +616,13 @@ fn a_page_estimate_counts_what_boundaries_add() {
         let mut fonts = testing::fonts();
         let mut f = fonts.with_pixels_per_point(1.0);
         full.frame(100.0, 0.0, &mut f, &NoImages);
-        let whole: f32 = (0..full.len()).map(|i| lay_out(&mut full, i).height).sum();
+        // with what stands around items: the column's padding, the first section's number
+        let whole: f32 = (0..full.len())
+            .map(|i| {
+                lay_out(&mut full, i);
+                full.height(i)
+            })
+            .sum();
         let estimated: f32 = (0..paged.len()).map(|i| paged.estimate(i)).sum();
         assert!(
             (whole - estimated).abs() / whole < 0.03,
@@ -813,4 +819,138 @@ fn a_section_goes_by_its_id_else_a_heading_at_the_title_level_else_any_else_the_
     // metadata before it is no block for this
     let (rows, _) = rows_of("A\n\n---\n\n:::section-metadata\n\nkind: x\n\n:::\n\n## B\n", true, 2);
     assert_eq!(rows, [Section(0), Section(1)]);
+}
+
+const TITLED: &str =
+    "---\nlang: en\n---\n\n# Title\n\n## First\n\nOne.\n\n---\n\n## Second\n\nTwo.\n\n---\n\n## Third\n\nThree.\n";
+
+/// The badge of the first section: the texts of item `i` drawn above its top.
+fn above_top(l: &markise_layout::BlockLayout) -> Vec<String> {
+    (l.prims.iter())
+        .filter_map(|p| match p {
+            Prim::Text { pos, text, .. } if pos.y < 0.0 => Some(text.text().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The first section has no boundary and gets its number all the same, above its first item after the
+/// document's title, from what no byte stands for (issue #231 follow-up).
+#[test]
+fn the_first_section_is_numbered_one_and_its_title_stands_above() {
+    for how in [
+        SectionStyleFor {
+            frame: false,
+            numbered: true,
+        },
+        FRAMED,
+    ] {
+        let mut v = styled(TITLED, &how, Paging::Full);
+        frame(&mut v);
+        let (title, first) = (item_of(&v, "# Title"), item_of(&v, "## First"));
+        assert_eq!(above_top(&lay_out(&mut v, first)), ["1"], "frame {}", how.frame);
+        assert!(above_top(&lay_out(&mut v, title)).is_empty());
+        let (a, b) = (rule_item(&v, 1), rule_item(&v, 2));
+        assert_eq!(texts(&lay_out(&mut v, a)), ["2"]);
+        assert_eq!(texts(&lay_out(&mut v, b)), ["3"]);
+        // the outline says the same
+        assert_eq!(v.section_shown_number(0), Some(1));
+        assert_eq!(v.doc().text(), TITLED, "no byte for it");
+    }
+    // with no title, it stands above the first item after front matter; with nothing to show, there is none
+    let mut v = styled(THREE.replace("# First", "## First").as_str(), &FRAMED, Paging::Full);
+    frame(&mut v);
+    let first = item_of(&v, "## First");
+    assert_eq!(above_top(&lay_out(&mut v, first)), ["1"]);
+    let mut v = styled(
+        TITLED,
+        &SectionStyleFor {
+            frame: false,
+            numbered: false,
+        },
+        Paging::Full,
+    );
+    frame(&mut v);
+    let first = item_of(&v, "## First");
+    assert!(above_top(&lay_out(&mut v, first)).is_empty());
+}
+
+/// It takes the room a boundary's row takes, in the item's estimate, its laid-out height and a page's estimate.
+#[test]
+fn the_first_sections_number_is_counted_in_heights_and_page_estimates() {
+    let quiet = SectionStyleFor {
+        frame: false,
+        numbered: false,
+    };
+    let numbered = SectionStyleFor {
+        frame: false,
+        numbered: true,
+    };
+    let mut on = styled(TITLED, &numbered, Paging::Full);
+    let mut off = styled(TITLED, &quiet, Paging::Full);
+    frame(&mut on);
+    frame(&mut off);
+    let first = item_of(&on, "## First");
+    let rule = rule_item(&on, 1);
+    let rule = lay_out(&mut on, rule);
+    let room = rule.height - rule.gap;
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    assert!(near(on.estimate(first) - off.estimate(first), room), "estimate");
+    lay_out(&mut on, first);
+    lay_out(&mut off, first);
+    assert!(near(on.height(first) - off.height(first), room), "laid out");
+    // with a frame, the estimate and the laid-out height hold the same room
+    let mut framed = styled(TITLED, &FRAMED, Paging::Full);
+    frame(&mut framed);
+    let e = framed.estimate(first) - off.estimate(first);
+    lay_out(&mut framed, first);
+    assert!(near(framed.height(first) - off.height(first), e), "framed");
+    assert!(e > 0.0);
+    // a paged model counts it once, whichever item holds it (the first page stays real)
+    let mut text = String::from(TITLED);
+    for k in 0..60 {
+        text.push_str(&format!("---\n\n## Part {k}\n\nText {k}.\n\n"));
+    }
+    let paged = styled(&text, &numbered, Paging::Paged { tops: 8 });
+    let quiet_paged = styled(&text, &quiet, Paging::Paged { tops: 8 });
+    assert!((0..paged.len()).any(|i| paged.model().is_page(i)), "placeholders");
+    let sum = |v: &View| (0..v.len()).map(|i| v.estimate(i)).sum::<f32>();
+    assert!(near(sum(&paged) - sum(&quiet_paged), room), "paged estimate");
+}
+
+/// An edit that moves the first section's number to another item re-measures both: every height is what a
+/// fresh view of the new text estimates.
+#[test]
+fn an_edit_that_moves_the_first_number_moves_its_room() {
+    let numbered = SectionStyleFor {
+        frame: false,
+        numbered: true,
+    };
+    for (find, insert) in [("# Title", "Intro.\n\n"), ("# Title\n\n", "")] {
+        let mut d = markise_md::parse(TITLED);
+        let model = DocModel::build_with(&d, None, Paging::Full);
+        let doc: Arc<dyn FormatDoc> = Arc::new(d.clone());
+        let mut v = View::new(doc, Arc::new(model), Theme::light(), 700.0, 1.0);
+        v.set_sections(true);
+        v.set_section_style(markise_layout::SectionStyle {
+            frame: numbered.frame,
+            numbered: numbered.numbered,
+            ..Default::default()
+        });
+        let before: Vec<f64> = (0..v.len()).map(|i| v.height(i) as f64).collect();
+        let at = TITLED.find(find).unwrap();
+        let cut = if insert.is_empty() { at..at + find.len() } else { at..at };
+        let e = d.apply(&PatchSet::single_verbatim(cut, insert));
+        let ch = v.model_mut().apply(&d, &e);
+        v.apply_change(Arc::new(d.clone()), &ch);
+        let fresh = styled(d.text(), &numbered, Paging::Full);
+        assert_eq!(v.len(), fresh.len());
+        for i in 0..v.len() {
+            assert_eq!(
+                v.height(i),
+                fresh.estimate(i),
+                "item {i} after {find:?} -> {insert:?} ({before:?})"
+            );
+        }
+    }
 }

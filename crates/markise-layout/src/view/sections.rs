@@ -6,7 +6,7 @@
 //!
 //! A document without sections pays one comparison per item.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -122,6 +122,11 @@ pub(super) struct SectionsState {
     /// For each section, how many sections before it are named by a heading whose row is left out, and at the
     /// end the number of all of them. For the document as it stands, with how many sections and outline entries.
     named: RefCell<Option<NamedRows>>,
+    /// Where the first section's number stands, by the start of the top-level block that carries it, once
+    /// asked: `Some(None)` when it shows none. For the document as it stands.
+    lead: RefCell<Option<Option<usize>>>,
+    /// The item that carried it when last asked, so that an edit can move it: its height holds it.
+    pub(super) lead_seen: Cell<Option<usize>>,
 }
 
 /// See [`SectionsState::named`].
@@ -159,6 +164,7 @@ impl SectionsState {
             self.roles.borrow_mut().clear();
             self.heads.borrow_mut().clear();
             *self.named.borrow_mut() = None;
+            *self.lead.borrow_mut() = None;
         }
     }
 }
@@ -432,6 +438,7 @@ impl View {
         if on != self.sections.on {
             self.sections.on = on;
             self.sections.roles.borrow_mut().clear();
+            *self.sections.lead.borrow_mut() = None;
             self.sections.held.clear();
             self.reset_heights();
         }
@@ -446,6 +453,7 @@ impl View {
         if *self.sections.style != style {
             self.sections.style = Arc::new(style);
             self.sections.roles.borrow_mut().clear();
+            *self.sections.lead.borrow_mut() = None;
             self.reset_heights();
         }
     }
@@ -465,6 +473,84 @@ impl View {
             (self.doc.text().get(s.start..s.end)).is_some_and(|t| t.trim_matches([' ', '\t', '\r', '\n']).is_empty())
         });
         if empty_first { index } else { index + 1 }
+    }
+
+    /// Where the first section's number stands: the start of the top-level block it goes above, which is no
+    /// boundary, as the first section has none and nothing is written for it. That is its first block after
+    /// front matter, or, when the document's title is that, the next one in the section, since the title stands
+    /// above the sections as in the outline. None when sections are off, the first section has nothing in it,
+    /// or there is nothing to show: no number, no frame and no name.
+    pub(super) fn section_lead(&self) -> Option<usize> {
+        if !self.sections.on {
+            return None;
+        }
+        if let Some(found) = *self.sections.lead.borrow() {
+            return found;
+        }
+        let found = self.find_section_lead();
+        *self.sections.lead.borrow_mut() = Some(found);
+        found
+    }
+
+    fn find_section_lead(&self) -> Option<usize> {
+        let style = &self.sections.style;
+        if self.section_number(0) == 0 || !(style.numbered || style.frame || self.divider_name(0).is_some()) {
+            return None;
+        }
+        let end = self.doc.section(0)?.end;
+        let items = &self.model.items;
+        let first = usize::from(items.get(0).is_some_and(|it| it.kind == ItemKind::FrontMatter));
+        if first >= items.len() {
+            return None;
+        }
+        let at = self.model.item_start(first);
+        if at >= end {
+            return None;
+        }
+        let Some(title) = self.document_title() else {
+            return Some(at);
+        };
+        let t = self.doc.top_at(title)?;
+        if self.doc.top_span(t).is_none_or(|s| s.start != at) {
+            return Some(at);
+        }
+        // with nothing after the title in its section, the title is what there is
+        match self.doc.top_span(t + 1) {
+            Some(next) if next.start < end => Some(next.start),
+            _ => Some(at),
+        }
+    }
+
+    /// The item the first section's number stands above, if it shows one.
+    pub(super) fn section_lead_item(&self) -> Option<usize> {
+        let i = self.section_lead().map(|at| self.model.item_at_offset(at));
+        self.sections.lead_seen.set(i);
+        i
+    }
+
+    /// The room above item `i` for the first section's number and the top of its frame.
+    pub(super) fn section_lead_room(&self, i: usize) -> f32 {
+        if self.section_lead_item() == Some(i) {
+            crate::block::section_lead_height(&self.theme, self.sections.style.frame)
+        } else {
+            0.0
+        }
+    }
+
+    /// What item `i`, the first section's first, shows above itself: its number and name.
+    pub(super) fn section_lead_prims(
+        &self,
+        i: usize,
+        shaper: &mut dyn crate::text::TextShaper,
+    ) -> Vec<crate::block::Prim> {
+        if self.section_lead_item() != Some(i) {
+            return Vec::new();
+        }
+        let style = &self.sections.style;
+        let number = style.numbered.then(|| self.section_number(0));
+        let name = self.divider_name(0);
+        let top = -crate::block::section_lead_height(&self.theme, style.frame);
+        crate::block::section_lead_prims(shaper, &self.theme, number, name.as_deref(), style, self.width(), top)
     }
 
     /// What a boundary calls its section besides its number: its `id`, unless that is what the first heading
@@ -515,8 +601,18 @@ impl View {
                 .items
                 .get(i - 1)
                 .is_some_and(|p| p.kind == ItemKind::FrontMatter);
-        let first = i == 0 || after_front;
         let last = i + 1 == self.model.items.len();
+        // the first section's frame starts where its number stands, the title above it outside
+        if let Some(lead) = self.section_lead_item() {
+            if i < lead {
+                return Vec::new();
+            }
+            if i == lead {
+                let top = -crate::block::section_lead_height(t, true) + crate::block::section_lead_frame_top(t);
+                return vec![band(top, if last { height + pad } else { height }, true, last)];
+            }
+        }
+        let first = (i == 0 || after_front) && self.section_lead_item().is_none();
         if let Role::Divider { .. } = self.section_role(i, it) {
             let m = crate::block::divider_metrics(t, true);
             let below = band(gap + m.opens, if last { height + pad } else { height }, true, last);
@@ -662,6 +758,19 @@ impl View {
             return 0;
         }
         let mut h = crate::model::hasher();
+        // the first section's number and the start of its frame are in the item it stands above
+        let lead = self.section_lead_item();
+        if lead.is_some() {
+            lead.map(|l| i.cmp(&l)).hash(&mut h);
+            if lead == Some(i) {
+                (
+                    self.sections.style.numbered.then(|| self.section_number(0)),
+                    self.divider_name(0),
+                )
+                    .hash(&mut h);
+                self.sections.style.hash(&mut h);
+            }
+        }
         // a frame's ends are in the items at the document's ends, and all of them hold it
         if self.sections.style.frame {
             self.sections.style.hash(&mut h);
@@ -673,7 +782,7 @@ impl View {
                     .is_some_and(|p| p.kind == ItemKind::FrontMatter))
             .hash(&mut h);
             (i + 1 == self.model.items.len()).hash(&mut h);
-        } else if matches!(self.section_role(i, it), Role::Plain | Role::Inside) {
+        } else if lead != Some(i) && matches!(self.section_role(i, it), Role::Plain | Role::Inside) {
             return 0;
         }
         match self.section_role(i, it) {
