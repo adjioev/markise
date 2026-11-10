@@ -334,9 +334,15 @@ fn the_check_and_practice_agree() {
         assert!(p.is_ready() && !p.stray_marks, "{source}");
         assert!(says(source).is_empty(), "{source}: {:?}", says(source));
     }
-    // and out of code it still is one
-    let source = ":::task\n\nDo.\n\n- [x] One\n\n```\ncode\n```\n\n> Done.\n\n:::";
-    assert!(parts(source, "task").stray_marks, "{source}");
+    // and out of code it still is one, also on the line where code starts after it
+    for source in [
+        ":::task\n\nDo.\n\n- [x] One\n\n```\ncode\n```\n\n> Done.\n\n:::",
+        ":::task\n\nDo.\n\n- [x] ```\n  code\n  ```\n\n> Done.\n\n:::",
+        ":::task\n\nDo.\n\n- [ ]     indented code after the box\n\n> Done.\n\n:::",
+    ] {
+        assert!(parts(source, "task").stray_marks, "{source}");
+        assert_eq!(says(source).len(), 1, "{source}");
+    }
     // answers and no mark: the view says not ready, and so does the check
     let source = ":::pick\n\nDo.\n\n- [ ] One {#a1}\n- [ ] Two {#a2}\n\n> Why.\n\n:::";
     assert!(!parts(source, "pick").is_ready() && !parts(source, "pick").nothing_to_practise());

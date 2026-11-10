@@ -280,17 +280,17 @@ fn has_stray_marks(source: &str, answers: &[PracticeAnswer]) -> bool {
     source.split_inclusive(['\n', '\r']).any(|line| {
         let range = at..at + line.len();
         at += line.len();
-        is_mark_line(line)
-            && !answers
-                .iter()
-                .any(|a| (a.range.start as usize) < range.end && range.start < a.range.end as usize)
+        let Some(mark) = mark_in_line(line).map(|m| range.start + m) else {
+            return false;
+        };
+        // where the mark itself is, not anything later on its line: a fence after a box leaves the box a box
+        !answers
+            .iter()
+            .any(|a| (a.range.start as usize) < range.end && range.start < a.range.end as usize)
             && !code
                 .get_or_insert_with(|| code_ranges(source))
                 .iter()
-                .any(|c: &std::ops::Range<usize>| {
-                    // a code block's span may start after the line's indent
-                    c.start < range.end && range.start < c.end
-                })
+                .any(|c: &std::ops::Range<usize>| c.contains(&mark))
     })
 }
 
@@ -312,23 +312,24 @@ fn code_ranges(source: &str) -> Vec<std::ops::Range<usize>> {
     out
 }
 
-fn is_mark_line(line: &str) -> bool {
+/// Where a list line's `[x]` or `[ ]` stands in it, if it reads so.
+fn mark_in_line(line: &str) -> Option<usize> {
     let rest = line.trim_start_matches([' ', '\t', '>']);
     let rest = match rest.strip_prefix(['-', '*', '+']) {
         Some(r) => r,
         None => {
             let digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
             if digits.len() == rest.len() {
-                return false;
+                return None;
             }
-            match digits.strip_prefix(['.', ')']) {
-                Some(r) => r,
-                None => return false,
-            }
+            digits.strip_prefix(['.', ')'])?
         }
     };
     let rest = rest.trim_start_matches([' ', '\t']);
-    ["[ ]", "[x]", "[X]"].iter().any(|m| rest.starts_with(m))
+    ["[ ]", "[x]", "[X]"]
+        .iter()
+        .any(|m| rest.starts_with(m))
+        .then(|| line.len() - rest.len())
 }
 
 impl PackageViews {
