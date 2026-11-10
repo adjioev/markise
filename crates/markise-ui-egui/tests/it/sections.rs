@@ -1072,3 +1072,42 @@ mod looks {
         assert!(s.contains("named"), "an id is not what the heading says: {s}");
     }
 }
+
+/// Codex review of #260: a click on the first section's number, or just under it, lands in the
+/// section's first item, and typing goes there, not into the title above.
+#[test]
+fn a_click_on_the_first_number_goes_into_the_first_section() {
+    let doc = "---\nauthoring: blocks-v3\n---\n\n# Title\n\n## First\n\nOne.\n\n---\n\n## Second\n\nTwo.\n";
+    let p = plain(doc);
+    let mut h = opened(&p);
+    let first = doc.find("## First").unwrap();
+    let r = h.state().viewer_item_rect(first).expect("on screen");
+    let view = &h.state_mut().viewer().unwrap().ed.view;
+    let room = view.room_above(view.model().item_at_offset(first));
+    assert!(room > 0.0);
+    for dy in [room - 4.0, room * 0.5, 2.0] {
+        let at = egui::pos2(r.left() + 30.0, r.top() - dy);
+        h.event(egui::Event::PointerMoved(at));
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        common::run(&mut h);
+        let f = focus(&mut h);
+        assert!((first..doc.find("One.").unwrap()).contains(&f), "{dy}: caret at {f}");
+    }
+    h.event(egui::Event::Text("X".into()));
+    common::run(&mut h);
+    let now = text(&h);
+    assert!(now.contains("# Title\n"), "the title is as it was: {now}");
+    let line = now.lines().find(|l| l.contains('X')).unwrap_or("");
+    assert!(
+        line.starts_with("## Fir"),
+        "typed into the first section's heading: {now}"
+    );
+}

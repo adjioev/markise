@@ -624,6 +624,20 @@ impl View {
         opened
     }
 
+    /// Hidden whatever the caret does (what the caret reveals aside): a comment, a closed fold's body,
+    /// Practice, a site view or a plaque.
+    pub(super) fn hidden_at_rest(&self, i: usize) -> bool {
+        self.practice_hidden(i)
+            || self.disclosures.hidden(i)
+            || self
+                .model
+                .items
+                .get(i)
+                .is_some_and(|it| it.raw.as_deref() == Some(&markise_doc::RawPresentation::Comment))
+            || self.site_hidden(i)
+            || self.section_hidden(i)
+    }
+
     fn disclosure_hidden(&self, i: usize) -> bool {
         // before the caret's say: a caret that gets there by any route reveals nothing here
         if self.practice_hidden(i) {
@@ -910,6 +924,8 @@ impl View {
     }
 
     fn reset_heights(&mut self) {
+        // what shows can have changed (a fold opened or closed): where the first number stands too
+        self.sections.forget_lead();
         let n = self.model.items.len();
         let mut values = Vec::with_capacity(n);
         let mut exact = Vec::with_capacity(n);

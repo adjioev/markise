@@ -1954,7 +1954,8 @@ impl DocViewer {
         let (&(first, fy), &(last, _)) = (shown.first()?, shown.last()?);
         let mut target = None;
         for &(idx, y) in &self.shown() {
-            if p.y >= top + y {
+            // the room above an item that is its own (the first section's number) is the item's
+            if p.y >= top + y - self.ed.view.room_above(idx) {
                 target = Some((idx, y));
             }
         }

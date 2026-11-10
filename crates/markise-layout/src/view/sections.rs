@@ -159,6 +159,10 @@ impl SectionsState {
         }
     }
 
+    pub(super) fn forget_lead(&self) {
+        *self.lead.borrow_mut() = None;
+    }
+
     pub(super) fn forget(&self) {
         if self.on {
             self.roles.borrow_mut().clear();
@@ -508,17 +512,32 @@ impl View {
             return None;
         }
         let Some(title) = self.document_title() else {
-            return Some(at);
+            return self.first_shown_from(first, end);
         };
         let t = self.doc.top_at(title)?;
         if self.doc.top_span(t).is_none_or(|s| s.start != at) {
-            return Some(at);
+            return self.first_shown_from(first, end);
         }
-        // with nothing after the title in its section, the title is what there is
-        match self.doc.top_span(t + 1) {
-            Some(next) if next.start < end => Some(next.start),
-            _ => Some(at),
+        // with nothing shown after the title in its section, the title is what there is
+        let after = self
+            .model
+            .item_at_offset(self.doc.top_span(t + 1).map_or(end, |s| s.start));
+        (self.doc.top_span(t + 1).is_some_and(|s| s.start < end))
+            .then(|| self.first_shown_from(after, end))
+            .flatten()
+            .or(Some(at))
+    }
+
+    /// The start of the first item from `i` on, before `end`, that shows whatever the caret does: a
+    /// hidden comment, a closed fold's body or what a plaque or a site view hides takes no number.
+    fn first_shown_from(&self, mut i: usize, end: usize) -> Option<usize> {
+        while i < self.model.items.len() && self.model.item_start(i) < end {
+            if !self.hidden_at_rest(i) {
+                return Some(self.model.item_start(i));
+            }
+            i += 1;
         }
+        None
     }
 
     /// The item the first section's number stands above, if it shows one.
@@ -535,6 +554,12 @@ impl View {
         } else {
             0.0
         }
+    }
+
+    /// Room above item `i`'s top that is its own (the first section's number and the top of its frame):
+    /// a point there is a point in the item, though it stands above where the item's layout starts.
+    pub fn room_above(&self, i: usize) -> f32 {
+        self.section_lead_room(i)
     }
 
     /// What item `i`, the first section's first, shows above itself: its number and name.

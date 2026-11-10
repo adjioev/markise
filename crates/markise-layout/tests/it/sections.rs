@@ -954,3 +954,54 @@ fn an_edit_that_moves_the_first_number_moves_its_room() {
         }
     }
 }
+
+/// Codex review of #260: a hidden comment after the title does not take the first section's number and
+/// frame: they go above the first item that shows.
+#[test]
+fn the_first_number_goes_above_the_first_item_that_shows() {
+    let text = "---\nlang: en\n---\n\n# Title\n\n<!-- a note -->\n\n## First\n\nOne.\n\n---\n\n## Second\n";
+    for how in [
+        SectionStyleFor {
+            frame: false,
+            numbered: true,
+        },
+        FRAMED,
+    ] {
+        let mut v = styled(text, &how, Paging::Full);
+        frame(&mut v);
+        let (note, first) = (item_of(&v, "<!--"), item_of(&v, "## First"));
+        assert_eq!(v.height(note), 0.0, "the comment is hidden");
+        assert!(above_top(&lay_out(&mut v, note)).is_empty());
+        assert_eq!(above_top(&lay_out(&mut v, first)), ["1"], "frame {}", how.frame);
+        if how.frame {
+            assert!(
+                lay_out(&mut v, first).bands.iter().any(|b| b.opens),
+                "the card starts here"
+            );
+        }
+    }
+}
+
+/// Codex review of #260: the room of the first section's number belongs to its item: a point in it is a
+/// place in that item, not in the title above.
+#[test]
+fn a_point_in_the_first_numbers_room_is_in_its_item() {
+    let mut v = styled(TITLED, &FRAMED, Paging::Full);
+    frame(&mut v);
+    let first = item_of(&v, "## First");
+    let room = v.room_above(first);
+    assert!(room > 0.0);
+    assert_eq!(v.room_above(item_of(&v, "# Title")), 0.0);
+    let mut fonts = testing::fonts();
+    let mut f = fonts.with_pixels_per_point(1.0);
+    let mut g = Geometry {
+        view: &mut v,
+        shaper: &mut f,
+        images: &NoImages,
+    };
+    let (start, end) = (TITLED.find("## First").unwrap(), TITLED.find("One.").unwrap());
+    for y in [-room + 2.0, -room * 0.5, -1.0] {
+        let at = g.hit(first, epaint::pos2(20.0, y)).expect("a place");
+        assert!((start..end).contains(&at.offset) && at.virt == 0, "{y}: {at:?}");
+    }
+}
