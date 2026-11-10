@@ -46,7 +46,7 @@ format. A change that an older Markise would misread needs a new format name.
 wherever a package may add one (the manifest, a schema, its `argument`, a field declaration, a view
 and its `practice`, the palette, a group, a palette block, a preset, the sections file, its fields,
 values and `view`), refuses nothing: it is ignored or kept as above, and it becomes a **note**, with
-the file and the place (`field "options" has the key "itemQuote", which this version of Markise does
+the file and the place (`field "body" has the key "someday", which this version of Markise does
 not read`). `PackageIndex::notes` lists them, at most 32. The app's package status shows how many
 and lists them in its menu; `markise-cli blocks check` prints them once per binding and adds them to
 its JSON as `package_notes`. Neither changes an exit code or a block's verdict. What stays a refusal
