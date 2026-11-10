@@ -684,6 +684,12 @@ impl Geometry<'_> {
     /// The document position at item-local point `pt` of item `i`.
     pub fn hit(&mut self, i: usize, pt: Pos2) -> Option<DocPos> {
         let l = self.layout(i);
+        // the room above the item that is its own (the first section's number): its first line
+        let pt = if pt.y < 0.0 && self.view.room_above(i) > 0.0 {
+            Pos2::new(pt.x, l.gap)
+        } else {
+            pt
+        };
         // a picture has no stops: its upper half is the place before it, its lower half after it;
         // a plaque likewise
         if l.has_picture() || l.plaque.is_some() {
