@@ -353,7 +353,7 @@ pub struct ParleyText {
 impl ParleyText {
     pub fn new(defs: &egui::FontDefinitions) -> Self {
         ParleyText {
-            shaper: ParleyShaper::from_font_definitions(defs),
+            shaper: ParleyShaper::from_font_definitions(&crate::fonts::for_parley(defs)),
             atlas: GlyphAtlas::default(),
         }
     }
@@ -361,7 +361,7 @@ impl ParleyText {
     /// Fonts changed (theme): new font store; old atlas entries are keyed by blob ids that will
     /// no longer occur, so the atlas is reset too.
     pub fn set_fonts(&mut self, defs: &egui::FontDefinitions) {
-        self.shaper.set_font_definitions(defs);
+        self.shaper.set_font_definitions(&crate::fonts::for_parley(defs));
         self.atlas = GlyphAtlas::default();
     }
 }

@@ -339,6 +339,19 @@ fn load_into(store: &Mutex<Store>, budget: usize, path: &Path, index: u32) -> Re
 /// Font-data name of the platform's colour emoji font.
 pub const EMOJI_FONT: &str = "sys-emoji";
 
+/// The definitions the parley backend registers: all but the colour emoji face. Parley's font store
+/// copies a face of a collection into a standalone font, and Apple Color Emoji's is some 190 MB: on
+/// the UI thread, outside [`FONT_BUDGET`], and again on every reinstall. Until it can register a mapped
+/// face without a copy, the developer backend (`MARKISE_TEXT=parley`) goes without colour emoji.
+pub fn for_parley(defs: &FontDefinitions) -> FontDefinitions {
+    let mut out = defs.clone();
+    out.font_data.remove(EMOJI_FONT);
+    for list in out.families.values_mut() {
+        list.retain(|n| n != EMOJI_FONT);
+    }
+    out
+}
+
 /// Like [`first`], but only a face mapped from the OS-protected folder: one read into memory would
 /// cost all of its size up front.
 fn first_mapped(paths: &[&str], name: &str) -> Option<(String, Arc<FontData>)> {
@@ -1128,6 +1141,26 @@ mod tests {
         // egui's own fonts alone lack it: this is what the platform's face is for
         let mut bundled = egui::epaint::text::Fonts::new(Default::default(), definitions(false));
         assert_eq!(missing(&mut bundled, &FontFamily::Proportional, "🧪"), "🧪");
+    }
+
+    /// The parley backend registers every face but the emoji one, which it would copy whole.
+    #[test]
+    fn the_parley_backend_goes_without_the_emoji_face() {
+        let face = Arc::new(FontData::from_static(markise_text::keys::FONT));
+        let defaults = DefaultFaces {
+            emoji: Some((EMOJI_FONT.to_string(), face)),
+            ..DefaultFaces::default()
+        };
+        let defs = definitions_with(&defaults, &FontSet::default());
+        let parley = for_parley(&defs);
+        assert!(!parley.font_data.contains_key(EMOJI_FONT));
+        assert!(parley.families.values().all(|l| !l.iter().any(|n| n == EMOJI_FONT)));
+        assert_eq!(
+            parley.font_data.len() + 1,
+            defs.font_data.len(),
+            "everything else stays"
+        );
+        assert_eq!(parley.families.len(), defs.families.len());
     }
 
     #[test]
