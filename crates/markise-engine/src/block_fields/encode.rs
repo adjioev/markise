@@ -694,8 +694,10 @@ fn render_list_item(
     }
 }
 
-/// `text`, lines after its first line terminator shifted by `shift` columns: spaces added, or
-/// leading spaces taken away as far as there are. A blank line stays as it is.
+/// `text`, lines after its first line terminator shifted by `shift` columns. The leading blanks of a
+/// shifted line are counted in columns, tabs to their stops, and written as spaces, as a tab would not move
+/// by a column added before it; a shift left takes away as many columns as there are. A blank line stays
+/// as it is.
 fn reindent(text: &str, shift: isize) -> String {
     if shift == 0 {
         return text.to_string();
@@ -707,13 +709,10 @@ fn reindent(text: &str, shift: isize) -> String {
             out.push_str(line);
             continue;
         }
-        if shift > 0 {
-            out.push_str(&" ".repeat(shift as usize));
-            out.push_str(line);
-        } else {
-            let spaces = body.len() - body.trim_start_matches(' ').len();
-            out.push_str(&line[spaces.min(shift.unsigned_abs())..]);
-        }
+        let lead = body.len() - body.trim_start_matches([' ', '\t']).len();
+        let width = columns(&body[..lead]) as isize;
+        out.push_str(&" ".repeat((width + shift).max(0) as usize));
+        out.push_str(&line[lead..]);
     }
     out
 }

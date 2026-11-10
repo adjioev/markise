@@ -195,6 +195,24 @@ impl SchemaForm {
         &self.values
     }
 
+    /// The keys of the rows of the array field `key` at the top of the form, in order. A row keeps its
+    /// key through edits, moves and the removal of others, and a new row gets a new one, so a host can
+    /// tell which row is which whatever they say: `None` if `key` holds no array.
+    pub fn row_keys(&mut self, key: &str) -> Option<Vec<u64>> {
+        let len = self.values.get(key)?.as_array()?.len();
+        Some(self.rows.keys(self.id.with(key), len))
+    }
+
+    /// [`SchemaForm::row_keys`] as they stand, without making any: `None` before the form has keys
+    /// for that array.
+    pub fn row_keys_now(&self, key: &str) -> Option<Vec<u64>> {
+        let len = self.values.get(key)?.as_array()?.len();
+        self.rows
+            .peek(self.id.with(key))
+            .filter(|k| k.len() == len)
+            .map(<[u64]>::to_vec)
+    }
+
     /// Every reason the values do not fit, as of the last change.
     pub fn errors(&self) -> &[FieldError] {
         &self.errors
