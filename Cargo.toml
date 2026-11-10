@@ -42,7 +42,9 @@ cssparser = "0.38"
 # `monochrome_emoji_fonts`: egui 0.37 no longer bundles its emoji/symbol fallbacks
 # (NotoEmoji-Regular, emoji-icon-font) by default; they were part of the 0.33 defaults.
 egui = { version = "0.37.0", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts"] }
-epaint = { version = "0.37.0", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts"] }
+# `color_fonts`: draws colour glyphs (sbix, CBDT, COLR), so the platform's colour emoji font shows
+# emoji egui's monochrome font lacks (issue #231); its vello_cpu features are already on below.
+epaint = { version = "0.37.0", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts", "color_fonts"] }
 # eframe 0.37 switched its default renderer to wgpu and added a system-font provider. Markise
 # loads system fonts itself (ADR 0004), so the feature set below mirrors the eframe 0.33
 # defaults plus `wgpu`: the app renders with wgpu (Metal on macOS) and falls back to glow

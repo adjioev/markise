@@ -38,6 +38,9 @@ struct Candidates {
     /// A broad symbol font (arrows, technical and miscellaneous symbols), loaded with the CJK
     /// fallback when a document needs glyphs the primary fonts lack.
     symbols: &'static [&'static str],
+    /// The platform's colour emoji font: the last face of every chain, for the emoji no other face
+    /// has (egui's bundled emoji font stops at an older Unicode version, so 🧪 drew as a box, issue #231).
+    emoji: &'static [&'static str],
 }
 
 /// Candidate system fonts of this platform.
@@ -51,6 +54,7 @@ fn candidates() -> Candidates {
                 "/System/Library/Fonts/STHeiti Light.ttc",
             ],
             symbols: &["/System/Library/Fonts/Apple Symbols.ttf"],
+            emoji: &["/System/Library/Fonts/Apple Color Emoji.ttc"],
         }
     } else if cfg!(target_os = "windows") {
         Candidates {
@@ -58,6 +62,7 @@ fn candidates() -> Candidates {
             bold: &["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\arialbd.ttf"],
             cjk: &["C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simsun.ttc"],
             symbols: &["C:\\Windows\\Fonts\\seguisym.ttf"],
+            emoji: &["C:\\Windows\\Fonts\\seguiemj.ttf"],
         }
     } else {
         Candidates {
@@ -79,6 +84,12 @@ fn candidates() -> Candidates {
                 "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
                 "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
                 "/usr/share/fonts/google-noto/NotoSansSymbols2-Regular.ttf",
+            ],
+            emoji: &[
+                "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+                "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+                "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+                "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
             ],
         }
     }
@@ -103,6 +114,10 @@ fn insert_before_emoji(list: &mut Vec<String>, name: &str) {
 
 /// Largest font file read.
 const MAX_FONT_BYTES: u64 = 64 << 20;
+
+/// Largest font file mapped from the OS-protected folder: only the pages of glyphs in use become
+/// resident, so a colour emoji collection of some 200 MB (macOS) costs what its used emoji take.
+const MAX_MAPPED_FONT_BYTES: u64 = 512 << 20;
 
 /// Bytes of font data retained by the process at most (all faces handed to epaint).
 pub const FONT_BUDGET: usize = 128 << 20;
@@ -253,7 +268,7 @@ fn protected_map(path: &Path) -> Option<&'static [u8]> {
     }
     let file = std::fs::File::open(&p).ok()?;
     let len = file.metadata().ok()?.len();
-    if len == 0 || len > MAX_FONT_BYTES {
+    if len == 0 || len > MAX_MAPPED_FONT_BYTES {
         return None;
     }
     // SAFETY: files in the OS-protected system font folder are not modified by user
@@ -321,6 +336,34 @@ fn load_into(store: &Mutex<Store>, budget: usize, path: &Path, index: u32) -> Re
     Ok(data)
 }
 
+/// Font-data name of the platform's colour emoji font.
+pub const EMOJI_FONT: &str = "sys-emoji";
+
+/// The definitions the parley backend registers: all but the colour emoji face. Parley's font store
+/// copies a face of a collection into a standalone font, and Apple Color Emoji's is some 190 MB: on
+/// the UI thread, outside [`FONT_BUDGET`], and again on every reinstall. Until it can register a mapped
+/// face without a copy, the developer backend (`MARKISE_TEXT=parley`) goes without colour emoji.
+pub fn for_parley(defs: &FontDefinitions) -> FontDefinitions {
+    let mut out = defs.clone();
+    out.font_data.remove(EMOJI_FONT);
+    for list in out.families.values_mut() {
+        list.retain(|n| n != EMOJI_FONT);
+    }
+    out
+}
+
+/// Like [`first`], but only a face mapped from the OS-protected folder: one read into memory would
+/// cost all of its size up front.
+fn first_mapped(paths: &[&str], name: &str) -> Option<(String, Arc<FontData>)> {
+    paths
+        .iter()
+        .find_map(|p| {
+            let bytes = protected_map(Path::new(p))?;
+            valid_face(bytes, 0).then(|| Arc::new(FontData::from_static(bytes)))
+        })
+        .map(|d| (name.to_string(), d))
+}
+
 fn first(paths: &[&str], name: &str) -> Option<(String, Arc<FontData>)> {
     paths
         .iter()
@@ -337,11 +380,15 @@ pub struct DefaultFaces {
     pub cjk: Option<(String, Arc<FontData>)>,
     /// The platform's symbol font (Apple Symbols, Segoe UI Symbol, Noto Sans Symbols 2).
     pub symbols: Option<(String, Arc<FontData>)>,
+    /// The platform's colour emoji font (Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji).
+    pub emoji: Option<(String, Arc<FontData>)>,
 }
 
 /// Loads the system default faces (file reads: call off the UI thread). The CJK and symbol
 /// fallbacks (tens of MB) are loaded only with `fallback` — when a document first needs a glyph
-/// the primary fonts lack (see `View::missing_glyphs`).
+/// the primary fonts lack (see `View::missing_glyphs`). The emoji font is loaded either way: an
+/// emoji in a file name, a tab or any other label asks for no fallback, and it is mapped from the
+/// system's protected folder, so it costs only the glyphs drawn (none, when no emoji shows).
 pub fn load_defaults(fallback: bool) -> DefaultFaces {
     let c = candidates();
     DefaultFaces {
@@ -353,6 +400,7 @@ pub fn load_defaults(fallback: bool) -> DefaultFaces {
         } else {
             None
         },
+        emoji: first_mapped(c.emoji, EMOJI_FONT),
     }
 }
 
@@ -382,8 +430,10 @@ pub fn definitions_with(defaults: &DefaultFaces, themed: &FontSet) -> FontDefini
             insert_before_emoji(list, KEYS_FONT);
         }
     }
-    // CJK and symbol fallbacks for every family (after the primary fonts)
-    for (name, data) in defaults.cjk.iter().chain(&defaults.symbols) {
+    // CJK and symbol fallbacks for every family (after the primary fonts), and colour emoji last of
+    // all: every family below takes this chain as its tail, so the document, the outline, the status
+    // bar, tabs and menus all find the same face for a glyph
+    for (name, data) in defaults.cjk.iter().chain(&defaults.symbols).chain(&defaults.emoji) {
         defs.font_data.insert(name.clone(), data.clone());
         for fam in [FontFamily::Proportional, FontFamily::Monospace] {
             if let Some(list) = defs.families.get_mut(&fam) {
@@ -1034,6 +1084,83 @@ mod tests {
         }
         let body = &defs.families[&FontFamily::Name(markise_layout::FAMILY_BODY.into())];
         assert!(body.iter().any(|n| n == KEYS_FONT), "{body:?}");
+    }
+
+    /// Issue #231: an emoji egui's own emoji font lacks (🧪) drew as a box in the outline. Every family
+    /// ends with the same faces, the platform's emoji font last: the document's roles, the sidebar and
+    /// egui's own families, which the status bar, tabs and menus use.
+    #[test]
+    fn every_family_ends_with_the_emoji_font() {
+        // a stand-in for the platform's face: what matters is where it goes
+        let face = Arc::new(FontData::from_static(markise_text::keys::FONT));
+        let defaults = DefaultFaces {
+            emoji: Some((EMOJI_FONT.to_string(), face)),
+            ..DefaultFaces::default()
+        };
+        let defs = definitions_with(&defaults, &FontSet::default());
+        let named = [
+            markise_layout::FAMILY_BODY,
+            markise_layout::FAMILY_BOLD,
+            markise_layout::FAMILY_HEADING,
+            markise_layout::FAMILY_HEADING_BOLD,
+            markise_layout::FAMILY_MONO,
+            markise_layout::FAMILY_MONO_BOLD,
+            markise_layout::FAMILY_SIDEBAR,
+            markise_layout::FAMILY_SIDEBAR_BOLD,
+        ]
+        .map(|n| FontFamily::Name(n.into()));
+        for fam in named.iter().chain(&[FontFamily::Proportional, FontFamily::Monospace]) {
+            let list = &defs.families[fam];
+            assert_eq!(list.last().map(String::as_str), Some(EMOJI_FONT), "{fam:?}: {list:?}");
+        }
+    }
+
+    /// With the platform's emoji font installed (macOS and Windows always, Linux with Noto Color Emoji),
+    /// 🧪 has a glyph wherever text is drawn, the outline's family and the editor's alike.
+    #[test]
+    fn an_emoji_newer_than_eguis_own_font_has_a_glyph_in_every_family() {
+        let defaults = load_defaults(false);
+        if defaults.emoji.is_none() {
+            // every macOS has Apple Color Emoji: there, finding none is the failure
+            #[cfg(target_os = "macos")]
+            panic!("no Apple Color Emoji");
+            #[cfg(not(target_os = "macos"))]
+            return;
+        }
+        let mut fonts =
+            egui::epaint::text::Fonts::new(Default::default(), definitions_with(&defaults, &FontSet::default()));
+        for fam in [
+            FontFamily::Name(markise_layout::FAMILY_SIDEBAR.into()),
+            FontFamily::Name(markise_layout::FAMILY_HEADING_BOLD.into()),
+            FontFamily::Name(markise_layout::FAMILY_BODY.into()),
+            FontFamily::Proportional,
+            FontFamily::Monospace,
+        ] {
+            assert_eq!(missing(&mut fonts, &fam, "🧪 Lab 🧠 🫠"), "", "{fam:?}");
+        }
+        // egui's own fonts alone lack it: this is what the platform's face is for
+        let mut bundled = egui::epaint::text::Fonts::new(Default::default(), definitions(false));
+        assert_eq!(missing(&mut bundled, &FontFamily::Proportional, "🧪"), "🧪");
+    }
+
+    /// The parley backend registers every face but the emoji one, which it would copy whole.
+    #[test]
+    fn the_parley_backend_goes_without_the_emoji_face() {
+        let face = Arc::new(FontData::from_static(markise_text::keys::FONT));
+        let defaults = DefaultFaces {
+            emoji: Some((EMOJI_FONT.to_string(), face)),
+            ..DefaultFaces::default()
+        };
+        let defs = definitions_with(&defaults, &FontSet::default());
+        let parley = for_parley(&defs);
+        assert!(!parley.font_data.contains_key(EMOJI_FONT));
+        assert!(parley.families.values().all(|l| !l.iter().any(|n| n == EMOJI_FONT)));
+        assert_eq!(
+            parley.font_data.len() + 1,
+            defs.font_data.len(),
+            "everything else stays"
+        );
+        assert_eq!(parley.families.len(), defs.families.len());
     }
 
     #[test]
