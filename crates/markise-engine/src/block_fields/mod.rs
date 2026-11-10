@@ -170,6 +170,11 @@ pub enum FieldsError {
     WrongKind {
         field: String,
     },
+    /// The edit would change a code, math or HTML block in the field, or take it away: those are
+    /// edited in the Markdown, never through a value (issue #231).
+    Code {
+        field: String,
+    },
     /// The document no longer holds this model's source at its place.
     Stale,
     Patch(PatchError),
@@ -183,6 +188,10 @@ impl std::fmt::Display for FieldsError {
             FieldsError::UnknownField(n) => write!(f, "no field `{n}`"),
             FieldsError::UnknownItem { field } => write!(f, "no such item in field `{field}`"),
             FieldsError::WrongKind { field } => write!(f, "the value does not fit field `{field}`"),
+            FieldsError::Code { field } => write!(
+                f,
+                "field `{field}` holds a code block, which is kept as written; edit it in the block's Markdown"
+            ),
             FieldsError::Stale => write!(f, "the document changed since the block was read"),
             FieldsError::Patch(e) => write!(f, "{e}"),
             FieldsError::Edit(e) => write!(f, "{e:?}"),
@@ -288,6 +297,16 @@ impl BlockFields {
             .as_ref()?;
         let text = self.source[src.under.clone()].trim_start_matches(['\r', '\n']);
         (!text.is_empty()).then_some(text)
+    }
+
+    /// Whether the field of this name holds a code, math or HTML block, in its text or at the start
+    /// of an item. Its value shows those lines as written, and no edit may change them: a form shows
+    /// such a field read-only and leaves the code to the Markdown (issue #231).
+    pub fn holds_code(&self, name: &str) -> bool {
+        self.field(name).is_some_and(|f| match &f.value {
+            FieldValue::Text(_) => !f.src.code.is_empty(),
+            FieldValue::Items(items) => (items.iter()).any(|i| i.src.as_ref().is_some_and(|s| !s.code.is_empty())),
+        })
     }
 
     /// Whether any item has Markdown nested under it ([`BlockFields::nested_under`]).

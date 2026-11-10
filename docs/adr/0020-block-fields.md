@@ -110,6 +110,18 @@ four spaces would make code.
 Lines that stay are not escaped. Text holding a list keeps that list's bytes while other lines
 change; an edited line of it becomes text. Changing structure is what the Markdown view is for.
 
+**Code in a field is never rewritten** (issue #231: a code line edited through the form lost its indent
+and a fence got a `\`). A code block, fenced or indented, and a math or HTML block are literal: escaping,
+unescaping or trimming a line of one changes what it says. So in a text field or a quote, and at the
+start of an item, their lines are values as written, with no escape taken away, and no edit may change
+their bytes: one that would, or that would take them away with their field, is refused
+(`FieldsError::Code`), whoever asks, the form, in-place editing or any other caller. Their bytes are their own: fences, delimiters and content lines as the parser reads them, without the marker, indent or `>` of what holds them, so renumbering or reindenting an item around one is no change of it. Prose around them
+stays text and is edited as before. The form shows a text field holding one read-only, with a note
+that the code is edited in the block's Markdown or in Source (`BlockFields::holds_code`,
+`SchemaForm::set_read_only`), rather than editing it line by line: which typed line belongs to the
+code cannot be told from a value, so only read-only never loses a byte. In place the keyboard does not
+reach into it, as before.
+
 ### Values for a form
 
 `values()` is JSON: strings, arrays of strings, `{id, text, correct}`, `{alt, path}`.

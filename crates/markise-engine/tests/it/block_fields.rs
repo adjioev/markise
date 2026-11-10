@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use markise_doc::DocumentFormat;
 use markise_engine::block_fields::{
-    BlockFields, FieldDecl, FieldEdit, FieldKind, FieldValue, ItemData, ItemId, block_range_at, decls_from_spec,
+    BlockFields, FieldDecl, FieldEdit, FieldKind, FieldValue, FieldsError, ItemData, ItemId, block_range_at,
+    decls_from_spec,
 };
 use markise_engine::editor::{EditorSession, HistoryLimits, ManualClock};
 use markise_md::{MarkdownFormat, ParseOptions};
@@ -1586,4 +1587,268 @@ fn a_slot_edit_keeps_the_argument_and_an_argument_is_one_undo_step() {
         b.apply_to_session(&mut changed, &[set_argument("c")], "Edit Block"),
         Err(markise_engine::block_fields::FieldsError::Stale)
     ));
+}
+
+/// Issue #231: a code line edited through a text field lost its indent, and a fence line got a `\`.
+/// A text field holding a code block keeps it byte for byte: an edit that would change it is refused.
+#[test]
+fn a_code_block_in_a_text_field_is_never_rewritten() {
+    let src = ":::f\n\n# T\n\nBefore\n\n```rust title\n  let x = 1;\n\\# not an escape\n```\n\n    indented code\n\nAfter\n\n:::";
+    let b = dec(src, &figure_decls());
+    let caption = b.values()["caption"].as_str().unwrap().to_string();
+    // the value shows the code as written, escapes and indents included
+    assert!(
+        caption.contains("```rust title\n  let x = 1;\n\\# not an escape\n```"),
+        "{caption}"
+    );
+    assert!(caption.contains("\n    indented code\n"), "{caption}");
+    assert!(b.holds_code("caption"));
+    assert!(!b.holds_code("title"));
+    // editing a code line, the info string or the indent is refused, and nothing is written
+    for (from, to) in [
+        ("  let x = 1;", "  let x = 2;"),
+        ("```rust title", "```python"),
+        ("    indented code", "    indented code!"),
+        ("\\# not an escape\n", "\\# not an escape\nmore\n"),
+    ] {
+        let text = caption.replacen(from, to, 1);
+        let e = b.apply(&[FieldEdit::SetText {
+            field: "caption".into(),
+            text: text.clone(),
+        }]);
+        assert!(
+            matches!(e, Err(FieldsError::Code { ref field }) if field == "caption"),
+            "{from:?} -> {to:?}: {:?}",
+            e.map(|a| a.fields.source().to_string())
+        );
+        let e = b.edits_from_values(&json!({"title": "T", "caption": text, "pictures": []}));
+        if let Ok(edits) = e {
+            assert!(b.apply(&edits).is_err(), "{from:?}");
+        }
+    }
+    // emptying the field would take the code away: refused too
+    assert!(
+        b.apply(&[FieldEdit::SetText {
+            field: "caption".into(),
+            text: String::new()
+        }])
+        .is_err()
+    );
+    // the prose around it is text, and the code keeps its bytes
+    let next = run(
+        &b,
+        &[FieldEdit::SetText {
+            field: "caption".into(),
+            text: caption.replace("Before", "# Before").replace("After", "After!"),
+        }],
+    );
+    assert_eq!(
+        next.source(),
+        src.replace("Before", "\\# Before").replace("After", "After!")
+    );
+}
+
+/// The code, math and HTML blocks of a block's source, as written.
+fn code_blocks(src: &str) -> Vec<String> {
+    fn walk(s: &str, blocks: &[markise_md::Block], out: &mut Vec<String>) {
+        for b in blocks {
+            match b.kind {
+                // what it says, without the prefixes of what holds it: its fence and its lines
+                markise_md::BlockKind::FencedCode { opener, closer, .. } => {
+                    let mut parts = vec![&s[opener.start..opener.end]];
+                    parts.extend(b.lines.iter().map(|l| &s[l.start..l.end]));
+                    parts.extend(closer.map(|c| &s[c.start..c.end]));
+                    out.push(parts.join("\n"));
+                }
+                markise_md::BlockKind::IndentedCode => out.push(
+                    b.lines
+                        .iter()
+                        .map(|l| &s[l.start..l.end])
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => walk(s, &b.children, out),
+            }
+        }
+    }
+    let doc = markise_md::Document::parse(src, ParseOptions::default());
+    let mut out = Vec::new();
+    walk(src, &doc.tree(), &mut out);
+    out
+}
+
+fn code_source() -> impl Strategy<Value = String> {
+    let part = prop_oneof![
+        "[a-z]{1,6}( [a-z]{1,4})?".prop_map(|w| w),
+        ("[a-z]{0,4}", proptest::collection::vec(code_line(), 1..4))
+            .prop_map(|(info, lines)| format!("```{info}\n{}\n```", lines.join("\n"))),
+        proptest::collection::vec(code_line(), 1..3).prop_map(|lines| lines
+            .iter()
+            .map(|l| format!("    {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")),
+    ];
+    (
+        prop_oneof![Just("\n"), Just("\r\n")],
+        proptest::collection::vec(part, 1..5),
+    )
+        .prop_map(|(eol, parts)| {
+            // two indented code blocks in a row would be one
+            let body = parts.join("\n\nx\n\n");
+            format!(":::f\n\n# T\n\n{body}\n\n:::").replace('\n', eol)
+        })
+}
+
+fn code_line() -> impl Strategy<Value = String> {
+    prop_oneof![
+        "[a-z]{1,5}".prop_map(|w| w),
+        Just("  indented".to_string()),
+        Just("\\# escaped".to_string()),
+        Just("# hash".to_string()),
+        Just("- dash".to_string()),
+        Just("\tTab".to_string()),
+    ]
+}
+
+proptest! {
+    /// Issue #231: whatever a text field's value becomes, a code block in it keeps its bytes, or
+    /// the edit is refused as touching code. An edit that goes through reads back as typed.
+    #[test]
+    fn code_in_a_text_field_round_trips(
+        src in code_source(),
+        at in 0usize..40,
+        line in prop_oneof![code_line(), word(), Just(String::new())],
+        how in 0usize..3,
+    ) {
+        let b = dec(&src, &figure_decls());
+        prop_assert!(b.apply(&[]).expect("applies").patches.is_empty());
+        prop_assert!(b.edits_from_values(&b.values()).expect("fits").is_empty());
+        let caption = b.values()["caption"].as_str().expect("text").to_string();
+        let mut lines: Vec<String> = caption.split('\n').map(str::to_string).collect();
+        let i = at % (lines.len() + 1);
+        match how {
+            0 if i < lines.len() => lines[i] = line,
+            1 if i < lines.len() => {
+                lines.remove(i);
+            }
+            _ => lines.insert(i, line),
+        }
+        let text = lines.join("\n");
+        match b.apply(&[FieldEdit::SetText { field: "caption".into(), text }]) {
+            Ok(out) => {
+                prop_assert_eq!(out.patches.apply_to(b.source()), out.fields.source());
+                prop_assert_eq!(code_blocks(out.fields.source()), code_blocks(b.source()), "{:?}", out.fields.source());
+                let fresh = dec(out.fields.source(), &figure_decls());
+                prop_assert_eq!(fresh.values(), out.fields.values());
+            }
+            Err(e) => prop_assert!(matches!(e, FieldsError::Code { .. }), "{:?}", e),
+        }
+    }
+}
+
+/// Codex review of #259: code at the start of an item is compared without the item's marker, so
+/// renumbering it (`2.` to `1.`) by removing or moving another item is no change of the code.
+#[test]
+fn renumbering_an_item_that_starts_with_code_is_no_change_of_the_code() {
+    let src = ":::l\n\n1. first\n2. ```rust\n   let x = 1;\n   ```\n3. third\n\n:::";
+    let b = dec(src, &list_decls());
+    assert!(b.holds_code("items"));
+    let v = ids(&b, "items");
+    let next = run(
+        &b,
+        &[FieldEdit::RemoveItem {
+            field: "items".into(),
+            item: v[0],
+        }],
+    );
+    assert_eq!(
+        next.source(),
+        ":::l\n\n1. ```rust\n   let x = 1;\n   ```\n2. third\n\n:::"
+    );
+    let moved = run(
+        &b,
+        &[FieldEdit::MoveItem {
+            field: "items".into(),
+            item: v[2],
+            to: 0,
+        }],
+    );
+    assert!(
+        moved.source().contains("3. ```rust\n   let x = 1;\n   ```"),
+        "{}",
+        moved.source()
+    );
+    // its own text is still refused
+    assert!(matches!(
+        b.apply(&[FieldEdit::SetItemText {
+            field: "items".into(),
+            item: v[1],
+            text: "```python".into()
+        }]),
+        Err(FieldsError::Code { .. })
+    ));
+}
+
+proptest! {
+    /// Codex review of #259: in an ordered list whose items may start with code, removing, moving,
+    /// inserting and editing the other items renumbers and reindents freely; the code never changes and
+    /// such an edit is never refused. Editing the text of an item that starts with code is refused.
+    #[test]
+    fn code_starting_list_items_survives_renumbering(
+        items in proptest::collection::vec(prop_oneof![
+            "[a-z]{1,5}".prop_map(|w| (w, false)),
+            "[a-z]{0,3}".prop_map(|info| (info, true)),
+        ], 2..6),
+        start in prop_oneof![Just(1u64), Just(8), Just(9), Just(99)],
+        op in (0usize..3, 0usize..8, 0usize..8, "[a-z]{1,4}"),
+    ) {
+        let mut src = ":::l\n\n".to_string();
+        for (i, (w, code)) in items.iter().enumerate() {
+            let marker = format!("{}. ", start + i as u64);
+            let pad = " ".repeat(marker.len());
+            if *code {
+                src.push_str(&format!("{marker}```{w}\n{pad}  indented {i}\n{pad}\\# kept\n{pad}```\n"));
+            } else {
+                src.push_str(&format!("{marker}{w}\n"));
+            }
+        }
+        src.push_str("\n:::");
+        let b = dec(&src, &list_decls());
+        let v = ids(&b, "items");
+        prop_assert_eq!(v.len(), items.len(), "{}", src);
+        let (kind, i, j, text) = op;
+        let (i, j) = (i % v.len(), j % v.len());
+        let plain = |k: usize| !items[k].1;
+        let edit = match kind {
+            0 => FieldEdit::RemoveItem { field: "items".into(), item: v[i] },
+            1 => FieldEdit::MoveItem { field: "items".into(), item: v[i], to: j },
+            _ if plain(i) => FieldEdit::SetItemText { field: "items".into(), item: v[i], text },
+            _ => FieldEdit::InsertItem { field: "items".into(), at: i, item: ItemData::Text(text) },
+        };
+        let out = b.apply(std::slice::from_ref(&edit));
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => return Err(TestCaseError::fail(format!("{edit:?} on {src:?}: {e:?}"))),
+        };
+        prop_assert_eq!(out.patches.apply_to(b.source()), out.fields.source());
+        let mut before = code_blocks(b.source());
+        let mut after = code_blocks(out.fields.source());
+        if let FieldEdit::RemoveItem { .. } = edit
+            && !plain(i)
+        {
+            prop_assert_eq!(before.len(), after.len() + 1);
+            before.sort();
+            after.sort();
+            prop_assert!(after.iter().all(|c| before.contains(c)), "{:?}", out.fields.source());
+        } else {
+            before.sort();
+            after.sort();
+            prop_assert_eq!(before, after, "{:?}", out.fields.source());
+        }
+        // an item that starts with code keeps it: its text is not for a value to change
+        if let Some(k) = (0..v.len()).find(|&k| !plain(k)) {
+            let e = b.apply(&[FieldEdit::SetItemText { field: "items".into(), item: v[k], text: "x".into() }]);
+            prop_assert!(matches!(e, Err(FieldsError::Code { .. })), "{:?}", e.map(|a| a.fields.source().to_string()));
+        }
+    }
 }

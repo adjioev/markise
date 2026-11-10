@@ -1141,3 +1141,21 @@ proptest! {
         prop_assert_eq!(s.text(), doc);
     }
 }
+
+/// Issue #231, in place: typing around a code block in a text field keeps every byte of it, its
+/// info string, indents and escapes included, and typing in it changes nothing.
+#[test]
+fn typing_beside_code_in_a_text_field_keeps_the_code() {
+    let doc = ":::tip\n\nBefore\n\n```rust info\n  let x = 1;\n\\# kept\n```\n\n    indented\n\nAfter\n\n:::\n";
+    let mut s = surface(doc);
+    s.caret_at("let x", 4);
+    s.typed("Y");
+    s.caret_at("indented", 3);
+    s.typed("Y");
+    assert_eq!(s.text(), doc);
+    s.caret_at("After", 5);
+    s.typed("!");
+    s.caret_at("Before", 0);
+    s.typed("# ");
+    assert_eq!(s.text(), doc.replace("After", "After!").replace("Before", "\\# Before"));
+}

@@ -55,6 +55,8 @@ pub(crate) struct Cx<'a> {
     /// The rows around the widget being drawn, innermost last.
     row_stack: Vec<Id>,
     pub changed: bool,
+    /// Text fields that are shown and not edited, with their notes.
+    read_only: &'a std::collections::HashMap<String, String>,
 }
 
 impl Cx<'_> {
@@ -157,6 +159,7 @@ impl SchemaForm {
             moving,
             row_stack: Vec::new(),
             changed: false,
+            read_only: &self.read_only,
         };
         if !self.values.is_object() {
             cx.draw_errors(ui, "");
@@ -227,7 +230,13 @@ fn draw_field(ui: &mut Ui, f: &FieldSpec, obj: &mut Map<String, Value>, id: Id, 
                     invalid: !cx.messages(path).is_empty(),
                     marked: false,
                 };
-                let r = text_editor(ui, s, id, *multiline, ui.available_width(), look, cx);
+                let r = match cx.read_only.get(path) {
+                    Some(note) => {
+                        ui.label(RichText::new(note).size(NOTE_SIZE).color(cx.style.muted));
+                        shown_text(ui, s, id, *multiline, ui.available_width(), look, cx)
+                    }
+                    None => text_editor(ui, s, id, *multiline, ui.available_width(), look, cx),
+                };
                 let r = r.labelled_by(label);
                 cx.describe(ui, &r, path);
             }
@@ -314,6 +323,24 @@ pub(crate) fn text_editor(
     look: FieldLook,
     cx: &mut Cx,
 ) -> Response {
+    edit_box(ui, s, id, multiline, width, look, cx)
+}
+
+/// A read-only text field: the same box, its text selectable and copyable, nothing typed goes in.
+fn shown_text(ui: &mut Ui, s: &str, id: Id, multiline: bool, width: f32, look: FieldLook, cx: &mut Cx) -> Response {
+    let mut shown = s;
+    edit_box(ui, &mut shown, id, multiline, width, look, cx)
+}
+
+fn edit_box(
+    ui: &mut Ui,
+    s: &mut dyn egui::TextBuffer,
+    id: Id,
+    multiline: bool,
+    width: f32,
+    look: FieldLook,
+    cx: &mut Cx,
+) -> Response {
     let editor_id = id.with("text");
     let st = cx.style;
     // the box goes under the text, and its size is known only after the text
@@ -342,7 +369,7 @@ pub(crate) fn text_editor(
         (out.inner, outer)
     } else {
         // one value, shown on as many lines as it takes: a long heading or answer stays readable
-        let had_breaks = s.contains(['\r', '\n']);
+        let had_breaks = s.as_str().contains(['\r', '\n']);
         let r = ui.add(
             TextEdit::multiline(s)
                 .id(editor_id)
@@ -353,8 +380,9 @@ pub(crate) fn text_editor(
                 .return_key(None),
         );
         // what a one-line field does: Enter ends the input, and a pasted line break is a space
-        if r.changed() && !had_breaks && s.contains(['\r', '\n']) {
-            *s = s.replace(['\r', '\n'], " ");
+        if r.changed() && !had_breaks && s.as_str().contains(['\r', '\n']) {
+            let one = s.as_str().replace(['\r', '\n'], " ");
+            s.replace_with(&one);
         }
         if r.has_focus() && !cx.composing && ui.input(enter_pressed) {
             ui.memory_mut(|m| m.surrender_focus(r.id));

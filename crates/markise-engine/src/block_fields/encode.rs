@@ -26,16 +26,63 @@ pub(super) fn apply(old: &BlockFields, edits: &[FieldEdit]) -> Result<Applied, F
     }
     let source = render(old, &draft.fields, &draft.kept);
     let patches = PatchSet::new(line_patches(&old.source, &source)).map_err(FieldsError::Patch)?;
-    let mut next = super::decode::decode(&source, old.base, &old.decls, &old.opts)?;
+    // a code line written anew can unpair the block itself: that is the code's refusal too
+    let mut next = (super::decode::decode(&source, old.base, &old.decls, &old.opts))
+        .map_err(|e| code_touched(old, &draft.fields).unwrap_or(e))?;
     argument_reads_back(&draft.fields, &next)?;
     next.retired = draft.retired;
     next.next_item = draft.next_item;
     carry(&draft.fields, &mut next, old);
+    code_kept(old, &draft.fields, &next)?;
     Ok(Applied {
         patches,
         fields: next,
         inserted: draft.inserted,
     })
+}
+
+/// A code block in a field keeps its bytes whatever the edit (issue #231): a value line of it
+/// written anew would be escaped and lose its indent. An edit that would change one, or take one
+/// away with its field, is refused; one goes with its item only when the item goes.
+fn code_kept(old: &BlockFields, edited: &[Field], next: &BlockFields) -> Result<(), FieldsError> {
+    for (k, f) in old.fields.iter().enumerate() {
+        let refused = || FieldsError::Code { field: f.name.clone() };
+        let after = &next.fields[k];
+        match (&f.value, &after.value) {
+            (FieldValue::Text(_), FieldValue::Text(_)) if !f.src.code.is_empty() => {
+                if f.src.code_text != after.src.code_text {
+                    return Err(refused());
+                }
+            }
+            (FieldValue::Items(items), FieldValue::Items(now)) => {
+                let kept =
+                    |id: ItemId| matches!(&edited[k].value, FieldValue::Items(v) if v.iter().any(|i| i.id == id));
+                for i in items {
+                    let Some(src) = i.src.as_ref().filter(|x| !x.code.is_empty()) else {
+                        continue;
+                    };
+                    if !kept(i.id) {
+                        continue;
+                    }
+                    let same = (now.iter().find(|j| j.id == i.id))
+                        .and_then(|j| j.src.as_ref())
+                        .is_some_and(|x| src.code_text == x.code_text);
+                    if !same {
+                        return Err(refused());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The first field holding code whose value the edits changed.
+fn code_touched(old: &BlockFields, edited: &[Field]) -> Option<FieldsError> {
+    (old.fields.iter().zip(edited))
+        .find(|(a, b)| a.value != b.value && old.holds_code(&a.name))
+        .map(|(a, _)| FieldsError::Code { field: a.name.clone() })
 }
 
 /// The blanks the parser does not count as part of the arguments.
