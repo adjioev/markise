@@ -41,6 +41,8 @@ pub(super) struct ItemSrc {
     pub protected: Vec<R>,
     /// The code, math and HTML blocks among `protected`: kept byte for byte, never rewritten.
     pub code: Vec<R>,
+    /// What each of them says, without the marker and prefixes of what holds it ([`verbatim_text`]).
+    pub code_text: Vec<String>,
     /// Markdown nested under the item after its own text: from the end of that text (its line
     /// terminator included) to the end of the item. Part of the item, kept byte for byte, never
     /// read as a value.
@@ -70,6 +72,8 @@ pub(super) struct FieldSrc {
     /// The code, math and HTML blocks in it, at any depth: their lines are values as written, and
     /// no edit may change their bytes.
     pub code: Vec<R>,
+    /// What each of them says, without the markers and prefixes of what holds it ([`verbatim_text`]).
+    pub code_text: Vec<String>,
 }
 
 /// A region of the body. Field regions and extras never overlap.
@@ -187,13 +191,36 @@ fn is_verbatim(b: &Block) -> bool {
     )
 }
 
-/// The verbatim blocks among `blocks` and below them, as whole lines.
-fn verbatim_ranges<'a>(s: &str, blocks: impl IntoIterator<Item = &'a Block>, out: &mut Vec<R>) {
+/// A verbatim block's own bytes, line by line: its fences or delimiters and its content lines as the
+/// parser reads them, with no list marker, indent or quote marker of what holds it. So an item
+/// renumbered or a list reindented around it is no change of it, and a change of any of its own bytes is.
+fn verbatim_text(s: &str, b: &Block) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let span = |r: &markise_md::Span| &s[r.start..r.end];
+    match &b.kind {
+        BlockKind::FencedCode { opener, closer, .. } => {
+            parts.push(span(opener));
+            parts.extend(b.lines.iter().map(span));
+            parts.extend(closer.as_ref().map(span));
+        }
+        BlockKind::MathBlock { opener, closer, .. } => {
+            parts.push(span(opener));
+            parts.extend(b.lines.iter().map(span));
+            parts.push(span(closer));
+        }
+        _ => parts.extend(b.lines.iter().map(span)),
+    }
+    parts.join("\n")
+}
+
+/// The verbatim blocks among `blocks` and below them, as whole lines and as what they say.
+fn verbatim_ranges<'a>(s: &str, blocks: impl IntoIterator<Item = &'a Block>, out: &mut Vec<R>, text: &mut Vec<String>) {
     for b in blocks {
         if is_verbatim(b) {
             out.push(extended(s, b));
+            text.push(verbatim_text(s, b));
         } else {
-            verbatim_ranges(s, &b.children, out);
+            verbatim_ranges(s, &b.children, out, text);
         }
     }
 }
@@ -343,7 +370,7 @@ fn list_item(s: &str, b: &Block, opts: &ParseOptions, choice: bool) -> Option<(I
         .filter(|c| !matches!(c.kind, BlockKind::Paragraph) && c.span.start < own_end)
         .collect();
     src.protected = own.iter().map(|c| extended(s, c)).collect();
-    verbatim_ranges(s, own, &mut src.code);
+    verbatim_ranges(s, own, &mut src.code, &mut src.code_text);
     src.under = own_end..whole.end;
     Some((src, data))
 }
@@ -443,7 +470,7 @@ fn read_field(s: &str, f: &mut Field, group: &[Block], whole: R, next_item: &mut
             } else {
                 group.iter().collect()
             };
-            verbatim_ranges(s, held.iter().copied(), &mut f.src.code);
+            verbatim_ranges(s, held.iter().copied(), &mut f.src.code, &mut f.src.code_text);
             f.src.lines = plain_lines(s, whole.clone(), f.kind == FieldKind::Quote, &f.src.code, opts);
             f.value = FieldValue::Text(join_values(&f.src.lines));
             f.src.protected = (held.into_iter())

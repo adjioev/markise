@@ -45,15 +45,12 @@ pub(super) fn apply(old: &BlockFields, edits: &[FieldEdit]) -> Result<Applied, F
 /// written anew would be escaped and lose its indent. An edit that would change one, or take one
 /// away with its field, is refused; one goes with its item only when the item goes.
 fn code_kept(old: &BlockFields, edited: &[Field], next: &BlockFields) -> Result<(), FieldsError> {
-    let text = |m: &BlockFields, rs: &[Range<usize>]| -> Vec<String> {
-        rs.iter().map(|r| m.source[r.clone()].to_string()).collect()
-    };
     for (k, f) in old.fields.iter().enumerate() {
         let refused = || FieldsError::Code { field: f.name.clone() };
         let after = &next.fields[k];
         match (&f.value, &after.value) {
             (FieldValue::Text(_), FieldValue::Text(_)) if !f.src.code.is_empty() => {
-                if text(old, &f.src.code) != text(next, &after.src.code) {
+                if f.src.code_text != after.src.code_text {
                     return Err(refused());
                 }
             }
@@ -69,7 +66,7 @@ fn code_kept(old: &BlockFields, edited: &[Field], next: &BlockFields) -> Result<
                     }
                     let same = (now.iter().find(|j| j.id == i.id))
                         .and_then(|j| j.src.as_ref())
-                        .is_some_and(|x| text(old, &src.code) == text(next, &x.code));
+                        .is_some_and(|x| src.code_text == x.code_text);
                     if !same {
                         return Err(refused());
                     }

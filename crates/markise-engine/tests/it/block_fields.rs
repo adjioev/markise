@@ -1653,9 +1653,20 @@ fn code_blocks(src: &str) -> Vec<String> {
     fn walk(s: &str, blocks: &[markise_md::Block], out: &mut Vec<String>) {
         for b in blocks {
             match b.kind {
-                markise_md::BlockKind::FencedCode { .. } | markise_md::BlockKind::IndentedCode => {
-                    out.push(s[b.span.start..b.span.end].to_string())
+                // what it says, without the prefixes of what holds it: its fence and its lines
+                markise_md::BlockKind::FencedCode { opener, closer, .. } => {
+                    let mut parts = vec![&s[opener.start..opener.end]];
+                    parts.extend(b.lines.iter().map(|l| &s[l.start..l.end]));
+                    parts.extend(closer.map(|c| &s[c.start..c.end]));
+                    out.push(parts.join("\n"));
                 }
+                markise_md::BlockKind::IndentedCode => out.push(
+                    b.lines
+                        .iter()
+                        .map(|l| &s[l.start..l.end])
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
                 _ => walk(s, &b.children, out),
             }
         }
@@ -1731,6 +1742,113 @@ proptest! {
                 prop_assert_eq!(fresh.values(), out.fields.values());
             }
             Err(e) => prop_assert!(matches!(e, FieldsError::Code { .. }), "{:?}", e),
+        }
+    }
+}
+
+/// Codex review of #259: code at the start of an item is compared without the item's marker, so
+/// renumbering it (`2.` to `1.`) by removing or moving another item is no change of the code.
+#[test]
+fn renumbering_an_item_that_starts_with_code_is_no_change_of_the_code() {
+    let src = ":::l\n\n1. first\n2. ```rust\n   let x = 1;\n   ```\n3. third\n\n:::";
+    let b = dec(src, &list_decls());
+    assert!(b.holds_code("items"));
+    let v = ids(&b, "items");
+    let next = run(
+        &b,
+        &[FieldEdit::RemoveItem {
+            field: "items".into(),
+            item: v[0],
+        }],
+    );
+    assert_eq!(
+        next.source(),
+        ":::l\n\n1. ```rust\n   let x = 1;\n   ```\n2. third\n\n:::"
+    );
+    let moved = run(
+        &b,
+        &[FieldEdit::MoveItem {
+            field: "items".into(),
+            item: v[2],
+            to: 0,
+        }],
+    );
+    assert!(
+        moved.source().contains("3. ```rust\n   let x = 1;\n   ```"),
+        "{}",
+        moved.source()
+    );
+    // its own text is still refused
+    assert!(matches!(
+        b.apply(&[FieldEdit::SetItemText {
+            field: "items".into(),
+            item: v[1],
+            text: "```python".into()
+        }]),
+        Err(FieldsError::Code { .. })
+    ));
+}
+
+proptest! {
+    /// Codex review of #259: in an ordered list whose items may start with code, removing, moving,
+    /// inserting and editing the other items renumbers and reindents freely; the code never changes and
+    /// such an edit is never refused. Editing the text of an item that starts with code is refused.
+    #[test]
+    fn code_starting_list_items_survives_renumbering(
+        items in proptest::collection::vec(prop_oneof![
+            "[a-z]{1,5}".prop_map(|w| (w, false)),
+            "[a-z]{0,3}".prop_map(|info| (info, true)),
+        ], 2..6),
+        start in prop_oneof![Just(1u64), Just(8), Just(9), Just(99)],
+        op in (0usize..3, 0usize..8, 0usize..8, "[a-z]{1,4}"),
+    ) {
+        let mut src = ":::l\n\n".to_string();
+        for (i, (w, code)) in items.iter().enumerate() {
+            let marker = format!("{}. ", start + i as u64);
+            let pad = " ".repeat(marker.len());
+            if *code {
+                src.push_str(&format!("{marker}```{w}\n{pad}  indented {i}\n{pad}\\# kept\n{pad}```\n"));
+            } else {
+                src.push_str(&format!("{marker}{w}\n"));
+            }
+        }
+        src.push_str("\n:::");
+        let b = dec(&src, &list_decls());
+        let v = ids(&b, "items");
+        prop_assert_eq!(v.len(), items.len(), "{}", src);
+        let (kind, i, j, text) = op;
+        let (i, j) = (i % v.len(), j % v.len());
+        let plain = |k: usize| !items[k].1;
+        let edit = match kind {
+            0 => FieldEdit::RemoveItem { field: "items".into(), item: v[i] },
+            1 => FieldEdit::MoveItem { field: "items".into(), item: v[i], to: j },
+            _ if plain(i) => FieldEdit::SetItemText { field: "items".into(), item: v[i], text },
+            _ => FieldEdit::InsertItem { field: "items".into(), at: i, item: ItemData::Text(text) },
+        };
+        let out = b.apply(std::slice::from_ref(&edit));
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => return Err(TestCaseError::fail(format!("{edit:?} on {src:?}: {e:?}"))),
+        };
+        prop_assert_eq!(out.patches.apply_to(b.source()), out.fields.source());
+        let mut before = code_blocks(b.source());
+        let mut after = code_blocks(out.fields.source());
+        if let FieldEdit::RemoveItem { .. } = edit
+            && !plain(i)
+        {
+            prop_assert_eq!(before.len(), after.len() + 1);
+            before.sort();
+            after.sort();
+            prop_assert!(after.iter().all(|c| before.contains(c)), "{:?}", out.fields.source());
+        } else {
+            before.sort();
+            after.sort();
+            prop_assert_eq!(before, after, "{:?}", out.fields.source());
+        }
+        // an item that starts with code keeps it: its text is not for a value to change
+        if let Some(k) = (0..v.len()).find(|&k| !plain(k)) {
+            let e = b.apply(&[FieldEdit::SetItemText { field: "items".into(), item: v[k], text: "x".into() }]);
+            prop_assert!(matches!(e, Err(FieldsError::Code { .. })), "{:?}", e.map(|a| a.fields.source().to_string()));
         }
     }
 }

@@ -115,7 +115,7 @@ and a fence got a `\`). A code block, fenced or indented, and a math or HTML blo
 unescaping or trimming a line of one changes what it says. So in a text field or a quote, and at the
 start of an item, their lines are values as written, with no escape taken away, and no edit may change
 their bytes: one that would, or that would take them away with their field, is refused
-(`FieldsError::Code`), whoever asks, the form, in-place editing or any other caller. Prose around them
+(`FieldsError::Code`), whoever asks, the form, in-place editing or any other caller. Their bytes are their own: fences, delimiters and content lines as the parser reads them, without the marker, indent or `>` of what holds them, so renumbering or reindenting an item around one is no change of it. Prose around them
 stays text and is edited as before. The form shows a text field holding one read-only, with a note
 that the code is edited in the block's Markdown or in Source (`BlockFields::holds_code`,
 `SchemaForm::set_read_only`), rather than editing it line by line: which typed line belongs to the
