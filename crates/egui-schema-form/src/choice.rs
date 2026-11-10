@@ -96,7 +96,11 @@ pub(crate) fn draw(ui: &mut Ui, c: &Choice, value: &mut Value, id: Id, path: &st
     }
     if let Some(i) = pressed {
         toggle_option(c.options, c.selection, &mut selected, i);
+        let before = value.as_array().cloned();
         write_selected(c.shape, c.options, &selected, value);
+        if let (Some(old), Some(new)) = (before, value.as_array()) {
+            follow_rows(cx, id, &old, new);
+        }
         cx.changed = true;
         cx.status.clear();
     }
@@ -109,6 +113,32 @@ pub(crate) fn draw(ui: &mut Ui, c: &Choice, value: &mut Value, id: Id, path: &st
             _ => error_label(ui, &message, cx.style),
         }
     }
+}
+
+/// The rows' keys after a press: a press only marks rows, adds new ones (with no `id` key, so like no
+/// row read before) and takes away all rows of an option, so rows that stay are found in order, by all
+/// but their mark. A row keeps its key, and with it its identity to a host.
+fn follow_rows(cx: &mut Cx, id: Id, old: &[Value], new: &[Value]) {
+    let same = |a: &Value, b: &Value| match (a.as_object(), b.as_object()) {
+        (Some(x), Some(y)) => {
+            let rest_x = x.iter().filter(|(k, _)| k.as_str() != "correct");
+            let rest_y = y.iter().filter(|(k, _)| k.as_str() != "correct");
+            rest_x.eq(rest_y)
+        }
+        _ => a == b,
+    };
+    let old_keys = cx.rows.keys(id, old.len());
+    let mut at = 0;
+    let keys = (new.iter())
+        .map(|n| match (at..old.len()).find(|&j| same(&old[j], n)) {
+            Some(j) => {
+                at = j + 1;
+                old_keys[j]
+            }
+            None => cx.rows.fresh(),
+        })
+        .collect();
+    cx.rows.store(id, keys);
 }
 
 fn row_text(value: &Value, row: usize) -> Option<&str> {
@@ -224,6 +254,9 @@ fn draw_unknown_rows(ui: &mut Ui, c: &Choice, value: &mut Value, id: Id, fallbac
         });
     }
     if let Some(row) = remove {
+        let mut keys = cx.rows.keys(id, rows.len());
+        keys.remove(row);
+        cx.rows.store(id, keys);
         rows.remove(row);
         cx.changed = true;
         if let Some(button) = fallback {

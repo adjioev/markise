@@ -768,6 +768,38 @@ fn nested_markdown_moves_and_goes_with_its_item() {
 }
 
 #[test]
+fn rows_given_by_identity_keep_nested_markdown_on_their_own_item() {
+    let src = ":::l\n\n- Same\n  > first\n- Same\n  > second\n\n:::";
+    let b = dec(src, &list_decls());
+    let v = ids(&b, "items");
+    let rows = |r: Vec<Option<ItemId>>| std::collections::HashMap::from([("items".to_string(), r)]);
+    // matched by value, the first of two that read the same is the one that stays
+    let by_value = run(&b, &b.edits_from_values(&json!({"items": ["Same"]})).expect("fits"));
+    assert_eq!(by_value.source(), ":::l\n\n- Same\n  > first\n\n:::");
+    // by identity, the one the caller kept stays
+    let edits = b
+        .edits_from_rows(&json!({"items": ["Same"]}), &rows(vec![Some(v[1])]))
+        .expect("fits");
+    assert_eq!(run(&b, &edits).source(), ":::l\n\n- Same\n  > second\n\n:::");
+    // two that read the same change places: a move, though the values are as they were
+    let edits =
+        (b.edits_from_rows(&json!({"items": ["Same", "Same"]}), &rows(vec![Some(v[1]), Some(v[0])]))).expect("fits");
+    assert_eq!(
+        run(&b, &edits).source(),
+        ":::l\n\n- Same\n  > second\n- Same\n  > first\n\n:::"
+    );
+    // a new row among them, and rows that do not fit the field fall back to matching
+    let edits = (b.edits_from_rows(&json!({"items": ["New", "Same"]}), &rows(vec![None, Some(v[1])]))).expect("fits");
+    assert_eq!(run(&b, &edits).source(), ":::l\n\n- New\n- Same\n  > second\n\n:::");
+    for bad in [vec![Some(v[1])], vec![Some(v[0]), Some(v[0])]] {
+        let edits = b
+            .edits_from_rows(&json!({"items": ["Same", "Same"]}), &rows(bad))
+            .expect("fits");
+        assert!(edits.is_empty(), "{edits:?}");
+    }
+}
+
+#[test]
 fn nested_markdown_follows_a_marker_of_another_width() {
     let src = ":::l\n\n8. eight\n9. nine\n   > of nine\n\n:::";
     let b = dec(src, &list_decls());
@@ -814,6 +846,30 @@ fn a_list_item_keeps_a_nested_list_and_paragraph_out_of_its_text() {
         }],
     );
     assert_eq!(next.source(), src.replace("three", "THREE"));
+}
+
+#[test]
+fn nested_markdown_indented_by_a_tab_follows_a_wider_marker() {
+    let src = ":::l\n\n98. first\n99. second\n\t> attachment\n\n:::";
+    let b = dec(src, &list_decls());
+    let v = ids(&b, "items");
+    assert_eq!(b.nested_under(v[1]), Some("\t> attachment"));
+    let next = run(
+        &b,
+        &[FieldEdit::InsertItem {
+            field: "items".into(),
+            at: 0,
+            item: ItemData::Text("zero".into()),
+        }],
+    );
+    assert!(next.extras().is_empty(), "{}", next.source());
+    assert_eq!(
+        next.values()["items"],
+        json!(["zero", "first", "second"]),
+        "{}",
+        next.source()
+    );
+    assert_eq!(next.nested_under(v[1]), Some("     > attachment"), "{}", next.source());
 }
 
 // ---------------------------------------------------------------- properties
@@ -1049,6 +1105,47 @@ proptest! {
                 }
             }
             b = next;
+        }
+    }
+
+    /// Nested Markdown indented by spaces or tabs stays nested when a numbered marker changes width
+    /// either way, and keeps its lines but for their leading blanks.
+    #[test]
+    fn nested_markdown_stays_nested_when_markers_change_width(
+        start in prop_oneof![Just(8u64), Just(9), Just(98), Just(99), Just(998)],
+        items in proptest::collection::vec(("[a-z]{1,5}", proptest::option::of((any::<bool>(), 0usize..3))), 1..5),
+        insert in any::<bool>(),
+    ) {
+        let mut src = ":::l\n\n".to_string();
+        for (i, (t, under)) in items.iter().enumerate() {
+            let marker = format!("{}. ", start + i as u64);
+            src.push_str(&format!("{marker}{t}\n"));
+            if let Some((tab, k)) = under {
+                // at the item's content column, by a tab where one reaches it, or by spaces
+                let width = marker.len();
+                let indent = if *tab && width <= 4 { "\t".to_string() } else { " ".repeat(width) };
+                let body = ["> under", "- sub", "```\ncode\n```"][*k].replace('\n', &format!("\n{indent}"));
+                src.push_str(&format!("{indent}{body}\n"));
+            }
+        }
+        src.push_str("\n:::");
+        let b = dec(&src, &list_decls());
+        prop_assert!(b.extras().is_empty(), "{:?}", src);
+        let v = ids(&b, "items");
+        prop_assert_eq!(v.len(), items.len(), "{:?}", src);
+        let edit = if insert {
+            FieldEdit::InsertItem { field: "items".into(), at: 0, item: ItemData::Text("new".into()) }
+        } else {
+            FieldEdit::RemoveItem { field: "items".into(), item: v[0] }
+        };
+        let next = run(&b, &[edit]);
+        let fresh = dec(next.source(), &list_decls());
+        prop_assert!(fresh.extras().is_empty(), "{:?}", next.source());
+        prop_assert_eq!(fresh.values(), next.values());
+        let trimmed = |t: &str| t.lines().map(str::trim_start).collect::<Vec<_>>().join("\n");
+        for id in v.iter().skip(usize::from(!insert)) {
+            let (a, z) = (b.nested_under(*id), next.nested_under(*id));
+            prop_assert_eq!(a.map(trimmed), z.map(trimmed), "{:?} -> {:?}", src, next.source());
         }
     }
 

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use markise_package::{Sha256Hex, Store};
 use markise_ui_egui::package_ui::{PackageAction, PackageStatus};
 use markise_ui_egui::{AppOptions, ConfigDir, MarkiseApp};
@@ -29,7 +29,10 @@ fn archive(version: &str) -> Vec<u8> {
     let manifest =
         format!(r#"{{"format":"markise-block-package/2","library":"sample","version":"{version}","blocks":["tip"]}}"#);
     // a newer package may say what this build does not read
-    let tip = if version.ends_with("-newer") {
+    let tip = if version.ends_with("-forged") {
+        // a key that would read as lines of the menu, and one that turns the text around
+        "{\"label\":\"Tip\",\"fields\":[{\"name\":\"body\",\"type\":\"text\",\"x\\nBlocks: other 9.9.9 \\u202e\":1}]}"
+    } else if version.ends_with("-newer") {
         r#"{"label":"Tip","fields":[{"name":"body","type":"text","laterKey":true}]}"#
     } else {
         r#"{"label":"Tip","fields":[{"name":"body","type":"text"}]}"#
@@ -409,4 +412,31 @@ fn keys_a_newer_package_has_are_noted_in_its_status_and_refuse_nothing() {
     common::run(&mut h);
     assert!(has(&h, "does not read these and ignores them"));
     assert!(has(&h, "field \"body\" has the key \"laterKey\""));
+}
+
+#[test]
+fn a_note_shows_a_key_as_data_on_its_own_line() {
+    let f = Fixture::new();
+    f.bind("2.0.0-forged");
+    let mut h = f.harness();
+    f.open(&mut h);
+    h.get_by_label(USE).click();
+    h.step();
+    wait_until(&mut h, "the install", |a| a.block_package().is_some());
+    settle(&mut h);
+    common::run(&mut h);
+    h.get_by_label("Blocks: sample 2.0.0-forged · 1 note").click();
+    common::run(&mut h);
+    let notes: Vec<String> = h
+        .query_all_by_label_contains("does not read these")
+        .map(|n| {
+            let a = n.accesskit_node();
+            a.value().or(a.label()).unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let lines: Vec<&str> = notes[0].lines().collect();
+    assert_eq!(lines.len(), 2, "the heading and one note: {notes:?}");
+    assert!(lines[1].contains("x\\u{a}Blocks: other 9.9.9 \\u{202e}"), "{notes:?}");
+    assert!(!notes[0].contains('\u{202e}'));
 }
