@@ -23,8 +23,6 @@ pub enum InsertRefused {
     NotItsBlock,
     /// In the document it would not stand as that block, or other blocks would pair differently.
     WouldNotStand,
-    /// A section would be left with nothing in it but metadata, which a site refuses (ADR 0026).
-    WouldLeaveEmpty,
     Edit(EditError),
 }
 
@@ -33,7 +31,6 @@ impl fmt::Display for InsertRefused {
         match self {
             InsertRefused::NotItsBlock => write!(f, "its Markdown is not exactly that block"),
             InsertRefused::WouldNotStand => write!(f, "it would change how the blocks around it pair"),
-            InsertRefused::WouldLeaveEmpty => write!(f, "it would leave a section with only metadata"),
             InsertRefused::Edit(e) => write!(f, "{e}"),
         }
     }

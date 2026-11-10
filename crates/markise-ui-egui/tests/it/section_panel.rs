@@ -156,16 +156,19 @@ fn only_what_can_be_done_is_offered() {
 }
 
 #[test]
-fn a_refusal_says_the_engine_s_message_and_changes_nothing() {
+fn a_section_with_only_metadata_moves_and_a_quiet_word_says_what_a_site_may_do() {
     let doc = format!("{HEAD}One.\n\n---\n\n:::section-metadata\n\nid: m\n\n:::\n\n---\n\nThree.\n");
     let p = plain(&doc);
     let mut h = opened(&p);
     menu_on(&mut h, "m");
     press_item(&mut h, "Move Down");
-    assert_eq!(text(&h), doc);
+    assert_eq!(
+        text(&h),
+        format!("{HEAD}One.\n\n---\n\nThree.\n\n---\n\n:::section-metadata\n\nid: m\n\n:::\n")
+    );
     let said = h.state().banner_text().unwrap();
-    assert!(said.contains("Not moved"), "{said}");
-    assert!(said.contains("fill it in or delete it first"), "{said}");
+    assert!(!said.contains("Not moved"), "{said}");
+    assert!(said.contains("which a site may refuse when it is published"), "{said}");
 }
 
 #[test]
@@ -249,6 +252,24 @@ fn insert_after_opens_the_form_and_goes_after_that_one_wherever_the_caret_is() {
     h.state_mut().viewer().unwrap().ed.edit(|s| s.undo());
     frames(&mut h);
     assert_eq!(text(&h), DOC);
+}
+
+#[test]
+fn a_section_inserted_after_one_with_only_metadata_fills_it_and_says_nothing() {
+    let doc = format!("{HEAD}One.\n\n---\n\n:::section-metadata\n\nid: m\n\n:::\n\n---\n\nThree.\n");
+    let p = plain(&doc);
+    let mut h = opened(&p);
+    menu_on(&mut h, "m");
+    press_item(&mut h, "Insert After…");
+    h.state_mut().set_section_form_title("New");
+    let ctx = h.ctx.clone();
+    assert!(h.state_mut().save_section_form(&ctx));
+    frames(&mut h);
+    assert_eq!(
+        text(&h),
+        format!("{HEAD}One.\n\n---\n\n:::section-metadata\n\nid: m\n\n:::\n\n## New {{#new}}\n\n---\n\nThree.\n")
+    );
+    assert!(h.state().banner_text().is_none_or(|t| !t.contains("site may refuse")));
 }
 
 #[test]
@@ -893,7 +914,7 @@ mod dragging {
     }
 
     #[test]
-    fn a_refusal_on_the_way_says_so_and_a_title_going_along_is_said() {
+    fn a_section_with_only_metadata_on_the_way_is_said_and_so_is_a_title_going_along() {
         let doc = format!("{HEAD}One.\n\n---\n\n:::section-metadata\n\nid: m\n\n:::\n\n---\n\nThree.\n");
         let p = plain(&doc);
         let mut h = opened(&p);
@@ -903,12 +924,12 @@ mod dragging {
         walk(&mut h, to);
         button(&mut h, to, false);
         h.step();
-        assert_eq!(text(&h), doc);
+        assert_ne!(text(&h), doc, "moved");
         assert!(
             h.state()
                 .banner_text()
                 .unwrap()
-                .contains("fill it in or delete it first")
+                .contains("which a site may refuse when it is published")
         );
 
         let doc = format!("{HEAD}# Title\n\n---\n\nTwo.\n\n---\n\nThree.\n");

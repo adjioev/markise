@@ -20,9 +20,6 @@ pub enum MoveRefused {
     WouldNotStand,
     /// Something other than blank lines would go with it.
     WouldLoseText,
-    /// It is, or stands next to, a section with nothing in it or only metadata, which a site refuses and
-    /// a move would leave as it is (ADR 0026).
-    WouldLeaveEmpty,
     Edit(EditError),
 }
 
@@ -31,12 +28,6 @@ impl fmt::Display for MoveRefused {
         match self {
             MoveRefused::WouldNotStand => write!(f, "it would change how the blocks around it pair"),
             MoveRefused::WouldLoseText => write!(f, "text next to it would be lost"),
-            MoveRefused::WouldLeaveEmpty => {
-                write!(
-                    f,
-                    "it or the one next to it has nothing in it but metadata: fill it in or delete it first"
-                )
-            }
             MoveRefused::Edit(e) => write!(f, "{e}"),
         }
     }

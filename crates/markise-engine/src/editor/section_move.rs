@@ -224,14 +224,26 @@ impl EditorView {
         }
     }
 
+    /// Section `index` has nothing in it, or only metadata. A site may refuse such a section when it is
+    /// published; the editor moves it and puts sections around it like any other, and a host may say so.
+    pub fn section_is_hollow(&self, index: usize) -> bool {
+        is_hollow(self.session.doc(), index)
+    }
+
+    /// Whether moving section `index` before section `to` takes along or goes past a section with nothing
+    /// in it or only metadata: worth a quiet word, never a refusal.
+    pub fn move_passes_hollow(&self, index: usize, to: usize) -> bool {
+        (self.section_runs(index, to))
+            .is_some_and(|(upper, lower)| (upper.start..lower.end).any(|k| self.section_is_hollow(k)))
+    }
+
     /// Section `index` has a neighbour to go past that way.
     pub fn can_move_section(&self, index: usize, up: bool) -> bool {
         step_to(index, up).is_some_and(|to| self.can_move_section_to(index, to))
     }
 
     /// Section `index` can go before section `to`, the count for the end. Cheap enough for a frame: only the ends
-    /// of the runs are looked at, and not whether a section they hold has nothing in it, which is for
-    /// [`Self::move_section_to`] to refuse with its message.
+    /// of the runs are looked at.
     pub fn can_move_section_to(&self, index: usize, to: usize) -> bool {
         let doc = self.session.doc();
         self.section_runs(index, to).is_some_and(|(upper, lower)| {
@@ -267,10 +279,6 @@ impl EditorView {
         let (Some(a), Some(b)) = (run(doc, &upper), run(doc, &lower)) else {
             return Ok(false);
         };
-        // a site refuses such a section: it is for filling in or deleting, not for moving around
-        if (upper.start..lower.end).any(|k| is_hollow(doc, k)) {
-            return Err(MoveRefused::WouldLeaveEmpty);
-        }
         let eol = doc.line_ending().as_str();
         let Some(planned) = plan_past(text, &a, &b, eol) else {
             return Ok(false);

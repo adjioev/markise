@@ -145,20 +145,16 @@ impl EditorView {
         let eol = doc.line_ending().as_str();
         let line = line_for_block(doc, at);
         let title = one_line(&new.title);
-        let leading = has_content_before(doc, line);
+        // new metadata where the section has its own and nothing else: a second block has no place there, so
+        // it starts a section of its own, and that one keeps only its metadata, which a host may point out
+        let second_metadata = !new.metadata.is_empty()
+            && !has_content_before(doc, line)
+            && doc
+                .section_metadata(doc.section_at(line.saturating_sub(1)).index)
+                .is_some();
+        let leading = has_content_before(doc, line) || second_metadata;
         let (follows, boundary_next) = after_it(doc, line);
         let trailing = !leading && follows && !boundary_next;
-        let holding = doc.section_at(line.saturating_sub(1));
-        // metadata of its own in a section that has some already: a second block has no place there, and a
-        // boundary would leave that one as it is
-        let second_metadata = !leading && !new.metadata.is_empty() && doc.section_metadata(holding.index).is_some();
-        // a boundary below it would leave what follows with only metadata
-        let hollow_below = trailing
-            && (doc.section_metadata(holding.index))
-                .is_some_and(|m| m.opener.start >= line && blank(&doc.text()[m.closer.end..holding.end]));
-        if second_metadata || hollow_below {
-            return Err(InsertRefused::WouldLeaveEmpty);
-        }
 
         let mut body = String::new();
         if leading {

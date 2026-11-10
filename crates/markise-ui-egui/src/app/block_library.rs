@@ -53,6 +53,11 @@ impl BlockLibraryState {
 
 /// What a move says of the document's `#` title, standing in section `title`, when section `index` goes before
 /// the section at `to`: it moves with its section, or from the top when another one comes first.
+/// A quiet word after a move or an insert: a site may refuse a section with nothing or only metadata
+/// when it is published, which is the site's to check (ADR 0026).
+pub(super) const HOLLOW_HINT: &str =
+    "A section here has nothing in it but metadata, which a site may refuse when it is published.";
+
 fn title_warning(index: usize, to: usize, title: usize) -> Option<String> {
     if title == index {
         Some("Moved, and the document's # title with it.".to_string())
@@ -316,6 +321,11 @@ impl MarkiseApp {
         let concerned = ed.section_has_title(index) || (to == 0 && ed.section_has_title(0));
         let title = (concerned && ed.can_move_section_to(index, to)).then(|| ed.only_title_section());
         let warning = title.flatten().and_then(|t| title_warning(index, to, t));
+        let hollow = ed.move_passes_hollow(index, to).then_some(HOLLOW_HINT);
+        let warning = match (warning, hollow) {
+            (Some(w), Some(h)) => Some(format!("{w} {h}")),
+            (w, h) => w.or(h.map(str::to_string)),
+        };
         let result = d.viewer.ed.move_section_to(index, to, in_source);
         if in_source {
             d.source_ui.find_reveal = true;
@@ -338,7 +348,7 @@ impl MarkiseApp {
     }
 
     /// Says what was just done, with Undo, unless something that asks for an answer is showing.
-    fn undo_notice(&mut self, text: String) {
+    pub(super) fn undo_notice(&mut self, text: String) {
         use super::Banner;
         if matches!(self.banner, Some(Banner::Conflict(_) | Banner::SaveConflict { .. })) {
             return;

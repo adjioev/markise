@@ -170,7 +170,7 @@ Paragraph menu, act on the section holding the caret. Under the pointer a divide
 A section moves past one neighbour, with everything in it, its metadata first as it was. Its bytes do not change, and blank lines around the dividers it touches come out as one on each side. The first section has no `---` above it, and whichever comes to be first still has none: the `---` stays between them. Front matter stays where it is.
 A first section with nothing in it stays first, as a section cannot take its place without a divider above it. If something would pair differently afterwards, such as a stray `:::` in each of two sections, a message says so and nothing changes.
 
-A section with nothing in it or only metadata, which a site refuses, does not move and nothing moves past it: a message says to fill it in or delete it.
+A section with nothing in it or only metadata moves like any other. A site may refuse such a section when it is published, so a short notice says so when a move or a new section involves one.
 
 Delete takes the section's bytes and one divider, with no question: a short notice says so and has **Undo** for a few seconds. The only section of a document cannot be deleted this way. Each move and each deletion is one undo step that brings back the exact file.
 

@@ -318,6 +318,25 @@ fn the_check_and_practice_agree() {
         assert_eq!(problems.len(), 1, "{source}: {problems:?}");
         assert!(problems[0].reason.contains("not read as answers"), "{problems:?}");
     }
+    // a mark in code is text, an example, and no answer: for the view, Practice and the check alike
+    for (name, source) in [
+        (
+            "task",
+            ":::task\n\nDo.\n\n```md\n- [x] One\n- [ ] Two\n```\n\n> Done.\n\n:::",
+        ),
+        ("task", ":::task\n\nDo.\n\n    - [ ] indented code\n\n> Done.\n\n:::"),
+        (
+            "pick",
+            ":::pick\n\nDo.\n\n```\n- [ ] in code\n```\n\n- [x] One {#a1}\n- [ ] Two {#a2}\n\n:::",
+        ),
+    ] {
+        let p = parts(source, name);
+        assert!(p.is_ready() && !p.stray_marks, "{source}");
+        assert!(says(source).is_empty(), "{source}: {:?}", says(source));
+    }
+    // and out of code it still is one
+    let source = ":::task\n\nDo.\n\n- [x] One\n\n```\ncode\n```\n\n> Done.\n\n:::";
+    assert!(parts(source, "task").stray_marks, "{source}");
     // answers and no mark: the view says not ready, and so does the check
     let source = ":::pick\n\nDo.\n\n- [ ] One {#a1}\n- [ ] Two {#a2}\n\n> Why.\n\n:::";
     assert!(!parts(source, "pick").is_ready() && !parts(source, "pick").nothing_to_practise());

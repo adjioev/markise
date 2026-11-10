@@ -210,13 +210,19 @@ impl MarkiseApp {
         };
         ctx.request_repaint();
         match result {
-            Ok(_) => {
+            Ok(heading) => {
                 if form.in_source {
                     d.source_ui.find_reveal = true;
                 } else {
                     d.viewer.find_reveal = true;
                 }
+                let ed = &d.viewer.ed;
+                let k = ed.session.doc().section_at(heading).index;
+                let hollow = (k.saturating_sub(1)..=k + 1).any(|i| ed.section_is_hollow(i));
                 self.remember_block_views();
+                if hollow {
+                    self.undo_notice(super::block_library::HOLLOW_HINT.to_string());
+                }
                 true
             }
             Err(why) => {

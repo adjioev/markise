@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use markise_layout::{
     BlockLook, BlockViews, NativeBlock, NativeKind, NativeRole, NativeView, PracticeAnswer, PracticeParts,
 };
-use markise_md::ParseOptions;
+use markise_md::{BlockKind, ParseOptions};
 use markise_package::{BlockSchema, PackageIndex, ViewKind};
 use schema_form_core::{Control, FormSpec, Selection};
 
@@ -271,18 +271,45 @@ fn unfilled(reason: &str) -> BlockVerdict {
     }])
 }
 
-/// A list line of `source` reads `[x]` or `[ ]`, and no answer's text is on that line. By the lines, also in code: a
-/// false positive costs a block being practised, and a miss shows what is meant to stay hidden.
+/// A list line of `source` reads `[x]` or `[ ]`, and no answer's text is on that line. By the lines, except in code:
+/// a mark in a fenced or indented code block is text shown as written, an example and no answer, anywhere (Practice,
+/// `blocks check`, the rule of what is not ready).
 fn has_stray_marks(source: &str, answers: &[PracticeAnswer]) -> bool {
+    let mut code = None;
     let mut at = 0;
     source.split_inclusive(['\n', '\r']).any(|line| {
-        let range = at as u32..(at + line.len()) as u32;
+        let range = at..at + line.len();
         at += line.len();
         is_mark_line(line)
             && !answers
                 .iter()
-                .any(|a| a.range.start < range.end && range.start < a.range.end)
+                .any(|a| (a.range.start as usize) < range.end && range.start < a.range.end as usize)
+            && !code
+                .get_or_insert_with(|| code_ranges(source))
+                .iter()
+                .any(|c: &std::ops::Range<usize>| {
+                    // a code block's span may start after the line's indent
+                    c.start < range.end && range.start < c.end
+                })
     })
+}
+
+/// The source ranges of the fenced and indented code blocks in `source`, at any depth.
+fn code_ranges(source: &str) -> Vec<std::ops::Range<usize>> {
+    fn walk(blocks: &[markise_md::Block], out: &mut Vec<std::ops::Range<usize>>) {
+        for b in blocks {
+            if matches!(b.kind, BlockKind::FencedCode { .. } | BlockKind::IndentedCode) {
+                out.push(b.span.start..b.span.end);
+            }
+            walk(&b.children, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        &markise_md::Document::parse(source, ParseOptions::default()).tree(),
+        &mut out,
+    );
+    out
 }
 
 fn is_mark_line(line: &str) -> bool {
