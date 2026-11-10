@@ -163,25 +163,31 @@ fn a_section_with_only_metadata_takes_the_heading_rather_than_a_boundary_after_i
 }
 
 #[test]
-fn nothing_is_written_that_leaves_a_section_with_only_metadata() {
+fn a_section_left_with_only_metadata_is_written_and_can_be_pointed_out() {
     let with = NewSection {
         metadata: vec![("kind".to_string(), "x".to_string())],
         ..new("T")
     };
-    // a second metadata block has no place in it, and a boundary would leave it as it is
+    // a second metadata block has no place in it: the new one starts a section of its own
     let doc = format!("A\n\n---\n\n{META}\n");
     let mut s = surface(&doc);
     s.caret(doc.len() - 1);
-    assert_eq!(s.ed.insert_section(&with, false), Err(InsertRefused::WouldLeaveEmpty));
-    assert_eq!(s.text(), doc);
+    assert!(s.ed.insert_section(&with, false).is_ok());
+    assert_eq!(s.ed.session.doc().section_count(), 3, "{}", s.text());
+    assert!(s.ed.section_is_hollow(1), "{}", s.text());
+    assert!(
+        s.text()
+            .starts_with(&format!("A\n\n---\n\n{META}\n\n---\n\n:::section-metadata")),
+        "{}",
+        s.text()
+    );
     // a boundary before metadata that is all there is below it
     let doc = format!("\n{META}\n\n---\n\nB\n");
     let mut s = surface(&doc);
     s.caret(0);
-    assert_eq!(
-        s.ed.insert_section(&new("T"), false),
-        Err(InsertRefused::WouldLeaveEmpty)
-    );
+    assert!(s.ed.insert_section(&new("T"), false).is_ok());
+    assert!(s.ed.section_is_hollow(1), "{}", s.text());
+    s.undo();
     assert_eq!(s.text(), doc);
 }
 

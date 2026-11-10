@@ -275,21 +275,30 @@ proptest! {
 const META: &str = ":::section-metadata\n\nid: m\n\n:::";
 
 #[test]
-fn a_section_with_nothing_or_only_metadata_does_not_move_and_nothing_moves_past_it() {
-    for doc in [
-        format!("A\n\n---\n\n{META}\n\n---\n\nC\n"),
-        "A\n\n---\n\n---\n\nC\n".to_string(),
-    ] {
-        let mut s = surface(&doc);
-        for (k, up) in [(1, true), (1, false), (0, false), (2, true)] {
-            // with a first section next to one with nothing in it the commands are off already
-            let done = s.ed.move_section(k, up, false);
-            assert!(
-                matches!(done, Err(MoveRefused::WouldLeaveEmpty) | Ok(false)),
-                "{doc:?} {k}: {done:?}"
-            );
-            assert_eq!(s.text(), doc);
+fn a_section_with_nothing_or_only_metadata_moves_like_any_other_and_is_only_pointed_out() {
+    // a site may refuse it when it is published; the editor moves it, one undo step, every byte kept
+    let doc = format!("A\n\n---\n\n{META}\n\n---\n\nC\n");
+    let mut s = surface(&doc);
+    assert!(s.ed.section_is_hollow(1) && !s.ed.section_is_hollow(0));
+    assert!(s.ed.move_passes_hollow(1, 3) && s.ed.move_passes_hollow(2, 1));
+    assert!(!s.ed.move_passes_hollow(0, 0));
+    assert_eq!(s.ed.move_section(1, false, false), Ok(true));
+    assert_eq!(s.text(), format!("A\n\n---\n\nC\n\n---\n\n{META}\n"));
+    s.undo();
+    assert_eq!(s.text(), doc);
+    assert_eq!(s.ed.move_section(2, true, false), Ok(true), "and past it");
+    assert_eq!(s.text(), format!("A\n\n---\n\nC\n\n---\n\n{META}\n"));
+    // one with nothing at all: a first section next to it still has no place to go
+    let doc = "A\n\n---\n\n---\n\nC\n".to_string();
+    let mut s = surface(&doc);
+    assert!(s.ed.section_is_hollow(1));
+    for (k, up) in [(1, true), (1, false), (0, false), (2, true)] {
+        let done = s.ed.move_section(k, up, false);
+        assert!(done.is_ok(), "{doc:?} {k}: {done:?}");
+        if done == Ok(true) {
+            s.undo();
         }
+        assert_eq!(s.text(), doc);
     }
     // elsewhere in the document it is no reason
     let doc = format!("A\n\n---\n\nB\n\n---\n\nC\n\n---\n\n{META}\n");
@@ -500,16 +509,21 @@ fn a_new_section_goes_at_the_end_of_the_one_named_and_the_caret_stays_if_refused
         assert!(s.ed.insert_section_after(0, &new, false).is_err());
         assert_eq!(s.text(), first_empty);
     }
-    // refused: the caret stays where it was
+    // next to a section with only metadata it is written all the same
     let hollow = format!("A\n\n---\n\n{META}\n\n---\n\nC\n");
     let mut s = surface(&hollow);
-    s.caret(0);
     let with = NewSection {
         metadata: vec![("kind".into(), "x".into())],
         ..new.clone()
     };
-    assert!(s.ed.insert_section_after(1, &with, false).is_err());
-    assert_eq!(s.text(), hollow);
+    assert!(s.ed.insert_section_after(1, &with, false).is_ok());
+    assert!(s.ed.section_is_hollow(1), "{}", s.text());
+    // refused: the caret stays where it was
+    let unclosed = "A\n\n---\n\nB\n\n```\ncode\n";
+    let mut s = surface(unclosed);
+    s.caret(0);
+    assert!(s.ed.insert_section_after(1, &new, false).is_err());
+    assert_eq!(s.text(), unclosed);
     assert_eq!(s.ed.session.selection().primary().focus.offset, 0);
     // undo: the caret where it was before, not at the end of the section named
     let mut s = surface(doc);
@@ -558,11 +572,13 @@ fn its_own_place_and_no_place_are_nothing_and_make_no_undo_step() {
 
 #[test]
 fn what_is_on_the_way_is_refused_as_for_a_step() {
-    // a section with only metadata on the way: nothing moves past it
+    // a section with only metadata on the way is no reason
     let doc = format!("A\n\n---\n\nB\n\n---\n\n{META}\n\n---\n\nD\n");
     let mut s = surface(&doc);
-    assert_eq!(s.ed.move_section_to(3, 0, false), Err(MoveRefused::WouldLeaveEmpty));
-    assert_eq!(s.text(), doc);
+    assert!(s.ed.move_passes_hollow(3, 0) && !s.ed.move_passes_hollow(1, 0));
+    assert_eq!(s.ed.move_section_to(3, 0, false), Ok(true));
+    assert_eq!(s.text(), format!("D\n\n---\n\nA\n\n---\n\nB\n\n---\n\n{META}\n"));
+    s.undo();
     assert_eq!(s.ed.move_section_to(1, 0, false), Ok(true), "not on the way");
     // a first section with nothing in it stays first
     let doc = "---\nlang: en\n---\n\n---\n\nB\n\n---\n\nC\n";
