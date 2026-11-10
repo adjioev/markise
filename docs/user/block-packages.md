@@ -461,10 +461,16 @@ parser does not need them.
       ]
     }
   ],
+  "package_notes": [],
   "summary": { "files": 1, "blocks": 9, "problems": 1, "errors": 0, "unbound": 0 }
 }
 ```
 
+- `package_notes` lists, once per binding, what a package says that this version of Markise does not
+  read, such as a key a newer package adds to a field (`{"binding": "<its blocks.config.json>", "note": "..."}`).
+  Such keys are ignored; they refuse nothing and change no exit code. In text output they are lines
+  `<blocks.config.json>: package note, ignored: ...`. The app lists them in the package's status menu.
+  An unknown field `type` still refuses the package, naming the type.
 - `status` is `clean`, `problems`, `unbound` (with `note`) or `error` (with `error`).
 - `binding` is `null` when none applies. With an `error` it may hold only `file`, or be `null`.
 - `language` is `null` unless the file was checked.

@@ -20,7 +20,8 @@ use serde_json::{Value, json};
 const CHECK_FORMAT: &str = "markise-blocks-check/1";
 
 /// One `blocks.config.json` as far as it was read: a package once, however many files use it.
-type Bound = Result<(Binding, BlockChecker), String>;
+/// A binding's package, ready to check with, and its notes: what it says that this build does not read.
+type Bound = Result<(Binding, BlockChecker, Vec<String>), String>;
 
 pub fn run(args: &[String]) -> Result<ExitCode, String> {
     match args {
@@ -51,13 +52,12 @@ enum Outcome {
     /// No binding applies.
     Unbound,
     /// The file cannot be read, or its package cannot.
-    Failed {
-        binding: Option<Value>,
-        error: String,
-    },
+    Failed { binding: Option<Value>, error: String },
     Checked {
         binding: Value,
         check: DocumentCheck,
+        /// The package's notes, on the first file checked with it only.
+        notes: Vec<String>,
     },
 }
 
@@ -81,6 +81,7 @@ fn error_line(error: &str) -> String {
 }
 
 fn check_file(file: &str, known: &mut HashMap<PathBuf, Bound>) -> Outcome {
+    // a package's notes are said once, with the first file that uses it
     let failed = |error: String| Outcome::Failed { binding: None, error };
     let text = match crate::read_markdown(file) {
         Ok(text) => text,
@@ -94,15 +95,20 @@ fn check_file(file: &str, known: &mut HashMap<PathBuf, Bound>) -> Outcome {
     let Some(binding_file) = find_binding(&path, home.as_deref()) else {
         return Outcome::Unbound;
     };
+    let first = !known.contains_key(&binding_file);
     let bound = known.entry(binding_file.clone()).or_insert_with(|| {
         (read_bound_package(&binding_file))
-            .map(|p| (p.binding, BlockChecker::new(Arc::new(p.index))))
+            .map(|p| {
+                let notes = p.index.notes().iter().map(ToString::to_string).collect();
+                (p.binding, BlockChecker::new(Arc::new(p.index)), notes)
+            })
             .map_err(|problem| problem.to_string())
     });
     match bound {
-        Ok((binding, checker)) => Outcome::Checked {
+        Ok((binding, checker, notes)) => Outcome::Checked {
             binding: binding_json(binding),
             check: checker.check(&text),
+            notes: if first { notes.clone() } else { Vec::new() },
         },
         Err(error) => Outcome::Failed {
             binding: Some(json!({ "file": binding_file.display().to_string() })),
@@ -165,9 +171,17 @@ fn check_text(results: &[(&str, Outcome)]) -> String {
                     error_line(error)
                 ));
             }
-            Outcome::Checked { check, .. } => {
+            Outcome::Checked { check, notes, binding } => {
                 blocks += check.blocks;
                 problems += check.problems.len();
+                let config = binding["file"].as_str().unwrap_or("");
+                for n in notes {
+                    out.push_str(&format!(
+                        "{}: package note, ignored: {}\n",
+                        printable(config),
+                        error_line(n)
+                    ));
+                }
                 for p in &check.problems {
                     let block = p
                         .block
@@ -196,6 +210,17 @@ fn check_text(results: &[(&str, Outcome)]) -> String {
 
 fn check_json(results: &[(&str, Outcome)]) -> String {
     let (mut blocks, mut problems, mut errors, mut unbound) = (0, 0, 0, 0);
+    let package_notes: Vec<Value> = (results.iter())
+        .filter_map(|(_, o)| match o {
+            Outcome::Checked { binding, notes, .. } => Some((binding, notes)),
+            _ => None,
+        })
+        .flat_map(|(binding, notes)| {
+            notes
+                .iter()
+                .map(move |n| json!({"binding": binding["file"], "note": n}))
+        })
+        .collect();
     let files: Vec<Value> = (results.iter())
         .map(|(file, outcome)| match outcome {
             Outcome::Unbound => {
@@ -208,7 +233,7 @@ fn check_json(results: &[(&str, Outcome)]) -> String {
                 json!({"file": file, "status": "error", "note": null, "binding": binding, "error": error,
                        "language": null, "blocks": 0, "problems": []})
             }
-            Outcome::Checked { binding, check } => {
+            Outcome::Checked { binding, check, .. } => {
                 blocks += check.blocks;
                 problems += check.problems.len();
                 let found: Vec<Value> = (check.problems.iter())
@@ -226,6 +251,7 @@ fn check_json(results: &[(&str, Outcome)]) -> String {
     let report = json!({
         "format": CHECK_FORMAT,
         "files": files,
+        "package_notes": package_notes,
         "summary": {"files": results.len(), "blocks": blocks, "problems": problems, "errors": errors, "unbound": unbound},
     });
     let text = serde_json::to_string_pretty(&report).unwrap_or_default();

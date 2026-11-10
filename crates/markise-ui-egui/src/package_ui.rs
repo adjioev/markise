@@ -4,7 +4,7 @@
 //! app glue is `app/package.rs`.
 
 use egui::{Context, RichText, Ui};
-use markise_package::{InstalledPackage, Pending, Problem, Sha256Hex};
+use markise_package::{InstalledPackage, Pending, Problem, Sha256Hex, printable};
 
 /// Error text from a package can be long, and the package chooses it.
 const MAX_SHOWN_CHARS: usize = 1200;
@@ -122,6 +122,17 @@ fn details(pending: &Pending) -> String {
     )
 }
 
+/// Above a package's notes: what they are and that they change nothing.
+pub const NOTES_HEAD: &str = "This version of Markise does not read these and ignores them:";
+
+fn notes_count(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => " · 1 note".to_string(),
+        n => format!(" · {n} notes"),
+    }
+}
+
 /// The status bar's item: which package the document uses, or why not.
 pub fn status_item(ui: &mut Ui, status: &PackageStatus, out: &mut Vec<PackageAction>) {
     match status {
@@ -144,7 +155,13 @@ pub fn status_item(ui: &mut Ui, status: &PackageStatus, out: &mut Vec<PackageAct
         }
         PackageStatus::Ready(p) => {
             let id = p.index.id();
-            let label = RichText::new(format!("Blocks: {}", name_of(&id.library, &id.version))).weak();
+            let notes = p.index.notes();
+            let label = RichText::new(format!(
+                "Blocks: {}{}",
+                name_of(&id.library, &id.version),
+                notes_count(notes.len())
+            ))
+            .weak();
             ui.menu_button(label, |ui| {
                 ui.set_max_width(360.0);
                 small(
@@ -156,6 +173,11 @@ pub fn status_item(ui: &mut Ui, status: &PackageStatus, out: &mut Vec<PackageAct
                         p.binding.file.display()
                     ),
                 );
+                if !notes.is_empty() {
+                    // a package wrote these: each stays one line, and nothing in it hides or turns the text around
+                    let text: Vec<String> = notes.iter().map(|n| printable(&n.to_string())).collect();
+                    small(ui, clip(&format!("{NOTES_HEAD}\n{}", text.join("\n"))));
+                }
                 if ui.button("Stop Using This Package").clicked() {
                     out.push(PackageAction::Forget);
                     ui.close();

@@ -54,6 +54,7 @@ pub struct BlockSchema {
 }
 
 pub(crate) fn parse(file: &str, name: &str, map: serde_json::Map<String, Value>, issues: &mut Issues) -> BlockSchema {
+    issues.unknown_keys(file, "the schema", &map, &["label", "variants", "argument", "fields"]);
     let label = opt_localized(file, "label", map.get("label"), issues);
     if let Some(variants) = map.get("variants") {
         match variants {
@@ -73,7 +74,10 @@ pub(crate) fn parse(file: &str, name: &str, map: serde_json::Map<String, Value>,
     }
     match map.get("argument") {
         None => {}
-        Some(Value::Object(argument)) => check_argument_pattern(file, argument, issues),
+        Some(Value::Object(argument)) => {
+            issues.unknown_keys(file, "the argument", argument, &["name", "label", "help", "pattern"]);
+            check_argument_pattern(file, argument, issues);
+        }
         Some(_) => issues.push(file, "argument must be an object"),
     }
     let mut fields = Vec::new();
@@ -116,6 +120,22 @@ fn check_argument_pattern(file: &str, argument: &serde_json::Map<String, Value>,
     }
 }
 
+/// What a field declaration may say, whatever its type: what the form and the field model read.
+const FIELD_KEYS: &[&str] = &[
+    "name",
+    "type",
+    "label",
+    "help",
+    "add_label",
+    "min",
+    "max",
+    "minItems",
+    "maxItems",
+    "level",
+    "correct",
+    "ids",
+];
+
 fn parse_field(file: &str, i: usize, item: &Value, issues: &mut Issues) -> Option<FieldSchema> {
     let Some(map) = item.as_object() else {
         issues.push(file, format!("field {i} must be an object"));
@@ -137,6 +157,7 @@ fn parse_field(file: &str, i: usize, item: &Value, issues: &mut Issues) -> Optio
         issues.push(file, format!("field \"{name}\" has the unknown type \"{type_name}\""));
         return None;
     };
+    issues.unknown_keys(file, &format!("field \"{name}\""), map, FIELD_KEYS);
     Some(FieldSchema {
         name: name.to_string(),
         kind,

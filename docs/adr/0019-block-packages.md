@@ -42,6 +42,18 @@ one: `/1` was a pre-release layout that never shipped. Unknown keys inside a kno
 ignored or kept (below), so a package can add data for later Markise versions without a new
 format. A change that an older Markise would misread needs a new format name.
 
+**What a newer package adds is noted, not refused** (issue #178). A key this build does not read,
+wherever a package may add one (the manifest, a schema, its `argument`, a field declaration, a view
+and its `practice`, the palette, a group, a palette block, a preset, the sections file, its fields,
+values and `view`), refuses nothing: it is ignored or kept as above, and it becomes a **note**, with
+the file and the place (`field "body" has the key "someday", which this version of Markise does
+not read`). `PackageIndex::notes` lists them, at most 32. The app's package status shows how many
+and lists them in its menu; `markise-cli blocks check` prints them once per binding and adds them to
+its JSON as `package_notes`. Neither changes an exit code or a block's verdict. What stays a refusal
+is what would be misread rather than left out: an unknown field **type** (`field "x" has the unknown
+type "y"`, naming the type, as no field model can hold content it does not know), an unknown view
+kind, a known key with a value of the wrong form, and a format name this build does not read.
+
 Two optional keys of the manifest are read and not checked, as they are a site's own values: `authoring` (ADR 0026) and `htmlContract` (ADR 0023).
 Other files, such as `templates/<name>/<name>.json`, are opaque like anything else the format does not name.
 

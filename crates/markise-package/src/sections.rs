@@ -89,6 +89,21 @@ pub(crate) fn parse(file: &str, map: serde_json::Map<String, Value>, issues: &mu
         Some(v) if v.as_u64() == Some(SECTIONS_FORMAT) => {}
         Some(v) => issues.push(file, format!("unsupported sections format {v}")),
     }
+    issues.unknown_keys(
+        file,
+        "the sections file",
+        &map,
+        &[
+            "format",
+            "label",
+            "description",
+            "keywords",
+            "icon",
+            "fields",
+            "title_level",
+            "view",
+        ],
+    );
     SectionConfig {
         label: opt_localized(file, "label", map.get("label"), issues),
         description: opt_localized(file, "description", map.get("description"), issues),
@@ -123,6 +138,7 @@ fn parse_view(file: &str, v: Option<&Value>, issues: &mut Issues) -> SectionView
             return view;
         }
     };
+    issues.unknown_keys(file, "view", map, &["frame", "numbered", "accent"]);
     let mut flag = |key: &str, into: &mut bool| match map.get(key) {
         None => {}
         Some(Value::Bool(b)) => *into = *b,
@@ -166,6 +182,9 @@ fn parse_fields(file: &str, v: Option<&Value>, issues: &mut Issues) -> Vec<Secti
             issues.push(file, format!("field \"{key}\" appears twice"));
             continue;
         }
+        if let Some(map) = item.as_object() {
+            issues.unknown_keys(file, &format!("field \"{key}\""), map, &["key", "label", "values"]);
+        }
         out.push(SectionField {
             key: key.to_string(),
             label: opt_localized(file, &format!("field \"{key}\" label"), item.get("label"), issues),
@@ -204,6 +223,14 @@ fn parse_values(file: &str, key: &str, v: Option<&Value>, issues: &mut Issues) -
         if out.iter().any(|o| o.value == value) {
             issues.push(file, format!("\"{value}\" of \"{key}\" appears twice"));
             continue;
+        }
+        if let Some(map) = item.as_object() {
+            issues.unknown_keys(
+                file,
+                &format!("value \"{value}\" of \"{key}\""),
+                map,
+                &["value", "label"],
+            );
         }
         out.push(SectionValue {
             value: value.to_string(),

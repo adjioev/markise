@@ -560,3 +560,56 @@ fn hostile_package_text_stays_data() {
     let error = String::from_utf8(out.stderr).unwrap();
     assert_eq!(raw_hidden(&error), [], "{error:?}");
 }
+
+/// The example package with a key in a field declaration that a newer package might have.
+fn newer_site() -> Site {
+    let root = tempfile::tempdir().unwrap();
+    let package = root.path().join("package");
+    copy_folder(&repo().join("examples/block-package/package"), &package);
+    let schema = package.join("components/tip/tip.json");
+    let mut tip: Value = serde_json::from_slice(&std::fs::read(&schema).unwrap()).unwrap();
+    tip["fields"][1]["laterKey"] = true.into();
+    std::fs::write(&schema, tip.to_string()).unwrap();
+    let packed = markise_package::pack_folder(&package).unwrap();
+    let site = root.path().join("home/site");
+    std::fs::create_dir_all(&site).unwrap();
+    std::fs::write(site.join("recipe.tar.gz"), &packed.bytes).unwrap();
+    std::fs::write(
+        site.join("blocks.config.json"),
+        format!(
+            r#"{{"library":"recipe-site","version":"1.0.0","source":"recipe.tar.gz","sha256":"{}"}}"#,
+            packed.sha256
+        ),
+    )
+    .unwrap();
+    Site {
+        sha256: packed.sha256.to_string(),
+        root,
+    }
+}
+
+#[test]
+fn a_key_this_version_does_not_read_is_a_note_once_and_refuses_nothing() {
+    let site = newer_site();
+    site.doc("a.md", ":::tip\n\nBody.\n\n:::\n");
+    site.doc("b.md", ":::tip\n\nBody.\n\n:::\n");
+    let out = site.run(&["check", "a.md", "b.md"]);
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    let notes: Vec<&str> = text.lines().filter(|l| l.contains("package note")).collect();
+    assert_eq!(notes.len(), 1, "{text}");
+    assert!(notes[0].contains("components/tip/tip.json: field"), "{text}");
+    assert!(notes[0].contains("has the key \"laterKey\""), "{text}");
+    assert!(
+        text.contains("a.md: ok, 1 blocks") && text.contains("b.md: ok, 1 blocks"),
+        "{text}"
+    );
+    let out = site.run(&["check", "--json", "a.md"]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let notes = report["package_notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 1, "{report}");
+    assert!(notes[0]["binding"].as_str().unwrap().ends_with("blocks.config.json"));
+    assert!(notes[0]["note"].as_str().unwrap().contains("laterKey"));
+    assert_eq!(report["files"][0]["status"], "clean");
+}
