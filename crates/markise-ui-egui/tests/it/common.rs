@@ -8,6 +8,8 @@
 #![allow(dead_code)] // each test module uses a different subset
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use egui_kittest::Harness;
@@ -74,11 +76,53 @@ pub fn assert_settings(h: &mut Harness<'static, MarkiseApp>, settings: &Path, ok
     );
 }
 
-/// `Harness::run` once the background has settled: the remaining frames are egui's own
-/// (layout passes, animations), so `max_steps` is not exhausted by late worker wake-ups.
+/// `Harness::run` once the background has settled, until the frames it runs start no new
+/// background work (issue #226).
+///
+/// The frames of a run can start work of their own — a form's file check, a lookup, a
+/// highlight — one frame after the input that asked for it, so after [`settle`] has returned.
+/// The worker's wake-up then lands in the middle of the run, at a moment that depends on the
+/// machine's load, and asks egui for two more frames: a loaded runner went past `max_steps`
+/// ("would have settled after 6 steps", the cause being a worker's wake). Such a run is
+/// repeated after settling again. A run is failed as before when it went past `max_steps`
+/// with no wake-up from another thread: then the UI itself keeps asking for frames, which is
+/// what `max_steps` is there to catch. Bounded by [`HANG_GUARD`] and by [`MAX_RUNS`] runs.
 pub fn run(h: &mut Harness<'static, MarkiseApp>) {
-    settle(h);
-    h.run();
+    let woken = off_thread_repaints(h);
+    let t = Instant::now();
+    for attempt in 1..=MAX_RUNS {
+        settle(h);
+        let before = woken.load(Ordering::SeqCst);
+        let result = h.try_run();
+        let wakes = woken.load(Ordering::SeqCst) - before;
+        match result {
+            // the run started nothing that is still going on: done
+            Ok(_) if h.state().background_settled() => return,
+            // it started background work: wait for that, then run again
+            Ok(_) => {}
+            Err(e) if wakes == 0 => panic!("{e}\n(no worker woke the UI during this run)"),
+            Err(e) => eprintln!("run {attempt} repeated: {wakes} wake-up(s) from workers during it ({e})"),
+        }
+        assert!(t.elapsed() < HANG_GUARD, "the UI never ran to rest (attempt {attempt})");
+    }
+    panic!("the UI started background work in each of {MAX_RUNS} runs: a loop through a worker");
+}
+
+/// How many times [`run`] runs before it calls the frames a loop through a worker.
+pub const MAX_RUNS: u32 = 20;
+
+/// Counts this harness's repaint requests made from threads other than the test's own — the
+/// wake-ups of background workers (a request made by the UI code runs on the test thread).
+/// Each call installs a fresh counter as the context's repaint observer.
+pub fn off_thread_repaints(h: &Harness<'static, MarkiseApp>) -> Arc<AtomicU64> {
+    let n = Arc::new(AtomicU64::new(0));
+    let (count, ui) = (n.clone(), std::thread::current().id());
+    h.ctx.set_repaint_observer(move |_| {
+        if std::thread::current().id() != ui {
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    n
 }
 
 /// The measurement of an idle check (NFR-10): runs `frame` until the document is loaded and
