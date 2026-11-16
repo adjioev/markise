@@ -20,6 +20,7 @@ mod export;
 mod files;
 mod find;
 mod full_view;
+mod harness;
 mod help;
 mod highlight;
 mod idle;

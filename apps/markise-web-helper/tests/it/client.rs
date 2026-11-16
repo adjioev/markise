@@ -35,8 +35,22 @@ fn job(key: u64, js: &'static str) -> Job {
     }
 }
 
+/// Limits for a page that is expected to draw. A helper's first page includes starting the web
+/// engine's processes, which is counted against the page: on a loaded CI runner even a trivial
+/// block took more than 4 s (issue #226, macOS run 42851048074). A test that does not exercise
+/// the limit gives it the most the protocol allows; it is a bound, not an expectation.
+fn generous() -> Limits {
+    Limits {
+        render: Duration::from_millis(u64::from(*markise_web_render::proto::LIMITS_MS.end())),
+        ..Limits::default()
+    }
+}
+
+/// Upper bound for any wait here: a hang guard, not a latency expectation.
+const HANG_GUARD: Duration = Duration::from_secs(240);
+
 fn results(client: &Client, n: usize) -> Vec<(u64, Outcome)> {
-    let deadline = Instant::now() + Duration::from_secs(40);
+    let deadline = Instant::now() + HANG_GUARD;
     let mut out = Vec::new();
     while out.len() < n && Instant::now() < deadline {
         out.extend(client.take_results());
@@ -69,7 +83,7 @@ fn a_picture_that_did_not_come_reaches_the_block_as_its_reason() {
     let spawner = ProcessSpawner {
         program: env!("CARGO_BIN_EXE_markise-web-helper").into(),
     };
-    let client = Client::new(Box::new(spawner), Limits::default(), wake);
+    let client = Client::new(Box::new(spawner), generous(), wake);
     let mut j = job(1, "");
     j.source = Arc::new(MissingPicture);
     client.want(vec![j]);
@@ -84,8 +98,11 @@ fn a_block_that_hangs_costs_a_helper_and_nothing_else() {
     let spawner = ProcessSpawner {
         program: env!("CARGO_BIN_EXE_markise-web-helper").into(),
     };
+    // The hang is found by this limit, so it is what the test takes at least. It also covers the
+    // other two pages, each the first of a helper (the engine's start counts against it): 4 s was
+    // not enough for them on a loaded runner, 20 s is five times what that runner needed.
     let limits = Limits {
-        render: Duration::from_secs(4),
+        render: Duration::from_secs(20),
         ..Limits::default()
     };
     let client = Client::new(Box::new(spawner), limits, Arc::new(|| {}));
@@ -97,10 +114,18 @@ fn a_block_that_hangs_costs_a_helper_and_nothing_else() {
     let got = results(&client, 3);
     assert_eq!(got.iter().map(|g| g.0).collect::<Vec<_>>(), [1, 2, 3]);
     let Outcome::Drawn(shot) = &got[0].1 else {
-        panic!("{:?}", got[0])
+        panic!("the first block, on the first helper: {:?}", got[0])
     };
     assert_eq!((shot.px_width, shot.px_height, shot.css_height), (200, 60, 30.0));
     assert_eq!(&shot.rgba[..4], &[0, 0, 255, 255]);
-    assert!(matches!(&got[1].1, Outcome::Failed(why) if why.contains("too long")));
-    assert!(matches!(got[2].1, Outcome::Drawn(_)), "on the next helper");
+    assert!(
+        matches!(&got[1].1, Outcome::Failed(why) if why.contains("too long")),
+        "the block that hangs: {:?}",
+        got[1]
+    );
+    assert!(
+        matches!(got[2].1, Outcome::Drawn(_)),
+        "the last block, on the next helper: {:?}",
+        got[2]
+    );
 }
