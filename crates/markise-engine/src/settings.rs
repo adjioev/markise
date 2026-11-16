@@ -30,7 +30,7 @@
 //! | `source` | object: `line_numbers` (default `false`), `soft_wrap` (`true`), `current_line` (highlight the caret's line, `true`), `whitespace_marks` (`false`), `font_size` (points, `8`–`40`; omitted = automatic, matched to the body text — issue #130) — source editor display (spec 02 §12.1.1; Preferences → Source Mode) | defaults |
 //! | `keyBinding` | object: command label (menu title) or id → accelerator (`"Ctrl+Shift+K"`), `""` unbinds (spec 05 §4.7); read only, kept verbatim | none |
 //! | `images` | object: `location` (`"note_folder"`: a folder next to the note, `"root_folder"`: a folder below the vault / opened folder root, `"same_folder"`: the note's own folder; default `"note_folder"`), `folder` (the folder for the first two, default `"assets"`), `obsidian` (use an Obsidian vault's `attachmentFolderPath` when set, `true`), `relative_paths` (`true`), `copy_images` (copy dropped image files into the image folder, `true`), `copy_files` (also copy other dropped files, `false`), `paste_urls` (a pasted image URL becomes an image, `true`) — pasted and dropped images (spec 04 §7, spec 05 §4.4; Preferences → Files & Images) | defaults |
-//! | `markdown` | object: `wikilinks` (default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`), `commentDisplay` (`"margin"` cards, default, or `"bubbles"` with hover popovers), `commentView` (`"all"` markup, default, `"simple"`, `"final"` or `"original"`; display only, issue #88) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
+//! | `markdown` | object: `wikilinks` (default `true`), `highlight` (`==text==` highlights, default `true`), `criticMarkup` (CriticMarkup comments and suggestions, default `true`; ADR 0012), `exportComments` (keep review comments in HTML/PDF exports, default `true`), `commentDisplay` (`"margin"` cards, default, or `"bubbles"` with hover popovers), `commentView` (`"all"` markup, default, `"simple"`, `"final"` or `"original"`; display only, issue #88) — Markdown dialect extensions (spec 01 §5; spec 06 V2.1 wikilinks; Preferences → Markdown) | defaults |
 //! | `side_by_side_split` | Side by Side divider position: fraction of the editor width given to the source pane, `0.15`–`0.85` (spec 04 §3.3); omitted until the divider is moved | `0.5` |
 //! | `tutorialShown` | `true` once the welcome tutorial was opened at first launch (issue #63); omitted until then | `false` |
 //! | `updates.autoCheck` | `true` / `false`: check GitHub for a newer release at launch, at most once a day (Preferences → General; issue #70); omitted until the user answered the first-launch question — omitted means off | none |
@@ -556,6 +556,8 @@ impl ImageSettings {
 pub struct MarkdownSettings {
     /// Wikilinks `[[Note]]` (spec 06 V2.1; owner default on).
     pub wikilinks: bool,
+    /// `==highlight==` (default on, issue #246).
+    pub highlight: bool,
     /// CriticMarkup comments and suggestions (ADR 0012; owner default on, issue #69).
     pub critic_markup: bool,
     /// Review comments are kept in HTML/PDF exports (`false`: stripped).
@@ -570,6 +572,7 @@ impl Default for MarkdownSettings {
     fn default() -> Self {
         MarkdownSettings {
             wikilinks: true,
+            highlight: true,
             critic_markup: true,
             export_comments: true,
             comment_display: CommentDisplay::Margin,
@@ -582,6 +585,7 @@ impl MarkdownSettings {
     fn to_json(self) -> Value {
         let mut m = Map::new();
         m.insert("wikilinks".into(), Value::from(self.wikilinks));
+        m.insert("highlight".into(), Value::from(self.highlight));
         m.insert("criticMarkup".into(), Value::from(self.critic_markup));
         m.insert("exportComments".into(), Value::from(self.export_comments));
         m.insert("commentDisplay".into(), Value::from(self.comment_display.as_str()));
@@ -593,6 +597,7 @@ impl MarkdownSettings {
         let d = MarkdownSettings::default();
         Some(MarkdownSettings {
             wikilinks: m.get("wikilinks").and_then(Value::as_bool).unwrap_or(d.wikilinks),
+            highlight: m.get("highlight").and_then(Value::as_bool).unwrap_or(d.highlight),
             critic_markup: m
                 .get("criticMarkup")
                 .and_then(Value::as_bool)
@@ -1751,6 +1756,20 @@ mod tests {
         let mut s = Settings::default();
         p.apply(&mut s);
         assert!(!s.markdown.wikilinks);
+    }
+
+    #[test]
+    fn highlight_setting_defaults_on_and_round_trips() {
+        assert!(Settings::default().markdown.highlight);
+        assert!(
+            Settings::from_json(r#"{"version": 2, "markdown": {}}"#)
+                .unwrap()
+                .markdown
+                .highlight
+        );
+        let off = Settings::from_json(r#"{"version": 2, "markdown": {"highlight": false}}"#).unwrap();
+        assert!(!off.markdown.highlight && off.markdown.wikilinks);
+        assert!(!Settings::from_json(&off.to_json()).unwrap().markdown.highlight);
     }
 
     /// Issue #63: the first-launch tutorial flag defaults off, is not written until set, and

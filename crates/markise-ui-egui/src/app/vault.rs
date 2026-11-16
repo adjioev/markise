@@ -112,6 +112,8 @@ pub(crate) struct VaultState {
     accept_pending: bool,
     /// Wikilinks may be on at all (the startup parse options allow them).
     pub(crate) allowed: bool,
+    /// `==highlight==` may be on at all (the startup parse options allow it).
+    pub(crate) highlight_allowed: bool,
 }
 
 impl VaultState {
@@ -267,6 +269,11 @@ impl MarkiseApp {
         if want != self.parse.wikilinks {
             self.apply_wikilinks(want);
         }
+        let want = self.vault.highlight_allowed && self.themes.highlight();
+        if want != self.parse.highlight {
+            self.parse.highlight = want;
+            self.reparse_document("Highlight");
+        }
         self.review_poll_setting();
         self.poll_reparse();
         self.poll_create();
@@ -312,6 +319,8 @@ impl MarkiseApp {
         // the CriticMarkup switch likewise (ADR 0012)
         let generation =
             (base << 3) | ((self.parse.critic_markup as u64) << 2) | ((self.parse.wikilinks as u64) << 1) | 1;
+        // `==highlight==` changes how any paragraph reads
+        d.viewer.ed.view.set_dialect(self.parse.highlight as u64);
         d.viewer.ed.view.set_links(Arc::new(VaultLinks {
             index,
             from,
@@ -339,6 +348,22 @@ impl MarkiseApp {
         let on = on && self.vault.allowed;
         if on != self.parse.wikilinks {
             self.apply_wikilinks(on);
+        }
+    }
+
+    /// Whether `==highlight==` is parsed (Preferences → Markdown, setting `markdown.highlight`).
+    pub fn highlight(&self) -> bool {
+        self.parse.highlight
+    }
+
+    /// Preferences → Markdown → Highlight: switches the extension (persisted) and re-parses the
+    /// open document in the background; the text is not changed.
+    pub fn set_highlight(&mut self, on: bool) {
+        self.themes.set_highlight(on);
+        let on = on && self.vault.highlight_allowed;
+        if on != self.parse.highlight {
+            self.parse.highlight = on;
+            self.reparse_document("Highlight");
         }
     }
 

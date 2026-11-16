@@ -19,7 +19,7 @@ pub struct ParseOptions {
     pub subscript: bool,
     /// `^x^` superscript. Default off.
     pub superscript: bool,
-    /// `==x==` highlight. Default off.
+    /// `==x==` highlight. Default on (issue #246; Preferences → Markdown turns it off).
     pub highlight: bool,
     /// GitHub alerts `> [!NOTE]` (R3.3.4). Default on.
     pub alerts: bool,
@@ -60,7 +60,7 @@ impl Default for ParseOptions {
             code_math: true,
             subscript: false,
             superscript: false,
-            highlight: false,
+            highlight: true,
             alerts: true,
             callouts: true,
             diagrams: true,

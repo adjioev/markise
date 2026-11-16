@@ -81,6 +81,9 @@ pub struct View {
     links: Arc<dyn LinkTargets + Send + Sync>,
     /// How review marks are shown (issue #88; part of every cache key).
     review: crate::block::ReviewView,
+    /// The document format's reading options that change how unchanged text renders
+    /// ([`View::set_dialect`]; part of every cache key).
+    dialect: u64,
     /// Reference labels per item hash ([`DocModel::item_references`]), computed when an item's
     /// key is first needed: reference definitions enter only the keys of items that may use
     /// them (ADR 0006 §7.4) without a document-wide scan when the model is built.
@@ -131,6 +134,7 @@ impl View {
             highlights: Arc::new(NoHighlights),
             diagrams: Arc::new(NoDiagrams),
             links: Arc::new(AllResolved),
+            dialect: 0,
             review: crate::block::ReviewView::All,
             refs: Default::default(),
             focus: None,
@@ -818,6 +822,13 @@ impl View {
         self.links = l;
     }
 
+    /// A fingerprint of the reading options the document was parsed with (a dialect extension
+    /// switched on or off): layouts cached under another one are not reused, although the text
+    /// is the same.
+    pub fn set_dialect(&mut self, fingerprint: u64) {
+        self.dialect = fingerprint;
+    }
+
     pub fn links(&self) -> &Arc<dyn LinkTargets + Send + Sync> {
         &self.links
     }
@@ -1112,7 +1123,8 @@ impl View {
 
     /// `dtag`: for a diagram item, its [`DiagramState::tag`].
     fn key_for(&self, i: usize, it: &Item, ready: Option<bool>, dtag: Option<u64>) -> CacheKey {
-        let mut extra = (self.review as u64).wrapping_mul(0x2545_f491_4f6c_dd1d).rotate_left(41);
+        let mut extra = (self.review as u64).wrapping_mul(0x2545_f491_4f6c_dd1d).rotate_left(41)
+            ^ self.dialect.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(23);
         if self.expanded.contains(&i) {
             extra |= 1;
         }

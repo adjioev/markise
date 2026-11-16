@@ -106,6 +106,7 @@ pub enum RowId {
     SmartDashesEm,
     Diagrams,
     Wikilinks,
+    Highlight,
     CriticMarkup,
     CommentDisplay,
     ExportComments,
@@ -266,6 +267,13 @@ pub const ROWS: &[Row] = &[
         "Extensions",
         "Wikilinks [[Note]]",
         "links vault obsidian",
+    ),
+    row(
+        R::Highlight,
+        S::Markdown,
+        "Extensions",
+        "Highlight ==text==",
+        "mark marker highlighter equals",
     ),
     row(
         R::CriticMarkup,
@@ -566,6 +574,7 @@ pub struct Values {
     pub source: SourceSettings,
     pub diagrams: bool,
     pub wikilinks: bool,
+    pub highlight: bool,
     pub critic_markup: bool,
     pub comment_display: CommentDisplay,
     pub export_comments: bool,
@@ -609,6 +618,7 @@ pub enum Change {
     Source(SourceSettings),
     Diagrams(bool),
     Wikilinks(bool),
+    Highlight(bool),
     CriticMarkup(bool),
     CommentDisplay(CommentDisplay),
     ExportComments(bool),
@@ -1293,6 +1303,11 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                 out.push(Change::Wikilinks(on));
             }
         }
+        R::Highlight => {
+            if let Some(on) = switch(ui, v.highlight) {
+                out.push(Change::Highlight(on));
+            }
+        }
         R::CriticMarkup => {
             if let Some(on) = switch(ui, v.critic_markup) {
                 out.push(Change::CriticMarkup(on));
@@ -1837,6 +1852,7 @@ pub fn section_at_defaults(s: Section, v: &Values) -> bool {
         Section::Markdown => {
             v.diagrams
                 && v.wikilinks
+                && v.highlight
                 && v.critic_markup
                 && v.comment_display == CommentDisplay::Margin
                 && v.export_comments

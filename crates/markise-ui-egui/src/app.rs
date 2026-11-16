@@ -639,7 +639,9 @@ impl MarkiseApp {
         let mut themes = ThemeManager::new(opts.config, opts.system_fonts);
         themes.set_watch(opts.watch);
         let diagrams = themes.diagrams();
-        let vault = vault::VaultState::new(opts.parse.wikilinks);
+        let mut vault = vault::VaultState::new(opts.parse.wikilinks);
+        vault.highlight_allowed = opts.parse.highlight;
+        opts.parse.highlight &= themes.highlight();
         opts.parse.wikilinks &= themes.wikilinks();
         let review = review::ReviewState::new(opts.parse.critic_markup);
         opts.parse.critic_markup &= themes.critic_markup();

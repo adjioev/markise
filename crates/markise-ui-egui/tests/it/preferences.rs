@@ -659,3 +659,38 @@ fn source_font_size_preference_reaches_the_source_view() {
     assert_eq!(h.state().source_prefs().font_size, None);
     assert_eq!(params(&mut h).font_size, None);
 }
+
+/// Markdown → Highlight (#246): on by default, `==text==` reads as a highlight; off, the marks
+/// show as text after a re-parse, the file and the document are untouched, and the setting is
+/// saved.
+#[test]
+fn highlight_is_on_by_default_and_the_setting_turns_it_off() {
+    let d = tmpdir("highlight");
+    let doc = d.join("note.md");
+    let text = "Some ==marked== text.\n";
+    std::fs::write(&doc, text).unwrap();
+    let cfg = d.join("config");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let mut h = harness_with(AppOptions {
+        open: vec![doc.clone()],
+        config: ConfigDir::Dir(cfg),
+        ..common::no_watch()
+    });
+    wait_until(&mut h, "load", |a| a.model().is_some() && !a.is_busy());
+    h.run_steps(2);
+    assert!(h.state().highlight());
+    let shown = |h: &mut H| h.state_mut().viewer().unwrap().visible_text();
+    assert!(shown(&mut h).contains("Some marked text."), "{}", shown(&mut h));
+    open_at(&mut h, Section::Markdown);
+    assert!(toggled(&h, "Highlight ==text=="));
+    h.get_by_label("Highlight ==text==").click();
+    h.run_steps(2);
+    assert!(!h.state().highlight());
+    wait_until(&mut h, "re-parse", |a| !a.is_reparsing());
+    h.run_steps(2);
+    assert!(shown(&mut h).contains("==marked=="), "{}", shown(&mut h));
+    assert_eq!(h.state().document_text().unwrap(), text);
+    assert!(!h.state().is_dirty());
+    common::assert_settings(&mut h, &settings_file(&d), |s| s.contains("\"highlight\": false"));
+    assert_eq!(std::fs::read_to_string(&doc).unwrap(), text);
+}

@@ -50,7 +50,7 @@ a second" for 10 MB.
 | `export.md` | callouts: ADR 0025 "Exports"; `crates/markise-engine/src/export.rs`; `crates/markise-export/src/pandoc.rs`, `images.rs`, `vars.rs`; `crates/markise-pdf/src/lib.rs`, `image.rs`; `crates/markise-ui-egui/src/export_ui.rs`, `prefs.rs` (empty Export section) |
 | `large-files.md` | ADR 0017 (threshold, measurements, behaviour while loading, peak heap); `crates/markise-ui-egui/src/app/progressive.rs`, `find.rs`, `sidebar.rs`, `export_ui.rs` |
 | `saving-and-recovery.md` | `crates/markise-engine/src/settings.rs` (defaults), `recovery.rs`, `save.rs`, `watch.rs`; `crates/markise-ui-egui/src/app/workflow.rs` (30 s backup interval, autosave conditions), `app.rs` (conflict banners) |
-| `settings.md` | `crates/markise-ui-egui/src/prefs.rs`; `crates/markise-engine/src/settings.rs`; `crates/markise-theme/src/discover.rs` (config folders) |
+| `settings.md` | highlight: `crates/markise-md/src/options.rs` (`highlight` default), `crates/markise-engine/src/settings.rs` (`MarkdownSettings::highlight`), `crates/markise-ui-egui/tests/it/preferences.rs` (`highlight_is_on_by_default_and_the_setting_turns_it_off`), `crates/markise-engine/src/export.rs` (`highlights_export_as_marks_unless_switched_off`); `crates/markise-ui-egui/src/prefs.rs`; `crates/markise-engine/src/settings.rs`; `crates/markise-theme/src/discover.rs` (config folders) |
 | `updates-and-privacy.md` | `docs/features/update-check.md`; `crates/markise-engine/src/update.rs`; `apps/markise/src/diag.rs` (log); a package's code: ADR 0023 "Isolation", `apps/markise-web-helper/src/mac/self_test.rs` |
 | `blocks.md` | see [Blocks](#blocks) below |
 | `block-packages.md` | see [Block packages](#block-packages) below |

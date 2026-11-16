@@ -264,6 +264,7 @@ impl MarkiseApp {
         // comments and suggestions (ADR 0012): parsed as in the editor, comments kept or
         // stripped by File → Export → Include Comments
         req.critic_markup = self.critic_markup();
+        req.highlight = self.highlight();
         req.comments = if self.export_comments() {
             markise_engine::export::CommentExport::Keep
         } else {
