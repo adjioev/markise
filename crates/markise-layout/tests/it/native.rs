@@ -802,3 +802,108 @@ fn an_opener_with_no_label_row_stays_while_its_controls_are_in_view() {
     assert!(first_at(false, 40.0).0 >= title);
     assert_eq!(first_at(true, 2.0).0, title);
 }
+
+/// Blocks that reveal only quotes, as a package's `practice` says (ADR 0024).
+struct Practising;
+
+impl BlockViews for Practising {
+    fn id(&self) -> u64 {
+        7
+    }
+    fn has_view(&self, name: &str) -> bool {
+        name == "task"
+    }
+    fn has_practice(&self, name: &str) -> bool {
+        name == "task"
+    }
+    fn any_practice(&self) -> bool {
+        true
+    }
+    fn practice_hides_quotes(&self, name: &str) -> bool {
+        name == "task"
+    }
+    fn practice_needs_quote(&self, name: &str) -> bool {
+        name == "task"
+    }
+    fn look(&self, _name: &str, _args: &str, source: &str) -> BlockLook {
+        let mut reveal = Vec::new();
+        let mut at = 0;
+        for line in source.split_inclusive('\n') {
+            if line.starts_with('>') {
+                reveal.push(at as u32..(at + line.len()) as u32);
+            }
+            at += line.len();
+        }
+        BlockLook::Native(NativeBlock {
+            view: Arc::new(NativeView {
+                kind: NativeKind::Card,
+                accent: None,
+                icon: None,
+                label: "Task".into(),
+                single_answer: true,
+                fill: true,
+                label_row: true,
+            }),
+            parts: role_ranges(source),
+            practice: Some(markise_layout::PracticeParts {
+                reveal,
+                ..Default::default()
+            }),
+        })
+    }
+}
+
+/// In Read, a block with nothing to reveal keeps no room for a row of buttons, item by item and in the
+/// estimate of a page that has not read it; one with a quote to reveal still does.
+#[test]
+fn a_block_with_nothing_to_practise_has_no_row_in_heights_or_page_estimates() {
+    let row = |src: &str| -> (f32, f32, usize) {
+        let src = src.repeat(400);
+        let doc: Arc<dyn FormatDoc> = Arc::new(markise_md::parse(&src));
+        let model = Arc::new(markise_layout::DocModel::build_with(
+            &*doc,
+            None,
+            Paging::Paged { tops: 32 },
+        ));
+        let page = (1..model.items.len())
+            .find(|&i| model.is_page(i))
+            .expect("a placeholder");
+        let estimate = |read: bool| {
+            let mut v = View::new(doc.clone(), model.clone(), Theme::light(), 700.0, 1.0);
+            v.set_block_views(Some(Arc::new(Practising)));
+            v.set_read_mode(read);
+            v.estimate(page)
+        };
+        let page_added = estimate(true) - estimate(false);
+        // one block's closer, estimated and laid out
+        let full = testing::Shown::full(doc.clone());
+        let mut v = View::new(doc.clone(), full.model.clone(), Theme::light(), 700.0, 1.0);
+        v.set_block_views(Some(Arc::new(Practising)));
+        v.set_read_mode(true);
+        let closer = (0..full.model.items.len())
+            .find(|&i| full.model.items[i].kind == (ItemKind::ContainerMarker { close: true }))
+            .unwrap();
+        let rows = (0..v.len())
+            .filter(|&i| v.practice_item_of(i) == Some(markise_layout::PracticeItem::Row))
+            .count();
+        let est = v.estimate(closer);
+        let mut fonts = testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        let laid = v.frame(4000.0, 0.0, &mut f, &NoImages)[closer].layout.height;
+        // with no row, the closer's estimate is its layout (a row's own estimate is corrected when laid out)
+        if !src.contains('>') {
+            assert!((est - laid).abs() < 0.5, "closer estimated {est}, laid out {laid}");
+        }
+        let mut e = View::new(doc.clone(), full.model.clone(), Theme::light(), 700.0, 1.0);
+        e.set_block_views(Some(Arc::new(Practising)));
+        let edit = e.frame(4000.0, 0.0, &mut f, &NoImages)[closer].layout.height;
+        (page_added, laid - edit, rows)
+    };
+    let (page, closer, rows) = row(":::task\n\nDo this.\n\n:::\n\n");
+    assert_eq!(rows, 0, "a row of buttons");
+    assert!(page.abs() < 0.5, "the page estimate adds {page}");
+    assert!(closer.abs() < 0.5, "the closer grows by {closer}");
+    let (_, closer, rows) = row(":::task\n\nDo this.\n\n> Done.\n\n:::\n\n");
+    assert!(rows > 0);
+    assert!(closer > 5.0, "the closer holds the row: {closer}");
+}

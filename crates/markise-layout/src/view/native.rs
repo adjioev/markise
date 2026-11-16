@@ -92,6 +92,10 @@ pub struct NativeAt {
     pub block: Arc<NativeBlock>,
     /// From the first colon of its opener to the end of its closer.
     pub range: Range<usize>,
+    /// It is practised: in Practice and with something in it to work out, so its answers, Check, Reset and
+    /// Show answer are the reader's. A block whose `practice` has nothing to work out shows as it is, with
+    /// none of them (ADR 0024).
+    pub practised: bool,
 }
 
 impl NativeAt {
@@ -300,6 +304,7 @@ impl View {
         Some(NativeAt {
             block,
             range: c.opener.start..c.closer.end,
+            practised: mode == BlockViewMode::Practice,
         })
     }
 
