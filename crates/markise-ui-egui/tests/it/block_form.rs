@@ -1135,12 +1135,21 @@ fn a_copy_for_a_form_that_is_gone_lands_nowhere() {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     });
-    h.state_mut()
-        .set_attach_job_test(std::time::Duration::from_secs(30), Some(job));
-    let steps = |h: &mut H| {
-        for _ in 0..4 {
+    // the held copy is never given up while the test runs (a 30 s give-up could end it on a
+    // slow runner, #226)
+    h.state_mut().set_attach_job_test(2 * common::HANG_GUARD, Some(job));
+    // While the copy is held the background never settles, so these steps wait for the event
+    // each needs (#226: a fixed four frames lost "Choose file" of form B under load, its
+    // button still moving while the form's worker answered).
+    let until = |h: &mut H, what: &str, f: &dyn Fn(&H) -> bool| {
+        let t = std::time::Instant::now();
+        while !f(h) {
+            assert!(t.elapsed() < common::HANG_GUARD, "timed out waiting for {what}");
             h.step();
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
+        // one frame more: what was waited for is laid out where it stays
+        h.step();
     };
     // form A: a slow copy
     assert!(h.state_mut().open_block_form(0));
@@ -1150,17 +1159,21 @@ fn a_copy_for_a_form_that_is_gone_lands_nowhere() {
     h.get_by_label("Choose file: Pictures 1").click();
     wait(&mut h);
     h.get_by_label("Browse…").click();
-    steps(&mut h);
-    assert!(h.state().image_picker().is_none());
+    until(&mut h, "Browse… taken (the picker gone)", &|h| {
+        h.state().image_picker().is_none()
+    });
     // form A goes, form B comes and asks for a file of its own
     h.state_mut().block_form_cancel();
-    steps(&mut h);
+    until(&mut h, "form A closed", &|h| h.state().block_form().is_none());
     let b = doc.rfind(":::gallery").unwrap();
     assert!(h.state_mut().open_block_form(b));
-    steps(&mut h);
+    until(&mut h, "form B, its worker answered", &|h| {
+        h.state().block_form().is_some()
+            && h.state().block_form_idle()
+            && h.query_by_label("Choose file: Pictures 1").is_some()
+    });
     h.get_by_label("Choose file: Pictures 1").click();
-    steps(&mut h);
-    assert!(h.state().image_picker().is_some());
+    until(&mut h, "the picker for form B", &|h| h.state().image_picker().is_some());
     hold.store(false, Ordering::SeqCst);
     wait(&mut h);
     assert_eq!(draft(&h)["pictures"][0]["path"], before, "A's file is not B's");
