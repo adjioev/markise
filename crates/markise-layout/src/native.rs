@@ -227,6 +227,12 @@ pub trait BlockViews: Send + Sync {
     fn practice_hides_quotes(&self, _name: &str) -> bool {
         false
     }
+    /// Whether a block of this name has something to practise only when a quote stands in it: its schema
+    /// gives no answers, and all it reveals are quotes. One with no quote is not practised and has no row of
+    /// buttons (page estimates: no source is read).
+    fn practice_needs_quote(&self, _name: &str) -> bool {
+        false
+    }
     /// Whether blocks of this name can be judged at all; the others are not read.
     fn has_schema(&self, name: &str) -> bool {
         self.has_view(name)

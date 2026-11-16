@@ -1522,3 +1522,110 @@ fn a_mark_taken_in_by_a_text_field_is_not_ready_and_tells_nothing() {
         assert_eq!(mode_of(&mut h, "Do this"), BlockViewMode::Practice, "{list}");
     }
 }
+
+// ---- nothing to practise draws no control
+
+const NOTHING_MANIFEST: &str =
+    r#"{"format":"markise-block-package/2","library":"sample","version":"1.0.0","blocks":["exercise","pick"]}"#;
+/// Answers that may be left out, and an explanation that may too.
+const PICK: &str = r#"{"label": "Pick", "fields": [
+    {"name": "prompt", "type": "text"},
+    {"name": "answers", "type": "choices", "minItems": 0},
+    {"name": "explanation", "type": "quote", "min": 0}
+]}"#;
+const NOTHING_VIEWS: &str = r#"{
+    "exercise": {"kind": "card", "practice": {"reveal": ["solution"]}},
+    "pick": {"kind": "choices", "practice": {"reveal": ["explanation"]}}
+}"#;
+const NOTHING_FILES: &[(&str, &str)] = &[
+    ("manifest.json", NOTHING_MANIFEST),
+    ("components/exercise/exercise.json", EXERCISE),
+    ("components/pick/pick.json", PICK),
+    ("editor/palette.json", r#"{"format": 1}"#),
+    ("editor/views.json", NOTHING_VIEWS),
+];
+
+/// The closers that hold a row of practice buttons, by item.
+fn rows(h: &mut H) -> Vec<usize> {
+    let view = &h.state_mut().viewer().unwrap().ed.view;
+    (0..view.len())
+        .filter(|&i| view.practice_item_of(i) == Some(markise_layout::PracticeItem::Row))
+        .collect()
+}
+
+/// The height of every item, laid out, and whether its estimate said the same.
+fn heights(h: &mut H) -> Vec<(f32, f32)> {
+    let view = &h.state_mut().viewer().unwrap().ed.view;
+    (0..view.len()).map(|i| (view.height(i), view.estimate(i))).collect()
+}
+
+/// A block whose `practice` has nothing in it to work out (no answers, its revealed fields empty) is
+/// not practised (ADR 0024), so in Read it has no Show answer, Check or Reset, keeps no room for one,
+/// and does not count; one with a solution beside it still has Show answer.
+#[test]
+fn a_block_with_nothing_to_practise_has_no_control_no_room_for_one_and_no_score() {
+    let empty = "Before.\n\n:::exercise\n\nDo this and that.\n\n:::\n\n:::pick\n\nPick nothing.\n\n:::\n\nAfter.\n";
+    let f = Fixture::with_package(empty, NOTHING_FILES);
+    let mut h = f.ready();
+    common::run(&mut h);
+    let edit = heights(&mut h);
+    command(&mut h, "view.readMode");
+    common::run(&mut h);
+    let s = shown(&mut h);
+    assert!(s.contains("Do this and that.") && s.contains("Pick nothing."), "{s}");
+    assert!(!s.contains("Not ready"), "{s}");
+    for label in ["Show answer", "Check", "Reset"] {
+        assert!(h.query_by_label(label).is_none(), "{label} in Read");
+    }
+    assert_eq!(rows(&mut h), Vec::<usize>::new(), "a row of buttons is laid out");
+    // it shows as it does in Edit: no room is kept for a control, and the estimates said so
+    let read = heights(&mut h);
+    assert_eq!(read.len(), edit.len());
+    for (i, (r, e)) in read.iter().zip(&edit).enumerate() {
+        assert!((r.0 - e.0).abs() < 0.5, "item {i}: {} in Read, {} in Edit", r.0, e.0);
+    }
+    let closers: Vec<usize> = (0..read.len())
+        .filter(|&i| {
+            let m = &h.state_mut().viewer().unwrap().ed.view.model().items[i];
+            m.kind == (markise_layout::ItemKind::ContainerMarker { close: true })
+        })
+        .collect();
+    assert_eq!(closers.len(), 2);
+    for i in closers {
+        assert!(
+            (read[i].0 - read[i].1).abs() < 0.5,
+            "closer {i}: laid out {}, estimated {}",
+            read[i].0,
+            read[i].1
+        );
+    }
+    // nothing can be checked, and nothing counts
+    let v = h.state_mut().viewer().unwrap();
+    for opener in [empty.find(":::exercise").unwrap(), empty.find(":::pick").unwrap()] {
+        assert!(!v.ed.practice_check(opener), "{opener}");
+    }
+    assert!(!v.ed.practice_started());
+    assert_eq!(v.ed.practice_score(), (0, 0));
+    untouched(&mut h, &f, empty);
+
+    // beside one with a solution: that one, and only it, has Show answer
+    let mixed = "Before.\n\n:::exercise\n\nDo this and that.\n\n:::\n\n:::exercise\n\nWork this out.\n\n> The worked solution.\n\n:::\n\n:::pick\n\nPick nothing.\n\n:::\n\nAfter.\n";
+    let f = Fixture::with_package(mixed, NOTHING_FILES);
+    let mut h = f.ready();
+    command(&mut h, "view.readMode");
+    common::run(&mut h);
+    assert!(!shown(&mut h).contains("worked solution"));
+    assert_eq!(h.query_all_by_label("Show answer").count(), 1);
+    assert!(h.query_by_label("Check").is_none());
+    assert_eq!(rows(&mut h).len(), 1);
+    h.get_by_label("Show answer").click();
+    common::run(&mut h);
+    assert!(shown(&mut h).contains("worked solution"));
+    assert_eq!(h.query_all_by_label("Reset").count(), 1);
+    assert_eq!(
+        h.state_mut().viewer().unwrap().ed.practice_score(),
+        (0, 0),
+        "no answers, no score"
+    );
+    untouched(&mut h, &f, mixed);
+}
