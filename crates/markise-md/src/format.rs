@@ -963,6 +963,8 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
             NK::Image {
                 src: dest.as_str().into(),
                 title: title.as_deref().map(Into::into),
+                size: None,
+                by_name: false,
             },
             Some(plain_text(s, &n.children)),
         ),
@@ -988,13 +990,32 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
             };
         }
         InlineKind::WikiLink {
-            target, subpath, inner, ..
+            target,
+            subpath,
+            inner,
+            embed,
+            ..
         } => {
             let content = inner.slice(s);
-            let label = crate::wikilink::split(content)
-                .map(|w| w.label(content))
-                .unwrap_or_default();
             let inner_src = map(inner.start)..map(inner.end);
+            let parts = crate::wikilink::split(content);
+            // `![[picture.png|300]]`: the image itself, one object like `![alt](path)`
+            if *embed && let Some(w) = parts.as_ref().filter(|w| w.is_image_embed()) {
+                return InlineNode {
+                    kind: NK::Image {
+                        src: target.as_str().into(),
+                        title: None,
+                        size: w.embed_size(content),
+                        by_name: true,
+                    },
+                    source: map(n.span.start)..map(n.span.end),
+                    content: inner_src.clone(),
+                    markers: vec![map(n.span.start)..inner_src.start, inner_src.end..map(n.span.end)],
+                    children: Vec::new(),
+                    text: push_value(pool, &w.embed_alt(content)),
+                };
+            }
+            let label = parts.map(|w| w.label(content)).unwrap_or_default();
             let child = InlineNode::leaf(NK::Text, inner_src.clone(), push_value(pool, &label));
             return InlineNode {
                 kind: NK::WikiLink {

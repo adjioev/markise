@@ -147,6 +147,8 @@ pub struct HtmlOptions {
     /// Where wikilinks point (spec 06 Q-V11): without a resolver, or for an unresolved target,
     /// a wikilink is written as its label in plain text.
     pub wikilinks: WikiLinkHrefs,
+    /// Where image embeds `![[name.png]]` point ([`EmbedPaths`]).
+    pub embeds: EmbedPaths,
     /// Review comments (CriticMarkup, ADR 0012): kept (default) or stripped. Suggestions
     /// are always written as `<ins>` / `<del>`.
     pub comments: CommentExport,
@@ -180,6 +182,58 @@ impl std::fmt::Debug for WikiLinkHrefs {
             "WikiLinkHrefs(none)"
         })
     }
+}
+
+/// Resolves an image embed's target (`![[name.png]]`) to the path of its file relative to the
+/// document's folder, percent-encoded, or `None` when no file of that name is known.
+pub type EmbedResolver = dyn Fn(&str) -> Option<String> + Send + Sync;
+
+/// The image embed resolver of an export ([`HtmlOptions::embeds`], [`model::ModelOptions::embeds`]).
+/// Without one, or for a name it does not know, the target is read as a path relative to the
+/// document, as written.
+#[derive(Clone, Default)]
+pub struct EmbedPaths(pub Option<std::sync::Arc<EmbedResolver>>);
+
+impl EmbedPaths {
+    /// The image's path relative to the document, percent-encoded like a Markdown destination.
+    pub fn dest(&self, target: &str) -> String {
+        self.0
+            .as_ref()
+            .and_then(|r| r(target))
+            .unwrap_or_else(|| encode_path(target.trim_start_matches('/')))
+    }
+}
+
+impl std::fmt::Debug for EmbedPaths {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "EmbedPaths(resolver)"
+        } else {
+            "EmbedPaths(none)"
+        })
+    }
+}
+
+/// A file path as a Markdown destination: characters that would end it or be read as a query,
+/// fragment or escape are percent-encoded.
+pub fn encode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control()
+            || matches!(
+                c,
+                ' ' | '%' | '#' | '?' | '(' | ')' | '<' | '>' | '^' | '|' | '[' | ']' | '\\'
+            )
+        {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Treatment of local image references in exported HTML. Remote URLs (`http:`, `https:`, …)
@@ -1330,9 +1384,27 @@ impl<'a> Ctx<'a> {
                 }
             },
             InlineKind::WikiLink {
-                target, subpath, inner, ..
+                target,
+                subpath,
+                inner,
+                embed,
+                ..
             } => {
                 let c = inner.slice(s);
+                // an image embed: the image, at the size asked for
+                if *embed && let Some(w) = markise_md::wikilink::split(c).filter(|w| w.is_image_embed()) {
+                    let dest = self.image_src(&self.opts.embeds.dest(target));
+                    let src = self.url(&dest, true).unwrap_or("");
+                    let _ = write!(out, "<img src=\"{}\" alt=\"{}\"", esc_url(src), esc(&w.embed_alt(c)));
+                    if let Some((wd, ht)) = w.embed_size(c) {
+                        let _ = write!(out, " width=\"{wd}\"");
+                        if let Some(ht) = ht {
+                            let _ = write!(out, " height=\"{ht}\" style=\"object-fit: contain\"");
+                        }
+                    }
+                    out.push_str(" />");
+                    return;
+                }
                 let label = markise_md::wikilink::split(c).map(|w| w.label(c)).unwrap_or_default();
                 let href = self
                     .opts

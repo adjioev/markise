@@ -263,6 +263,13 @@ pub enum InlineKind {
     Image {
         src: Box<str>,
         title: Option<Box<str>>,
+        /// The size the source asks for, in CSS pixels: a width, and a height when given (the
+        /// image keeps its proportions within them). `None`: its own size.
+        size: Option<(u32, Option<u32>)>,
+        /// `src` is a file name looked up like a wikilink target (any folder of the opened
+        /// folder) before it is read as a path relative to the document: a Markdown embed
+        /// `![[name.png]]`.
+        by_name: bool,
     },
     /// Inline math; `display`: display style (e.g. Markdown `$$…$$` inside a paragraph) while
     /// still positioned inline.
