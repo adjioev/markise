@@ -154,16 +154,10 @@ fn opening_a_folder_mounts_it() {
     std::fs::write(dir.join("sub").join("deep.md"), "# Deep\n").unwrap();
     std::fs::write(dir.join("top.md"), "# Top\n").unwrap();
     let mut h = harness(vec![dir.clone()]);
-    h.run_steps(3);
-    wait_until(&mut h, "listing", |_| true);
-    std::thread::sleep(Duration::from_millis(100));
-    h.run_steps(3);
-    h.get_by_label("top.md");
+    // the listings come from a worker: wait for the rows, not for 100 ms (Windows CI, #226)
+    common::wait_for_label(&mut h, "top.md");
     h.get_by_label("sub").click();
-    std::thread::sleep(Duration::from_millis(100));
-    h.run_steps(3);
-    std::thread::sleep(Duration::from_millis(100));
-    h.run_steps(3);
+    common::wait_for_label(&mut h, "deep.md");
     h.get_by_label("deep.md").click();
     wait_until(&mut h, "open deep", |a| {
         a.document_path().is_some_and(|p: &Path| p.ends_with("deep.md")) && !a.is_loading()

@@ -33,6 +33,23 @@ pub fn wait_until(h: &mut Harness<'static, MarkiseApp>, what: &str, f: impl Fn(&
     h.step();
 }
 
+/// Steps until a node labelled `label` is in the accessibility tree (a row a worker lists, a
+/// panel a worker opens), failing only after [`HANG_GUARD`].
+pub fn wait_for_label(h: &mut Harness<'static, MarkiseApp>, label: &str) {
+    use egui_kittest::kittest::Queryable;
+    let t = Instant::now();
+    while h.query_by_label(label).is_none() {
+        assert!(
+            t.elapsed() < HANG_GUARD,
+            "timed out waiting for {label:?} (background settled: {}, banner: {:?})",
+            h.state().background_settled(),
+            h.state().banner_text()
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
 /// Blocks until the app's watchers applied every request (their catch-up events queued for
 /// the next frame), failing — instead of blocking — once [`HANG_GUARD`] since `started` is
 /// spent. A watch that is not in effect is still applied (not an error here).
