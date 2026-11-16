@@ -28,11 +28,13 @@ fn dump(s: &str, o: &ParseOptions) -> Vec<String> {
                     subpath,
                     display,
                     inner,
+                    embed,
                 } => {
-                    assert_eq!(inner.start, x.span.start + 2);
+                    assert_eq!(inner.start, x.span.start + if *embed { 3 } else { 2 });
                     assert_eq!(inner.end + 2, x.span.end);
                     format!(
-                        "wiki({}|{}|{})",
+                        "{}({}|{}|{})",
+                        if *embed { "embed" } else { "wiki" },
                         target,
                         subpath.as_deref().unwrap_or("-"),
                         display.map_or("-".into(), |d| d.slice(s).to_string())
@@ -113,9 +115,65 @@ fn edge_cases() {
 }
 
 #[test]
-fn embeds_are_plain_text_for_now() {
-    assert_eq!(dump("![[Pic.png]]", &on()), ["text:![[Pic.png]]"]);
-    assert_eq!(dump("x ![[Note#H|*a*]] y", &on()), ["text:x ![[Note#H|*a*]] y"]);
+fn embeds_are_recognised() {
+    assert_eq!(dump("![[Pic.png]]", &on()), ["embed(Pic.png|-|-)"]);
+    assert_eq!(dump("![[Pic.png|300]]", &on()), ["embed(Pic.png|-|300)"]);
+    assert_eq!(
+        dump("x ![[Note#H|*a*]] y", &on()),
+        ["text:x ", "embed(Note|H|*a*)", "text: y"]
+    );
+    // `![[a]](b.png)`: an ordinary image whose description is `[a]`
+    assert!(dump("![[a]](b.png)", &on()).iter().any(|k| k == "image"));
+    // escaped `!`: a wikilink after a literal `!`
+    assert_eq!(dump("\\![[Pic.png]]", &on()), ["escape", "wiki(Pic.png|-|-)"]);
+    // off: text
+    assert!(dump("![[Pic.png]]", &off()).iter().all(|k| k.starts_with("text:")));
+}
+
+/// An image embed is an image of the neutral view: its size and description from the display
+/// text, the name looked up by name; any other embed is a wikilink.
+#[test]
+fn image_embeds_in_the_neutral_view() {
+    use markise_doc::InlineKind as NK;
+    let kinds = |s: &str| -> Vec<(String, String)> {
+        let d = Document::parse(s, on());
+        let leaf = markise_doc::FormatDoc::leaf(&d, 0).unwrap();
+        let rich = markise_doc::FormatDoc::inlines(&d, &leaf);
+        rich.nodes
+            .iter()
+            .map(|n| {
+                let k = match &n.kind {
+                    NK::Image { src, size, by_name, .. } => format!("image({src}|{size:?}|{by_name})"),
+                    NK::WikiLink { target, .. } => format!("wikilink({target})"),
+                    k => format!("{k:?}"),
+                };
+                (k, rich.value(n).to_string())
+            })
+            .collect()
+    };
+    assert_eq!(
+        kinds("![[a b.png|300]]\n"),
+        [("image(a b.png|Some((300, None))|true)".to_string(), String::new())]
+    );
+    assert_eq!(
+        kinds("![[a.PNG|120x80]]\n")[0].0,
+        "image(a.PNG|Some((120, Some(80)))|true)"
+    );
+    assert_eq!(
+        kinds("![[a.png|A cat]]\n")[0],
+        ("image(a.png|None|true)".into(), "A cat".into())
+    );
+    assert_eq!(kinds("![[Note]]\n")[0].0, "wikilink(Note)");
+    assert_eq!(kinds("![[a.png#x]]\n")[0].0, "wikilink(a.png)");
+    assert_eq!(kinds("![a](b.png)\n")[0].0, "image(b.png|None|false)");
+}
+
+/// Embeds keep their bytes: a document with every form round-trips exactly (V2.9).
+#[test]
+fn embeds_round_trip() {
+    let src = "# T\n\n![[a.png]]\n\n![[b c.jpg|300]] and ![[d.webp|120x80]]\n\n- ![[Note]]\n- ![[e.png|A cat]]\n\n| x |\n|---|\n| ![[f.png\\|40]] |\n";
+    let d = Document::parse(src, on());
+    assert_eq!(d.serialize(), src);
 }
 
 #[test]
@@ -210,8 +268,9 @@ fn commonmark_examples_that_diverge_by_design() {
     assert_eq!(dump("[[[foo]]]", &on()), ["text:[", "wiki(foo|-|-)", "text:]"]);
     // CM 559 `[[*foo* bar]]` with `[*foo* bar]` defined: a wikilink, not a bracketed link
     assert_eq!(wikis("[[*foo* bar]]"), ["wiki(*foo* bar|-|-)"]);
-    // CM 590 `![[foo]]`: an embed (plain text for now) — CommonMark text as well
-    assert_eq!(dump("![[foo]]", &on()), ["text:![[foo]]"]);
+    // CM 590 `![[foo]]`: an embed (CommonMark: an image whose description is `[foo]`, with
+    // no destination, so text)
+    assert_eq!(dump("![[foo]]", &on()), ["embed(foo|-|-)"]);
     for s in ["[[[foo]]]", "[[*foo* bar]]", "![[foo]]"] {
         assert!(wikis_with(s, &off()).is_empty(), "{s}");
     }

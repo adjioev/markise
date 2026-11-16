@@ -261,6 +261,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
                 images: html_images(&doc, base_dir.as_deref(), &req.output, plain),
                 control: Some(control.clone()),
                 wikilinks: wikilink_hrefs(req),
+                embeds: embed_paths(req),
                 comments: req.comments,
                 ..Default::default()
             };
@@ -295,6 +296,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
                 &ModelOptions {
                     highlight: true,
                     comments: req.comments,
+                    embeds: embed_paths(req),
                 },
             );
             let mut opts = PdfOptions {
@@ -324,6 +326,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
                 &ModelOptions {
                     highlight: true,
                     comments: req.comments,
+                    embeds: embed_paths(req),
                 },
             );
             let opts = PngOptions {
@@ -368,6 +371,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
                 &doc,
                 &ModelOptions {
                     comments: req.comments,
+                    embeds: embed_paths(req),
                     ..Default::default()
                 },
             );
@@ -381,6 +385,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
                 &doc,
                 &ModelOptions {
                     comments: req.comments,
+                    embeds: embed_paths(req),
                     ..Default::default()
                 },
             );
@@ -399,6 +404,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
             &doc,
             &ModelOptions {
                 comments: req.comments,
+                embeds: embed_paths(req),
                 ..Default::default()
             },
         );
@@ -525,6 +531,22 @@ fn wikilink_hrefs(req: &ExportRequest) -> markise_export::WikiLinkHrefs {
             href.push_str(&markise_md::slug::slug(h));
         }
         Some(href)
+    })))
+}
+
+/// Image embed paths of an export: the file found in the opened folder like a wikilink target,
+/// relative to the document's folder and percent-encoded (the exporters resolve images against
+/// that folder). Without an opened folder the name is read relative to the document.
+fn embed_paths(req: &ExportRequest) -> markise_export::EmbedPaths {
+    let (Some(ix), Some(doc)) = (req.vault.clone(), req.doc_path.clone()) else {
+        return markise_export::EmbedPaths(None);
+    };
+    let from = ix.rel_of(&doc);
+    let dir = doc.parent().map(Path::to_path_buf).unwrap_or_default();
+    markise_export::EmbedPaths(Some(std::sync::Arc::new(move |target: &str| {
+        let f = ix.resolve_wikilink(target, from.as_deref())?;
+        let rel = crate::vault::relative_path(&dir, &ix.abs(&f.rel))?;
+        Some(markise_export::encode_path(&rel))
     })))
 }
 
@@ -669,6 +691,52 @@ mod tests {
 
     /// Spec 06 Q-V11: resolved wikilinks become relative links to the linked file, unresolved
     /// ones plain text; with wikilinks off the brackets stay text.
+    #[test]
+    fn image_embeds_export_as_images_found_in_the_folder() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().to_path_buf();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        let ix = crate::vault::VaultIndex::from_rels(
+            root.clone(),
+            ["notes/doc.md".to_string(), "media/pic one.png".to_string()],
+            1,
+        );
+        let text = "![[pic one.png|300]] ![[pic one.png|120x80]] ![[pic one.png|A cat]] ![[gone.png]] ![[doc]]\n";
+        let mut r = ExportRequest::new(
+            ExportKind::HtmlPlain,
+            text.into(),
+            Some(root.join("notes/doc.md")),
+            root.join("notes/out.html"),
+            Theme::light(),
+        );
+        r.vault = Some(std::sync::Arc::new(ix));
+        let c = JobControl::new();
+        let out = run_export(&r, &c).unwrap();
+        let s = std::fs::read_to_string(&out.outputs[0]).unwrap();
+        assert!(
+            s.contains("<img src=\"../media/pic%20one.png\" alt=\"\" width=\"300\" />"),
+            "{s}"
+        );
+        assert!(s.contains("width=\"120\" height=\"80\""), "{s}");
+        assert!(s.contains("alt=\"A cat\""), "{s}");
+        // not in the folder: next to the document, as written
+        assert!(s.contains("<img src=\"gone.png\""), "{s}");
+        // a note embed is a link
+        assert!(s.contains("<a href=\"doc.md\">doc</a>"), "{s}");
+        // PDF/PNG/Pandoc: the same image paths
+        let doc = Document::parse(text.to_string(), ParseOptions::default());
+        let ex = ExDoc::build(
+            &doc,
+            &ModelOptions {
+                embeds: embed_paths(&r),
+                ..Default::default()
+            },
+        );
+        let dump = format!("{:?}", ex.blocks);
+        assert!(dump.contains("src: \"../media/pic%20one.png\""), "{dump}");
+        assert!(dump.contains("alt: \"A cat\""), "{dump}");
+    }
+
     #[test]
     fn html_wikilinks_link_to_resolved_notes() {
         let d = tempfile::tempdir().unwrap();

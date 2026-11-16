@@ -145,6 +145,12 @@ impl LinkTargets for VaultLinks {
             Some(ix) => ix.resolve_wikilink(target, self.from.as_deref()).is_some(),
         }
     }
+
+    fn file(&self, target: &str) -> Option<String> {
+        let ix = self.index.as_ref()?;
+        let f = ix.resolve_wikilink(target, self.from.as_deref())?;
+        Some(ix.abs(&f.rel).to_string_lossy().into_owned())
+    }
 }
 
 /// File extensions that never get `.md` appended when a note is created from a link (they

@@ -119,6 +119,16 @@ click can place the caret inside the link text. Links between notes in a folder 
 
 In the rendered view an image shows at its own size at most, within the column and 400 points high, scaled with the window's zoom. The file, the Markdown and exports stay as they are, and a double click or the expand button shows the image whole.
 
+An image can also be written by file name alone, as an embed: `![[photo.png]]`. Markise looks for
+that name in the opened folder the way it finds a wikilink's target (any subfolder; with several
+files of that name, the one nearest the note), and otherwise next to the note. Text after a `|`
+sets the size in pixels, shown as points: `![[photo.png|300]]` is 300 wide, `![[photo.png|300x200]]`
+fits within 300 by 200, its proportions kept. An embed may be larger than the picture's own size,
+but never wider than the column or higher than 400 points. Any other text after the `|` is the
+image's description. Images with the extensions avif, bmp, gif, jpeg, jpg, png, svg and webp are
+embedded this way; an embed of a note (`![[note]]`) or of any other file is shown as a link to it.
+The text of an embed is never rewritten.
+
 Paste an image (for example a screenshot) or drag image files into a document. Markise copies
 the image into a folder next to the note — `assets` by default — and inserts a Markdown image
 with a relative path. Pasted image data is saved as `Pasted image <date and time>.png`.
@@ -141,7 +151,8 @@ To change an image, hover it. **Replace…** opens the image picker and changes 
 description and the title stay, and an image from anywhere, a web address included, can be
 replaced. **Edit…** opens a small window with the
 description and the path as written. Each is one undo step, and undo never deletes a copied file.
-A reference image (`![text][label]`) has its path in the definition, so it has neither button; a
+A reference image (`![text][label]`) has its path in the definition, so it has neither button, nor
+does an embed (`![[photo.png]]`), whose name is edited as text; a
 picture in a block's native view belongs to the block's form; and comments shown as No Markup or
 Original leave the document read-only.
 

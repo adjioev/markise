@@ -722,6 +722,8 @@ enum Segment {
         link: Option<String>,
         /// The image's own source, relative as an inline node's.
         source: Range<u32>,
+        /// The size the source asks for (CSS pixels: width, height).
+        size: Option<(u32, Option<u32>)>,
     },
 }
 
@@ -1094,6 +1096,19 @@ impl<'a> InlineBuilder<'a> {
         }
     }
 
+    /// An image's file: a by-name reference is looked up in the opened folder first, else
+    /// taken relative to the document as written (not a URL: no decoding).
+    fn resolve_image(&self, src: &str, by_name: bool) -> String {
+        if !by_name {
+            return self.resolve(src);
+        }
+        if let Some(f) = self.link_targets.and_then(|l| l.file(src)) {
+            return f;
+        }
+        let dir = self.model.base_dir.clone().unwrap_or_default();
+        dir.join(src.trim_start_matches('/')).to_string_lossy().into_owned()
+    }
+
     fn resolve(&self, dest: &str) -> String {
         // the one resource resolver shared with the HTML and PDF/PNG exports (query/fragment,
         // percent-decoding, `file:` URLs, resource root); non-local references stay as written
@@ -1421,17 +1436,23 @@ impl<'a> InlineBuilder<'a> {
                 if top
                     && self.split_images
                     && n.children.len() == 1
-                    && let InlineKind::Image { src: isrc, .. } = &n.children[0].kind
+                    && let InlineKind::Image {
+                        src: isrc,
+                        size,
+                        by_name,
+                        ..
+                    } = &n.children[0].kind
                 {
                     let alt = r.value(&n.children[0]).to_string();
                     self.flush();
-                    let src = self.resolve(isrc);
+                    let src = self.resolve_image(isrc, *by_name);
                     self.segments.push(Segment::Image {
                         src,
                         written: isrc.to_string(),
                         alt,
                         link: Some(target.to_string()),
                         source: n.children[0].source.clone(),
+                        size: *size,
                     });
                     return;
                 }
@@ -1448,19 +1469,20 @@ impl<'a> InlineBuilder<'a> {
                     self.links.push((start..end, Mark::Link(target.to_string())));
                 }
             }
-            InlineKind::Image { src, .. } => {
+            InlineKind::Image { src, size, by_name, .. } => {
                 let alt = r.value(n);
                 if top && self.split_images {
                     let alt = alt.to_string();
                     self.flush();
                     let written = src.to_string();
-                    let src = self.resolve(src);
+                    let src = self.resolve_image(src, *by_name);
                     self.segments.push(Segment::Image {
                         src,
                         written,
                         alt,
                         link: None,
                         source: n.source.clone(),
+                        size: *size,
                     });
                 } else {
                     let mut c = st.clone();
@@ -2441,6 +2463,7 @@ pub fn layout_item(
                             alt,
                             link,
                             source,
+                            size,
                         } => {
                             if let Some(target) = link {
                                 // (the image's primitive comes first in `layout_image`)
@@ -2452,6 +2475,7 @@ pub fn layout_item(
                             }
                             let h = layout_image(
                                 &mut out, shaper, images, t, &src, &written, &alt, x, y, width, only_image, source,
+                                size,
                             );
                             if first {
                                 first_line_h = h.min(line_px);
@@ -4176,6 +4200,21 @@ pub fn image_show_size(w: f32, h: f32, width: f32) -> (f32, f32) {
     (w * scale, h * scale)
 }
 
+/// [`image_show_size`] for an image whose source asks for a size (CSS pixels, shown as points):
+/// within that width, and that height when given, its proportions kept, larger than its own
+/// size if asked; then within the column and [`IMAGE_MAX_HEIGHT`] like any image.
+pub fn image_show_size_asked(w: f32, h: f32, width: f32, asked: Option<(u32, Option<u32>)>) -> (f32, f32) {
+    let Some((aw, ah)) = asked else {
+        return image_show_size(w, h, width);
+    };
+    let mut scale = aw as f32 / w;
+    if let Some(ah) = ah {
+        scale = scale.min(ah as f32 / h);
+    }
+    let scale = scale.min(width / w).min(IMAGE_MAX_HEIGHT / h);
+    (w * scale, h * scale)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn layout_image(
     out: &mut Out,
@@ -4190,12 +4229,13 @@ fn layout_image(
     width: f32,
     center: bool,
     source: Range<u32>,
+    asked: Option<(u32, Option<u32>)>,
 ) -> f32 {
     let ph = color(t.image_placeholder);
     match images.state(src) {
         ImageState::Ready { size: [w, h] } => {
             let (w, h) = (w.max(1) as f32, h.max(1) as f32);
-            let (sw, sh) = image_show_size(w, h, width);
+            let (sw, sh) = image_show_size_asked(w, h, width, asked);
             let size = vec2(sw, sh);
             let left = if center { x + (width - size.x) * 0.5 } else { x };
             out.prims.push(Prim::Image {

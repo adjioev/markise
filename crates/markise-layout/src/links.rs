@@ -12,6 +12,12 @@ pub trait LinkTargets: std::fmt::Debug {
     /// Whether the wikilink target `target` (trimmed; empty = the document itself) resolves to
     /// an existing file.
     fn resolves(&self, target: &str) -> bool;
+    /// The file a by-name image reference (`![[name.png]]`) names, as an absolute path, when the
+    /// opened folder knows it. `None`: not known here; the name is then read relative to the
+    /// document.
+    fn file(&self, _target: &str) -> Option<String> {
+        None
+    }
 }
 
 /// No knowledge of files: every link is shown resolved (plain link style).
