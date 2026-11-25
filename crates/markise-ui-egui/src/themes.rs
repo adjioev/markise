@@ -784,6 +784,21 @@ impl ThemeManager {
         }
     }
 
+    /// Whether `==highlight==` is parsed (settings key `markdown.highlight`, default on).
+    pub fn highlight(&self) -> bool {
+        self.settings.markdown.highlight
+    }
+
+    /// Preferences → Markdown → Highlight; persisted like the other settings.
+    pub fn set_highlight(&mut self, on: bool) {
+        self.chose_markdown = true;
+        if on != self.settings.markdown.highlight {
+            self.settings.markdown.highlight = on;
+            self.dirty.markdown = Some(self.settings.markdown);
+            self.schedule_save();
+        }
+    }
+
     /// Whether CriticMarkup comments and suggestions are parsed (settings key
     /// `markdown.criticMarkup`, default on; ADR 0012).
     pub fn critic_markup(&self) -> bool {

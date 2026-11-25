@@ -356,8 +356,25 @@ fn t35_highlight_and_escape() {
     };
     assert_eq!(inline_kinds("==hi==\n", o.clone()), ["highlight", "text:hi"]);
     assert_eq!(inline_kinds("\\==hi==\n", o.clone()), ["escape:\\=", "text:=hi=="]);
-    // without the extension `\=` is not an escape
-    assert_eq!(inline_kinds("\\==hi==\n", opts()), ["text:\\==hi=="]);
+    // on by default (#246)
+    assert_eq!(inline_kinds("==hi==\n", opts()), ["highlight", "text:hi"]);
+    // without the extension `\=` is not an escape and `==` is text
+    let off = ParseOptions {
+        highlight: false,
+        ..opts()
+    };
+    assert_eq!(inline_kinds("\\==hi==\n", off.clone()), ["text:\\==hi=="]);
+    assert_eq!(inline_kinds("==hi==\n", off), ["text:==hi=="]);
+    // a review highlight `{==…==}` stays a review mark; the highlight round-trips byte for byte
+    let d = Document::parse("a {==x==} ==y== b\n", opts());
+    assert_eq!(d.serialize(), "a {==x==} ==y== b\n");
+    assert_eq!(
+        inline_kinds("a {==x==} ==y== b\n", opts())
+            .iter()
+            .filter(|k| k.starts_with("critic") || *k == "highlight")
+            .count(),
+        2
+    );
 }
 
 #[test]

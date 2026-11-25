@@ -15,7 +15,7 @@ use markise_doc::{FormatDoc, Selection};
 use markise_engine::vault::{VaultIndex, VaultScanner};
 use markise_layout::{DocModel, LinkTargets};
 use markise_md::wikilink::WikiParts;
-use markise_md::{Document, MarkdownFormat};
+use markise_md::{Document, MarkdownFormat, ParseOptions};
 
 use super::{Ask, Banner, MarkiseApp};
 
@@ -82,6 +82,8 @@ struct Reparse {
     rx: Receiver<(Arc<Document>, Arc<DocModel>)>,
     /// What switched (the view's label for the install).
     label: &'static str,
+    /// The options the document is re-parsed with.
+    opts: ParseOptions,
 }
 
 /// Vault state of the application.
@@ -104,6 +106,9 @@ pub(crate) struct VaultState {
     /// Session revision counter seen by the last autocomplete update.
     seen_counter: Option<(u64, u64)>,
     reparse: Option<Reparse>,
+    /// The parse options of the document the view shows: its layouts' cache keys follow these,
+    /// not the ones a re-parse is still applying (set with the document it was installed with).
+    shown: ParseOptions,
     /// A note being created from an unresolved link.
     creating: Option<Receiver<Result<PathBuf, String>>>,
     /// An IME composition is in progress: the popup leaves the keys to it.
@@ -112,6 +117,8 @@ pub(crate) struct VaultState {
     accept_pending: bool,
     /// Wikilinks may be on at all (the startup parse options allow them).
     pub(crate) allowed: bool,
+    /// `==highlight==` may be on at all (the startup parse options allow it).
+    pub(crate) highlight_allowed: bool,
 }
 
 impl VaultState {
@@ -273,6 +280,11 @@ impl MarkiseApp {
         if want != self.parse.wikilinks {
             self.apply_wikilinks(want);
         }
+        let want = self.vault.highlight_allowed && self.themes.highlight();
+        if want != self.parse.highlight {
+            self.parse.highlight = want;
+            self.reparse_document("Highlight");
+        }
         self.review_poll_setting();
         self.poll_reparse();
         self.poll_create();
@@ -307,17 +319,21 @@ impl MarkiseApp {
         }
     }
 
-    /// Gives the open document's view the current link targets.
+    /// Gives the open document's view the current link targets, and the cache keys of the
+    /// options it was parsed with ([`VaultState::shown`]): a scanner update while a re-parse
+    /// runs must not file the old document's layouts under the new options.
     pub(super) fn set_doc_links(&mut self) {
         let index = self.vault.index.clone();
+        let shown = &self.vault.shown;
         let Some(d) = self.doc.as_mut() else { return };
         let from = index.as_ref().and_then(|ix| d.file().and_then(|p| ix.rel_of(p)));
         // the wikilinks switch is part of it: layouts cached with the other parse options of
         // the same source must not be reused
         let base = index.as_ref().map_or(0, |ix| ix.generation().wrapping_add(1));
         // the CriticMarkup switch likewise (ADR 0012)
-        let generation =
-            (base << 3) | ((self.parse.critic_markup as u64) << 2) | ((self.parse.wikilinks as u64) << 1) | 1;
+        let generation = (base << 3) | ((shown.critic_markup as u64) << 2) | ((shown.wikilinks as u64) << 1) | 1;
+        // `==highlight==` changes how any paragraph reads
+        d.viewer.ed.view.set_dialect(shown.highlight as u64);
         d.viewer.ed.view.set_links(Arc::new(VaultLinks {
             index,
             from,
@@ -348,6 +364,22 @@ impl MarkiseApp {
         }
     }
 
+    /// Whether `==highlight==` is parsed (Preferences → Markdown, setting `markdown.highlight`).
+    pub fn highlight(&self) -> bool {
+        self.parse.highlight
+    }
+
+    /// Preferences → Markdown → Highlight: switches the extension (persisted) and re-parses the
+    /// open document in the background; the text is not changed.
+    pub fn set_highlight(&mut self, on: bool) {
+        self.themes.set_highlight(on);
+        let on = on && self.vault.highlight_allowed;
+        if on != self.parse.highlight {
+            self.parse.highlight = on;
+            self.reparse_document("Highlight");
+        }
+    }
+
     fn apply_wikilinks(&mut self, on: bool) {
         self.parse.wikilinks = on;
         self.vault.complete = None;
@@ -372,6 +404,7 @@ impl MarkiseApp {
         d.viewer.ed.session.set_format(format);
         let text = d.viewer.ed.session.text().to_string();
         let opts = self.parse.clone();
+        let parsed_with = opts.clone();
         let path = d.file().map(Path::to_path_buf);
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
@@ -390,6 +423,7 @@ impl MarkiseApp {
                 counter: d.viewer.ed.session.revision().counter,
                 rx,
                 label,
+                opts: parsed_with,
             });
         }
     }
@@ -397,19 +431,20 @@ impl MarkiseApp {
     fn poll_reparse(&mut self) {
         let Some(r) = &self.vault.reparse else { return };
         let Ok((doc, model)) = r.rx.try_recv() else { return };
-        let (doc_id, counter, label) = (r.doc_id, r.counter, r.label);
-        self.vault.reparse = None;
+        let Some(r) = self.vault.reparse.take() else { return };
         let Some(d) = self.doc.as_mut() else { return };
-        if d.id != doc_id {
+        if d.id != r.doc_id {
             return;
         }
-        if d.viewer.ed.session.revision().counter != counter {
+        if d.viewer.ed.session.revision().counter != r.counter {
             // edited meanwhile: parse the current text again
-            self.reparse_document(label);
+            self.reparse_document(r.label);
             return;
         }
         let doc: Arc<dyn FormatDoc> = doc;
-        let _ = d.viewer.install(doc, model, label, false);
+        let _ = d.viewer.install(doc, model, r.label, false);
+        // the cache keys change with the document they describe
+        self.vault.shown = r.opts;
         self.set_doc_links();
     }
 
@@ -634,6 +669,8 @@ impl MarkiseApp {
         self.vault.complete = None;
         self.vault.dismissed = None;
         self.vault.reparse = None;
+        // loads parse with the current options (a switch drops a load in flight)
+        self.vault.shown = self.parse.clone();
         self.set_doc_links();
         if untitled {
             return;
@@ -1105,6 +1142,40 @@ fn unresolvable_wikilink_message(folder_open: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codex review on #265: a folder scan that lands while a switched dialect extension is
+    /// still re-parsing keeps the shown document's cache keys; they change with the install.
+    #[test]
+    fn a_scan_during_a_reparse_keeps_the_shown_documents_cache_keys() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("note.md");
+        std::fs::write(&p, "Some ==marked== text.\n").unwrap();
+        let mut app = MarkiseApp::new(super::super::AppOptions::default());
+        app.wake = Some(Arc::new(|| {}));
+        app.workflow.started = true;
+        let pump = |app: &mut MarkiseApp, what: &str, f: &dyn Fn(&MarkiseApp) -> bool| {
+            let start = Instant::now();
+            while !f(app) {
+                assert!(start.elapsed() < Duration::from_secs(20), "waited too long for: {what}");
+                app.poll_loading();
+                app.poll_reparse();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        app.open(p);
+        pump(&mut app, "the document", &|a| a.doc.is_some() && !a.is_loading());
+        let dialect = |a: &MarkiseApp| a.doc.as_ref().unwrap().viewer.ed.view.dialect();
+        assert!(app.highlight());
+        let before = dialect(&app);
+        app.set_highlight(false);
+        assert!(app.is_reparsing());
+        // the scanner's result arrives first: the old document is still shown
+        app.set_doc_links();
+        assert_eq!(dialect(&app), before, "the old document's layouts under the new key");
+        pump(&mut app, "the re-parse", &|a| !a.is_reparsing());
+        assert_ne!(dialect(&app), before, "the new document under the old key");
+    }
 
     #[test]
     fn wikilink_message_without_a_folder_121() {

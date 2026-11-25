@@ -118,6 +118,8 @@ fn conformance_options(ext: Option<&str>) -> ParseOptions {
         // CriticMarkup (ADR 0012) is a Markise extension too; `critic_markup_changes_no_example`
         // pins that switching it on changes no example
         critic_markup: false,
+        // `==highlight==` is an extension (on by default since #246), not CommonMark/GFM
+        highlight: false,
         ..ParseOptions::default()
     }
 }

@@ -94,6 +94,8 @@ pub struct ExportRequest {
     /// Parse CriticMarkup comments and suggestions (the `markdown.criticMarkup` setting,
     /// ADR 0012).
     pub critic_markup: bool,
+    /// Parse `==highlight==` (the `markdown.highlight` setting).
+    pub highlight: bool,
     /// Keep or strip review comments in the output (setting `export.comments`, ADR 0012).
     pub comments: CommentExport,
     /// HTML export: stop before writing, reporting [`ExportDone::too_large`], when the
@@ -121,6 +123,7 @@ impl ExportRequest {
             wikilinks: true,
             vault: None,
             critic_markup: true,
+            highlight: true,
             comments: CommentExport::Keep,
             confirm_html_above: Some(LARGE_HTML_BYTES),
             sections: false,
@@ -223,6 +226,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
         ParseOptions {
             wikilinks: req.wikilinks,
             critic_markup: req.critic_markup,
+            highlight: req.highlight,
             ..ParseOptions::default()
         },
     );
@@ -691,8 +695,26 @@ mod tests {
         assert!(!r.output.exists());
     }
 
-    /// Spec 06 Q-V11: resolved wikilinks become relative links to the linked file, unresolved
-    /// ones plain text; with wikilinks off the brackets stay text.
+    #[test]
+    fn highlights_export_as_marks_unless_switched_off() {
+        let d = tempfile::tempdir().unwrap();
+        let mut r = ExportRequest::new(
+            ExportKind::HtmlPlain,
+            "Some ==marked== text and {==review==}.\n".into(),
+            None,
+            d.path().join("h.html"),
+            Theme::light(),
+        );
+        let c = JobControl::new();
+        let s = std::fs::read_to_string(&run_export(&r, &c).unwrap().outputs[0]).unwrap();
+        assert!(s.contains("<mark>marked</mark>"), "{s}");
+        r.highlight = false;
+        let s = std::fs::read_to_string(&run_export(&r, &c).unwrap().outputs[0]).unwrap();
+        assert!(s.contains("Some ==marked== text"), "{s}");
+        // the review highlight is CriticMarkup's, not this switch's
+        assert!(s.contains("critic"), "{s}");
+    }
+
     #[test]
     fn image_embeds_export_as_images_found_in_the_folder() {
         let d = tempfile::tempdir().unwrap();
@@ -789,6 +811,8 @@ mod tests {
         }
     }
 
+    /// Spec 06 Q-V11: resolved wikilinks become relative links to the linked file, unresolved
+    /// ones plain text; with wikilinks off the brackets stay text.
     #[test]
     fn html_wikilinks_link_to_resolved_notes() {
         let d = tempfile::tempdir().unwrap();

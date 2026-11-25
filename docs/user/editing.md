@@ -26,6 +26,7 @@ Select text and use the **Format** menu or a shortcut, or type the Markdown your
 | Underline | <kbd>Cmd+U</kbd> | <kbd>Ctrl+U</kbd> | `<u>text</u>` |
 | Code | <kbd>Ctrl+&#96;</kbd> | <kbd>Ctrl+Shift+&#96;</kbd> | `` `code` `` |
 | Strike | <kbd>Ctrl+Shift+&#96;</kbd> | <kbd>Alt+Shift+5</kbd> | `~~text~~` |
+| Highlight | <kbd>Shift+Cmd+H</kbd> | <kbd>Ctrl+Shift+H</kbd> | `==text==` |
 | Hyperlink | <kbd>Cmd+K</kbd> | <kbd>Ctrl+K</kbd> | `[text](url)` |
 | Image | <kbd>Ctrl+Cmd+I</kbd> | <kbd>Ctrl+Shift+I</kbd> | `![alt](path)` |
 | Clear Format | <kbd>Cmd+\\</kbd> | <kbd>Ctrl+\\</kbd> | |
