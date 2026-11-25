@@ -4,7 +4,7 @@ Markise is a Markdown editor for macOS, Windows and Linux. You write in the rend
 plain Markdown source, or in both side by side; the file on disk is always plain Markdown that
 any other tool can read.
 
-This guide describes the first public beta, **0.1.0-beta.1**. New to Markise? Start with
+This guide describes the second public beta, **0.1.0-beta.2**. New to Markise? Start with
 [Getting started](getting-started.md), then open **Help → Tutorial** in the app: a hands-on tour
 in a scratch document that never touches your own files.
 

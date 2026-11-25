@@ -3,7 +3,7 @@
 ## Download
 
 Markise is published on the [GitHub releases page](https://github.com/adjioev/markise/releases).
-The current version is the first beta, [**0.1.0-beta.1**](https://github.com/adjioev/markise/releases/tag/v0.1.0-beta.1).
+The current version is the second beta, [**0.1.0-beta.2**](https://github.com/adjioev/markise/releases/tag/v0.1.0-beta.2).
 
 | Platform | File | Requirements |
 |---|---|---|
@@ -11,8 +11,8 @@ The current version is the first beta, [**0.1.0-beta.1**](https://github.com/adj
 | Windows | `markise-windows-x86_64.zip` | Windows 10 or 11, x86_64, a graphics driver with OpenGL 3 |
 | Linux | `markise-x86_64.AppImage`, `markise_<version>_amd64.deb` or `markise-linux-x86_64.tar.gz` | x86_64, glibc 2.35 or later (for example Ubuntu 22.04, Debian 12, Fedora 36 and newer), X11 or Wayland |
 
-The AppImage and the `.deb` package are published from the release after 0.1.0-beta.1 on;
-0.1.0-beta.1 has the `.tar.gz` only.
+The AppImage and the `.deb` package are published since 0.1.0-beta.2; 0.1.0-beta.1 has the
+`.tar.gz` only.
 
 Each download also contains `markise-cli` (a command-line tool for HTML export and round-trip
 checks), the licences, `NOTICE` and `THIRD_PARTY/`.
