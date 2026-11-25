@@ -829,6 +829,11 @@ impl View {
         self.dialect = fingerprint;
     }
 
+    /// The fingerprint given by [`View::set_dialect`].
+    pub fn dialect(&self) -> u64 {
+        self.dialect
+    }
+
     pub fn links(&self) -> &Arc<dyn LinkTargets + Send + Sync> {
         &self.links
     }
