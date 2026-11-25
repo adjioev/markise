@@ -222,7 +222,8 @@ fn build(root: &Path, out: &Path) -> Result<(), String> {
 }
 
 /// The site's absolute base URL: the `href` of the front page's `<link rel="canonical">`,
-/// which must be an `http(s)://` URL ending in `/`.
+/// HTML character references decoded, which must be `http(s)://host/…/` with a non-empty host,
+/// a path ending in `/` and no query or fragment.
 fn canonical_base(index_html: &str) -> Result<String, String> {
     let mut rest = index_html;
     while let Some(i) = rest.find("<link") {
@@ -235,14 +236,69 @@ fn canonical_base(index_html: &str) -> Result<String, String> {
         let Some((_, _, _, href, _)) = next_url_attr(tag) else {
             return Err("the canonical link has no quoted href".into());
         };
-        if !(href.starts_with("https://") || href.starts_with("http://")) || !href.ends_with('/') {
-            return Err(format!(
-                "the canonical URL `{href}` must be absolute (http/https) and end in `/`"
-            ));
-        }
-        return Ok(href.to_string());
+        let href = decode_char_refs(href)?;
+        check_base(&href)?;
+        return Ok(href);
     }
     Err("no <link rel=\"canonical\" href=\"…\"> (the sitemap's base URL)".into())
+}
+
+fn check_base(url: &str) -> Result<(), String> {
+    let bad = |why: &str| Err(format!("the canonical URL `{url}` {why}"));
+    let Some(after) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) else {
+        return bad("must start with https:// or http://");
+    };
+    if url.contains(['?', '#']) {
+        return bad("must not have a query or fragment");
+    }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return bad("must not contain whitespace or control characters");
+    }
+    let host = &after[..after.find('/').unwrap_or(after.len())];
+    if host.is_empty() {
+        return bad("must have a host");
+    }
+    if !after[host.len()..].ends_with('/') {
+        return bad("must have a path ending in `/`");
+    }
+    Ok(())
+}
+
+/// An attribute value with HTML character references decoded: `&amp;`, `&lt;`, `&gt;`,
+/// `&quot;`, `&apos;` and numeric `&#N;`/`&#xH;`. Any other `&` is an error rather than a guess.
+fn decode_char_refs(s: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 1..];
+        let end = tail
+            .find(';')
+            .ok_or_else(|| format!("unterminated character reference in `{s}`"))?;
+        let name = &tail[..end];
+        let c = match name {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            _ => {
+                let code = if let Some(h) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+                    u32::from_str_radix(h, 16).ok()
+                } else if let Some(d) = name.strip_prefix('#') {
+                    d.parse().ok()
+                } else {
+                    None
+                };
+                code.and_then(char::from_u32)
+                    .ok_or_else(|| format!("unsupported character reference `&{name};` in `{s}`"))?
+            }
+        };
+        out.push(c);
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// `sitemap.xml` for the front page and every guide page in [`PAGES`] order, URLs under `base`.
@@ -691,6 +747,31 @@ mod tests {
         assert!(canonical_base("<link rel=\"icon\" href=\"a.svg\">").is_err());
         assert!(canonical_base("<link rel=\"canonical\" href=\"https://x.org/s\">").is_err());
         assert!(canonical_base("<link rel=\"canonical\" href=\"s/\">").is_err());
+        // character references are decoded before the URL is XML-escaped again
+        let amp = "<link rel=\"canonical\" href=\"https://example.org/a&amp;b/\">";
+        assert_eq!(canonical_base(amp).unwrap(), "https://example.org/a&b/");
+        assert!(sitemap(&canonical_base(amp).unwrap()).contains("<loc>https://example.org/a&amp;b/</loc>"));
+        assert_eq!(
+            canonical_base("<link rel='canonical' href='https://x.org/&#39;q&#x41;&lt;&gt;&quot;/'>").unwrap(),
+            "https://x.org/'qA<>\"/"
+        );
+        assert!(canonical_base("<link rel='canonical' href='https://x.org/a&b/'>").is_err());
+        assert!(canonical_base("<link rel='canonical' href='https://x.org/&nbsp;/'>").is_err());
+        // a non-empty host, a path ending in `/`, no query or fragment
+        for bad in [
+            "https://example.org/?q=/",
+            "https://example.org/#x/",
+            "https:///",
+            "https:///path/",
+            "https://example.org",
+            "https://example.org/a b/",
+            "ftp://example.org/",
+        ] {
+            assert!(
+                canonical_base(&format!("<link rel='canonical' href='{bad}'>")).is_err(),
+                "{bad}"
+            );
+        }
         // the real front page carries one
         let front = include_str!("../../site/index.html");
         assert!(canonical_base(front).unwrap().starts_with("https://"));
