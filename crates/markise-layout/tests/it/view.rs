@@ -770,3 +770,67 @@ fn review_views_show_final_original_and_simple() {
     v.set_review_view(ReviewView::All);
     assert_eq!(shown(&mut v, &mut f, 0).0, all);
 }
+
+/// An image embed `![[name|300]]` keeps its proportions within the size asked for, may be
+/// larger than its own size, and stays within the column and the height cap.
+#[test]
+fn an_image_embed_shows_at_the_size_it_asks_for() {
+    use markise_layout::block::IMAGE_MAX_HEIGHT as MAX;
+    for (md, [w, h], want) in [
+        ("![[t.png]]\n", [200, 100], (200.0, 100.0)),
+        ("![[t.png|100]]\n", [200, 100], (100.0, 50.0)),
+        ("![[t.png|400]]\n", [200, 100], (400.0, 200.0)),
+        ("![[t.png|300x50]]\n", [200, 100], (100.0, 50.0)),
+        ("![[t.png|5000]]\n", [200, 100], (700.0, 350.0)),
+        ("![[t.png|600]]\n", [100, 400], (100.0, MAX)),
+        ("text ![[t.png|50]] text\n", [200, 100], (50.0, 25.0)),
+    ] {
+        let (r, item) = shown_image(md, [w, h], 700.0);
+        assert!((r.width() - want.0).abs() < 0.01, "{md:?}: {r:?}");
+        assert!((r.height() - want.1).abs() < 0.01, "{md:?}: {r:?}");
+        assert!(item >= r.height(), "the item holds it");
+    }
+}
+
+/// Link targets that know one file by name.
+#[derive(Debug)]
+struct KnowsPic;
+
+impl markise_layout::LinkTargets for KnowsPic {
+    fn generation(&self) -> u64 {
+        3
+    }
+    fn resolves(&self, target: &str) -> bool {
+        target == "pic.png"
+    }
+    fn file(&self, target: &str) -> Option<String> {
+        (target == "pic.png").then(|| "/vault/media/pic.png".to_string())
+    }
+}
+
+/// An embed's name is looked up in the opened folder first, then read relative to the document,
+/// as written (no URL decoding); `![[note]]` is a link, not an image.
+#[test]
+fn an_image_embed_is_found_by_name_then_next_to_the_document() {
+    let dir = std::path::Path::new("/notes/sub");
+    let ask = |md: &str| -> Vec<String> {
+        let doc: Arc<dyn markise_doc::FormatDoc> = Arc::new(markise_md::parse(md));
+        let model = full(&*doc, Some(&dir.join("doc.md")));
+        let mut v = View::new(doc, model, Theme::light(), 700.0, 1.0);
+        v.set_links(Arc::new(KnowsPic));
+        let mut fonts = testing::fonts();
+        let mut f = fonts.with_pixels_per_point(1.0);
+        let rec = Recorder(Default::default());
+        v.frame(1500.0, 0.0, &mut f, &rec);
+        rec.0.into_inner()
+    };
+    assert_eq!(ask("![[pic.png]]\n"), ["/vault/media/pic.png"]);
+    assert_eq!(
+        ask("![[other%20name.png|20]]\n")
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>(),
+        [dir.join("other%20name.png")]
+    );
+    assert!(ask("![[Some note]]\n").is_empty());
+}

@@ -11,7 +11,8 @@ The beta covers everyday writing, but some things are not there yet:
 - **Editing:** paste inserts plain text (rich text is not converted to Markdown); the text being
   composed with an input method (IME) is not shown inline until it is committed; there is no
   spell checker.
-- **Wikilinks:** embeds (`![[note]]`) and block references (`#^id`) are not supported.
+- **Wikilinks:** note embeds (`![[note]]`, shown as a link) and block references (`#^id`) are
+  not supported; image embeds (`![[photo.png]]`) are.
 - **Diagrams:** of the Mermaid diagram types, only flowcharts and sequence diagrams are drawn.
 - **Export:** no export settings; PDF and PNG show math and diagrams as source text and use
   local images only; the Pandoc path cannot be set by hand ([Export](export.md#limitations-in-the-beta)).

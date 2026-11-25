@@ -78,8 +78,9 @@ keys, and press <kbd>Enter</kbd> or <kbd>Tab</kbd> to insert the link; <kbd>Esc<
 list. In an Obsidian vault Markise inserts a wikilink (unless the vault is set to Markdown
 links); in a plain folder it inserts a Markdown link such as `[Tides](Tides.md)`.
 
-Not supported yet: embeds (`![[note]]` is shown as text) and block references (`[[note#^id]]`
-opens the note without scrolling).
+Embeds of images (`![[photo.png]]`) show the image; see [Images](editing.md#images). Not
+supported yet: embeds of notes (`![[note]]` is shown as a link to the note, not its text) and
+block references (`[[note#^id]]` opens the note without scrolling).
 
 ## Obsidian vaults
 

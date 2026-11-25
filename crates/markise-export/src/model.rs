@@ -185,6 +185,8 @@ pub struct ModelOptions {
     /// highlighted) or stripped (ADR 0012). Suggestions are always shown as underlined
     /// insertions and struck deletions.
     pub comments: crate::CommentExport,
+    /// Where image embeds `![[name.png]]` point.
+    pub embeds: crate::EmbedPaths,
 }
 
 /// Plain text of inline content (alt text, outline titles).
@@ -636,11 +638,22 @@ impl Builder<'_> {
                     K::Comment => {}
                 }
             }
-            // wikilinks: their label as text (PDF/PNG/Pandoc have no vault to resolve against)
-            InlineKind::WikiLink { inner, .. } => {
+            // wikilinks: their label as text (PDF/PNG/Pandoc have no vault to resolve against);
+            // an image embed is the image at its own size
+            InlineKind::WikiLink {
+                inner, embed, target, ..
+            } => {
                 let c = inner.slice(s);
                 if let Some(w) = markise_md::wikilink::split(c) {
-                    out.push(ExInline::Text(w.label(c)));
+                    if *embed && w.is_image_embed() {
+                        out.push(ExInline::Image {
+                            src: self.opts.embeds.dest(target),
+                            alt: w.embed_alt(c),
+                            title: None,
+                        });
+                    } else {
+                        out.push(ExInline::Text(w.label(c)));
+                    }
                 }
             }
         }

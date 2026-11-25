@@ -224,7 +224,7 @@ pub fn link_from(from_dir: &Path, r: &LocalRef) -> Option<String> {
 }
 
 /// Link between two canonical paths (no filesystem access).
-fn relative_link(from: &Path, to: &Path) -> String {
+pub(crate) fn relative_link(from: &Path, to: &Path) -> String {
     let fc: Vec<Component> = from.components().collect();
     let tc: Vec<Component> = to.components().collect();
     if fc.first() != tc.first() {
@@ -240,7 +240,7 @@ fn relative_link(from: &Path, to: &Path) -> String {
     encode_path(&parts.join("/"))
 }
 
-fn file_url(p: &Path) -> String {
+pub(crate) fn file_url(p: &Path) -> String {
     let s = p.to_string_lossy();
     // Windows canonical paths are verbatim (`\\?\C:\…`, `\\?\UNC\server\…`)
     let s = s

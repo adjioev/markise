@@ -89,6 +89,54 @@ impl WikiParts {
     }
 }
 
+/// File extensions an embed `![[name.ext]]` shows as an image (compared without case): the
+/// formats the image loader decodes (the `image` crate features in the workspace `Cargo.toml`).
+/// SVG and AVIF are not decoded for documents, so such an embed is a link like any other file.
+pub const IMAGE_EXTENSIONS: &[&str] = &["bmp", "gif", "jpeg", "jpg", "png", "webp"];
+
+/// Whether an embed's target names an image file by its extension.
+pub fn is_image(target: &str) -> bool {
+    target
+        .rsplit_once('.')
+        .is_some_and(|(stem, e)| !stem.is_empty() && IMAGE_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// The size an image embed asks for, in CSS pixels: `|300` (a width) or `|300x200` (width and
+/// height); `None` for any other display text, which is then the image's description.
+pub fn embed_size(display: &str) -> Option<(u32, Option<u32>)> {
+    let d = display.trim();
+    let num = |t: &str| -> Option<u32> {
+        (!t.is_empty() && t.len() <= 5 && t.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| t.parse().ok())
+            .flatten()
+            .filter(|&n| n > 0)
+    };
+    match d.split_once(['x', 'X']) {
+        Some((w, h)) => Some((num(w)?, Some(num(h)?))),
+        None => Some((num(d)?, None)),
+    }
+}
+
+impl WikiParts {
+    /// An image embed's description: its display text unless that is a size.
+    pub fn embed_alt(&self, content: &str) -> String {
+        match &self.display {
+            Some(r) if embed_size(&content[r.clone()]).is_none() => content[r.clone()].trim().to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// An image embed's size ([`embed_size`]), when its display text is one.
+    pub fn embed_size(&self, content: &str) -> Option<(u32, Option<u32>)> {
+        self.display.as_ref().and_then(|r| embed_size(&content[r.clone()]))
+    }
+
+    /// Whether `![[content]]` shows an image: the target names an image file and no subpath.
+    pub fn is_image_embed(&self) -> bool {
+        self.subpath.is_none() && is_image(&self.target)
+    }
+}
+
 /// `t` without a trailing `.md` (any case).
 pub fn strip_md(t: &str) -> &str {
     let n = t.len();
@@ -191,5 +239,28 @@ mod tests {
         assert!(split("x#^b").unwrap().headings().is_empty());
         assert_eq!(parse_link_string("[[x]]").unwrap().target, "x");
         assert!(parse_link_string("x").is_none());
+    }
+
+    #[test]
+    fn image_embeds() {
+        assert!(is_image("a.png") && is_image("dir/B.JPG") && is_image("x y.webp"));
+        assert!(!is_image("note") && !is_image("a.md") && !is_image(".png") && !is_image("a.pdf"));
+        // not decoded by the image loader: a link, not an error placeholder
+        assert!(!is_image("a.svg") && !is_image("a.AVIF"));
+        assert_eq!(embed_size("300"), Some((300, None)));
+        assert_eq!(embed_size(" 300x200 "), Some((300, Some(200))));
+        assert_eq!(embed_size("0"), None);
+        assert_eq!(embed_size("300x"), None);
+        assert_eq!(embed_size("a cat"), None);
+        assert_eq!(embed_size("1234567"), None);
+        let c = "cat.png|A cat";
+        let w = split(c).unwrap();
+        assert!(w.is_image_embed());
+        assert_eq!(w.embed_alt(c), "A cat");
+        assert_eq!(w.embed_size(c), None);
+        let c = "cat.png|120";
+        let w = split(c).unwrap();
+        assert_eq!((w.embed_alt(c).as_str(), w.embed_size(c)), ("", Some((120, None))));
+        assert!(!split("cat.png#x").unwrap().is_image_embed());
     }
 }
