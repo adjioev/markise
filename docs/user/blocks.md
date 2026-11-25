@@ -16,7 +16,7 @@ the site you write for: which fields it has, how it looks, what you can insert. 
 a block is a simple card with its name on the top edge, and you can write one by hand: type
 `:::name` on a new line and press <kbd>Return</kbd>, and Markise adds the closing line.
 
-Block packages are new after 0.1.0-beta.1. If you make a site and want to write a package, see
+Block packages are new in 0.1.0-beta.2. If you make a site and want to write a package, see
 [Making block packages](block-packages.md).
 
 ## Connect a package

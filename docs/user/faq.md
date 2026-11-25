@@ -20,8 +20,8 @@ The beta covers everyday writing, but some things are not there yet:
 - **Shortcuts:** changed in `settings.json` only; file and view commands cannot be rebound
   ([Keyboard shortcuts](shortcuts.md#change-a-shortcut)).
 - **Updates:** Markise tells you about a new version but never installs it.
-- **Linux:** 0.1.0-beta.1 is a tarball only; later releases add an AppImage and a `.deb`
-  package. No Flatpak and no apt repository.
+- **Linux:** no Flatpak and no apt repository. The AppImage and the `.deb` package are
+  published since 0.1.0-beta.2 (0.1.0-beta.1 was a tarball only).
 
 ## Is Markise free? Where is the source?
 
