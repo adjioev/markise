@@ -183,6 +183,14 @@ fn replacing_in_the_rendered_view_does_not_touch_a_hidden_id() {
     wait_until(&mut h, "the replacement", |a| {
         a.document_text().unwrap().contains("- [ ] b {#a1}")
     });
+    // The replacement starts a new search (a worker), and Replace All with no results yet is
+    // nothing to do: wait for the results of the edited text (#226, it hung once under load).
+    wait_until(&mut h, "the search of the edited text", |a| a.find_results().is_some());
+    assert_eq!(
+        h.state().find_results().unwrap().matches.len(),
+        2,
+        "the two not replaced yet"
+    );
     h.state_mut().replace_find("c".into(), true);
     wait_until(&mut h, "all of them", |a| a.document_text().unwrap().contains("some c"));
     assert_eq!(

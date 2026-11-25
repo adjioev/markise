@@ -90,11 +90,32 @@ fn pixel(r: &Rendered, bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
     bytes.get(at..at + 4).map_or([0; 4], |p| [p[0], p[1], p[2], p[3]])
 }
 
+/// A TCP listener and a UDP socket on one port of any interface. The system picks the port for
+/// TCP; another process can hold the same number for UDP ("Address already in use", seen on CI),
+/// so such a port is passed over. The passed-over listeners are kept until the end, so the system
+/// cannot hand the same port out again.
+fn bind_pair(mut tcp: impl FnMut() -> std::io::Result<TcpListener>) -> std::io::Result<(TcpListener, UdpSocket)> {
+    const TRIES: usize = 64;
+    let mut passed_over = Vec::new();
+    for _ in 0..TRIES {
+        let tcp = tcp()?;
+        let port = tcp.local_addr()?.port();
+        match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)) {
+            Ok(udp) => return Ok((tcp, udp)),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => passed_over.push(tcp),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AddrInUse,
+        format!("no port free for both TCP and UDP in {TRIES} tries"),
+    ))
+}
+
 /// Hears anything that comes on this port, on any interface, until told to stop.
 fn listen() -> std::io::Result<(u16, Arc<AtomicBool>, std::thread::JoinHandle<Vec<String>>)> {
-    let tcp = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    let (tcp, udp) = bind_pair(|| TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)))?;
     let port = tcp.local_addr()?.port();
-    let udp = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))?;
     tcp.set_nonblocking(true)?;
     udp.set_read_timeout(Some(Duration::from_millis(50)))?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -210,5 +231,31 @@ pub fn start(frames: Receiver<(FromHelper, Vec<u8>)>) {
         });
     if spawned.is_err() {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The listener's port is the system's choice for TCP; the same number can already be taken for
+    /// UDP by another process (CI: "Address already in use", the packaged self-test, run 42184347749).
+    /// Such a port is passed over, not the end of the self-test.
+    #[test]
+    fn a_port_taken_for_udp_is_passed_over() {
+        let fresh = || TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0));
+        // a pair got the way the self-test gets one, so the setup has no race of its own; its UDP socket
+        // stays held, so the same TCP listener offered again meets a port taken for UDP
+        let (first, _other) = bind_pair(fresh).expect("a first pair");
+        let taken = first.local_addr().unwrap().port();
+        let mut first = Some(first);
+        let (tcp, udp) = bind_pair(|| match first.take() {
+            Some(t) => Ok(t),
+            None => fresh(),
+        })
+        .expect("another port");
+        let port = tcp.local_addr().unwrap().port();
+        assert_ne!(port, taken);
+        assert_eq!(udp.local_addr().unwrap().port(), port);
     }
 }

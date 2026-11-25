@@ -112,6 +112,36 @@ tests of reloads, conflicts with external writes and live updates (`watch_gaps`,
 `qa_sweep`, `vault` and `sidebar`) keep it on. Settings-file assertions settle the background
 and read the file once (`common::assert_settings`) instead of polling it.
 
+## File-watch tests in a sandbox (macOS, #226)
+
+The file-watch tests — `markise-engine`'s `watch::tests`, and the UI modules or tests that
+keep watching on (`watch_gaps`, `safety`, `vault`, `themes` live reload, `qa_sweep::l12_…`,
+`smoke::reloads_…`, `sidebar::hover_and_selection_…` and the others listed above) — pass on CI
+and fail on a developer Mac only when they run inside a process sandbox that denies the
+FSEvents service. They do not fail because of timing.
+
+- On macOS every watcher is an FSEvents stream, and starting one asks the system service
+  `com.apple.FSEvents` over Mach IPC. A Seatbelt profile without
+  `(allow mach-lookup (global-name "com.apple.FSEvents"))` makes that fail.
+- Codex CLI's macOS sandbox is such a profile (an agent sandbox that allows the lookup, such
+  as the one Claude Code ran them in for #226, passes them). Reproduced on 2026-11-16 with
+  the engine's test binary: under `codex sandbox -c 'sandbox_mode="workspace-write"' -- <binary>
+  watch::tests` 12 of the 16 tests fail at once with `cannot start watching: unable to start
+  FSEvent stream` (the other 4 pass); `codex sandbox` in its default read-only
+  mode fails even earlier, writing the fixture (`Operation not permitted`). The same 12 fail
+  under a bare `sandbox-exec -p '(version 1)(allow default)(deny mach-lookup (global-name
+  "com.apple.FSEvents"))'`, and all 16 pass without it. CI's macOS runner runs the job
+  without such a sandbox, and the tests pass there.
+- The UI tests fail more slowly: the app keeps working without file events when the stream
+  cannot start, and the test waits for a reload until `common::HANG_GUARD` (180 s), then fails
+  with `timed out waiting for …`. Under the workspace-write sandbox, of the 45 tests selected
+  by `watch_gaps:: safety:: vault:: themes:: qa_sweep::l12 sidebar:: smoke::`, 11 failed that
+  way; the other 34 passed.
+
+Run these tests outside such a sandbox (a normal terminal, or the agent's "run unsandboxed"
+escape). They are not skipped in a sandbox: they test the watching itself, which cannot run
+there, and a skip would hide a real failure on a machine where FSEvents is expected to work.
+
 ## Fast and heavy coverage (#98)
 
 `cargo test --workspace` and `cargo xtask ci` run the fast suite. The target is a few minutes

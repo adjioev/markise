@@ -330,31 +330,46 @@ mod tests {
         let text = markise_corpus::generate(2 << 20, 5);
         let mut s = EditorSession::new(std::sync::Arc::new(markise_md::MarkdownFormat::default()), text.clone());
         let ctx = egui::Context::default();
-        let wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let w = wakes.clone();
-        ctx.set_request_repaint_callback(move |_| {
-            w.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        });
         // egui's own first passes ask for repaints
         for _ in 0..3 {
             let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
             out.textures_delta.clear();
         }
+        // Repaint requests by who made them (issue #226): the frames (this thread) and the
+        // worker's wake-up (its thread). The wake can come at any moment once the count is
+        // done — during the first frame, or between two frames on a loaded machine — so it
+        // is told apart by thread, not by when it was seen.
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let (asked, wakes) = (
+            std::sync::Arc::new(AtomicUsize::new(0)),
+            std::sync::Arc::new(AtomicUsize::new(0)),
+        );
+        let (a, w, me) = (asked.clone(), wakes.clone(), std::thread::current().id());
+        ctx.set_repaint_observer(move |_| {
+            if std::thread::current().id() == me { &a } else { &w }.fetch_add(1, SeqCst);
+        });
         let mut wc = WordCount::default();
         let (shown, delay) = frame(&ctx, &mut wc, &mut s, 0..0);
         assert!(matches!(shown, Shown::Counting(_)), "{shown:?}");
-        assert_eq!(delay, Duration::MAX, "no repaint requested to count");
-        wakes.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(asked.load(SeqCst), 0, "no repaint requested to count");
+        assert!(
+            delay == Duration::MAX || wakes.load(SeqCst) > 0,
+            "{delay:?} with no wake-up"
+        );
         // frames while the worker counts never ask for a repaint
         let mut frames = 0;
         while !wc.settled() {
             let (_, delay) = frame(&ctx, &mut wc, &mut s, 0..0);
+            assert_eq!(
+                asked.load(SeqCst),
+                0,
+                "frame {frames} asked for a repaint while counting"
+            );
             // (the worker's wake-up, when the count is complete, is the only repaint; it may
             // land while the frame runs, so it is read after the frame)
-            let woken = wakes.load(std::sync::atomic::Ordering::SeqCst) > 0;
             assert!(
-                delay == Duration::MAX || woken,
-                "frame {frames} asked for a repaint while counting: {delay:?}"
+                delay == Duration::MAX || wakes.load(SeqCst) > 0,
+                "frame {frames} was asked to repaint with no wake-up: {delay:?}"
             );
             frames += 1;
             std::thread::sleep(Duration::from_millis(1));
@@ -374,12 +389,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         frame(&ctx, &mut wc, &mut s, 0..0);
-        // the worker's wake-up and the frame egui runs for it
-        assert!(
-            wakes.load(std::sync::atomic::Ordering::SeqCst) <= 2,
-            "one wake when the count arrived: {}",
-            wakes.load(std::sync::atomic::Ordering::SeqCst)
-        );
+        assert_eq!(wakes.load(SeqCst), 1, "one wake when the count arrived");
+        assert_eq!(asked.load(SeqCst), 0, "no frame asked for a repaint");
         assert_eq!(frame(&ctx, &mut wc, &mut s, 0..0).1, Duration::MAX, "idle once counted");
 
         // typing: no document copy; counted after the debounce
