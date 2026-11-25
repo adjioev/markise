@@ -534,19 +534,21 @@ fn wikilink_hrefs(req: &ExportRequest) -> markise_export::WikiLinkHrefs {
     })))
 }
 
-/// Image embed paths of an export: the file found in the opened folder like a wikilink target,
-/// relative to the document's folder and percent-encoded (the exporters resolve images against
-/// that folder). Without an opened folder the name is read relative to the document.
+/// Image embed files of an export: the file found in the opened folder like a wikilink target,
+/// else the name relative to the document's folder as written (not a URL), like the viewer
+/// (`markise_layout`'s `resolve_image`). The path is kept as a path ([`markise_export::EmbedPaths`]).
 fn embed_paths(req: &ExportRequest) -> markise_export::EmbedPaths {
-    let (Some(ix), Some(doc)) = (req.vault.clone(), req.doc_path.clone()) else {
+    let Some(doc) = req.doc_path.clone() else {
         return markise_export::EmbedPaths(None);
     };
-    let from = ix.rel_of(&doc);
+    let vault = req.vault.clone();
+    let from = vault.as_ref().and_then(|ix| ix.rel_of(&doc));
     let dir = doc.parent().map(Path::to_path_buf).unwrap_or_default();
     markise_export::EmbedPaths(Some(std::sync::Arc::new(move |target: &str| {
-        let f = ix.resolve_wikilink(target, from.as_deref())?;
-        let rel = crate::vault::relative_path(&dir, &ix.abs(&f.rel))?;
-        Some(markise_export::encode_path(&rel))
+        let found = vault
+            .as_ref()
+            .and_then(|ix| Some(ix.abs(&ix.resolve_wikilink(target, from.as_deref())?.rel)));
+        Some(found.unwrap_or_else(|| dir.join(target.trim_start_matches('/'))))
     })))
 }
 
@@ -733,8 +735,58 @@ mod tests {
             },
         );
         let dump = format!("{:?}", ex.blocks);
-        assert!(dump.contains("src: \"../media/pic%20one.png\""), "{dump}");
+        // the file found, as a `file:` URL (read back without ambiguity)
+        assert!(dump.contains("src: \"file://"), "{dump}");
+        assert!(dump.contains("/media/pic%20one.png\""), "{dump}");
         assert!(dump.contains("alt: \"A cat\""), "{dump}");
+    }
+
+    /// Codex review on #262: with `pic one.png` and `pic%20one.png` side by side, the embed
+    /// `![[pic one.png]]` exports the file the viewer shows, in the folder and without one.
+    #[test]
+    fn an_image_embed_exports_the_file_it_names_beside_a_percent_named_one() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().to_path_buf();
+        std::fs::write(root.join("pic one.png"), png_bytes()).unwrap();
+        std::fs::write(root.join("pic%20one.png"), b"not this one").unwrap();
+        let text = "![[pic one.png]]\n";
+        let mut r = ExportRequest::new(
+            ExportKind::HtmlPlain,
+            text.into(),
+            Some(root.join("doc.md")),
+            root.join("out.html"),
+            Theme::light(),
+        );
+        let ix = crate::vault::VaultIndex::from_rels(
+            root.clone(),
+            [
+                "doc.md".to_string(),
+                "pic one.png".to_string(),
+                "pic%20one.png".to_string(),
+            ],
+            1,
+        );
+        for vault in [Some(std::sync::Arc::new(ix)), None] {
+            let with = vault.is_some();
+            r.vault = vault;
+            // HTML: a link to `pic one.png` (`pic%20one.png` would be written `pic%2520one.png`)
+            let out = run_export(&r, &JobControl::new()).unwrap();
+            let s = std::fs::read_to_string(&out.outputs[0]).unwrap();
+            assert!(s.contains("<img src=\"pic%20one.png\""), "vault {with}: {s}");
+            // PDF/PNG/Pandoc read the model's `src` with the shared resolver
+            let doc = Document::parse(text.to_string(), ParseOptions::default());
+            let ex = ExDoc::build(
+                &doc,
+                &ModelOptions {
+                    embeds: embed_paths(&r),
+                    ..Default::default()
+                },
+            );
+            let dump = format!("{:?}", ex.blocks);
+            let src = dump.split("src: \"").nth(1).and_then(|t| t.split('"').next()).unwrap();
+            let got = markise_doc::resource::local_file(&root, None, src).unwrap().path;
+            assert_eq!(got, root.join("pic one.png"), "vault {with}: {src}");
+        }
     }
 
     #[test]

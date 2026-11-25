@@ -125,7 +125,7 @@ files of that name, the one nearest the note), and otherwise next to the note. T
 sets the size in pixels, shown as points: `![[photo.png|300]]` is 300 wide, `![[photo.png|300x200]]`
 fits within 300 by 200, its proportions kept. An embed may be larger than the picture's own size,
 but never wider than the column or higher than 400 points. Any other text after the `|` is the
-image's description. Images with the extensions avif, bmp, gif, jpeg, jpg, png, svg and webp are
+image's description. Images with the extensions bmp, gif, jpeg, jpg, png and webp are
 embedded this way; an embed of a note (`![[note]]`) or of any other file is shown as a link to it.
 The text of an embed is never rewritten.
 

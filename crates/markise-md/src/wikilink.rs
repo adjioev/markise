@@ -89,8 +89,10 @@ impl WikiParts {
     }
 }
 
-/// File extensions an embed `![[name.ext]]` shows as an image (compared without case).
-pub const IMAGE_EXTENSIONS: &[&str] = &["avif", "bmp", "gif", "jpeg", "jpg", "png", "svg", "webp"];
+/// File extensions an embed `![[name.ext]]` shows as an image (compared without case): the
+/// formats the image loader decodes (the `image` crate features in the workspace `Cargo.toml`).
+/// SVG and AVIF are not decoded for documents, so such an embed is a link like any other file.
+pub const IMAGE_EXTENSIONS: &[&str] = &["bmp", "gif", "jpeg", "jpg", "png", "webp"];
 
 /// Whether an embed's target names an image file by its extension.
 pub fn is_image(target: &str) -> bool {
@@ -243,6 +245,8 @@ mod tests {
     fn image_embeds() {
         assert!(is_image("a.png") && is_image("dir/B.JPG") && is_image("x y.webp"));
         assert!(!is_image("note") && !is_image("a.md") && !is_image(".png") && !is_image("a.pdf"));
+        // not decoded by the image loader: a link, not an error placeholder
+        assert!(!is_image("a.svg") && !is_image("a.AVIF"));
         assert_eq!(embed_size("300"), Some((300, None)));
         assert_eq!(embed_size(" 300x200 "), Some((300, Some(200))));
         assert_eq!(embed_size("0"), None);

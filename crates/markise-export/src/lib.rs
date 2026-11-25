@@ -184,23 +184,34 @@ impl std::fmt::Debug for WikiLinkHrefs {
     }
 }
 
-/// Resolves an image embed's target (`![[name.png]]`) to the path of its file relative to the
-/// document's folder, percent-encoded, or `None` when no file of that name is known.
-pub type EmbedResolver = dyn Fn(&str) -> Option<String> + Send + Sync;
+/// Resolves an image embed's target (`![[name.png]]`) to its file, an absolute path, or `None`
+/// when no file of that name is known.
+pub type EmbedResolver = dyn Fn(&str) -> Option<std::path::PathBuf> + Send + Sync;
 
 /// The image embed resolver of an export ([`HtmlOptions::embeds`], [`model::ModelOptions::embeds`]).
 /// Without one, or for a name it does not know, the target is read as a path relative to the
 /// document, as written.
+///
+/// A file found keeps its path until it is written as a URL: a relative reference with `%XX` in
+/// it would be read by [`markise_doc::resource::local_file`] as the literal name first when such a
+/// file exists (`pic%20one.png` beside `pic one.png`), not as the file the viewer shows.
 #[derive(Clone, Default)]
 pub struct EmbedPaths(pub Option<std::sync::Arc<EmbedResolver>>);
 
 impl EmbedPaths {
-    /// The image's path relative to the document, percent-encoded like a Markdown destination.
+    /// The embed's file, when the resolver knows the name.
+    pub fn file(&self, target: &str) -> Option<std::path::PathBuf> {
+        self.0.as_ref().and_then(|r| r(target))
+    }
+
+    /// The image as a Markdown destination for the PDF/PNG/Pandoc model: a file found as a
+    /// `file:` URL (always percent-decoded, so it names that one file), else the target
+    /// relative to the document, percent-encoded.
     pub fn dest(&self, target: &str) -> String {
-        self.0
-            .as_ref()
-            .and_then(|r| r(target))
-            .unwrap_or_else(|| encode_path(target.trim_start_matches('/')))
+        match self.file(target) {
+            Some(p) => images::file_url(&p),
+            None => encode_path(target.trim_start_matches('/')),
+        }
     }
 }
 
@@ -1219,13 +1230,42 @@ impl<'a> Ctx<'a> {
 
     /// `src` of a document image according to [`HtmlOptions::images`].
     fn image_src(&self, dest: &str) -> String {
+        let assets = match &self.opts.images {
+            ImageLinks::Keep => return dest.to_string(),
+            ImageLinks::Embed { assets, .. } | ImageLinks::Rebase { assets } => assets,
+        };
+        let Some(r) = images::local_ref(assets, dest) else {
+            return dest.to_string(); // remote, data: or another host's file: — never touched
+        };
+        self.local_image_src(&r, dest)
+    }
+
+    /// An image embed's `src`. A file the resolver found is used by its path, never re-read
+    /// from a URL ([`EmbedPaths`]); an unknown name is a reference relative to the document.
+    fn embed_src(&self, target: &str) -> String {
+        let Some(path) = self.opts.embeds.file(target) else {
+            return self.image_src(&encode_path(target.trim_start_matches('/')));
+        };
+        let assets = match &self.opts.images {
+            ImageLinks::Keep => return images::file_url(&path),
+            ImageLinks::Embed { assets, .. } | ImageLinks::Rebase { assets } => assets,
+        };
+        // what stays in the page when the file cannot be read: the path relative to the document
+        let written = images::relative_link(&assets.doc_dir, &path);
+        let r = images::LocalRef {
+            path,
+            suffix: String::new(),
+        };
+        self.local_image_src(&r, &written)
+    }
+
+    /// A local image's `src`: embedded or relative to the exported file; `dest` as written when
+    /// the file cannot be resolved on disk.
+    fn local_image_src(&self, r: &images::LocalRef, dest: &str) -> String {
         let (assets, embed) = match &self.opts.images {
             ImageLinks::Keep => return dest.to_string(),
             ImageLinks::Embed { assets, .. } => (assets, true),
             ImageLinks::Rebase { assets } => (assets, false),
-        };
-        let Some(r) = images::local_ref(assets, dest) else {
-            return dest.to_string(); // remote, data: or another host's file: — never touched
         };
         if embed {
             match self.embedder.borrow_mut().embed(&r.path, self.opts.control.as_ref()) {
@@ -1235,7 +1275,7 @@ impl<'a> Ctx<'a> {
             }
         }
         // a reference that cannot be resolved on disk is kept as written
-        images::link_from(&assets.out_dir, &r).unwrap_or_else(|| dest.to_string())
+        images::link_from(&assets.out_dir, r).unwrap_or_else(|| dest.to_string())
     }
 
     /// URL for an attribute, or `None` when the scheme is not allowed (untrusted export).
@@ -1393,7 +1433,7 @@ impl<'a> Ctx<'a> {
                 let c = inner.slice(s);
                 // an image embed: the image, at the size asked for
                 if *embed && let Some(w) = markise_md::wikilink::split(c).filter(|w| w.is_image_embed()) {
-                    let dest = self.image_src(&self.opts.embeds.dest(target));
+                    let dest = self.embed_src(target);
                     let src = self.url(&dest, true).unwrap_or("");
                     let _ = write!(out, "<img src=\"{}\" alt=\"{}\"", esc_url(src), esc(&w.embed_alt(c)));
                     if let Some((wd, ht)) = w.embed_size(c) {
