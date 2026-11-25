@@ -11,6 +11,13 @@
 //! Then every built HTML file is checked: each local `href`/`src`/`srcset` target must exist and
 //! each `#fragment` must name an `id` in its page. Any broken link fails the command. External
 //! links are not fetched (the build is offline).
+//!
+//! Finally `sitemap.xml` (sitemaps.org 0.9) is written: the front page and every guide page as
+//! absolute URLs under the site's address, which is read from the `<link rel="canonical">` in
+//! `site/index.html` (the one place it is kept). Only `<loc>` is written: no `lastmod`, so the
+//! same sources always give the same bytes. There is no `robots.txt`: crawlers only read it at a
+//! domain's root, so under a project subpath it would have no effect; the sitemap is submitted
+//! to search engines directly.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -23,7 +30,8 @@ pub const USAGE: &str = "\
 usage: cargo xtask site [--out <dir>]
 
 Builds the website: site/ plus the user guide docs/user/*.md rendered to docs/*.html,
-then checks every local link, image and #fragment (fails on any broken one).
+then checks every local link, image and #fragment (fails on any broken one), and writes
+sitemap.xml with absolute URLs under the canonical address in site/index.html.
 
   --out   output folder (default: target/site/); it is replaced, so it must be under the
           workspace's target/ folder, or outside the workspace and either new or a folder
@@ -204,7 +212,68 @@ fn build(root: &Path, out: &Path) -> Result<(), String> {
         let dest = docs_out.join(format!("{stem}.html"));
         std::fs::write(&dest, html).map_err(|e| format!("{}: {e}", dest.display()))?;
     }
+
+    let index = root.join("site").join("index.html");
+    let front = std::fs::read_to_string(&index).map_err(|e| format!("{}: {e}", index.display()))?;
+    let base = canonical_base(&front).map_err(|e| format!("{}: {e}", index.display()))?;
+    let dest = out.join("sitemap.xml");
+    std::fs::write(&dest, sitemap(&base)).map_err(|e| format!("{}: {e}", dest.display()))?;
     Ok(())
+}
+
+/// The site's absolute base URL: the `href` of the front page's `<link rel="canonical">`,
+/// which must be an `http(s)://` URL ending in `/`.
+fn canonical_base(index_html: &str) -> Result<String, String> {
+    let mut rest = index_html;
+    while let Some(i) = rest.find("<link") {
+        let tag = &rest[i..];
+        let tag = &tag[..tag.find('>').map_or(tag.len(), |e| e + 1)];
+        rest = &rest[i + tag.len()..];
+        if !(tag.contains(" rel=\"canonical\"") || tag.contains(" rel='canonical'")) {
+            continue;
+        }
+        let Some((_, _, _, href, _)) = next_url_attr(tag) else {
+            return Err("the canonical link has no quoted href".into());
+        };
+        if !(href.starts_with("https://") || href.starts_with("http://")) || !href.ends_with('/') {
+            return Err(format!(
+                "the canonical URL `{href}` must be absolute (http/https) and end in `/`"
+            ));
+        }
+        return Ok(href.to_string());
+    }
+    Err("no <link rel=\"canonical\" href=\"…\"> (the sitemap's base URL)".into())
+}
+
+/// `sitemap.xml` for the front page and every guide page in [`PAGES`] order, URLs under `base`.
+fn sitemap(base: &str) -> String {
+    let mut urls = vec![base.to_string()];
+    urls.extend(PAGES.iter().map(|(stem, _)| format!("{base}docs/{stem}.html")));
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
+    );
+    for url in urls {
+        let _ = writeln!(xml, "  <url><loc>{}</loc></url>", xml_escape(&url));
+    }
+    xml.push_str("</urlset>\n");
+    xml
+}
+
+/// Text escaped for XML element content and attribute values (the five predefined entities).
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
@@ -587,6 +656,44 @@ mod tests {
         // an existing folder that an earlier build did not mark
         assert!(!ok(&other.join("photos")));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sitemap_lists_front_page_and_every_guide_page() {
+        let base = "https://example.org/markise-site/";
+        let xml = sitemap(base);
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"));
+        assert!(xml.contains("<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">"));
+        assert!(xml.ends_with("</urlset>\n"));
+        let locs: Vec<&str> = xml
+            .split("<loc>")
+            .skip(1)
+            .map(|l| &l[..l.find("</loc>").unwrap()])
+            .collect();
+        let mut want = vec![base.to_string()];
+        want.extend(PAGES.iter().map(|(s, _)| format!("{base}docs/{s}.html")));
+        assert_eq!(locs, want);
+        assert!(locs.iter().all(|l| l.starts_with(base)));
+        // deterministic: same input, same bytes
+        assert_eq!(xml, sitemap(base));
+        assert_eq!(xml_escape("a&b<c>'\""), "a&amp;b&lt;c&gt;&apos;&quot;");
+        assert!(sitemap("https://x.org/?a=1&b=2/").contains("<loc>https://x.org/?a=1&amp;b=2/</loc>"));
+    }
+
+    #[test]
+    fn sitemap_base_comes_from_the_canonical_link() {
+        let page = "<link rel=\"icon\" href=\"a.svg\">\n<link rel=\"canonical\" href=\"https://x.org/s/\">";
+        assert_eq!(canonical_base(page).unwrap(), "https://x.org/s/");
+        assert_eq!(
+            canonical_base("<link rel='canonical' href='https://x.org/'>").unwrap(),
+            "https://x.org/"
+        );
+        assert!(canonical_base("<link rel=\"icon\" href=\"a.svg\">").is_err());
+        assert!(canonical_base("<link rel=\"canonical\" href=\"https://x.org/s\">").is_err());
+        assert!(canonical_base("<link rel=\"canonical\" href=\"s/\">").is_err());
+        // the real front page carries one
+        let front = include_str!("../../site/index.html");
+        assert!(canonical_base(front).unwrap().starts_with("https://"));
     }
 
     #[test]
