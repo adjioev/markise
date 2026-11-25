@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "egui-schema-form"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "egui",
  "egui_kittest",
@@ -2761,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "markise"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "arboard",
  "eframe",
@@ -2782,7 +2782,7 @@ dependencies = [
 
 [[package]]
 name = "markise-blocks"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "criterion",
  "dugong",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "markise-cli"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "markise-doc",
  "markise-engine",
@@ -2820,7 +2820,7 @@ dependencies = [
 
 [[package]]
 name = "markise-corpus"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -2828,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "markise-doc"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "libc",
  "memchr",
@@ -2838,7 +2838,7 @@ dependencies = [
 
 [[package]]
 name = "markise-engine"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "ahash",
  "cap-fs-ext",
@@ -2874,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "markise-export"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "criterion",
  "libc",
@@ -2893,7 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "markise-layout"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "ahash",
  "criterion",
@@ -2912,7 +2912,7 @@ dependencies = [
 
 [[package]]
 name = "markise-md"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "criterion",
  "emojis",
@@ -2928,7 +2928,7 @@ dependencies = [
 
 [[package]]
 name = "markise-package"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "flate2",
  "markise-doc",
@@ -2942,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "markise-pdf"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "criterion",
  "image",
@@ -2961,14 +2961,14 @@ dependencies = [
 
 [[package]]
 name = "markise-testfmt"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "markise-doc",
 ]
 
 [[package]]
 name = "markise-text"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "ahash",
  "brotli",
@@ -2991,7 +2991,7 @@ dependencies = [
 
 [[package]]
 name = "markise-theme"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "criterion",
  "cssparser",
@@ -3002,7 +3002,7 @@ dependencies = [
 
 [[package]]
 name = "markise-ui-egui"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "ahash",
  "egui",
@@ -3038,7 +3038,7 @@ dependencies = [
 
 [[package]]
 name = "markise-web-helper"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -3062,7 +3062,7 @@ dependencies = [
 
 [[package]]
 name = "markise-web-render"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "serde_json",
 ]
@@ -4789,7 +4789,7 @@ dependencies = [
 
 [[package]]
 name = "schema-form-core"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "proptest",
  "regex",
@@ -6686,7 +6686,7 @@ checksum = "9440ea3e5aeabb0ac63af70daf835274065238cdd0cec83418f417eae38bacee"
 
 [[package]]
 name = "xtask"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "markise-export",
  "markise-md",
