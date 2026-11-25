@@ -136,6 +136,9 @@ impl BlockViews for ViewsWithIcons {
     fn practice_hides_quotes(&self, name: &str) -> bool {
         self.views.practice_hides_quotes(name)
     }
+    fn practice_needs_quote(&self, name: &str) -> bool {
+        self.views.practice_needs_quote(name)
+    }
     fn icon_ready(&self, icon: &str) -> bool {
         self.icons.ready(icon)
     }

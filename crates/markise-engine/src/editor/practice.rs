@@ -4,7 +4,7 @@
 use std::ops::Range;
 
 use markise_doc::{DocPos, Selection};
-use markise_layout::{BlockViewMode, NativeAt, PracticeShow};
+use markise_layout::{NativeAt, PracticeShow};
 
 use super::EditorView;
 
@@ -188,9 +188,7 @@ impl EditorView {
 
     /// The block in Practice around `at`, ready to be practised.
     fn practice_block(&self, at: usize) -> Option<NativeAt> {
-        self.view
-            .native_block(at)
-            .filter(|b| self.view.block_mode_of(b.range.start) == BlockViewMode::Practice)
+        self.view.native_block(at).filter(|b| b.practised)
     }
 
     fn practice_entry(&mut self, block: &NativeAt) -> &mut Practised {

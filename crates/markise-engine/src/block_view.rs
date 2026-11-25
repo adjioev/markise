@@ -418,6 +418,19 @@ impl BlockViews for PackageViews {
         })
     }
 
+    fn practice_needs_quote(&self, name: &str) -> bool {
+        self.index.block(name).is_some_and(|e| {
+            let Some(practice) = e.view.and_then(|v| v.practice.as_ref()) else {
+                return false;
+            };
+            let fields = &e.schema.fields;
+            !fields.iter().any(|f| f.kind == markise_package::FieldKind::Choices)
+                && !practice.reveal.is_empty()
+                && (practice.reveal.iter())
+                    .all(|r| (fields.iter()).any(|f| &f.name == r && f.kind == markise_package::FieldKind::Quote))
+        })
+    }
+
     fn id(&self) -> u64 {
         self.id
     }
