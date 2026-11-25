@@ -243,13 +243,15 @@ mod tests {
     /// Such a port is passed over, not the end of the self-test.
     #[test]
     fn a_port_taken_for_udp_is_passed_over() {
-        let first = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let fresh = || TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0));
+        // a pair got the way the self-test gets one, so the setup has no race of its own; its UDP socket
+        // stays held, so the same TCP listener offered again meets a port taken for UDP
+        let (first, _other) = bind_pair(fresh).expect("a first pair");
         let taken = first.local_addr().unwrap().port();
-        let _other = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, taken)).unwrap();
         let mut first = Some(first);
         let (tcp, udp) = bind_pair(|| match first.take() {
             Some(t) => Ok(t),
-            None => TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)),
+            None => fresh(),
         })
         .expect("another port");
         let port = tcp.local_addr().unwrap().port();
