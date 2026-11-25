@@ -5,6 +5,11 @@
 //! [`LinkTargets::generation`] in their cache key, so a new set of files (a note created or
 //! deleted) restyles exactly those items. Only colors depend on it, never heights.
 
+/// The link target a tag reports for hit testing (`tag:#name`, spec 06 V10.4): the
+/// application lists the notes with the tag instead of following a link. A real link never
+/// starts like this (a `tag:` URI has an authority, not `#`, after the colon).
+pub const TAG_LINK_PREFIX: &str = "tag:#";
+
 /// What layout may ask about link targets. Format-neutral: targets are passed as written.
 pub trait LinkTargets: std::fmt::Debug {
     /// Changes whenever any answer may change (part of the keys of items with wikilinks).

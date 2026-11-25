@@ -96,6 +96,8 @@ pub struct ExportRequest {
     pub critic_markup: bool,
     /// Parse `==highlight==` (the `markdown.highlight` setting).
     pub highlight: bool,
+    /// Parse `#tags` (the `markdown.tags` setting).
+    pub tags: bool,
     /// Keep or strip review comments in the output (setting `export.comments`, ADR 0012).
     pub comments: CommentExport,
     /// HTML export: stop before writing, reporting [`ExportDone::too_large`], when the
@@ -124,6 +126,7 @@ impl ExportRequest {
             vault: None,
             critic_markup: true,
             highlight: true,
+            tags: true,
             comments: CommentExport::Keep,
             confirm_html_above: Some(LARGE_HTML_BYTES),
             sections: false,
@@ -227,6 +230,7 @@ pub fn run_export(req: &ExportRequest, control: &JobControl) -> Result<ExportDon
             wikilinks: req.wikilinks,
             critic_markup: req.critic_markup,
             highlight: req.highlight,
+            tags: req.tags,
             ..ParseOptions::default()
         },
     );
@@ -693,6 +697,29 @@ mod tests {
         canceller.join().unwrap();
         assert!(res.is_err(), "cancelled, not {res:?}");
         assert!(!r.output.exists());
+    }
+
+    /// ADR 0027: a tag exports as written, marked for styling in HTML; with tags off, as text.
+    #[test]
+    fn tags_export_as_written() {
+        let d = tempfile::tempdir().unwrap();
+        let mut r = ExportRequest::new(
+            ExportKind::HtmlPlain,
+            "Plans #idea/next and `#code`.\n".into(),
+            None,
+            d.path().join("t.html"),
+            Theme::light(),
+        );
+        let c = JobControl::new();
+        let s = std::fs::read_to_string(&run_export(&r, &c).unwrap().outputs[0]).unwrap();
+        assert!(s.contains("<span class=\"md-tag\">#idea/next</span>"), "{s}");
+        assert!(s.contains("<code>#code</code>"), "{s}");
+        r.tags = false;
+        let s = std::fs::read_to_string(&run_export(&r, &c).unwrap().outputs[0]).unwrap();
+        assert!(
+            s.contains("Plans #idea/next and") && !s.contains("<span class=\"md-tag\">"),
+            "{s}"
+        );
     }
 
     #[test]

@@ -119,6 +119,8 @@ pub(crate) struct VaultState {
     pub(crate) allowed: bool,
     /// `==highlight==` may be on at all (the startup parse options allow it).
     pub(crate) highlight_allowed: bool,
+    /// `#tags` may be on at all (the startup parse options allow them).
+    pub(crate) tags_allowed: bool,
 }
 
 impl VaultState {
@@ -285,6 +287,11 @@ impl MarkiseApp {
             self.parse.highlight = want;
             self.reparse_document("Highlight");
         }
+        let want = self.vault.tags_allowed && self.themes.tags();
+        if want != self.parse.tags {
+            self.parse.tags = want;
+            self.reparse_document("Tags");
+        }
         self.review_poll_setting();
         self.poll_reparse();
         self.poll_create();
@@ -332,8 +339,11 @@ impl MarkiseApp {
         let base = index.as_ref().map_or(0, |ix| ix.generation().wrapping_add(1));
         // the CriticMarkup switch likewise (ADR 0012)
         let generation = (base << 3) | ((shown.critic_markup as u64) << 2) | ((shown.wikilinks as u64) << 1) | 1;
-        // `==highlight==` changes how any paragraph reads
-        d.viewer.ed.view.set_dialect(shown.highlight as u64);
+        // `==highlight==` and `#tags` change how any paragraph reads
+        d.viewer
+            .ed
+            .view
+            .set_dialect(shown.highlight as u64 | (shown.tags as u64) << 1);
         d.viewer.ed.view.set_links(Arc::new(VaultLinks {
             index,
             from,
@@ -342,7 +352,7 @@ impl MarkiseApp {
     }
 
     /// The open document's vault path.
-    fn current_rel(&self) -> Option<String> {
+    pub(super) fn current_rel(&self) -> Option<String> {
         let ix = self.vault.index.as_ref()?;
         self.doc.as_ref().and_then(|d| d.file()).and_then(|p| ix.rel_of(p))
     }
@@ -377,6 +387,22 @@ impl MarkiseApp {
         if on != self.parse.highlight {
             self.parse.highlight = on;
             self.reparse_document("Highlight");
+        }
+    }
+
+    /// Whether `#tags` are parsed (Preferences → Markdown, setting `markdown.tags`).
+    pub fn tags(&self) -> bool {
+        self.parse.tags
+    }
+
+    /// Preferences → Markdown → Tags: switches the extension (persisted) and re-parses the open
+    /// document in the background; the text is not changed.
+    pub fn set_tags(&mut self, on: bool) {
+        self.themes.set_tags(on);
+        let on = on && self.vault.tags_allowed;
+        if on != self.parse.tags {
+            self.parse.tags = on;
+            self.reparse_document("Tags");
         }
     }
 

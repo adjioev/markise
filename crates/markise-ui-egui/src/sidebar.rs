@@ -14,6 +14,8 @@ pub enum Tab {
     Outline,
     /// Comments and suggestions of the document (ADR 0012).
     Comments,
+    /// The tags of the opened folder and the notes with each (ADR 0027).
+    Tags,
 }
 
 /// What the user asked for in the file tree: a click, or a context-menu item (spec 04 §4.1
@@ -1189,10 +1191,11 @@ enum BarGlyph {
     Search,
     Outline,
     Comments,
+    Tags,
 }
 
 /// One activity bar item: the tab it shows, or `None` for a placeholder (disabled) — more
-/// views (backlinks, tags) are added here.
+/// views (backlinks) are added here.
 struct Activity {
     label: &'static str,
     tooltip: &'static str,
@@ -1200,7 +1203,7 @@ struct Activity {
     tab: Option<Tab>,
 }
 
-const ACTIVITIES: [Activity; 4] = [
+const ACTIVITIES: [Activity; 5] = [
     Activity {
         label: "Files",
         tooltip: "Files",
@@ -1225,6 +1228,12 @@ const ACTIVITIES: [Activity; 4] = [
         tooltip: "Comments and suggestions",
         glyph: BarGlyph::Comments,
         tab: Some(Tab::Comments),
+    },
+    Activity {
+        label: "Tags",
+        tooltip: "Tags",
+        glyph: BarGlyph::Tags,
+        tab: Some(Tab::Tags),
     },
 ];
 
@@ -1317,6 +1326,13 @@ fn paint_bar_glyph(p: &egui::Painter, r: egui::Rect, glyph: BarGlyph, color: Col
             line(vec![pt(6.0, 14.0), pt(5.5, 18.0), pt(10.0, 14.0)]);
             line(vec![pt(6.0, 7.0), pt(14.0, 7.0)]);
             line(vec![pt(6.0, 10.3), pt(11.5, 10.3)]);
+        }
+        BarGlyph::Tags => {
+            // a number sign, slightly slanted
+            line(vec![pt(8.0, 3.0), pt(6.5, 17.0)]);
+            line(vec![pt(13.5, 3.0), pt(12.0, 17.0)]);
+            line(vec![pt(3.5, 7.5), pt(17.0, 7.5)]);
+            line(vec![pt(3.0, 12.5), pt(16.5, 12.5)]);
         }
         BarGlyph::Outline => {
             // a heading tree: short lines with stepped indentation, a dot at each start

@@ -401,6 +401,12 @@ pub const CODE_BLOCK_SCALE: f32 = SOURCE_SCALE;
 pub const INLINE_CODE_SCALE: f32 = 0.88;
 
 impl Theme {
+    /// Text and background of a tag pill (`#tag`, spec 06 V10.4): the link colour on a faint
+    /// tint of itself, so every theme has them without a field of its own.
+    pub fn tag_colors(&self) -> (Rgba, Rgba) {
+        (self.link, self.link.with_alpha(if self.dark { 46 } else { 30 }))
+    }
+
     /// Built-in light theme ("Markise Light", original design).
     pub fn light() -> Theme {
         let ink = Rgba::hex(0x2a2b2e);

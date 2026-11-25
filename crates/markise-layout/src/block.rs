@@ -1421,6 +1421,32 @@ impl<'a> InlineBuilder<'a> {
                     },
                 ));
             }
+            // a tag (spec 06 V10.4): its text as written on a pill in the link colour;
+            // Cmd/Ctrl+click lists the notes with it (the target `tag:#name`)
+            InlineKind::Tag { name } => {
+                let (text, bg) = t.tag_colors();
+                let mut c = st.clone();
+                c.color = color(text);
+                let start = self.job.text.len();
+                self.pending_lead += 3.0;
+                self.nodes(r, &n.children, &c, false);
+                self.pending_lead += 3.0;
+                let end = self.job.text.len();
+                self.links.push((
+                    start..end,
+                    Mark::Box {
+                        stroke: Stroke::NONE,
+                        fill: color(bg),
+                        pad: 3.0,
+                        radius: 8.0,
+                        stretch: false,
+                    },
+                ));
+                self.links.push((
+                    start..end,
+                    Mark::Link(format!("{}{name}", crate::links::TAG_LINK_PREFIX)),
+                ));
+            }
             InlineKind::Sub | InlineKind::Sup => {
                 let mut c = st.clone();
                 c.size = (st.size * 0.75).round();

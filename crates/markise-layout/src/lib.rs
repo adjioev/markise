@@ -33,7 +33,7 @@ pub use block::{
 pub use cache::{CacheKey, LayoutCache};
 pub use diagram::{DiagramQuery, DiagramState, Diagrams, NoDiagrams};
 pub use highlight::{CodeQuery, Highlights, NoHighlights};
-pub use links::{AllResolved, LinkTargets};
+pub use links::{AllResolved, LinkTargets, TAG_LINK_PREFIX};
 pub use math::{MATH_SCALE, MathBox, MathQuery, MathState};
 pub use model::{
     CodeRef, Container, DocModel, Gap, Item, ItemKind, Items, Marker, ModelChange, Moved, OutlineEntry, PAGE_TOPS,

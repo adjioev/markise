@@ -68,6 +68,7 @@ mod progressive;
 mod quick_open;
 mod review;
 mod section_form;
+mod tags;
 mod updates;
 mod vault;
 mod workflow;
@@ -514,6 +515,8 @@ pub struct MarkiseApp {
     /// measurements, tests).
     pub source_input_ms: Vec<f64>,
     sidebar_visible: bool,
+    /// The sidebar's Tags view (ADR 0027).
+    tags_view: tags::TagsView,
     /// Formatting toolbar state (spec 04 §3.2; shown per the `showToolbar` setting).
     toolbar: crate::toolbar::Toolbar,
     find: find::FindState,
@@ -642,6 +645,8 @@ impl MarkiseApp {
         let mut vault = vault::VaultState::new(opts.parse.wikilinks);
         vault.highlight_allowed = opts.parse.highlight;
         opts.parse.highlight &= themes.highlight();
+        vault.tags_allowed = opts.parse.tags;
+        opts.parse.tags &= themes.tags();
         opts.parse.wikilinks &= themes.wikilinks();
         let review = review::ReviewState::new(opts.parse.critic_markup);
         opts.parse.critic_markup &= themes.critic_markup();
@@ -676,6 +681,7 @@ impl MarkiseApp {
             sbs: SideBySide::default(),
             source_input_ms: Vec::new(),
             sidebar_visible: true,
+            tags_view: Default::default(),
             toolbar: Default::default(),
             find: Default::default(),
             workflow: Default::default(),
@@ -2373,6 +2379,11 @@ impl MarkiseApp {
     }
 
     fn open_link(&mut self, ctx: &Context, target: &str) {
+        // a tag in the document: the notes with it (spec 06 V10.4)
+        if let Some(name) = target.strip_prefix(markise_layout::TAG_LINK_PREFIX) {
+            self.show_tag(name);
+            return;
+        }
         if self.follow_vault_link(target) {
             return;
         }
@@ -3164,6 +3175,12 @@ impl MarkiseApp {
                             self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
                         }
                         self.comments_panel(ui, &look);
+                    }
+                    Tab::Tags => {
+                        if self.files.rename.is_some() {
+                            self.tree_action(ui.ctx(), TreeAction::EndRename(EditEnd::CommitOrCancel));
+                        }
+                        self.tags_panel(ui, &look);
                     }
                     Tab::Outline => {
                         // switched away from the Files tab while a name was being edited:

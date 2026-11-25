@@ -74,6 +74,7 @@ impl MarkiseApp {
             diagrams: self.diagrams,
             wikilinks: t.wikilinks(),
             highlight: t.highlight(),
+            tags: t.tags(),
             critic_markup: t.critic_markup(),
             comment_display: t.comment_display(),
             export_comments: t.export_comments(),
@@ -159,6 +160,7 @@ impl MarkiseApp {
             Change::Diagrams(on) => self.set_diagrams(on),
             Change::Wikilinks(on) => self.set_wikilinks(on),
             Change::Highlight(on) => self.set_highlight(on),
+            Change::Tags(on) => self.set_tags(on),
             Change::CriticMarkup(on) => self.set_critic_markup(on),
             Change::CommentDisplay(d) => self.themes.set_comment_display(d),
             Change::ExportComments(on) => self.set_export_comments(on),
@@ -211,6 +213,7 @@ impl MarkiseApp {
                 self.set_diagrams(true);
                 self.set_wikilinks(true);
                 self.set_highlight(true);
+                self.set_tags(true);
                 self.set_critic_markup(true);
                 self.themes.set_comment_display(Default::default());
                 self.set_export_comments(true);

@@ -799,6 +799,21 @@ impl ThemeManager {
         }
     }
 
+    /// Whether `#tags` in text are parsed (settings key `markdown.tags`, default on; ADR 0027).
+    pub fn tags(&self) -> bool {
+        self.settings.markdown.tags
+    }
+
+    /// Preferences → Markdown → Tags; persisted like the other settings.
+    pub fn set_tags(&mut self, on: bool) {
+        self.chose_markdown = true;
+        if on != self.settings.markdown.tags {
+            self.settings.markdown.tags = on;
+            self.dirty.markdown = Some(self.settings.markdown);
+            self.schedule_save();
+        }
+    }
+
     /// Whether CriticMarkup comments and suggestions are parsed (settings key
     /// `markdown.criticMarkup`, default on; ADR 0012).
     pub fn critic_markup(&self) -> bool {
