@@ -287,6 +287,11 @@ pub enum InlineKind {
         target: Box<str>,
         subpath: Option<Box<str>>,
     },
+    /// A tag (`#name` in Markdown, spec 06 §10): `name` without the `#`. No markers: its one
+    /// `Text` child shows the whole source as written (byte for byte), drawn as a pill.
+    Tag {
+        name: Box<str>,
+    },
     RawInline,
     /// A keyboard key name, with source markers and rich children.
     Keyboard,
@@ -421,6 +426,7 @@ impl RichInline {
                 InlineKind::Image { .. } => "image".to_string(),
                 InlineKind::FootnoteRef { .. } => "fnref".to_string(),
                 InlineKind::WikiLink { .. } => "wikilink".to_string(),
+                InlineKind::Tag { .. } => "tag".to_string(),
                 InlineKind::Critic(k) => format!("critic.{}", k.name()),
                 InlineKind::Math { .. } => "math".to_string(),
                 InlineKind::Break { hard } => if *hard { "hardbreak" } else { "softbreak" }.to_string(),

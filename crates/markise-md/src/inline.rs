@@ -74,6 +74,9 @@ pub enum InlineKind {
     BareUrl {
         url: String,
     },
+    /// `#tag` (spec 06 §10, [`ParseOptions::tags`], [`crate::tags`]): the span covers the `#`
+    /// and the tag body; no children.
+    Tag,
     /// Raw inline HTML (tags, comments, processing instructions…).
     Html,
     Math {
@@ -297,7 +300,92 @@ pub fn parse_inlines(s: &str, opts: &ParseOptions, ctx: &InlineContext) -> Vec<I
     if opts.auto_links {
         detect_bare_urls(s, &mut v);
     }
+    if opts.tags && s.contains('#') {
+        detect_tags(s, &mut v);
+    }
     v
+}
+
+/// Finds `#tags` in the text runs of `nodes` (and of nested emphasis), never inside code,
+/// math, HTML, links, URLs or wikilinks (spec 06 V10.1). A tag may span adjacent text nodes
+/// (`#snake_case`: an unmatched `_` is a text node of its own), so each run of contiguous text
+/// nodes is read as one.
+fn detect_tags(s: &str, nodes: &mut Vec<Inline>) {
+    let mut old = std::mem::take(nodes);
+    let mut out: Vec<Inline> = Vec::with_capacity(old.len());
+    let mut i = 0;
+    let text = |a: usize, b: usize| Inline {
+        kind: InlineKind::Text,
+        span: Span::new(a, b),
+        children: vec![],
+    };
+    while i < old.len() {
+        match old[i].kind {
+            InlineKind::Text => {
+                let start = old[i].span.start;
+                let mut end = old[i].span.end;
+                let mut j = i + 1;
+                while j < old.len() && matches!(old[j].kind, InlineKind::Text) && old[j].span.start == end {
+                    end = old[j].span.end;
+                    j += 1;
+                }
+                let run = &s[start..end];
+                if !run.contains('#') {
+                    out.extend(old[i..j].iter().cloned());
+                    i = j;
+                    continue;
+                }
+                let mut plain = start;
+                let mut p = start;
+                while let Some(off) = s[p..end].find('#') {
+                    let h = p + off;
+                    match crate::tags::tag_at(&s[..end], h) {
+                        Some(e) => {
+                            if h > plain {
+                                out.push(text(plain, h));
+                            }
+                            out.push(Inline {
+                                kind: InlineKind::Tag,
+                                span: Span::new(h, e),
+                                children: vec![],
+                            });
+                            plain = e;
+                            p = e;
+                        }
+                        None => p = h + 1,
+                    }
+                }
+                if plain == start {
+                    out.extend(old[i..j].iter().cloned());
+                } else if plain < end {
+                    out.push(text(plain, end));
+                }
+                i = j;
+            }
+            InlineKind::Link { .. }
+            | InlineKind::Image { .. }
+            | InlineKind::Autolink { .. }
+            | InlineKind::BareUrl { .. }
+            | InlineKind::Code { .. }
+            | InlineKind::Math { .. }
+            | InlineKind::Html
+            | InlineKind::WikiLink { .. }
+            | InlineKind::Critic {
+                kind: CriticKind::Comment,
+                ..
+            } => {
+                out.push(std::mem::replace(&mut old[i], text(0, 0)));
+                i += 1;
+            }
+            _ => {
+                let mut n = std::mem::replace(&mut old[i], text(0, 0));
+                detect_tags(s, &mut n.children);
+                out.push(n);
+                i += 1;
+            }
+        }
+    }
+    *nodes = out;
 }
 
 fn parse_at(s: &str, base: usize, opts: &ParseOptions, ctx: &InlineContext, escape_space: bool) -> Vec<Inline> {
@@ -2053,7 +2141,7 @@ pub fn plain_text(s: &str, nodes: &[Inline]) -> String {
     fn go(s: &str, nodes: &[Inline], out: &mut String) {
         for n in nodes {
             match &n.kind {
-                InlineKind::Text | InlineKind::BareUrl { .. } => out.push_str(n.span.slice(s)),
+                InlineKind::Text | InlineKind::BareUrl { .. } | InlineKind::Tag => out.push_str(n.span.slice(s)),
                 InlineKind::Escape => out.push_str(&s[n.span.start + 1..n.span.end]),
                 InlineKind::Entity => out.push_str(&decode_entity(n.span.slice(s))),
                 InlineKind::Code { content } => out.push_str(content.slice(s)),

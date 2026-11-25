@@ -1080,6 +1080,19 @@ fn neutral_inline(s: &str, n: &Inline, map: &dyn Fn(usize) -> u32, pool: &mut St
                 text: 0..0,
             };
         }
+        InlineKind::Tag => {
+            let src = map(n.span.start)..map(n.span.end);
+            let raw = n.span.slice(s);
+            let child = InlineNode::leaf(NK::Text, src.clone(), push_value(pool, raw));
+            return InlineNode {
+                kind: NK::Tag { name: raw[1..].into() },
+                content: src.clone(),
+                source: src,
+                markers: Vec::new(),
+                children: vec![child],
+                text: 0..0,
+            };
+        }
         InlineKind::BareUrl { url } => {
             let src = map(n.span.start)..map(n.span.end);
             let child = InlineNode::leaf(NK::Text, src.clone(), push_value(pool, n.span.slice(s)));
@@ -1679,7 +1692,7 @@ impl Document {
                 Some(Selection::caret(ce + eol.len())),
             ));
         }
-        if let Some((_, content, _)) = scan::atx_heading(b, p, b.len(), self.options().strict)
+        if let Some((_, content, _)) = scan::atx_heading(b, p, b.len(), self.options().strict, self.options().tags)
             && content.is_empty()
         {
             // C43: an empty heading becomes an empty paragraph in place (its `##` removed),

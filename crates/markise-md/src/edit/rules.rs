@@ -33,7 +33,7 @@ pub(crate) fn opener_of(line: &str, opts: &crate::ParseOptions) -> Option<Opener
     if p > 3 || p >= end {
         return None;
     }
-    if scan::atx_heading(b, p, end, opts.strict).is_some()
+    if scan::atx_heading(b, p, end, opts.strict, opts.tags).is_some()
         || scan::fence_open(b, p, end).is_some()
         || scan::thematic_break(b, p, end, opts.remap_unicode_punctuation)
         || scan::is_toc_marker(&line[p..], opts.remap_unicode_punctuation, opts.wikilinks)

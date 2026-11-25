@@ -31,6 +31,7 @@ mod section;
 pub mod slug;
 mod source_tokens;
 pub mod table;
+pub mod tags;
 pub mod text;
 mod ticks;
 mod tops;

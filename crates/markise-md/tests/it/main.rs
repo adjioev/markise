@@ -20,4 +20,5 @@ mod regressions;
 mod roundtrip;
 mod sections;
 mod spec01;
+mod tags;
 mod wikilinks;
