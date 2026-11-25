@@ -31,6 +31,7 @@ Source Mode, Files & Images); it asks before resetting.
 | Render diagrams | on | Mermaid, sequence and flow fences are drawn; see [Math and diagrams](math-and-diagrams.md). |
 | Wikilinks | on | `[[Note]]` links; see [Folders and vaults](folders-and-vaults.md). |
 | Highlight ==text== | on | Text between `==` and `==` is highlighted, in the editor and in exports. Off: the marks stay plain text. The file is never changed. |
+| Tags #tag | on | `#tag` in the text is a tag: shown as a pill and listed in the sidebar's Tags view; a line such as `#idea` is then not a heading. Off: `#` is plain text again (front-matter tags are still listed); see [Folders and vaults](folders-and-vaults.md#tags). |
 | Comments & suggestions (CriticMarkup) | on | See [Comments and suggestions](comments-and-suggestions.md). |
 | Show comments | In the margin | Or "As bubbles (hover to read)". |
 | Keep comments in exports | on | HTML and PDF keep comments. |

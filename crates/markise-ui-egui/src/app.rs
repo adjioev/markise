@@ -1744,6 +1744,8 @@ impl MarkiseApp {
                         }
                     }
                 }
+                // a note written in place: its tags are read again (ADR 0027)
+                WatchEvent::NoteChanged(p) => self.vault_changed(&p),
                 WatchEvent::DirChanged(d) => {
                     self.vault_changed(&d);
                     if let (Some(t), Some(w)) = (self.tree.as_mut(), self.wake.as_ref()) {

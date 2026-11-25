@@ -19,8 +19,6 @@ pub(crate) struct TagsView {
     pub query: String,
     /// The tag whose notes are listed (as its key is written by the user or the index).
     pub selected: Option<String>,
-    /// Focus the filter field next frame.
-    focus: bool,
 }
 
 /// A row of the tag list.
@@ -86,13 +84,17 @@ impl MarkiseApp {
         }
         let tags = ix.tags().clone();
         ui.add_space(4.0);
-        let field = egui::TextEdit::singleline(&mut self.tags_view.query)
-            .hint_text("Filter, or tag:name")
-            .desired_width(f32::INFINITY);
-        let resp = ui.add(field);
-        if std::mem::take(&mut self.tags_view.focus) {
-            resp.request_focus();
-        }
+        let query = &mut self.tags_view.query;
+        let resp = ui
+            .horizontal(|ui| {
+                let l = ui.label(RichText::new("Find").font(look.font.clone()).color(look.muted));
+                let field = egui::TextEdit::singleline(query)
+                    .id_salt("markise-tags-search")
+                    .hint_text("name, #name or tag:name")
+                    .desired_width(f32::INFINITY);
+                ui.add(field).labelled_by(l.id)
+            })
+            .inner;
         if resp.changed() {
             self.tags_view.selected = None;
         }
