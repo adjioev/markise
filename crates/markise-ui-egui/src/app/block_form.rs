@@ -96,6 +96,14 @@ impl MarkiseApp {
         self.block_form.open.as_ref()
     }
 
+    /// Test hook (issue #226): the form's worker (icons, file checks) has answered everything
+    /// asked of it. Part of [`MarkiseApp::background_settled`], for a test that holds other
+    /// background work on purpose.
+    #[doc(hidden)]
+    pub fn block_form_idle(&self) -> bool {
+        self.block_form.is_idle()
+    }
+
     /// The caret is in a block with a form.
     pub(super) fn block_form_available(&self) -> bool {
         let (Some(p), Some(d)) = (self.block_package(), &self.doc) else {

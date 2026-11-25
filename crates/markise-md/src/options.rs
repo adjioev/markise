@@ -41,7 +41,8 @@ pub struct ParseOptions {
     /// Smart punctuation applied at render time (R4.5.1 "convert on rendering"). Default off.
     pub smart_punctuation_render: bool,
     /// Wikilinks `[[Note]]`, `[[Note#Heading|alias]]` (spec 06 V2.1). Default on (owner,
-    /// 2026-10-28: vault features on in every folder). Embeds `![[…]]` stay plain text for now.
+    /// 2026-10-28: vault features on in every folder). Embeds `![[…]]` are recognised with it: an
+    /// image embed is shown as the image, any other embed as a link.
     /// With it on, a `[[_TOC_]]` line is a wikilink, not a TOC marker (spec 06 V1.6 f).
     pub wikilinks: bool,
     /// CriticMarkup review marks `{++ins++}`, `{--del--}`, `{~~old~>new~~}`, `{==mark==}`,

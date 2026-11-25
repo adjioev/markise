@@ -188,7 +188,9 @@ impl View {
 
     /// What an item of a block in Practice lays out by.
     pub(super) fn practice_item(&self, at: &NativeAt, start: usize, it: &Item) -> Option<PracticeItem> {
-        if !self.native.practice.on || self.block_mode_of(at.range.start) != BlockViewMode::Practice {
+        // what the block shows, not the state its name gives it in Read: one with nothing to work out is
+        // not practised, and has no row of buttons and no room kept for one
+        if !self.native.practice.on || !at.practised {
             return None;
         }
         let parts = at.block.practice.as_ref()?;
@@ -271,8 +273,9 @@ impl View {
     }
 
     /// What Practice adds to a page's estimate, while the document is in Read: a row of buttons per
-    /// block, less the quotes of blocks that reveal them. Other fields are corrected when they are laid
-    /// out, like any estimate.
+    /// block, less the quotes of blocks that reveal them. A block that would reveal only quotes and has
+    /// none has nothing to practise, and no row. Other fields are corrected when they are laid out, like
+    /// any estimate.
     pub(super) fn practice_page_estimate(&self, s: &PageStats, per_line: f32) -> f32 {
         let Some(source) = self.native.source.as_ref().filter(|_| self.native.practice.read) else {
             return 0.0;
@@ -281,7 +284,12 @@ impl View {
         let row = t.block_spacing + crate::native::practice_row_height(t);
         let mut h = 0.0;
         for (name, tally) in s.card_tallies.iter().filter(|(name, _)| source.has_practice(name)) {
-            h += tally.closers as f32 * row;
+            let bare = if source.practice_needs_quote(name) {
+                tally.bare
+            } else {
+                0
+            };
+            h += tally.closers.saturating_sub(bare) as f32 * row;
             if source.practice_hides_quotes(name) {
                 h -= tally.paras as f32 * t.block_spacing + tally.lines_at(per_line) * t.line_px();
             }

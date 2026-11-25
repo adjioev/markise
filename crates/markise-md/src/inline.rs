@@ -88,12 +88,15 @@ pub enum InlineKind {
     },
     /// `[[target#subpath|display]]` (spec 06 V2.1, [`ParseOptions::wikilinks`]). `inner` is the
     /// text between the brackets, `display` the text after the first `|` (both content spans);
-    /// no children.
+    /// no children. `embed`: written `![[…]]` (the span then starts at the `!`); an embed whose
+    /// target names an image ([`crate::wikilink::is_image`]) is shown as that image, any other
+    /// embed as a link.
     WikiLink {
         target: String,
         subpath: Option<String>,
         inner: Span,
         display: Option<Span>,
+        embed: bool,
     },
     /// CriticMarkup review mark (ADR 0012, [`ParseOptions::critic_markup`]): `content` is
     /// the text between the delimiters. Insertions, deletions and highlights have their
@@ -804,7 +807,7 @@ impl<'a> P<'a> {
         found
     }
 
-    /// `[[…]]` at `pos` (`embed`: `![[…]]`, shown as plain text for now). Spec 06 V2.1.2:
+    /// `[[…]]` at `pos` (`embed`: `![[…]]`). Spec 06 V2.1.2:
     /// the content up to the first `]]` on the line must be non-empty and free of `[[`; a code
     /// span opened inside it and closed after it takes precedence (V2.1.3). Followed directly
     /// by `(`, the brackets are left to the standard link rules (owner decision 2026-10-28).
@@ -858,10 +861,6 @@ impl<'a> P<'a> {
                 break;
             }
         }
-        if embed {
-            self.push(InlineKind::Text, pos, close + 2);
-            return Some(close + 2);
-        }
         let display = parts.display.map(|r| self.sp(open + r.start, open + r.end));
         self.push(
             InlineKind::WikiLink {
@@ -869,6 +868,7 @@ impl<'a> P<'a> {
                 subpath: parts.subpath,
                 inner: self.sp(open, close),
                 display,
+                embed,
             },
             pos,
             close + 2,
@@ -2061,10 +2061,14 @@ pub fn plain_text(s: &str, nodes: &[Inline]) -> String {
                 InlineKind::Autolink { url, .. } => out.push_str(url),
                 InlineKind::Math { content, .. } => out.push_str(content.slice(s)),
                 InlineKind::Emoji { emoji } => out.push_str(emoji),
-                InlineKind::WikiLink { inner, .. } => {
+                InlineKind::WikiLink { inner, embed, .. } => {
                     let c = inner.slice(s);
                     if let Some(w) = crate::wikilink::split(c) {
-                        out.push_str(&w.label(c));
+                        if *embed && w.is_image_embed() {
+                            out.push_str(&w.embed_alt(c));
+                        } else {
+                            out.push_str(&w.label(c));
+                        }
                     }
                 }
                 InlineKind::Html | InlineKind::FootnoteRef { .. } => {}

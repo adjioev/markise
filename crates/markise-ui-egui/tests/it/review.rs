@@ -689,7 +689,8 @@ fn settle(h: &mut H) {
     let t = Instant::now();
     h.run_steps(2);
     while h.state_mut().viewer().is_some_and(|v| v.comment_lookup_pending()) {
-        assert!(t.elapsed() < Duration::from_secs(10), "comment lookup did not finish");
+        // a hang guard, not a latency expectation (10 s was one, which a loaded machine can miss)
+        assert!(t.elapsed() < common::HANG_GUARD, "comment lookup did not finish");
         std::thread::sleep(Duration::from_millis(5));
         h.step();
     }
@@ -1673,6 +1674,8 @@ fn refused_card_save_keeps_the_draft_and_stops_save_and_close() {
 fn external_change_with_an_open_draft_is_a_conflict() {
     let src = "Note {>>c<<} end.\n";
     let (mut h, p) = open_roomy_opts("card-reload", src, None, true);
+    // the watch is in effect before the write below
+    common::settle(&mut h);
     open_card(&mut h, 5);
     typ(&mut h, "d");
     let theirs = "Note {>>zz<<} end.\n";
@@ -1686,7 +1689,8 @@ fn external_change_with_an_open_draft_is_a_conflict() {
     wait_until(&mut h, "reload", |a| {
         a.document_text().as_deref() == Some(theirs) && !a.is_busy()
     });
-    h.run_steps(2);
+    // the reloaded document's comment scan and lookups have answered (not a frame count)
+    common::settle(&mut h);
     assert_eq!(edited(&mut h), None, "the draft named another comment");
     save_card(&mut h);
     assert_eq!(text(&h), theirs);

@@ -132,6 +132,10 @@ pub struct PageStats {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct CardTally {
     pub closers: u32,
+    /// Closers of blocks with no quote paragraph directly in them on the page: a block that would reveal
+    /// only quotes has nothing to practise then, and no row of buttons (ADR 0024). Of a block the page cut,
+    /// only its part on the page is known.
+    pub bare: u32,
     /// Quote paragraphs.
     pub paras: u32,
     pub wrapped: [u32; PARA_LINE_CHARS.len()],
@@ -174,6 +178,8 @@ impl PageStats {
 
     fn of(items: &[Item], doc: &dyn FormatDoc) -> PageStats {
         let mut s = PageStats::default();
+        // the openers of blocks a quote paragraph stood directly in, on the page
+        let mut quoted: Vec<usize> = Vec::new();
         for it in items {
             s.add(it);
             if let ItemKind::Heading { level } = it.kind
@@ -215,8 +221,13 @@ impl PageStats {
                         s.card_tallies.len() - 1
                     }
                 };
+                if quote && quoted.last() != Some(&c.opener.start) {
+                    quoted.push(c.opener.start);
+                }
+                let bare = closes && !quoted.contains(&c.opener.start);
                 let tally = &mut s.card_tallies[at].1;
                 tally.closers += u32::from(closes);
+                tally.bare += u32::from(bare);
                 if quote {
                     tally.paras += 1;
                     for (w, &n) in tally.wrapped.iter_mut().zip(&PARA_LINE_CHARS) {
