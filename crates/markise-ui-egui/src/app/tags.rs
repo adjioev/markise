@@ -19,36 +19,38 @@ pub(crate) struct TagsView {
     pub query: String,
     /// The tag whose notes are listed (as its key is written by the user or the index).
     pub selected: Option<String>,
+    /// The rows of the last filter: the index generation and query it was computed for, and
+    /// the positions of the kept tags in [`TagIndex::entries`] (recomputed only when either
+    /// changes, not per frame).
+    rows: Option<(u64, String, Arc<[usize]>)>,
 }
 
-/// A row of the tag list.
-struct TagRow {
-    name: String,
-    leaf: String,
-    depth: usize,
-    count: usize,
+impl TagsView {
+    /// The tags the query keeps, from the cache when the index and the query are unchanged.
+    fn rows(&mut self, generation: u64, tags: &TagIndex) -> Arc<[usize]> {
+        match &self.rows {
+            Some((g, q, rows)) if *g == generation && *q == self.query => rows.clone(),
+            _ => {
+                let rows: Arc<[usize]> = filtered(tags, &self.query).into();
+                self.rows = Some((generation, self.query.clone(), rows.clone()));
+                rows
+            }
+        }
+    }
 }
 
-/// The tags `query` keeps (all when it is empty): by part of the name, `tag:` and `#` removed.
-fn filtered(tags: &TagIndex, query: &str) -> Vec<TagRow> {
+/// The positions in [`TagIndex::entries`] of the tags `query` keeps (all when it names none):
+/// by part of the name, `tag:` and `#` removed.
+fn filtered(tags: &TagIndex, query: &str) -> Vec<usize> {
     let q = query_tag(query).map(markise_md::tags::fold);
     tags.entries()
         .iter()
-        .filter(|e| {
+        .enumerate()
+        .filter(|(_, e)| {
             q.as_ref()
                 .is_none_or(|q| markise_md::tags::fold(&e.name).contains(q.as_str()))
         })
-        .map(|e| TagRow {
-            // filtered: the full name (parents may be hidden); else the tree's last segment
-            leaf: if q.is_some() {
-                e.name.clone()
-            } else {
-                e.leaf().to_string()
-            },
-            depth: if q.is_some() { 0 } else { e.depth },
-            name: e.name.clone(),
-            count: e.notes.len(),
-        })
+        .map(|(i, _)| i)
         .collect()
 }
 
@@ -98,13 +100,15 @@ impl MarkiseApp {
         if resp.changed() {
             self.tags_view.selected = None;
         }
-        let rows = filtered(&tags, &self.tags_view.query);
+        let rows = self.tags_view.rows(ix.generation(), &tags);
+        let filtering = query_tag(&self.tags_view.query).is_some();
         // Enter: the notes of the tag the search names, else of the first match
         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
             let exact = query_tag(&self.tags_view.query)
                 .and_then(|q| tags.get(q))
                 .map(|e| e.name.clone());
-            if let Some(name) = exact.or_else(|| rows.first().map(|r| r.name.clone())) {
+            let first = || rows.first().map(|&i| tags.entries()[i].name.clone());
+            if let Some(name) = exact.or_else(first) {
                 self.tags_view.selected = Some(name);
             }
         }
@@ -118,13 +122,15 @@ impl MarkiseApp {
         }
         match self.tags_view.selected.clone() {
             Some(sel) => self.tag_notes(ui, look, &ix, &tags, &sel),
-            None => self.tag_list(ui, look, rows, tags.is_empty()),
+            None => self.tag_list(ui, look, &tags, &rows, filtering),
         }
     }
 
-    fn tag_list(&mut self, ui: &mut Ui, look: &SideLook, rows: Vec<TagRow>, none: bool) {
+    /// `rows`: positions in `tags.entries()`; `filtering`: a query narrows the list (full names,
+    /// no tree indentation, since parents may be left out).
+    fn tag_list(&mut self, ui: &mut Ui, look: &SideLook, tags: &TagIndex, rows: &[usize], filtering: bool) {
         if rows.is_empty() {
-            let note = if none {
+            let note = if tags.is_empty() {
                 "No tags in this folder"
             } else {
                 "No matching tags"
@@ -134,12 +140,20 @@ impl MarkiseApp {
         }
         let mut picked = None;
         virtual_rows(ui, "markise-tags", look.row_h, rows.len(), None, |ui, range| {
-            for r in &rows[range] {
-                let full = format!("#{} ({} note{})", r.name, r.count, if r.count == 1 { "" } else { "s" });
-                let resp = look.row_named(ui, r.depth, RowKind::File { markdown: true }, &r.leaf, &full, false);
-                count_badge(ui, look, resp.rect, r.count);
+            // only the visible rows are built
+            for &i in &rows[range] {
+                let e = &tags.entries()[i];
+                let count = e.notes.len();
+                let full = format!("#{} ({count} note{})", e.name, if count == 1 { "" } else { "s" });
+                let (shown, depth) = if filtering {
+                    (e.name.as_str(), 0)
+                } else {
+                    (e.leaf(), e.depth)
+                };
+                let resp = look.row_named(ui, depth, RowKind::File { markdown: true }, shown, &full, false);
+                count_badge(ui, look, resp.rect, count);
                 if resp.clicked() {
-                    picked = Some(r.name.clone());
+                    picked = Some(e.name.clone());
                 }
             }
         });
@@ -160,9 +174,10 @@ impl MarkiseApp {
             self.tags_view.selected = None;
             return;
         }
-        let (name, notes) = match tags.get(sel) {
-            Some(e) => (e.name.clone(), e.notes.clone()),
-            None => (sel.to_string(), Vec::new()),
+        // borrowed from the index: nothing is copied per frame
+        let (name, notes): (&str, &[String]) = match tags.get(sel) {
+            Some(e) => (&e.name, &e.notes),
+            None => (sel, &[]),
         };
         ui.label(
             RichText::new(format!(
@@ -217,4 +232,38 @@ fn count_badge(ui: &Ui, look: &SideLook, rect: egui::Rect, count: usize) {
         look.font.clone(),
         look.muted,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// Review of #270: the filter runs when the index or the query changes, not per frame.
+    #[test]
+    fn filter_rows_are_cached_by_generation_and_query() {
+        let notes: BTreeMap<String, Arc<[String]>> = [
+            (
+                "a.md".to_string(),
+                vec!["idea".to_string(), "area/x".to_string()].into(),
+            ),
+            ("b.md".to_string(), vec!["Idea".to_string()].into()),
+        ]
+        .into_iter()
+        .collect();
+        let tags = TagIndex::build(notes, true);
+        let mut v = TagsView::default();
+        let all = v.rows(1, &tags);
+        assert_eq!(all.len(), 3);
+        assert!(Arc::ptr_eq(&all, &v.rows(1, &tags)), "same frame inputs: cached");
+        v.query = "tag:#ide".into();
+        let some = v.rows(1, &tags);
+        assert_eq!(
+            some.iter()
+                .map(|&i| tags.entries()[i].name.as_str())
+                .collect::<Vec<_>>(),
+            ["idea"]
+        );
+        assert!(!Arc::ptr_eq(&some, &v.rows(2, &tags)), "a new index: computed again");
+    }
 }
