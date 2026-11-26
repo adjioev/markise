@@ -1300,9 +1300,11 @@ impl ScanState {
         }
     }
 
-    /// The tags differ from the last snapshot's (or are now complete).
+    /// The tags differ from the last snapshot's, or the first reading has just finished. A
+    /// reading merely interrupted by a new command publishes nothing of its own (the notes it
+    /// has not reached yet keep their last tags).
     fn tags_changed(&self) -> bool {
-        self.tags_dirty || self.tags.is_complete() != self.stale.is_empty()
+        self.tags_dirty || (!self.tags.is_complete() && self.stale.is_empty())
     }
 
     /// The tag index for the next snapshot (rebuilt only when something changed).
