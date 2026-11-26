@@ -161,3 +161,61 @@ fn tags_round_trip() {
     d.edit(at..at, "More ");
     assert_eq!(d.serialize(), src.replacen("Text", "More Text", 1));
 }
+
+/// Review of #270: table cells are read one by one, as the editor renders them — a tag right
+/// after a pipe counts, inline Markdown never spans cells, `\|` is a literal pipe.
+#[test]
+fn table_cells_are_read_as_rendered() {
+    assert_eq!(doc_tags("|#idea|\n|---|\n|text|\n"), ["idea"]);
+    // the row splitter keeps a code span whole (one cell of code), as the editor shows it
+    assert!(doc_tags("| `a | #b` |\n|---|\n| x |\n").is_empty());
+    assert_eq!(doc_tags("| [x | #b](u) |\n|---|---|\n| x | y |\n"), ["b"]);
+    assert_eq!(doc_tags("| a \\| #c |\n|---|\n| `#code` |\n"), ["c"]);
+    // a cell beyond the header's columns is not shown, so not read
+    assert_eq!(doc_tags("| h |\n|---|\n| #shown | #extra |\n"), ["shown"]);
+    // what the editor shows: the same tags in the neutral view of each cell
+    let d = Document::parse("|#idea|\n|---|\n|text|\n", on());
+    let cell = table::cell_spans(d.text(), &d.tree()[0])[0][0];
+    let rich = markise_doc::FormatDoc::inline(
+        &d,
+        markise_doc::InlineSource::Cell { span: cell, cap: 4096 },
+        cell.start,
+    );
+    assert!(
+        rich.nodes
+            .iter()
+            .any(|n| n.kind == markise_doc::InlineKind::Tag { name: "idea".into() })
+    );
+}
+
+/// Review of #270 (ADR 0027): the text inside an inline HTML element is not a tag, whatever
+/// the white space around it; void elements, comments and closed elements end nothing.
+#[test]
+fn no_tags_inside_inline_html_elements() {
+    assert_eq!(tags("Text <span> #hidden </span> and #shown", &on()), ["#shown"]);
+    assert!(tags("<b>#x</b>", &on()).is_empty());
+    assert!(tags("<span class=\"a\">\n #x\n</span>", &on()).is_empty());
+    assert!(tags("<i>a <b>b</b> #x</i>", &on()).is_empty());
+    assert_eq!(tags("a<br> #y", &on()), ["#y"]);
+    assert_eq!(tags("<img src=x/> #y", &on()), ["#y"]);
+    assert_eq!(tags("<!-- c --> #z", &on()), ["#z"]);
+    assert_eq!(tags("</span> #w", &on()), ["#w"]);
+    assert_eq!(doc_tags("Text <span> #hidden </span> #shown\n"), ["shown"]);
+}
+
+/// Review of #270: many distinct tags in one note are collected in linear time and capped.
+#[test]
+fn many_tags_are_capped_and_linear() {
+    let mut src = String::new();
+    for i in 0..20_000 {
+        src.push_str(&format!("#t{i} "));
+    }
+    src.push('\n');
+    let t = std::time::Instant::now();
+    let got = doc_tags(&src);
+    assert_eq!(got.len(), tags::MAX_NOTE_TAGS);
+    assert_eq!(got[0], "t0");
+    assert_eq!(got[tags::MAX_NOTE_TAGS - 1], format!("t{}", tags::MAX_NOTE_TAGS - 1));
+    // a hang guard, not a benchmark (quadratic deduplication took minutes here)
+    assert!(t.elapsed() < std::time::Duration::from_secs(60));
+}

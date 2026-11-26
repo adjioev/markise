@@ -7,6 +7,8 @@
 //! folder index uses, so the index and the editor agree on what a tag is. The source is never
 //! rewritten: a tag is a read-only view of its bytes.
 
+use std::collections::HashSet;
+
 use crate::Document;
 use crate::block::{Block, BlockKind};
 use crate::inline::{InlineKind, parse_inlines};
@@ -182,20 +184,46 @@ pub fn front_matter_tags(content: &str) -> Vec<String> {
     out
 }
 
-/// Adds `tag` unless a tag with the same key is already in `out` (first casing wins).
-fn push_unique(out: &mut Vec<String>, tag: String) {
-    let k = fold(&tag);
-    if !out.iter().any(|t| fold(t) == k) {
-        out.push(tag);
-    }
+/// Most distinct tags kept per note: a guard against generated or hostile files (a real note has
+/// a handful), so the index of one note stays small.
+pub const MAX_NOTE_TAGS: usize = 1000;
+
+/// The tags of one note in order, each once (compared by [`fold`]; the first casing wins),
+/// at most [`MAX_NOTE_TAGS`]. Linear: the keys seen are kept in a set.
+#[derive(Default)]
+struct Collected {
+    tags: Vec<String>,
+    seen: HashSet<String>,
 }
 
-/// Collects the tags of inline nodes into `out` (`s`: the content the spans point into).
-fn inline_tags(s: &str, nodes: &[crate::inline::Inline], out: &mut Vec<String>) {
-    for n in nodes {
-        match &n.kind {
-            InlineKind::Tag => push_unique(out, s[n.span.start + 1..n.span.end].to_string()),
-            _ => inline_tags(s, &n.children, out),
+impl Collected {
+    fn full(&self) -> bool {
+        self.tags.len() >= MAX_NOTE_TAGS
+    }
+
+    fn push(&mut self, tag: &str) {
+        if !self.full() && self.seen.insert(fold(tag)) {
+            self.tags.push(tag.to_string());
+        }
+    }
+
+    /// The tags of inline nodes (`s`: the content the spans point into).
+    fn inline(&mut self, s: &str, nodes: &[crate::inline::Inline]) {
+        for n in nodes {
+            match &n.kind {
+                InlineKind::Tag => self.push(&s[n.span.start + 1..n.span.end]),
+                _ => self.inline(s, &n.children),
+            }
+        }
+    }
+
+    /// The tags of a neutral inline tree (a table cell read as the editor reads it).
+    fn neutral(&mut self, nodes: &[markise_doc::InlineNode]) {
+        for n in nodes {
+            match &n.kind {
+                markise_doc::InlineKind::Tag { name } => self.push(name),
+                _ => self.neutral(&n.children),
+            }
         }
     }
 }
@@ -205,48 +233,50 @@ fn inline_tags(s: &str, nodes: &[crate::inline::Inline], out: &mut Vec<String>) 
 /// is kept). Inline tags are found exactly as the editor finds them (the document's own parse
 /// options); front-matter tags are read whatever the options say.
 pub fn document_tags(doc: &Document) -> Vec<String> {
-    let text = doc.text();
-    let mut out = Vec::new();
-    let ctx = &doc.ref_context().inline;
-    let opts = doc.options();
-    fn visit(
-        b: &Block,
-        text: &str,
-        opts: &crate::ParseOptions,
-        ctx: &crate::inline::InlineContext,
-        out: &mut Vec<String>,
-    ) {
+    fn visit(doc: &Document, b: &Block, out: &mut Collected) {
+        if out.full() {
+            return;
+        }
+        let text = doc.text();
+        let opts = doc.options();
         match &b.kind {
             BlockKind::FrontMatter { .. } => {
                 for t in front_matter_tags(&b.content(text)) {
-                    push_unique(out, t);
+                    out.push(&t);
                 }
             }
             BlockKind::Paragraph | BlockKind::Heading { .. } if opts.tags => {
                 let c = b.content(text);
                 if c.contains('#') {
-                    inline_tags(&c, &parse_inlines(&c, opts, ctx), out);
+                    out.inline(&c, &parse_inlines(&c, opts, &doc.ref_context().inline));
                 }
             }
             BlockKind::Table { .. } if opts.tags => {
-                // header and body rows (the delimiter row holds no text)
-                for (i, l) in b.lines.iter().enumerate() {
-                    let row = l.slice(text);
-                    if i != 1 && row.contains('#') {
-                        inline_tags(row, &parse_inlines(row, opts, ctx), out);
+                // cell by cell, as the editor reads them (`\|` unescaped, inline Markdown never
+                // spanning cells); a row's cells beyond the header's are not shown, so not read
+                let rows = crate::table::cell_spans(text, b);
+                let columns = rows.first().map_or(0, Vec::len);
+                for cell in rows.iter().flat_map(|r| r.iter().take(columns)) {
+                    if cell.slice(text).contains('#') {
+                        let src = markise_doc::InlineSource::Cell {
+                            span: *cell,
+                            cap: usize::MAX,
+                        };
+                        out.neutral(&markise_doc::FormatDoc::inline(doc, src, cell.start).nodes);
                     }
                 }
             }
             _ => {}
         }
         for c in &b.children {
-            visit(c, text, opts, ctx, out);
+            visit(doc, c, out);
         }
     }
+    let mut out = Collected::default();
     for b in doc.tree() {
-        visit(&b, text, opts, ctx, &mut out);
+        visit(doc, &b, &mut out);
     }
-    out
+    out.tags
 }
 
 #[cfg(test)]

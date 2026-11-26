@@ -306,11 +306,35 @@ pub fn parse_inlines(s: &str, opts: &ParseOptions, ctx: &InlineContext) -> Vec<I
     v
 }
 
+/// How an inline HTML node changes the nesting of elements: `1` for an opening tag of an
+/// element with content (`<span>`), `-1` for a closing tag, `0` for anything else (void and
+/// self-closing elements, comments, declarations, processing instructions).
+fn html_depth_change(raw: &str) -> i32 {
+    const VOID: &[&str] = &[
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
+    ];
+    if raw.starts_with("</") {
+        return -1;
+    }
+    if raw.starts_with("<!") || raw.starts_with("<?") || raw.ends_with("/>") {
+        return 0;
+    }
+    let name: String = raw[1..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    i32::from(!name.is_empty() && !VOID.contains(&name.as_str()))
+}
+
 /// Finds `#tags` in the text runs of `nodes` (and of nested emphasis), never inside code,
-/// math, HTML, links, URLs or wikilinks (spec 06 V10.1). A tag may span adjacent text nodes
+/// math, HTML (tags, and the text between an inline element's opening and closing tags),
+/// links, URLs or wikilinks (spec 06 V10.1). A tag may span adjacent text nodes
 /// (`#snake_case`: an unmatched `_` is a text node of its own), so each run of contiguous text
 /// nodes is read as one.
 fn detect_tags(s: &str, nodes: &mut Vec<Inline>) {
+    // open inline HTML elements among these siblings: their content is HTML's, not text
+    let mut in_html = 0i32;
     let mut old = std::mem::take(nodes);
     let mut out: Vec<Inline> = Vec::with_capacity(old.len());
     let mut i = 0;
@@ -320,6 +344,17 @@ fn detect_tags(s: &str, nodes: &mut Vec<Inline>) {
         children: vec![],
     };
     while i < old.len() {
+        if let InlineKind::Html = old[i].kind {
+            in_html = (in_html + html_depth_change(old[i].span.slice(s))).max(0);
+            out.push(std::mem::replace(&mut old[i], text(0, 0)));
+            i += 1;
+            continue;
+        }
+        if in_html > 0 {
+            out.push(std::mem::replace(&mut old[i], text(0, 0)));
+            i += 1;
+            continue;
+        }
         match old[i].kind {
             InlineKind::Text => {
                 let start = old[i].span.start;
