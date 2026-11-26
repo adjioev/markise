@@ -49,6 +49,11 @@ pub struct ParseOptions {
     /// `{>>comment<<}` (ADR 0012). Default on (owner, 2026-10-29, issue #69). Inline only:
     /// a mark never spans blocks (an unclosed mark stays text).
     pub critic_markup: bool,
+    /// Tags `#tag` in text (spec 06 §10, ADR 0027): shown as pills, indexed per folder. Default
+    /// on. With it on, a line starting with `#` followed directly by a tag (`#idea`) is a
+    /// paragraph with a tag, not a heading, also outside [`ParseOptions::strict`] mode
+    /// (spec 06 V1.6 b).
+    pub tags: bool,
 }
 
 impl Default for ParseOptions {
@@ -73,6 +78,7 @@ impl Default for ParseOptions {
             smart_punctuation_render: false,
             wikilinks: true,
             critic_markup: true,
+            tags: true,
         }
     }
 }

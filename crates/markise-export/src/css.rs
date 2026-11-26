@@ -191,6 +191,14 @@ pub fn theme_css(theme: &Theme) -> String {
         color(t.highlight_bg),
         color(t.inline.mark_text.unwrap_or(t.text))
     );
+    // tags as pills, like the editor's live view (spec 06 V10.4)
+    let (tag_text, tag_bg) = t.tag_colors();
+    let _ = writeln!(
+        c,
+        "#write .md-tag {{ color: {}; background: {}; border-radius: 0.8em; padding: 0 0.35em; white-space: nowrap; }}",
+        color(tag_text),
+        color(tag_bg)
+    );
     // review marks (ADR 0012)
     let rc = t.review_colors();
     let _ = writeln!(

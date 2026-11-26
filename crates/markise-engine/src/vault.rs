@@ -10,7 +10,9 @@
 //!   note → fewest folder levels → path order);
 //! - Markdown link paths (V2.6: `%20` and `<…>` forms, relative first, then root, then name);
 //! - the shortest unique link text for a file (V14.3 "shortest");
-//! - fuzzy note-name matching for link autocomplete (V3.3).
+//! - fuzzy note-name matching for link autocomplete (V3.3);
+//! - the tags of its notes ([`tags::TagIndex`], ADR 0027): the scanner reads each note once,
+//!   after the file list is published, and again when its size or modification time changes.
 //!
 //! Vault paths use `/` separators and NFC; names compare case-insensitively (lower-cased NFC,
 //! an approximation of simple case folding).
@@ -58,6 +60,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::Wake;
+
+pub mod tags;
+use tags::TagIndex;
 
 /// NFC form of `s`.
 pub fn nfc(s: &str) -> String {
@@ -253,6 +258,8 @@ pub struct VaultIndex {
     files: Vec<VaultFile>,
     by_name: HashMap<String, Vec<u32>>,
     by_rel: HashMap<String, Vec<u32>>,
+    /// The tags of the notes (shared between snapshots while they do not change).
+    tags: Arc<TagIndex>,
 }
 
 /// Folder part of a vault path.
@@ -410,7 +417,19 @@ impl VaultIndex {
             files,
             by_name,
             by_rel,
+            tags: Arc::default(),
         }
+    }
+
+    /// The same index with `tags`.
+    pub fn with_tags(mut self, tags: Arc<TagIndex>) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// The tags of the vault's notes.
+    pub fn tags(&self) -> &Arc<TagIndex> {
+        &self.tags
     }
 
     /// The same index with the vault root's directory capability.
@@ -1078,9 +1097,15 @@ pub struct VaultScanner {
     worker: Option<std::thread::JoinHandle<()>>,
     /// Commands sent and not fully processed yet (tests: [`VaultScanner::is_idle`]).
     pending: Arc<std::sync::atomic::AtomicUsize>,
+    /// The worker is reading notes for tags (its snapshot is not sent yet).
+    tagging: Arc<std::sync::atomic::AtomicBool>,
     /// A snapshot taken off the channel by [`VaultScanner::is_idle`], handed out next.
     stash: std::sync::Mutex<Option<Arc<VaultIndex>>>,
 }
+
+/// How long a batch reads notes for tags before it publishes its snapshot (the rest is read
+/// after it): a small folder gets one snapshot with its tags, a large one its links at once.
+const TAGS_IN_BATCH: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// How long dropping a scanner waits for its worker (on the UI thread).
 const DROP_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
@@ -1138,7 +1163,18 @@ struct ScanState {
     cancel: Arc<std::sync::atomic::AtomicBool>,
     /// Tests: called at the start of every rescan walk (counts them, can hold the worker).
     on_rescan: Option<RescanHook>,
+    /// Tags read per note (disk vault path → size and modification time when read, tags).
+    note_tags: HashMap<String, (Stamp, Arc<[String]>)>,
+    /// Notes (disk vault paths) to read for tags.
+    stale: BTreeSet<String>,
+    /// The tags of the last snapshot.
+    tags: Arc<TagIndex>,
+    /// `note_tags` changed since `tags` was built.
+    tags_dirty: bool,
 }
+
+/// What identifies a version of a note for the tag reader: size and modification time.
+type Stamp = Option<(u64, std::time::SystemTime)>;
 
 /// Test hook of [`ScanState::rescan`].
 type RescanHook = Arc<dyn Fn() + Send + Sync>;
@@ -1199,6 +1235,93 @@ impl ScanState {
         }
     }
 
+    /// The absolute path of disk vault path `rel`.
+    fn abs_disk(&self, rel: &str) -> PathBuf {
+        let mut p = self.root.clone();
+        p.extend(rel.split('/'));
+        p
+    }
+
+    fn stamp(&self, rel: &str) -> Stamp {
+        let m = std::fs::metadata(self.abs_disk(rel)).ok()?;
+        Some((m.len(), m.modified().ok()?))
+    }
+
+    /// Brings the tag bookkeeping of folder `dir` (`""` = the root) up to date after its files
+    /// were listed: notes that went away are dropped, new ones are queued for reading, and the
+    /// notes directly in `dir` (or every note, `deep`) are queued when their size or
+    /// modification time changed (an edit in place).
+    fn sync_tags(&mut self, dir: &str, deep: bool) {
+        let (files, _) = self.subtree(dir);
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
+        let under = |p: &str| dir.is_empty() || p.starts_with(&prefix);
+        let present: HashSet<&String> = files.iter().collect();
+        let before = self.note_tags.len();
+        self.note_tags.retain(|p, _| !under(p) || present.contains(p));
+        self.stale.retain(|p| !under(p) || present.contains(p));
+        if self.note_tags.len() != before {
+            self.tags_dirty = true;
+        }
+        for f in files.iter().filter(|f| is_note(f)) {
+            let direct = !f[prefix.len()..].contains('/');
+            match self.note_tags.get(f) {
+                None => {
+                    self.stale.insert(f.clone());
+                }
+                Some((stamp, _)) if deep || direct => {
+                    if *stamp != self.stamp(f) {
+                        self.stale.insert(f.clone());
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// Reads queued notes for tags until none is left, the scanner is dropped or `stop` says
+    /// a new command is waiting (the rest is read after it).
+    fn read_tags(&mut self, stop: &dyn Fn() -> bool) {
+        while let Some(rel) = self.stale.first().cloned() {
+            if self.cancelled() || stop() {
+                return;
+            }
+            self.stale.remove(&rel);
+            let stamp = self.stamp(&rel);
+            let tags: Arc<[String]> = tags::read_note_tags(&self.abs_disk(&rel)).into();
+            let same = self.note_tags.get(&rel).map_or(tags.is_empty(), |(_, t)| *t == tags);
+            self.note_tags.insert(rel, (stamp, tags));
+            if !same {
+                self.tags_dirty = true;
+            }
+        }
+    }
+
+    /// The tags differ from the last snapshot's, or the first reading has just finished. A
+    /// reading merely interrupted by a new command publishes nothing of its own (the notes it
+    /// has not reached yet keep their last tags).
+    fn tags_changed(&self) -> bool {
+        self.tags_dirty || (!self.tags.is_complete() && self.stale.is_empty())
+    }
+
+    /// The tag index for the next snapshot (rebuilt only when something changed).
+    fn tag_index(&mut self) -> Arc<TagIndex> {
+        let complete = self.stale.is_empty();
+        if std::mem::take(&mut self.tags_dirty) || self.tags.is_complete() != complete {
+            let notes = self
+                .note_tags
+                .iter()
+                .filter(|(_, (_, t))| !t.is_empty())
+                .map(|(rel, (_, t))| (nfc(rel), t.clone()))
+                .collect();
+            self.tags = Arc::new(TagIndex::build(notes, complete));
+        }
+        self.tags.clone()
+    }
+
     fn remove_subtree(&mut self, dir: &str) {
         let prefix = format!("{dir}/");
         self.files.retain(|f| !f.starts_with(&prefix));
@@ -1213,8 +1336,13 @@ impl ScanState {
         self.root = root;
         self.files.clear();
         self.dirs.clear();
+        self.note_tags.clear();
+        self.stale.clear();
+        self.tags = Arc::default();
+        self.tags_dirty = true;
         let mut seen = HashSet::new();
         self.walk("", 0, &mut seen);
+        self.sync_tags("", false);
     }
 
     /// Walks the mounted root again (the watch restarted), keeping its directory handle;
@@ -1231,6 +1359,8 @@ impl ScanState {
             self.settings = settings;
             self.dirty = true;
         }
+        // edits in place made while the watch was down have no events either
+        self.sync_tags("", true);
     }
 
     /// The indexed files and folders below `dir` (`""` = all), for change detection.
@@ -1286,6 +1416,7 @@ impl ScanState {
         if self.subtree(&dir) != before {
             self.dirty = true;
         }
+        self.sync_tags(&dir, false);
     }
 
     fn relist(&mut self, dir: &str) {
@@ -1335,7 +1466,8 @@ impl ScanState {
         Arc::new(
             VaultIndex::from_rels(self.root.clone(), self.files.iter().cloned(), self.generation)
                 .with_settings(self.settings.clone())
-                .with_root_dir(self.root_dir.clone()),
+                .with_root_dir(self.root_dir.clone())
+                .with_tags(self.tag_index()),
         )
     }
 }
@@ -1352,6 +1484,8 @@ impl VaultScanner {
         let worker_cancel = cancel.clone();
         let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let worker_pending = pending.clone();
+        let tagging = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_tagging = tagging.clone();
         let worker = std::thread::Builder::new()
             .name("markise-vault".into())
             .spawn(move || {
@@ -1365,6 +1499,10 @@ impl VaultScanner {
                     root_dir: None,
                     cancel: worker_cancel,
                     on_rescan,
+                    note_tags: HashMap::new(),
+                    stale: BTreeSet::new(),
+                    tags: Arc::default(),
+                    tags_dirty: false,
                 };
                 while let Ok(first) = cmd_rx.recv() {
                     if st.cancelled() {
@@ -1406,18 +1544,47 @@ impl VaultScanner {
                     if st.cancelled() {
                         break;
                     }
+                    // notes to read for tags: a short while within this batch (a small
+                    // folder gets one snapshot with its tags), the rest after its snapshot
+                    if mounted && !st.stale.is_empty() {
+                        let until = std::time::Instant::now() + TAGS_IN_BATCH;
+                        st.read_tags(&|| {
+                            std::time::Instant::now() > until
+                                || worker_pending.load(std::sync::atomic::Ordering::Acquire) > n
+                        });
+                    }
+                    // the rest is counted as work before this batch is, so the scanner never
+                    // looks idle in between (tests)
+                    let tag_work = mounted && !st.stale.is_empty();
+                    if tag_work {
+                        worker_tagging.store(true, std::sync::atomic::Ordering::Release);
+                    }
                     // nothing visible changed (e.g. Obsidian rewrote app.json unchanged): no new
-                    // snapshot, so layouts and autocomplete keep their state
-                    if !mounted || !std::mem::take(&mut st.dirty) {
-                        done();
-                        continue;
+                    // snapshot, so layouts and autocomplete keep their state. The file list is
+                    // published before the remaining notes are read (links work meanwhile).
+                    if mounted && (std::mem::take(&mut st.dirty) || st.tags_changed()) {
+                        if res_tx.send(st.snapshot()).is_err() {
+                            break;
+                        }
+                        // processed only once the wake announcing the snapshot returned
+                        wake();
                     }
-                    if res_tx.send(st.snapshot()).is_err() {
-                        break;
-                    }
-                    // processed only once the wake announcing the snapshot returned
-                    wake();
                     done();
+                    if tag_work {
+                        // stops early when a new command waits; the rest is read after it
+                        st.read_tags(&|| worker_pending.load(std::sync::atomic::Ordering::Acquire) > 0);
+                        let sent = st.cancelled() || !st.tags_changed() || {
+                            let ok = res_tx.send(st.snapshot()).is_ok();
+                            if ok {
+                                wake();
+                            }
+                            ok
+                        };
+                        worker_tagging.store(false, std::sync::atomic::Ordering::Release);
+                        if !sent || st.cancelled() {
+                            break;
+                        }
+                    }
                 }
             })
             .map_err(|e| format!("cannot start vault thread: {e}"))?;
@@ -1427,6 +1594,7 @@ impl VaultScanner {
             rx,
             worker: Some(worker),
             pending,
+            tagging,
             stash: Default::default(),
         })
     }
@@ -1446,7 +1614,9 @@ impl VaultScanner {
     pub fn is_idle(&self) -> bool {
         // the worker sends a snapshot before it counts the command as processed: once the
         // count is zero, every snapshot is already in the channel
-        if self.pending.load(std::sync::atomic::Ordering::Acquire) != 0 {
+        if self.pending.load(std::sync::atomic::Ordering::Acquire) != 0
+            || self.tagging.load(std::sync::atomic::Ordering::Acquire)
+        {
             return false;
         }
         let mut stash = self.stash.lock().unwrap_or_else(|e| e.into_inner());

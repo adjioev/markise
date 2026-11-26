@@ -49,6 +49,7 @@ mod site_blocks;
 mod smoke;
 mod source_editor;
 mod tables;
+mod tags;
 mod tasks_e2e;
 mod themes;
 mod toolbar;

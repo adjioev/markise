@@ -611,6 +611,8 @@ impl Builder<'_> {
                 title: None,
                 children: vec![ExInline::Text(url.clone())],
             }),
+            // a tag reads as written (`#tag`) in every output
+            InlineKind::Tag => out.push(ExInline::Text(n.span.slice(s).to_string())),
             InlineKind::BareUrl { url } => out.push(ExInline::Link {
                 url: url.clone(),
                 title: None,

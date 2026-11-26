@@ -31,8 +31,9 @@ pub(crate) fn rest_blank(b: &[u8], p: usize, end: usize) -> bool {
     skip_ws(b, p, end) == end
 }
 
-/// ATX heading (R3.2.1). Returns `(level, text span, closed)`.
-pub(crate) fn atx_heading(b: &[u8], p: usize, end: usize, strict: bool) -> Option<(u8, Span, bool)> {
+/// ATX heading (R3.2.1). Returns `(level, text span, closed)`. With `tags`, a single `#`
+/// followed directly by a tag (`#idea`) is no heading (spec 06 V1.6 b, ADR 0027).
+pub(crate) fn atx_heading(b: &[u8], p: usize, end: usize, strict: bool, tags: bool) -> Option<(u8, Span, bool)> {
     let mut q = p;
     while q < end && b[q] == b'#' {
         q += 1;
@@ -42,6 +43,14 @@ pub(crate) fn atx_heading(b: &[u8], p: usize, end: usize, strict: bool) -> Optio
         return None;
     }
     if q < end && !is_ws(b[q]) && strict {
+        return None;
+    }
+    if tags
+        && level == 1
+        && q < end
+        && !is_ws(b[q])
+        && std::str::from_utf8(&b[q..end]).is_ok_and(|rest| crate::tags::body_len(rest).is_some())
+    {
         return None;
     }
     let start = skip_ws(b, q, end);

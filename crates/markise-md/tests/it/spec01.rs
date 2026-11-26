@@ -67,7 +67,12 @@ fn t1_bold_em_roundtrip() {
 
 #[test]
 fn t2_heading_without_space_non_strict() {
-    assert_eq!(tree("#Title\n"), "h1 \"Title\"\n");
+    // spec 01 T2 holds with tags off; with tags on (the default) `#Title` is a tag in a
+    // paragraph (spec 06 V1.6 b, ADR 0027), while `#1 Title` still reads as a heading
+    let o = ParseOptions { tags: false, ..opts() };
+    assert_eq!(tree_with("#Title\n", o), "h1 \"Title\"\n");
+    assert_eq!(tree("#Title\n"), "para \"#Title\"\n");
+    assert_eq!(tree("#1 Title\n"), "h1 \"1 Title\"\n");
 }
 
 #[test]

@@ -27,6 +27,9 @@ pub enum WatchEvent {
     FileRemoved(PathBuf),
     /// Something changed in this directory of the mounted folder.
     DirChanged(PathBuf),
+    /// A note (`.md`) of the mounted folder was written in place, outside hidden folders: its
+    /// tags may have changed (ADR 0027). Names did not change (that is [`WatchEvent::DirChanged`]).
+    NoteChanged(PathBuf),
     /// The mounted folder's `.obsidian/app.json` (or the `.obsidian/` folder itself) changed,
     /// also in place (spec 06 §14, E17); carries the mounted folder.
     VaultConfigChanged(PathBuf),
@@ -109,6 +112,20 @@ fn vault_config_event(root: &Path, p: &Path, kind: &EventKind) -> bool {
                 kind,
                 EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(notify::event::ModifyKind::Name(_))
             ))
+}
+
+/// A content change of a note in the mounted folder `root`, outside hidden folders (a
+/// constantly rewritten config or cache file never counts).
+fn note_content_event(root: &Path, p: &Path, kind: &EventKind) -> bool {
+    use notify::event::ModifyKind;
+    if !matches!(kind, EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Any)) {
+        return false;
+    }
+    let Ok(rest) = p.strip_prefix(root) else { return false };
+    crate::vault::is_note(&rest.to_string_lossy())
+        && !rest
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
 }
 
 fn canonical(p: &Path) -> PathBuf {
@@ -210,6 +227,12 @@ fn route(ev: &notify::Event, targets: &TargetSet) -> Vec<WatchEvent> {
         // plugin writes are not reported
         if let Some(root) = folder.as_ref().filter(|root| vault_config_event(root, p, &ev.kind)) {
             out.push(WatchEvent::VaultConfigChanged(root.clone()));
+        }
+        if folder
+            .as_ref()
+            .is_some_and(|root| note_content_event(root, p, &ev.kind))
+        {
+            out.push(WatchEvent::NoteChanged(p.clone()));
         }
         if folder.as_ref().is_some_and(|root| p.starts_with(root))
             && matches!(
@@ -949,6 +972,29 @@ mod tests {
         }
         assert!(wait_event(&w, &WatchEvent::VaultConfigChanged(root.clone())));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ADR 0027: a note written in place is reported (its tags are read again); hidden
+    /// folders, other files and name changes are not.
+    #[test]
+    fn note_content_events_are_classified() {
+        use notify::event::{CreateKind, DataChange, ModifyKind};
+        let root = Path::new("/v/Notes");
+        let data = EventKind::Modify(ModifyKind::Data(DataChange::Content));
+        assert!(note_content_event(root, Path::new("/v/Notes/a/B.md"), &data));
+        assert!(note_content_event(
+            root,
+            Path::new("/v/Notes/B.MD"),
+            &EventKind::Modify(ModifyKind::Any)
+        ));
+        assert!(!note_content_event(root, Path::new("/v/Notes/.trash/B.md"), &data));
+        assert!(!note_content_event(root, Path::new("/v/Notes/b.txt"), &data));
+        assert!(!note_content_event(root, Path::new("/v/Other/B.md"), &data));
+        assert!(!note_content_event(
+            root,
+            Path::new("/v/Notes/B.md"),
+            &EventKind::Create(CreateKind::File)
+        ));
     }
 
     #[test]

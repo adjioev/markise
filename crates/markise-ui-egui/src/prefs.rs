@@ -107,6 +107,7 @@ pub enum RowId {
     Diagrams,
     Wikilinks,
     Highlight,
+    Tags,
     CriticMarkup,
     CommentDisplay,
     ExportComments,
@@ -274,6 +275,13 @@ pub const ROWS: &[Row] = &[
         "Extensions",
         "Highlight ==text==",
         "mark marker highlighter equals",
+    ),
+    row(
+        R::Tags,
+        S::Markdown,
+        "Extensions",
+        "Tags #tag",
+        "hashtag label folder sidebar",
     ),
     row(
         R::CriticMarkup,
@@ -575,6 +583,7 @@ pub struct Values {
     pub diagrams: bool,
     pub wikilinks: bool,
     pub highlight: bool,
+    pub tags: bool,
     pub critic_markup: bool,
     pub comment_display: CommentDisplay,
     pub export_comments: bool,
@@ -619,6 +628,7 @@ pub enum Change {
     Diagrams(bool),
     Wikilinks(bool),
     Highlight(bool),
+    Tags(bool),
     CriticMarkup(bool),
     CommentDisplay(CommentDisplay),
     ExportComments(bool),
@@ -1308,6 +1318,11 @@ fn row_ui(ui: &mut Ui, p: &Palette, r: &Row, v: &Values, out: &mut Vec<Change>) 
                 out.push(Change::Highlight(on));
             }
         }
+        R::Tags => {
+            if let Some(on) = switch(ui, v.tags) {
+                out.push(Change::Tags(on));
+            }
+        }
         R::CriticMarkup => {
             if let Some(on) = switch(ui, v.critic_markup) {
                 out.push(Change::CriticMarkup(on));
@@ -1853,6 +1868,7 @@ pub fn section_at_defaults(s: Section, v: &Values) -> bool {
             v.diagrams
                 && v.wikilinks
                 && v.highlight
+                && v.tags
                 && v.critic_markup
                 && v.comment_display == CommentDisplay::Margin
                 && v.export_comments

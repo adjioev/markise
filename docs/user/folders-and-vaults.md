@@ -11,8 +11,9 @@ and folders (unless you turn that off in **Preferences → Files & Images**).
 
 **View → Toggle Sidebar** (<kbd>Shift+Cmd+L</kbd>, <kbd>Ctrl+Shift+L</kbd>) shows or hides the
 sidebar. Its activity bar switches between **Files**, the **Outline** of the current document
-(click a heading to jump to it) and **Comments**. The Search icon is a placeholder: search
-across a folder is not available in the beta.
+(click a heading to jump to it), **Comments** and the folder's **Tags** (see [Tags](#tags)).
+The Search icon is a placeholder: full-text search across a folder is not available in the
+beta; search by tag is.
 
 ## The file tree
 
@@ -82,6 +83,44 @@ Embeds of images (`![[photo.png]]`) show the image; see [Images](editing.md#imag
 supported yet: embeds of notes (`![[note]]` is shown as a link to the note, not its text) and
 block references (`[[note#^id]]` opens the note without scrolling).
 
+## Tags
+
+Label notes with tags, in the text or in the front matter:
+
+```markdown
+---
+tags: [project/alpha, idea]
+---
+Notes for today. #idea #travel/2026
+```
+
+- **In the text**, a tag is `#` followed by letters, digits, `_`, `-` or `/` (any script, emoji
+  too), at the start of a line or after a space or `(`. It ends at a space or punctuation, so
+  `#idea.` is the tag `idea`. These are not tags: `#1984` (digits only), `a#b`, the `#` of a
+  link such as `https://example.com/#part`, `# Heading`, and anything in code, math or HTML.
+- **In the front matter**, `tags:` (or `tag:`) takes a list `[a, b]`, one item per line
+  (`- a`), or names separated by commas or spaces (`tags: a, b`). A leading `#` is allowed; an
+  item with a space in it is ignored.
+- **Nested tags** use `/`: a note tagged `#area/health` also counts for `area`.
+- Tags ignore letter case: `#Idea` and `#idea` are the same tag.
+
+In the rendered view a tag is shown as a pill. The file keeps exactly what you typed. Click a tag
+to put the cursor in it; <kbd>Cmd</kbd>-click (<kbd>Ctrl</kbd>-click) it to list the notes with
+that tag.
+
+**The Tags view** (the `#` icon in the activity bar) lists every tag of the opened folder with its
+number of notes; nested tags sit under their parent. Click a tag to see its notes, and a note to
+open it. Type in **Find** to narrow the list by name; `tag:name` or `#name` followed by
+<kbd>Enter</kbd> lists the notes with that tag (and with tags nested below it).
+
+The tag list follows the files on disk: it updates when a note is saved or changed by another
+program, not while you type. Notes larger than 4 MB are not read for tags.
+
+A line that starts with `#` directly followed by a word, such as `#idea`, is a tag, not a
+heading; write `# Heading` (with a space) for a heading. If your notes use headings without the
+space, turn off **Preferences → Markdown → Tags #tag**: `#` in the text is then plain text again
+(tags in front matter are still listed).
+
 ## Obsidian vaults
 
 A folder is treated as an Obsidian vault when it contains a `.obsidian` folder. Markise reads
@@ -96,5 +135,6 @@ Markise is an independent project; see the trademark notice at the bottom of thi
 ## Background indexing
 
 When a folder opens, Markise lists its files on a background thread, so the window stays
-responsive, and then follows changes made by other programs. The index lives in memory only;
-nothing is written to the folder.
+responsive, then reads the notes for their tags, and then follows changes made by other
+programs. Links work as soon as the files are listed; while notes are still being read, the Tags
+view says so. The index lives in memory only; nothing is written to the folder.

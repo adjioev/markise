@@ -3,8 +3,9 @@
 //! thread once per wikilink laid out or followed, so it must stay in the microseconds).
 //!
 //! Reported: index build from a file list, a full background scan of a real folder of 10k
-//! files, wikilink resolution (unique name, ambiguous name, path, suffix, unresolved),
-//! Markdown link resolution and autocomplete queries of growing length.
+//! files (file list, then every note read for its tags, ADR 0027), wikilink resolution (unique
+//! name, ambiguous name, path, suffix, unresolved), Markdown link resolution, autocomplete
+//! queries of growing length, and the tag index build and a tag search.
 //!
 //! Run: `cargo bench -p markise-engine --bench vault`.
 
@@ -96,17 +97,48 @@ fn main() {
     for r in &rels {
         let p = base.join(r);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(&p, "").unwrap();
+        // a short note with front-matter and inline tags (attachments stay empty)
+        let text = if r.ends_with(".md") {
+            format!(
+                "---\ntags: [area/{}, daily]\n---\n# Note\n\nSome text about #topic{} and more.\n",
+                r.len() % 10,
+                r.len() % 53
+            )
+        } else {
+            String::new()
+        };
+        std::fs::write(&p, text).unwrap();
     }
     let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
     let t = Instant::now();
     sc.mount(base.clone());
-    let got = sc.recv_timeout(Duration::from_secs(60)).expect("scan");
+    let mut got = sc.recv_timeout(Duration::from_secs(60)).expect("scan");
     println!(
         "background scan of {} files (worker thread) {:>10.3} ms",
         got.len(),
         t.elapsed().as_secs_f64() * 1e3
     );
+    while !got.tags().is_complete() {
+        got = sc.recv_timeout(Duration::from_secs(120)).expect("tags");
+    }
+    println!(
+        "… and every note read for tags ({} tags)     {:>10.3} ms",
+        got.tags().len(),
+        t.elapsed().as_secs_f64() * 1e3
+    );
+    let tags = got.tags().clone();
+    time("tag search tag:#area (all its notes)", 1_000, || {
+        tags.search("tag:#area").len()
+    });
+    let notes: std::collections::BTreeMap<String, Arc<[String]>> = got
+        .files()
+        .iter()
+        .filter(|f| f.is_note())
+        .map(|f| (f.rel.clone(), tags.tags_of(&f.rel).to_vec().into()))
+        .collect();
+    time("tag index build (10k notes)", 5, || {
+        markise_engine::vault::tags::TagIndex::build(notes.clone(), true).len()
+    });
     // a real indexed change (a no-op notification publishes no snapshot)
     std::fs::write(base.join("Area 3/Folder 33/Added note.md"), "").unwrap();
     let t = Instant::now();

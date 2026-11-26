@@ -120,6 +120,8 @@ fn conformance_options(ext: Option<&str>) -> ParseOptions {
         critic_markup: false,
         // `==highlight==` is an extension (on by default since #246), not CommonMark/GFM
         highlight: false,
+        // `#tags` (ADR 0027) are an extension too: `#foo` is an ATX heading test case there
+        tags: false,
         ..ParseOptions::default()
     }
 }

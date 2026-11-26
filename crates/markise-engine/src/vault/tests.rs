@@ -887,3 +887,62 @@ fn rescan_notices_during_a_walk_cause_at_most_one_more_walk() {
     assert_eq!(walks.load(Ordering::SeqCst), 2, "one walk plus one follow-up");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// ADR 0027: the scanner reads each note's tags (front matter and text), keeps them current
+/// when a note is edited in place, created or removed, and publishes nothing when they do not
+/// change.
+#[test]
+fn scanner_indexes_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::create_dir_all(root.join(".hidden")).unwrap();
+    std::fs::write(root.join("A.md"), "---\ntags: [project/alpha, Idea]\n---\nText.\n").unwrap();
+    std::fs::write(root.join("sub/B.md"), "Some #idea and `#code`.\n\n```\n#not\n```\n").unwrap();
+    std::fs::write(root.join("sub/C.txt"), "#plain text files have no tags\n").unwrap();
+    std::fs::write(root.join(".hidden/D.md"), "#hidden\n").unwrap();
+    let sc = VaultScanner::new(Arc::new(|| {})).unwrap();
+    sc.mount(root.clone());
+    let ix = latest(&sc);
+    let tags = ix.tags();
+    assert!(tags.is_complete());
+    let names: Vec<&str> = tags.entries().iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["Idea", "project", "project/alpha"]);
+    assert_eq!(tags.search("tag:idea"), ["A.md", "sub/B.md"]);
+    assert_eq!(tags.search("#project"), ["A.md"]);
+    assert!(tags.search("code").is_empty() && tags.search("not").is_empty());
+    // an edit in place (no directory event of its own): the folder's change notice re-reads it
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(root.join("sub/B.md"), "Now #other/thing, longer than before.\n").unwrap();
+    sc.changed(root.join("sub/B.md"));
+    let ix = latest(&sc);
+    assert_eq!(ix.tags().search("idea"), ["A.md"]);
+    assert_eq!(ix.tags().search("other"), ["sub/B.md"]);
+    // a removed note drops its tags; a new one adds its own
+    std::fs::remove_file(root.join("A.md")).unwrap();
+    std::fs::write(root.join("sub/E.md"), "tags here: #new\n").unwrap();
+    sc.changed(root.clone());
+    sc.changed(root.join("sub"));
+    let ix = latest(&sc);
+    assert!(ix.tags().get("idea").is_none() && ix.tags().get("project").is_none());
+    assert_eq!(ix.tags().search("new"), ["sub/E.md"]);
+    // the same tags again: no snapshot
+    std::fs::write(root.join("sub/E.md"), "still #new, with other words\n").unwrap();
+    sc.changed(root.join("sub/E.md"));
+    sc.rescan();
+    assert!(quiet(&sc), "unchanged tags");
+}
+
+/// The newest snapshot once the scanner has finished everything asked of it (one must come).
+fn latest(sc: &VaultScanner) -> Arc<VaultIndex> {
+    let mut ix = sc.recv_timeout(HANG_GUARD).expect("a snapshot");
+    let t = std::time::Instant::now();
+    while !sc.is_idle() {
+        if let Some(n) = sc.try_recv() {
+            ix = n;
+        }
+        assert!(t.elapsed() < HANG_GUARD, "scanner never finished");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    ix
+}

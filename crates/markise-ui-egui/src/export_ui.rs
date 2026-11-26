@@ -265,6 +265,7 @@ impl MarkiseApp {
         // stripped by File → Export → Include Comments
         req.critic_markup = self.critic_markup();
         req.highlight = self.highlight();
+        req.tags = self.tags();
         req.comments = if self.export_comments() {
             markise_engine::export::CommentExport::Keep
         } else {

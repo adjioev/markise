@@ -545,7 +545,8 @@ impl<'a> Parser<'a> {
 
                 // ATX heading.
                 if ch == b'#'
-                    && let Some((level, content, closed)) = scan::atx_heading(b, p, c.end, self.opts.strict)
+                    && let Some((level, content, closed)) =
+                        scan::atx_heading(b, p, c.end, self.opts.strict, self.opts.tags)
                 {
                     self.prepare(&mut container, &mut started);
                     let mut blk = Block::new(

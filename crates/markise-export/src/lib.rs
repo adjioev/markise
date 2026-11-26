@@ -320,6 +320,7 @@ body { margin: 0; background: #fff; color: #222; }
 #write pre.md-fences, #write code, #write kbd { font-family: ui-monospace, monospace; }
 #write kbd { font-size: 0.9em; background: #f6f6f4; border: 1px solid #ccc; border-radius: 3px; padding: 0 4px; margin: 0 2px; white-space: nowrap; }
 #write pre.md-fences { background: #f6f6f4; padding: 8px 12px; overflow-x: auto; }
+#write .md-tag { color: #2f6fb3; background: rgba(47,111,179,0.12); border-radius: 0.8em; padding: 0 0.35em; white-space: nowrap; }
 #write blockquote { border-left: 4px solid #ddd; margin-left: 0; padding-left: 1em; color: #555; }
 #write table { border-collapse: collapse; }
 #write th, #write td { border: 1px solid #ccc; padding: 4px 8px; }
@@ -1369,6 +1370,12 @@ impl<'a> Ctx<'a> {
                     }
                     None => escape_html(url, out),
                 }
+            }
+            // a tag as written, marked for styling (spec 06 V10.4)
+            InlineKind::Tag => {
+                out.push_str("<span class=\"md-tag\">");
+                escape_html(n.span.slice(s), out);
+                out.push_str("</span>");
             }
             InlineKind::BareUrl { url } => match self.url(url, false) {
                 Some(h) => {
